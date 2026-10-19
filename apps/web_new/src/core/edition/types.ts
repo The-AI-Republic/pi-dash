@@ -28,6 +28,12 @@ export interface SidebarItem {
  */
 export const APP_RAIL_FLAG = "app-rail";
 export const SIDEBAR_TOGGLE_FLAG = "sidebar-toggle";
+/**
+ * Cloud de-dupe (ISS-121, ISS-231; parity/specs/issues.md §23). The
+ * create modal's similar-issue search mounts only where a build sets
+ * this; the community edition leaves it absent and renders nothing.
+ */
+export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
 
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {

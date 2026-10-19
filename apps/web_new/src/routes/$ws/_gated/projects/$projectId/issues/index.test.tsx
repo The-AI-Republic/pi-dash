@@ -543,6 +543,40 @@ describe("project issues screen", () => {
     expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
   });
 
+  it("leaves the New work item command to the shell", () => {
+    // The `ni` sequence belongs to the workspace shell so it works from
+    // cycle, module, view and drafts pages too (ISS-117, SHELL-086);
+    // the list screen only owns its refresh command.
+    renderScreen({}, 1, [issueRow()]);
+    expect(listCommands().find((entry) => entry.id === "issues.create-work-item")).toBeUndefined();
+    expect(listCommands().find((entry) => entry.id === "issues.refresh-list")).toBeDefined();
+  });
+
+  it("offers Add work item in the header and opens the dialog", async () => {
+    renderScreen({}, 1, [issueRow()]);
+    const add = screen.getByRole("button", { name: "Add work item" });
+    fireEvent.click(add);
+    expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
+  });
+
+  it("keeps the header entry out of reach for a guest on every project", () => {
+    renderScreen({}, 1, [issueRow()], { role: 20, project: { member_role: 5 } });
+    expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
+  });
+
+  it("offers the header entry when one project grants create rights", () => {
+    const other = projectSeed();
+    renderScreen({}, 1, [issueRow()], {
+      role: 20,
+      project: { member_role: 5 },
+      projects: [
+        { ...projectSeed(), member_role: 5 },
+        { ...other, id: ISSUE_UUID, name: "Blog", identifier: "BLOG", member_role: 15 },
+      ],
+    });
+    expect(screen.getByRole("button", { name: "Add work item" })).toBeInTheDocument();
+  });
+
   it("registers a refresh command that invalidates the workspace", async () => {
     const invalidate = vi.spyOn(queryModule, "invalidateWorkspace").mockResolvedValue({} as never);
     renderScreen({}, 1, [issueRow()]);
@@ -587,7 +621,10 @@ describe("project issues screen", () => {
 
     expect(await screen.findByRole("table")).toBeInTheDocument();
     expect(screen.getByText("Work items")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add work item" })).toBeEnabled();
+    // The sheet carries its own quick-add row; the header entry sits beside it.
+    expect(
+      screen.getAllByRole("button", { name: "Add work item" }).some((entry) => !entry.hasAttribute("disabled"))
+    ).toBe(true);
   });
 
   it("hides the spreadsheet estimate column when the project has no estimate system", async () => {

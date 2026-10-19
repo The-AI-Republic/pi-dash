@@ -22,11 +22,29 @@ export interface ProjectOption {
 export interface ProjectOptionsInput {
   projects: ProjectList;
   excludeIds?: readonly string[] | undefined;
+  /** When set, projects outside this list are never offered. */
+  includeIds?: readonly string[] | undefined;
   selectedIds: readonly string[];
+}
+
+/** One display row from a caller's own project data (no full row needed). */
+export function toProjectOption(
+  project: { id: string; name: string; identifier: string },
+  logoProps: Record<string, unknown> = {}
+): ProjectOption {
+  return {
+    id: project.id,
+    name: project.name,
+    identifier: project.identifier,
+    logoProps,
+    searchText: `${project.name} ${project.identifier}`,
+    selected: false,
+  };
 }
 
 export function selectProjectOptions(input: ProjectOptionsInput): ProjectOption[] {
   const options = input.projects
+    .filter((project) => input.includeIds === undefined || input.includeIds.includes(project.id))
     .filter((project) => !(input.excludeIds?.includes(project.id) ?? false))
     .map((project) => ({
       id: project.id,

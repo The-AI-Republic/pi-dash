@@ -25,7 +25,9 @@ import {
   prefsQueryOptions,
   resolveActiveLayout,
   useWeekStart,
+  selectCreatableProjects,
   type LayoutKind,
+  type WorkItemCreateProject,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { GanttTimeline } from "../../../../../../features/issues/gantt/GanttTimeline.js";
@@ -54,6 +56,15 @@ primeIssueListLeaves();
 const LazySpreadsheetLayout = React.lazy(() =>
   import("../../../../../../features/issues/spreadsheet/SpreadsheetLayout.js").then((module) => ({
     default: module.SpreadsheetLayout,
+  }))
+);
+
+// The create dialog carries the property strip and every picker. It opens
+// from the header button or the shell's `ni`, so load it on first use and
+// keep it out of the route's initial chain (ISS-117).
+const LazyWorkItemCreateDialog = React.lazy(() =>
+  import("../../../../../../features/issues/components/WorkItemCreateDialog.js").then((module) => ({
+    default: module.WorkItemCreateDialog,
   }))
 );
 
@@ -134,6 +145,24 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
 
     const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
     const project = projects.find((entry) => entry.id === params.projectId) ?? null;
+    const [createOpen, setCreateOpen] = React.useState(false);
+    const creatable: WorkItemCreateProject[] = React.useMemo(
+      () =>
+        selectCreatableProjects(
+          projects.map((entry) => ({
+            id: entry.id,
+            name: entry.name,
+            identifier: entry.identifier,
+            memberRole: entry.member_role,
+            archived: entry.archived_at !== null,
+          }))
+        ),
+      [projects]
+    );
+    // The entry needs a project the user may file into. Workspace standing
+    // alone is not enough: an admin who is only a guest on every project
+    // would otherwise see a primary button that opens the no-project notice.
+    const canCreate = creatable.length > 0;
 
     const { data: preferences } = useSuspenseQuery(
       prefsQueryOptions(context.apiClient, params.ws, { scope: "project", projectId: params.projectId })
@@ -180,6 +209,17 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const offered: readonly LayoutKind[] = ["list", "gantt_chart", "spreadsheet"];
     const weekStart = useWeekStart();
     const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
+    const addWorkItem = canCreate ? (
+      <Button
+        variant="primary"
+        size="small"
+        onClick={() => {
+          setCreateOpen(true);
+        }}
+      >
+        Add work item
+      </Button>
+    ) : null;
     const display = (
       <DisplayControl
         workspaceSlug={params.ws}
@@ -249,25 +289,44 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         }}
         emptyState={<ProjectIssuesEmptyState />}
         noMatchState={<ProjectIssuesNoMatchState />}
-        headerActions={display}
+        headerActions={
+          <>
+            {addWorkItem}
+            {display}
+          </>
+        }
         displayControl={display}
         filterControl={richFilter?.control}
         filterRow={richFilter?.row}
         analyticsControl={analytics}
       />
     );
-    return (
-      <React.Suspense fallback={renderWithFilters(null)}>
-        <LazyIssueFilters
+    const createDialog = createOpen ? (
+      <React.Suspense fallback={null}>
+        <LazyWorkItemCreateDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
           workspaceSlug={params.ws}
-          projectId={params.projectId}
-          hideCycle={!project.cycle_view}
-          hideModule={!project.module_view}
-          viewsEnabled={project.issue_views_view}
-        >
-          {renderWithFilters}
-        </LazyIssueFilters>
+          projects={creatable}
+          initialProjectId={params.projectId}
+        />
       </React.Suspense>
+    ) : null;
+    return (
+      <>
+        <React.Suspense fallback={renderWithFilters(null)}>
+          <LazyIssueFilters
+            workspaceSlug={params.ws}
+            projectId={params.projectId}
+            hideCycle={!project.cycle_view}
+            hideModule={!project.module_view}
+            viewsEnabled={project.issue_views_view}
+          >
+            {renderWithFilters}
+          </LazyIssueFilters>
+        </React.Suspense>
+        {createDialog}
+      </>
     );
   },
 });

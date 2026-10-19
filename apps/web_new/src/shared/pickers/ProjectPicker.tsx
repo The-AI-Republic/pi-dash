@@ -17,7 +17,11 @@ import { usePickerProjects } from "./reference.js";
 interface ProjectPickerBase {
   workspaceSlug: string;
   /** Projects hidden from the list (the modal excludes nothing). */
-  excludeProjectIds?: readonly string[];
+  excludeProjectIds?: readonly string[] | undefined;
+  /** When set, only these projects are offered. Unlike an exclusion
+   * list this is safe before the read resolves: the picker cannot show
+   * a row the caller has not named. */
+  includeProjectIds?: readonly string[] | undefined;
   disabled?: boolean;
   /** Button variant of the default trigger. */
   variant?: ButtonVariant;
@@ -27,6 +31,12 @@ interface ProjectPickerBase {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /**
+   * Extra display rows for the default trigger, e.g. the caller's own
+   * project list before the lazy read resolves. They only label the
+   * picked project; the option list still comes from the read.
+   */
+  knownProjects?: readonly ProjectOption[] | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -54,11 +64,13 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
   const {
     workspaceSlug,
     excludeProjectIds,
+    includeProjectIds,
     disabled = false,
     variant = "secondary",
     iconOnly = false,
     trigger,
     placeholder,
+    knownProjects,
     open: controlledOpen,
     onOpenChange,
   } = props;
@@ -77,9 +89,10 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
       selectProjectOptions({
         projects: projects.data ?? [],
         excludeIds: excludeProjectIds,
+        includeIds: includeProjectIds,
         selectedIds: props.multiple ? props.value : props.value === null ? [] : [props.value],
       }),
-    [projects.data, excludeProjectIds, props.multiple, props.value]
+    [projects.data, excludeProjectIds, includeProjectIds, props.multiple, props.value]
   );
   const loading = open && !disabled && projects.isPending;
   const errorText = projects.isError ? "Couldn't load projects." : undefined;
@@ -95,7 +108,11 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
     const prompt = placeholder ?? (multiple ? "Select projects" : "Select project");
     if (!props.multiple) {
-      const current = props.value === null ? undefined : options.find((option) => option.id === props.value);
+      const current =
+        props.value === null
+          ? undefined
+          : (options.find((option) => option.id === props.value) ??
+            knownProjects?.find((option) => option.id === props.value));
       const text = current?.name ?? prompt;
       if (iconOnly) {
         return (

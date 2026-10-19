@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { selectProjectMark, selectProjectOptions } from "./projects.js";
+import { selectProjectMark, selectProjectOptions, toProjectOption } from "./projects.js";
 
 const SEED = "22222222-2222-4222-8222-222222222222";
 const OTHER = "33333333-3333-4333-8333-333333333333";
@@ -55,6 +55,38 @@ describe("selectProjectOptions", () => {
       selectedIds: [],
     });
     expect(excluded.map((option) => option.id)).toEqual([OTHER]);
+  });
+
+  it("never offers a row outside the caller's allow list", () => {
+    const rows = [projectRow(SEED, "Seed", "SEED"), projectRow(OTHER, "Other", "OTH")];
+    expect(selectProjectOptions({ projects: rows, includeIds: [OTHER], selectedIds: [] }).map((o) => o.id)).toEqual([
+      OTHER,
+    ]);
+    expect(selectProjectOptions({ projects: rows, includeIds: [], selectedIds: [SEED] })).toEqual([]);
+    expect(selectProjectOptions({ projects: rows, includeIds: [SEED], excludeIds: [SEED], selectedIds: [] })).toEqual(
+      []
+    );
+    expect(selectProjectOptions({ projects: rows, selectedIds: [] }).map((o) => o.id)).toEqual([SEED, OTHER]);
+  });
+});
+
+describe("toProjectOption", () => {
+  it("shapes a display row from a partial project", () => {
+    expect(toProjectOption({ id: SEED, name: "Atlas", identifier: "ATL" })).toEqual({
+      id: SEED,
+      name: "Atlas",
+      identifier: "ATL",
+      logoProps: {},
+      searchText: "Atlas ATL",
+      selected: false,
+    });
+  });
+
+  it("keeps logo props and never marks itself selected", () => {
+    const option = toProjectOption({ id: SEED, name: "Atlas", identifier: "ATL" }, { in_use: "emoji" });
+    expect(option.logoProps).toEqual({ in_use: "emoji" });
+    expect(option.selected).toBe(false);
+    expect(selectProjectMark(option.logoProps, option.identifier)).toBe("A");
   });
 });
 

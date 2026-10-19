@@ -1,16 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Quick-create submit (parity/specs/shell.md §4, SHELL-047). Posts the
-// dialog's title to the target project, toasts the outcome, and
-// refreshes the workspace's issue lists. The submit paints an optimistic
-// temp row first (parity/specs/issues.md §1, ISS-006): the confirm
-// refetch overwrites it with the server row, failures remove it again.
-// The issues epic extends the dialog with the full field set; the entry
-// point stays shared.
+// Work-item create submit (parity/specs/issues.md §11, ISS-117). One
+// mutation behind every creation entry — the sidebar quick-create, the
+// issues header, the palette command and the layout quick-adds. The
+// caller hands over the whole form payload; the submit paints an
+// optimistic temp row first (ISS-006), then confirms through the usual
+// list invalidation or removes the temp row again.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { createIssue, type IssueCreateResult } from "@pidash/api-client";
+import { createIssue, type IssueCreateInput, type IssueCreateResult } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
@@ -18,35 +17,35 @@ import { createTempId } from "../freshness/fresh.js";
 import { insertTempRow, removeTempRow, tempIssueRow } from "../freshness/tempRows.js";
 import { issueKeys } from "./keys.js";
 
-/** Success title after the quick-create lands. */
-export const WORK_ITEM_CREATED_TITLE = "Work item created";
-const WORK_ITEM_CREATED_BODY = "It is at the top of the project's list.";
-/** Failure title when the quick-create does not land. */
+/** Success title after a work item lands. */
+export const WORK_ITEM_CREATED_TITLE = "Work item created successfully";
+/** Failure title when the work item does not land. */
 export const WORK_ITEM_CREATE_FAILED_TITLE = "Couldn't create the work item";
 const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connection and try again.";
 
+/** One submit: the target project plus everything the dialog collected. */
 export interface WorkItemCreateInput {
   projectId: string;
-  name: string;
+  payload: IssueCreateInput;
 }
 
-/** Post one quick-create title, refreshing the workspace lists after. */
+/** Post one work item, refreshing the workspace lists after. */
 export function useCreateWorkItem(workspaceSlug: string) {
   const queryClient = useQueryClient();
   return useMutation<IssueCreateResult, Error, WorkItemCreateInput>({
     mutationFn: async (input) => {
       const tempId = createTempId();
       const listsPrefix = issueKeys.lists(workspaceSlug, input.projectId);
-      insertTempRow(queryClient, listsPrefix, tempIssueRow(tempId, input.name));
+      insertTempRow(queryClient, listsPrefix, tempIssueRow(tempId, input.payload.name));
       try {
-        return await createIssue(getAppClient(), workspaceSlug, input.projectId, { name: input.name });
+        return await createIssue(getAppClient(), workspaceSlug, input.projectId, input.payload);
       } catch (error) {
         removeTempRow(queryClient, listsPrefix, tempId);
         throw error;
       }
     },
     onSuccess: () => {
-      notifySuccess(WORK_ITEM_CREATED_TITLE, WORK_ITEM_CREATED_BODY);
+      notifySuccess(WORK_ITEM_CREATED_TITLE);
     },
     onError: () => {
       notifyError(WORK_ITEM_CREATE_FAILED_TITLE, WORK_ITEM_CREATE_FAILED_BODY);

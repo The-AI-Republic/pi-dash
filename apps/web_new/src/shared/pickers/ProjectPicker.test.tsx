@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -173,6 +173,31 @@ describe("ProjectPicker", () => {
     expect(optionNames()).toEqual(["Other project"]);
   });
 
+  it("offers only the caller's allow list", async () => {
+    const { queryClient } = harness(PROJECTS);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} includeProjectIds={[OTHER]} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(await screen.findByRole("option", { name: "Other project" })).toBeInTheDocument();
+    expect(optionNames()).toEqual(["Other project"]);
+  });
+
+  it("cannot show a row outside the allow list while the read is pending", () => {
+    // A pending read leaves no rows at all; an allow list can only narrow
+    // them once they land, so nothing outside the list can flash first.
+    const { queryClient } = harness(PROJECTS);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} includeProjectIds={[OTHER]} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    screen.queryAllByRole("option").forEach((option) => expect(option).toHaveAccessibleName("Other project"));
+  });
+
   it("reports failed loads and blocks reads while disabled", async () => {
     const failed = harness({ detail: "boom" }, 500);
     const first = render(
@@ -248,6 +273,80 @@ describe("ProjectPicker", () => {
     expect(screen.getByRole("listbox", { name: "Projects" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("option", { name: "Seed project" }));
     expect(onChange).toHaveBeenCalledWith(SEED);
+  });
+
+  it("labels the picked project from the caller's own rows before the read resolves", () => {
+    // The create dialog already holds the projects it may file into, so
+    // its trigger must name the pick even while the picker's lazy read
+    // has not happened (ISS-117/ISS-123).
+    const { queryClient, calls } = harness(PROJECTS);
+    const known = [
+      {
+        id: OTHER,
+        name: "Caller's own name",
+        identifier: "OWN",
+        logoProps: {},
+        searchText: "Caller's own name OWN",
+        selected: false,
+      },
+    ];
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={OTHER} onChange={() => undefined} knownProjects={known} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("button", { name: "Caller's own name" })).toBeInTheDocument();
+    expect(calls).toEqual([]);
+  });
+
+  it("prefers the read's row over the caller's label once it resolves", async () => {
+    const { queryClient } = harness(PROJECTS);
+    const known = [
+      {
+        id: OTHER,
+        name: "Caller's own name",
+        identifier: "OWN",
+        logoProps: {},
+        searchText: "Caller's own name OWN",
+        selected: false,
+      },
+    ];
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={OTHER} onChange={() => undefined} knownProjects={known} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Caller's own name" }));
+    expect(await screen.findByRole("option", { name: "Seed project" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Other project" })).toBeInTheDocument());
+  });
+
+  it("keeps the read's option list even when the caller's labels name other projects", async () => {
+    const { queryClient } = harness(PROJECTS);
+    const known = [
+      {
+        id: SEED,
+        name: "Label only",
+        identifier: "LBL",
+        logoProps: {},
+        searchText: "Label only LBL",
+        selected: false,
+      },
+    ];
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker
+          workspaceSlug="acme"
+          value={null}
+          onChange={() => undefined}
+          includeProjectIds={[OTHER]}
+          knownProjects={known}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    const list = await screen.findByRole("listbox", { name: "Projects" });
+    expect(within(list).queryByRole("option", { name: /Label only/ })).not.toBeInTheDocument();
   });
 
   it("renders icon-only and custom triggers", async () => {

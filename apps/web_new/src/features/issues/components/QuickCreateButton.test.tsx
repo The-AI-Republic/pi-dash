@@ -6,13 +6,25 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { selectCreatableProjects } from "../create/createForm.js";
 import { QuickCreateButton } from "./QuickCreateButton.js";
 
-const PROJECTS = [{ id: "p1", name: "Atlas" }];
+const PROJECTS = [
+  { id: "p1", name: "Atlas", identifier: "ATL", memberRole: 15, archived: false },
+  { id: "p2", name: "Guestland", identifier: "GST", memberRole: 5, archived: false },
+  { id: "p3", name: "Old Atlas", identifier: "OLD", memberRole: 20, archived: true },
+];
 
-function setup(projects: Array<{ id: string; name: string }> = PROJECTS, canCreate = true) {
+function setup(projects: typeof PROJECTS = PROJECTS, canCreate = true) {
+  createAppClient("https://api.test", (async (url: string) => ({
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => JSON.stringify({ is_configured: false }),
+  })) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
@@ -21,6 +33,10 @@ function setup(projects: Array<{ id: string; name: string }> = PROJECTS, canCrea
   );
 }
 
+afterEach(() => {
+  resetAppClient();
+});
+
 describe("QuickCreateButton", () => {
   it("opens the creation dialog for eligible members", async () => {
     const user = userEvent.setup();
@@ -28,7 +44,8 @@ describe("QuickCreateButton", () => {
     const entry = screen.getByRole("button", { name: "New work item" });
     expect(entry).toBeEnabled();
     await user.click(entry);
-    expect(await screen.findByRole("dialog", { name: "Create new work item" })).toBeInTheDocument();
+    // The dialog rides a lazy chunk, so the first open spans a module load.
+    expect(await screen.findByRole("dialog", { name: "Create new work item" }, { timeout: 5000 })).toBeInTheDocument();
   });
 
   it("stays disabled for guests", () => {
@@ -39,5 +56,18 @@ describe("QuickCreateButton", () => {
   it("stays disabled with zero joined projects", () => {
     setup([], true);
     expect(screen.getByRole("button", { name: "New work item" })).toBeDisabled();
+  });
+
+  it("stays disabled when every joined project is a guest membership", () => {
+    // A workspace member who can only guest in the projects they joined
+    // may not file work anywhere, so the entry stays off (ISS-117).
+    setup([PROJECTS[1]!, PROJECTS[2]!], true);
+    expect(screen.getByRole("button", { name: "New work item" })).toBeDisabled();
+  });
+
+  it("carries each project's own membership into the dialog's create list", () => {
+    // A workspace admin who is only a guest on a project must not be able
+    // to file there (ISS-117), so the rows carry their own roles.
+    expect(selectCreatableProjects(PROJECTS).map((project) => project.id)).toEqual(["p1"]);
   });
 });
