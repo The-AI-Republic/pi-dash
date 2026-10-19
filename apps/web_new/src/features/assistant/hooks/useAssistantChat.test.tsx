@@ -141,7 +141,7 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
   const hook = renderHook(() => useAssistantChat("acme", THREAD_ID), {
     wrapper: ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={queryClient}>
-        {options.strict === true ? <React.StrictMode>{children}</React.StrictMode> : children}
+        {options.strict === true ? <React.StrictMode>{children}</React.StrictMode> : <>{children}</>}
       </QueryClientProvider>
     ),
   });
