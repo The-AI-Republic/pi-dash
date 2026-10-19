@@ -535,15 +535,16 @@ describe("gated layout shell wiring", () => {
   function stubShellQueries(
     unread: unknown = undefined,
     sidebarPrefs: unknown = { data: undefined },
-    projectsResult: unknown = null
+    projectsResult: unknown = null,
+    meResult: { data: unknown } = {
+      data: { id: "u1", display_name: "Ada", email: "ada@example.com", avatar_url: null },
+    }
   ): void {
     const suspenseQuery = vi.mocked(useSuspenseQuery) as unknown as {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => { data: unknown }) => void;
     };
     suspenseQuery.mockImplementation((options) => {
-      if (options.queryKey[1] === "me") {
-        return { data: { id: "u1", display_name: "Ada", email: "ada@example.com", avatar_url: null } };
-      }
+      if (options.queryKey[1] === "me") return meResult;
       if (options.queryKey[1] === "workspaces") {
         return {
           data: [{ id: "w1", slug: "acme", name: "Acme", role: harness.role, total_members: 3, logo_url: null }],
@@ -1036,6 +1037,14 @@ describe("gated layout shell wiring", () => {
     await user.click(screen.getByRole("button", { name: "Sign out Ada" }));
     await waitFor(() => expect(harness.settled).toBe(true));
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("labels the account by email when the profile carries no display name", () => {
+    stubShellQueries(undefined, { data: undefined }, null, {
+      data: { id: "u1", display_name: "", email: "ada@example.com", avatar_url: null },
+    });
+    renderShell();
+    expect(screen.getByRole("button", { name: "Sign out ada@example.com" })).toBeInTheDocument();
   });
 
   it("passes the workspace scope to the shell and the top bar", () => {

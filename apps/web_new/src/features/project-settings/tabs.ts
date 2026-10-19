@@ -165,8 +165,8 @@ export function resolveSettingsAddress(
   const rest = pathname.startsWith(prefix) ? pathname.slice(prefix.length) : null;
   if (rest === null || rest === "") return undefined;
   const segments = rest.split("/");
-  const projectId = segments[0] ?? "";
-  if (projectId === "") return undefined;
+  const projectId = segments[0];
+  if (projectId === undefined || projectId === "") return undefined;
   const suffix = segments.length === 1 ? "" : `/${segments.slice(1).filter(Boolean).join("/")}`;
   const tab = findTabBySuffix(suffix);
   if (tab === undefined) return undefined;
