@@ -10,12 +10,11 @@ import { ApiClient } from "../client.js";
 import { dateTime, uuid } from "./fields.js";
 
 /**
- * A webhook row as the list and detail reads answer it. The UI never reads
- * the secret from these responses — the one-time reveal comes from create
- * and regenerate — but the backend's read serializer currently still
- * echoes `secret_key` (a backend variance from the spec, which says reads
- * must not return it). It stays optional here so the contract matches the
- * live response today without making the leak a required field.
+ * A webhook row as the list and detail reads answer it: metadata and the
+ * five event flags only. Reads must never expose the secret (spec §§18-22);
+ * the one-time reveal comes from the create and regenerate answers. The
+ * backend's read serializer currently still echoes `secret_key`, which a
+ * strict object drops, so a leaked field can never reach a slice's UI.
  */
 export const WorkspaceWebhook = z.object({
   id: uuid(),
@@ -28,7 +27,6 @@ export const WorkspaceWebhook = z.object({
   cycle: z.boolean(),
   module: z.boolean(),
   issue_comment: z.boolean(),
-  secret_key: z.optional(z.string()),
 });
 export type WorkspaceWebhook = z.infer<typeof WorkspaceWebhook>;
 

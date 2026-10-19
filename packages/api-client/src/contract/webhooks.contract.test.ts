@@ -88,6 +88,13 @@ describe.skipIf(!contractEnabled)("workspace webhooks contract", () => {
       expect(list).toHaveLength(1);
       expect(list[0]?.id).toBe(created.id);
       expect(typeof list[0]?.created_at).toBe("string");
+      // The backend still echoes secret_key on reads (NEWFRONT-541); the
+      // read contract declares no such field, so the strict parse drops it
+      // before any caller can hold the one-time key.
+      expect(list[0]).not.toHaveProperty("secret_key");
+
+      const detail = await getWorkspaceWebhook(client, slug, created.id);
+      expect(detail).not.toHaveProperty("secret_key");
     });
   });
 

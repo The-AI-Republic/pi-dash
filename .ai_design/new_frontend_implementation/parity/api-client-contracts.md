@@ -255,7 +255,7 @@ Unset `PIDASH_CONTRACT_BASE_URL` returns the package to unit-only mode.
   (newest-first reads a transient probe under parallel runs).
 - Workspace webhook reads currently echo `secret_key` although the
   workspace-settings spec (§§20–22) says a read must never return the key.
-  The read row (`WorkspaceWebhook`) declares no secret field, so a strict
+  The read row (`WorkspaceWebhook`) declares no secret field, so the strict
   parse drops the leaked key before any caller sees it; the reveal still
   comes from the create and regenerate answers (`CreatedWorkspaceWebhook`,
   which requires the key). Noted for the webhooks slice (NEWFRONT-541) to

@@ -263,15 +263,17 @@ describe("workspace webhook contract", () => {
     expect((error as ApiError).code).toBe("contract");
   });
 
-  it("tolerates the backend's secret echo on reads", async () => {
-    // The backend still sends secret_key on reads although the spec says it
-    // must not; the field stays optional so the contract matches both the
-    // current response and the intended one.
+  it("never exposes the secret echoed by a webhook read", async () => {
+    // The backend's read serializer still sends secret_key although the spec
+    // says reads must not. The read row declares no such field, so the
+    // contract's strict parse drops it before any slice can see it; the
+    // create/regenerate answers below still carry the one-time key.
     const { client } = recorder({ ...WEBHOOK, secret_key: "pi_dash_wh_leak" });
     const row = await getWorkspaceWebhook(client, "acme", UUID);
     expect(row.id).toBe(UUID);
-    const plain = await getWorkspaceWebhook(recorder(WEBHOOK).client, "acme", UUID);
-    expect(plain).not.toHaveProperty("secret_key");
+    expect(row).not.toHaveProperty("secret_key");
+    const list = await listWorkspaceWebhooks(recorder([{ ...WEBHOOK, secret_key: "pi_dash_wh_leak" }]).client, "acme");
+    expect(list[0]).not.toHaveProperty("secret_key");
   });
 
   it("computes all-events mode from the five flags", () => {
