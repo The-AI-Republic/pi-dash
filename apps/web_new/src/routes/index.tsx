@@ -19,10 +19,9 @@ import {
   ONBOARDING_PATH,
   parseReturnPath,
 } from "../core/session/index.js";
-import { edition, isEditionRootEnabled } from "../core/edition/index.js";
+import { edition, isEditionRootEnabled, signedOutRootTarget } from "../core/edition/index.js";
 import { platform } from "../core/platform/index.js";
 import { DesktopSignInScreen, EntryScreen } from "../features/auth/index.js";
-import { signedOutRootTarget } from "../features/marketing/routes.js";
 
 export interface EntrySearch {
   next?: string | undefined;

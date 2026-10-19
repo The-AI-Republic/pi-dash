@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   APPS_CATALOG_ROUTE_PATH,
+  CLOUD_LOGIN_PATH,
+  MARKETING_HOME_PATH,
   PUBLIC_MARKETING_PATHS,
   ROOT_ROUTE_PATH,
   SITEMAP_MARKETING_PATHS,
@@ -18,7 +20,9 @@ import {
   isTopLevelRoute,
   publicMarketingPathOf,
   resolveEditionSidebarHref,
+  signedOutRootTarget,
 } from "./routes.js";
+import { safeNextPath } from "../session/index.js";
 import type { Edition } from "./types.js";
 
 describe("edition routes", () => {
@@ -126,5 +130,62 @@ describe("edition settings sections", () => {
   it("returns null for an undeclared section", () => {
     expect(findEditionSettingsSection(cloud, "security")).toBeNull();
     expect(findEditionSettingsSection({ id: "oss", flags: {} }, "ai-assistant")).toBeNull();
+  });
+});
+
+describe("signedOutRootTarget (CLOUD-001)", () => {
+  const cloud: Edition = {
+    id: "cloud",
+    flags: {},
+    routes: [
+      { path: "/", scope: "top-level" },
+      { path: "home", scope: "top-level" },
+      { path: "docs", scope: "top-level" },
+      { path: "downloads", scope: "top-level" },
+      { path: "pricing", scope: "top-level" },
+      { path: "login", scope: "top-level" },
+    ],
+  };
+
+  it("lands a visitor with no target on the marketing home", () => {
+    expect(signedOutRootTarget(undefined)).toBe(MARKETING_HOME_PATH);
+    expect(MARKETING_HOME_PATH).toBe("/home");
+  });
+
+  it("carries a safe target to the login page as next_path", () => {
+    expect(signedOutRootTarget("/acme/projects/p-1?tab=issues")).toBe(
+      "/login?next_path=%2Facme%2Fprojects%2Fp-1%3Ftab%3Dissues"
+    );
+    expect(CLOUD_LOGIN_PATH).toBe("/login");
+  });
+
+  it("never forwards an unsafe value (CLOUD-013)", () => {
+    // The root passes the parser's sanitized value; an unsafe one becomes
+    // absent, so the visitor simply lands on the marketing home.
+    expect(signedOutRootTarget(safeNextPath("https://evil.test/phish"))).toBe("/home");
+    expect(signedOutRootTarget(safeNextPath("//evil.test"))).toBe("/home");
+    expect(signedOutRootTarget(safeNextPath("\\evil.test"))).toBe("/home");
+  });
+
+  it("enables the declared marketing pages on the cloud edition", () => {
+    for (const path of ["/home", "/docs", "/downloads", "/pricing", "/home/"]) {
+      expect(isEditionMarketingPath(cloud, path)).toBe(true);
+    }
+    expect(isEditionRootEnabled(cloud)).toBe(true);
+  });
+
+  it("leaves the OSS build without a marketing surface or root forward", () => {
+    const oss: Edition = { id: "oss", flags: {} };
+    for (const path of ["/home", "/docs", "/downloads", "/pricing"]) {
+      expect(isEditionMarketingPath(oss, path)).toBe(false);
+    }
+    expect(isEditionRootEnabled(oss)).toBe(false);
+  });
+
+  it("does not enable undeclared or non-marketing paths", () => {
+    const partial: Edition = { id: "cloud", flags: {}, routes: [{ path: "home", scope: "top-level" }] };
+    expect(isEditionMarketingPath(partial, "/home")).toBe(true);
+    expect(isEditionMarketingPath(partial, "/docs")).toBe(false);
+    expect(isEditionMarketingPath(partial, "/somewhere")).toBe(false);
   });
 });

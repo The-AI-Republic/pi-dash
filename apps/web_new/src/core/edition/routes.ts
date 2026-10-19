@@ -108,6 +108,25 @@ export function isEditionProviderFreePath(edition: Edition, pathname: string): b
   return isEditionMarketingPath(edition, pathname);
 }
 
+/** Marketing home every public forward lands on (CLOUD-001). */
+export const MARKETING_HOME_PATH = "/home";
+
+/** Cloud sign-in page, rendered in place by the cloud edition (CLOUD-002). */
+export const CLOUD_LOGIN_PATH = "/login";
+
+/**
+ * The address a signed-out visitor on the edition's root is sent to
+ * (CLOUD-001). A safe return target is carried as the login page's
+ * `next_path`, so the visitor comes back to it after signing in; an absent
+ * or unsafe target is not carried, and the visitor lands on the marketing
+ * home (CLOUD-013 discards unsafe values rather than forwarding them).
+ * `safeNext` is the parser's already-sanitized value.
+ */
+export function signedOutRootTarget(safeNext: string | undefined): string {
+  if (safeNext === undefined) return MARKETING_HOME_PATH;
+  return `${CLOUD_LOGIN_PATH}?next_path=${encodeURIComponent(safeNext)}`;
+}
+
 /**
  * True when the edition declares an extra settings section with this id.
  * The settings shell reads the sections once and lets each declared id
