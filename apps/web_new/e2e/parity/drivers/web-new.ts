@@ -2924,8 +2924,36 @@ export class WebNewDriver implements ParityDriver {
   async widgetTitles(): Promise<string[]> {
     return todo("widgetTitles");
   }
-  async widgetRowNames(_widget: string): Promise<string[]> {
-    return todo("widgetRowNames");
+  private widgetSection(widget: string): Locator {
+    return this.page.locator(`[data-widget-root="${widget}"]`).first();
+  }
+
+  private widgetHeader(widget: string): Locator {
+    return this.page.locator(`[data-widget-header="${widget}"]`).first();
+  }
+
+  private widgetPanel(widget: string): Locator {
+    return this.page.locator(`[data-widget-rows="${widget}"]`).first();
+  }
+
+  async widgetRowNames(widget: string): Promise<string[]> {
+    // Rows are the direct blocks of the panel; ignore the pending upload row
+    // only when it has not settled (callers look for the settled size text).
+    const rows = this.widgetPanel(widget).locator(":scope > [data-widget-row]");
+    const count = await rows.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const text = (
+        (await rows
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") out.push(text);
+    }
+    return out;
   }
   async widgetProgress(_widget: string): Promise<string | null> {
     return todo("widgetProgress");
@@ -2933,17 +2961,20 @@ export class WebNewDriver implements ParityDriver {
   async widgetGroupNames(_widget: string): Promise<string[]> {
     return todo("widgetGroupNames");
   }
-  async openWidgetSection(_widget: string): Promise<void> {
-    return todo("openWidgetSection");
+  async openWidgetSection(widget: string): Promise<void> {
+    if (await this.widgetExpanded(widget)) return;
+    await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async widgetExpanded(_widget: string): Promise<boolean> {
-    return todo("widgetExpanded");
+  async widgetExpanded(widget: string): Promise<boolean> {
+    const header = this.widgetHeader(widget);
+    if ((await header.count()) === 0) return false;
+    return (await header.getAttribute("aria-expanded")) === "true";
   }
   async widgetHeaderControlCount(_widget: string): Promise<number> {
     return todo("widgetHeaderControlCount");
   }
-  async toggleWidgetSection(_widget: string): Promise<void> {
-    return todo("toggleWidgetSection");
+  async toggleWidgetSection(widget: string): Promise<void> {
+    await this.widgetHeader(widget).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async widgetAddMenuNames(_widget: string): Promise<string[]> {
     return todo("widgetAddMenuNames");
@@ -2966,23 +2997,80 @@ export class WebNewDriver implements ParityDriver {
   async clickWidgetRow(_widget: string, _rowName: string): Promise<void> {
     return todo("clickWidgetRow");
   }
-  async widgetRowActionNames(_widget: string, _rowName: string): Promise<string[]> {
-    return todo("widgetRowActionNames");
+  private widgetRow(widget: string, rowName: string): Locator {
+    return this.widgetPanel(widget).locator(":scope > [data-widget-row]").filter({ hasText: rowName }).first();
   }
-  async clickWidgetRowAction(_widget: string, _rowName: string, _action: string): Promise<void> {
-    return todo("clickWidgetRowAction");
+
+  async widgetRowActionNames(widget: string, rowName: string): Promise<string[]> {
+    await this.widgetRow(widget, rowName)
+      .locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]')
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    return (await this.page.locator('[role="menuitem"]:visible').allTextContents())
+      .map((text) => text.trim())
+      .filter((text) => text !== "");
   }
-  async downloadWidgetRowFile(_widget: string, _rowName: string): Promise<{ fileName: string; bytes: Buffer }> {
-    return todo("downloadWidgetRowFile");
+
+  async clickWidgetRowAction(widget: string, rowName: string, action: string): Promise<void> {
+    await this.widgetRow(widget, rowName)
+      .locator('button[aria-haspopup="menu"], button[aria-haspopup="true"]')
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[role="menuitem"]:visible')
+      .filter({ hasText: action })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+  async downloadWidgetRowFile(widget: string, rowName: string): Promise<{ fileName: string; bytes: Buffer }> {
+    // The row is a new-tab link to the served asset; the tab downloads the
+    // bytes instead of rendering them, so capture both halves.
+    const popupWait = this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: 60_000 }),
+      this.widgetRow(widget, rowName).locator('a[target="_blank"]').first().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const popup = await popupWait;
+    if (popup === null) throw new Error(`[parity] row ${JSON.stringify(rowName)} downloaded without opening a tab.`);
+    await popup.close().catch(() => undefined);
+    const stream = await download.createReadStream();
+    if (stream === null) throw new Error(`[parity] download of ${JSON.stringify(rowName)} produced no bytes.`);
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
+  }
+  private appDialogs(): Locator {
+    return this.page.locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]');
+  }
+
+  private async openAppDialog(): Promise<Locator | null> {
+    const dialogs = this.appDialogs();
+    const count = await dialogs.count();
+    for (let i = 0; i < count; i++) {
+      const candidate = dialogs.nth(i);
+      const text = ((await candidate.innerText().catch(() => "")) ?? "").trim();
+      if (text !== "") return candidate;
+    }
+    return null;
+  }
+
   async confirmModalTitle(): Promise<string | null> {
-    return todo("confirmModalTitle");
+    const dialog = await this.openAppDialog();
+    if (dialog === null) return null;
+    const heading = dialog.locator("h1, h2, h3, [role='heading']").first();
+    if ((await heading.count()) > 0) return ((await heading.innerText().catch(() => "")) ?? "").trim() || null;
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim();
+    return text.split("\n")[0]?.trim() || null;
   }
   async confirmModalText(): Promise<string | null> {
-    return todo("confirmModalText");
+    const dialog = await this.openAppDialog();
+    if (dialog === null) return null;
+    return ((await dialog.innerText().catch(() => "")) ?? "").trim() || null;
   }
-  async confirmModal(_label: string): Promise<void> {
-    return todo("confirmModal");
+  async confirmModal(label: string): Promise<void> {
+    const dialog = await this.openAppDialog();
+    if (dialog === null) throw new Error("[parity] no open confirmation dialog.");
+    await dialog.getByRole("button", { name: label, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async addRelationViaModal(_type: string, _search: string, _name: string): Promise<void> {
     return todo("addRelationViaModal");
@@ -2999,8 +3087,17 @@ export class WebNewDriver implements ParityDriver {
   async linkRowTarget(_rowName: string): Promise<{ href: string; target: string | null } | null> {
     return todo("linkRowTarget");
   }
-  async uploadAttachment(_file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
-    return todo("uploadAttachment");
+  async uploadAttachment(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    const chooserWait = this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    await this.page.getByRole("button", { name: "Attach" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    const chooser = await chooserWait;
+    if (chooser !== null) {
+      await chooser.setFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+      return;
+    }
+    const input = this.page.locator('input[type="file"]').first();
+    await input.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
   }
   async clickWidgetAction(_name: string): Promise<void> {
     return todo("clickWidgetAction");
@@ -3530,32 +3627,82 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  private codeReviewsSection(): Locator {
+    return this.page.locator('[data-widget-root="Code reviews"]').first();
+  }
+
   async codeReviewsVisible(): Promise<boolean> {
-    return todo("codeReviewsVisible");
+    return (await this.codeReviewsSection().count()) > 0 && (await this.codeReviewsSection().isVisible());
   }
 
   async codeReviewLinks(): Promise<{ badge: string; title: string; href: string | null; target: string | null }[]> {
-    return todo("codeReviewLinks");
+    return this.page.evaluate(() => {
+      const section = document.querySelector('[data-widget-root="Code reviews"]');
+      if (!section) return [];
+      return Array.from(section.querySelectorAll("a[target='_blank']")).map((anchor) => {
+        const row = anchor.closest("[data-widget-row]");
+        const badge = row?.firstElementChild?.textContent?.trim() ?? "";
+        return {
+          badge,
+          title: ((anchor as HTMLElement).innerText ?? "").trim(),
+          href: anchor.getAttribute("href"),
+          target: anchor.getAttribute("target"),
+        };
+      });
+    });
   }
 
-  async codeReviewAttach(_url: string): Promise<void> {
-    return todo("codeReviewAttach");
+  async codeReviewAttach(url: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.fill(url);
+    await input.locator("xpath=ancestor::form[1]").getByRole("button", { name: "Attach" }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.page.waitForFunction(
+      () => {
+        const el = document.querySelector("input[placeholder='Paste a pull request or merge request URL']");
+        return el instanceof HTMLInputElement && el.value === "";
+      },
+      null,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
 
-  async codeReviewAttemptAttach(_url: string): Promise<void> {
-    return todo("codeReviewAttemptAttach");
+  async codeReviewAttemptAttach(url: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.fill(url);
+    await input.locator("xpath=ancestor::form[1]").getByRole("button", { name: "Attach" }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
   async codeReviewInputValue(): Promise<string> {
-    return todo("codeReviewInputValue");
+    const input = this.page.getByPlaceholder("Paste a pull request or merge request URL").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return input.inputValue();
   }
 
-  async codeReviewDetach(_title: string): Promise<void> {
-    return todo("codeReviewDetach");
+  async codeReviewDetach(title: string): Promise<void> {
+    const row = this.page
+      .locator('[data-widget-root="Code reviews"] [data-widget-row]')
+      .filter({ hasText: title })
+      .first();
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByRole("button").first().click({ force: true, timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction((text) => !document.body.innerText.includes(text), title, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
   async worklogCreateVisible(): Promise<boolean> {
-    return todo("worklogCreateVisible");
+    // The community build renders no worklog control anywhere on the item.
+    const texts = await this.page
+      .locator('[data-testid="issue-detail-widgets"] button, main button')
+      .allInnerTexts()
+      .catch(() => [] as string[]);
+    return texts.some((text) => /work\s?log/i.test(text));
   }
 
   // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Stubs until

@@ -15,7 +15,7 @@ import {
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RouterContext } from "../../../__root.js";
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
@@ -367,6 +367,29 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
     } else if (url.includes("/issue-links/")) {
       status = 200;
       body = JSON.stringify([]);
+    } else if (url.endsWith(`/issues/${ISSUE_ID}/attachments/`)) {
+      status = 200;
+      body = JSON.stringify([]);
+    } else if (url.endsWith(`/issues/${ISSUE_ID}/code-reviews/`)) {
+      status = 200;
+      body = JSON.stringify([]);
+    } else if (url.includes("/api/instances/")) {
+      status = 200;
+      body = JSON.stringify({
+        config: {
+          enable_signup: true,
+          is_workspace_creation_disabled: false,
+          is_google_enabled: false,
+          is_github_enabled: false,
+          is_gitlab_enabled: false,
+          is_gitea_enabled: false,
+          is_magic_login_enabled: true,
+          is_email_password_enabled: true,
+          is_smtp_configured: false,
+          is_self_managed: true,
+          instance_changelog_url: "",
+        },
+      });
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = {
@@ -464,6 +487,38 @@ describe("browse route", () => {
     // No project details resolve, so the title reads as a heading.
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
     expect(document.title).toBe("WEB-1 Fix login");
+  });
+
+  it("mounts attachments in the widget root and hides code reviews at zero", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    expect(await within(widgets).findByRole("region", { name: "Attachments" })).toBeInTheDocument();
+    expect(within(widgets).getAllByRole("button", { name: "Attach" }).length).toBeGreaterThan(0);
+    expect(within(widgets).queryByText("Code reviews")).not.toBeInTheDocument();
+    expect(widgets.textContent ?? "").not.toMatch(/work\s?log/i);
+  });
+
+  it("routes the action row's Attach entry to the attachment picker", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    const actions = await within(widgets).findAllByRole("button", { name: "Attach" });
+    const actionRow = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
+    expect(actionRow).toBeDefined();
+    expect(actionRow).toBeEnabled();
+    const clicked = vi.spyOn(HTMLInputElement.prototype, "click");
+    await userEvent.setup().click(actionRow as HTMLElement);
+    expect(clicked).toHaveBeenCalled();
+    clicked.mockRestore();
+  });
+
+  it("keeps the widget root's sections in their fixed order", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    await within(widgets).findByRole("region", { name: "Attachments" });
+    const labels = [...widgets.querySelectorAll("[data-widget-section]")].map((node) =>
+      node.getAttribute("data-widget-section")
+    );
+    expect(labels).toEqual(["Attachments"]);
   });
 
   it("edits the title inline once membership resolves", async () => {

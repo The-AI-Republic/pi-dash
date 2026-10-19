@@ -1728,10 +1728,21 @@ assert each renders and persists.
 
 Worklog (ISS-206 owned by NEWFRONT-650; edition-gated proof in
 `worklog-absent.spec.ts` plus a cloud worklog spec). OSS builds
-empty surfaces with a filter category that filters nothing. Cloud
+empty surfaces with no worklog button, rows, summary, or call to
+action, and the activity filter keeps no worklog category. Cloud
 builds the log entry, rows, sidebar summary, and feed entries for
 eligible members. The cloud scenarios log time and assert it appears
 in the feed and sidebar.
+
+The cloud worklog implementation is currently blocked: the OSS
+backend has no worklog model, serializer, route, or contract, and the
+cloud overlay is not part of this repository (NEWFRONT-612 recorded
+the same gap). NEWFRONT-650 therefore builds the OSS absence plus the
+`issue-worklog` edition flag in
+`apps/web_new/src/features/issues/detail/widgets/worklog/`, and
+NEWFRONT-672 carries the cloud backend, contracts, cloud surface, and
+cloud scenario. ISS-206 turns fully new green only when NEWFRONT-672
+lands and the area gate proves both editions.
 
 Epics (ISS-232 owned by NEWFRONT-657; edition-gated proof in
 `edition-stubs.spec.ts` plus cloud epic scenarios). OSS builds the

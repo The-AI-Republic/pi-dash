@@ -200,6 +200,14 @@ export { IssueDetailRoot } from "./detail/IssueDetailRoot.js";
 export { IssuePropertiesSidebar } from "./detail/sidebar/index.js";
 export type { IssuePropertiesSidebarProps } from "./detail/sidebar/index.js";
 export type { IssueDetailRootProps } from "./detail/IssueDetailRoot.js";
+export { AttachmentsWidget } from "./detail/widgets/attachments/AttachmentsWidget.js";
+export type {
+  AttachmentsWidgetHandle,
+  AttachmentsWidgetProps,
+} from "./detail/widgets/attachments/AttachmentsWidget.js";
+export { CodeReviewsWidget } from "./detail/widgets/codeReviews/CodeReviewsWidget.js";
+export type { CodeReviewsWidgetProps } from "./detail/widgets/codeReviews/CodeReviewsWidget.js";
+export { isWorklogEnabled, WORKLOG_FLAG } from "./detail/widgets/worklog/worklog.js";
 export { TriageDetailRoot } from "./detail/TriageDetailRoot.js";
 export type { TriageDetailRootProps } from "./detail/TriageDetailRoot.js";
 export { IssueTitleField, TITLE_AUTOSAVE_MS, TITLE_MAX_LENGTH } from "./detail/IssueTitleField.js";

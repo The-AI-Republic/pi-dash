@@ -80,6 +80,8 @@ export interface SubIssuesWidgetProps {
   createProjects: WorkItemCreateProject[];
   /** Sections relations/links/attachments slices mount here. */
   extraSections?: readonly WidgetSectionSlot[] | undefined;
+  /** Opens the attachment picker; the Attach entry stays disabled without it. */
+  onAttach?: (() => void) | undefined;
 }
 
 export function SubIssuesWidget({
@@ -92,6 +94,7 @@ export function SubIssuesWidget({
   onOpen,
   createProjects,
   extraSections = [],
+  onAttach,
 }: SubIssuesWidgetProps): React.ReactElement {
   const section = React.useRef<SubIssueSectionHandle>(null);
   const [addMenuOpen, setAddMenuOpen] = React.useState(false);
@@ -123,9 +126,16 @@ export function SubIssuesWidget({
           if (slot?.action !== undefined) {
             return <React.Fragment key={label}>{slot.action}</React.Fragment>;
           }
-          const implemented = SUB_ISSUES_WIDGET_ACTIONS.includes(label);
+          const implemented =
+            SUB_ISSUES_WIDGET_ACTIONS.includes(label) || (label === "Attach" && onAttach !== undefined);
           const button = (
-            <Button variant="secondary" size="medium" disabled={!canAdd || !implemented} data-widget-action={label}>
+            <Button
+              variant="secondary"
+              size="medium"
+              disabled={!canAdd || !implemented}
+              data-widget-action={label}
+              onClick={label === "Attach" ? onAttach : undefined}
+            >
               <span className="flex items-center gap-(--space-1)">
                 {actionIcon(label)}
                 <span>{label}</span>
