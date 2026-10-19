@@ -163,7 +163,7 @@ describe("LabelPicker options", () => {
     const user = userEvent.setup();
     setup();
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     expect(screen.getByTestId("label-picker-search")).toHaveFocus();
     await user.type(screen.getByTestId("label-picker-search"), "bet");
     expect(optionTexts()).toEqual(["Beta"]);
@@ -173,7 +173,7 @@ describe("LabelPicker options", () => {
     const user = userEvent.setup();
     setup();
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "bet");
     expect(optionTexts()).toEqual(["Beta"]);
     await user.keyboard("{Escape}");
@@ -205,7 +205,7 @@ describe("LabelPicker keyboard submit", () => {
     const user = userEvent.setup();
     const { calls, onChange } = setup();
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "beta");
     await user.keyboard("{Enter}");
     expect(onChange).toHaveBeenCalledWith([BID]);
@@ -216,7 +216,7 @@ describe("LabelPicker keyboard submit", () => {
     const user = userEvent.setup();
     const { onChange } = setup();
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "a");
     await user.keyboard("{Enter}");
     expect(onChange).toHaveBeenCalledWith([AID]);
@@ -226,19 +226,24 @@ describe("LabelPicker keyboard submit", () => {
     const user = userEvent.setup();
     const { calls, onChange } = setup();
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.keyboard("{Enter}");
     expect(onChange).not.toHaveBeenCalled();
     expect(calls.some((call) => call.method === "POST")).toBe(false);
   });
 });
 
+// Base UI mounts the popover in a follow-up task and the option list
+// renders after that; under a full-suite run the pair can outlast the
+// 1 s default wait, so the settled list gets an explicit budget.
+const POPOVER_TIMEOUT = { timeout: 10_000 };
+
 describe("LabelPicker inline create", () => {
   it("creates and selects a fresh name for admins", async () => {
     const user = userEvent.setup();
     const { calls, onChange } = setup({ roles: { [PROJECT]: 20 }, memberRole: 15 });
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "Fresh");
     await waitFor(() => expect(screen.getByTestId("label-picker-create")).toHaveTextContent('Create "Fresh"'));
     await user.click(screen.getByTestId("label-picker-create"));
@@ -255,7 +260,7 @@ describe("LabelPicker inline create", () => {
     const user = userEvent.setup();
     const { onChange } = setup({ roles: { [PROJECT]: 15 }, memberRole: 20 });
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "Fresh");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(onChange).toHaveBeenCalledWith([NEWID]));
@@ -266,7 +271,7 @@ describe("LabelPicker inline create", () => {
     const user = userEvent.setup();
     const { onChange } = setup({ post: { status: 400, body: { name: ["LABEL_NAME_ALREADY_EXISTS"] } } });
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "Fresh");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(expect.anything(), LABEL_DUPLICATE_MESSAGE));
@@ -278,46 +283,57 @@ describe("LabelPicker inline create", () => {
     const user = userEvent.setup();
     const { calls } = setup();
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "x".repeat(256));
     await user.keyboard("{Enter}");
     await waitFor(() =>
       expect(notifyError).toHaveBeenCalledWith(LABEL_CREATE_FAILED_TITLE, expect.stringContaining("255"))
     );
     expect(calls.some((call) => call.method === "POST")).toBe(false);
-  });
+  }, 30_000);
 
   it("offers non-admins the empty note instead of creation", async () => {
     const user = userEvent.setup();
     const { onChange } = setup({ roles: { [PROJECT]: 15 }, memberRole: 15 });
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "zzz");
-    await waitFor(() => expect(screen.getByTestId("label-picker-empty")).toHaveTextContent("No matching results"));
+    await waitFor(
+      () => expect(screen.getByTestId("label-picker-empty")).toHaveTextContent("No matching results"),
+      POPOVER_TIMEOUT
+    );
+    // The empty note landed after the picker was interactive.
+    expect(screen.getByTestId("label-picker-search")).toHaveFocus();
     expect(screen.queryByTestId("label-picker-create")).not.toBeInTheDocument();
     await user.keyboard("{Enter}");
     expect(onChange).not.toHaveBeenCalled();
-  });
+  }, 30_000);
 
   it("hides creation when standing fails", async () => {
     const user = userEvent.setup();
     setup({ rolesStatus: 500 });
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "zzz");
-    await waitFor(() => expect(screen.getByTestId("label-picker-empty")).toHaveTextContent("No matching results"));
+    await waitFor(
+      () => expect(screen.getByTestId("label-picker-empty")).toHaveTextContent("No matching results"),
+      POPOVER_TIMEOUT
+    );
     expect(screen.queryByTestId("label-picker-create")).not.toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("hides creation when the membership read fails", async () => {
     const user = userEvent.setup();
     setup({ memberStatus: 500 });
     await user.click(screen.getByTestId("label-picker-trigger"));
-    await waitFor(() => expect(optionTexts()).toHaveLength(3));
+    await waitFor(() => expect(optionTexts()).toHaveLength(3), POPOVER_TIMEOUT);
     await user.type(screen.getByTestId("label-picker-search"), "zzz");
-    await waitFor(() => expect(screen.getByTestId("label-picker-empty")).toHaveTextContent("No matching results"));
+    await waitFor(
+      () => expect(screen.getByTestId("label-picker-empty")).toHaveTextContent("No matching results"),
+      POPOVER_TIMEOUT
+    );
     expect(screen.queryByTestId("label-picker-create")).not.toBeInTheDocument();
-  });
+  }, 30_000);
 });
 
 describe("LabelPicker chrome", () => {

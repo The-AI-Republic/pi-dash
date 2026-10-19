@@ -94,7 +94,9 @@ describe("CustomSnoozeDialog", () => {
     // The same slot is still offered in the afternoon, so it stays picked.
     expect(within(panel).getByRole("option", { name: "10:30" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("button", { name: TIME_SECTION_HEADING })).toHaveTextContent("10:30 PM");
-  });
+    // Two day/time picker round-trips in one case: give the full flow
+    // room when the rest of the suite competes for the CPU.
+  }, 30_000);
 
   it("renders nothing while closed", () => {
     renderDialog({ open: false });

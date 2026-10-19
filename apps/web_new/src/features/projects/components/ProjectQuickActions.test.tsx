@@ -66,6 +66,10 @@ afterEach(() => {
   }
 });
 
+// Both dialogs ride lazily imported chunks; the first import can take
+// seconds while the whole suite competes for the CPU.
+const LAZY_DIALOG_TIMEOUT = { timeout: 10_000 };
+
 describe("ProjectQuickActions", () => {
   it("offers admins publish, copy, archives and settings", () => {
     setup({ isAdmin: true, isAuthorized: true });
@@ -89,14 +93,14 @@ describe("ProjectQuickActions", () => {
     setup();
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Publish project" }));
-    expect(await screen.findByRole("heading", { name: "Publish project" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Publish project" }, LAZY_DIALOG_TIMEOUT)).toBeInTheDocument();
   });
 
   it("opens the leave dialog from its entry", async () => {
     setup({ isAdmin: false, isAuthorized: false });
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Leave project" }));
-    expect(await screen.findByRole("heading", { name: "Leave project" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Leave project" }, LAZY_DIALOG_TIMEOUT)).toBeInTheDocument();
   });
 
   it("navigates to archives and settings from their entries", () => {

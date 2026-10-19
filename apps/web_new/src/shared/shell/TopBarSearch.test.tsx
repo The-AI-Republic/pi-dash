@@ -80,6 +80,10 @@ afterEach(() => {
   useTopSearchFocus.setState({ request: 0 });
 });
 
+// The search rows live in a lazily imported panel; the first import can
+// take seconds while the whole suite competes for the CPU.
+const LAZY_ROW_TIMEOUT = { timeout: 10_000 };
+
 describe("TopBarSearch (SHELL-081)", () => {
   it("focuses and opens the panel on a focus request (SHELL-089)", () => {
     renderBox({ scope: null });
@@ -125,8 +129,10 @@ describe("TopBarSearch (SHELL-081)", () => {
     await user.click(input);
     expect(screen.getByRole("listbox", { name: "Top bar search results" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: "Sign out" })).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name: "Go to workspace home" })).toBeInTheDocument();
+    // The rows live in a lazily imported panel; under a full-suite run
+    // that chunk lands well after the 1 s default find budget.
+    expect(await screen.findByRole("option", { name: "Sign out" }, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: "Go to workspace home" }, LAZY_ROW_TIMEOUT)).toBeInTheDocument();
   });
 
   it("filters commands as the term types", async () => {
