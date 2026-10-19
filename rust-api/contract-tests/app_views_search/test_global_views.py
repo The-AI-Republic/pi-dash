@@ -9,6 +9,7 @@ Routes (apps/api/pi_dash/app/urls/views.py):
 """
 
 import os
+from datetime import datetime, timedelta, timezone
 
 from .conftest import session_headers
 
@@ -172,6 +173,51 @@ def test_view_issues_shape(api, seed, tenant_a, project_a, auth_a):
     assert entry["assignee_ids"] == []
     assert entry["label_ids"] == []
     assert entry["module_ids"] == []
+
+
+def _utc():
+    return datetime.now(timezone.utc)
+
+
+def test_view_issues_m2m_ids_newest_first(
+    api, seed, tenant_a, project_a, auth_a
+):
+    """``assignee_ids``/``label_ids``/``module_ids`` come back newest first.
+
+    Django's ``IssueAssignee``/``IssueLabel``/``ModuleIssue`` all set
+    ``Meta.ordering = ("-created_at",)``, so the prefetch SQL carries
+    ``ORDER BY created_at DESC`` and the serializer's ``.all()`` iteration
+    yields the ids newest-created first. Rust must match, so seed two of
+    each with distinct ``created_at`` values and assert the order.
+    """
+    ws = tenant_a["workspace"]["id"]
+    issue_id = seed.issue(ws, project_a, name="Ordered m2m links")
+    older = _utc() - timedelta(hours=1)
+    newer = _utc()
+
+    assignee_a = seed.user()
+    assignee_b = seed.user()
+    seed.issue_assignee(ws, project_a, issue_id, assignee_a["id"], created_at=older)
+    seed.issue_assignee(ws, project_a, issue_id, assignee_b["id"], created_at=newer)
+
+    label_a = seed.label(ws, project_a)
+    label_b = seed.label(ws, project_a)
+    seed.issue_label(ws, project_a, issue_id, label_a, created_at=older)
+    seed.issue_label(ws, project_a, issue_id, label_b, created_at=newer)
+
+    module_a = seed.module(ws, project_a)
+    module_b = seed.module(ws, project_a)
+    seed.module_issue(ws, project_a, module_a, issue_id, created_at=older)
+    seed.module_issue(ws, project_a, module_b, issue_id, created_at=newer)
+
+    r = api.get(
+        f"/api/workspaces/{tenant_a['workspace']['slug']}/issues/", headers=auth_a
+    )
+    assert r.status_code == 200, r.text
+    entry = next(e for e in r.json()["results"] if e["id"] == issue_id)
+    assert entry["assignee_ids"] == [assignee_b["id"], assignee_a["id"]], entry
+    assert entry["label_ids"] == [label_b, label_a], entry
+    assert entry["module_ids"] == [module_b, module_a], entry
 
 
 def test_view_issues_guest_sees_only_own(api, seed, tenant_a, project_a, auth_a):

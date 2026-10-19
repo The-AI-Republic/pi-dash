@@ -157,6 +157,14 @@ class Seed:
                     (workspaces,),
                 )
                 cur.execute(
+                    "DELETE FROM issue_assignees WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
+                cur.execute(
+                    "DELETE FROM issue_labels WHERE workspace_id = ANY(%s)",
+                    (workspaces,),
+                )
+                cur.execute(
                     "DELETE FROM issues WHERE workspace_id = ANY(%s)",
                     (workspaces,),
                 )
@@ -655,15 +663,56 @@ class Seed:
             updated_at=_now(),
         )
 
-    def module_issue(self, workspace_id, project_id, module_id, issue_id):
+    def module_issue(self, workspace_id, project_id, module_id, issue_id,
+                     *, created_at=None):
         return self._insert(
             "module_issues",
             module_id=module_id,
             issue_id=issue_id,
             project_id=project_id,
             workspace_id=workspace_id,
+            created_at=created_at or _now(),
+            updated_at=created_at or _now(),
+        )
+
+    def label(self, workspace_id, project_id, *, name=None):
+        """A minimal labels row (project-scoped)."""
+        return self._insert(
+            "labels",
+            name=name or f"CT1199 label {uuid.uuid4().hex[:6]}",
+            description="",
+            color="#ffffff",
+            sort_order=65535,
+            project_id=project_id,
+            workspace_id=workspace_id,
             created_at=_now(),
             updated_at=_now(),
+        )
+
+    def issue_assignee(self, workspace_id, project_id, issue_id, assignee_id,
+                       *, created_at=None):
+        """A link row in ``issue_assignees`` (Django ``IssueAssignee``)."""
+        return self._insert(
+            "issue_assignees",
+            assignee_id=assignee_id,
+            issue_id=issue_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            created_at=created_at or _now(),
+            updated_at=created_at or _now(),
+        )
+
+    def issue_label(self, workspace_id, project_id, issue_id, label_id,
+                    *, created_at=None):
+        """A link row in ``issue_labels`` (Django ``IssueLabel``)."""
+        return self._insert(
+            "issue_labels",
+            label_id=label_id,
+            issue_id=issue_id,
+            project_id=project_id,
+            workspace_id=workspace_id,
+            created_at=created_at or _now(),
+            updated_at=created_at or _now(),
         )
 
     def module_link(self, workspace_id, project_id, module_id, *, title="Docs",
