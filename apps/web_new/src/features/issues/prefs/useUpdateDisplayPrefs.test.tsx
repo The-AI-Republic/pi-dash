@@ -169,7 +169,7 @@ describe("useUpdateDisplayPrefs", () => {
         order_by: "sort_order",
         sub_group_by: null,
         show_empty_groups: false,
-        sub_issue: false,
+        sub_issue: true,
         calendar: { layout: "month", show_weekends: true },
         future_key: "kept",
       },

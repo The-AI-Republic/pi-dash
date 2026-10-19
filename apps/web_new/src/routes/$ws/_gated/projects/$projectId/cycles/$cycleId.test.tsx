@@ -152,6 +152,7 @@ describe("cycle issues route", () => {
       entity: { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
       groupBy: null,
       orderBy: "sort_order",
+      showSubIssues: true,
     });
     expect(mocks.prefs).toHaveBeenCalledWith(expect.anything(), "acme", {
       scope: "cycle",

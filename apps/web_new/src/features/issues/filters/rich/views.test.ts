@@ -229,6 +229,7 @@ describe("viewDisplaySnapshot", () => {
       group_by: null,
       order_by: "-created_at",
       show_empty_groups: true,
+      sub_issue: false,
       calendar: { layout: "month", show_weekends: false },
       custom_key: "kept",
     });

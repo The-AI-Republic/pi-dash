@@ -60,6 +60,9 @@ export function VirtualList<T>({
             <div
               key={getKey(item, virtualRow.index)}
               data-index={virtualRow.index}
+              // Rows can grow after mount (inline sub-issue expansion), so
+              // measured height, not the estimate, owns their offsets.
+              ref={virtualizer.measureElement}
               style={{
                 position: "absolute",
                 top: 0,

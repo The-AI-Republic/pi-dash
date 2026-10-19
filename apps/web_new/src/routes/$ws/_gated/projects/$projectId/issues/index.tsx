@@ -37,6 +37,7 @@ import {
 } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { loadListLayout, resolvedListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import { selectDisplayPrefs } from "../../../../../../features/issues/prefs/displayPrefs.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 // The timeline boundary (and the chart code behind it) only matters when
@@ -120,7 +121,8 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       );
       // The list and analytics leaves, and the list layout itself, ride
       // their own chunks (Quality gates); await them with the data so the
-      // first commit is the screen itself.
+      // first commit is the screen itself. The list layout reads its own
+      // first page, including the stored sub-issue and empty-group flags.
       await Promise.all([loadIssueListLeaves(), loadListLayout()]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them

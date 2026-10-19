@@ -108,7 +108,7 @@ describe("ListRow", () => {
     fireEvent.click(anchor, { button: 1 });
     expect(onOpenPeek).not.toHaveBeenCalled();
     fireEvent.click(anchor);
-    expect(onOpenPeek).toHaveBeenCalledWith("WEB-42");
+    expect(onOpenPeek).toHaveBeenCalledWith("WEB-42", "Fix login");
   });
 
   it("marks a temp row as saving without the property strip", () => {
@@ -163,7 +163,7 @@ describe("ListRow", () => {
       />
     );
     fireEvent.click(screen.getByRole("button", { name: "Open sub-work items of Deep in preview" }));
-    expect(onOpenPeek).toHaveBeenCalledWith("WEB-42");
+    expect(onOpenPeek).toHaveBeenCalledWith("WEB-42", "Deep");
   });
 
   it("hides the expander when the display toggle is off", () => {

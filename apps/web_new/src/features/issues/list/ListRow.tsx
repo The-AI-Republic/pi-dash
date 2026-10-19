@@ -82,7 +82,7 @@ export interface ListRowProps {
   estimateEnabled: boolean;
   highlightedId: string | null;
   /** Opens the peek panel for the row's key. */
-  onOpenPeek: (issueKey: string) => void;
+  onOpenPeek: (issueKey: string, title: string) => void;
   /** href for the row anchor; the route builds it. */
   hrefFor: (issue: IssueListItem) => string;
   /** Row density from the layout search param (list vs compact). */
@@ -125,7 +125,7 @@ function SubIssueExpander({
   issue: IssueListItem;
   depth: number;
   projectIdentifier: string;
-  onOpenPeek: (issueKey: string) => void;
+  onOpenPeek: (issueKey: string, title: string) => void;
   showSubIssues: boolean;
   renderChild: (child: IssueListItem, depth: number) => React.ReactNode;
 }): React.ReactElement | null {
@@ -147,7 +147,7 @@ function SubIssueExpander({
         <button
           type="button"
           aria-label={`Open sub-work items of ${issue.name} in preview`}
-          onClick={() => onOpenPeek(issueKey(projectIdentifier, issue))}
+          onClick={() => onOpenPeek(issueKey(projectIdentifier, issue), issue.name)}
           className="grid size-4 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
         >
           <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
@@ -233,7 +233,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           onClick={(event) => {
             if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
             event.preventDefault();
-            if (!temp) onOpenPeek(key);
+            if (!temp) onOpenPeek(key, issue.name);
           }}
         >
           <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">

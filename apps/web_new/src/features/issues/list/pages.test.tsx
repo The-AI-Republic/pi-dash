@@ -185,7 +185,7 @@ describe("useListPages", () => {
       url.searchParams.get("cursor") === "100:1:0" ? envelope([row("two", 2)]) : envelope([row("one", 1)], "100:1:0")
     );
     const { result } = renderHook(
-      () => useListPages("acme", { scope: "project", projectId: PROJECT }, null, "sort_order", new Map(), false),
+      () => useListPages("acme", { scope: "project", projectId: PROJECT }, null, "sort_order", new Map(), false, true),
       { wrapper: wrapper(client) }
     );
     await waitFor(() => expect(result.current.isPending).toBe(false));
@@ -201,7 +201,7 @@ describe("useListPages", () => {
   it("ignores loadMore while grouped or when no cursor remains", async () => {
     const client = hookClient(() => envelope([row("one", 1)]));
     const { result } = renderHook(
-      () => useListPages("acme", { scope: "project", projectId: PROJECT }, null, "sort_order", new Map(), false),
+      () => useListPages("acme", { scope: "project", projectId: PROJECT }, null, "sort_order", new Map(), false, true),
       { wrapper: wrapper(client) }
     );
     await waitFor(() => expect(result.current.isPending).toBe(false));
@@ -221,7 +221,8 @@ describe("useListPages", () => {
       });
     });
     const { result } = renderHook(
-      () => useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true),
+      () =>
+        useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true, true),
       { wrapper: wrapper(client) }
     );
     await waitFor(() => expect(result.current.isPending).toBe(false));
@@ -243,7 +244,8 @@ describe("useListPages", () => {
   it("drops duplicate section cursors", async () => {
     const client = hookClient(() => groupedEnvelope({ todo: { rows: [row("todo-1", 1)], total: 51 } }));
     const { result } = renderHook(
-      () => useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true),
+      () =>
+        useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true, true),
       { wrapper: wrapper(client) }
     );
     await waitFor(() => expect(result.current.isPending).toBe(false));
@@ -258,17 +260,47 @@ describe("useListPages", () => {
       groupedEnvelope({ todo: { rows: [row("todo-1", 1)], total: 1 }, empty: { rows: [], total: 0 } })
     );
     const hidden = renderHook(
-      () => useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), false),
+      () =>
+        useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), false, true),
       { wrapper: wrapper(client) }
     );
     await waitFor(() => expect(hidden.result.current.isPending).toBe(false));
     expect(hidden.result.current.sections.map((section) => section.key)).toEqual(["todo"]);
     hidden.unmount();
     const shown = renderHook(
-      () => useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true),
+      () =>
+        useListPages("acme", { scope: "project", projectId: PROJECT }, "state", "sort_order", new Map(), true, true),
       { wrapper: wrapper(client) }
     );
     await waitFor(() => expect(shown.result.current.isPending).toBe(false));
     expect(shown.result.current.sections.map((section) => section.key)).toEqual(["todo", "empty"]);
+  });
+
+  it("sends the sub-issue preference with every list read", async () => {
+    const seen: string[] = [];
+    const client = hookClient((url) => {
+      seen.push(url.searchParams.get("sub_issue") ?? "missing");
+      return envelope([row("one", 1)]);
+    });
+    const { result } = renderHook(
+      () => useListPages("acme", { scope: "project", projectId: PROJECT }, null, "sort_order", new Map(), false, true),
+      { wrapper: wrapper(client) }
+    );
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(seen).toEqual(["true"]);
+  });
+
+  it("excludes sub-issues when the display switch is off", async () => {
+    const seen: string[] = [];
+    const client = hookClient((url) => {
+      seen.push(url.searchParams.get("sub_issue") ?? "missing");
+      return envelope([row("one", 1)]);
+    });
+    const { result } = renderHook(
+      () => useListPages("acme", { scope: "project", projectId: PROJECT }, null, "sort_order", new Map(), false, false),
+      { wrapper: wrapper(client) }
+    );
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    expect(seen).toEqual(["false"]);
   });
 });

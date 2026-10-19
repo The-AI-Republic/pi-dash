@@ -88,6 +88,7 @@ describe("issues denial tolerance", () => {
         entity: { scope: "project", projectId: PARAMS.projectId },
         groupBy: null,
         orderBy: "sort_order",
+        showSubIssues: true,
       }).queryKey,
       {
         grouped_by: null,
@@ -133,6 +134,7 @@ describe("issues denial tolerance", () => {
         entity: { scope: "project", projectId: PARAMS.projectId },
         groupBy: null,
         orderBy: "sort_order",
+        showSubIssues: true,
       }).queryKey,
       {
         grouped_by: null,
@@ -383,6 +385,7 @@ function renderScreen(
   queryClient.setQueryData(
     sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {
       orderBy: "-created_at",
+      showSubIssues: true,
       richExpression: prefs.rich_filters,
     }).queryKey,
     {
@@ -405,7 +408,10 @@ function renderScreen(
   );
   if (options.unfilteredSheetRows !== undefined) {
     queryClient.setQueryData(
-      sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, { orderBy: "-created_at" }).queryKey,
+      sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {
+        orderBy: "-created_at",
+        showSubIssues: true,
+      }).queryKey,
       {
         pages: [
           {
@@ -431,6 +437,7 @@ function renderScreen(
       entity: ENTITY,
       groupBy: null,
       orderBy: orderByOf(prefs),
+      showSubIssues: true,
       richFilters: prefs.rich_filters,
     }).queryKey,
     {
@@ -521,6 +528,7 @@ describe("project issues screen", () => {
         entity: { scope: "project", projectId: PARAMS.projectId },
         groupBy: null,
         orderBy: "sort_order",
+        showSubIssues: true,
         richFilters: rich,
       }).queryKey,
       {

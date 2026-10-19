@@ -113,7 +113,12 @@ function setup(overrides: Partial<EntityListScreenProps> = {}, projects: Array<R
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
   queryClient.setQueryData(PROJECTS_KEY, projects);
-  queryClient.setQueryData(PREFS_KEY, { filters: {}, rich_filters: { priority__in: "urgent" } });
+  queryClient.setQueryData(PREFS_KEY, {
+    filters: {},
+    display_filters: {},
+    display_properties: {},
+    rich_filters: { priority__in: "urgent" },
+  });
   queryClient.setQueryData(PAGE_KEY, { total_count: 7, results: [{ id: "one" }, { id: "two" }], count: 2 });
   const props: EntityListScreenProps = {
     workspaceSlug: "acme",
@@ -163,6 +168,7 @@ describe("EntityListScreen", () => {
       entity: { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
       groupBy: null,
       orderBy: "sort_order",
+      showSubIssues: true,
       richFilters: { priority__in: "urgent" },
     });
   });
@@ -191,7 +197,12 @@ describe("EntityListScreen", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
     queryClient.setQueryData(PROJECTS_KEY, [project()]);
-    queryClient.setQueryData(PREFS_KEY, { filters: {}, rich_filters: {} });
+    queryClient.setQueryData(PREFS_KEY, {
+      filters: {},
+      display_filters: {},
+      display_properties: {},
+      rich_filters: {},
+    });
     queryClient.setQueryData(PAGE_KEY, { total_count: 5, results: {}, count: 5 });
     render(
       <QueryClientProvider client={queryClient}>

@@ -44,6 +44,8 @@ export interface ListPageInput {
   /** Display dimension (state, priority, ...), or null for flat. */
   groupBy: string | null;
   orderBy: string;
+  /** Whether child work items join the list (ISS-013/ISS-079). */
+  showSubIssues?: boolean;
   cursor?: string;
   /** Stored rich-filter expression (ISS-095–099); absent reads all rows. */
   richFilters?: RichExpression;
@@ -67,6 +69,7 @@ async function readPage(
     {
       perPage: pageSize,
       orderBy: input.orderBy,
+      filters: { sub_issue: String(input.showSubIssues === true) },
       ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
     },
     input.richFilters ?? {}
@@ -98,6 +101,7 @@ export function listPageQueryOptions(client: ApiClient, workspaceSlug: string, i
       "page",
       input.groupBy ?? "flat",
       input.orderBy,
+      input.showSubIssues === true,
       input.cursor ?? "first",
       richFiltersParam(input.richFilters ?? {}),
     ] as const,
@@ -150,6 +154,7 @@ export function useListPages(
   orderBy: string,
   labels: ReadonlyMap<string, string>,
   showEmptyGroups: boolean,
+  showSubIssues: boolean,
   richFilters: RichExpression = {}
 ): ListPages {
   const client = getAppClient();
@@ -173,6 +178,7 @@ export function useListPages(
             entity,
             groupBy: null,
             orderBy,
+            showSubIssues,
             richFilters,
             ...(cursor === undefined ? {} : { cursor }),
           })
@@ -190,6 +196,7 @@ export function useListPages(
             entity,
             groupBy,
             orderBy,
+            showSubIssues,
             richFilters,
             cursor: entry.cursor,
           })
@@ -204,6 +211,7 @@ export function useListPages(
       entity,
       groupBy,
       orderBy,
+      showSubIssues,
       richFilters,
     }),
     enabled: grouped,

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualList } from "./VirtualList";
 
 const items = Array.from({ length: 1000 }, (_, index) => `Issue ${index + 1}`);
@@ -86,5 +86,21 @@ describe("VirtualList", () => {
     await screen.findByText("Issue 1");
     const lastRow = screen.getByText("Issue 1").closest("[data-index]")?.parentElement;
     expect(lastRow?.nextElementSibling).toBe(footer);
+  });
+
+  it("moves following rows down when an expanded row measures taller", async () => {
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        if (this.getAttribute("data-index") === "0") return 96;
+        if (this.hasAttribute("data-index")) return 28;
+        if (this.getAttribute("role") === "region") return 224;
+        return originalHeight?.get?.call(this) || 0;
+      },
+    });
+    setup();
+    await screen.findByText("Issue 1");
+    const second = screen.getByText("Issue 2").closest<HTMLElement>("[data-index]");
+    await vi.waitFor(() => expect(second?.style.transform).toBe("translateY(96px)"));
   });
 });

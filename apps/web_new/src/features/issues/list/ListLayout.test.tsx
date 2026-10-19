@@ -71,12 +71,15 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
   ListRow: (props: {
     issue: IssueListItem;
     compact?: boolean;
-    onOpenPeek: (key: string) => void;
+    onOpenPeek: (key: string, title: string) => void;
     hrefFor: (row: IssueListItem) => string;
   }) => (
     <div data-testid="row-probe" data-compact={String(props.compact ?? false)} data-href={props.hrefFor(props.issue)}>
-      <button type="button" onClick={() => props.onOpenPeek(`WEB-${props.issue.sequence_id}`)}>
+      <button type="button" onClick={() => props.onOpenPeek(`WEB-${props.issue.sequence_id}`, props.issue.name)}>
         {props.issue.name}
+      </button>
+      <button type="button" onClick={() => props.onOpenPeek("WEB-99", "Nested child")}>
+        Nested child
       </button>
     </div>
   ),
@@ -507,6 +510,13 @@ describe("ListLayout", () => {
     expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.queryByLabelText("Work item preview")).not.toBeInTheDocument();
+  });
+
+  it("opens peek for a nested row key that is not in the top-level pages", async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "Nested child" }));
+    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
+    expect(screen.getByLabelText("Work item title")).toHaveValue("Nested child");
   });
 
   it("passes compact density through and keeps the flat sentinel inside the scroll region", () => {

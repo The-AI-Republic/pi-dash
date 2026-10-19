@@ -165,6 +165,7 @@ export function ListLayout({
     prefs.orderBy,
     labels,
     prefs.showEmptyGroups,
+    prefs.showSubIssues,
     richFilters
   );
   const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
@@ -174,6 +175,10 @@ export function ListLayout({
   const estimateEnabled = projectDetails !== null && projectDetails.estimate !== null;
   const [uncontrolledPeekKey, setUncontrolledPeekKey] = React.useState<string | null>(null);
   const peekKey = controlledPeekKey === undefined ? uncontrolledPeekKey : controlledPeekKey;
+  // Children live inside their parent row's state, so a deep row's peek
+  // cannot resolve through the top-level page rows. The opener hands over
+  // the title, which keeps the peek usable at the three-level cap.
+  const [peekTitleHint, setPeekTitleHint] = React.useState<string | null>(null);
   const [createState, setCreateState] = React.useState<CreateModalState | null>(null);
   const [addExistingOpen, setAddExistingOpen] = React.useState(false);
   const create = useCreateWorkItem(workspaceSlug);
@@ -187,13 +192,16 @@ export function ListLayout({
   const allRows = pages.sections.flatMap((section) => section.rows);
   const peekIssue =
     peekKey === null ? null : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ?? null);
+  const peekTitle = peekIssue?.name ?? peekTitleHint;
 
   function setPeek(key: string | null): void {
+    if (key === null) setPeekTitleHint(null);
     if (controlledPeekKey === undefined) setUncontrolledPeekKey(key);
     onPeekChange?.(key);
   }
 
-  function openPeek(key: string): void {
+  function openPeek(key: string, title: string): void {
+    setPeekTitleHint(title);
     setPeek(key);
   }
 
@@ -312,9 +320,9 @@ export function ListLayout({
       {...(pages.grouped ? { role: "region", "aria-label": "Issues" } : { "data-testid": "list-scroll" })}
       className="relative flex h-full flex-col overflow-auto pb-16"
     >
-      {peekIssue === null ? null : (
+      {peekKey === null ? null : (
         <React.Suspense fallback={null}>
-          <LazyListPeek issueKey={peekKey ?? ""} title={peekIssue.name} onClose={closePeek} />
+          <LazyListPeek issueKey={peekKey ?? ""} title={peekTitle ?? ""} onClose={closePeek} />
         </React.Suspense>
       )}
       {sectionGroups.map((section) => {

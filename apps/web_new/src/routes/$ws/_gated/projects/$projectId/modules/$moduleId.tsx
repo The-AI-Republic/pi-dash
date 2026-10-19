@@ -28,13 +28,20 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/modules/$m
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
   beforeLoad: async ({ context, params }) => {
     const { listPageQueryOptions } = await import("../../../../../../features/issues/list/pages.js");
+    const { selectDisplayPrefs } = await import("../../../../../../features/issues/prefs/displayPrefs.js");
     const entity = { scope: "module", projectId: params.projectId, moduleId: params.moduleId } as const;
+    const record = await context.queryClient.ensureQueryData(prefsQueryOptions(context.apiClient, params.ws, entity));
+    const showSubIssues = selectDisplayPrefs(record).showSubIssues;
     await Promise.all([
       loadListLayout(),
       context.queryClient.ensureQueryData(
-        listPageQueryOptions(context.apiClient, params.ws, { entity, groupBy: null, orderBy: "sort_order" })
+        listPageQueryOptions(context.apiClient, params.ws, {
+          entity,
+          groupBy: null,
+          orderBy: "sort_order",
+          showSubIssues,
+        })
       ),
-      context.queryClient.ensureQueryData(prefsQueryOptions(context.apiClient, params.ws, entity)),
     ]);
   },
   pendingComponent: function ModuleIssuesPending() {

@@ -16,6 +16,7 @@ import { DisplayControl } from "../display/DisplayControl.js";
 import type { LayoutKind } from "../layouts/kinds.js";
 import { IssuesLayoutRoot } from "../layouts/IssuesLayoutRoot.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
+import { selectDisplayPrefs } from "../prefs/displayPrefs.js";
 import { listPageQueryOptions } from "./pages.js";
 import { resolvedListLayout } from "./lazy.js";
 import type { IssuesEntity } from "../prefs/entities.js";
@@ -63,8 +64,15 @@ export function EntityListScreen({
   // Stored rich filters scope the list in cycle/module context too.
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
   const richFilters = preferences.rich_filters;
+  const showSubIssues = selectDisplayPrefs(preferences).showSubIssues;
   const { data: firstPage } = useSuspenseQuery(
-    listPageQueryOptions(client, workspaceSlug, { entity, groupBy: null, orderBy: "sort_order", richFilters })
+    listPageQueryOptions(client, workspaceSlug, {
+      entity,
+      groupBy: null,
+      orderBy: "sort_order",
+      showSubIssues,
+      richFilters,
+    })
   );
 
   if (project === null) {
