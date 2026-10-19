@@ -9,7 +9,7 @@
 import * as React from "react";
 
 import { cn } from "../lib/cn";
-import { parseMarkdown, type MarkdownBlock, type MarkdownListItem, type MarkdownSpan } from "../lib/markdown";
+import { parseMarkdown, safeHref, type MarkdownBlock, type MarkdownListItem, type MarkdownSpan } from "../lib/markdown";
 
 export interface MarkdownProps {
   /** Markdown source; an empty string renders nothing. */
@@ -53,6 +53,15 @@ export function MarkdownSpans({ spans }: { spans: readonly MarkdownSpan[] }): Re
               </s>
             );
           case "link":
+            // A span may be built by hand, not only parsed, so the target
+            // is checked here as well: an unsafe one reads as its label.
+            if (safeHref(span.href) === null) {
+              return (
+                <React.Fragment key={index}>
+                  <MarkdownSpans spans={span.spans} />
+                </React.Fragment>
+              );
+            }
             return (
               <a
                 key={index}

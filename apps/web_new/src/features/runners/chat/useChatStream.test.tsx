@@ -334,6 +334,18 @@ describe("useChatStream", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("never hands the previous conversation's streamed rows to the new one", () => {
+    const { result, rerender } = renderHook(({ id }) => useChatStream(id, [], callbacks()), {
+      initialProps: { id: "s-1" as string | null },
+    });
+    act(() => transportState.handlers[0]?.onEvent?.(frame(1)));
+    expect(result.current.messages).toHaveLength(1);
+    // The render right after the switch happens before the reset effect;
+    // the new conversation's read has not answered, so it reads empty.
+    rerender({ id: "s-2" });
+    expect(result.current.messages).toEqual([]);
+  });
+
   it("layers the stream over a refreshed transcript without reopening the feed", async () => {
     const { result, rerender } = renderHook(
       ({ base }: { base: ChatMessage[] }) => useChatStream("s-1", base, callbacks()),

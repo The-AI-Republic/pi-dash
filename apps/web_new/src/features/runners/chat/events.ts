@@ -52,6 +52,19 @@ const NARRATION_METHODS = new Set([
 /** Item types the transcript already renders, so the strip would only repeat them. */
 const TRANSCRIPT_ITEMS = new Set(["userMessage", "agentMessage", "reasoning"]);
 
+/** A frame's payload as records, with anything mistyped reading as empty. */
+function payloadParts(payload: Record<string, unknown>): {
+  method: string;
+  params: Record<string, unknown>;
+  item: Record<string, unknown>;
+} {
+  const asRecord = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const method = typeof payload.method === "string" ? payload.method : "";
+  const params = asRecord(payload.params);
+  return { method, params, item: asRecord(params.item) };
+}
+
 /** Read the delta text out of an assistant frame's payload. */
 export function assistantDeltaText(payload: Record<string, unknown>): string {
   const params = payload.params;
@@ -130,75 +143,65 @@ export function applyAssistantDelta(
 }
 
 /**
+ * One strip entry: what the frame says, and the action it reports. A
+ * started frame and its completed counterpart share a key, so only the
+ * later wording survives; every other frame is its own action.
+ */
+interface FrameActivity {
+  label: string;
+  key: string;
+}
+
+/**
  * What one frame is doing, for the activity strip, or null to show
  * nothing. Commands, edits, warnings, approvals and failures matter;
  * lifecycle chatter and repeated transcript rows do not. Engine methods
  * the daemon did not classify arrive as `kind: "raw"`, so the payload's
  * method is read rather than the kind.
  */
-export function activityLabel(event: Pick<ChatEvent, "kind" | "payload">): string | null {
+function frameActivity(event: Pick<ChatEvent, "kind" | "payload">): FrameActivity | null {
   if (event.kind !== "raw") {
     const named = NAMED_LABELS[event.kind];
-    if (named !== undefined) return named;
-    return STRIP_EXCLUDED_KINDS.has(event.kind) ? null : event.kind;
+    const label = named !== undefined ? named : STRIP_EXCLUDED_KINDS.has(event.kind) ? null : event.kind;
+    return label === null ? null : { label, key: label };
   }
-  const record = event.payload as { method?: unknown; params?: unknown };
-  const method = typeof record.method === "string" ? record.method : "";
-  const params =
-    record.params !== null && typeof record.params === "object" && !Array.isArray(record.params)
-      ? (record.params as Record<string, unknown>)
-      : {};
-  const item =
-    params.item !== null && typeof params.item === "object" && !Array.isArray(params.item)
-      ? (params.item as Record<string, unknown>)
-      : {};
+  const { method, params, item } = payloadParts(event.payload);
   const itemType = typeof item.type === "string" ? item.type : "";
+  const labelled = (label: string, key: string = label): FrameActivity => ({ label, key });
   switch (method) {
     case "warning":
-      return typeof params.message === "string" && params.message !== "" ? `Warning: ${params.message}` : "Warning";
+      return typeof params.message === "string" && params.message !== ""
+        ? labelled(`Warning: ${params.message}`)
+        : labelled("Warning");
     case "item/started":
     case "item/completed": {
       const done = method === "item/completed";
       if (TRANSCRIPT_ITEMS.has(itemType)) return null;
       if (itemType === "commandExecution") {
         const command = typeof item.command === "string" && item.command !== "" ? item.command : "command";
-        return `${done ? "Ran" : "Running"}: ${command}`;
+        return labelled(`${done ? "Ran" : "Running"}: ${command}`, `${itemType}|${command}`);
       }
       if (itemType === "fileChange") {
         const path = typeof item.path === "string" && item.path !== "" ? item.path : "a file";
-        return `${done ? "Edited" : "Editing"} ${path}`;
+        return labelled(`${done ? "Edited" : "Editing"} ${path}`, `${itemType}|${path}`);
       }
-      return itemType === "" ? null : `${done ? "Finished" : "Started"} ${itemType}`;
+      return itemType === "" ? null : labelled(`${done ? "Finished" : "Started"} ${itemType}`, `${itemType}|`);
     }
     default:
       if (NARRATION_METHODS.has(method)) return null;
-      return method === "" ? null : method;
+      return method === "" ? null : labelled(method);
   }
+}
+
+/** What one frame says in the activity strip, or null to show nothing. */
+export function activityLabel(event: Pick<ChatEvent, "kind" | "payload">): string | null {
+  return frameActivity(event)?.label ?? null;
 }
 
 /** One activity row with the frame that produced it. */
 export interface ActivityRow {
   seq: number;
   label: string;
-}
-
-/**
- * Identity of the action a frame reports, so a started frame and its
- * completed counterpart read as one entry. Non-raw frames are
- * identified by their label.
- */
-function activityKey(event: Pick<ChatEvent, "kind" | "payload">, label: string): string {
-  if (event.kind !== "raw") return label;
-  const record = event.payload as { method?: unknown; params?: unknown };
-  const params =
-    record.params !== null && typeof record.params === "object" && !Array.isArray(record.params)
-      ? (record.params as Record<string, unknown>)
-      : {};
-  const item =
-    params.item !== null && typeof params.item === "object" && !Array.isArray(params.item)
-      ? (params.item as Record<string, unknown>)
-      : {};
-  return `${String(item.type ?? "")}|${String(item.command ?? item.path ?? "")}`;
 }
 
 /**
@@ -209,8 +212,8 @@ function activityKey(event: Pick<ChatEvent, "kind" | "payload">, label: string):
 export function activityRows(events: readonly Pick<ChatEvent, "seq" | "kind" | "payload">[]): ActivityRow[] {
   const labelled: { row: ActivityRow; key: string }[] = [];
   for (const event of events) {
-    const label = activityLabel(event);
-    if (label !== null) labelled.push({ row: { seq: event.seq, label }, key: activityKey(event, label) });
+    const activity = frameActivity(event);
+    if (activity !== null) labelled.push({ row: { seq: event.seq, label: activity.label }, key: activity.key });
   }
   const collapsed = labelled.filter(
     (entry, index) => index === labelled.length - 1 || labelled[index + 1]!.key !== entry.key

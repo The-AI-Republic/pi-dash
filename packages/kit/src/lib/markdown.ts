@@ -43,14 +43,48 @@ const ALLOWED_SCHEMES = new Set(["http:", "https:", "mailto:"]);
  * Accept a link target only when it is a relative address, a fragment or
  * one of the browsing schemes above. Returns null for anything else
  * (javascript:, data:, file:), which the caller renders as text.
+ *
+ * A browser strips control characters and whitespace before resolving a
+ * target, so `java&#9;script:` would become `javascript:` in the href
+ * attribute. Targets carrying any of those stay text. A same-host
+ * address only ever starts with a single slash; `//host` and `\\host`
+ * are scheme-relative and leave the site, so they stay text too.
  */
 export function safeHref(raw: string): string | null {
   const target = raw.trim();
   if (target === "") return null;
+  if (hasDroppedCharacter(target)) return null;
+  if (target.startsWith("//") || target.startsWith("\\\\")) return null;
   if (target.startsWith("#") || target.startsWith("/")) return target;
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(target);
   if (!scheme) return target;
   return ALLOWED_SCHEMES.has(`${scheme[1]!.toLowerCase()}:`) ? target : null;
+}
+
+/**
+ * True when a browser would silently drop a character before resolving the
+ * target: ASCII controls and spaces, DEL and the C1 block, and the Unicode
+ * spaces it treats as whitespace. `java&#9;script:` would resolve to
+ * `javascript:` once that tab is gone, so such a target is never a link.
+ */
+function hasDroppedCharacter(target: string): boolean {
+  for (const char of target) {
+    // Every code point a for-of yields has a code point; the assertion
+    // only satisfies the type.
+    const code = char.codePointAt(0)!;
+    const dropped =
+      code <= 0x20 ||
+      (code >= 0x7f && code <= 0xa0) ||
+      code === 0x1680 ||
+      (code >= 0x2000 && code <= 0x200a) ||
+      code === 0x2028 ||
+      code === 0x2029 ||
+      code === 0x202f ||
+      code === 0x205f ||
+      code === 0x3000;
+    if (dropped) return true;
+  }
+  return false;
 }
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)\s*$/;

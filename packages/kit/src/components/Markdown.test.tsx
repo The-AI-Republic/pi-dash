@@ -47,6 +47,22 @@ describe("Markdown", () => {
     expect(link).toHaveAttribute("target", "_blank");
   });
 
+  it("renders a target a browser would read as a command as plain text", () => {
+    // The inline parser refuses these; a span built by hand must not slip
+    // past it either.
+    const { container } = render(
+      <MarkdownSpans
+        spans={[
+          { type: "link", href: "javascript:alert(1)", spans: [{ type: "text", text: "one" }] },
+          { type: "link", href: "\u0001javascript:alert(1)", spans: [{ type: "text", text: "two" }] },
+          { type: "link", href: "//evil.test", spans: [{ type: "text", text: "three" }] },
+        ]}
+      />
+    );
+    expect(container.querySelector("a")).toBeNull();
+    expect(container).toHaveTextContent("onetwothree");
+  });
+
   it("renders each list entry's paragraph without outer margins", () => {
     const { container } = render(<Markdown source={"- a\n- b"} />);
     const paragraphs = container.querySelectorAll("li p");

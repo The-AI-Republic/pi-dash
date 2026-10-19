@@ -132,6 +132,10 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
   const tickRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const capRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const cancelledRef = React.useRef(false);
+  // Set when the control is released while the microphone prompt is still
+  // open: nothing started yet, so the granted stream is handed straight
+  // back instead of recording until the cap.
+  const releasedRef = React.useRef(false);
 
   const setPhase = React.useCallback((next: DictationStatus) => {
     statusRef.current = next;
@@ -178,7 +182,10 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
 
   const stop = React.useCallback(() => {
     const recorder = recorderRef.current;
-    if (recorder === null) return;
+    if (recorder === null) {
+      if (statusRef.current === "requesting") releasedRef.current = true;
+      return;
+    }
     if (recorder.state !== "inactive") recorder.stop();
     else void finishRecording();
   }, [finishRecording]);
@@ -197,6 +204,7 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
       return;
     }
     cancelledRef.current = false;
+    releasedRef.current = false;
     setErrorMessage(null);
     setPhase("requesting");
     let stream: MediaStream;
@@ -212,8 +220,12 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
       return;
     }
     // Released before the microphone answered: hand the device straight back.
-    if (!stillRequesting()) {
+    if (!stillRequesting() || releasedRef.current) {
       for (const track of stream.getTracks()) track.stop();
+      releasedRef.current = false;
+      // Nothing was started, so the control returns to rest whether the
+      // release or a cancel got here first.
+      setPhase("idle");
       return;
     }
     streamRef.current = stream;
@@ -253,6 +265,7 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
   const cancel = React.useCallback(() => {
     if (statusRef.current !== "requesting" && statusRef.current !== "recording") return;
     cancelledRef.current = true;
+    releasedRef.current = false;
     clearTimers();
     const recorder = recorderRef.current;
     if (recorder === null) {

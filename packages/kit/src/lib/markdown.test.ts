@@ -25,6 +25,25 @@ describe("safeHref", () => {
     expect(safeHref("file:///etc/passwd")).toBeNull();
     expect(safeHref("   ")).toBeNull();
   });
+
+  it("refuses targets a browser would read as a different scheme", () => {
+    // The browser drops control characters and whitespace before resolving,
+    // so each of these would land on javascript: or data: in the href.
+    expect(safeHref("java\tscript:alert(1)")).toBeNull();
+    expect(safeHref("jav\nascript:alert(1)")).toBeNull();
+    expect(safeHref("\u0001javascript:alert(1)")).toBeNull();
+    expect(safeHref("da\tta:text/html,x")).toBeNull();
+    expect(safeHref("java\u00a0script:alert(1)")).toBeNull();
+    expect(safeHref("java\u2003script:alert(1)")).toBeNull();
+    expect(safeHref("java\u2028script:alert(1)")).toBeNull();
+    expect(safeHref("java\u3000script:alert(1)")).toBeNull();
+  });
+
+  it("refuses a target that leaves the site by its own authority", () => {
+    expect(safeHref("//evil.test/x")).toBeNull();
+    expect(safeHref("\\\\evil.test")).toBeNull();
+    expect(safeHref("/\\evil.test")).toBe("/\\evil.test");
+  });
 });
 
 describe("parseMarkdown blocks", () => {
@@ -199,6 +218,8 @@ describe("parseInline", () => {
       },
     ]);
     expect(parseInline("[x](javascript:alert(1))")).toEqual([{ type: "text", text: "[x]" }]);
+    expect(parseInline("[x](\u0001javascript:alert(1))")).toEqual([{ type: "text", text: "[x]" }]);
+    expect(parseInline("[x](//evil.test)")).toEqual([{ type: "text", text: "[x]" }]);
   });
 
   it("reads an image as its alt text", () => {

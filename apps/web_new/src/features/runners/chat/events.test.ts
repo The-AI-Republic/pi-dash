@@ -254,6 +254,24 @@ describe("activityRows", () => {
     ).toEqual([{ seq: 4, label: "custom_kind" }]);
   });
 
+  it("keeps distinct warnings and distinct engine methods apart", () => {
+    // Only an item's started/completed pair names one action. Two warnings
+    // carry no item, so folding them together would hide the first one.
+    expect(
+      activityRows([
+        { seq: 1, kind: "raw", payload: { method: "warning", params: { message: "first" } } },
+        { seq: 2, kind: "raw", payload: { method: "warning", params: { message: "second" } } },
+        { seq: 3, kind: "raw", payload: { method: "custom/one", params: {} } },
+        { seq: 4, kind: "raw", payload: { method: "custom/two", params: {} } },
+      ])
+    ).toEqual([
+      { seq: 1, label: "Warning: first" },
+      { seq: 2, label: "Warning: second" },
+      { seq: 3, label: "custom/one" },
+      { seq: 4, label: "custom/two" },
+    ]);
+  });
+
   it("collapses a started pair without a command, and names the action by kind", () => {
     const pair = [
       { seq: 1, kind: "raw", payload: { method: "item/started", params: { item: { type: "customTool" } } } },

@@ -67,6 +67,11 @@ export function useChatStream(
   const [liveMessages, setLiveMessages] = React.useState<ChatMessage[]>([]);
   const [events, setEvents] = React.useState<ChatEvent[]>([]);
   const [error, setError] = React.useState<string | null>(null);
+  // The conversation the transcript on screen belongs to. Until the reset
+  // effect below has run, a render after a session change would otherwise
+  // hand the previous conversation's streamed rows to the new one (its
+  // saved read may still be empty), so they are filtered out on the way.
+  const [transcriptSession, setTranscriptSession] = React.useState<string | null>(sessionId);
 
   const appliedRef = React.useRef<Set<number>>(new Set());
   const eventsRef = React.useRef<ChatEvent[]>([]);
@@ -81,8 +86,6 @@ export function useChatStream(
   const callbacksRef = React.useRef(callbacks);
   callbacksRef.current = callbacks;
 
-  const liveSessionRef = React.useRef<string | null>(sessionId);
-
   // The saved transcript is authoritative; the streamed rows layer on top.
   React.useEffect(() => {
     messagesRef.current = [...baseRef.current];
@@ -96,13 +99,16 @@ export function useChatStream(
   React.useEffect(() => {
     // A different conversation starts from scratch: no cursor, no strip,
     // no carried error, and a fresh "live since" point.
-    liveSessionRef.current = sessionId;
     appliedRef.current = new Set();
     eventsRef.current = [];
     messagesRef.current = [...baseRef.current];
     subscribedAtRef.current = Date.now();
+    // The rows on screen belonged to the conversation that just left; the
+    // new one starts from whatever its own read has already answered.
+    setLiveMessages([...baseRef.current]);
     setEvents([]);
     setError(null);
+    setTranscriptSession(sessionId);
   }, [sessionId]);
 
   React.useEffect(() => {
@@ -167,7 +173,7 @@ export function useChatStream(
   const dismissError = React.useCallback(() => setError(null), []);
 
   return {
-    messages: liveMessages,
+    messages: transcriptSession === sessionId ? liveMessages : [...baseMessages],
     activity: React.useMemo(() => activityRows(events), [events]),
     error,
     dismissError,

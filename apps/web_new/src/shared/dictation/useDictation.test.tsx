@@ -250,6 +250,28 @@ describe("useDictation", () => {
     expect((stream.getTracks()[0] as unknown as { stop: ReturnType<typeof vi.fn> }).stop).toHaveBeenCalled();
   });
 
+  it("does not leave the microphone recording when released before it was granted", async () => {
+    let grant: (stream: MediaStream) => void = () => undefined;
+    const stream = fakeStream();
+    const { view, recorders } = setup({
+      getUserMedia: () => new Promise<MediaStream>((done) => (grant = done)),
+    });
+    let pending: Promise<void> = Promise.resolve();
+    act(() => {
+      pending = view.result.current.start();
+    });
+    // A quick press and release: the pointer went up while the browser was
+    // still asking for permission.
+    act(() => view.result.current.stop());
+    await act(async () => {
+      grant(stream);
+      await pending;
+    });
+    expect(recorders).toHaveLength(0);
+    expect(view.result.current.status).toBe("idle");
+    expect((stream.getTracks()[0] as unknown as { stop: ReturnType<typeof vi.fn> }).stop).toHaveBeenCalled();
+  });
+
   it("reports a recorder that cannot be opened", async () => {
     const view = renderHook(() =>
       useDictation({
