@@ -80,7 +80,7 @@ function renderDialog(props: Partial<React.ComponentProps<typeof AddExistingDial
       <AddExistingDialog
         open
         onOpenChange={onOpenChange}
-        scope={{ workspaceSlug: WS, projectId: PROJECT, parentId: PARENT }}
+        scope={{ workspaceSlug: WS, projectId: PROJECT, parentId: PARENT, isEpic: false }}
         projectName="Atlas"
         {...props}
       />

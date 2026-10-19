@@ -24,6 +24,12 @@ export interface SubIssueRowActions {
   write: (input: SubIssueWrite) => void;
 }
 
+/** Display name and avatar for one member id, resolved from the project's members. */
+export interface SubIssueMemberIdentity {
+  label: string;
+  avatarUrl: string | null;
+}
+
 /** Reference rows the filter menu draws from the section's own reads. */
 export interface SubIssueFilterSources {
   /** Assignee rows; already narrowed to the project's members. */

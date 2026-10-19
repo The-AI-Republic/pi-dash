@@ -202,11 +202,16 @@ describe("date bounds", () => {
     expect(parseDateBound(" 2026-10-01;before ", TODAY)).toEqual({ type: "before", day: "2026-10-01" });
   });
 
+  it("reads a bare day as exactly that day", () => {
+    expect(parseDateBound("2026-10-05", TODAY)).toEqual({ type: "on", day: "2026-10-05" });
+    expect(parseDateBound(" 2026-10-05 ", TODAY)).toEqual({ type: "on", day: "2026-10-05" });
+  });
+
   it("ignores strings it cannot read", () => {
     expect(parseDateBound("tomorrow", TODAY)).toBeNull();
-    expect(parseDateBound("2026-10-01", TODAY)).toBeNull();
     expect(parseDateBound("2026-10-01;during", TODAY)).toBeNull();
     expect(parseDateBound("2026-1-1;after", TODAY)).toBeNull();
+    expect(parseDateBound("2026-10-01;", TODAY)).toBeNull();
   });
 
   it("matches inclusive bounds and skips unreadable entries", () => {
@@ -217,6 +222,37 @@ describe("date bounds", () => {
     expect(matchesDateBounds("2026-09-30", ["2026-10-01;after"], TODAY)).toBe(false);
     expect(matchesDateBounds("2026-10-18T00:00:00Z", ["2026-10-18;before"], TODAY)).toBe(true);
     expect(matchesDateBounds("2026-10-18", ["2026-10-01;after", "2026-10-31;before"], TODAY)).toBe(true);
+  });
+
+  it("keeps only the exact day for a stored On value", () => {
+    expect(matchesDateBounds("2026-10-05", ["2026-10-05"], TODAY)).toBe(true);
+    expect(matchesDateBounds("2026-10-06", ["2026-10-05"], TODAY)).toBe(false);
+    expect(matchesDateBounds("2026-10-04", ["2026-10-05"], TODAY)).toBe(false);
+    expect(matchesDateBounds("2026-10-05T09:30:00Z", ["2026-10-05"], TODAY)).toBe(true);
+    expect(matchesDateBounds(null, ["2026-10-05"], TODAY)).toBe(false);
+  });
+
+  it("filters a row by the On value the menu stores", () => {
+    const filters = { ...emptySubIssueFilters(), start_date: ["2026-10-05"] };
+    const rows = [
+      row({ id: ADA, start_date: "2026-10-04" }),
+      row({ id: GRACE, start_date: "2026-10-05" }),
+      row({ id: BACKLOG, start_date: "2026-10-06" }),
+    ];
+    expect(filterSubIssues(rows, filters, TODAY).map((entry) => entry.id)).toEqual([GRACE]);
+  });
+
+  it("reads After as a lower bound and Before as an upper bound on either date", () => {
+    for (const key of ["start_date", "target_date"] as const) {
+      const after = { ...emptySubIssueFilters(), [key]: ["2026-10-10;after"] };
+      expect(filterSubIssues([row({ [key]: "2026-10-09" })], after, TODAY)).toEqual([]);
+      expect(filterSubIssues([row({ [key]: "2026-10-10" })], after, TODAY)).toHaveLength(1);
+      expect(filterSubIssues([row({ [key]: "2026-10-11" })], after, TODAY)).toHaveLength(1);
+      const before = { ...emptySubIssueFilters(), [key]: ["2026-10-10;before"] };
+      expect(filterSubIssues([row({ [key]: "2026-10-09" })], before, TODAY)).toHaveLength(1);
+      expect(filterSubIssues([row({ [key]: "2026-10-10" })], before, TODAY)).toHaveLength(1);
+      expect(filterSubIssues([row({ [key]: "2026-10-11" })], before, TODAY)).toEqual([]);
+    }
   });
 });
 

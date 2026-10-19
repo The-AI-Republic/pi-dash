@@ -98,6 +98,7 @@ function ok(url: string, status: number, body: unknown): TransportResponse {
 interface StubOptions {
   fail?: boolean;
   addRows?: unknown[];
+  epic?: boolean;
 }
 
 function stubApi(options: StubOptions = {}) {
@@ -108,7 +109,10 @@ function stubApi(options: StubOptions = {}) {
     const body: unknown = init.body === undefined ? undefined : JSON.parse(init.body);
     calls.push({ method, url, body });
     if (options.fail === true) return ok(url, 500, { detail: "server refused" });
-    if (method === "POST" && url.endsWith(`/issues/${PARENT}/sub-issues/`)) {
+    if (
+      method === "POST" &&
+      (url.endsWith(`/issues/${PARENT}/sub-issues/`) || url.endsWith(`/epics/${PARENT}/issues/`))
+    ) {
       return ok(url, 201, {
         sub_issues: options.addRows ?? [
           {
@@ -164,7 +168,7 @@ function cachedPages(client: QueryClient): SubIssuesResponse[] {
   return data?.pages ?? [];
 }
 
-const SCOPE = { workspaceSlug: WS, projectId: PROJECT, parentId: PARENT };
+const SCOPE = { workspaceSlug: WS, projectId: PROJECT, parentId: PARENT, isEpic: false };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -324,6 +328,18 @@ describe("useAttachSubIssues (ISS-175)", () => {
     result.current.mutate([ADDED]);
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(client.getQueryData(subIssuesKey(WS, PROJECT, PARENT))).toEqual({ notPages: true });
+  });
+
+  it("attaches an epic's children through the epics collection", async () => {
+    const calls = stubApi();
+    const client = seeded();
+    const { result } = renderHook(() => useAttachSubIssues({ ...SCOPE, isEpic: true }), { wrapper: wrapper(client) });
+    result.current.mutate([ADDED]);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const post = calls.find((call) => call.method === "POST");
+    expect(post?.url).toContain(`/projects/${PROJECT}/epics/${PARENT}/issues/`);
+    expect(post?.body).toEqual({ sub_issue_ids: [ADDED] });
+    expect(notifySuccess).toHaveBeenCalledWith(SUB_ISSUES_ADDED_TITLE, "1 item attached.");
   });
 
   it("toasts the server detail when the attach is refused", async () => {

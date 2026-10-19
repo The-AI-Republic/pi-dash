@@ -227,9 +227,12 @@ export function subIssuesExhausted(page: SubIssuesResponse, pageSize = SUB_ISSUE
   return page.sub_issues.length < pageSize;
 }
 
-/** One parsed date entry: an inclusive open bound on a calendar day. */
+/**
+ * One parsed date entry: an inclusive bound on a calendar day. `on`
+ * pins the exact day, `after`/`before` keep one open side.
+ */
 export interface SubIssueDateBound {
-  type: "after" | "before";
+  type: "on" | "after" | "before";
   day: string;
 }
 
@@ -244,9 +247,10 @@ function isoDay(date: Date): string {
 
 /**
  * One date-filter entry resolved against `today`: a relative window
- * (`<n>_<unit>s;after|before;fromnow`) or an absolute day carrying its
- * direction (`<day>;after|before`). Anything else is ignored rather than
- * failing the whole dimension.
+ * (`<n>_<unit>s;after|before;fromnow`), an absolute day carrying its
+ * direction (`<day>;after|before`), or a bare day, which means exactly
+ * that day (`<day>`). Anything else is ignored rather than failing the
+ * whole dimension.
  */
 export function parseDateBound(entry: string, today: Date): SubIssueDateBound | null {
   const trimmed = entry.trim();
@@ -264,6 +268,7 @@ export function parseDateBound(entry: string, today: Date): SubIssueDateBound | 
   }
   const [day, direction] = trimmed.split(";");
   if (day === undefined || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  if (direction === undefined) return { type: "on", day };
   if (direction !== "after" && direction !== "before") return null;
   return { type: direction, day };
 }
@@ -278,6 +283,7 @@ export function matchesDateBounds(iso: string | null | undefined, entries: reado
   if (iso === null || iso === undefined) return false;
   const value = iso.slice(0, 10);
   return bounds.every((bound) => {
+    if (bound.type === "on") return value === bound.day;
     return bound.type === "after" ? value >= bound.day : value <= bound.day;
   });
 }

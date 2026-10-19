@@ -11,19 +11,23 @@
 
 import { Avatar, IconButton, Menu, type MenuEntry, Spinner } from "@pidash/kit";
 import type { SubIssueItem } from "@pidash/api-client";
-import { ChevronRight, Copy, ExternalLink, MoreHorizontal, Pencil, Trash2, Unlink } from "lucide-react";
+import { ChevronRight, Copy, MoreHorizontal, Trash2, Unlink } from "lucide-react";
 import * as React from "react";
 
 import { useSubIssues } from "./queries.js";
 import { isPropertyVisible, isSubIssueOverdue, showsMergedDateRange, type SubIssueDisplayProperties } from "./rules.js";
-import type { SubIssueRowActions } from "./types.js";
+import type { SubIssueMemberIdentity, SubIssueRowActions } from "./types.js";
 import { SubIssuePropertyControls, SubIssueTime } from "./SubIssueProperties.js";
 
 export interface SubIssueRowProps {
   row: SubIssueItem;
   workspaceSlug: string;
-  /** Short code of the child's project, for the identifier. */
+  /** Short code of this row's project, for its identifier. */
   projectIdentifier: string;
+  /** Short code for any nested child, which may sit in another project. */
+  projectCodeFor: (row: SubIssueItem) => string;
+  /** Display names and avatars for assignee ids. */
+  memberIdentities: Readonly<Record<string, SubIssueMemberIdentity>>;
   properties: SubIssueDisplayProperties;
   editable: boolean;
   depth: number;
@@ -50,22 +54,43 @@ function TimeCell({ row, today }: { row: SubIssueItem; today: Date }): React.Rea
   return <SubIssueTime row={row} today={today} />;
 }
 
-function Assignees({ ids }: { ids: readonly string[] }): React.ReactElement | null {
+function Assignees({
+  ids,
+  identities,
+}: {
+  ids: readonly string[];
+  identities: Readonly<Record<string, SubIssueMemberIdentity>>;
+}): React.ReactElement | null {
   if (ids.length === 0) return null;
+  const names = ids.map((id) => identities[id]?.label ?? "Member");
   return (
-    <span className="flex shrink-0 items-center -space-x-1" aria-label={`${ids.length} assignees`}>
+    <span
+      className="flex shrink-0 items-center -space-x-1"
+      aria-label={names.length === 1 ? `Assigned to ${names[0]}` : `${names.length} assignees: ${names.join(", ")}`}
+    >
       {ids.slice(0, 3).map((id) => (
-        <Avatar key={id} name={id} size="small" className="ring-2 ring-(--bg)" />
+        <Avatar
+          key={id}
+          name={identities[id]?.label ?? "Member"}
+          {...(identities[id]?.avatarUrl === null || identities[id]?.avatarUrl === undefined
+            ? {}
+            : { src: identities[id]!.avatarUrl! })}
+          size="small"
+          className="ring-2 ring-(--bg)"
+        />
       ))}
     </span>
   );
 }
 
-/** Everything the row menu can do; members get the write entries. */
+/**
+ * Everything the row menu can do; members get the write entries. The
+ * full edit modal belongs to NEWFRONT-631, so no edit entry is offered
+ * here until that slice mounts it — a menu entry that only navigates
+ * would be the wrong promise.
+ */
 export interface SubIssueRowMenuActions {
   copyLink: (row: SubIssueItem) => void;
-  openInNewTab: (row: SubIssueItem) => void;
-  edit: (row: SubIssueItem) => void;
   remove: (row: SubIssueItem) => void;
   delete: (row: SubIssueItem) => void;
 }
@@ -78,19 +103,9 @@ export function rowMenuItems(
 ): MenuEntry[] {
   const items: MenuEntry[] = [
     { label: "Copy link", onSelect: () => actions.copyLink(row), icon: <Copy size={14} aria-hidden="true" /> },
-    {
-      label: "Open in new tab",
-      onSelect: () => actions.openInNewTab(row),
-      icon: <ExternalLink size={14} aria-hidden="true" />,
-    },
   ];
   if (!editable) return items;
   items.push({ separator: true });
-  items.push({
-    label: "Edit work item",
-    onSelect: () => actions.edit(row),
-    icon: <Pencil size={14} aria-hidden="true" />,
-  });
   items.push({
     label: isEpic ? "Remove work item" : "Remove sub-work item",
     onSelect: () => actions.remove(row),
@@ -128,7 +143,7 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
     setExpanded((current) => !current);
   }
 
-  const items = rowMenuItems(row, editable, isEpic, props.menuActions);
+  const items = rowMenuItems(row, props.editable, isEpic, props.menuActions);
 
   return (
     <div data-sub-issue-row={identifier} className="flex flex-col">
@@ -174,7 +189,9 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
             <span className="text-body min-w-0 flex-1 truncate text-(--text)">{row.name}</span>
           </a>
           <div className="flex shrink-0 items-center gap-(--space-1)">
-            {isPropertyVisible(properties, "assignee") ? <Assignees ids={row.assignee_ids} /> : null}
+            {isPropertyVisible(properties, "assignee") ? (
+              <Assignees ids={row.assignee_ids} identities={props.memberIdentities} />
+            ) : null}
             {isPropertyVisible(properties, "state") ||
             isPropertyVisible(properties, "priority") ||
             isPropertyVisible(properties, "start_date") ||
@@ -217,6 +234,8 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
           parent={row}
           workspaceSlug={workspaceSlug}
           projectIdentifier={projectIdentifier}
+          projectCodeFor={props.projectCodeFor}
+          memberIdentities={props.memberIdentities}
           properties={properties}
           editable={editable}
           depth={depth + 1}
@@ -234,7 +253,7 @@ export function SubIssueRow(props: SubIssueRowProps): React.ReactElement {
 /** A nested parent's children, fetched on first expansion. */
 function SubIssueChildren(props: Omit<SubIssueRowProps, "row"> & { parent: SubIssueItem }): React.ReactElement {
   const { parent, ancestors } = props;
-  const query = useSubIssues(props.workspaceSlug, parent.project_id, parent.id);
+  const query = useSubIssues(props.workspaceSlug, parent.project_id, parent.id, { isEpic: props.isEpic });
   const rows = query.data?.pages.flatMap((page) => page.sub_issues) ?? [];
   const cycle = ancestors.includes(parent.id);
   if (cycle) {
@@ -267,7 +286,9 @@ function SubIssueChildren(props: Omit<SubIssueRowProps, "row"> & { parent: SubIs
             key={row.id}
             row={row}
             workspaceSlug={props.workspaceSlug}
-            projectIdentifier={props.projectIdentifier}
+            projectIdentifier={props.projectCodeFor(row)}
+            projectCodeFor={props.projectCodeFor}
+            memberIdentities={props.memberIdentities}
             properties={props.properties}
             editable={props.editable}
             depth={props.depth}

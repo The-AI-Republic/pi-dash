@@ -16,6 +16,7 @@ import {
   loadedRows,
   subIssueSearchKey,
   subIssueSearchQueryOptions,
+  listChildren,
   subIssuesKey,
   subIssuesQueryOptions,
 } from "./queries.js";
@@ -23,7 +24,7 @@ import { SUB_ISSUE_PAGE_SIZE } from "./rules.js";
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
-  return { ...original, listSubIssues: vi.fn(), searchIssues: vi.fn() };
+  return { ...original, listSubIssues: vi.fn(), listEpicWorkItems: vi.fn(), searchIssues: vi.fn() };
 });
 
 const WS = "acme";
@@ -56,6 +57,31 @@ describe("sub-issue query", () => {
       perPage: SUB_ISSUE_PAGE_SIZE,
       cursor: "c2",
     });
+  });
+
+  it("reads an epic parent through the epics children collection", async () => {
+    vi.mocked(api.listEpicWorkItems).mockResolvedValue(envelope());
+    vi.mocked(api.listSubIssues).mockClear();
+    const options = subIssuesQueryOptions(CLIENT, WS, PROJECT, PARENT, true);
+    await options.queryFn({ pageParam: options.initialPageParam });
+    expect(api.listEpicWorkItems).toHaveBeenCalledWith(CLIENT, WS, PROJECT, PARENT, { perPage: SUB_ISSUE_PAGE_SIZE });
+    expect(api.listSubIssues).not.toHaveBeenCalled();
+  });
+
+  it("keeps one cache key per parent regardless of kind", () => {
+    expect(subIssuesQueryOptions(CLIENT, WS, PROJECT, PARENT, true).queryKey).toEqual(
+      subIssuesQueryOptions(CLIENT, WS, PROJECT, PARENT, false).queryKey
+    );
+  });
+
+  it("passes the cursor through to the epic read", async () => {
+    vi.mocked(api.listEpicWorkItems).mockResolvedValue(envelope());
+    await listChildren(
+      CLIENT,
+      { workspaceSlug: WS, projectId: PROJECT, parentId: PARENT, isEpic: true },
+      { perPage: 50, cursor: "c9" }
+    );
+    expect(api.listEpicWorkItems).toHaveBeenCalledWith(CLIENT, WS, PROJECT, PARENT, { perPage: 50, cursor: "c9" });
   });
 
   it("asks for the next page only while the envelope carries a cursor", () => {

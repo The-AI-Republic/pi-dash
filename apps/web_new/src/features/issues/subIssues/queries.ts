@@ -11,6 +11,7 @@
 import { queryOptions, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   isApiError,
+  listEpicWorkItems,
   listSubIssues,
   searchIssues,
   type ApiClient,
@@ -24,9 +25,28 @@ import { REFERENCE_STALE_TIME_MS } from "../../../core/query/client.js";
 import { issueKeys } from "../api/keys.js";
 import { nextSubIssueCursor, SUB_ISSUE_PAGE_SIZE } from "./rules.js";
 
-/** Cache key for one parent's paged child list. */
+/**
+ * One parent's cache key. Epic children share the key with issue
+ * children: one parent never changes kind, so the key stays one entry.
+ */
 export function subIssuesKey(workspaceSlug: string, projectId: string, parentId: string) {
   return [...issueKeys.all(workspaceSlug), "sub-issues", projectId, parentId] as const;
+}
+
+/**
+ * The children read for one parent kind (ISS-174). Epics serve their
+ * children under `epics/<id>/issues/`, issues under
+ * `issues/<id>/sub-issues/`; both answer the same page shape.
+ */
+export function listChildren(
+  client: ApiClient,
+  scope: { workspaceSlug: string; projectId: string; parentId: string; isEpic: boolean },
+  query: { perPage?: number; cursor?: string } = {}
+): Promise<SubIssuesResponse> {
+  if (scope.isEpic) {
+    return listEpicWorkItems(client, scope.workspaceSlug, scope.projectId, scope.parentId, query);
+  }
+  return listSubIssues(client, scope.workspaceSlug, scope.projectId, scope.parentId, query);
 }
 
 /** One parent's page position; the first page carries no cursor. */
@@ -35,14 +55,24 @@ export interface SubIssuePageParam {
 }
 
 /** The paged read behind the widget. */
-export function subIssuesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, parentId: string) {
+export function subIssuesQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  parentId: string,
+  isEpic = false
+) {
   return {
     queryKey: subIssuesKey(workspaceSlug, projectId, parentId),
     queryFn: ({ pageParam }: { pageParam: SubIssuePageParam }): Promise<SubIssuesResponse> =>
-      listSubIssues(client, workspaceSlug, projectId, parentId, {
-        perPage: SUB_ISSUE_PAGE_SIZE,
-        ...(pageParam.cursor === undefined ? {} : { cursor: pageParam.cursor }),
-      }),
+      listChildren(
+        client,
+        { workspaceSlug, projectId, parentId, isEpic },
+        {
+          perPage: SUB_ISSUE_PAGE_SIZE,
+          ...(pageParam.cursor === undefined ? {} : { cursor: pageParam.cursor }),
+        }
+      ),
     initialPageParam: { cursor: undefined } as SubIssuePageParam,
     getNextPageParam: (last: SubIssuesResponse): SubIssuePageParam | undefined => {
       const cursor = nextSubIssueCursor(last);
@@ -51,16 +81,19 @@ export function subIssuesQueryOptions(client: ApiClient, workspaceSlug: string, 
   };
 }
 
-/** The query hook a parent's section calls; disabled until it opens. */
+/**
+ * The query hook a parent's section calls. The read runs whether or not
+ * the section is open: the collapsed title still needs the counts, and a
+ * remounted parent must render its header before anyone can reopen it.
+ */
 export function useSubIssues(
   workspaceSlug: string,
   projectId: string,
   parentId: string,
-  options: { enabled?: boolean } = {}
+  options: { isEpic?: boolean } = {}
 ) {
   return useInfiniteQuery({
-    ...subIssuesQueryOptions(getAppClient(), workspaceSlug, projectId, parentId),
-    enabled: options.enabled ?? true,
+    ...subIssuesQueryOptions(getAppClient(), workspaceSlug, projectId, parentId, options.isEpic ?? false),
   });
 }
 
@@ -82,6 +115,8 @@ export interface SubIssueScope {
   workspaceSlug: string;
   projectId: string;
   parentId: string;
+  /** Epic parents attach through their own children collection. */
+  isEpic: boolean;
 }
 
 /** Server detail for a failure notice, falling back when empty. */

@@ -4,9 +4,9 @@
 // See the LICENSE file for details.
 // One sub-issue row (parity/specs/issues.md §15, ISS-174/176/177/238):
 // identifier and name link to the child, the chevron lazily fetches the
-// row's own children with its own load-more, the menu offers copy/open
-// to everyone and the write entries to members, and a writing row shows
-// its busy state.
+// row's own children with its own load-more, the menu offers copy to
+// everyone and the write entries to members, assignees draw member
+// names, and a writing row shows its busy state.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -95,13 +95,13 @@ function renderRow(
     properties?: ReturnType<typeof defaultDisplayProperties>;
     menu?: Partial<SubIssueRowMenuActions>;
     onOpen?: (row: SubIssueItem) => void;
+    projectCodeFor?: (child: SubIssueItem) => string;
+    memberIdentities?: Record<string, { label: string; avatarUrl: string | null }>;
   } = {}
 ) {
   const onOpen = options.onOpen ?? vi.fn();
   const menuActions: SubIssueRowMenuActions = {
     copyLink: vi.fn(),
-    openInNewTab: vi.fn(),
-    edit: vi.fn(),
     remove: vi.fn(),
     delete: vi.fn(),
     ...options.menu,
@@ -114,6 +114,8 @@ function renderRow(
         row={options.row ?? row()}
         workspaceSlug={WS}
         projectIdentifier="ATL"
+        projectCodeFor={options.projectCodeFor ?? ((child) => (child.project_id === PROJECT ? "ATL" : "OTHER"))}
+        memberIdentities={options.memberIdentities ?? {}}
         properties={options.properties ?? defaultDisplayProperties()}
         editable={options.editable ?? true}
         depth={0}
@@ -201,19 +203,14 @@ describe("row rendering", () => {
 });
 
 describe("row menu", () => {
-  it("offers copy and open to everyone, the writes only to members", () => {
-    const actions = { copyLink: vi.fn(), openInNewTab: vi.fn(), edit: vi.fn(), remove: vi.fn(), delete: vi.fn() };
+  it("offers copy to everyone, the writes only to members", () => {
+    const actions = { copyLink: vi.fn(), remove: vi.fn(), delete: vi.fn() };
     const guest = rowMenuItems(row(), false, false, actions);
-    expect(guest.map((entry) => ("label" in entry ? entry.label : "separator"))).toEqual([
-      "Copy link",
-      "Open in new tab",
-    ]);
+    expect(guest.map((entry) => ("label" in entry ? entry.label : "separator"))).toEqual(["Copy link"]);
     const member = rowMenuItems(row(), true, false, actions);
     expect(member.map((entry) => ("label" in entry ? entry.label : "separator"))).toEqual([
       "Copy link",
-      "Open in new tab",
       "separator",
-      "Edit work item",
       "Remove sub-work item",
       "Delete",
     ]);
@@ -226,17 +223,77 @@ describe("row menu", () => {
     await user.click(await screen.findByRole("menuitem", { name: "Copy link" }));
     expect(menuActions.copyLink).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }));
     await user.click(menuButton());
-    await user.click(await screen.findByRole("menuitem", { name: "Open in new tab" }));
-    expect(menuActions.openInNewTab).toHaveBeenCalledWith(expect.objectContaining({ id: CHILD }));
-    await user.click(menuButton());
-    await user.click(await screen.findByRole("menuitem", { name: "Edit work item" }));
-    expect(menuActions.edit).toHaveBeenCalled();
-    await user.click(menuButton());
     await user.click(await screen.findByRole("menuitem", { name: "Remove sub-work item" }));
     expect(menuActions.remove).toHaveBeenCalled();
     await user.click(menuButton());
     await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     expect(menuActions.delete).toHaveBeenCalled();
+  });
+
+  it("never navigates instead of editing: the edit modal is a later slice", async () => {
+    const user = userEvent.setup();
+    const onOpen = vi.fn();
+    renderRow({ onOpen });
+    await user.click(menuButton());
+    expect(screen.queryByRole("menuitem", { name: /Edit work item/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /Open in new tab/ })).not.toBeInTheDocument();
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe("assignees", () => {
+  it("draws member names and avatars from the identity map", () => {
+    renderRow({
+      row: row({ assignee_ids: ["923e4567-e89b-12d3-a456-426614174008"] }),
+      memberIdentities: {
+        "923e4567-e89b-12d3-a456-426614174008": { label: "Ada Lovelace", avatarUrl: "https://cdn.test/ada.png" },
+      },
+    });
+    expect(screen.getByRole("img", { name: "Ada Lovelace" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Assigned to Ada Lovelace")).toBeInTheDocument();
+    expect(screen.queryByText(/923e4567/)).not.toBeInTheDocument();
+  });
+
+  it("names several assignees and falls back for an unknown id", () => {
+    renderRow({
+      row: row({ assignee_ids: ["923e4567-e89b-12d3-a456-426614174008", "a23e4567-e89b-12d3-a456-426614174009"] }),
+      memberIdentities: { "923e4567-e89b-12d3-a456-426614174008": { label: "Ada Lovelace", avatarUrl: null } },
+    });
+    expect(screen.getByLabelText("2 assignees: Ada Lovelace, Member")).toBeInTheDocument();
+  });
+});
+
+describe("project codes", () => {
+  it("labels a nested child from another project with its own code", async () => {
+    const OTHER = "723e4567-e89b-12d3-a456-426614174006";
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, { csrf_token: "csrf" });
+      return ok(
+        url,
+        page([row({ id: GRANDCHILD, name: "Elsewhere", sequence_id: 12, project_id: OTHER, sub_issues_count: null })])
+      );
+    }) as never);
+    const user = userEvent.setup();
+    renderRow({
+      row: row({ sub_issues_count: 1 }),
+      projectCodeFor: (child) => (child.project_id === PROJECT ? "ATL" : "BET"),
+    });
+    await user.click(screen.getByRole("button", { name: "Expand children of ATL-7" }));
+    expect(await screen.findByText("BET-12")).toBeInTheDocument();
+  });
+
+  it("reads an epic row's children through the epics collection", async () => {
+    const calls: string[] = [];
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, { csrf_token: "csrf" });
+      calls.push(url);
+      return ok(url, page([]));
+    }) as never);
+    const user = userEvent.setup();
+    renderRow({ row: row({ sub_issues_count: 1 }), isEpic: true });
+    await user.click(screen.getByRole("button", { name: "Expand children of ATL-7" }));
+    await waitFor(() => expect(calls.some((url) => url.includes(`/epics/${CHILD}/issues/`))).toBe(true));
+    expect(calls.some((url) => url.includes(`/sub-issues/`))).toBe(false);
   });
 });
 

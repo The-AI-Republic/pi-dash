@@ -19,6 +19,7 @@ import { useMe } from "../../../core/session/index.js";
 import { FilterSectionOption } from "../filters/shared/FilterSection.js";
 import {
   usePickerProjectMembers,
+  usePickerProjects,
   usePickerStates,
   usePickerWorkspaceMembers,
 } from "../../../shared/pickers/reference.js";
@@ -40,7 +41,7 @@ import {
   SUB_ISSUE_FILTER_KEYS,
 } from "./rules.js";
 import { useSubIssuesUiStore } from "./store.js";
-import type { SubIssueFilterSources, SubIssueRowActions, SubIssueWrite } from "./types.js";
+import type { SubIssueFilterSources, SubIssueMemberIdentity, SubIssueRowActions, SubIssueWrite } from "./types.js";
 
 /** Title the row menu copies under. */
 export const SUB_ISSUE_LINK_COPIED_TITLE = "Link copied";
@@ -93,33 +94,56 @@ export function SubIssueGauge({ percent, label }: { percent: number; label: stri
   );
 }
 
-/** Assignee rows for the filter menu, derived from the parent's members. */
+/** Assignee rows for the filter menu, plus the id-to-member map rows draw with. */
 export function useAssigneeFilterRows(
   workspaceSlug: string,
   projectId: string,
   enabled: boolean
-): SubIssueFilterSources {
+): SubIssueFilterSources & { memberIdentities: Readonly<Record<string, SubIssueMemberIdentity>> } {
   const members = usePickerProjectMembers(workspaceSlug, projectId, enabled);
   const directory = usePickerWorkspaceMembers(workspaceSlug, enabled);
   const me = useMe();
-  const rows = React.useMemo(() => {
-    if (members.data === undefined || directory.data === undefined) return [];
+  const { rows, memberIdentities } = React.useMemo(() => {
+    if (members.data === undefined || directory.data === undefined) {
+      return { rows: [] as FilterSectionOption[], memberIdentities: {} as Record<string, SubIssueMemberIdentity> };
+    }
     const options = selectMemberOptions({
       projectMembers: members.data,
       directory: directory.data,
       meId: me.data?.id ?? null,
       selectedIds: [],
     });
-    return options.map(
-      (option): FilterSectionOption => ({
-        id: option.userId,
-        label: option.label,
-        searchText: option.searchText,
-        disabled: option.suspended,
-      })
-    );
+    const identities: Record<string, SubIssueMemberIdentity> = {};
+    for (const option of options) {
+      identities[option.userId] = { label: option.searchText, avatarUrl: option.avatarUrl };
+    }
+    return {
+      rows: options.map(
+        (option): FilterSectionOption => ({
+          id: option.userId,
+          label: option.label,
+          searchText: option.searchText,
+          disabled: option.suspended,
+        })
+      ),
+      memberIdentities: identities,
+    };
   }, [directory.data, members.data, me.data?.id]);
-  return { assigneeRows: rows, assigneesLoading: enabled && (members.isPending || directory.isPending) };
+  return {
+    assigneeRows: rows,
+    assigneesLoading: enabled && (members.isPending || directory.isPending),
+    memberIdentities,
+  };
+}
+
+/** Short code per project id, for children that live outside the parent's project. */
+export function useProjectCodes(workspaceSlug: string, enabled: boolean): Readonly<Record<string, string>> {
+  const projects = usePickerProjects(workspaceSlug, enabled);
+  return React.useMemo(() => {
+    const codes: Record<string, string> = {};
+    for (const project of projects.data ?? []) codes[project.id] = project.identifier;
+    return codes;
+  }, [projects.data]);
 }
 
 export interface SubIssueSectionProps {
@@ -160,7 +184,8 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   handle
 ): React.ReactElement | null {
   const parentId = issue.id;
-  const scope: SubIssueScope = { workspaceSlug, projectId: issue.project_id, parentId };
+  const isEpic = issue.is_epic ?? false;
+  const scope: SubIssueScope = { workspaceSlug, projectId: issue.project_id, parentId, isEpic };
   const state = useSubIssuesUiStore((store) => store.stateFor(parentId));
   const setOpen = useSubIssuesUiStore((store) => store.setOpen);
   const toggleFilter = useSubIssuesUiStore((store) => store.toggleFilter);
@@ -174,14 +199,17 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
   const [existingOpen, setExistingOpen] = React.useState(false);
   const [pendingDelete, setPendingDelete] = React.useState<SubIssueItem | null>(null);
   const [busyRows, setBusyRows] = React.useState<readonly string[]>([]);
-  const query = useSubIssues(workspaceSlug, issue.project_id, parentId, { enabled: state.open });
+  // The read always runs: the collapsed header needs the counts, and a
+  // remounted parent must render its header before it can be reopened.
+  const query = useSubIssues(workspaceSlug, issue.project_id, parentId, { isEpic });
   const patch = usePatchSubIssue(scope);
   const remove = useRemoveSubIssue(scope);
   const destroy = useDeleteSubIssue(scope);
   const states = usePickerStates(workspaceSlug, issue.project_id, state.open);
   const today = React.useMemo(() => new Date(), []);
   const sources = useAssigneeFilterRows(workspaceSlug, issue.project_id, state.open);
-  const isEpic = issue.is_epic ?? false;
+  const foreignProject = loadedRows(query.data).some((row) => row.project_id !== issue.project_id);
+  const projectCodes = useProjectCodes(workspaceSlug, foreignProject);
 
   React.useImperativeHandle(
     handle,
@@ -221,8 +249,14 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
     },
   };
 
+  function identifierOf(row: SubIssueItem): string {
+    return row.project_id === issue.project_id
+      ? projectIdentifier
+      : (projectCodes[row.project_id] ?? projectIdentifier);
+  }
+
   function copyLink(row: SubIssueItem): void {
-    const url = `${globalThis.location?.origin ?? ""}/${workspaceSlug}/browse/${projectIdentifier}-${row.sequence_id}`;
+    const url = `${globalThis.location?.origin ?? ""}/${workspaceSlug}/browse/${identifierOf(row)}-${row.sequence_id}`;
     void globalThis.navigator?.clipboard?.writeText(url).then(
       () => notifySuccess(SUB_ISSUE_LINK_COPIED_TITLE),
       () => notifyError(SUB_ISSUE_LINK_COPY_FAILED_TITLE, "Copy the address from the work item instead.")
@@ -231,23 +265,11 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
 
   const menuActions: SubIssueRowMenuActions = {
     copyLink,
-    openInNewTab: (row) => {
-      globalThis.open?.(subIssueHref(workspaceSlug, projectIdentifier, row), "_blank", "noopener,noreferrer");
-    },
-    edit: onOpen,
     remove: (row) => remove.mutate(row),
     delete: (row) => setPendingDelete(row),
   };
 
-  if (envelope === undefined) return null;
-  if (subIssueRollup(envelope).total === 0) return null;
-
-  const rollup = subIssueRollup(envelope);
   const title = heading ?? subIssueTitle(isEpic);
-  const offered = SUB_ISSUE_FILTER_KEYS.filter(
-    (key) => key !== "project" || rows.some((row) => row.project_id !== issue.project_id)
-  );
-
   const addEntries: MenuEntry[] = [
     {
       label: "Create new",
@@ -260,6 +282,88 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
       icon: <Workflow size={14} strokeWidth={1.5} aria-hidden="true" />,
     },
   ];
+  const addMenu = canWrite ? (
+    <Menu
+      open={addOpen}
+      onOpenChange={setAddOpen}
+      trigger={
+        <IconButton label="Add a sub-work item" size="small" variant="ghost" data-testid="sub-issues-add">
+          <Plus size={14} strokeWidth={2} aria-hidden="true" />
+        </IconButton>
+      }
+      items={addEntries}
+    />
+  ) : null;
+  const dialogs = (
+    <SubIssueDialogs
+      scope={scope}
+      issue={issue}
+      projectIdentifier={projectIdentifier}
+      projectName={project?.name ?? projectIdentifier}
+      createProjects={createProjects}
+      createOpen={createOpen}
+      setCreateOpen={setCreateOpen}
+      existingOpen={existingOpen}
+      setExistingOpen={setExistingOpen}
+      pendingDelete={pendingDelete}
+      setPendingDelete={setPendingDelete}
+      destroy={destroy}
+    />
+  );
+
+  // Nothing has arrived yet: draw the header, its count-free title, the
+  // add entry and the busy row until the read settles, so a collapsed or
+  // remounted parent keeps its toggle and its first-child path.
+  if (envelope === undefined) {
+    return (
+      <div className="flex flex-col gap-(--space-3)" data-testid="sub-issues-section">
+        <div className="flex items-center gap-(--space-2)">
+          <button
+            type="button"
+            className="text-emphasis flex w-full min-w-0 items-center gap-(--space-2) text-left text-(--text)"
+            aria-expanded={state.open}
+            aria-controls="sub-issues-panel"
+            onClick={() => setOpen(parentId, !state.open)}
+            data-testid="sub-issues-collapsible"
+          >
+            <ChevronRight
+              size={14}
+              strokeWidth={2}
+              aria-hidden="true"
+              className={state.open ? "rotate-90 transition-transform" : "transition-transform"}
+            />
+            <span className="truncate text-14">{title}</span>
+          </button>
+          <span className="flex shrink-0 items-center gap-(--space-1)" onClick={(event) => event.stopPropagation()}>
+            {query.isError ? null : <Spinner size="small" aria-label="Loading sub-work items" />}
+            {addMenu}
+          </span>
+        </div>
+        {state.open ? (
+          <div id="sub-issues-panel" className="grid overflow-hidden">
+            {query.isError ? (
+              <div className="flex items-center gap-(--space-2) px-(--space-2) py-(--space-1)">
+                <span className="text-body text-(--danger)">Couldn&apos;t load the sub-work items.</span>
+                <Button variant="ghost" size="small" onClick={() => void query.refetch()}>
+                  Try again
+                </Button>
+              </div>
+            ) : (
+              <p role="status" className="text-body px-(--space-2) py-(--space-1) text-(--text-muted)">
+                Loading sub-work items
+              </p>
+            )}
+          </div>
+        ) : null}
+        {dialogs}
+      </div>
+    );
+  }
+
+  const rollup = subIssueRollup(envelope);
+  const offered = SUB_ISSUE_FILTER_KEYS.filter(
+    (key) => key !== "project" || rows.some((row) => row.project_id !== issue.project_id)
+  );
 
   return (
     <div className="flex flex-col gap-(--space-3)" data-testid="sub-issues-section">
@@ -300,18 +404,7 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
             onToggle={(key, value) => toggleFilter(parentId, key, value)}
             onSetDate={(key, values) => setFilterValues(parentId, key, values)}
           />
-          {canWrite ? (
-            <Menu
-              open={addOpen}
-              onOpenChange={setAddOpen}
-              trigger={
-                <IconButton label="Add a sub-work item" size="small" variant="ghost" data-testid="sub-issues-add">
-                  <Plus size={14} strokeWidth={2} aria-hidden="true" />
-                </IconButton>
-              }
-              items={addEntries}
-            />
-          ) : null}
+          {addMenu}
         </span>
       </div>
       {state.open ? (
@@ -358,7 +451,9 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
                         key={row.id}
                         row={row}
                         workspaceSlug={workspaceSlug}
-                        projectIdentifier={projectIdentifier}
+                        projectIdentifier={identifierOf(row)}
+                        projectCodeFor={(child) => identifierOf(child)}
+                        memberIdentities={sources.memberIdentities}
                         properties={state.display.properties}
                         editable={editable}
                         depth={0}
@@ -394,59 +489,93 @@ export const SubIssueSection = React.forwardRef<SubIssueSectionHandle, SubIssueS
           </div>
         </div>
       ) : null}
-      {canWrite ? (
-        <>
-          <WorkItemCreateDialog
-            open={createOpen}
-            onOpenChange={setCreateOpen}
-            workspaceSlug={workspaceSlug}
-            projects={createProjects}
-            initialProjectId={issue.project_id}
-            lockedProjectId={issue.project_id}
-            initialParent={{
-              id: parentId,
-              name: issue.name,
-              identifier: projectIdentifier,
-              sequenceId: issue.sequence_id,
-            }}
-          />
-          <AddExistingDialog
-            open={existingOpen}
-            onOpenChange={setExistingOpen}
-            scope={scope}
-            projectName={project?.name ?? projectIdentifier}
-          />
-          <Dialog
-            open={pendingDelete !== null}
-            onOpenChange={(next) => {
-              if (!next) setPendingDelete(null);
-            }}
-            title={SUB_ISSUE_DELETE_CONFIRM_TITLE}
-            actions={
-              <>
-                <Button variant="ghost" onClick={() => setPendingDelete(null)} disabled={destroy.isPending}>
-                  Cancel
-                </Button>
-                <Button
-                  variant="danger"
-                  disabled={destroy.isPending}
-                  onClick={() => {
-                    const row = pendingDelete;
-                    if (row === null) return;
-                    destroy.mutate(row, { onSettled: () => setPendingDelete(null) });
-                  }}
-                >
-                  Delete
-                </Button>
-              </>
-            }
-          >
-            <p className="text-body text-(--text-muted)">
-              {pendingDelete === null ? "" : deleteConfirmBody(pendingDelete.name)}
-            </p>
-          </Dialog>
-        </>
-      ) : null}
+      {/* The dialogs live outside the content branch: a collapsed
+          parent still owns its create, add-existing and delete flows. */}
+      {dialogs}
     </div>
   );
 });
+
+interface SubIssueDialogsProps {
+  scope: SubIssueScope;
+  issue: Issue;
+  projectIdentifier: string;
+  projectName: string;
+  createProjects: WorkItemCreateProject[];
+  createOpen: boolean;
+  setCreateOpen: (open: boolean) => void;
+  existingOpen: boolean;
+  setExistingOpen: (open: boolean) => void;
+  pendingDelete: SubIssueItem | null;
+  setPendingDelete: (row: SubIssueItem | null) => void;
+  destroy: ReturnType<typeof useDeleteSubIssue>;
+}
+
+/**
+ * The section's modal owners. They stay mounted for every parent,
+ * childless ones included, so the widget's add menu has something to
+ * open and a newly created first child has somewhere to land.
+ */
+function SubIssueDialogs({
+  scope,
+  issue,
+  projectIdentifier,
+  projectName,
+  createProjects,
+  createOpen,
+  setCreateOpen,
+  existingOpen,
+  setExistingOpen,
+  pendingDelete,
+  setPendingDelete,
+  destroy,
+}: SubIssueDialogsProps): React.ReactElement {
+  return (
+    <>
+      <WorkItemCreateDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        workspaceSlug={scope.workspaceSlug}
+        projects={createProjects}
+        initialProjectId={issue.project_id}
+        lockedProjectId={issue.project_id}
+        initialParent={{
+          id: issue.id,
+          name: issue.name,
+          identifier: projectIdentifier,
+          sequenceId: issue.sequence_id,
+        }}
+      />
+      <AddExistingDialog open={existingOpen} onOpenChange={setExistingOpen} scope={scope} projectName={projectName} />
+      <Dialog
+        open={pendingDelete !== null}
+        onOpenChange={(next) => {
+          if (!next) setPendingDelete(null);
+        }}
+        title={SUB_ISSUE_DELETE_CONFIRM_TITLE}
+        actions={
+          <>
+            <Button variant="ghost" onClick={() => setPendingDelete(null)} disabled={destroy.isPending}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={destroy.isPending}
+              onClick={() => {
+                const row = pendingDelete;
+                if (row === null) return;
+                destroy.mutate(row, { onSettled: () => setPendingDelete(null) });
+              }}
+            >
+              Delete
+            </Button>
+          </>
+        }
+      >
+        <p className="text-body text-(--text-muted)">
+          {pendingDelete === null ? "" : deleteConfirmBody(pendingDelete.name)}
+        </p>
+      </Dialog>
+    </>
+  );
+}

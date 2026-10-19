@@ -8,6 +8,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  addEpicWorkItems,
   addSubIssues,
   deleteIssue,
   updateIssue,
@@ -136,7 +137,9 @@ export function useAttachSubIssues(scope: SubIssueScope) {
   const client: ApiClient = getAppClient();
   return useMutation({
     mutationFn: async (ids: string[]) =>
-      addSubIssues(client, scope.workspaceSlug, scope.projectId, scope.parentId, ids),
+      scope.isEpic
+        ? addEpicWorkItems(client, scope.workspaceSlug, scope.projectId, scope.parentId, ids)
+        : addSubIssues(client, scope.workspaceSlug, scope.projectId, scope.parentId, ids),
     onSuccess: (answer, ids) => {
       const key = subIssuesKey(scope.workspaceSlug, scope.projectId, scope.parentId);
       queryClient.setQueryData(key, (previous: unknown) => {
