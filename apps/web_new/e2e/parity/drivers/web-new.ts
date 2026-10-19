@@ -269,6 +269,26 @@ export class WebNewDriver implements ParityDriver {
     this.page = page;
   }
 
+  // Runner-chat stubs and counters (NEWFRONT-549); set by the chat methods.
+  private runnerChatSessionCreateFailRemaining = 0;
+  private runnerChatSessionCreateDelayMs = 0;
+  private runnerChatSessionCreateDelayRemaining = 0;
+  private runnerChatSendFailRemaining = 0;
+  private runnerChatRunnerDetailDelayMs = 0;
+  private runnerChatRunnerDetailDelayRemaining = 0;
+  private runnerChatRunnerDetailDelayPattern: string | null = null;
+  private runnerChatStreamFrames = new Map<string, RunnerChatStreamFrame[]>();
+  private runnerChatStreamUrls = new Map<string, string[]>();
+  private runnerChatSpyCounts = {
+    warm: 0,
+    sessionCreate: 0,
+    send: 0,
+    cancel: 0,
+    close: 0,
+    sessionList: 0,
+    messageList: 0,
+  };
+
   // --- Auth area (NEWFRONT-491 gate). The card is email-first with
   // --- placeholder-pinned steps; submits are XHR plus a full navigation on
   // --- success, an inline banner plus step recovery on failure.
@@ -7924,124 +7944,321 @@ export class WebNewDriver implements ParityDriver {
     return todo("schedulerRunsExportControls");
   }
 
-  // --- Runner chat on cloud/web (NEWFRONT-181, RUN-025–032). Throwing
-  // --- stubs per the shared driver contract; the chat area fills these
-  // --- in when it lands in apps/web_new.
+  // --- Runner chat on cloud/web (NEWFRONT-549 shell; messaging lands with
+  // --- NEWFRONT-551). The page renders the history column, the header and
+  // --- the composer inside the area shell. Selectors pin the same roles
+  // --- and copy the scenarios use against the old app.
 
-  async runnerChatOpen(_workspaceSlug: string, _runnerId: string, _sessionId?: string): Promise<void> {
-    return todo("runnerChatOpen");
+  /** The rail (area side nav) that hosts the chat contacts. */
+  private runnerChatSideNav(): Locator {
+    return this.page.getByTestId("runners-rail");
+  }
+
+  private runnerChatHistoryPanel(): Locator {
+    return this.page.getByTestId("runner-chat-history");
+  }
+
+  private runnerChatComposerBox(): Locator {
+    return this.page.getByPlaceholder(/Message this runner/);
+  }
+
+  private runnerChatThread(): Locator {
+    return this.page.getByTestId("runner-chat");
+  }
+
+  async runnerChatOpen(workspaceSlug: string, runnerId: string, sessionId?: string): Promise<void> {
+    const suffix = sessionId === undefined ? "" : `?sessionId=${encodeURIComponent(sessionId)}`;
+    await this.page.goto(`/${workspaceSlug}/runners/chat/${runnerId}${suffix}`, { timeout: 60_000 });
+    // Both the history heading and the composer render for known and
+    // unknown runners, so the unavailable state settles here too.
+    await this.runnerChatHistoryPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.runnerChatComposerBox().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async runnerChatContactNames(): Promise<string[]> {
-    return todo("runnerChatContactNames");
+    const links = this.runnerChatSideNav().getByTestId("runners-rail-contact");
+    const names: string[] = [];
+    for (const link of await links.all()) names.push((await link.innerText()).trim());
+    return names;
   }
 
-  async runnerChatContactDotClass(_runnerName: string): Promise<string> {
-    return todo("runnerChatContactDotClass");
+  async runnerChatContactDotClass(runnerName: string): Promise<string> {
+    const contact = this.runnerChatSideNav().getByTestId("runners-rail-contact").filter({ hasText: runnerName });
+    const dot = contact.locator("svg[data-status]");
+    await dot.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await dot.first().getAttribute("class")) ?? "";
   }
 
-  async runnerChatOpenContact(_runnerName: string): Promise<void> {
-    return todo("runnerChatOpenContact");
+  async runnerChatOpenContact(runnerName: string): Promise<void> {
+    const before = this.page.url();
+    await this.runnerChatSideNav().getByTestId("runners-rail-contact").filter({ hasText: runnerName }).first().click();
+    await this.page.waitForURL((url) => url.toString() !== before, { timeout: WebNewDriver.WAIT_MS });
+    await this.runnerChatComposerBox().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async runnerChatHeader(): Promise<{ name: string; secondary: string; badge: string }> {
-    return todo("runnerChatHeader");
+    const header = this.page.getByTestId("runner-chat-header");
+    const name = (await header.getByTestId("runner-chat-name").innerText()).trim();
+    const secondary = await header
+      .getByTestId("runner-chat-secondary")
+      .innerText()
+      .then(
+        (text) => text.trim(),
+        () => ""
+      );
+    // The badge is the only status-labelled element in the header.
+    const badge = (
+      (await header
+        .getByTestId("runner-status-badge")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { name, secondary, badge };
   }
 
   async runnerChatHistoryEmptyVisible(): Promise<boolean> {
-    return todo("runnerChatHistoryEmptyVisible");
+    return this.runnerChatHistoryPanel()
+      .getByTestId("runner-chat-history-empty")
+      .isVisible()
+      .then(
+        (visible) => visible,
+        () => false
+      );
   }
 
   async runnerChatHistoryItems(): Promise<{ title: string; subtitle: string; active: boolean }[]> {
-    return todo("runnerChatHistoryItems");
+    const entries = this.runnerChatHistoryPanel().locator("nav button");
+    const items: { title: string; subtitle: string; active: boolean }[] = [];
+    for (const entry of await entries.all()) {
+      const lines = await entry.locator(":scope > span > span").allInnerTexts();
+      items.push({
+        title: (lines[0] ?? "").trim(),
+        subtitle: (lines[1] ?? "").trim(),
+        active: (await entry.getAttribute("aria-current")) === "true",
+      });
+    }
+    return items;
   }
 
-  async runnerChatClickHistoryItem(_index: number): Promise<void> {
-    return todo("runnerChatClickHistoryItem");
+  async runnerChatClickHistoryItem(index: number): Promise<void> {
+    await this.runnerChatHistoryPanel().locator("nav button").nth(index).click();
   }
 
   async runnerChatNewChat(): Promise<void> {
-    return todo("runnerChatNewChat");
+    const before = new URL(this.page.url()).search;
+    await this.runnerChatHistoryPanel().getByRole("button", { name: "New chat", exact: true }).click();
+    // Resolves on selection (the address gains the session) or on the
+    // error toast: the error-state scenario asserts which one it got.
+    await Promise.race([
+      this.page
+        .waitForFunction((previous) => new URL(window.location.href).search !== previous, before, {
+          timeout: WebNewDriver.WAIT_MS,
+        })
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page
+        .getByTestId("toast-notification")
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
   }
 
   async runnerChatNewChatDisabled(): Promise<boolean> {
-    return todo("runnerChatNewChatDisabled");
+    return this.runnerChatHistoryPanel()
+      .getByRole("button", { name: "New chat", exact: true })
+      .isDisabled()
+      .then(
+        (disabled) => disabled,
+        () => false
+      );
   }
 
   async runnerChatFailSessionCreate(): Promise<void> {
-    return todo("runnerChatFailSessionCreate");
+    this.runnerChatSessionCreateFailRemaining = 1;
+    await this.page.route("**/api/runners/chat/sessions**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (
+        request.method() === "POST" &&
+        pathname.endsWith("/chat/sessions/") &&
+        this.runnerChatSessionCreateFailRemaining > 0
+      ) {
+        this.runnerChatSessionCreateFailRemaining -= 1;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity session-create failure" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
   }
 
-  async runnerChatDelaySessionCreate(_ms: number): Promise<void> {
-    return todo("runnerChatDelaySessionCreate");
+  async runnerChatDelaySessionCreate(ms: number): Promise<void> {
+    this.runnerChatSessionCreateDelayMs = ms;
+    this.runnerChatSessionCreateDelayRemaining = 1;
+    await this.page.route("**/api/runners/chat/sessions**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (
+        request.method() === "POST" &&
+        pathname.endsWith("/chat/sessions/") &&
+        this.runnerChatSessionCreateDelayRemaining > 0
+      ) {
+        this.runnerChatSessionCreateDelayRemaining -= 1;
+        await new Promise((resolve) => setTimeout(resolve, this.runnerChatSessionCreateDelayMs));
+      }
+      await route.fallback();
+    });
   }
 
   async runnerChatClearSessionCreateStubs(): Promise<void> {
-    return todo("runnerChatClearSessionCreateStubs");
+    this.runnerChatSessionCreateFailRemaining = 0;
+    this.runnerChatSessionCreateDelayRemaining = 0;
+    await this.page.unroute("**/api/runners/chat/sessions**");
   }
 
-  async runnerChatFillDraft(_text: string): Promise<void> {
-    return todo("runnerChatFillDraft");
+  async runnerChatFillDraft(text: string): Promise<void> {
+    await this.runnerChatComposerBox().first().fill(text);
   }
 
   async runnerChatDraftValue(): Promise<string> {
-    return todo("runnerChatDraftValue");
+    return this.runnerChatComposerBox().first().inputValue();
   }
 
   async runnerChatPressEnter(): Promise<void> {
-    return todo("runnerChatPressEnter");
+    await this.runnerChatComposerBox().first().press("Enter");
   }
 
   async runnerChatPressShiftEnter(): Promise<void> {
-    return todo("runnerChatPressShiftEnter");
+    await this.runnerChatComposerBox().first().press("Shift+Enter");
   }
 
   async runnerChatSendEnabled(): Promise<boolean> {
-    return todo("runnerChatSendEnabled");
+    return this.runnerChatThread()
+      .getByRole("button", { name: "Send message" })
+      .first()
+      .isEnabled()
+      .then(
+        (enabled) => enabled,
+        () => false
+      );
   }
 
   async runnerChatClickSend(): Promise<void> {
-    return todo("runnerChatClickSend");
+    await this.runnerChatThread().getByRole("button", { name: "Send message" }).first().click();
   }
 
   async runnerChatComposerReason(): Promise<string | null> {
-    return todo("runnerChatComposerReason");
+    const reason = this.runnerChatThread().getByTestId("runner-chat-block-reason").first();
+    if ((await reason.count()) === 0) return null;
+    const text = (await reason.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async runnerChatTextareaDisabled(): Promise<boolean> {
-    return todo("runnerChatTextareaDisabled");
+    return this.runnerChatComposerBox().first().isDisabled();
   }
 
   async runnerChatAlertText(): Promise<string | null> {
-    return todo("runnerChatAlertText");
+    const alert = this.runnerChatThread().locator('[role="alert"]').first();
+    if ((await alert.count()) === 0) return null;
+    const text = (await alert.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async runnerChatDismissAlert(): Promise<void> {
-    return todo("runnerChatDismissAlert");
+    await this.runnerChatThread().locator('[role="alert"]').first().getByRole("button").first().click();
   }
 
   async runnerChatLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("runnerChatLastToast");
+    const candidates = this.page.getByTestId("toast-notification");
+    const count = await candidates.count();
+    if (count === 0) return null;
+    // Toasts prepend newest-first, so the first root carries the latest.
+    for (let index = 0; index < count; index += 1) {
+      const lines = ((await candidates.nth(index).innerText()) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length === 0) continue;
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
 
   async runnerChatFailNextSend(): Promise<void> {
-    return todo("runnerChatFailNextSend");
+    this.runnerChatSendFailRemaining = 1;
+    await this.page.route("**/api/runners/chat/sessions/*/messages**", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST" && this.runnerChatSendFailRemaining > 0) {
+        this.runnerChatSendFailRemaining -= 1;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity send failure" }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
   }
 
   async runnerChatClearSendFailure(): Promise<void> {
-    return todo("runnerChatClearSendFailure");
+    this.runnerChatSendFailRemaining = 0;
+    await this.page.unroute("**/api/runners/chat/sessions/*/messages**");
   }
 
   async runnerChatVoiceButtonLabel(): Promise<string | null> {
-    return todo("runnerChatVoiceButtonLabel");
+    // Dictation ships with the messaging slice; until then there is none.
+    const mic = this.runnerChatThread()
+      .getByRole("button", { name: /dictat|voice/i })
+      .first();
+    if ((await mic.count()) === 0) return null;
+    return await mic.getAttribute("aria-label");
   }
 
   async runnerChatClickVoiceButton(): Promise<void> {
-    return todo("runnerChatClickVoiceButton");
+    await this.runnerChatThread()
+      .getByRole("button", { name: /dictat|voice/i })
+      .first()
+      .click();
   }
 
   async runnerChatStartApiSpy(): Promise<void> {
-    return todo("runnerChatStartApiSpy");
+    this.runnerChatSpyCounts = {
+      warm: 0,
+      sessionCreate: 0,
+      send: 0,
+      cancel: 0,
+      close: 0,
+      sessionList: 0,
+      messageList: 0,
+    };
+    // One classifying route: counts the call, then falls through so the
+    // request still reaches the server (or a later-registered stub).
+    await this.page.route("**/api/runners/**", async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      const method = request.method();
+      const counts = this.runnerChatSpyCounts;
+      if (method === "POST" && pathname.endsWith("/warm/")) counts.warm += 1;
+      else if (method === "POST" && pathname.endsWith("/chat/sessions/")) counts.sessionCreate += 1;
+      else if (method === "POST" && pathname.endsWith("/messages/")) counts.send += 1;
+      else if (method === "POST" && pathname.endsWith("/cancel/")) counts.cancel += 1;
+      else if (method === "POST" && pathname.endsWith("/close/")) counts.close += 1;
+      else if (method === "GET" && pathname.endsWith("/chat/sessions/")) counts.sessionList += 1;
+      else if (method === "GET" && pathname.endsWith("/messages/")) counts.messageList += 1;
+      await route.fallback();
+    });
   }
 
   async runnerChatApiCounts(): Promise<{
@@ -8053,59 +8270,135 @@ export class WebNewDriver implements ParityDriver {
     sessionList: number;
     messageList: number;
   }> {
-    return todo("runnerChatApiCounts");
+    return { ...this.runnerChatSpyCounts };
   }
 
   async runnerChatStopApiSpy(): Promise<void> {
-    return todo("runnerChatStopApiSpy");
+    await this.page.unroute("**/api/runners/**");
   }
 
-  async runnerChatDelayRunnerDetail(_runnerId: string, _ms: number): Promise<void> {
-    return todo("runnerChatDelayRunnerDetail");
+  async runnerChatDelayRunnerDetail(runnerId: string, ms: number): Promise<void> {
+    this.runnerChatRunnerDetailDelayMs = ms;
+    this.runnerChatRunnerDetailDelayRemaining = 1;
+    this.runnerChatRunnerDetailDelayPattern = `**/api/runners/${runnerId}**`;
+    await this.page.route(this.runnerChatRunnerDetailDelayPattern, async (route) => {
+      const request = route.request();
+      const pathname = new URL(request.url()).pathname;
+      if (
+        request.method() === "GET" &&
+        pathname === `/api/runners/${runnerId}/` &&
+        this.runnerChatRunnerDetailDelayRemaining > 0
+      ) {
+        this.runnerChatRunnerDetailDelayRemaining -= 1;
+        await new Promise((resolve) => setTimeout(resolve, this.runnerChatRunnerDetailDelayMs));
+      }
+      await route.fallback();
+    });
   }
 
   async runnerChatClearRunnerDetailDelay(): Promise<void> {
-    return todo("runnerChatClearRunnerDetailDelay");
+    this.runnerChatRunnerDetailDelayRemaining = 0;
+    if (this.runnerChatRunnerDetailDelayPattern !== null) {
+      await this.page.unroute(this.runnerChatRunnerDetailDelayPattern);
+      this.runnerChatRunnerDetailDelayPattern = null;
+    }
   }
 
-  async runnerChatStubStream(_sessionId: string, _frames: RunnerChatStreamFrame[]): Promise<void> {
-    return todo("runnerChatStubStream");
+  async runnerChatStubStream(sessionId: string, frames: RunnerChatStreamFrame[]): Promise<void> {
+    this.runnerChatStreamFrames.set(sessionId, frames);
+    if (!this.runnerChatStreamUrls.has(sessionId)) {
+      this.runnerChatStreamUrls.set(sessionId, []);
+      // Installed once per session; re-stubbing swaps the frames the
+      // handler serves, so the stream's natural reconnect picks them up.
+      await this.page.route(`**/chat/sessions/${sessionId}/events**`, async (route) => {
+        this.runnerChatStreamUrls.get(sessionId)?.push(route.request().url());
+        const stamp = new Date().toISOString();
+        const body = (this.runnerChatStreamFrames.get(sessionId) ?? [])
+          .map((frame) => {
+            // A deliberately unparsable data line: the page surfaces a
+            // transient-error banner for it, cleared by the next frame.
+            if (frame.kind === "raw-invalid") return `event: chat.event\ndata: not-json seq=${frame.seq}\n\n`;
+            const event = {
+              id: frame.seq,
+              session: sessionId,
+              message: frame.message ?? null,
+              seq: frame.seq,
+              kind: frame.kind,
+              payload: frame.payload,
+              created_at: stamp,
+            };
+            return `event: chat.event\nid: ${frame.seq}\ndata: ${JSON.stringify(event)}\n\n`;
+          })
+          .join("");
+        await route.fulfill({
+          status: 200,
+          headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+          body,
+        });
+      });
+    }
   }
 
-  async runnerChatClearStreamStub(_sessionId: string): Promise<void> {
-    return todo("runnerChatClearStreamStub");
+  async runnerChatClearStreamStub(sessionId: string): Promise<void> {
+    this.runnerChatStreamFrames.delete(sessionId);
+    await this.page.unroute(`**/chat/sessions/${sessionId}/events**`);
   }
 
-  async runnerChatStreamRequestUrls(_sessionId: string): Promise<string[]> {
-    return todo("runnerChatStreamRequestUrls");
+  async runnerChatStreamRequestUrls(sessionId: string): Promise<string[]> {
+    return [...(this.runnerChatStreamUrls.get(sessionId) ?? [])];
   }
 
   async runnerChatMessageBubbles(): Promise<{ role: string; text: string }[]> {
-    return todo("runnerChatMessageBubbles");
+    const list = this.page.getByTestId("runner-chat-transcript").getByRole("list", { name: "Messages" });
+    if ((await list.count()) === 0) return [];
+    const rows: { role: string; text: string }[] = [];
+    for (const item of await list.getByRole("listitem").all()) {
+      const text = ((await item.innerText()) ?? "").trim();
+      if (text === "") continue;
+      const role = (await item.locator("[data-role]").first().getAttribute("data-role")) ?? "status";
+      rows.push({ role, text });
+    }
+    return rows;
   }
 
-  async runnerChatAssistantBubbleHtml(_index: number): Promise<string> {
-    return todo("runnerChatAssistantBubbleHtml");
+  async runnerChatAssistantBubbleHtml(index: number): Promise<string> {
+    const bubble = this.page.getByTestId("runner-chat-transcript").locator('[data-role="assistant"]').nth(index);
+    return bubble.innerHTML();
   }
 
   async runnerChatActivityStrip(): Promise<string[]> {
-    return todo("runnerChatActivityStrip");
+    // The activity strip is derived from the event feed and lands with the
+    // messaging slice; the shell renders none.
+    const items = this.runnerChatThread().getByTestId("runner-chat-activity");
+    const total = await items.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const text = ((await items.nth(i).innerText()) ?? "").trim();
+      if (text !== "") labels.push(text);
+    }
+    return labels;
   }
 
   async runnerChatStopVisible(): Promise<boolean> {
-    return todo("runnerChatStopVisible");
+    return this.runnerChatThread()
+      .getByRole("button", { name: "Stop response" })
+      .count()
+      .then((count) => count > 0);
   }
 
   async runnerChatClickStop(): Promise<void> {
-    return todo("runnerChatClickStop");
+    await this.runnerChatThread().getByRole("button", { name: "Stop response" }).first().click();
   }
 
   async runnerChatClickClose(): Promise<void> {
-    return todo("runnerChatClickClose");
+    await this.page.getByTestId("runner-chat-header").getByRole("button", { name: "Close chat" }).first().click();
   }
 
   async runnerChatApprovalPromptVisible(): Promise<boolean> {
-    return todo("runnerChatApprovalPromptVisible");
+    return this.runnerChatThread()
+      .getByTestId("runner-chat-approval")
+      .count()
+      .then((count) => count > 0);
   }
 
   async runnerChatHoldMessageList(_ms: number): Promise<void> {
