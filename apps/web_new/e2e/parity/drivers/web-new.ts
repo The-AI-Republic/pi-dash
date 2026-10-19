@@ -16998,82 +16998,253 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsDownloadCount");
   }
 
-  // --- Workspace billing oracle (NEWFRONT-414, WSET-029..032). Appended;
-  // --- existing stubs above are untouched per the shared driver contract.
-  async wsSettingsBillingOpen(_workspaceSlug: string): Promise<void> {
-    return todo("wsSettingsBillingOpen");
+  // --- Workspace billing oracle (NEWFRONT-414, WSET-029..032). The billing
+  // --- page is admin-only and entirely static (no reads), each card owns
+  // --- its month/year choice, and every plan action opens an external page
+  // --- in a new tab without changing the page. No upgrade dialog exists in
+  // --- the new app, so the dialog readers report its absence and the
+  // --- former trigger points are inert.
+  async wsSettingsBillingOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/billing`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
+        document.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null,
+      null,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
+
   async wsSettingsBillingNotAuthorized(): Promise<boolean> {
-    return todo("wsSettingsBillingNotAuthorized");
+    return this.isShown(this.page.locator('[data-testid="workspace-settings-not-authorized"]'));
   }
+
   async wsSettingsBillingCommunityTitle(): Promise<string | null> {
-    return todo("wsSettingsBillingCommunityTitle");
+    return this.billingText(this.page.locator('[data-testid="billing-community"]').getByRole("heading"));
   }
+
   async wsSettingsBillingCommunityDescription(): Promise<string | null> {
-    return todo("wsSettingsBillingCommunityDescription");
+    return this.billingText(this.page.locator('[data-testid="billing-community-description"]'));
   }
+
   async wsSettingsBillingPlanNames(): Promise<string[]> {
-    return todo("wsSettingsBillingPlanNames");
+    return this.page
+      .locator('[data-testid="billing-plan-list"] [data-testid^="billing-plan-"]')
+      .evaluateAll((cards) =>
+        cards.map((card) => (card.querySelector("h3")?.textContent ?? "").replace(/\s+/g, " ").trim())
+      );
   }
+
   async wsSettingsBillingPopularPlan(): Promise<string | null> {
-    return todo("wsSettingsBillingPopularPlan");
+    const marker = this.page.locator('[data-testid="billing-plan-list"]').getByText("Popular", { exact: true });
+    if ((await marker.count()) === 0) return null;
+    return (
+      (await marker
+        .first()
+        .evaluate((node) => {
+          const card = node.closest('[data-testid^="billing-plan-"]');
+          return (card?.querySelector("h3")?.textContent ?? "").replace(/\s+/g, " ").trim();
+        })
+        .catch(() => "")) || null
+    );
   }
-  async wsSettingsBillingPlanPrice(_planName: string): Promise<string | null> {
-    return todo("wsSettingsBillingPlanPrice");
+
+  /** The plan card for a plan name; the list holds only compared plans. */
+  private billingPlanCard(planName: string): Locator {
+    return this.page
+      .locator('[data-testid="billing-plan-list"] [data-testid^="billing-plan-"]')
+      .filter({ has: this.page.getByRole("heading", { name: planName, exact: true }) })
+      .first();
   }
-  async wsSettingsBillingFrequencyVisible(_planName: string): Promise<boolean> {
-    return todo("wsSettingsBillingFrequencyVisible");
+
+  async wsSettingsBillingPlanPrice(planName: string): Promise<string | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    const id = ((await card.getAttribute("data-testid")) ?? "").replace("billing-plan-", "");
+    return this.billingText(this.page.locator(`[data-testid="billing-price-${id}"]`));
   }
-  async wsSettingsBillingSelectedFrequency(_planName: string): Promise<"month" | "year" | null> {
-    return todo("wsSettingsBillingSelectedFrequency");
+
+  async wsSettingsBillingFrequencyVisible(planName: string): Promise<boolean> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return false;
+    return (
+      (await card.getByRole("button", { name: "Monthly", exact: true }).count()) > 0 &&
+      (await card.getByRole("button", { name: "Yearly", exact: true }).count()) > 0
+    );
   }
-  async wsSettingsBillingSelectFrequency(_planName: string, _frequency: "month" | "year"): Promise<void> {
-    return todo("wsSettingsBillingSelectFrequency");
+
+  async wsSettingsBillingSelectedFrequency(planName: string): Promise<"month" | "year" | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    const monthly = card.getByRole("button", { name: "Monthly", exact: true }).first();
+    const yearly = card.getByRole("button", { name: "Yearly", exact: true }).first();
+    if ((await monthly.getAttribute("aria-pressed").catch(() => null)) === "true") return "month";
+    if ((await yearly.getAttribute("aria-pressed").catch(() => null)) === "true") return "year";
+    return null;
   }
-  async wsSettingsBillingDiscountBadge(_planName: string): Promise<string | null> {
-    return todo("wsSettingsBillingDiscountBadge");
+
+  async wsSettingsBillingSelectFrequency(planName: string, frequency: "month" | "year"): Promise<void> {
+    const card = this.billingPlanCard(planName);
+    const label = frequency === "month" ? "Monthly" : "Yearly";
+    await card.getByRole("button", { name: label, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => card.getAttribute("data-frequency"), { timeout: 15_000 })
+      .toBe(frequency)
+      .catch(() => undefined);
   }
+
+  async wsSettingsBillingDiscountBadge(planName: string): Promise<string | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    const id = ((await card.getAttribute("data-testid")) ?? "").replace("billing-plan-", "");
+    return this.billingText(this.page.locator(`[data-testid="billing-discount-${id}"]`));
+  }
+
   async wsSettingsBillingCompareToggleLabel(): Promise<string | null> {
-    return todo("wsSettingsBillingCompareToggleLabel");
+    return this.billingText(this.page.locator('[data-testid="billing-compare-toggle"]'));
   }
+
   async wsSettingsBillingToggleCompare(): Promise<void> {
-    return todo("wsSettingsBillingToggleCompare");
+    const before = await this.wsSettingsBillingCompareToggleLabel();
+    await this.page.locator('[data-testid="billing-compare-toggle"]').click({ timeout: WebNewDriver.WAIT_MS });
+    if (before === null) return;
+    const expected = before.includes("Compare") ? "Collapse comparison" : "Compare all features";
+    await this.page
+      .waitForFunction(
+        (text) => (document.querySelector('[data-testid="billing-compare-toggle"]')?.textContent ?? "").includes(text),
+        expected,
+        { timeout: 15_000 }
+      )
+      .catch(() => undefined);
   }
+
   async wsSettingsBillingComparisonVisible(): Promise<boolean> {
-    return todo("wsSettingsBillingComparisonVisible");
+    return (
+      (await this.page
+        .locator('[data-testid="billing-compare-toggle"]')
+        .first()
+        .getAttribute("aria-expanded")
+        .catch(() => null)) === "true"
+    );
   }
+
   async wsSettingsBillingComparisonSections(): Promise<string[]> {
-    return todo("wsSettingsBillingComparisonSections");
+    if (!(await this.wsSettingsBillingComparisonVisible())) return [];
+    return this.page
+      .locator('[data-testid="billing-comparison"] [data-testid^="billing-comparison-section-"] h3')
+      .evaluateAll((heads) =>
+        heads.map((head) => (head.textContent ?? "").replace(/\s+/g, " ").trim()).filter((text) => text !== "")
+      );
   }
-  async wsSettingsBillingPlanButtonLabel(_planName: string): Promise<string | null> {
-    return todo("wsSettingsBillingPlanButtonLabel");
+
+  async wsSettingsBillingPlanButtonLabel(planName: string): Promise<string | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    return this.billingText(card.locator('a[target="_blank"]'));
   }
-  async wsSettingsBillingPlanButtonPopupUrl(_planName: string): Promise<string | null> {
-    return todo("wsSettingsBillingPlanButtonPopupUrl");
+
+  async wsSettingsBillingPlanButtonPopupUrl(planName: string): Promise<string | null> {
+    const card = this.billingPlanCard(planName);
+    if ((await card.count()) === 0) return null;
+    const action = card.locator('a[target="_blank"]').first();
+    if ((await action.count()) === 0) return null;
+    // The action opens an external page in a new tab; capture the target
+    // without ever loading it (the checkout itself is never completed).
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 15_000 }).catch(() => null),
+      action.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    if (popup === null) return null;
+    let url = "";
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      url = popup.url();
+      if (url !== "" && url !== "about:blank") break;
+      await this.page.waitForTimeout(250);
+    }
+    await popup.close().catch(() => undefined);
+    return url === "" || url === "about:blank" ? null : url;
   }
+
   async wsSettingsBillingPageText(): Promise<string> {
-    return todo("wsSettingsBillingPageText");
+    return (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
+
+  /** The paid-plan upgrade dialog, which the new app never renders (§31). */
+  private upgradeDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: /upgrade to a paid plan/i })
+      .first();
+  }
+
   async wsSettingsUpgradeModalVisible(): Promise<boolean> {
-    return todo("wsSettingsUpgradeModalVisible");
+    return this.isShown(this.upgradeDialog());
   }
+
   async wsSettingsUpgradeModalTitle(): Promise<string | null> {
-    return todo("wsSettingsUpgradeModalTitle");
+    if (!(await this.wsSettingsUpgradeModalVisible())) return null;
+    return this.billingText(this.upgradeDialog().getByRole("heading"));
   }
+
   async wsSettingsUserMenuOpenCommunity(_workspaceSlug: string): Promise<void> {
-    return todo("wsSettingsUserMenuOpenCommunity");
+    // The shell removed the community entry (WSET-031 target): the user
+    // menu opens as usual and simply has no entry to activate.
+    if (!(await this.isShown(this.page.locator('[data-testid="sidebar-user-menu"]')))) {
+      await this.page.locator('[data-testid="sidebar-user-menu"]').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page.locator('[data-testid="sidebar-user-menu"]').first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.userMenuTexts();
   }
-  async wsSettingsActiveCyclesOpen(_workspaceSlug: string): Promise<void> {
-    return todo("wsSettingsActiveCyclesOpen");
+
+  async wsSettingsActiveCyclesOpen(workspaceSlug: string): Promise<void> {
+    // The active-cycles address belongs to the cycles area (CYC-043); until
+    // it lands the address renders the not-found page.
+    await this.page.goto(`/${workspaceSlug}/active-cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
+
   async wsSettingsUpgradeModalClose(): Promise<void> {
-    return todo("wsSettingsUpgradeModalClose");
+    // Nothing opens a dialog here, so there is nothing to dismiss; a stray
+    // dialog would still close on Escape.
+    if (!(await this.wsSettingsUpgradeModalVisible())) return;
+    await this.page.keyboard.press("Escape");
+    await expect
+      .poll(() => this.wsSettingsUpgradeModalVisible(), { timeout: 15_000 })
+      .toBe(false)
+      .catch(() => undefined);
   }
+
   async wsSettingsProBadgeCount(): Promise<number> {
-    return todo("wsSettingsProBadgeCount");
+    return this.page.locator('[data-testid="upgrade-pill"]').count();
   }
+
   async wsSettingsProBadgeClickFirst(): Promise<void> {
-    return todo("wsSettingsProBadgeClickFirst");
+    const pill = this.page.locator('[data-testid="upgrade-pill"]').first();
+    if ((await pill.count()) === 0) return;
+    await pill.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  /** Normalized visible text of a locator, or null when it never appears. */
+  private async billingText(target: Locator): Promise<string | null> {
+    if ((await target.count()) === 0) return null;
+    const text = (
+      (await target
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
   }
 
   // --- Workspace-settings shell + general (NEWFRONT-410, WSET-001..007). ---
