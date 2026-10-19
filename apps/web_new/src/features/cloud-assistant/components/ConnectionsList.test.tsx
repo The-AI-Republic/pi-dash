@@ -22,7 +22,7 @@ function row(overrides: Partial<ConnectionRow> = {}): ConnectionRow {
     selectable: true,
     markers: ["In use"],
     stale: false,
-    planBacked: false,
+    usesChatgptPlan: false,
     modelControl: "input",
     modelName: "meta-llama/llama-3.3-70b-instruct",
     modelChoices: [],
@@ -243,7 +243,7 @@ describe("ConnectionsList", () => {
   });
 
   it("links plan-backed rows to the usage page and shows the verified stamp", () => {
-    setup([row({ kind: "codex", title: "OpenAI account", planBacked: true, verifiedAt: "2026-02-03T04:05:06Z" })]);
+    setup([row({ kind: "codex", title: "OpenAI account", usesChatgptPlan: true, verifiedAt: "2026-02-03T04:05:06Z" })]);
     const link = screen.getByRole("link", { name: "Manage plan usage" });
     expect(link).toHaveAttribute("href", "https://chatgpt.com/settings/usage");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");

@@ -89,7 +89,7 @@ function ConnectionCard(props: ConnectionsListProps & { row: ConnectionRow }): R
             ))}
           </label>
           <div className="flex flex-wrap items-center gap-(--space-2)">
-            {row.planBacked ? (
+            {row.usesChatgptPlan ? (
               <a
                 href={MANAGE_USAGE_HREF}
                 target="_blank"

@@ -79,7 +79,7 @@ export const SIGN_IN_START_FAILED_TITLE = "Could not start ChatGPT sign-in";
 export const SIGN_IN_START_FAILED_FALLBACK = "Unknown error";
 export const SIGN_IN_CLOSED_TITLE = "Sign-in window closed";
 export const SIGN_IN_CLOSED_BODY = "The sign-in window closed before OpenAI answered. Start it again.";
-export const SIGN_IN_OK_TITLE = "ChatGPT plan connected";
+export const SIGN_IN_OK_TITLE = "OpenAI account ready";
 export const SIGN_IN_OK_BODY =
   "The OpenAI account is connected, and the assistant will draw on its ChatGPT plan allowance.";
 export const SIGN_IN_FAILED_TITLE = "OpenAI sign-in failed";
@@ -92,10 +92,10 @@ export const TOOL_SERVERS_INTRO =
   "Servers listed here are offered to the assistant as tools. Give each one a name and the address it answers on.";
 export const TOOL_SERVER_NAME_PLACEHOLDER = "Team tools";
 export const TOOL_SERVER_URL_PLACEHOLDER = "https://tools.example/mcp";
-export const TOOL_SERVER_AUTH_PLACEHOLDER = "Bearer …";
+export const TOOL_SERVER_AUTH_PLACEHOLDER = "Paste the server's access token";
 export const TOOL_SERVER_NAME_LABEL = "Name";
 export const TOOL_SERVER_URL_LABEL = "Server address";
-export const TOOL_SERVER_AUTH_LABEL = "Authorization header (optional)";
+export const TOOL_SERVER_AUTH_LABEL = "Access credential (optional)";
 export const TOOL_SERVER_ADD_ACTION = "Add server";
 export const TOOL_SERVER_EMPTY = "No tool servers registered yet.";
 export const TOOL_SERVER_ADDED_TITLE = "Added";

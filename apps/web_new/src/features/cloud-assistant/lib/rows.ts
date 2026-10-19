@@ -79,8 +79,8 @@ export interface ConnectionRow {
   markers: string[];
   /** Rows whose session predates the hosted lane's permissions. */
   stale: boolean;
-  /** Whether the row draws on the account's plan (manage-usage link). */
-  planBacked: boolean;
+  /** True only when the row draws on the ChatGPT plan (guards the manage-usage link). */
+  usesChatgptPlan: boolean;
   modelControl: ModelControlKind;
   modelName: string;
   modelChoices: ModelChoice[];
@@ -177,7 +177,7 @@ export function toConnectionRow(
     selectable: !disconnected && !stale,
     markers,
     stale,
-    planBacked: row.uses_chatgpt_plan,
+    usesChatgptPlan: row.uses_chatgpt_plan,
     modelControl: control,
     modelName,
     modelChoices: control === "select" ? choicesFor(row, flags, modelName) : [],

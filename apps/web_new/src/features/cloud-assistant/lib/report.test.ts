@@ -43,7 +43,7 @@ describe("startFailureNotice", () => {
 
 describe("finishNotice", () => {
   it("confirms a completion", () => {
-    expect(finishNotice({ kind: "confirmed" }).title).toBe("ChatGPT plan connected");
+    expect(finishNotice({ kind: "confirmed" }).title).toBe("OpenAI account ready");
   });
 
   it("distinguishes a timeout from a provider-side failure", () => {

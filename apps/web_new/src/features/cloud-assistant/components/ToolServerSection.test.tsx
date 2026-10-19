@@ -134,7 +134,7 @@ describe("ToolServerSection", () => {
     await screen.findByText("No tool servers registered yet.");
     await user.type(screen.getByRole("textbox", { name: "Name" }), "  probe-mcp-b ");
     await user.type(screen.getByRole("textbox", { name: "Server address" }), " https://mcp-b.example.com/mcp ");
-    await user.type(screen.getByLabelText("Authorization header (optional)"), " Bearer x ");
+    await user.type(screen.getByLabelText("Access credential (optional)"), " Bearer x ");
     await user.click(screen.getByRole("button", { name: "Add server" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Added", "Tool server added."));
     expect(calls.find((call) => call.method === "POST")?.body).toEqual({

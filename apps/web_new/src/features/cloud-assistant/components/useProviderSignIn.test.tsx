@@ -184,7 +184,7 @@ describe("useProviderSignIn", () => {
     await time.fire();
     await waitFor(() =>
       expect(notifySuccess).toHaveBeenCalledWith(
-        "ChatGPT plan connected",
+        "OpenAI account ready",
         "The OpenAI account is connected, and the assistant will draw on its ChatGPT plan allowance."
       )
     );

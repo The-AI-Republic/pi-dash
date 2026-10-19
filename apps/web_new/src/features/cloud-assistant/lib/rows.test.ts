@@ -139,7 +139,7 @@ describe("toConnectionRow", () => {
       selected: true,
       selectable: true,
       stale: false,
-      planBacked: false,
+      usesChatgptPlan: false,
       modelControl: "input",
       modelName: "meta-llama/llama-3.3-70b-instruct",
       verifiedAt: "2026-02-03T04:05:06Z",
@@ -199,7 +199,7 @@ describe("toConnectionRow", () => {
   it("marks plan-backed rows so the manage-usage link renders", () => {
     const answer = list({ connections: [row({ kind: "codex", uses_chatgpt_plan: true, is_selected: false })] });
     const target = toConnectionRow(answer.connections[0]!, answer, connectionModelFlags(answer));
-    expect(target.planBacked).toBe(true);
+    expect(target.usesChatgptPlan).toBe(true);
     expect(target.markers).toEqual(["ChatGPT plan linked"]);
   });
 
