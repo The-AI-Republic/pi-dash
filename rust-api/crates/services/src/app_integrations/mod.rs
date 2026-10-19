@@ -7,12 +7,14 @@
 //!
 //! Write path, mirroring DRF `is_valid()` then `save()`:
 //!
-//! 1. field level (`validate_url_field`): trim, blank, `max_length=1024`,
-//!    then every declared validator in order — `validate_schema`,
-//!    `validate_domain`, Django `URLValidator` — collecting each failure
-//!    into one `{"url": [...]}` list (the contract pins
-//!    `{"url": ["Invalid schema. Only HTTP and HTTPS are allowed.",
-//!    "Enter a valid URL."]}` for `"not-a-url"`).
+//! 1. field level (`validate_url_field`): trim, blank, then every declared
+//!    validator in order — `validate_schema`, `validate_domain`,
+//!    `ProhibitNullCharactersValidator`, Django `URLValidator` (2048-char
+//!    cap). The declared `URLField` carries no `max_length`, so the model's
+//!    `varchar(1024)` column is a Postgres error at INSERT/UPDATE, not a
+//!    field error. Collects each failure into one `{"url": [...]}` list
+//!    (the contract pins `{"url": ["Invalid schema. Only HTTP and HTTPS are
+//!    allowed.", "Enter a valid URL."]}` for `"not-a-url"`).
 //! 2. guards (`validate_create_url` / `validate_update_url`): hostname
 //!    extraction, `getaddrinfo` resolution, the per-IP SSRF flag check,
 //!    and the disallowed-domain check, each raising a single

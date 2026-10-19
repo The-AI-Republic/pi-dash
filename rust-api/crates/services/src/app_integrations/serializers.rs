@@ -35,13 +35,12 @@ pub const WEBHOOK_LOG_FIELDS: &str = "__all__";
 /// validation; these constants are its whole port.
 pub const WEBHOOK_LOG_READ_ONLY_FIELDS: &[&str] = &["workspace", "webhook"];
 
-/// `Webhook.url` column limit (`db/models/webhook.py:36`
-/// `max_length=1024`), enforced by DRF's `CharField` before any URL check.
-pub const MAX_URL_CHARS: usize = 1024;
-
-/// Django `URLValidator.max_length` (`django/core/validators.py`);
-/// unreachable through [`validate_url_field`] (1024 trips first) but part
-/// of [`url_validator_ok`] when called directly.
+/// Django `URLValidator.max_length` (`django/core/validators.py`, 2048).
+/// This is the only URL-length cap in the chain: `WebhookSerializer` declares
+/// `url` explicitly (`serializers/webhook.py:20`) and DRF never maps the
+/// model's `max_length=1024` (`db/models/webhook.py:36`) onto a declared
+/// field, so the `varchar(1024)` column is enforced by Postgres, not by the
+/// serializer.
 pub const MAX_VALIDATOR_URL_CHARS: usize = 2048;
 
 /// Django `URLValidator` hostname cap (RFC 1034 §3.1, 253 chars).
@@ -60,10 +59,9 @@ pub const MSG_REQUIRED: &str = "This field is required.";
 pub const MSG_NULL: &str = "This field may not be null.";
 /// Empty value (DRF `CharField`, `allow_blank=False` default).
 pub const MSG_BLANK: &str = "This field may not be blank.";
-/// Over-`max_length` value (DRF `CharField`, `max_length=1024` from the model).
-pub const MSG_MAX_LENGTH: &str = "Ensure this field has no more than 1024 characters.";
 /// NUL content (DRF `ProhibitNullCharactersValidator`, pinned chain position
-/// 4th: after `MaxLengthValidator`, before `URLValidator`).
+/// 3rd: after the declared `validate_schema`/`validate_domain`, before
+/// `URLValidator`).
 pub const MSG_NULL_CHARS: &str = "Null characters are not allowed.";
 /// Django `URLValidator.message`.
 pub const MSG_INVALID_URL: &str = "Enter a valid URL.";
@@ -377,16 +375,22 @@ fn split_url_parts(value: &str) -> Option<(String, &str, &str)> {
 // Field level (`URLField` + declared validators)
 // ---------------------------------------------------------------------------
 
-/// Full field validation for the `url` field: `URLField(validators=[
-/// validate_schema, validate_domain])` (`serializers/webhook.py:20`) with
-/// `max_length=1024` mapped from the model (`db/models/webhook.py:36`).
+/// Full field validation for the `url` field: the declared
+/// `URLField(validators=[validate_schema, validate_domain])`
+/// (`serializers/webhook.py:20`).
+///
+/// Because `url` is a declared serializer field, DRF's `ModelSerializer`
+/// uses it as-is and never calls `build_field`, so the model's
+/// `max_length=1024` (`db/models/webhook.py:36`) is **not** mapped onto it:
+/// the field keeps `max_length=None` and no `MaxLengthValidator` exists at
+/// the serializer layer. The `varchar(1024)` column is only enforced by
+/// Postgres (`SQLSTATE 22001` → Django `DataError` → the generic 500).
 ///
 /// Order mirrors DRF `CharField.run_validation` + `run_validators`: missing
 /// → required; [`python_strip`] (`trim_whitespace=True`); blank; then each
 /// validator in list order — declared `[validate_schema, validate_domain]`,
-/// `MaxLengthValidator` (chars, not bytes), `ProhibitNullCharactersValidator`,
-/// `URLValidator` — collecting every failure (so `"not-a-url"` yields both
-/// the schema and the URL message).
+/// `ProhibitNullCharactersValidator`, `URLValidator` — collecting every
+/// failure (so `"not-a-url"` yields both the schema and the URL message).
 ///
 /// `ProhibitSurrogateCharactersValidator` sits between the null check and
 /// `URLValidator` in DRF's list but needs no runtime check here: lone
@@ -409,22 +413,19 @@ pub fn validate_url_field(raw: Option<Option<&str>>) -> Result<String, Vec<Strin
     if value.is_empty() {
         return Err(vec![MSG_BLANK.to_owned()]);
     }
-    // Validator order mirrors the `self.validators` list DRF builds:
-    // declared `[validate_schema, validate_domain]`, then the
-    // `MaxLengthValidator` mapped from the model, then
-    // `ProhibitNullCharactersValidator`, then `URLValidator`
-    // (probed on live DRF: an over-long `ftp:` URL yields schema then
-    // max-length; a NUL `https:` URL yields exactly the null message —
-    // `URLValidator` itself passes NUL, so it contributes nothing there).
+    // Validator order mirrors the `self.validators` list DRF builds for the
+    // declared `URLField`: `[validate_schema, validate_domain]`, then
+    // `ProhibitNullCharactersValidator`, then `URLValidator`. There is no
+    // max-length element — see the doc comment above.
+    // (Probed on live DRF: a long `ftp:` URL yields exactly the schema
+    // message; a NUL `https:` URL yields exactly the null message —
+    // `URLValidator` itself passes NUL, so it contributes nothing there.)
     let mut errors = Vec::new();
     if let Err(message) = validate_schema(&value) {
         errors.push(message.to_owned());
     }
     if let Err(message) = validate_domain(&value) {
         errors.push(message.to_owned());
-    }
-    if value.chars().count() > MAX_URL_CHARS {
-        errors.push(MSG_MAX_LENGTH.to_owned());
     }
     // Lone surrogates (`ProhibitSurrogateCharactersValidator`, next in DRF's
     // list) cannot occur in a `&str`: no runtime check, comment only.
@@ -926,24 +927,26 @@ mod tests {
                 .body(),
             field_body(&["Enter a valid URL."])
         );
+        // A 1025-2048-char `https` URL passes the field chain: the declared
+        // `URLField` carries no `max_length`, so Django's `URLValidator`
+        // (2048 cap) is the only length check. The `varchar(1024)` overflow
+        // is a database error at INSERT/UPDATE, not a field error — probed
+        // on Django main: such a POST answers 500
+        // `{"error":"Something went wrong please try again later"}`.
         let long = format!("https://example.com/{}", "a".repeat(2000));
         assert_eq!(
-            validate_create_url(Some(Some(&long)), None, &public_dns())
-                .unwrap_err()
-                .body(),
-            field_body(&["Ensure this field has no more than 1024 characters."])
+            validate_create_url(Some(Some(&long)), None, &public_dns()).unwrap(),
+            long
         );
-        // Over-long *and* mis-schemed: both messages, schema first (probed
-        // against real DRF with `max_length=1024` + the declared validators).
+        // Long *and* mis-schemed: only the schema message — there is no
+        // max-length element in DRF's chain for a declared `URLField`
+        // (probed on Django main: `ftp:` + 2000 chars → exactly one message).
         let long_ftp = format!("ftp://example.com/{}", "a".repeat(2000));
         assert_eq!(
             validate_create_url(Some(Some(&long_ftp)), None, &public_dns())
                 .unwrap_err()
                 .body(),
-            field_body(&[
-                "Invalid schema. Only HTTP and HTTPS are allowed.",
-                "Ensure this field has no more than 1024 characters."
-            ])
+            field_body(&["Invalid schema. Only HTTP and HTTPS are allowed."])
         );
         // NUL content yields exactly the null message: `URLValidator`
         // itself passes NUL (probed on live DRF 3.16.1 / Django 4.2.30).
@@ -978,7 +981,9 @@ mod tests {
                 "Enter a valid URL."
             ])
         );
-        // Over-long NUL URL: schema, max-length, null, in that order (probed).
+        // Over-long NUL URL: schema then null, in that order (probed on
+        // Django main: the NUL does not stop `URLValidator`, and no
+        // max-length element exists).
         let long_nul = format!("ftp://example.com/{}\0", "a".repeat(2000));
         assert_eq!(
             validate_create_url(Some(Some(&long_nul)), None, &public_dns())
@@ -986,7 +991,6 @@ mod tests {
                 .body(),
             field_body(&[
                 "Invalid schema. Only HTTP and HTTPS are allowed.",
-                "Ensure this field has no more than 1024 characters.",
                 "Null characters are not allowed."
             ])
         );
