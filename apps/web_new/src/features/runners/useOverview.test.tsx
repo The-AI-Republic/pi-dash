@@ -16,6 +16,12 @@ const view = { projectId: "p-1" as string | undefined };
 const deleteMutate = vi.fn(async () => undefined);
 const revokeMutate = vi.fn(async () => undefined);
 const useRunners = vi.fn();
+const podsState = {
+  data: [{ id: "p-1", name: "WEB_alpha" }] as unknown as Pod[] | undefined,
+  isPending: false,
+  isError: false,
+  isSuccess: true,
+};
 
 vi.mock("./area.js", () => ({
   useRunnersArea: () => ({
@@ -36,7 +42,7 @@ vi.mock("./area.js", () => ({
 }));
 vi.mock("./api/queries.js", () => ({
   useRunners: (...args: unknown[]) => useRunners(...args),
-  useRunnersPods: () => ({ data: [] as Pod[] }),
+  useRunnersPods: () => podsState,
 }));
 vi.mock("./api/mutations.js", () => ({
   useDeleteRunner: () => ({ mutateAsync: deleteMutate }),
@@ -57,6 +63,10 @@ function wrapper({ children }: { children: React.ReactNode }): React.ReactElemen
 beforeEach(() => {
   allowed.value = true;
   view.projectId = "p-1";
+  podsState.data = [{ id: "p-1", name: "WEB_alpha" }] as unknown as Pod[];
+  podsState.isPending = false;
+  podsState.isError = false;
+  podsState.isSuccess = true;
   useRunners.mockReset();
   deleteMutate.mockClear();
   revokeMutate.mockClear();
@@ -101,6 +111,42 @@ describe("useRunnersOverview", () => {
     expect(deleteMutate).toHaveBeenCalledWith("r-1");
     await result.current.onRevoke("r-2");
     expect(revokeMutate).toHaveBeenCalledWith("r-2");
+  });
+
+  it("hands the screen the pods and their read progress", () => {
+    useRunners.mockReturnValue({ data: [] });
+    const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
+    expect(result.current.pods).toEqual([{ id: "p-1", name: "WEB_alpha" }]);
+    expect(result.current.podsLoading).toBe(false);
+    expect(result.current.podsFailed).toBe(false);
+  });
+
+  it("reports the pod read while it is still pending", () => {
+    useRunners.mockReturnValue({ data: [] });
+    podsState.data = undefined;
+    podsState.isPending = true;
+    podsState.isSuccess = false;
+    const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
+    expect(result.current.pods).toBeUndefined();
+    expect(result.current.podsLoading).toBe(true);
+  });
+
+  it("reports a failed pod read", () => {
+    useRunners.mockReturnValue({ data: [] });
+    podsState.isError = true;
+    podsState.isSuccess = false;
+    const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
+    expect(result.current.podsFailed).toBe(true);
+  });
+
+  it("reports neither progress nor failure while denied", () => {
+    allowed.value = false;
+    useRunners.mockReturnValue({ data: undefined });
+    podsState.isError = true;
+    podsState.isSuccess = false;
+    const { result } = renderHook(() => useRunnersOverview("acme"), { wrapper });
+    expect(result.current.podsLoading).toBe(false);
+    expect(result.current.podsFailed).toBe(false);
   });
 
   it("ignores the list while denied", () => {

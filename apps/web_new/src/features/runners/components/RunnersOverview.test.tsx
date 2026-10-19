@@ -5,6 +5,7 @@
 // Overview table and row actions (NEWFRONT-540, RUN-002/RUN-010/RUN-011).
 // Seven columns, dash fallbacks, revoke only where credentials exist, a
 // Details route per row, and the two confirmations with their failure toast.
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Runner } from "@pidash/api-client";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -18,6 +19,30 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return { ...original, useNavigate: () => navigate };
 });
+vi.mock("./CreatePodDialog.js", () => ({
+  CreatePodDialog: (props: { open: boolean; onClose: () => void }) =>
+    props.open ? (
+      <button type="button" onClick={props.onClose}>
+        stub-create-dialog
+      </button>
+    ) : null,
+}));
+vi.mock("./EditPodDialog.js", () => ({
+  EditPodDialog: (props: { pod: unknown; onClose: () => void }) =>
+    props.pod === null ? null : (
+      <button type="button" onClick={props.onClose}>
+        stub-edit-dialog
+      </button>
+    ),
+}));
+vi.mock("./DeletePodDialog.js", () => ({
+  DeletePodDialog: (props: { pod: { id: string } | null; onCancel: () => void; onDeleted: (id: string) => void }) =>
+    props.pod === null ? null : (
+      <button type="button" onClick={() => props.onDeleted(props.pod!.id)}>
+        stub-delete-dialog
+      </button>
+    ),
+}));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   return { ...original, notifyError: (title: string, description?: string) => notifyError(title, description) };
@@ -62,12 +87,17 @@ function renderTable(
   const onDelete = handlers.onDelete ?? vi.fn(async () => undefined);
   const onRevoke = handlers.onRevoke ?? vi.fn(async () => undefined);
   render(
-    <RunnersOverview
-      scope={{ workspaceSlug: "acme" }}
-      filter={state(runners)}
-      onDelete={onDelete}
-      onRevoke={onRevoke}
-    />
+    <QueryClientProvider client={new QueryClient()}>
+      <RunnersOverview
+        scope={{ workspaceSlug: "acme" }}
+        filter={state(runners)}
+        pods={[]}
+        podsLoading={false}
+        podsFailed={false}
+        onDelete={onDelete}
+        onRevoke={onRevoke}
+      />
+    </QueryClientProvider>
   );
   return { onDelete, onRevoke };
 }
@@ -163,12 +193,17 @@ describe("RunnersOverview table", () => {
 
   it("builds project detail links under the project base", async () => {
     render(
-      <RunnersOverview
-        scope={{ workspaceSlug: "acme", projectId: "p-9" }}
-        filter={state([runner()])}
-        onDelete={vi.fn(async () => undefined)}
-        onRevoke={vi.fn(async () => undefined)}
-      />
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme", projectId: "p-9" }}
+          filter={state([runner()])}
+          pods={[]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+        />
+      </QueryClientProvider>
     );
     await userEvent.click(screen.getByRole("button", { name: "Details" }));
     expect(navigate).toHaveBeenCalledWith({ to: "/acme/projects/p-9/runners/detail/r-1" });
@@ -179,30 +214,35 @@ describe("RunnersOverview pod filter", () => {
   it("shows the active-pod bar and clears it through the affordance", async () => {
     const clear = vi.fn();
     render(
-      <RunnersOverview
-        scope={{ workspaceSlug: "acme" }}
-        filter={{
-          selectedPodId: "p-1",
-          selectedPod: {
-            id: "p-1",
-            name: "Alpha pod",
-            description: "",
-            is_default: false,
-            workspace: "ws-id",
-            project: "p-1",
-            project_identifier: "ALP",
-            created_by: null,
-            runner_count: 1,
-            created_at: "2024-01-01T00:00:00Z",
-            updated_at: "2024-01-01T00:00:00Z",
-          },
-          runners: [runner()],
-          toggle: vi.fn(),
-          clear,
-        }}
-        onDelete={vi.fn(async () => undefined)}
-        onRevoke={vi.fn(async () => undefined)}
-      />
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{
+            selectedPodId: "p-1",
+            selectedPod: {
+              id: "p-1",
+              name: "Alpha pod",
+              description: "",
+              is_default: false,
+              workspace: "ws-id",
+              project: "p-1",
+              project_identifier: "ALP",
+              created_by: null,
+              runner_count: 1,
+              created_at: "2024-01-01T00:00:00Z",
+              updated_at: "2024-01-01T00:00:00Z",
+            },
+            runners: [runner()],
+            toggle: vi.fn(),
+            clear,
+          }}
+          pods={[]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+        />
+      </QueryClientProvider>
     );
     expect(screen.getByText("Filtering runners by pod Alpha pod")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Clear filter" }));
@@ -288,5 +328,117 @@ describe("RunnersOverview row actions", () => {
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(onDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe("RunnersOverview pods wiring", () => {
+  it("renders the pods section above the table", () => {
+    renderTable([runner()]);
+    expect(screen.getByRole("heading", { name: "Pods" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create new pod" })).toBeInTheDocument();
+  });
+
+  it("opens each pod dialog from the section", async () => {
+    renderTable([runner()]);
+    await userEvent.click(screen.getByRole("button", { name: "Create new pod" }));
+    expect(screen.getByRole("button", { name: "stub-create-dialog" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "stub-create-dialog" }));
+    expect(screen.queryByRole("button", { name: "stub-create-dialog" })).toBeNull();
+  });
+
+  it("clears a filter on the the deleted pod and keeps any other", async () => {
+    const clear = vi.fn();
+    const selected = {
+      id: "p-1",
+      name: "Alpha pod",
+      description: "",
+      is_default: false,
+      workspace: "ws-id",
+      project: "p-1",
+      project_identifier: "ALP",
+      created_by: null,
+      runner_count: 1,
+      created_at: "2024-01-01T00:00:00Z",
+      updated_at: "2024-01-01T00:00:00Z",
+    };
+    const filter: PodFilterState = {
+      selectedPodId: "p-1",
+      selectedPod: selected,
+      runners: [runner()],
+      toggle: vi.fn(),
+      clear,
+    };
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={filter}
+          pods={[selected]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+        />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Pod actions for Alpha pod" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "stub-delete-dialog" }));
+    expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an unrelated filter alone", async () => {
+    const clear = vi.fn();
+    const other = {
+      id: "p-2",
+      name: "Beta pod",
+      description: "",
+      is_default: false,
+      workspace: "ws-id",
+      project: "p-2",
+      project_identifier: "BET",
+      created_by: null,
+      runner_count: 0,
+      created_at: "2024-01-01T00:00:00Z",
+      updated_at: "2024-01-01T00:00:00Z",
+    };
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={{ selectedPodId: "p-1", selectedPod: null, runners: [runner()], toggle: vi.fn(), clear }}
+          pods={[other]}
+          podsLoading={false}
+          podsFailed={false}
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+        />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Pod actions for Beta pod" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(screen.getByRole("button", { name: "stub-edit-dialog" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Pod actions for Beta pod" }));
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "stub-delete-dialog" }));
+    expect(clear).not.toHaveBeenCalled();
+  });
+
+  it("shows the pod read failure inside the section", () => {
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <RunnersOverview
+          scope={{ workspaceSlug: "acme" }}
+          filter={state([runner()])}
+          pods={undefined}
+          podsLoading={false}
+          podsFailed
+          onDelete={vi.fn(async () => undefined)}
+          onRevoke={vi.fn(async () => undefined)}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByText("Failed to load pods")).toBeInTheDocument();
+    expect(screen.getByRole("table")).toBeInTheDocument();
   });
 });

@@ -31,8 +31,10 @@ function stubLocator(overrides: Record<string, unknown> = {}) {
     innerText: vi.fn(async () => ""),
     getAttribute: vi.fn(async () => null),
     click: vi.fn(async () => undefined),
+    fill: vi.fn(async (_value: string) => undefined),
     isVisible: vi.fn(async () => false),
     isDisabled: vi.fn(async () => false),
+    isEnabled: vi.fn(async () => true),
     all: vi.fn(async () => []),
     evaluate: vi.fn(async () => ""),
     locator: vi.fn(() => locator),
@@ -489,6 +491,17 @@ describe("page facts", () => {
     expect(page.locator).toHaveBeenCalledWith('a[href$="/runners/"]');
   });
 
+  it("returns a single-line breadcrumb whole and treats an empty one as missing", async () => {
+    const single = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "  AI Workers  ") });
+    await expect(new WebNewDriver(pageStub({ locator: vi.fn(() => single) })).runnersBreadcrumbLeaf()).resolves.toBe(
+      "AI Workers"
+    );
+    const blank = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "\n") });
+    await expect(
+      new WebNewDriver(pageStub({ locator: vi.fn(() => blank) })).runnersBreadcrumbLeaf()
+    ).resolves.toBeNull();
+  });
+
   it("returns null without a breadcrumb", async () => {
     const driver = new WebNewDriver(pageStub());
     await expect(driver.runnersBreadcrumbLeaf()).resolves.toBeNull();
@@ -520,6 +533,9 @@ describe("page facts", () => {
 
     const none = pageStub({ getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) });
     await expect(new WebNewDriver(none).runnersLastToast()).resolves.toBeNull();
+
+    const empty = pageStub({ getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 1) })) });
+    await expect(new WebNewDriver(empty).runnersLastToast()).resolves.toBe("");
   });
 
   it("returns the current URL", async () => {
@@ -768,5 +784,566 @@ describe("runner chat shell (NEWFRONT-549)", () => {
     ]);
     await driver.runnerChatClearStreamStub("s-1");
     expect(page.unroute).toHaveBeenCalledWith("**/chat/sessions/s-1/events**");
+  });
+});
+
+describe("pod methods (NEWFRONT-542, RUN-012–015)", () => {
+  it("reads tiles off the labelled filter buttons, tolerating a missing label", async () => {
+    const tiles = [
+      stubLocator({
+        getAttribute: vi.fn(async () => null),
+        locator: vi.fn(() =>
+          stubLocator({
+            getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+          })
+        ),
+      }),
+      stubLocator({
+        getAttribute: vi.fn(async () => "Filter runners by pod WEB_beefy"),
+        locator: vi.fn(() =>
+          stubLocator({
+            getByText: vi.fn((text: RegExp | string) =>
+              String(text) === "default"
+                ? stubLocator({ count: vi.fn(async () => 1) })
+                : stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "3 runner(s)") })
+            ),
+          })
+        ),
+      }),
+      stubLocator({
+        getAttribute: vi.fn(async () => "Filter runners by pod WEB_slim"),
+        locator: vi.fn(() =>
+          stubLocator({
+            getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+          })
+        ),
+      }),
+    ];
+    const page = pageStub({
+      getByRole: vi.fn(() => stubLocator({ locator: vi.fn(() => stubLocator({ all: vi.fn(async () => tiles) })) })),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.runnersPodTiles()).toEqual([
+      { name: "", isDefault: false, runnerCount: "" },
+      { name: "WEB_beefy", isDefault: true, runnerCount: "3 runner(s)" },
+      { name: "WEB_slim", isDefault: false, runnerCount: "" },
+    ]);
+  });
+
+  it("selects a tile and reads the clear-filter line", async () => {
+    const clear = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn(() =>
+        stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Filtering runners by pod WEB_beefy") })
+      ),
+    });
+    const page = pageStub({
+      getByRole: vi.fn(() => stubLocator({ getByRole: vi.fn(() => clear) })),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.runnersFilterText()).toBe("Filtering runners by pod WEB_beefy");
+    await driver.runnersClearPodFilter();
+    expect(clear.click).toHaveBeenCalled();
+    expect(clear.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: expect.any(Number) });
+  });
+
+  it("reads null when no filter is active", async () => {
+    const page = pageStub({
+      getByRole: vi.fn(() => stubLocator({ getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) })),
+    });
+    expect(await new WebNewDriver(page).runnersFilterText()).toBeNull();
+  });
+
+  it("reports the pods failure line or null", async () => {
+    const message = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Failed to load pods") });
+    const failing = pageStub({ getByRole: vi.fn(() => stubLocator({ getByText: vi.fn(() => message) })) });
+    expect(await new WebNewDriver(failing).runnersPodsError()).toBe("Failed to load pods");
+    const quiet = pageStub({
+      getByRole: vi.fn(() => stubLocator({ getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) })),
+    });
+    expect(await new WebNewDriver(quiet).runnersPodsError()).toBeNull();
+  });
+
+  it("opens the create dialog and reads its form, errors and state", async () => {
+    const submit = stubLocator({
+      count: vi.fn(async () => 1),
+      isDisabled: vi.fn(async () => true),
+      isVisible: vi.fn(async () => true),
+    });
+    const cancel = stubLocator({
+      count: vi.fn(async () => 1),
+      first: (): unknown => cancel,
+      isEnabled: vi.fn(async () => false),
+    });
+    const picker = stubLocator({ innerText: vi.fn(async () => "Select a project\nChoose") });
+    const form = stubLocator({
+      locator: vi.fn(() => stubLocator({ first: () => picker })),
+      getByRole: vi.fn(() => stubLocator({ first: () => picker })),
+    });
+    const dialog = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn((selector: string) => {
+        if (selector === 'button[type="submit"]') return submit;
+        if (selector === 'form [role="alert"]')
+          return stubLocator({ allTextContents: vi.fn(async () => ["Pick a project.", " "]) });
+        if (selector === "form") return form;
+        return stubLocator();
+      }),
+      getByRole: vi.fn((role: string) => (role === "button" ? cancel : submit)),
+      getByLabel: vi.fn((label: string) =>
+        stubLocator({ inputValue: vi.fn(async () => (label === "Name" ? "beefy" : "")) })
+      ),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog"
+          ? stubLocator({
+              filter: vi.fn(() => dialog),
+              locator: dialog.locator,
+              count: dialog.count,
+              getByRole: dialog.getByRole,
+              getByLabel: dialog.getByLabel,
+            })
+          : stubLocator()
+      ),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.runnersOpenCreatePod();
+    expect(await driver.runnersPodFormErrors()).toEqual(["Pick a project."]);
+    expect(await driver.runnersCreatePodSubmitting()).toBe(true);
+    expect(await driver.runnersPodCancelEnabled()).toBe(false);
+    expect(await driver.runnersCreatePodForm()).toEqual({
+      project: "Select a project",
+      name: "beefy",
+      description: "",
+    });
+    expect(await driver.runnersPodModalOpen()).toBe(true);
+  });
+
+  it("reports a closed pod dialog", async () => {
+    const page = pageStub({
+      getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.runnersPodModalOpen()).toBe(false);
+    expect(await driver.runnersCreatePodSubmitting()).toBe(false);
+    expect(await driver.runnersPodCancelEnabled()).toBe(false);
+    expect(await driver.runnersPodFormErrors()).toEqual([]);
+  });
+
+  it("reads the edit form including the one-way default switch", async () => {
+    const toggle = stubLocator({
+      getAttribute: vi.fn(async (name: string) => (name === "aria-checked" ? "true" : null)),
+      isDisabled: vi.fn(async () => false),
+    });
+    const dialog = stubLocator({
+      getByRole: vi.fn(() => toggle),
+      getByLabel: vi.fn((label: string) =>
+        stubLocator({ inputValue: vi.fn(async () => (label === "Name" ? "beefy" : "")) })
+      ),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+    });
+    expect(await new WebNewDriver(page).runnersEditPodForm()).toEqual({
+      name: "beefy",
+      description: "",
+      isDefault: true,
+      defaultDisabled: false,
+    });
+  });
+
+  it("captures the PATCH bodies of an edit", async () => {
+    const submit = stubLocator();
+    const dialog = stubLocator({
+      locator: vi.fn(() => submit),
+      getByRole: vi.fn(() =>
+        stubLocator({ getAttribute: vi.fn(async () => "false"), click: vi.fn(async () => undefined) })
+      ),
+      getByLabel: vi.fn(() => stubLocator({ fill: vi.fn(async () => undefined) })),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+      route: vi.fn(async (pattern: string, handler: unknown) => {
+        if (pattern !== "**/api/runners/pods/**") return;
+        const route = {
+          request: () => ({ method: () => "PATCH", postData: () => JSON.stringify({ name: "heavier" }) }),
+          continue: vi.fn(async () => undefined),
+        };
+        await (handler as (route: unknown) => Promise<void>)(route);
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.runnersSavePodEditCapturing({ name: "heavier", makeDefault: true })).toEqual([
+      { name: "heavier" },
+    ]);
+    expect(dialog.getByLabel).toHaveBeenCalledWith("Name", { exact: true });
+  });
+
+  it("counts no PATCH for an unchanged save", async () => {
+    const dialog = stubLocator({
+      locator: vi.fn(() => stubLocator()),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+      route: vi.fn(async (_pattern: string, handler: unknown) => {
+        const route = { request: () => ({ method: () => "GET" }), continue: vi.fn(async () => undefined) };
+        await (handler as (route: unknown) => Promise<void>)(route);
+      }),
+    });
+    expect(await new WebNewDriver(page).runnersUnchangedEditSkipsSave()).toBe(true);
+    expect(page.unroute).toHaveBeenCalledWith("**/api/runners/pods/**");
+  });
+
+  it("deletes a pod through its menu and waits for the tile to vanish", async () => {
+    const tile = stubLocator();
+    const menuItem = stubLocator();
+    const confirm = stubLocator({
+      getByRole: vi.fn(() => stubLocator({ click: vi.fn(async () => undefined) })),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) => {
+        if (role === "main") return stubLocator({ getByRole: vi.fn(() => tile) });
+        if (role === "menuitem") return menuItem;
+        if (role === "dialog") return stubLocator({ filter: vi.fn(() => confirm) });
+        return stubLocator();
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.runnersDeletePod("WEB_beefy");
+    expect(menuItem.click).toHaveBeenCalled();
+    expect(tile.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: expect.any(Number) });
+  });
+
+  it("stops after the failure toast when the delete is refused", async () => {
+    const tile = stubLocator();
+    const confirm = stubLocator({
+      getByRole: vi.fn(() => stubLocator({ click: vi.fn(async () => undefined) })),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) => {
+        if (role === "main") return stubLocator({ getByRole: vi.fn(() => tile) });
+        if (role === "menuitem") return stubLocator();
+        if (role === "dialog") return stubLocator({ filter: vi.fn(() => confirm) });
+        if (role === "text") return stubLocator({ count: vi.fn(async () => 0) });
+        return stubLocator();
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    Object.defineProperty(driver, "runnersLastToast", { value: vi.fn(async () => "Error! refusal") });
+    await driver.runnersDeletePod("WEB_beefy", { expectFailure: true });
+    expect(tile.waitFor).not.toHaveBeenCalled();
+  });
+});
+
+describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
+  it("clicks the labelled tile for a pod", async () => {
+    const tile = stubLocator();
+    const page = pageStub({ getByRole: vi.fn(() => stubLocator({ getByRole: vi.fn(() => tile) })) });
+    const driver = new WebNewDriver(page);
+
+    await driver.runnersSelectPod("WEB_beefy");
+
+    expect(page.getByRole).toHaveBeenCalledWith("main");
+    expect(tile.click).toHaveBeenCalled();
+  });
+
+  it("reads a bare filter line as null when there is no sibling span", async () => {
+    const clear = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+    });
+    const page = pageStub({ getByRole: vi.fn(() => stubLocator({ getByRole: vi.fn(() => clear) })) });
+
+    expect(await new WebNewDriver(page).runnersFilterText()).toBeNull();
+  });
+
+  it("submits the open pod form", async () => {
+    const submit = stubLocator();
+    const dialog = stubLocator({ locator: vi.fn(() => submit) });
+    const page = pageStub({ getByRole: vi.fn(() => dialog) });
+
+    await new WebNewDriver(page).runnersSubmitPodForm();
+
+    expect(submit.click).toHaveBeenCalled();
+  });
+
+  it("reports a submitting form without its submit button as not submitting", async () => {
+    const dialog = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+    });
+    const page = pageStub({ getByRole: vi.fn(() => dialog) });
+
+    expect(await new WebNewDriver(page).runnersCreatePodSubmitting()).toBe(false);
+  });
+
+  it("reports no cancel button as disabled", async () => {
+    const dialog = stubLocator({
+      count: vi.fn(async () => 1),
+      getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+    });
+    const page = pageStub({ getByRole: vi.fn(() => dialog) });
+
+    expect(await new WebNewDriver(page).runnersPodCancelEnabled()).toBe(false);
+  });
+
+  it("takes the first non-empty line of the project picker as its label", async () => {
+    const labels = ["  Web  ", "\n", ""];
+    for (const label of labels) {
+      const picker = stubLocator({ innerText: vi.fn(async () => label) });
+      const dialog = stubLocator({
+        locator: vi.fn(() => stubLocator({ first: () => picker })),
+        getByLabel: vi.fn(() => stubLocator({ inputValue: vi.fn(async () => "") })),
+      });
+      const page = pageStub({
+        getByRole: vi.fn((role: string) =>
+          role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+        ),
+      });
+
+      expect((await new WebNewDriver(page).runnersCreatePodForm()).project).toBe(label.trim());
+    }
+  });
+
+  it("reports a dialog without a submit button as open while its first action shows", async () => {
+    const action = stubLocator({ count: vi.fn(async () => 1), isVisible: vi.fn(async () => true) });
+    const dialogs = stubLocator({
+      count: vi.fn(async () => 1),
+      first: () => dialogs,
+      locator: vi.fn((selector: string) =>
+        selector === 'button[type="submit"]' ? stubLocator({ count: vi.fn(async () => 0) }) : action
+      ),
+    });
+    const page = pageStub({ getByRole: vi.fn(() => dialogs) });
+
+    expect(await new WebNewDriver(page).runnersPodModalOpen()).toBe(true);
+  });
+
+  it("reports a dialog with neither submit nor action as closed", async () => {
+    const dialogs = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+    });
+    const page = pageStub({ getByRole: vi.fn(() => dialogs) });
+
+    expect(await new WebNewDriver(page).runnersPodModalOpen()).toBe(false);
+  });
+
+  it("creates a pod through the picker and the form", async () => {
+    const option = stubLocator();
+    const name = stubLocator({ fill: vi.fn(async () => undefined) });
+    const description = stubLocator({ fill: vi.fn(async () => undefined) });
+    const submit = stubLocator();
+    const dialog = stubLocator({
+      getByRole: vi.fn((role: string) => (role === "button" ? stubLocator() : option)),
+      getByLabel: vi.fn((label: string) => (label === "Name" ? name : description)),
+      locator: vi.fn(() => submit),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) => {
+        if (role === "dialog") return stubLocator({ filter: vi.fn(() => dialog) });
+        if (role === "option") return option;
+        return stubLocator();
+      }),
+    });
+
+    await new WebNewDriver(page).runnersCreatePod({
+      projectName: "Web",
+      name: "beefy",
+      description: "the big boxes",
+    });
+
+    expect(name.fill).toHaveBeenCalledWith("beefy");
+    expect(description.fill).toHaveBeenCalledWith("the big boxes");
+    expect(submit.click).toHaveBeenCalled();
+    expect(submit.waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: expect.any(Number) });
+  });
+
+  it("leaves the description alone and waits for the toast on a refused create", async () => {
+    const name = stubLocator();
+    const description = stubLocator();
+    const dialog = stubLocator({
+      getByRole: vi.fn(() => stubLocator()),
+      getByLabel: vi.fn((label: string) => (label === "Name" ? name : description)),
+      locator: vi.fn(() => stubLocator()),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+    });
+    const driver = new WebNewDriver(page);
+    Object.defineProperty(driver, "runnersLastToast", { value: vi.fn(async () => "Error! duplicate") });
+
+    await driver.runnersCreatePod({ projectName: "Web", name: "beefy" }, { expectFailure: true });
+
+    expect(description.fill).not.toHaveBeenCalled();
+    expect(dialog.locator('button[type="submit"]').waitFor).not.toHaveBeenCalled();
+  });
+
+  it("selects a pod twice and counts no runner fetches as a client-side filter", async () => {
+    let handler: ((route: unknown) => Promise<void>) | undefined;
+    const page = pageStub({
+      route: vi.fn(async (pattern: string, h: unknown) => {
+        if (pattern === "**/api/runners/?*") handler = h as (route: unknown) => Promise<void>;
+      }),
+    });
+    const select = vi.fn(async () => undefined);
+    Object.defineProperty(page, "waitForTimeout", { value: vi.fn(async () => undefined) });
+    const driver = new WebNewDriver(page);
+    const spy = vi.spyOn(driver, "runnersSelectPod").mockImplementation(select);
+
+    expect(await driver.runnersPodFilterIsClientSide("WEB_beefy")).toBe(true);
+    expect(select).toHaveBeenCalledTimes(2);
+    expect(page.unroute).toHaveBeenCalledWith("**/api/runners/?*", handler);
+
+    const get = stubRoute("GET");
+    await handler!(get);
+    expect(get.continue).toHaveBeenCalled();
+    const post = stubRoute("POST");
+    await handler!(post);
+    expect(post.continue).toHaveBeenCalled();
+    void spy;
+  });
+
+  it("counts a runner GET during selection and through the route as server-side", async () => {
+    let handler: ((route: unknown) => Promise<void>) | undefined;
+    const page = pageStub({
+      route: vi.fn(async (_pattern: string, h: unknown) => {
+        handler = h as (route: unknown) => Promise<void>;
+      }),
+    });
+    Object.defineProperty(page, "waitForTimeout", { value: vi.fn(async () => undefined) });
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver, "runnersSelectPod").mockImplementation(async () => {
+      if (handler !== undefined) await handler(stubRoute("GET"));
+    });
+
+    expect(await driver.runnersPodFilterIsClientSide("WEB_beefy")).toBe(false);
+  });
+
+  it("opens a pod's edit dialog from its menu", async () => {
+    const tile = stubLocator();
+    const edit = stubLocator();
+    const page = pageStub({
+      getByRole: vi.fn((role: string) => {
+        if (role === "main") return stubLocator({ getByRole: vi.fn(() => tile) });
+        if (role === "menuitem") return edit;
+        return stubLocator();
+      }),
+    });
+
+    await new WebNewDriver(page).runnersOpenEditPod("WEB_beefy");
+
+    expect(edit.click).toHaveBeenCalled();
+  });
+
+  it("fills only the fields an edit passes", async () => {
+    const name = stubLocator();
+    const description = stubLocator();
+    const toggle = stubLocator();
+    const submit = stubLocator();
+    const dialog = stubLocator({
+      getByLabel: vi.fn((label: string) => (label === "Name" ? name : description)),
+      getByRole: vi.fn(() => toggle),
+      locator: vi.fn(() => submit),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+    });
+
+    await new WebNewDriver(page).runnersSavePodEdit({ description: "moved" });
+
+    expect(name.fill).not.toHaveBeenCalled();
+    expect(description.fill).toHaveBeenCalledWith("moved");
+    expect(toggle.click).not.toHaveBeenCalled();
+    expect(submit.click).toHaveBeenCalled();
+  });
+
+  it("skips the default toggle when the switch already reads on", async () => {
+    const toggle = stubLocator({ getAttribute: vi.fn(async () => "true") });
+    const dialog = stubLocator({
+      getByLabel: vi.fn(() => stubLocator()),
+      getByRole: vi.fn(() => toggle),
+      locator: vi.fn(() => stubLocator()),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+    });
+
+    await new WebNewDriver(page).runnersSavePodEdit({ makeDefault: true });
+
+    expect(toggle.click).not.toHaveBeenCalled();
+  });
+
+  it("counts a PATCH during an unchanged save and still releases the route", async () => {
+    const dialog = stubLocator({ locator: vi.fn(() => stubLocator()) });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+      route: vi.fn(async (_pattern: string, handler: unknown) => {
+        await (handler as (route: unknown) => Promise<void>)(stubRoute("PATCH"));
+      }),
+    });
+
+    expect(await new WebNewDriver(page).runnersUnchangedEditSkipsSave()).toBe(false);
+    expect(page.unroute).toHaveBeenCalledWith("**/api/runners/pods/**");
+  });
+
+  it("captures a PATCH without a body as empty", async () => {
+    const dialog = stubLocator({ locator: vi.fn(() => stubLocator()) });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+      route: vi.fn(async (_pattern: string, handler: unknown) => {
+        const route = {
+          request: () => ({ method: () => "PATCH", postData: () => null }),
+          continue: vi.fn(async () => undefined),
+        };
+        await (handler as (route: unknown) => Promise<void>)(route);
+      }),
+    });
+
+    expect(await new WebNewDriver(page).runnersSavePodEditCapturing({})).toEqual([{}]);
+  });
+
+  it("captures an unreadable PATCH body as empty", async () => {
+    const dialog = stubLocator({
+      getByLabel: vi.fn(() => stubLocator()),
+      getByRole: vi.fn(() => stubLocator({ getAttribute: vi.fn(async () => "false") })),
+      locator: vi.fn(() => stubLocator()),
+    });
+    const page = pageStub({
+      getByRole: vi.fn((role: string) =>
+        role === "dialog" ? stubLocator({ filter: vi.fn(() => dialog) }) : stubLocator()
+      ),
+      route: vi.fn(async (_pattern: string, handler: unknown) => {
+        const route = {
+          request: () => ({
+            method: () => "PATCH",
+            postData: () => {
+              throw new Error("no body");
+            },
+          }),
+          continue: vi.fn(async () => undefined),
+        };
+        await (handler as (route: unknown) => Promise<void>)(route);
+      }),
+    });
+
+    expect(await new WebNewDriver(page).runnersSavePodEditCapturing({})).toEqual([{}]);
   });
 });

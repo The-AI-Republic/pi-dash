@@ -5,7 +5,7 @@
 // the oracle driver so scenarios compile against either target, but every
 // action throws until the matching area lands in apps/web_new. Area issues
 // fill these in method by method; the oracle driver stays untouched.
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
@@ -7129,94 +7129,268 @@ export class WebNewDriver implements ParityDriver {
     };
   }
 
-  // Pod tiles, the create/edit modals and the delete confirm land with
-  // NEWFRONT-542; they stay throwing stubs until that slice fills them in.
+  // Pod tiles, the create/edit modals and the delete confirm (NEWFRONT-542,
+  // RUN-012–015). Tiles are the labelled filter buttons; each sits in a
+  // container with its overflow menu. The dialogs are the area's own; the
+  // project picker and the default switch are kit controls.
 
   async runnersPodTiles(): Promise<RunnersPodTile[]> {
-    return todo("runnersPodTiles");
+    const buttons = this.page.getByRole("main").locator('button[aria-label^="Filter runners by pod "]');
+    const out: RunnersPodTile[] = [];
+    for (const button of await buttons.all()) {
+      const label = (await button.getAttribute("aria-label")) ?? "";
+      const name = label.replace(/^Filter runners by pod /, "");
+      const container = button.locator("xpath=..");
+      const count = container.getByText(/\d+ runner\(s\)/);
+      out.push({
+        name,
+        isDefault: (await container.getByText("default", { exact: true }).count()) > 0,
+        runnerCount: (await count.count()) > 0 ? (await count.first().innerText()).trim() : "",
+      });
+    }
+    return out;
   }
 
-  async runnersSelectPod(_podName: string): Promise<void> {
-    return todo("runnersSelectPod");
+  private runnersPodTile(podName: string): Locator {
+    return this.page.getByRole("main").getByRole("button", { name: `Filter runners by pod ${podName}`, exact: true });
+  }
+
+  async runnersSelectPod(podName: string): Promise<void> {
+    await this.runnersPodTile(podName).click();
   }
 
   async runnersFilterText(): Promise<string | null> {
-    return todo("runnersFilterText");
+    const clear = this.page.getByRole("main").getByRole("button", { name: "Clear filter", exact: true });
+    if ((await clear.count()) === 0) return null;
+    const line = clear.locator("xpath=../span").first();
+    return (await line.count()) > 0 ? (await line.innerText()).trim() : null;
   }
 
   async runnersClearPodFilter(): Promise<void> {
-    return todo("runnersClearPodFilter");
+    const clear = this.page.getByRole("main").getByRole("button", { name: "Clear filter", exact: true });
+    await clear.click();
+    await clear.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The open dialog whose heading carries this text. */
+  private async runnersPodModal(title: string): Promise<Locator> {
+    const dialog = this.runnersDialog().filter({ has: this.page.getByRole("heading", { name: title, exact: true }) });
+    await dialog.getByRole("heading", { name: title, exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return dialog;
+  }
+
+  /** A pod dialog is closed once its form's submit button is gone. */
+  private async runnersWaitPodModalClosed(dialog: Locator, timeoutMs: number): Promise<void> {
+    await dialog.locator('button[type="submit"]').first().waitFor({ state: "hidden", timeout: timeoutMs });
   }
 
   async runnersOpenCreatePod(): Promise<void> {
-    return todo("runnersOpenCreatePod");
+    await this.page.getByRole("main").getByRole("button", { name: "Create new pod", exact: true }).click();
+    await this.runnersPodModal("Create new pod");
   }
 
   async runnersPodFormErrors(): Promise<string[]> {
-    return todo("runnersPodFormErrors");
+    const dialog = this.runnersDialog().first();
+    if ((await dialog.count()) === 0) return [];
+    // Field messages render as alert elements inside the form.
+    const texts = await dialog.locator('form [role="alert"]').allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   async runnersCreatePod(
-    _input: { projectName: string; name: string; description?: string },
-    _options?: { expectFailure?: boolean }
+    input: { projectName: string; name: string; description?: string },
+    options?: { expectFailure?: boolean }
   ): Promise<void> {
-    return todo("runnersCreatePod");
+    const dialog = await this.runnersPodModal("Create new pod");
+    await dialog.getByRole("button", { name: "Select a project", exact: true }).click();
+    await this.page.getByRole("option", { name: input.projectName, exact: true }).click();
+    await dialog.getByLabel("Name", { exact: true }).fill(input.name);
+    if (input.description !== undefined) {
+      await dialog.getByLabel("Description (optional)", { exact: true }).fill(input.description);
+    }
+    await dialog.locator('button[type="submit"]').click();
+    if (options?.expectFailure === true) {
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebNewDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    await this.runnersWaitPodModalClosed(dialog, WebNewDriver.WAIT_MS);
   }
 
-  async runnersPodFilterIsClientSide(_podName: string): Promise<boolean> {
-    return todo("runnersPodFilterIsClientSide");
+  async runnersPodFilterIsClientSide(podName: string): Promise<boolean> {
+    let fetches = 0;
+    const handler = async (route: Route): Promise<void> => {
+      if (route.request().method() === "GET") fetches += 1;
+      await route.continue();
+    };
+    await this.page.route("**/api/runners/?*", handler);
+    try {
+      await this.runnersSelectPod(podName);
+      await this.page.waitForTimeout(1_500);
+      await this.runnersSelectPod(podName);
+      await this.page.waitForTimeout(1_500);
+    } finally {
+      await this.page.unroute("**/api/runners/?*", handler);
+    }
+    return fetches === 0;
   }
 
   async runnersSubmitPodForm(): Promise<void> {
-    return todo("runnersSubmitPodForm");
-  }
-
-  async runnersPodCancelEnabled(): Promise<boolean> {
-    return todo("runnersPodCancelEnabled");
-  }
-
-  async runnersCreatePodForm(): Promise<{ project: string; name: string; description: string }> {
-    return todo("runnersCreatePodForm");
-  }
-
-  async runnersPodModalOpen(): Promise<boolean> {
-    return todo("runnersPodModalOpen");
-  }
-
-  async runnersPodsError(): Promise<string | null> {
-    return todo("runnersPodsError");
+    await this.runnersDialog().first().locator('button[type="submit"]').click();
   }
 
   async runnersCreatePodSubmitting(): Promise<boolean> {
-    return todo("runnersCreatePodSubmitting");
+    const dialog = this.runnersDialog().first();
+    if ((await dialog.count()) === 0) return false;
+    const submit = dialog.locator('button[type="submit"]');
+    if ((await submit.count()) === 0) return false;
+    return await submit.first().isDisabled();
   }
 
-  async runnersOpenEditPod(_podName: string): Promise<void> {
-    return todo("runnersOpenEditPod");
+  async runnersPodCancelEnabled(): Promise<boolean> {
+    const dialog = this.runnersDialog().first();
+    if ((await dialog.count()) === 0) return false;
+    const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+    if ((await cancel.count()) === 0) return false;
+    return await cancel.first().isEnabled();
+  }
+
+  async runnersCreatePodForm(): Promise<{ project: string; name: string; description: string }> {
+    const dialog = await this.runnersPodModal("Create new pod");
+    const picker = dialog.locator("form").getByRole("button").first();
+    const lines = (await picker.innerText()).split("\n").map((line) => line.trim());
+    return {
+      project: lines[0]!,
+      name: await dialog.getByLabel("Name", { exact: true }).inputValue(),
+      description: await dialog.getByLabel("Description (optional)", { exact: true }).inputValue(),
+    };
+  }
+
+  async runnersPodModalOpen(): Promise<boolean> {
+    const dialogs = this.runnersDialog();
+    if ((await dialogs.count()) === 0) return false;
+    const submit = dialogs.first().locator('button[type="submit"]');
+    if ((await submit.count()) > 0) return await submit.first().isVisible();
+    const action = dialogs.first().locator("button").first();
+    if ((await action.count()) === 0) return false;
+    return await action.isVisible();
+  }
+
+  async runnersPodsError(): Promise<string | null> {
+    const message = this.page.getByRole("main").getByText("Failed to load pods");
+    if ((await message.count()) === 0) return null;
+    return (await message.first().innerText()).trim();
+  }
+
+  /** Open one pod tile's overflow menu. */
+  private async runnersOpenPodMenu(podName: string): Promise<void> {
+    await this.runnersPodTile(podName)
+      .locator("xpath=..")
+      .getByRole("button", { name: `Pod actions for ${podName}`, exact: true })
+      .first()
+      .click();
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async runnersOpenEditPod(podName: string): Promise<void> {
+    await this.runnersOpenPodMenu(podName);
+    await this.page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    await this.runnersPodModal("Edit pod");
   }
 
   async runnersEditPodForm(): Promise<RunnersEditPodForm> {
-    return todo("runnersEditPodForm");
+    const dialog = await this.runnersPodModal("Edit pod");
+    const toggle = dialog.getByRole("switch", { name: "Project default" });
+    return {
+      name: await dialog.getByLabel("Name", { exact: true }).inputValue(),
+      description: await dialog.getByLabel("Description (optional)", { exact: true }).inputValue(),
+      isDefault: (await toggle.getAttribute("aria-checked")) === "true",
+      defaultDisabled: (await toggle.isDisabled()) || (await toggle.getAttribute("aria-disabled")) === "true",
+    };
   }
 
-  async runnersSavePodEdit(_input: { name?: string; description?: string; makeDefault?: boolean }): Promise<void> {
-    return todo("runnersSavePodEdit");
+  /** Fill the open edit form; shared by the save helpers. */
+  private async runnersFillPodEdit(input: {
+    name?: string;
+    description?: string;
+    makeDefault?: boolean;
+  }): Promise<Locator> {
+    const dialog = await this.runnersPodModal("Edit pod");
+    if (input.name !== undefined) {
+      await dialog.getByLabel("Name", { exact: true }).fill(input.name);
+    }
+    if (input.description !== undefined) {
+      await dialog.getByLabel("Description (optional)", { exact: true }).fill(input.description);
+    }
+    if (input.makeDefault === true) {
+      const toggle = dialog.getByRole("switch", { name: "Project default" });
+      if ((await toggle.getAttribute("aria-checked")) !== "true") await toggle.click();
+    }
+    return dialog;
+  }
+
+  async runnersSavePodEdit(input: { name?: string; description?: string; makeDefault?: boolean }): Promise<void> {
+    const dialog = await this.runnersFillPodEdit(input);
+    await dialog.locator('button[type="submit"]').click();
+    await this.runnersWaitPodModalClosed(dialog, WebNewDriver.WAIT_MS);
   }
 
   async runnersUnchangedEditSkipsSave(): Promise<boolean> {
-    return todo("runnersUnchangedEditSkipsSave");
+    const dialog = await this.runnersPodModal("Edit pod");
+    let patches = 0;
+    const pattern = "**/api/runners/pods/**";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "PATCH") patches += 1;
+      await route.continue();
+    });
+    try {
+      await dialog.locator('button[type="submit"]').click();
+      await this.runnersWaitPodModalClosed(dialog, WebNewDriver.WAIT_MS);
+    } finally {
+      await this.page.unroute(pattern);
+    }
+    return patches === 0;
   }
 
-  async runnersSavePodEditCapturing(_input: {
+  async runnersSavePodEditCapturing(input: {
     name?: string;
     description?: string;
     makeDefault?: boolean;
   }): Promise<Record<string, unknown>[]> {
-    return todo("runnersSavePodEditCapturing");
+    const bodies: Record<string, unknown>[] = [];
+    const pattern = "**/api/runners/pods/**";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() === "PATCH") {
+        try {
+          const raw = route.request().postData();
+          bodies.push(raw === null ? {} : (JSON.parse(raw) as Record<string, unknown>));
+        } catch {
+          bodies.push({});
+        }
+      }
+      await route.continue();
+    });
+    try {
+      const dialog = await this.runnersFillPodEdit(input);
+      await dialog.locator('button[type="submit"]').click();
+      await this.runnersWaitPodModalClosed(dialog, WebNewDriver.WAIT_MS);
+    } finally {
+      await this.page.unroute(pattern);
+    }
+    return bodies;
   }
 
-  async runnersDeletePod(_podName: string, _options?: { expectFailure?: boolean }): Promise<void> {
-    return todo("runnersDeletePod");
+  async runnersDeletePod(podName: string, options?: { expectFailure?: boolean }): Promise<void> {
+    await this.runnersOpenPodMenu(podName);
+    await this.page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+    const dialog = await this.runnersWaitForConfirm("Delete pod?");
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click();
+    if (options?.expectFailure === true) {
+      await expect.poll(() => this.runnersLastToast(), { timeout: WebNewDriver.WAIT_MS }).not.toBeNull();
+      return;
+    }
+    await this.runnersWaitPodModalClosed(dialog, WebNewDriver.WAIT_MS);
+    const tile = this.runnersPodTile(podName);
+    await tile.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async runnersLastToast(): Promise<string | null> {
@@ -7232,7 +7406,7 @@ export class WebNewDriver implements ParityDriver {
       }
       return (element.textContent ?? "").trim();
     });
-    return text.length > 0 ? text : null;
+    return text;
   }
 
   async runnersPageTitle(): Promise<string> {
@@ -7257,8 +7431,9 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
       .catch(() => undefined);
     if ((await crumb.count()) === 0) return null;
-    const text = ((await crumb.first().innerText()).trim().split("\n")[0] ?? "").trim();
-    return text === "" ? null : text;
+    const lines = (await crumb.first().innerText()).split("\n").map((line) => line.trim());
+    const leaf = lines.find((line) => line !== "");
+    return leaf === undefined ? null : leaf;
   }
 
   async runnersDeniedVisible(): Promise<boolean> {

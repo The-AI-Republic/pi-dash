@@ -33,5 +33,15 @@ export function RunnersOverviewScreen({
   const area = useRunnersArea();
   const data = useRunnersOverview(workspaceSlug);
   useDocumentHead({ title: runnersDocumentTitle(workspaceName), robots: "noindex, nofollow" });
-  return <RunnersOverview scope={area.scope} filter={data} onDelete={data.onDelete} onRevoke={data.onRevoke} />;
+  return (
+    <RunnersOverview
+      scope={area.scope}
+      filter={data}
+      pods={data.pods}
+      podsLoading={data.podsLoading}
+      podsFailed={data.podsFailed}
+      onDelete={data.onDelete}
+      onRevoke={data.onRevoke}
+    />
+  );
 }
