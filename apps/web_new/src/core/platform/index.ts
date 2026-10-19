@@ -10,13 +10,18 @@ export type {
   AgentEngineProfile,
   AgentHostCheck,
   AgentRuntimeApi,
+  CliInstallProgress,
+  CliSetupApi,
+  CliStatus,
   DeepLinkApi,
   EventStream,
+  FetchInit,
   KeyValueStore,
   MenuApi,
   MenuCommand,
   PendingUpdate,
   Platform,
+  PlatformFetch,
   SessionTeardownApi,
   StreamInit,
   StreamMessage,
@@ -25,6 +30,16 @@ export type {
   UpdaterApi,
 } from "./types.js";
 export { platform } from "@pidash/platform-target";
+export {
+  bakedHostedOrigin,
+  desktopShareUrl,
+  HOSTED_ORIGIN_REQUIRED,
+  HOSTED_ORIGIN_SCHEME,
+  pageOrigin,
+  parseHostedOrigin,
+  resolveShareUrl,
+  webShareUrl,
+} from "./shareUrl.js";
 export { toApiTransport } from "./transport.js";
 export { isWebAddress } from "./urls.js";
 export { createIndexedDbStore, createLocalStorageStore, createMemoryStore, createPersistentStore } from "./storage.js";

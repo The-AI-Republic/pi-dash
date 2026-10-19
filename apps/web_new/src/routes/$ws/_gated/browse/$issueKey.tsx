@@ -28,6 +28,7 @@ import {
 } from "../../../../features/issues/index.js";
 import { projectDetailsQueryOptions, ProjectTabStrip } from "../../../../features/projects/index.js";
 import { canEditInProject, useWorkItemPaletteContext } from "../../../../shared/shell/contextual/index.js";
+import { CopyWorkItemLinkButton } from "../../../../shared/shell/CopyWorkItemLinkButton.js";
 import { useDocumentHead } from "../../../../shared/shell/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/browse/$issueKey")({
@@ -163,6 +164,12 @@ function BrowseIssueDetail({
         projectId={projectId}
         issue={issue}
         editable={editable}
+        topSlot={
+          <div className="flex items-center gap-(--space-2)">
+            <span className="text-meta font-medium text-(--text-muted)">{issueKey}</span>
+            <CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={issueKey} />
+          </div>
+        }
         belowDescription={
           <CommentThread
             workspaceSlug={workspaceSlug}

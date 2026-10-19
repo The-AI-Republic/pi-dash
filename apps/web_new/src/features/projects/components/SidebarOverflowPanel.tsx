@@ -12,16 +12,12 @@ import type { Project } from "@pidash/api-client";
 import { Copy, Ellipsis, GripVertical, Plus, Search } from "lucide-react";
 import * as React from "react";
 
-import { isClientSideClick, notifyError, notifySuccess, useShellChrome } from "../../../shared/shell/index.js";
+import { isClientSideClick, useShellChrome } from "../../../shared/shell/index.js";
+
 import { useUpdateProjectOrder } from "../api/projectOrder.js";
 import { filterOverflowProjects } from "../overflow.js";
 import { resolveDropTarget, resolveReorder, type SidebarDropRow, type SidebarDropTarget } from "../sidebar.js";
-import {
-  ROW_COPY_FAILED_BODY,
-  ROW_COPY_FAILED_TITLE,
-  ROW_LINK_COPIED_BODY,
-  ROW_LINK_COPIED_TITLE,
-} from "./SidebarProjectRow.js";
+import { copyMessages } from "./SidebarProjectRow.js";
 
 export interface SidebarOverflowPanelProps {
   workspaceSlug: string;
@@ -124,15 +120,8 @@ export function SidebarOverflowPanel({
   }
 
   async function copyLink(project: Project): Promise<void> {
-    const path = `/${workspaceSlug}/projects/${project.id}/issues`;
-    try {
-      const clipboard = globalThis.navigator.clipboard;
-      if (clipboard === undefined) throw new Error("clipboard unavailable");
-      await clipboard.writeText(`${globalThis.window.location.origin}${path}`);
-      notifySuccess(ROW_LINK_COPIED_TITLE, ROW_LINK_COPIED_BODY);
-    } catch {
-      notifyError(ROW_COPY_FAILED_TITLE, ROW_COPY_FAILED_BODY);
-    }
+    const { copyWorkItemLink } = await import("../../../shared/shell/shareLink.js");
+    await copyWorkItemLink(`/${workspaceSlug}/projects/${project.id}/issues`, copyMessages);
   }
 
   return (

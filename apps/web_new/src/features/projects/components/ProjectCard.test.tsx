@@ -34,13 +34,13 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
-vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
+vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { formatCreationDate, ProjectCard, type ProjectCardProps } from "./ProjectCard.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";

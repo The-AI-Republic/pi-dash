@@ -4,6 +4,7 @@
 // Browser platform: plain browser primitives. No desktop code may be
 // imported here; the no-Tauri bundle check enforces that.
 
+import { webShareUrl } from "./shareUrl.js";
 import { createPersistentStore } from "./storage.js";
 import { isWebAddress } from "./urls.js";
 import type { EventStream, Platform, StreamInit, StreamMessage, Unsubscribe } from "./types.js";
@@ -73,6 +74,7 @@ function browserStream(url: string, init: StreamInit = {}): EventStream {
 
   return {
     messages,
+    error: undefined,
     close: () => {
       if (!closed) {
         closed = true;
@@ -97,6 +99,9 @@ function trackFocus(callback: (focused: boolean) => void): Unsubscribe {
 
 export const platform: Platform = {
   kind: "web",
+  get apiOrigin() {
+    return globalThis.window?.location?.origin || "http://localhost:8000";
+  },
   fetch: (...args) => globalThis.fetch(...args),
   stream: (url, init) => browserStream(url, init),
   openExternal: (url) => {
@@ -106,6 +111,7 @@ export const platform: Platform = {
     globalThis.window.open(url, "_blank", "noopener");
     return Promise.resolve();
   },
+  shareableUrl: (path) => webShareUrl(path),
   storage: createPersistentStore("pidash.web"),
   onFocusChange: trackFocus,
 };

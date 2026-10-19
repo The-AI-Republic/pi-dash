@@ -39,6 +39,8 @@ export {
   MagicGenerateResponse,
   SetPasswordResult,
   approveDeviceCode,
+  DeviceStartResponse,
+  startDeviceGrant,
   checkEmail,
   generateMagicCode,
   getCsrfToken,

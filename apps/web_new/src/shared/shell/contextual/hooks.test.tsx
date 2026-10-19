@@ -211,7 +211,9 @@ describe("contextual mounting hooks", () => {
     });
     expect(writeText).toHaveBeenCalledWith("ACME-12");
     expect(writeText).toHaveBeenCalledWith("Fix the leak");
-    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    // DESK-019: the work-item entry copies the canonical browse address, not
+    // whatever query the palette happens to sit behind.
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/acme/browse/ACME-12/`);
     expect(await screen.findByText("Copied the work item ID.")).toBeInTheDocument();
     expect(user).toBeDefined();
   });

@@ -13,6 +13,9 @@ import { createSessionMiddleware } from "../session/middleware.js";
 import { setSessionClient } from "../session/queries.js";
 
 function defaultBaseUrl(): string {
+  // Desktop advertises the API origin: the bundle's own origin is private,
+  // so API calls must be addressed at the shell's allowlisted origin.
+  if (platform.apiOrigin !== undefined) return platform.apiOrigin;
   if (typeof globalThis.window !== "undefined" && globalThis.window.location?.origin) {
     return globalThis.window.location.origin;
   }

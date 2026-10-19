@@ -9,12 +9,12 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 import { projectKeys } from "../api/keys.js";
 import { ROW_LINK_COPIED_TITLE, SidebarProjectRow, type SidebarProjectRowProps } from "./SidebarProjectRow.js";
 
-vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/toaster.js")>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
 });
 

@@ -9,6 +9,7 @@ import { createClient } from "./client.js";
 import { deactivateAccount, getInstanceConfig, signOut } from "./contracts/auth.js";
 import {
   approveDeviceCode,
+  startDeviceGrant,
   checkEmail,
   generateMagicCode,
   getCsrfToken,
@@ -628,6 +629,35 @@ describe("auth contracts", () => {
     expect(parsed).toEqual({ id: UUID, email: "ada@example.com", is_password_autoset: false });
     const setCall = transport.calls.find((call) => call.url.endsWith("/auth/set-password/"));
     expect(setCall?.init.body).toBe(JSON.stringify({ password: "fresh-secret" }));
+  });
+
+  it("starts a device grant and parses the polling facts", async () => {
+    const grant = {
+      device_code: "device-1",
+      user_code: "ABCD-1234",
+      verification_uri: "https://app.test/auth/device/",
+      expires_in: 600,
+      interval: 5,
+    };
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify(grant) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    expect(await startDeviceGrant(client)).toEqual(grant);
+    const startCall = transport.calls.find((call) => call.url.endsWith("/api/v1/auth/device/start/"));
+    expect(startCall?.init.method).toBe("POST");
+    expect(startCall?.init.body).toBe("{}");
+  });
+
+  it("rejects a device grant missing its polling facts", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ device_code: "device-1", user_code: "ABCD-1234" }),
+    });
+    const error = await startDeviceGrant(client).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
   });
 
   it("approves a device code and parses the grant", async () => {

@@ -20,7 +20,8 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { CrossAppLink } from "../../../shared/coexistence/index.js";
-import { isClientSideClick, notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { isClientSideClick } from "../../../shared/shell/index.js";
+import type { CopyLinkMessages } from "../../../shared/shell/shareLink.js";
 import { projectPropertiesQueryOptions } from "../api/tabPreferences.js";
 import {
   isProjectAdmin,
@@ -44,6 +45,14 @@ const ROW_LINK_TONE =
   "text-body flex min-w-0 flex-1 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-2) text-left hover:bg-(--subtle)";
 const SUBNAV_LINK_TONE =
   "text-body flex w-full items-center justify-between gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left hover:bg-(--subtle)";
+
+/** Toast copy for "Copy link"; shared by the row and the overflow panel. */
+export const copyMessages: CopyLinkMessages = Object.freeze({
+  copied: ROW_LINK_COPIED_TITLE,
+  copiedBody: ROW_LINK_COPIED_BODY,
+  failed: ROW_COPY_FAILED_TITLE,
+  failedBody: ROW_COPY_FAILED_BODY,
+});
 
 export interface SidebarProjectRowProps {
   workspaceSlug: string;
@@ -126,15 +135,9 @@ export function SidebarProjectRow({
   }
 
   async function copyLink(): Promise<void> {
-    const path = `/${workspaceSlug}/projects/${project.id}/issues`;
-    try {
-      const clipboard = globalThis.navigator.clipboard;
-      if (clipboard === undefined) throw new Error("clipboard unavailable");
-      await clipboard.writeText(`${globalThis.window.location.origin}${path}`);
-      notifySuccess(ROW_LINK_COPIED_TITLE, ROW_LINK_COPIED_BODY);
-    } catch {
-      notifyError(ROW_COPY_FAILED_TITLE, ROW_COPY_FAILED_BODY);
-    }
+    // Loaded on the click so the shell's first paint stays free of it.
+    const { copyWorkItemLink } = await import("../../../shared/shell/shareLink.js");
+    await copyWorkItemLink(`/${workspaceSlug}/projects/${project.id}/issues`, copyMessages);
   }
 
   function runAction(id: QuickActionId): void {

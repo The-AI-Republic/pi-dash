@@ -6,6 +6,20 @@
 // later slices mount their screens through `RunnersAreaShell`, build their
 // child links with `runnersPath`, and read data through the api hooks.
 
+// In-app command-line setup (DESK-021): detect, install, self-approved login.
+export {
+  CLI_SETUP_BUSY,
+  CLI_SETUP_UNAVAILABLE,
+  createSetupLock,
+  setUpCli,
+  type CliSetupApi,
+  type CliSetupDeps,
+  type CliSetupInput,
+  type CliSetupResult,
+  type CliSetupStage,
+} from "./cliSetup.js";
+export { CliSetupPanel, CLI_SETUP_HEADING, CLI_SETUP_INTRO } from "./components/CliSetupPanel.js";
+
 // Desktop runtime lifecycle (NEWFRONT-552). The root lifecycle (mounted in
 // the app shell) owns sign-out registration; the hooks below are its API.
 export { APPROVAL_MODE_STORAGE_PREFIX, restoreApprovalModes, stashApprovalModes } from "./runtime/approvalModes.js";

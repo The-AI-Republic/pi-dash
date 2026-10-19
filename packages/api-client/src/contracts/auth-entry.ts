@@ -207,6 +207,27 @@ export async function setPassword(client: ApiClient, password: string): Promise<
   return client.parse(SetPasswordResult, envelope.data, "POST /auth/set-password/");
 }
 
+/**
+ * Response of POST /api/v1/auth/device/start/: the grant the CLI polls.
+ * `expires_in` and `interval` are seconds. Field names are the server's
+ * protocol vocabulary; the client that runs the desktop CLI setup feeds the
+ * device code back to the tool and approves the user code in the same
+ * session.
+ */
+export const DeviceStartResponse = z.object({
+  device_code: z.string(),
+  user_code: z.string(),
+  verification_uri: z.string(),
+  expires_in: z.number(),
+  interval: z.number(),
+});
+export type DeviceStartResponse = z.infer<typeof DeviceStartResponse>;
+
+export async function startDeviceGrant(client: ApiClient): Promise<DeviceStartResponse> {
+  const envelope = await client.sendJson<unknown>("POST", "/api/v1/auth/device/start/", { json: {} });
+  return client.parse(DeviceStartResponse, envelope.data, "POST /api/v1/auth/device/start/");
+}
+
 /** Response of POST /api/v1/auth/device/approve/: the stamped grant. */
 export const DeviceApproveResponse = z.object({
   ok: z.literal(true),

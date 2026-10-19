@@ -9,7 +9,7 @@ import { IconButton, Menu } from "@pidash/kit";
 import { Ellipsis } from "lucide-react";
 import * as React from "react";
 
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { copyWorkItemLink } from "../../../shared/shell/shareLink.js";
 import { selectCopyPath, selectQuickActions, type QuickActionId } from "../tabs.js";
 import { LeaveProjectEntry } from "./LeaveProjectEntry.js";
 import { PublishProjectEntry } from "./PublishProjectEntry.js";
@@ -18,6 +18,12 @@ const COPIED_TITLE = "Copied the project link";
 const COPIED_BODY = "Paste it anywhere to share this tab.";
 const COPY_FAILED_TITLE = "Couldn't copy the address";
 const COPY_FAILED_BODY = "The clipboard refused the write — try again.";
+const COPY_LINK_MESSAGES = {
+  copied: COPIED_TITLE,
+  copiedBody: COPIED_BODY,
+  failed: COPY_FAILED_TITLE,
+  failedBody: COPY_FAILED_BODY,
+} as const;
 
 export interface ProjectQuickActionsProps {
   workspaceSlug: string;
@@ -42,15 +48,7 @@ export function ProjectQuickActions({
   const [leaveOpen, setLeaveOpen] = React.useState(false);
 
   async function copyLocation(): Promise<void> {
-    const path = selectCopyPath({ activeHref, workspaceSlug, projectId });
-    try {
-      const clipboard = globalThis.navigator.clipboard;
-      if (clipboard === undefined) throw new Error("clipboard unavailable");
-      await clipboard.writeText(`${globalThis.window.location.origin}${path}`);
-      notifySuccess(COPIED_TITLE, COPIED_BODY);
-    } catch {
-      notifyError(COPY_FAILED_TITLE, COPY_FAILED_BODY);
-    }
+    await copyWorkItemLink(selectCopyPath({ activeHref, workspaceSlug, projectId }), COPY_LINK_MESSAGES);
   }
 
   function runAction(id: QuickActionId): void {

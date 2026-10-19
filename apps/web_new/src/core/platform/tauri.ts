@@ -7,14 +7,18 @@
 // data directory). This module is excluded from the web bundle by the
 // build-time alias; the no-Tauri bundle check proves it.
 
+import { desktopShareUrl } from "./shareUrl.js";
 import { createPersistentStore } from "./storage.js";
 import { isWebAddress } from "./urls.js";
 import type {
   AgentEngineProfile,
   AgentHostCheck,
   AgentRuntimeApi,
+  CliSetupApi,
+  CliStatus,
   DeepLinkApi,
   EventStream,
+  FetchInit,
   PendingUpdate,
   Platform,
   SessionTeardownApi,
@@ -111,55 +115,153 @@ function headToResponse(head: NativeResponseHead, body: Uint8Array): Response {
   });
 }
 
+/** RequestInit plus the deadline the native layer enforces itself. */
+type DesktopRequestInit = FetchInit;
+
+/** Abort reason a caller sees as an abort (never as a transport failure). */
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("Aborted", "AbortError");
+}
+
+/**
+ * Map the native layer's failure strings onto the errors a browser fetch
+ * would raise: the native timeout verb as TimeoutError, the cancel verb as
+ * AbortError, everything else as a network TypeError. A transport failure
+ * must never look like a session problem.
+ */
+function nativeTransportError(error: unknown, signal: AbortSignal | null): unknown {
+  if (signal?.aborted) return abortReason(signal);
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "API request timed out") return new DOMException("The request timed out", "TimeoutError");
+  if (message === "API request canceled") return new DOMException("The request was aborted", "AbortError");
+  return new TypeError(`Network request failed: ${message}`);
+}
+
+/** A boundary no form value can collide with. */
+function multipartBoundary(): string {
+  const random =
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID().replace(/-/g, "")
+      : Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return `----pidash${random}`;
+}
+
+/**
+ * Encode a FormData body as multipart bytes with its own boundary. The
+ * webview's Response would derive one, but doing it here keeps the exact
+ * same bytes (and the Content-Type the server parses) in every runtime,
+ * including the unit-test DOM where Response cannot derive it.
+ */
+async function encodeMultipart(form: FormData): Promise<{ bytes: Uint8Array; contentType: string }> {
+  const boundary = multipartBoundary();
+  const parts: Uint8Array[] = [];
+  const push = (text: string): void => {
+    parts.push(textEncoder.encode(text));
+  };
+  for (const [name, value] of form.entries()) {
+    push(`--${boundary}\r\n`);
+    if (typeof value === "string") {
+      push(`Content-Disposition: form-data; name="${name.replace(/"/g, "%22")}"\r\n\r\n`);
+      push(`${value}\r\n`);
+      continue;
+    }
+    const type = value.type === "" ? "application/octet-stream" : value.type;
+    push(
+      `Content-Disposition: form-data; name="${name.replace(/"/g, "%22")}"; filename="${value.name.replace(/"/g, "%22")}"\r\n`
+    );
+    push(`Content-Type: ${type}\r\n\r\n`);
+    parts.push(new Uint8Array(await new Response(value).arrayBuffer()));
+    push("\r\n");
+  }
+  push(`--${boundary}--\r\n`);
+  const length = parts.reduce((total, part) => total + part.length, 0);
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.length;
+  }
+  return { bytes, contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
 async function nativeRequest(
   core: TauriInvokeCore,
   url: string,
-  init: RequestInit | undefined,
+  init: DesktopRequestInit | undefined,
   signal: AbortSignal | null
 ): Promise<Response> {
   const id = nextRequestId();
   const method = (init?.method ?? "GET").toUpperCase();
   const headers = new Headers(init?.headers);
+  let bodyBytes: Uint8Array | null = null;
+  if (init?.body != null) {
+    const suppliedType = headers.get("content-type") ?? "";
+    if (typeof FormData !== "undefined" && init.body instanceof FormData) {
+      // A multipart body carries its own boundary, so a caller's bare
+      // multipart Content-Type can never hide it from the server.
+      const encoded = await encodeMultipart(init.body);
+      headers.set("content-type", encoded.contentType);
+      bodyBytes = encoded.bytes;
+    } else {
+      // Response turns Blob, URLSearchParams and strings into their wire
+      // bytes and names the type; keep a caller's explicit type.
+      const encoded = new Response(init.body as BodyInit, init.headers === undefined ? {} : { headers: init.headers });
+      const derivedType = encoded.headers.get("content-type");
+      if (derivedType !== null && suppliedType === "") headers.set("content-type", derivedType);
+      bodyBytes = new Uint8Array(await encoded.arrayBuffer());
+    }
+  }
   const pairs: Array<[string, string]> = [];
   headers.forEach((value, name) => pairs.push([name, value]));
-  const bodyBytes =
-    init?.body == null
-      ? null
-      : typeof init.body === "string"
-        ? textEncoder.encode(init.body)
-        : new Uint8Array(await new Response(init.body as BodyInit).arrayBuffer());
-  const frame = encodeFrame({ id, url, method, headers: pairs, has_body: bodyBytes !== null }, bodyBytes);
+  const frame = encodeFrame(
+    {
+      id,
+      url,
+      method,
+      headers: pairs,
+      hasBody: bodyBytes !== null,
+      timeoutMs: init?.timeoutMs != null && init.timeoutMs > 0 ? init.timeoutMs : null,
+    },
+    bodyBytes
+  );
   const cancel = (): void => {
     core.invoke("desktop_api_cancel", { id }).catch(() => undefined);
   };
+  if (signal?.aborted) throw abortReason(signal);
   signal?.addEventListener("abort", cancel, { once: true });
   try {
-    if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
     const raw = await core.invoke<ArrayBuffer | number[]>("desktop_api_request", frame);
     const bytes = raw instanceof ArrayBuffer ? new Uint8Array(raw) : new Uint8Array(raw);
     const { head, body } = decodeFrame(bytes);
     return headToResponse(head as NativeResponseHead, body);
+  } catch (error) {
+    throw nativeTransportError(error, signal);
   } finally {
     signal?.removeEventListener("abort", cancel);
   }
 }
 
-function desktopFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+function desktopFetch(input: RequestInfo | URL, init?: DesktopRequestInit): Promise<Response> {
   const native = nativeApiOrigin();
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
   const request = input instanceof Request ? input : undefined;
   const signal = init?.signal ?? request?.signal ?? null;
-  if (!native) return globalThis.fetch(input, init);
+  if (!native) return globalThis.fetch(input, init as RequestInit);
   let target: URL | undefined;
   try {
     target = new URL(url, globalThis.location.href);
   } catch {
-    return globalThis.fetch(input, init);
+    return globalThis.fetch(input, init as RequestInit);
   }
   if (target.origin !== native.origin || !isApiPath(target.pathname)) {
-    return globalThis.fetch(input, init);
+    // Presigned storage uploads and anything off the API allowlist keep the
+    // page transport, with its own progress and cancellation behavior.
+    return globalThis.fetch(input, init as RequestInit);
   }
-  const merged: RequestInit = { method: init?.method ?? request?.method ?? "GET" };
+  const merged: DesktopRequestInit = {
+    method: init?.method ?? request?.method ?? "GET",
+    timeoutMs: init?.timeoutMs,
+  };
   const headers = init?.headers ?? request?.headers;
   if (headers !== undefined) {
     merged.headers = headers;
@@ -175,69 +277,188 @@ type NativeStreamEvent = {
   type: string;
   status?: number;
   statusText?: string;
+  status_text?: string;
   headers?: Array<[string, string]>;
   text?: string;
 };
 
+/** Reconnect delay after a recoverable stream ending (EventSource default). */
+export const STREAM_RECONNECT_MS = 3000;
+
+/** Whole UTF-8 lines assembled from the native stream's text chunks. */
+class LineBuffer {
+  private buffer = "";
+
+  reset(): void {
+    this.buffer = "";
+  }
+
+  push(chunk: string): string[] {
+    this.buffer += chunk;
+    if (this.buffer.charCodeAt(0) === 0xfeff) this.buffer = this.buffer.slice(1);
+    const lines: string[] = [];
+    for (;;) {
+      const match = /\r\n|\r|\n/.exec(this.buffer);
+      // A trailing \r may be the first half of \r\n; wait for more text.
+      if (!match || (match[0] === "\r" && match.index === this.buffer.length - 1)) break;
+      lines.push(this.buffer.slice(0, match.index));
+      this.buffer = this.buffer.slice(match.index + match[0].length);
+    }
+    return lines;
+  }
+}
+
+/**
+ * SSE parser state across one connection: dispatches an event on the blank
+ * line that ends a block, carries the event id forward for reconnects, and
+ * honors a server-sent retry gap.
+ */
+class EventStreamParser {
+  lastEventId = "";
+  retryMs = STREAM_RECONNECT_MS;
+  private eventType = "";
+  private data: string[] = [];
+  private idBuffer = "";
+
+  constructor(private readonly emit: (message: StreamMessage) => void) {}
+
+  start(lastEventId: string): void {
+    this.eventType = "";
+    this.data = [];
+    this.idBuffer = lastEventId;
+  }
+
+  line(line: string): void {
+    if (line === "") {
+      this.lastEventId = this.idBuffer;
+      if (this.data.length > 0) {
+        this.emit({ event: this.eventType || "message", data: this.data.join("\n") });
+      }
+      this.eventType = "";
+      this.data = [];
+      return;
+    }
+    if (line.startsWith(":")) return;
+    const colon = line.indexOf(":");
+    const field = colon < 0 ? line : line.slice(0, colon);
+    let value = colon < 0 ? "" : line.slice(colon + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") this.eventType = value;
+    else if (field === "data") this.data.push(value);
+    else if (field === "id" && !value.includes("\0")) this.idBuffer = value;
+    else if (field === "retry" && /^\d+$/.test(value)) this.retryMs = Number(value);
+  }
+}
+
+/**
+ * Native event stream with the browser EventSource's resilience: a
+ * transport drop or end of body reconnects with Last-Event-ID after the
+ * retry gap, while a non-success status or a non-event-stream answer closes
+ * it for good (surfaced through `error`). The bundle origin makes the
+ * webview's own EventSource unusable for credentialed API streams.
+ */
 function desktopStream(url: string, init: StreamInit = {}): EventStream {
   const native = nativeApiOrigin();
   if (!native) {
     throw new Error("Desktop streams need the desktop shell");
   }
   const core = native.core;
-  const id = nextRequestId();
-  const pairs = Object.entries(init.headers ?? {});
   const queue: StreamMessage[] = [];
+  const parser = new EventStreamParser((message) => {
+    queue.push(message);
+    wake();
+  });
+  const lineBuffer = new LineBuffer();
   let waiting: (() => void) | null = null;
+  let closed = false;
   let finished = false;
-  let failed: Error | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let requestId: string | undefined;
+  let fatal: Error | undefined;
 
-  const wake = (): void => {
+  function wake(): void {
     const notify = waiting;
     waiting = null;
     notify?.();
-  };
+  }
 
-  const channel = new core.Channel<NativeStreamEvent>();
-  channel.onmessage = (message) => {
-    if (message.type === "head") {
-      const status = message.status ?? 200;
-      if (status < 200 || status >= 300) {
-        failed = new Error(`Stream failed with status ${status}`);
-        finished = true;
-      }
-    } else if (message.type === "data") {
-      queue.push({ event: "message", data: message.text ?? "" });
-    } else if (message.type === "end") {
-      finished = true;
-    }
+  function stopForGood(error: Error): void {
+    fatal = error;
+    finished = true;
+    requestId = undefined;
     wake();
-  };
+  }
 
-  const started = core
-    .invoke("desktop_api_stream", {
-      request: { id, url, method: init.method ?? "GET", headers: pairs, has_body: init.body != null },
-      channel,
-    })
-    .catch((error: unknown) => {
-      failed = error instanceof Error ? error : new Error("Stream failed");
-      finished = true;
-      wake();
-    });
+  function connect(): void {
+    if (closed) return;
+    const id = nextRequestId();
+    requestId = id;
+    lineBuffer.reset();
+    parser.start(parser.lastEventId);
+    const current = (): boolean => requestId === id && !closed && fatal === undefined;
+    const headers: Record<string, string> = {
+      Accept: "text/event-stream",
+      "Cache-Control": "no-cache",
+      ...(init.headers ?? {}),
+    };
+    if (parser.lastEventId !== "") headers["Last-Event-ID"] = parser.lastEventId;
+    const channel = new core.Channel<NativeStreamEvent>();
+    channel.onmessage = (message) => {
+      if (!current()) return;
+      if (message.type === "head") {
+        const status = message.status ?? 200;
+        const type = (message.headers ?? []).find(([name]) => name.toLowerCase() === "content-type")?.[1] ?? "";
+        if (status < 200 || status >= 300 || !type.toLowerCase().startsWith("text/event-stream")) {
+          stopForGood(new Error(`Stream failed with status ${status}`));
+          return;
+        }
+      } else if (message.type === "data") {
+        for (const line of lineBuffer.push(message.text ?? "")) parser.line(line);
+        wake();
+      } else {
+        // End of body: the server closed cleanly; reconnect and resume.
+        requestId = undefined;
+        reconnect();
+      }
+    };
+    core
+      .invoke("desktop_api_stream", {
+        request: {
+          id,
+          url,
+          method: init.method ?? "GET",
+          headers: Object.entries(headers),
+          hasBody: init.body != null,
+          timeoutMs: null,
+        },
+        channel,
+      })
+      .catch((error: unknown) => {
+        if (!current()) return;
+        requestId = undefined;
+        reconnect();
+        void error;
+      });
+  }
 
-  void started;
-  let closed = false;
+  function reconnect(): void {
+    // Both callers guard with current(), which is false once closed.
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, parser.retryMs);
+  }
 
   const messages = async function* (): AsyncIterable<StreamMessage> {
     try {
+      connect();
       for (;;) {
-        if (init.signal?.aborted) return;
+        if (closed) return;
         const next = queue.shift();
-        if (next) {
+        if (next !== undefined) {
           yield next;
           continue;
         }
-        if (failed) return;
         if (finished) return;
         await new Promise<void>((resolve) => {
           waiting = resolve;
@@ -252,12 +473,21 @@ function desktopStream(url: string, init: StreamInit = {}): EventStream {
     if (closed) return;
     closed = true;
     finished = true;
-    core.invoke("desktop_api_cancel", { id }).catch(() => undefined);
+    if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
+    const id = requestId;
+    requestId = undefined;
+    if (id !== undefined) core.invoke("desktop_api_cancel", { id }).catch(() => undefined);
     wake();
   }
 
   init.signal?.addEventListener("abort", close, { once: true });
-  return { messages, close };
+  return {
+    messages,
+    close,
+    get error() {
+      return fatal;
+    },
+  };
 }
 
 /**
@@ -477,8 +707,77 @@ const desktopDeepLinks: DeepLinkApi = {
   },
 };
 
+interface NativeCliStatus {
+  installed?: unknown;
+  path?: unknown;
+  version?: unknown;
+}
+
+function toCliStatus(raw: NativeCliStatus | null | undefined): CliStatus {
+  return {
+    installed: raw?.installed === true,
+    path: typeof raw?.path === "string" && raw.path.length > 0 ? raw.path : null,
+    version: typeof raw?.version === "string" && raw.version.length > 0 ? raw.version : null,
+  };
+}
+
+/** Event the native installer streams its output lines on. */
+export const CLI_INSTALL_LOG_EVENT = "pidash-install-log";
+
+/** One install at a time: the native command refuses a racing second call. */
+let installInFlight = false;
+
+const desktopCliSetup: CliSetupApi = {
+  detect: async () => toCliStatus(await invokeNative<NativeCliStatus>("detect_pidash_cli")),
+  install: async () => {
+    if (installInFlight) throw new Error("The command-line tool is already being installed.");
+    installInFlight = true;
+    try {
+      await invokeNative("install_pidash_cli");
+      return toCliStatus(await invokeNative<NativeCliStatus>("detect_pidash_cli"));
+    } finally {
+      installInFlight = false;
+    }
+  },
+  onInstallLog: (callback) => {
+    // The shell exposes the event bus as __TAURI__.event (Tauri 2); without
+    // it there is nothing to subscribe to.
+    const events = tauriWindow()?.__TAURI__?.event;
+    if (!events) return () => undefined;
+    let cancelled = false;
+    let stop: Unsubscribe | undefined;
+    void events
+      .listen<{ line?: unknown }>(CLI_INSTALL_LOG_EVENT, (event) => {
+        if (cancelled) return;
+        if (typeof event.payload?.line === "string") callback({ line: event.payload.line });
+      })
+      .then(
+        (unlisten) => {
+          if (cancelled) void unlisten();
+          else stop = unlisten;
+        },
+        // An older shell without the event still installs; it just shows no
+        // progress lines, so the subscription stays a no-op.
+        () => undefined
+      );
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  },
+  login: (input) =>
+    invokeNative("pidash_cli_login", {
+      deviceCode: input.deviceCode,
+      cloudUrl: input.cloudUrl,
+      workspace: input.workspace,
+    }),
+};
+
 export const platform: Platform = {
   kind: "desktop",
+  get apiOrigin() {
+    return nativeApiOrigin()?.origin ?? globalThis.window?.location?.origin;
+  },
   fetch: (input, init) => desktopFetch(input, init),
   stream: (url, init) => desktopStream(url, init),
   openExternal: (url) => {
@@ -499,11 +798,13 @@ export const platform: Platform = {
       }
     );
   },
+  shareableUrl: (path) => desktopShareUrl(path),
   storage: createPersistentStore("pidash.desktop"),
   onFocusChange: trackFocus,
   window: desktopWindow,
   deepLinks: desktopDeepLinks,
   agentRuntime: desktopAgentRuntime,
   updates: desktopUpdater,
+  cliSetup: desktopCliSetup,
   sessionTeardown: desktopSessionTeardown,
 };

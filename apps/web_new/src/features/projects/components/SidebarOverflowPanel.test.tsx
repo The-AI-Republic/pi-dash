@@ -18,12 +18,12 @@ import {
   ROW_LINK_COPIED_TITLE,
 } from "./SidebarProjectRow.js";
 
-vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
+vi.mock("../../../shared/shell/toaster.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../shared/shell/toaster.js")>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
 });
 
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/toaster.js";
 
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
 const PROJECT_A = "223e4567-e89b-12d3-a456-426614174001";

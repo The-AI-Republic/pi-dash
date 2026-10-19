@@ -13,6 +13,7 @@ import * as React from "react";
 
 import { registerCommands, registerPalettePages } from "../../commands/registry.js";
 import { useCommandPalette } from "../../commands/store.js";
+import { copyLinkWithToast, workItemPath } from "../shareLink.js";
 import { notifyError, notifySuccess } from "../toaster.js";
 import {
   selectNamedProjectMembers,
@@ -147,12 +148,12 @@ export function useWorkItemPaletteContext(input: WorkItemPaletteInput): WorkItem
   );
   const copyUrl = React.useCallback(
     () =>
-      void copyText(
-        typeof window === "undefined" ? "" : window.location.href,
-        "Copied the work item link.",
-        "Couldn't copy the work item link."
+      void copyLinkWithToast(
+        workItemPath(input.workspaceSlug, input.issueKey),
+        { copied: "Copied the work item link.", failed: "Couldn't copy the work item link." },
+        { success: notifySuccess, error: notifyError }
       ),
-    []
+    [input.workspaceSlug, input.issueKey]
   );
   const close = React.useCallback(() => useCommandPalette.getState().closePalette(), []);
 

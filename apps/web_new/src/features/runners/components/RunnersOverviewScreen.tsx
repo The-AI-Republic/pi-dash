@@ -8,9 +8,11 @@
 
 import * as React from "react";
 
+import { platform } from "../../../core/platform/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useRunnersArea } from "../area.js";
 import { useRunnersOverview } from "../useOverview.js";
+import { CliSetupPanel } from "./CliSetupPanel.js";
 import { RunnersOverview } from "./RunnersOverview.js";
 
 /** Page title (RUN-005 pins "AI Agents"); one area name per surface. */
@@ -34,14 +36,17 @@ export function RunnersOverviewScreen({
   const data = useRunnersOverview(workspaceSlug);
   useDocumentHead({ title: runnersDocumentTitle(workspaceName), robots: "noindex, nofollow" });
   return (
-    <RunnersOverview
-      scope={area.scope}
-      filter={data}
-      pods={data.pods}
-      podsLoading={data.podsLoading}
-      podsFailed={data.podsFailed}
-      onDelete={data.onDelete}
-      onRevoke={data.onRevoke}
-    />
+    <>
+      {platform.cliSetup === undefined ? null : <CliSetupPanel workspaceSlug={workspaceSlug} />}
+      <RunnersOverview
+        scope={area.scope}
+        filter={data}
+        pods={data.pods}
+        podsLoading={data.podsLoading}
+        podsFailed={data.podsFailed}
+        onDelete={data.onDelete}
+        onRevoke={data.onRevoke}
+      />
+    </>
   );
 }

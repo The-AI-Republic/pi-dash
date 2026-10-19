@@ -10,6 +10,12 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 const useRunnersOverview = vi.fn();
+const platformHarness = vi.hoisted(() => ({ current: {} as Record<string, unknown> }));
+vi.mock("../../../core/platform/index.js", () => ({
+  get platform() {
+    return platformHarness.current;
+  },
+}));
 
 vi.mock("../useOverview.js", () => ({ useRunnersOverview: (slug: string) => useRunnersOverview(slug) }));
 vi.mock("../area.js", () => ({
@@ -57,5 +63,38 @@ describe("RunnersOverviewScreen", () => {
     expect(screen.getByText("alpha")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Filter runners by pod WEB_alpha" })).toBeInTheDocument();
     expect(document.title).toBe("Acme - AI Agents");
+  });
+
+  it("mounts the command-line setup panel when the build has the native tool", () => {
+    useRunnersOverview.mockReturnValue({
+      selectedPodId: null,
+      selectedPod: null,
+      runners: [],
+      toggle: vi.fn(),
+      clear: vi.fn(),
+      pods: [],
+      podsLoading: false,
+      podsFailed: false,
+      onDelete: vi.fn(async () => undefined),
+      onRevoke: vi.fn(async () => undefined),
+    });
+    platformHarness.current = {
+      cliSetup: {
+        detect: async () => ({ installed: false, path: null, version: null }),
+        install: async () => ({ installed: false, path: null, version: null }),
+        onInstallLog: () => () => undefined,
+        login: async () => undefined,
+      },
+    };
+    try {
+      render(
+        <QueryClientProvider client={new QueryClient()}>
+          <RunnersOverviewScreen workspaceSlug="acme" workspaceName="Acme" />
+        </QueryClientProvider>
+      );
+      expect(screen.getByRole("region", { name: "Command-line tool" })).toBeInTheDocument();
+    } finally {
+      platformHarness.current = {};
+    }
   });
 });

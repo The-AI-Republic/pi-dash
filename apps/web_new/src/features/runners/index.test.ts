@@ -8,6 +8,11 @@ const harness = vi.hoisted(() => ({
   agentRuntime: {},
   confirmRuntimeSignOut: vi.fn(async () => ({ deleteChatHistory: false })),
   disposeRuntimeForSignOut: vi.fn(async (..._args: Array<unknown>) => undefined),
+  listen: vi.fn(async (_event: string, _handler: (event: { payload: unknown }) => void) => {
+    harness.unlisten?.();
+    return harness.unlisten ?? (() => undefined);
+  }),
+  unlisten: undefined as (() => void) | undefined,
 }));
 
 vi.mock("../../core/api/client.js", () => ({
@@ -16,7 +21,21 @@ vi.mock("../../core/api/client.js", () => ({
 
 vi.mock("../../core/platform/index.js", () => ({
   get platform() {
-    return { kind: "desktop", agentRuntime: harness.agentRuntime };
+    return {
+      kind: "desktop",
+      agentRuntime: harness.agentRuntime,
+      cliSetup: {
+        detect: async () => ({ installed: true, path: "/usr/local/bin/pidash", version: "1.0.0" }),
+        install: async () => ({ installed: true, path: "/usr/local/bin/pidash", version: "1.0.0" }),
+        onInstallLog: (callback: (progress: { line: string }) => void) => {
+          void harness.listen("pidash-install-log", (event) => {
+            void callback(event.payload as { line: string });
+          });
+          return () => undefined;
+        },
+        login: async () => undefined,
+      },
+    };
   },
 }));
 
@@ -62,5 +81,13 @@ describe("root runtime sign-out lifecycle", () => {
     const { registerRuntimeSignOutLifecycle } = await import("./runtime/SignOutLifecycle.js");
     registerRuntimeSignOutLifecycle(undefined);
     expect(getRuntimeSignOutHooks()).toBeNull();
+  });
+
+  it("exposes the command-line setup surface from the feature barrel", async () => {
+    const feature = await import("./index.js");
+    expect(feature.CLI_SETUP_HEADING).toBe("Command-line tool");
+    expect(typeof feature.createSetupLock).toBe("function");
+    expect(typeof feature.setUpCli).toBe("function");
+    expect(feature.CliSetupPanel).toBeTypeOf("function");
   });
 });

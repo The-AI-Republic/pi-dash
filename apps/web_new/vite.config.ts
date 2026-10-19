@@ -8,15 +8,18 @@ import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type ProxyOptions } from "vite";
 
+import { hostedBaseUrlFromEnv } from "./src/core/platform/hostedBaseUrl.js";
+
 const target = process.env.PIDASH_TARGET === "desktop" ? "desktop" : "web";
 const here = dirname(fileURLToPath(import.meta.url));
 // Local Django for `pnpm dev`. Overridden per shell with e.g.
 // `export PIDASH_API_ORIGIN="http://127.0.0.1:8123"` on its own line.
 const apiOrigin = process.env.PIDASH_API_ORIGIN ?? "http://localhost:8000";
-// Hosted web app origin for the desktop unavailable-sign-in card
-// (AUTH-023). The desktop pipeline bakes PIDASH_WEB_BASE_URL; builds
-// without it fall back to the API origin at runtime.
-const webBaseUrl = process.env.PIDASH_WEB_BASE_URL ?? null;
+// Hosted web app origin for shareable links (DESK-019) and the desktop
+// unavailable-sign-in card (AUTH-023). The desktop pipeline bakes
+// VITE_WEB_BASE_URL; PIDASH_WEB_BASE_URL is accepted too. Builds without
+// either leave the define null so links refuse rather than guess an origin.
+const webBaseUrl = hostedBaseUrlFromEnv(process.env);
 
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind

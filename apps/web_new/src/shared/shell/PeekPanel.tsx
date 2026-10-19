@@ -23,6 +23,8 @@ export interface PeekPanelProps {
   onClose: () => void;
   /** Commits a renamed title; without it edits stay local to the field. */
   onCommitTitle?: ((next: string) => void) | undefined;
+  /** Controls beside the close button (e.g. copy link). */
+  actions?: React.ReactNode;
   children?: React.ReactNode;
 }
 
@@ -32,6 +34,7 @@ export function PeekPanel({
   titleLabel,
   onClose,
   onCommitTitle,
+  actions,
   children,
 }: PeekPanelProps): React.ReactNode {
   const [draft, setDraft] = React.useState(title);
@@ -66,9 +69,12 @@ export function PeekPanel({
       >
         <div className="flex items-start justify-between gap-(--space-4)">
           <p className="text-caption min-w-0 flex-1 truncate pt-(--space-1) text-(--text-muted)">{eyebrow}</p>
-          <IconButton label="Close preview" size="small" onClick={onClose}>
-            <X size={16} strokeWidth={1.5} aria-hidden="true" />
-          </IconButton>
+          <div className="flex shrink-0 items-center gap-(--space-1)">
+            {actions}
+            <IconButton label="Close preview" size="small" onClick={onClose}>
+              <X size={16} strokeWidth={1.5} aria-hidden="true" />
+            </IconButton>
+          </div>
         </div>
         <input
           aria-label={titleLabel}

@@ -15,6 +15,7 @@ import * as React from "react";
 import { Skeleton } from "@pidash/kit";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { PeekPanel } from "../../../shared/shell/index.js";
 import { useUpdateIssue } from "../api/mutations.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
@@ -81,6 +82,7 @@ export function GanttPeekPanel({ workspaceSlug, projectId, row, onClose }: Gantt
       titleLabel="Work item title"
       onClose={onClose}
       onCommitTitle={(next: string) => rename.mutate({ name: next })}
+      actions={<CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={row.identifier} />}
     >
       <React.Suspense fallback={<PeekFallback />}>
         <PeekBody workspaceSlug={workspaceSlug} projectId={projectId} issueId={row.id} />
