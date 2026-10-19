@@ -69,9 +69,12 @@
 //!   counts (`0 → miss`, `>1 → MultipleObjectsReturned`).
 //! * `Pod.save()`'s workspace-denorm check (`models.py:145-159`) runs on
 //!   EVERY save, including `update_fields` saves: unless `pod.project`
-//!   is already cached it fires one [`project_by_id_sql`] read first.
-//!   The P2 create passes the project object (cached — no extra read);
-//!   the P4 patch and P5 stamp saves do not (handlers run the read).
+//!   is already cached it fires one project read first. That read is a
+//!   forward-FK access, so it uses `_base_manager` — the base variant
+//!   [`project_by_id_base_sql`], NOT the scoped [`project_by_id_sql`]
+//!   (PIDASHCONV-1210). The P2 create passes the project object (cached —
+//!   no extra read); the P4 patch and P5 stamp saves do not (handlers run
+//!   the base read).
 //! * Timestamps, UUIDs and computed strings cross this boundary as bind
 //!   params (`now()`, fresh UUIDs, labels and prefixed names are
 //!   computed by the caller); the SQL only names the `$N` slots. The
@@ -285,6 +288,25 @@ pub fn project_by_id_sql() -> String {
     )
 }
 
+/// Forward-FK `pod.project` read (the serializer's `project.identifier`
+/// / the `Pod.save()` denorm check).
+///
+/// A forward FK is resolved through `Project._base_manager` — a plain
+/// `models.Manager` — because `Project` sets no `base_manager_name`, so
+/// `SoftDeletionManager` does NOT scope it and a tombstoned project still
+/// renders (PIDASHCONV-1210; same base-manager semantics PB-0617 records
+/// for the scheduler `pod_name`). Same shape as [`project_by_id_sql`] with
+/// the `deleted_at` conjunct dropped (the `ORDER BY` is unobservable on a
+/// PK lookup, kept for parity). `$1` = project id.
+pub fn project_by_id_base_sql() -> String {
+    format!(
+        "SELECT {} FROM \"projects\" \
+         WHERE \"projects\".\"id\" = $1 \
+         ORDER BY \"projects\".\"created_at\" DESC LIMIT 1",
+        qualified(project_cols::TABLE, project_cols::COLUMNS),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // P1. Pod lists
 // ---------------------------------------------------------------------------
@@ -439,9 +461,10 @@ pub fn pod_demote_siblings_sql() -> String {
 /// * all three: `$1` name, `$2` description, `$3` is_default, `$4` updated_at, `$5` id.
 ///
 /// `save()` also runs the workspace-denorm check first (see module
-/// docs): handlers run [`project_by_id_sql`] unless `pod.project` is
-/// cached. Rename inputs: blank (after strip) → 400 `name cannot be
-/// empty`; bare suffix re-prefixed with `pod.project.identifier`
+/// docs): handlers run [`project_by_id_base_sql`] (a forward-FK read)
+/// unless `pod.project` is cached. Rename inputs: blank (after strip) →
+/// 400 `name cannot be empty`; bare suffix re-prefixed with
+/// `pod.project.identifier`
 /// (needs the project row); validator failure → 400 (handlers-owned).
 /// Description input: `value or ""`. Demote branch (`!wants_default
 /// && pod.is_default`) sets `FALSE`, leaving NO default
@@ -545,7 +568,7 @@ pub fn pod_active_runs_exist_sql() -> String {
 /// "updated_at"])`: model-field order is `is_default`, `deleted_at`,
 /// `updated_at` (NOT the list order). `save()` also runs the
 /// workspace-denorm check first (see module docs): handlers run
-/// [`project_by_id_sql`] unless `pod.project` is cached. Guard 3
+/// [`project_by_id_base_sql`] unless `pod.project` is cached. Guard 3
 /// (`locked.is_default` → 409 `default_pod_undeletable`) is a pure
 /// column read off the locked row — no SQL of its own. Guard order is
 /// runners → runs → default (first hit wins).
@@ -1120,6 +1143,24 @@ mod tests {
         ] {
             assert_builder_contains(&sql, &fragment);
         }
+    }
+
+    #[test]
+    fn project_read_base_has_no_soft_delete_scope() {
+        // Forward-FK `pod.project` read: `_base_manager` (no scope), so a
+        // tombstoned project still renders (PIDASHCONV-1210). Otherwise the
+        // shape matches the scoped read.
+        let sql = project_by_id_base_sql();
+        let list = assert_suffix(
+            &sql,
+            "FROM \"projects\" WHERE \"projects\".\"id\" = $1 \
+             ORDER BY \"projects\".\"created_at\" DESC LIMIT 1",
+        );
+        assert_eq!(list, expected_list("projects", project_cols::COLUMNS));
+        assert!(
+            !sql.contains("\"deleted_at\" IS NULL"),
+            "base read must not filter tombstones:\n{sql}"
+        );
     }
 
     // -- P1 lists + count --
