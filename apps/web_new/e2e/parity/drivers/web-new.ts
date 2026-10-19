@@ -365,6 +365,21 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
+  /**
+   * The app never mounted: the served document is up but its mount point is
+   * still empty. A dev server compiling under load can hand a page a module
+   * graph that never runs, and a reload picks up a fresh one; an entry that
+   * mounted always fills this node, card or not.
+   */
+  private async appMounted(): Promise<boolean> {
+    return (
+      (await this.page
+        .locator("#root")
+        .evaluate((root) => root.childElementCount > 0, undefined, { timeout: 2_000 })
+        .catch(() => true)) === true
+    );
+  }
+
   /** The card's own "Could not load sign-in" state, told apart from a painted form. */
   private async instanceConfigFailed(): Promise<boolean> {
     const notice = this.page.getByText(/Could not load sign-in\.|Could not load sign-up\./);
@@ -477,6 +492,7 @@ export class WebNewDriver implements ParityDriver {
     // skeleton shares the section's aria-label and carries no form.
     const settleBy = Date.now() + left(60_000);
     let settled: "signed-in" | "card" | null = null;
+    let remounted = false;
     while (Date.now() < settleBy) {
       if (new URL(page.url()).pathname !== "/") {
         settled = "signed-in";
@@ -485,6 +501,15 @@ export class WebNewDriver implements ParityDriver {
       if ((await this.paintedCard().count()) > 0) {
         settled = "card";
         break;
+      }
+      // A long run can land on a document whose app never mounted; that
+      // page never paints, however long the settle waits. One reload per
+      // pass gives it a fresh module graph, the same recovery the
+      // pre-step settle uses for a blank paint.
+      if (!remounted && !(await this.appMounted())) {
+        remounted = true;
+        await page.reload();
+        continue;
       }
       await page.waitForTimeout(1_000);
     }

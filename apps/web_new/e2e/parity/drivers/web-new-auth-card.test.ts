@@ -95,3 +95,36 @@ describe("instanceConfigFailed", () => {
     expect(failed).toBe(false);
   });
 });
+
+describe("appMounted", () => {
+  /** A page whose only interesting call is the mount point's child count. */
+  function mountPage(children: number | Error) {
+    const locator = {
+      evaluate: async (): Promise<boolean> => {
+        if (children instanceof Error) throw children;
+        return children > 0;
+      },
+    };
+    return { page: { locator: vi.fn((_selector: string) => locator), on: vi.fn() } as unknown as Page };
+  }
+
+  it("reads an empty mount point as not mounted", async () => {
+    const driver = new WebNewDriver(mountPage(0).page);
+
+    expect(await (driver as unknown as { appMounted: () => Promise<boolean> }).appMounted()).toBe(false);
+  });
+
+  it("reads a filled mount point as mounted, whatever it renders", async () => {
+    const driver = new WebNewDriver(mountPage(1).page);
+
+    expect(await (driver as unknown as { appMounted: () => Promise<boolean> }).appMounted()).toBe(true);
+  });
+
+  it("does not force a reload when the mount point cannot be read", async () => {
+    // A navigation mid-evaluate or a detached node must never turn a slow
+    // paint into a reload loop.
+    const driver = new WebNewDriver(mountPage(new Error("Execution context was destroyed")).page);
+
+    expect(await (driver as unknown as { appMounted: () => Promise<boolean> }).appMounted()).toBe(true);
+  });
+});
