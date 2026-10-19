@@ -216,12 +216,19 @@ function harness(options: StubOptions = {}) {
         [
           {
             id: ESTIMATE,
+            workspace: ISSUE,
+            project: PROJECT,
             name: "Points",
+            description: "",
             type: "points",
             last_used: true,
+            created_at: "2024-01-02T03:04:05Z",
+            updated_at: "2024-02-03T04:05:06Z",
+            created_by: null,
+            updated_by: null,
             points: [
-              { id: "f23e4567-e89b-12d3-a456-42661417400d", key: 1, value: "1" },
-              { id: "f33e4567-e89b-12d3-a456-42661417400e", key: 3, value: "3" },
+              { id: "f23e4567-e89b-12d3-a456-42661417400d", key: 1, value: "1", description: "" },
+              { id: "f33e4567-e89b-12d3-a456-42661417400e", key: 3, value: "3", description: "" },
             ],
           },
         ],
