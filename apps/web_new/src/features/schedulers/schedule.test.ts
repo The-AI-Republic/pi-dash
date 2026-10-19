@@ -138,6 +138,7 @@ describe("describeRrule", () => {
     expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,WE")).toBe("Every Monday and Wednesday");
     expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE")).toBe("Every Monday, Tuesday and Wednesday");
     expect(describeRrule("FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR")).toBe("Every weekday");
+    expect(describeRrule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,FR")).toBe("Every Monday and Friday every 2 weeks");
     expect(describeRrule("FREQ=DAILY;INTERVAL=2")).toBe("Every 2 days");
     expect(describeRrule("freq=daily;byhour=9;byminute=5")).toBe("Every day at 09:05");
     expect(describeRrule("FREQ=MONTHLY;BYMONTHDAY=1,15")).toBe("Every month on day 1, 15");

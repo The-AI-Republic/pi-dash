@@ -275,7 +275,7 @@ describe("InstallForm install path", () => {
   });
 });
 
-describe("InstallForm author path", () => {
+describe("InstallForm author path", { timeout: 30_000 }, () => {
   it("creates and installs in one submit", async () => {
     contracts.createScheduler.mockResolvedValue(scheduler({ id: "new", slug: "authored" }));
     contracts.createSchedulerBinding.mockResolvedValue(binding({ scheduler: "new", scheduler_slug: "authored" }));

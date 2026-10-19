@@ -213,7 +213,7 @@ export function describeRrule(rrule: string): string {
   const monthDays = parts.get("BYMONTHDAY");
   if (monthDays !== undefined && !/^-?\d+(,-?\d+)*$/.test(monthDays)) return rule;
 
-  const head = dayText ?? cadence;
+  const head = dayText === null ? cadence : interval === 1 ? dayText : `${dayText} every ${interval} ${nouns[1]}`;
   const onMonthDay = monthDays === undefined ? "" : ` on day ${monthDays.replace(/,/g, ", ")}`;
   return `${head}${onMonthDay}${clockSentence(parts)}${countSentence(parts)}${untilSentence(parts)}`;
 }

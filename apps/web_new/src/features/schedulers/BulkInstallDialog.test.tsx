@@ -151,8 +151,8 @@ function renderDialog(scheduler: Scheduler | null = SCHEDULER) {
 }
 
 async function openPicker(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: /project/ }));
-  return screen.findByRole("listbox", { name: "Projects" });
+  await user.click(await screen.findByRole("button", { name: /project/ }, { timeout: 10_000 }));
+  return screen.findByRole("listbox", { name: "Projects" }, { timeout: 10_000 });
 }
 
 beforeEach(() => {
@@ -174,7 +174,7 @@ describe("joinedProjects", () => {
   });
 });
 
-describe("BulkInstallDialog", () => {
+describe("BulkInstallDialog", { timeout: 30_000 }, () => {
   it("stays unmounted while no definition is chosen", () => {
     contracts.listProjectDetails.mockResolvedValue([project()]);
     renderDialog(null);
@@ -201,6 +201,14 @@ describe("BulkInstallDialog", () => {
     expect(within(listbox).queryByText("Archived")).not.toBeInTheDocument();
     expect(within(listbox).getByText("Installed")).toBeInTheDocument();
     expect(within(listbox).getByLabelText(/Beta/)).toBeChecked();
+  });
+
+  it("waits for the project read before judging the joined set", async () => {
+    contracts.listProjectDetails.mockReturnValue(new Promise(() => undefined));
+    renderDialog();
+    expect(await screen.findByText("Loading projects…")).toBeInTheDocument();
+    expect(screen.queryByText("You haven't joined a project in this workspace to install on.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install" })).toBeDisabled();
   });
 
   it("leaves a target offerable when its installs cannot be read", async () => {

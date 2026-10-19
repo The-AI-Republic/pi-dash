@@ -260,7 +260,9 @@ function BulkInstallForm({
         <p className="text-body text-(--text-muted)">{scheduler.description}</p>
       </div>
 
-      {joined.length === 0 ? (
+      {projects.isPending ? (
+        <p className="text-body px-(--space-4) py-(--space-6) text-center text-(--text-muted)">Loading projects…</p>
+      ) : joined.length === 0 ? (
         <p className="text-body rounded-(--radius-control) border border-(--border) px-(--space-4) py-(--space-6) text-center text-(--text-muted)">
           You haven't joined a project in this workspace to install on.
         </p>
