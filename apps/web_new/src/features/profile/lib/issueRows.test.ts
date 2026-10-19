@@ -15,6 +15,7 @@ import {
   groupIssueRows,
   issueAssigneeIds,
   issueStateGroup,
+  stateGroupFor,
   isProfileStateGroup,
   priorityLabel,
   type ProfileStateLookup,
@@ -147,6 +148,20 @@ describe("groupIssueRows", () => {
       { group: (id) => (id === "s-done" ? "completed" : undefined), name: () => undefined }
     );
     expect(groups.map((group) => group.title)).toEqual(["Backlog", "Completed"]);
+  });
+
+  it("resolves a grouping key to its seven-group bucket", () => {
+    // A project may answer a group outside the seven; that must not leak
+    // out of the lookup, so the cast feeds one through on purpose.
+    const named = {
+      group: (id: string) => (id === "s-done" ? "completed" : id === "s-odd" ? "sideways" : undefined),
+      name: () => undefined,
+    } as unknown as ProfileStateLookup;
+    expect(stateGroupFor("started", EMPTY_STATE_LOOKUP)).toBe("started");
+    expect(stateGroupFor("s-done", named)).toBe("completed");
+    expect(stateGroupFor("s-odd", named)).toBe("backlog");
+    expect(stateGroupFor("s-missing", named)).toBe("backlog");
+    expect(stateGroupFor("s-missing", EMPTY_STATE_LOOKUP)).toBe("backlog");
   });
 
   it("groups assignees with unassigned first and an unassigned title", () => {

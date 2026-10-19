@@ -73,6 +73,17 @@ export function isProfileStateGroup(value: string): value is ProfileStateGroup {
   return (PROFILE_STATE_GROUPS as readonly string[]).includes(value);
 }
 
+/**
+ * The seven-group bucket a grouping key stands for. A key that already
+ * names a group is itself; anything else goes through the state lookup,
+ * and an unknown or off-vocabulary group falls back to backlog.
+ */
+export function stateGroupFor(key: string, lookup: ProfileStateLookup): ProfileStateGroup {
+  if (isProfileStateGroup(key)) return key;
+  const group = lookup.group(key);
+  return group !== undefined && isProfileStateGroup(group) ? group : "backlog";
+}
+
 /** An issue row's state group; absent or unknown states read as backlog. */
 export function issueStateGroup(issue: IssueListItem, lookup: ProfileStateLookup): ProfileStateGroup {
   if (issue.state_id === null) return "backlog";
@@ -94,7 +105,7 @@ function groupTitle(
     case "priority":
       return priorityLabel(key);
     case "state":
-      return STATE_GROUP_TITLES[isProfileStateGroup(key) ? key : "backlog"];
+      return STATE_GROUP_TITLES[stateGroupFor(key, lookup)];
     case "assignees":
       return key === "unassigned" ? "Unassigned" : (memberNames.get(key) ?? key);
   }
@@ -144,9 +155,7 @@ export function groupIssueRows(
 }
 
 function stateRank(key: string, lookup: ProfileStateLookup): number {
-  const group = isProfileStateGroup(key) ? key : (lookup.group(key) ?? "backlog");
-  const index = PROFILE_STATE_GROUPS.indexOf(group);
-  return index === -1 ? PROFILE_STATE_GROUPS.length : index;
+  return PROFILE_STATE_GROUPS.indexOf(stateGroupFor(key, lookup));
 }
 
 function compareGroupKeys(

@@ -369,6 +369,56 @@ describe("ProfileIssuesTab", () => {
     expect(screen.getByRole("button", { name: "Show empty groups" })).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("names the assignee column, blanks dates that are unset, and keeps a row whose state left the project", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([
+        issue("i-urgent", "Prof working row", { state_id: "s-working", assignee_ids: ["u-2", "u-3"] }),
+        issue("i-low", "Prof orphan row", {
+          state_id: "s-gone",
+          assignee_ids: [],
+          start_date: "2026-10-02",
+          target_date: "2026-10-09",
+        }),
+      ])
+    );
+    renderTab();
+    await screen.findByTestId("profile-list");
+    const [working, orphan] = [...document.querySelectorAll("[data-profile-row]")] as HTMLElement[];
+    expect(working?.textContent).toContain("In progress");
+    expect(working?.textContent).toContain("2 assigned");
+    expect(orphan?.textContent).toContain("Unassigned");
+    expect(orphan?.textContent).toContain("2026-10-02");
+    expect(orphan?.textContent).toContain("2026-10-09");
+    expect(orphan?.textContent).not.toContain("s-gone");
+  });
+
+  it("drops every stored-off column from the row", async () => {
+    localStorage.setItem(
+      profileDisplayKey("acme", "u-1"),
+      JSON.stringify({
+        properties: { key: false, priority: false, state: false, assignee: false, start_date: false, due_date: false },
+      })
+    );
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([
+        issue("i-urgent", "Prof bare row", {
+          state_id: "s-working",
+          assignee_ids: ["u-2"],
+          start_date: "2026-10-02",
+          target_date: "2026-10-09",
+        }),
+      ])
+    );
+    renderTab();
+    await screen.findByTestId("profile-list");
+    const row = document.querySelector("[data-profile-row]") as HTMLElement;
+    expect(row.textContent).toBe("Prof bare row");
+    expect(row.textContent).not.toContain("In progress");
+    expect(row.textContent).not.toContain("1 assigned");
+    expect(row.textContent).not.toContain("2026-10-02");
+    expect(row.textContent).not.toContain("2026-10-09");
+  });
+
   it("hides and restores a column from the display properties", async () => {
     renderTab();
     await screen.findByTestId("profile-list");
