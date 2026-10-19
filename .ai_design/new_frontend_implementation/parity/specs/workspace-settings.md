@@ -97,6 +97,7 @@ read, §44). No other API traffic belongs to the shell.
 Each settings page titles the browser tab with the workspace name
 followed by the section name: `{workspace} - General settings`,
 `{workspace} - Members`, `{workspace} - Billing & Plans`, `{workspace}
+
 - Exports`, `{workspace} - Webhooks`, `{workspace} - Integrations`.
 The webhook detail page uses `{workspace} - Webhook`. Navigating
 between sections updates the title; refused sections leave it empty.
@@ -672,6 +673,13 @@ the gate revisits it there.
 
 ## 30. Plan actions (WSET-030, slice NEWFRONT-546)
 
+Built typing (NEWFRONT-546): both link targets above are literal hrefs on
+an anchor that opens a new tab, so no request is ever issued by the app and
+the page state is untouched. The two pricing-page targets carry the chosen
+frequency in `plan`; the enterprise contact page carries none. Per-card
+frequency state lives on the billing page, so two cards never share a
+choice.
+
 Every plan action opens an external page in a new tab; nothing is
 purchased in-app and no workspace state changes. The button reads
 `Upgrade to {plan}` on purchasable plans and `Talk to Sales`
@@ -691,6 +699,14 @@ unobservable in this checkout; they need oracle confirmation on the
 cloud build and the gate revisits them there.
 
 ## 31. No paid-plan upgrade modal (WSET-031, slice NEWFRONT-546)
+
+Built typing (NEWFRONT-546): the new billing body renders no dialog at
+all, the shell user menu has no community entry (§1), and nothing outside
+the billing page links to any plan surface. The oracle's pre-removal
+`bug:` scenario keeps its observed leg for the old app and asserts the
+intended absence on `apps/web_new` (target branch in the spec). The
+active-cycles pill leg is skipped on `apps/web_new` until the cycles route
+lands (NEWFRONT-527 carries the leg).
 
 Target behavior, from the inventory acceptance text and main PR #572
 (`Delete the dead Community upgrade/pricing modal
@@ -721,6 +737,11 @@ This spec and the inventory negative row win: the slice builds
 nothing here and proves the absence.
 
 ## 32. OSS billing (WSET-032, slice NEWFRONT-546)
+
+Built typing (NEWFRONT-546): the page reads no endpoint on any build, so
+the OSS and cloud bodies are identical today. Every plan action is an
+anchor to the external pages in §30; no trial, portal, checkout,
+current-plan or cancellation wording exists in the body.
 
 On OSS builds the billing page renders the community summary and the
 plan comparison of §29 with no purchase, portal, trial or
@@ -1096,4 +1117,3 @@ Instance (no new contracts — UI-only reads owned with the shell):
 
 - GET `/api/instances/` — instance info: setup-done flag and
   instance standing; drives §§34–35.
-

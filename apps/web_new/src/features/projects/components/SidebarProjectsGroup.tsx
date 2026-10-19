@@ -31,7 +31,12 @@ import {
   type SidebarDropRow,
   type SidebarDropTarget,
 } from "../sidebar.js";
-import { SidebarOverflowPanel } from "./SidebarOverflowPanel.js";
+// The slide-over only mounts after the user opens it, and its search box,
+// drag math and row menu are heavy relative to the sidebar; it rides its
+// own chunk so first paint never carries it (Quality gates budget).
+const LazySidebarOverflowPanel = React.lazy(() =>
+  import("./SidebarOverflowPanel.js").then((module) => ({ default: module.SidebarOverflowPanel }))
+);
 import { SidebarProjectRow } from "./SidebarProjectRow.js";
 
 export interface SidebarProjectsGroupProps {
@@ -194,14 +199,16 @@ export function SidebarProjectsGroup({
         </button>
       )}
       {overflowOpen ? (
-        <SidebarOverflowPanel
-          workspaceSlug={workspaceSlug}
-          projects={joined}
-          canCreateProject={canCreateProject}
-          onCreateProject={onCreateProject}
-          onNavigate={onNavigate}
-          onClose={() => setOverflowOpen(false)}
-        />
+        <React.Suspense fallback={null}>
+          <LazySidebarOverflowPanel
+            workspaceSlug={workspaceSlug}
+            projects={joined}
+            canCreateProject={canCreateProject}
+            onCreateProject={onCreateProject}
+            onNavigate={onNavigate}
+            onClose={() => setOverflowOpen(false)}
+          />
+        </React.Suspense>
       ) : null}
       {closed || projectsStatus !== "pending" ? null : (
         <div role="status" aria-label="Loading projects" data-testid="sidebar-project-placeholders">

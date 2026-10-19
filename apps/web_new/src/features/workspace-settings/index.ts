@@ -74,6 +74,31 @@ export type {
   WorkspaceSettingsSection,
   WorkspaceSettingsSectionKey,
 } from "./lib/sections.js";
+export { BillingPage } from "./billing/BillingPage.js";
+export type { BillingPageProps } from "./billing/BillingPage.js";
+export { PlanCard } from "./billing/PlanCard.js";
+export type { PlanCardProps } from "./billing/PlanCard.js";
+export { COMPARE_COLLAPSE_LABEL, COMPARE_EXPAND_LABEL, PlanComparison } from "./billing/PlanComparison.js";
+export {
+  BILLING_COMPARISON,
+  BILLING_PAGE_DESCRIPTION,
+  BILLING_PLANS,
+  COMMUNITY_PLAN,
+  comparisonCellLabel,
+  findBillingPlan,
+  planActionHref,
+  planActionLabel,
+  planAmount,
+  QUOTE_ON_REQUEST,
+} from "./billing/model.js";
+export type {
+  BillingFrequency,
+  ComparisonFeature,
+  ComparisonSection,
+  PlanDefinition,
+  PlanId,
+  PlanPrice,
+} from "./billing/model.js";
 export { WORKSPACE_SETTINGS_QUERY_POLICY } from "./lib/settingsQuery.js";
 export { isWorkspaceWebhookDetailPath, workspaceSettingsTitle } from "./lib/title.js";
 export type { WorkspaceSettingsTitleInput } from "./lib/title.js";

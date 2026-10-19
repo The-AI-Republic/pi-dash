@@ -13,6 +13,8 @@ describe("UpgradePill", () => {
     expect(pill.tagName).toBe("SPAN");
     expect(pill.className).toContain("text-caption");
     expect(pill.className).not.toContain("text-meta");
+    // The stable hook parity scenarios use to count and click the marker.
+    expect(pill).toHaveAttribute("data-testid", "upgrade-pill");
   });
 
   it("renders the medium size variant", () => {

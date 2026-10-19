@@ -35,7 +35,6 @@ const LayoutComponent: RouteComponent = Layout;
 const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["general", "/", GeneralRoute.options.component as RouteComponent],
   ["members", "members", MembersRoute.options.component as RouteComponent],
-  ["billing", "billing", BillingRoute.options.component as RouteComponent],
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
   ["webhooks", "webhooks", WebhooksRoute.options.component as RouteComponent],
   ["integrations", "integrations", IntegrationsRoute.options.component as RouteComponent],
@@ -74,6 +73,36 @@ describe("workspace settings section routes", () => {
       expect(await screen.findByTestId("workspace-settings-section-placeholder")).toBeInTheDocument();
     });
   }
+
+  // The billing section (NEWFRONT-546) owns its page body too: admins get
+  // the static plans page inside the frame, and members are refused by the
+  // shell's admin gate on the same address.
+  it("mounts the billing plans page for its own address", async () => {
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: BillingRoute.options.component as RouteComponent,
+      leafPath: "billing",
+      transport: settingsTransport({ role: 20 }),
+    });
+    expect(await screen.findByTestId("workspace-settings-shell")).toBeInTheDocument();
+    expect(await screen.findByTestId("workspace-settings-billing")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-section-placeholder")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "All plans" })).toBeInTheDocument();
+  });
+
+  it("refuses a member on the billing address without rendering the page", async () => {
+    const requested: string[] = [];
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: BillingRoute.options.component as RouteComponent,
+      leafPath: "billing",
+      transport: settingsTransport({ role: 15, onRequest: (url) => requested.push(url) }),
+    });
+    expect(await screen.findByTestId("workspace-settings-not-authorized")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-billing")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-shell")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "All plans" })).not.toBeInTheDocument();
+  });
 
   it("renders the registered webhook detail body with its id", async () => {
     const id = "223e4567-e89b-12d3-a456-426614174001";

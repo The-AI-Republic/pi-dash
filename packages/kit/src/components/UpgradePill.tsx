@@ -23,6 +23,7 @@ const sizeClasses: Record<UpgradePillSize, string> = {
 export function UpgradePill({ size = "small", className }: UpgradePillProps): React.ReactElement {
   return (
     <span
+      data-testid="upgrade-pill"
       className={cn(
         "inline-flex w-fit items-center rounded-(--radius-full) bg-(--accent-subtle) py-px font-medium whitespace-nowrap text-(--accent)",
         sizeClasses[size],

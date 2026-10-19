@@ -44,6 +44,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-prompts.test.ts",
       "e2e/parity/drivers/web-new-runners.test.ts",
       "e2e/parity/drivers/web-new-assistant.test.ts",
+      "e2e/parity/drivers/web-new-billing.test.ts",
       "e2e/parity/drivers/modal-copy.test.tsx",
       "e2e/parity/helpers/calendar-dates.test.ts",
       "e2e/parity/drivers/web-favorites.test.ts",

@@ -196,6 +196,15 @@ test(
     });
 
     await test.step("upgrade pills are static labels that open nothing", async () => {
+      if (driver.target === "web_new") {
+        // The active-cycles route belongs to the cycles area (CYC-043), so
+        // the pill's mount host has not landed yet. The rest of this row
+        // (no dialog at the former trigger points, no plan surface in the
+        // shell) is proven above; the pill leg skips like the shell's
+        // SHELL-101 precedent until the host exists. TODO(NEWFRONT-527).
+        test.skip(true, "cycles route unlanded; pill mount unprovable");
+        return;
+      }
       // The active-cycles header carries an upgrade pill.
       await driver.wsSettingsActiveCyclesOpen(seed.workspaceSlug);
       expect(await driver.wsSettingsProBadgeCount()).toBeGreaterThan(0);
@@ -211,7 +220,8 @@ test(
   async ({ driver, seed }) => {
     // Bug NEWFRONT-423: the upgrade dialog was intended removed (WSET-031
     // negative row), but the sidebar user-menu community entry still
-    // opens it. Pinned as observed until the removal lands.
+    // opens it. Pinned as observed until the removal lands. web_new builds
+    // the intended target (§31): no community entry, so no dialog.
     // The first-run tour overlay would cover the home sidebar, so the
     // seeded tour flag is completed first (home-spec precedent).
     await serverSetTourCompleted(await signInSession(seed.email, seed.password), true);
@@ -219,6 +229,13 @@ test(
     await driver.wsSettingsBillingOpen(seed.workspaceSlug);
     expect(await driver.wsSettingsUpgradeModalVisible()).toBe(false);
     await driver.wsSettingsUserMenuOpenCommunity(seed.workspaceSlug);
+    if (driver.target === "web_new") {
+      // Intended: the entry is gone, so activating the menu opens nothing.
+      expect(await driver.userMenuTexts()).not.toEqual([]);
+      expect((await driver.userMenuTexts()).join(" ")).not.toContain("Community");
+      expect(await driver.wsSettingsUpgradeModalVisible()).toBe(false);
+      return;
+    }
     expect(await driver.wsSettingsUpgradeModalVisible()).toBe(true);
     expect(await driver.wsSettingsUpgradeModalTitle()).toBe("Upgrade to a paid plan and unlock missing features.");
     await driver.wsSettingsUpgradeModalClose();
