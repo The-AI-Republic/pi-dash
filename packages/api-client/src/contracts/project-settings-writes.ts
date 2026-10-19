@@ -94,9 +94,9 @@ export async function updateProjectMember(
 }
 
 /**
- * DELETE .../members/<id>/ soft-deactivates the membership (204). The row
- * disappears from the member list but still resolves through the admin
- * lens on a direct read.
+ * DELETE .../members/<id>/ deactivates the membership (204). The row leaves
+ * the member list, and a direct read of the membership answers 404 because
+ * the retrieve path only matches active rows.
  */
 export async function removeProjectMember(
   client: ApiClient,
