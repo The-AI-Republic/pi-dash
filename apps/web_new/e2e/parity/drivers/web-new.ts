@@ -10448,7 +10448,10 @@ export class WebNewDriver implements ParityDriver {
     for (let index = 0; index < total; index += 1) {
       const row = rows.nth(index);
       const bubble = row.locator("[data-role]").first();
-      const role = (await bubble.getAttribute("data-role").catch(() => null)) ?? "assistant";
+      const raw = (await bubble.getAttribute("data-role").catch(() => null)) ?? "assistant";
+      // Tool calls and their results are one kind of row to a reader, and the
+      // parity contract names it `tool` whatever the row's stored role is.
+      const role = raw === "tool_call" || raw === "tool_result" ? "tool" : raw;
       const text = ((await bubble.innerText().catch(() => "")) ?? "").trim();
       if (text === "") continue;
       bubbles.push({ role, text });

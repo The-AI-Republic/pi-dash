@@ -12,6 +12,7 @@ import {
   mergeTranscript,
   replySettled,
   streamingPlaceholder,
+  terminalRow,
   transcriptRows,
 } from "./turn.js";
 
@@ -254,6 +255,17 @@ describe("replySettled", () => {
         message({ id: "e", role: "error", status: "failed", seq: 2 }),
       ])
     ).toBe(true);
+  });
+});
+
+describe("terminalRow", () => {
+  it("matches a finished reply to the named turn only", () => {
+    const reply = message({ role: "assistant", status: "completed", turn_id: "turn" });
+    expect(terminalRow(reply, "turn")).toBe(true);
+    expect(terminalRow(reply, "other")).toBe(false);
+    expect(terminalRow({ ...reply, status: "streaming" }, "turn")).toBe(false);
+    expect(terminalRow({ ...reply, role: "tool_result" }, "turn")).toBe(false);
+    expect(terminalRow({ ...reply, role: "error", status: "failed" }, "turn")).toBe(true);
   });
 });
 

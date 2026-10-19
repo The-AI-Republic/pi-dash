@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { assistantKeys } from "../api/keys.js";
 import { transcriptKey } from "../api/threadKeys.js";
-import { TURN_POLL_MS, useAssistantChat } from "./useAssistantChat.js";
+import { TURN_FAILED_FALLBACK, TURN_POLL_MS, useAssistantChat } from "./useAssistantChat.js";
 
 const stream = vi.hoisted(() => ({ subscriptions: [] as { onEvent: (event: unknown) => void }[] }));
 
@@ -35,6 +35,8 @@ vi.mock("../api/events.js", async (importOriginal) => {
 });
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
+const STREAM_ROW = "44444444-4444-4444-8444-444444444444";
+const TOOL_ROW = "55555555-5555-4555-8555-555555555555";
 
 function row(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
   return {
@@ -334,6 +336,82 @@ describe("useAssistantChat", () => {
     expect(result.current.running).toBe(true);
   });
 
+  it("ignores a replayed start and terminal of an earlier turn after a new send", async () => {
+    // The stream resubscribes from zero after a send, so the previous turn's
+    // whole lifecycle arrives before the queued turn's own start. Nothing in
+    // it may claim the queue (AGT-042).
+    const { result, sends } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done", turn_id: "old" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() => result.current.send("next"));
+    await waitFor(() => expect(sends()).toBe(1));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => {
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 40,
+        thread: THREAD_ID,
+        message: null,
+        seq: 40,
+        kind: "turn_started",
+        payload: { turn_id: "old" },
+        created_at: "2026-01-01T00:00:00Z",
+      });
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 41,
+        thread: THREAD_ID,
+        message: null,
+        seq: 41,
+        kind: "turn_completed",
+        payload: { turn_id: "old", usage: {} },
+        created_at: "2026-01-01T00:00:01Z",
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("keeps a cold load's active turn running through a replayed earlier lifecycle", async () => {
+    // A reload lands on a transcript ending in an answered turn while the
+    // server reports another turn active. The replay serves the old start and
+    // terminal first; neither may settle the active turn, and the poll has to
+    // stay on so the answer still lands (AGT-042).
+    const { result, server } = setup(
+      [
+        row({ id: "u", seq: 1 }),
+        row({ id: "a", role: "assistant", seq: 2, content: "done", turn_id: "old" }),
+        row({ id: "u2", seq: 3, content: "next", turn_id: "current" }),
+      ],
+      { active: true }
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => {
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 42,
+        thread: THREAD_ID,
+        message: null,
+        seq: 42,
+        kind: "turn_started",
+        payload: { turn_id: "old" },
+        created_at: "2026-01-01T00:00:00Z",
+      });
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 43,
+        thread: THREAD_ID,
+        message: null,
+        seq: 43,
+        kind: "turn_completed",
+        payload: { turn_id: "old", usage: {} },
+        created_at: "2026-01-01T00:00:01Z",
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+  });
+
   it("ignores a replayed start at a sequence already seen", async () => {
     const { result } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
     await waitFor(() => expect(result.current.loaded).toBe(true));
@@ -394,6 +472,239 @@ describe("useAssistantChat", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(result.current.error).toBeNull();
     expect(result.current.running).toBe(true);
+  });
+
+  it("fails a followed turn with the event's detail and re-reads the list", async () => {
+    const { result, listReads } = setup([row()]);
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 45,
+        thread: THREAD_ID,
+        message: null,
+        seq: 45,
+        kind: "turn_started",
+        payload: { turn_id: "turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(true));
+    const before = listReads();
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 46,
+        thread: THREAD_ID,
+        message: null,
+        seq: 46,
+        kind: "turn_failed",
+        payload: { turn_id: "turn", error_code: "provider_error", detail: "Provider unreachable." },
+        created_at: "2026-01-01T00:00:01Z",
+      })
+    );
+    await waitFor(() => expect(result.current.error).toBe("Provider unreachable."));
+    expect(result.current.running).toBe(false);
+    await waitFor(() => expect(listReads()).toBeGreaterThan(before));
+  });
+
+  it("falls back to the code, then to a sentence, when a failure has no detail", async () => {
+    const { result } = setup([row()]);
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 47,
+        thread: THREAD_ID,
+        message: null,
+        seq: 47,
+        kind: "turn_started",
+        payload: { turn_id: "turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 48,
+        thread: THREAD_ID,
+        message: null,
+        seq: 48,
+        kind: "turn_failed",
+        payload: { turn_id: "turn", error_code: "provider_error", detail: "   " },
+        created_at: "2026-01-01T00:00:01Z",
+      })
+    );
+    await waitFor(() => expect(result.current.error).toBe("provider_error"));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 49,
+        thread: THREAD_ID,
+        message: null,
+        seq: 49,
+        kind: "turn_started",
+        payload: { turn_id: "turn-2" },
+        created_at: "2026-01-01T00:00:02Z",
+      })
+    );
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 50,
+        thread: THREAD_ID,
+        message: null,
+        seq: 50,
+        kind: "turn_failed",
+        payload: { turn_id: "turn-2", detail: "" },
+        created_at: "2026-01-01T00:00:03Z",
+      })
+    );
+    await waitFor(() => expect(result.current.error).toBe(TURN_FAILED_FALLBACK));
+  });
+
+  it("settles from a terminal that names no turn before any start", async () => {
+    // An event without a turn id can only be about the turn on screen.
+    const { result } = setup([row()]);
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 51,
+        thread: THREAD_ID,
+        message: null,
+        seq: 51,
+        kind: "turn_completed",
+        payload: { usage: {} },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(false));
+  });
+
+  it("ignores a cold-load terminal for a turn the transcript tail does not follow", async () => {
+    // The tail is a user row of one turn; a replayed terminal naming an
+    // older turn settles nothing.
+    const { result } = setup([row({ id: "u", seq: 1, turn_id: "current" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 52,
+        thread: THREAD_ID,
+        message: null,
+        seq: 52,
+        kind: "turn_completed",
+        payload: { turn_id: "old", usage: {} },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("settles a cold load from a terminal naming the tail's own turn", async () => {
+    // The transcript ends on the user row of the turn the terminal names, and
+    // the page holds no reply for it: that terminal does close the turn.
+    const { result } = setup([row({ id: "u", seq: 1, turn_id: "turn" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 54,
+        thread: THREAD_ID,
+        message: null,
+        seq: 54,
+        kind: "turn_completed",
+        payload: { turn_id: "turn", usage: {} },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(false));
+  });
+
+  it("ignores a cold-load terminal for a turn the page already answered", async () => {
+    // The tail is a tool row of a turn whose reply is already stored; the
+    // page, not a replayed terminal, says whether that turn still runs.
+    const { result, server } = setup(
+      [
+        row({ id: "u", seq: 1, turn_id: "turn" }),
+        row({ id: "a", role: "assistant", seq: 2, content: "done", turn_id: "turn" }),
+        row({ id: "t", role: "tool_result", seq: 3, content: "Found it", turn_id: "turn" }),
+      ],
+      { active: true }
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 55,
+        thread: THREAD_ID,
+        message: null,
+        seq: 55,
+        kind: "turn_completed",
+        payload: { turn_id: "turn", usage: {} },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+  });
+
+  it("merges created and tool rows from the stream", async () => {
+    const { result } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })]);
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 60,
+        thread: THREAD_ID,
+        message: STREAM_ROW,
+        seq: 60,
+        kind: "message_created",
+        payload: { turn_id: "turn", message: row({ id: STREAM_ROW, seq: 3, status: "streaming", turn_id: "turn" }) },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.messages.map((message) => message.id)).toContain(STREAM_ROW));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 61,
+        thread: THREAD_ID,
+        message: TOOL_ROW,
+        seq: 61,
+        kind: "tool_call",
+        payload: {
+          turn_id: "turn",
+          message: row({ id: TOOL_ROW, role: "tool_call", seq: 4, content: "Search", turn_id: "turn" }),
+        },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.messages.map((message) => message.id)).toContain(TOOL_ROW));
+  });
+
+  it("ignores a cold-load terminal once the transcript shows the turn settled", async () => {
+    // A completed transcript is the page's answer; a replayed terminal may
+    // still arrive and must not unlock anything or rewrite the error line.
+    const { result } = setup(
+      [
+        row({ id: "u", seq: 1, turn_id: "turn" }),
+        row({ id: "a", role: "assistant", seq: 2, content: "done", turn_id: "turn" }),
+      ],
+      { active: false }
+    );
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(false));
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 53,
+        thread: THREAD_ID,
+        message: null,
+        seq: 53,
+        kind: "turn_failed",
+        payload: { turn_id: "turn", error_code: "old_failure" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.error).toBeNull();
   });
 
   it("follows the queued turn's own start after a send", async () => {

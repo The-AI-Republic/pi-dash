@@ -25,6 +25,7 @@ import {
   mergeMessage,
   mergeTranscript,
   replySettled,
+  terminalRow,
   transcriptRows,
   type TranscriptState,
 } from "../lib/turn.js";
@@ -104,9 +105,19 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
   // an older turn's `turn_completed` can arrive after a new send; matching the
   // id keeps that replay from unlocking a turn that has not started yet.
   const turnRef = React.useRef<string | null>(null);
+  // The newest row's turn, and whether the transcript still looks mid-turn.
+  // Before any start has been seen these are the only way to tell a terminal
+  // for the turn on screen from the replay of an older one.
+  const tailTurnRef = React.useRef<string | null>(null);
+  const pendingRef = React.useRef(false);
   // Highest `turn_started` sequence applied. The replay is ordered, so a
   // start at or below it describes a turn this view already saw.
   const startSeqRef = React.useRef(0);
+  // The turn a send queued and this view is still waiting to see start. Until
+  // its own start arrives, any other start in the replay belongs to an
+  // earlier turn and must not claim the view; the closure's `busy` cannot
+  // police that because the subscription is not re-created on every render.
+  const awaitingStartRef = React.useRef<string | null>(null);
 
   // When the latest turn started, on this clock. A thread-list read taken at
   // or after this point is the server's answer about that turn; an older one
@@ -119,7 +130,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
   // says a turn is over even when stopping added no transcript row (a cancel
   // before the assistant row exists, or after a tool row). The rail shares
   // this cache and its screens read the same list.
-  const pending = turnPending(messages) && !terminalSeen;
+  const pending = turnPending(messages);
   // Poll the list while a turn looks in flight: a local start (busy) and a
   // trailing user or tool row from a cold load both need the server's answer.
   const threads = useQuery({
@@ -137,21 +148,19 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     ? serverFresh && serverActive === false && settledFor === startedAt
     : serverFresh && serverActive === false;
   let running = false;
-  if (!terminalSeen) {
-    if (busy) {
-      // A fresh read that says no turn runs settles a stop whose cancel
-      // finalized the turn without adding a row.
-      running = !serverSettled;
-    } else if (serverActive === true) {
-      // The server says a turn is in flight even if the stored tail looks
-      // settled (a segment completed before a tool call) or is a tool row.
-      running = true;
-    } else if (!serverFresh) {
-      // No answer about this thread yet: a tail that lacks a closing reply
-      // (user, streaming or tool row) may still be mid-turn, so stay
-      // optimistic and let the first list read settle it.
-      running = pending;
-    }
+  if (terminalSeen) {
+    // A terminal that a live turn or the turn on screen accepted is final:
+    // the server said so, and a replayed terminal never reaches this point.
+    running = false;
+  } else if (busy) {
+    // A fresh read that says no turn runs settles a stop whose cancel
+    // finalized the turn without adding a row.
+    running = !serverSettled;
+  } else {
+    // No start seen yet (a cold load) or the tail is the only evidence: the
+    // server's `has_active_turn` wins, and a tail that lacks a closing reply
+    // (user, streaming or tool row) stays optimistic until the first read.
+    running = serverActive === true || (!serverFresh && pending);
   }
 
   const page = useQuery({
@@ -195,6 +204,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     dispatch({ type: "reset" });
     setTerminalSeen(false);
     turnRef.current = null;
+    awaitingStartRef.current = null;
     startSeqRef.current = 0;
     setBusy(false);
     setError(null);
@@ -205,6 +215,16 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     if (page.data !== undefined) dispatch({ type: "page", rows: page.data });
   }, [page.data]);
 
+  // The rows as the event handler sees them. A replayed `turn_started` is
+  // recognisable by its data, not its sequence: it names a turn whose answer
+  // the page already holds. Kept in a ref because the channel subscription
+  // is not re-created on every render.
+  const rowsRef = React.useRef(messages);
+  rowsRef.current = messages;
+  const tail = messages.at(-1);
+  tailTurnRef.current = typeof tail?.turn_id === "string" ? tail.turn_id : null;
+  pendingRef.current = pending;
+
   const markStarted = React.useCallback((turnId: string) => {
     setTerminalSeen(false);
     turnRef.current = turnId;
@@ -212,18 +232,30 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     setBusy(true);
   }, []);
 
-  const markTerminal = React.useCallback(() => {
+  const markTerminal = React.useCallback((turnId: string) => {
     setTerminalSeen(true);
+    if (turnId !== "") turnRef.current = turnId;
+    awaitingStartRef.current = null;
     setBusy(false);
   }, []);
 
   // Lifecycle events carry the turn they describe. The channel replays from
   // zero on every (re)connect, so one from a previous turn must neither end
   // nor start the turn this view is queued for; the send response and the
-  // newest `turn_started` are what name the current turn.
-  const followsTurn = React.useCallback((event: AssistantEvent): boolean => {
+  // newest `turn_started` are what name the current turn (AGT-042).
+  const followsTurn = React.useCallback((event: AssistantEvent): string | null => {
     const turnId = (event.payload as { turn_id?: unknown }).turn_id;
-    return typeof turnId !== "string" || turnRef.current === null || turnId === turnRef.current;
+    if (typeof turnId !== "string") return "";
+    if (turnRef.current !== null) return turnId === turnRef.current ? turnId : null;
+    // No start seen yet (a cold load): a terminal only describes the turn on
+    // screen when the transcript still looks mid-turn, the tail either has no
+    // turn of its own or belongs to that turn, and the page holds no reply
+    // for it yet. A settled transcript means the server's active read, not a
+    // replayed terminal, decides; so does a tail already answered by that
+    // same turn.
+    if (!pendingRef.current) return null;
+    if (tailTurnRef.current !== null && tailTurnRef.current !== turnId) return null;
+    return rowsRef.current.some((message) => terminalRow(message, turnId)) ? null : turnId;
   }, []);
 
   const refresh = React.useCallback(() => {
@@ -237,13 +269,19 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
           case "turn_started": {
             const turnId = (event.payload as { turn_id: string }).turn_id;
             // A replay from zero repeats earlier starts first; only a start
-            // past the last one applied describes a newer turn. While a local
-            // turn waits for its own start, an older id is the replay, not a
-            // turn from another tab.
-            const replay = event.seq <= startSeqRef.current;
-            const foreign = turnRef.current !== null && turnId !== turnRef.current && busy;
-            if (replay || foreign) break;
+            // past the last one applied describes a newer turn. While a send
+            // waits for its own start, the replayed starts all name earlier
+            // turns and must not take the view from it.
+            if (event.seq <= startSeqRef.current) break;
+            const awaiting = awaitingStartRef.current;
+            if (awaiting !== null && turnId !== awaiting) break;
+            // A cold-load replay serves the starts of turns whose answers the
+            // page already holds; those are history, and replaying them would
+            // let their terminals unlock a turn the server says is running.
+            const finished = rowsRef.current.some((message) => terminalRow(message, turnId));
+            if (finished && awaiting !== turnId) break;
             startSeqRef.current = event.seq;
+            if (awaiting === turnId) awaitingStartRef.current = null;
             markStarted(turnId);
             break;
           }
@@ -256,26 +294,32 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
           case "tool_result":
             dispatch({ type: "event", event });
             break;
-          case "turn_failed":
-            if (!followsTurn(event)) break;
+          case "turn_failed": {
+            const turnId = followsTurn(event);
+            if (turnId === null) break;
             setError(failureDetail(event));
-            markTerminal();
+            markTerminal(turnId);
             refresh();
+            void refetchThreads();
             break;
+          }
           case "turn_completed":
-          case "turn_cancelled":
-            if (!followsTurn(event)) break;
+          case "turn_cancelled": {
+            const turnId = followsTurn(event);
+            if (turnId === null) break;
             setError(null);
-            markTerminal();
+            markTerminal(turnId);
             refresh();
+            void refetchThreads();
             break;
+          }
           default:
             break;
         }
       },
     });
     return () => subscription.close();
-  }, [followsTurn, markStarted, markTerminal, refresh, threadId, workspaceSlug]);
+  }, [followsTurn, markStarted, markTerminal, refetchThreads, refresh, threadId, workspaceSlug]);
 
   const sendMutation = useSendMessage();
   const stopMutation = useStopTurn();
@@ -291,6 +335,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
         {
           onSuccess: (answer) => {
             dispatch({ type: "message", message: answer.message });
+            awaitingStartRef.current = answer.turn.id;
             markStarted(answer.turn.id);
             refresh();
           },

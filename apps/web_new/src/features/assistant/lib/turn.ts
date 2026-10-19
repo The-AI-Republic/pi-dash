@@ -110,6 +110,15 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
   }
 }
 
+/** Whether one row is a finished reply to the given turn. */
+export function terminalRow(message: AssistantMessage, turnId: string): boolean {
+  return (
+    message.turn_id === turnId &&
+    (message.role === "assistant" || message.role === "error") &&
+    message.status !== "streaming"
+  );
+}
+
 /** Rows oldest first; the sequence number is the server's ordering. */
 export function transcriptRows(state: TranscriptState): AssistantMessage[] {
   return Object.values(state.rows)

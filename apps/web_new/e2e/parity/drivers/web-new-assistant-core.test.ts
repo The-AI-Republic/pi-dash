@@ -121,6 +121,32 @@ describe("transcript reads", () => {
     ]);
   });
 
+  it("reports tool calls and tool results as one tool role", async () => {
+    // The parity contract has one `tool` role; the transcript keeps the two
+    // stored roles apart for styling and deep links.
+    const rows = [
+      locator({ getAttribute: async () => "tool_call", innerText: async () => "Searching" }),
+      locator({ getAttribute: async () => "tool_result", innerText: async () => "Found it" }),
+      locator({ getAttribute: async () => "assistant", innerText: async () => "Done" }),
+    ];
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-transcript"]'
+          ? locator({
+              locator: (inner: string) =>
+                inner === ":scope > li"
+                  ? locator({ count: async () => rows.length, nth: (i) => rows[i] as never })
+                  : locator(),
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).assistantBubbles()).resolves.toEqual([
+      { role: "tool", text: "Searching" },
+      { role: "tool", text: "Found it" },
+      { role: "assistant", text: "Done" },
+    ]);
+  });
+
   it("returns no bubbles when the transcript is absent", async () => {
     const driver = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 0 }) }));
     await expect(driver.assistantBubbles()).resolves.toEqual([]);
