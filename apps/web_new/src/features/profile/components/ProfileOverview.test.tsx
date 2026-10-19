@@ -65,6 +65,7 @@ function activityRow(overrides: Partial<IssueActivity> = {}): IssueActivity {
     },
     issue_detail: { id: "i-1", name: "Prof acted", sequence_id: 12 },
     project_detail: { id: "p-1", identifier: "PP", name: "Prof Proj" },
+    workspace_detail: { id: "w-1", name: "Acme", slug: "acme" },
     verb: "updated",
     field: "priority",
     old_value: "low",

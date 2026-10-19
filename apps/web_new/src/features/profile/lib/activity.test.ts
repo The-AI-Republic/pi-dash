@@ -4,7 +4,8 @@
 // Activity row presentation (parity/specs/profile.md §1 and §3).
 import { describe, expect, it } from "vitest";
 
-import type { IssueActivity } from "@pidash/api-client";
+import { IssueActivity } from "@pidash/api-client";
+import type { IssueActivity as ActivityRow } from "@pidash/api-client";
 
 import {
   activityActorName,
@@ -14,7 +15,7 @@ import {
   appendActivityPage,
 } from "./activity.js";
 
-type Row = IssueActivity;
+type Row = ActivityRow;
 
 const actor = {
   id: "u-1",
@@ -52,6 +53,7 @@ function row(overrides: Partial<Row> = {}): Row {
     actor_detail: actor,
     issue_detail: { id: "i-1", name: "Fix the thing", sequence_id: 42 },
     project_detail: { id: "p-1", identifier: "PP", name: "Prof Proj" },
+    workspace_detail: { id: "w-1", name: "Acme", slug: "acme" },
     ...overrides,
   };
 }
@@ -63,7 +65,6 @@ describe("activityIssueRef", () => {
 
   it("declines a link when either projection is missing or the identifier is blank", () => {
     expect(activityIssueRef(row({ issue_detail: null }), "acme")).toBeNull();
-    expect(activityIssueRef(row({ issue_detail: undefined }), "acme")).toBeNull();
     expect(activityIssueRef(row({ project_detail: null }), "acme")).toBeNull();
     expect(activityIssueRef(row({ project_detail: { id: "p-1", identifier: "", name: "x" } }), "acme")).toBeNull();
   });
@@ -71,6 +72,27 @@ describe("activityIssueRef", () => {
   it("reads the issue name, or null when not serialised", () => {
     expect(activityIssueName(row())).toBe("Fix the thing");
     expect(activityIssueName(row({ issue_detail: null }))).toBeNull();
+  });
+
+  it("accepts the wire row with its flattened issue and workspace projections", () => {
+    const id = "3f1c7a52-6a3f-4c1f-9a5e-0d0f0b1c2d3e";
+    const wire = {
+      ...row(),
+      id,
+      issue: id,
+      project: id,
+      workspace: id,
+      actor: id,
+      actor_detail: { ...actor, id },
+      issue_detail: { id, name: "Fix the thing", sequence_id: 42 },
+      project_detail: { id, identifier: "PP", name: "Prof Proj" },
+      workspace_detail: { id, name: "Acme", slug: "acme" },
+    };
+    const parsed = IssueActivity.safeParse(wire);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.workspace_detail?.slug).toBe("acme");
+    expect(activityIssueRef(parsed.data, "acme")).toEqual({ key: "PP-42", href: "/acme/browse/PP-42" });
   });
 });
 

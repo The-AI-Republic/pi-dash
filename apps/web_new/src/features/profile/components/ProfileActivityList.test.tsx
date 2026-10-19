@@ -49,6 +49,7 @@ function row(id: string, name: string): IssueActivity {
     },
     issue_detail: { id: "i-1", name, sequence_id: Number(id.replace(/\D/g, "")) || 1 },
     project_detail: { id: "p-1", identifier: "PP", name: "Prof Proj" },
+    workspace_detail: { id: "w-1", name: "Acme", slug: "acme" },
     verb: "updated",
     field: "priority",
     old_value: "low",
