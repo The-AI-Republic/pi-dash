@@ -14,13 +14,12 @@ import * as React from "react";
 import type { RouteComponent } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { registerMembersSettingsPage } from "../../../../../features/workspace-settings/members/index.js";
 import {
   registerWorkspaceSettingsPage,
   resetWorkspaceSettingsPages,
   type WorkspaceSettingsSectionKey,
 } from "../../../../../features/workspace-settings/index.js";
-import { registerMembersSettingsPage } from "../../../../../features/workspace-settings/members/register.js";
+import { registerMembersSettingsPage } from "../../../../../features/workspace-settings/members/index.js";
 import { Route as BillingRoute } from "./billing/index.js";
 import { Route as ExportsRoute } from "./exports/index.js";
 import { Route as GeneralRoute } from "./index.js";
@@ -126,11 +125,11 @@ describe("workspace settings section routes", () => {
     expect(screen.queryByRole("heading", { name: "All plans" })).not.toBeInTheDocument();
   });
 
-  // The roster section (NEWFRONT-537) keeps its body in the page registry
-  // but the live route mounts the real page inside the same frame. The
-  // reads answer 404 here, so the failed state proves the body mounted with
-  // the workspace slug.
-  it("mounts the members roster page for its own address", async () => {
+  // The members chunk registers its body when its route imports it, as the
+  // browser loads it; the test import does the same, and each test starts
+  // from that registration. The reads answer 404 here, so the failed state
+  // proves the real roster mounted with the workspace slug.
+  it("mounts the roster body the members chunk registers", async () => {
     const requested: string[] = [];
     renderSettingsRoute({
       layoutComponent: LayoutComponent,
