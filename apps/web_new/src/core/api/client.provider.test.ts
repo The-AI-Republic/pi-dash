@@ -87,6 +87,17 @@ describe("provider write client", () => {
     expect(() => getProviderWriteClient()).toThrow(/not configured/i);
   });
 
+  it("refuses the app client before bootstrap", () => {
+    expect(() => getAppClient()).toThrow(/not configured/i);
+  });
+
+  it("addresses the desktop shell's advertised API origin when none is passed", () => {
+    platformHarness.current = { kind: "desktop", apiOrigin: "https://api.desktop.test" };
+    const app = createAppClient(undefined, async () => response(200, "{}"));
+    expect(app.baseUrl).toBe("https://api.desktop.test");
+    expect(getProviderWriteClient().baseUrl).toBe("https://api.desktop.test");
+  });
+
   it("sends provider writes through the platform transport when bootstrap passed none", async () => {
     const platformCalls: string[] = [];
     platformHarness.current = {

@@ -156,6 +156,23 @@ describe("workspace settings section routes", () => {
     expect(screen.getByRole("heading", { name: "GitLab" })).toBeInTheDocument();
   });
 
+  // WSET-016: the integrations address is admin-only. The shell owns the
+  // gate, so a member never reaches the page body or its provider reads.
+  it("refuses a member on the integrations address without rendering the page", async () => {
+    const requested: string[] = [];
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: IntegrationsRoute.options.component as RouteComponent,
+      leafPath: "integrations",
+      transport: settingsTransport({ role: 15, onRequest: (url) => requested.push(url) }),
+    });
+    expect(await screen.findByTestId("workspace-settings-not-authorized")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-integrations")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "GitHub" })).not.toBeInTheDocument();
+    expect(requested.some((url) => url.includes("/integrations/github/"))).toBe(false);
+    expect(requested.some((url) => url.includes("/integrations/git/accounts/"))).toBe(false);
+  });
+
   it("mounts the webhooks list page for its own address", async () => {
     renderSettingsRoute({
       layoutComponent: LayoutComponent,

@@ -25,7 +25,7 @@ function defaultBaseUrl(): string {
 let appClient: ApiClient | null = null;
 let providerClient: ApiClient | null = null;
 let appTransport: Transport | null = null;
-let appBaseUrl: string | null = null;
+let appBaseUrl = "";
 
 /**
  * Build the singleton client. Called once at bootstrap; also points the
@@ -63,7 +63,7 @@ export function getProviderWriteClient(): ApiClient {
   }
   if (providerClient === null) {
     providerClient = createClient({
-      baseUrl: appBaseUrl ?? appClient.baseUrl,
+      baseUrl: appBaseUrl,
       transport: appTransport,
     });
   }
@@ -83,5 +83,5 @@ export function resetAppClient(): void {
   appClient = null;
   providerClient = null;
   appTransport = null;
-  appBaseUrl = null;
+  appBaseUrl = "";
 }
