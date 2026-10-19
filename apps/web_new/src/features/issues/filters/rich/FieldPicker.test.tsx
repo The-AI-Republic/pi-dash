@@ -13,11 +13,21 @@ import { richFilterFields } from "./expression.js";
 describe("fieldPickerOptions", () => {
   it("lists only unused fields in catalogue order", () => {
     const options = fieldPickerOptions(richFilterFields(), new Set(["state_group"]));
-    expect(options.map((option) => option.id)).toEqual(["state_id", "priority"]);
+    expect(options.map((option) => option.id)).toEqual([
+      "state_id",
+      "priority",
+      "assignee_id",
+      "created_by_id",
+      "mention_id",
+      "label_id",
+    ]);
   });
 
   it("returns one disabled exhaustion row when every field is used", () => {
-    const options = fieldPickerOptions(richFilterFields(), new Set(["state_id", "state_group", "priority"]));
+    const options = fieldPickerOptions(
+      richFilterFields(),
+      new Set(["state_id", "state_group", "priority", "assignee_id", "created_by_id", "mention_id", "label_id"])
+    );
     expect(options).toEqual([{ id: "__exhausted__", label: "All filters applied", disabled: true }]);
   });
 });
@@ -56,7 +66,9 @@ describe("FieldPicker", () => {
     render(
       <FieldPicker
         fields={richFilterFields()}
-        used={new Set(["state_id", "state_group", "priority"])}
+        used={
+          new Set(["state_id", "state_group", "priority", "assignee_id", "created_by_id", "mention_id", "label_id"])
+        }
         onPick={onPick}
         trigger={<Button>Add</Button>}
       />

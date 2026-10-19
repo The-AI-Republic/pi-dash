@@ -220,6 +220,8 @@ export interface RichFilterField {
   allowNegative: boolean;
   /** Static values for single/multi fields, when the field needs no read. */
   staticValues?: readonly { value: string; label: string }[];
+  /** Where the value list comes from; absent means the static values. */
+  source?: "states" | "members" | "labels";
 }
 
 const DEFAULT_FIELDS: readonly RichFilterField[] = [
@@ -231,10 +233,11 @@ const DEFAULT_FIELDS: readonly RichFilterField[] = [
     defaultNegated: false,
     operators: ["in"],
     allowNegative: true,
+    source: "states",
   },
   {
     stem: "state_group",
-    label: "State group",
+    label: "State Group",
     kind: "multi",
     defaultOperator: "in",
     defaultNegated: false,
@@ -261,6 +264,46 @@ const DEFAULT_FIELDS: readonly RichFilterField[] = [
       label: level.charAt(0).toUpperCase() + level.slice(1),
     })),
   },
+  {
+    stem: "assignee_id",
+    label: "Assignees",
+    kind: "multi",
+    defaultOperator: "in",
+    defaultNegated: false,
+    operators: ["in"],
+    allowNegative: true,
+    source: "members",
+  },
+  {
+    stem: "created_by_id",
+    label: "Created by",
+    kind: "multi",
+    defaultOperator: "in",
+    defaultNegated: false,
+    operators: ["in"],
+    allowNegative: true,
+    source: "members",
+  },
+  {
+    stem: "mention_id",
+    label: "Mentions",
+    kind: "multi",
+    defaultOperator: "in",
+    defaultNegated: false,
+    operators: ["in"],
+    allowNegative: true,
+    source: "members",
+  },
+  {
+    stem: "label_id",
+    label: "Label",
+    kind: "multi",
+    defaultOperator: "in",
+    defaultNegated: false,
+    operators: ["in"],
+    allowNegative: true,
+    source: "labels",
+  },
 ];
 
 /** Drop the dimensions a project with those features switched off must not offer. */
@@ -277,8 +320,8 @@ export function hideRichFilterFields(
 
 /** The field catalogue for one project surface. */
 export function richFilterFields(input?: { hideCycle?: boolean; hideModule?: boolean }): RichFilterField[] {
-  // Legacy dimensions (assignee, labels, cycle, module, project, dates)
-  // register their fields as their slices land (ISS-082–094, ISS-100–103).
+  // Cycle, module, project and date dimensions register their fields as
+  // their slices land (ISS-089–094, ISS-100–103).
   return hideRichFilterFields(DEFAULT_FIELDS, input ?? {});
 }
 

@@ -83,7 +83,7 @@ describe("ConditionPill", () => {
     const { onChange } = renderPill(seed());
     await user.click(screen.getByRole("button", { name: /Priority/ }));
     const list = await screen.findByRole("listbox", { name: "Filter properties" });
-    await user.click(within(list).getByRole("option", { name: "State group" }));
+    await user.click(within(list).getByRole("option", { name: "State Group" }));
     expect(onChange).toHaveBeenCalledWith({
       key: "a",
       property: "state_group",

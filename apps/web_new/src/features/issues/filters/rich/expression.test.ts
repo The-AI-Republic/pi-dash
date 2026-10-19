@@ -192,13 +192,21 @@ describe("condition operations", () => {
 
 describe("field catalogue", () => {
   it("offers the core fields this slice can edit", () => {
-    expect(richFilterFields().map((field) => field.stem)).toEqual(["state_id", "state_group", "priority"]);
+    expect(richFilterFields().map((field) => field.stem)).toEqual([
+      "state_id",
+      "state_group",
+      "priority",
+      "assignee_id",
+      "created_by_id",
+      "mention_id",
+      "label_id",
+    ]);
   });
 
   it("filters cycle and module when the flags hide them", () => {
-    expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(3);
-    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(3);
-    expect(richFilterFields()).toHaveLength(3);
+    expect(richFilterFields({ hideCycle: true, hideModule: true })).toHaveLength(7);
+    expect(richFilterFields({ hideCycle: false, hideModule: false })).toHaveLength(7);
+    expect(richFilterFields()).toHaveLength(7);
   });
 
   it("drops exactly the dimension the surface hides", () => {
@@ -209,8 +217,19 @@ describe("field catalogue", () => {
     expect(hideRichFilterFields(withDimensions, { hideModule: true }).map((field) => field.stem)).not.toContain(
       "module_id"
     );
-    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(5);
-    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(5);
+    expect(hideRichFilterFields(withDimensions, {})).toHaveLength(9);
+    expect(hideRichFilterFields(withDimensions, { hideCycle: false, hideModule: false })).toHaveLength(9);
+  });
+
+  it("labels the state group picker entry and names each value source", () => {
+    const fields = richFilterFields();
+    expect(findField(fields, "state_group")?.label).toBe("State Group");
+    expect(findField(fields, "state_id")?.source).toBe("states");
+    for (const stem of ["assignee_id", "created_by_id", "mention_id"]) {
+      expect(findField(fields, stem)).toMatchObject({ source: "members", kind: "multi", operators: ["in"] });
+    }
+    expect(findField(fields, "label_id")).toMatchObject({ source: "labels", kind: "multi", operators: ["in"] });
+    expect(findField(fields, "priority")?.source).toBeUndefined();
   });
 
   it("exposes static values and the priority order", () => {
