@@ -8,10 +8,11 @@
 // that already has a transcript.
 
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { getChatSession, getRunner, listChatMessages, listChatSessions, type ApiClient } from "@pidash/api-client";
+import { getChatSession, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { chatKeys } from "./keys.js";
+import { fetchChatMessages, fetchChatRunner, fetchChatSessions } from "./transport.js";
 
 /** Status changes appear live; the detail read re-polls on the list cadence. */
 export const CHAT_RUNNER_POLL_INTERVAL_MS = 5_000;
@@ -21,7 +22,7 @@ export const CHAT_SESSIONS_POLL_INTERVAL_MS = 5_000;
 export function chatRunnerQueryOptions(client: ApiClient, workspaceSlug: string, runnerId: string) {
   return queryOptions({
     queryKey: chatKeys.runner(workspaceSlug, runnerId),
-    queryFn: () => getRunner(client, runnerId),
+    queryFn: () => fetchChatRunner(client, runnerId),
     staleTime: 0,
     refetchInterval: CHAT_RUNNER_POLL_INTERVAL_MS,
   });
@@ -35,7 +36,7 @@ export function chatSessionsQueryOptions(
 ) {
   return queryOptions({
     queryKey: chatKeys.sessions(workspaceSlug, runnerId),
-    queryFn: () => listChatSessions(client, { workspace: workspaceId, runner: runnerId }),
+    queryFn: () => fetchChatSessions(client, workspaceId, runnerId),
     staleTime: 0,
     refetchInterval: CHAT_SESSIONS_POLL_INTERVAL_MS,
   });
@@ -52,7 +53,7 @@ export function chatSessionQueryOptions(client: ApiClient, workspaceSlug: string
 export function chatMessagesQueryOptions(client: ApiClient, workspaceSlug: string, sessionId: string) {
   return queryOptions({
     queryKey: chatKeys.messages(workspaceSlug, sessionId),
-    queryFn: () => listChatMessages(client, sessionId),
+    queryFn: () => fetchChatMessages(client, sessionId),
     staleTime: 0,
   });
 }

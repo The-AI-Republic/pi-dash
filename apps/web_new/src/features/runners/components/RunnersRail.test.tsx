@@ -21,7 +21,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   };
 });
 
-import { RunnersRail, chatHref, RAIL_HEADER } from "./RunnersRail.js";
+import { BUILTIN_SECTION_HEADER, RunnersRail, chatHref, RAIL_HEADER } from "./RunnersRail.js";
 
 const runner = (id: string, name: string, status: Runner["status"] = "online"): Runner =>
   ({ id, name, status, enrolled_at: "2024-01-01T00:00:00Z" }) as Runner;
@@ -71,6 +71,54 @@ describe("RunnersRail", () => {
     render(<RunnersRail scope={{ workspaceSlug: "acme", projectId: "p-1" }} runners={[]} isProjectScope />);
     expect(screen.getByTestId("runners-rail-empty")).toHaveTextContent("No runners connected to this project yet.");
     expect(screen.queryAllByTestId("runners-rail-contact")).toEqual([]);
+  });
+
+  it("links an available built-in contact above the runner contacts", () => {
+    render(
+      <RunnersRail
+        scope={{ workspaceSlug: "acme" }}
+        runners={[runner("r-1", "alpha")]}
+        isProjectScope={false}
+        localContacts={[{ id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: null }]}
+      />
+    );
+    expect(screen.getByText(BUILTIN_SECTION_HEADER)).toBeInTheDocument();
+    expect(screen.getByTestId("runners-rail-local-contact")).toHaveAttribute(
+      "href",
+      "/acme/runners/chat/pidash-builtin"
+    );
+    expect(screen.getByText("Built-in agent")).toBeInTheDocument();
+    expect(screen.getAllByTestId("runners-rail-contact")).toHaveLength(1);
+    expect(screen.queryByTestId("runners-rail-local-reason")).toBeNull();
+    // The built-in section reads before the runner section.
+    const sections = screen.getAllByText(/^(Built-in|Runners)$/).map((node) => node.textContent);
+    expect(sections).toEqual([BUILTIN_SECTION_HEADER, "Runners"]);
+  });
+
+  it("shows an unavailable built-in contact disabled with the server's reason", () => {
+    render(
+      <RunnersRail
+        scope={{ workspaceSlug: "acme", projectId: "p-1" }}
+        runners={[]}
+        isProjectScope
+        localContacts={[
+          { id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: "Turned off here." },
+        ]}
+      />
+    );
+    const contact = screen.getByTestId("runners-rail-local-contact");
+    expect(contact.tagName).not.toBe("A");
+    expect(contact).toHaveAttribute("aria-disabled", "true");
+    expect(contact).toHaveAttribute("title", "Turned off here.");
+    expect(screen.getByTestId("runners-rail-local-reason")).toHaveTextContent("Turned off here.");
+    // The unavailable entry keeps the runners section and its empty sentence.
+    expect(screen.getByTestId("runners-rail-empty")).toBeInTheDocument();
+  });
+
+  it("renders no built-in section on a build without the local contact", () => {
+    render(<RunnersRail scope={{ workspaceSlug: "acme" }} runners={[runner("r-1", "alpha")]} isProjectScope={false} />);
+    expect(screen.queryByText(BUILTIN_SECTION_HEADER)).toBeNull();
+    expect(screen.queryByTestId("runners-rail-local-contact")).toBeNull();
   });
 
   it("shows the workspace empty sentence", () => {

@@ -25,7 +25,18 @@ const contracts = vi.hoisted(() => ({
 }));
 
 const active = vi.hoisted(() => ({ transport: null as unknown }));
-vi.mock("./transport.js", () => ({ getChatTransport: () => active.transport }));
+vi.mock("./transport.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./transport.js")>();
+  return {
+    ...original,
+    getChatTransport: () => active.transport,
+    openChatSession: (...args: unknown[]) => contracts.createChatSession(...args),
+    prepareChatSession: (...args: unknown[]) => contracts.warmChatSession(...args),
+    fetchChatRunner: (...args: unknown[]) => contracts.getRunner(...args),
+    fetchChatSessions: (...args: unknown[]) => contracts.listChatSessions(...args),
+    fetchChatMessages: (...args: unknown[]) => contracts.listChatMessages(...args),
+  };
+});
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();

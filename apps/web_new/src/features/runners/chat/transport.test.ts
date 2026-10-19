@@ -9,7 +9,13 @@ import type { ApiClient, ChatEvent } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { platform, type EventStream, type StreamInit, type StreamMessage } from "../../../core/platform/index.js";
-import { createCloudChatTransport, getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
+import {
+  createCloudChatTransport,
+  getChatTransport,
+  openChatSession,
+  setChatTransport,
+  type ChatTransport,
+} from "./transport.js";
 
 const client = { baseUrl: "https://api.test" } as ApiClient;
 
@@ -171,6 +177,30 @@ describe("active transport", () => {
     expect(getChatTransport()).toBe(initial);
     setChatTransport(undefined);
     expect(getChatTransport()).toBe(initial);
+  });
+});
+
+describe("read and write seams", () => {
+  it("opens a conversation through the API when no transport replaces it", async () => {
+    const send = vi.fn(async () => ({ data: { id: "s-new" } }));
+    const parse = vi.fn(() => ({ id: "s-new" }));
+    const api = { sendJson: send, parse } as unknown as ApiClient;
+    await expect(openChatSession(api, { workspace: "ws-id", runner: "r-1" })).resolves.toEqual({ id: "s-new" });
+    expect(send).toHaveBeenCalledWith("POST", "/api/runners/chat/sessions/", {
+      json: { workspace: "ws-id", runner: "r-1" },
+    });
+  });
+
+  it("opens a conversation through the active transport when it has the verb", async () => {
+    const createChatSession = vi.fn(async () => ({ id: "local" }));
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      createChatSession,
+    } as unknown as ChatTransport);
+    await expect(openChatSession({} as ApiClient, { workspace: "ws-id", runner: "r-1" })).resolves.toEqual({
+      id: "local",
+    });
+    expect(createChatSession).toHaveBeenCalledWith({ workspace: "ws-id", runner: "r-1" });
   });
 });
 

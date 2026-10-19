@@ -14,6 +14,8 @@
 import * as React from "react";
 
 import type { Runner } from "@pidash/api-client";
+
+import type { LocalContact } from "../chat/localContact.js";
 import type { RunnersAccess } from "../access.js";
 import type { RunnersScopeInput } from "../scope.js";
 import { RunnersNotAuthorized } from "./NotAuthorizedView.js";
@@ -28,6 +30,8 @@ export interface RunnersAreaShellProps {
   pathname: string;
   /** Project chrome (breadcrumb header) rendered above the area. */
   chrome?: React.ReactNode;
+  /** The built-in local contact; absent on cloud and web (RUN-033). */
+  localContacts?: readonly LocalContact[];
   children: React.ReactNode;
 }
 
@@ -41,6 +45,7 @@ export function RunnersAreaShell({
   runners,
   pathname,
   chrome,
+  localContacts,
   children,
 }: RunnersAreaShellProps): React.ReactElement | null {
   if (access === "loading") return null;
@@ -56,7 +61,12 @@ export function RunnersAreaShell({
     <>
       {chrome}
       <div className="flex min-h-0 w-full flex-1 overflow-hidden">
-        <RunnersRail scope={scope} runners={runners} isProjectScope={isProjectScope(scope)} />
+        <RunnersRail
+          scope={scope}
+          runners={runners}
+          isProjectScope={isProjectScope(scope)}
+          {...(localContacts === undefined ? {} : { localContacts })}
+        />
         <main aria-label="Runners content" data-testid="runners-content" className="min-w-0 flex-1 overflow-auto">
           <RunnersTabStrip scope={scope} pathname={pathname} />
           {children}

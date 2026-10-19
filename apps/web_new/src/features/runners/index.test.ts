@@ -83,11 +83,13 @@ describe("root runtime sign-out lifecycle", () => {
     expect(getRuntimeSignOutHooks()).toBeNull();
   });
 
+  // The barrel pulls the whole feature into a cold module graph, which takes
+  // several seconds on a loaded suite host; the default budget is too tight.
   it("exposes the command-line setup surface from the feature barrel", async () => {
     const feature = await import("./index.js");
     expect(feature.CLI_SETUP_HEADING).toBe("Command-line tool");
     expect(typeof feature.createSetupLock).toBe("function");
     expect(typeof feature.setUpCli).toBe("function");
     expect(feature.CliSetupPanel).toBeTypeOf("function");
-  });
+  }, 20_000);
 });

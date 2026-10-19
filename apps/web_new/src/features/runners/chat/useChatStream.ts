@@ -29,6 +29,19 @@ export const STREAM_RETRY_BASE_MS = 1_000;
 /** Longest wait between reopen attempts. */
 export const STREAM_RETRY_MAX_MS = 15_000;
 
+/**
+ * The approval request still waiting for an answer: the last approval
+ * frame, provided no terminal frame came after it.
+ */
+export function parkedApproval(events: readonly ChatEvent[]): ChatEvent | null {
+  let parked: ChatEvent | null = null;
+  for (const event of events) {
+    if (event.kind === "chat_approval_request") parked = event;
+    else if (isTerminalEvent(event.kind)) parked = null;
+  }
+  return parked;
+}
+
 /** Read an error worth showing to the person; a shrug reads as null. */
 export function streamErrorMessage(error: unknown): string | null {
   if (error instanceof Error && error.message !== "") return error.message;
@@ -48,6 +61,12 @@ export interface ChatStreamView {
   messages: ChatMessage[];
   /** Activity strip rows, newest last. */
   activity: ActivityRow[];
+  /**
+   * The parked inline approval, when the last approval request has not
+   * been followed by a terminal frame (RUN-034). Desktop only in effect:
+   * the cloud transport never emits approval requests.
+   */
+  approval: ChatEvent | null;
   /** The last stream failure worth naming, until a frame or a dismissal clears it. */
   error: string | null;
   dismissError: () => void;
@@ -175,6 +194,7 @@ export function useChatStream(
   return {
     messages: transcriptSession === sessionId ? liveMessages : [...baseMessages],
     activity: React.useMemo(() => activityRows(events), [events]),
+    approval: React.useMemo(() => parkedApproval(events), [events]),
     error,
     dismissError,
   };

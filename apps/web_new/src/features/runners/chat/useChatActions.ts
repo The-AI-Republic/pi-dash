@@ -10,12 +10,12 @@
 // sessions, stop and close re-read sessions.
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { createChatSession, type ChatSession } from "@pidash/api-client";
+import type { ChatSession } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { chatKeys } from "./keys.js";
-import { getChatTransport } from "./transport.js";
+import { getChatTransport, openChatSession } from "./transport.js";
 
 /** Toast headline when the server will not take a message. */
 export const SEND_FAILED_TITLE = "Message not sent";
@@ -91,7 +91,7 @@ export function useChatActions({
   const ensureSession = React.useCallback(async (): Promise<ChatSession> => {
     const current = sessionRef.current;
     if (current !== null && current.status === "open") return current;
-    const created = await createChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
+    const created = await openChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
     publishSession(created);
     return created;
   }, [publishSession, runnerId, workspaceId]);
@@ -110,9 +110,6 @@ export function useChatActions({
         if (liveRunnerRef.current !== runnerId) return;
         if (target.id !== sessionRef.current?.id) onSelectSession(target.id);
         const transport = getChatTransport();
-        // The desktop transport hands the runner's approval mode to the
-        // engine here; the cloud transport has no such step.
-        transport.applyApprovalMode?.(target.id);
         await transport.sendChatMessage(target.id, content);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: chatKeys.messages(workspaceSlug, target.id) }),

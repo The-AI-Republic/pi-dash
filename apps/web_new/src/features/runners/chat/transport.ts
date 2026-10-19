@@ -12,14 +12,20 @@
 import {
   cancelChat,
   type CancelChatResult,
+  createChatSession,
   ChatEvent,
   CHAT_EVENT_STREAM_NAME,
   chatEventsUrl,
   closeChat,
+  getRunner,
+  listChatMessages,
+  listChatSessions,
   sendChatMessage,
+  warmChatSession,
   type ApiClient,
   type ChatMessage,
   type ChatSession,
+  type Runner,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -59,11 +65,23 @@ export interface ChatTransport {
   /** Close the conversation; answers the updated session. */
   closeChat(sessionId: string): Promise<ChatSession>;
   /**
-   * Hand the runner's approval mode to the conversation before a turn.
-   * Desktop transports implement this for their local engine; the cloud
-   * path has no approval mode, so it is absent there.
+   * Record the approval mode the engine should capture for this session's
+   * next thread (RUN-035). Desktop transports keep it in memory; the
+   * cloud path has no approval mode, so it is absent there.
    */
-  applyApprovalMode?(sessionId: string): void;
+  setApprovalMode?(sessionId: string, mode: string): void;
+  /** Answer one inline approval (RUN-034); desktop only. */
+  decideChatApproval?(sessionId: string, localApprovalId: string, decision: string): Promise<void>;
+  /**
+   * Read and write verbs. The cloud implementations are `@pidash/api-client`
+   * calls; a desktop transport replaces them with the local store and
+   * daemon, which is why they are optional here.
+   */
+  chatRunner?(runnerId: string): Promise<Runner>;
+  listChatSessions?(workspaceId: string, runnerId: string): Promise<ChatSession[]>;
+  createChatSession?(input: { workspace: string; runner: string }): Promise<ChatSession>;
+  listChatMessages?(sessionId: string): Promise<ChatMessage[]>;
+  warmChatSession?(sessionId: string): Promise<void>;
 }
 
 /** Opens an event stream; injectable so the parser can be tested without a server. */
@@ -147,4 +165,39 @@ export function getChatTransport(): ChatTransport {
 /** Replace the default (desktop bootstrap, tests); `null` restores the default. */
 export function setChatTransport(transport: ChatTransport | null | undefined): void {
   activeTransport = transport ?? cloudTransport;
+}
+
+/** Runner detail for the chat header: local engine shim, else the API. */
+export function fetchChatRunner(client: ApiClient, runnerId: string): Promise<Runner> {
+  return activeTransport.chatRunner?.(runnerId) ?? getRunner(client, runnerId);
+}
+
+/** History list for one runner. */
+export function fetchChatSessions(client: ApiClient, workspaceId: string, runnerId: string): Promise<ChatSession[]> {
+  return (
+    activeTransport.listChatSessions?.(workspaceId, runnerId) ??
+    listChatSessions(client, { workspace: workspaceId, runner: runnerId })
+  );
+}
+
+/** Open a conversation against the runner. */
+export function openChatSession(client: ApiClient, input: { workspace: string; runner: string }): Promise<ChatSession> {
+  return activeTransport.createChatSession?.(input) ?? createChatSession(client, input);
+}
+
+/** One conversation's saved transcript. */
+export function fetchChatMessages(client: ApiClient, sessionId: string): Promise<ChatMessage[]> {
+  return activeTransport.listChatMessages?.(sessionId) ?? listChatMessages(client, sessionId);
+}
+
+/**
+ * Prepare a session so its first turn streams promptly (RUN-028). Local
+ * transports warm the engine; the cloud path posts to the warm endpoint.
+ */
+export async function prepareChatSession(client: ApiClient, sessionId: string): Promise<void> {
+  if (activeTransport.warmChatSession) {
+    await activeTransport.warmChatSession(sessionId);
+    return;
+  }
+  await warmChatSession(client, sessionId);
 }
