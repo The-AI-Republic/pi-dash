@@ -6,12 +6,17 @@
 // settings screen with its params inside the gated shell. No loader
 // prefetch — the page reads its own data, so the skeleton paints.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
+import { renderInRouter } from "../../../../../../features/project-settings/testing.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../core/api/client.js";
-import { membershipQueryOptions, projectRolesQueryOptions } from "../../../../../../features/auth/index.js";
+import {
+  membershipQueryOptions,
+  projectQueryOptions,
+  projectRolesQueryOptions,
+} from "../../../../../../features/auth/index.js";
 import { automationStatesQueryOptions } from "../../../../../../features/automations/index.js";
 import type { ProjectDetails } from "@pidash/api-client";
 
@@ -30,7 +35,7 @@ describe("automations route", () => {
     expect(Route.options.beforeLoad).toBeUndefined();
   });
 
-  it("mounts the automations screen with the route params", () => {
+  it("mounts the automations screen with the route params", async () => {
     vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
     const apiClient = createAppClient("https://api.test", (() => {
       throw new Error("unexpected network fetch in a seeded render");
@@ -40,16 +45,22 @@ describe("automations route", () => {
       { id: PARAMS.projectId, archive_in: 0, close_in: 0, default_state: null } as ProjectDetails,
     ]);
     queryClient.setQueryData(automationStatesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId).queryKey, []);
+    queryClient.setQueryData(projectQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId).queryKey, {
+      id: PARAMS.projectId,
+      name: "Website relaunch",
+      identifier: "WEB",
+      logo_props: {},
+    } as never);
     queryClient.setQueryData(projectRolesQueryOptions(apiClient, PARAMS.ws).queryKey, { [PARAMS.projectId]: 20 });
     queryClient.setQueryData(membershipQueryOptions(apiClient, PARAMS.ws).queryKey, { role: 20 } as never);
     const Component = Route.options.component;
     if (!Component) throw new Error("automations route has no component");
     render(
       <QueryClientProvider client={queryClient}>
-        <Component />
+        {renderInRouter(`/acme/settings/projects/${PARAMS.projectId}/`, <Component />)}
       </QueryClientProvider>
     );
-    expect(screen.getByRole("heading", { name: "Automations" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Automations" })).toBeInTheDocument());
     expect(screen.getByRole("heading", { level: 4, name: "Auto-archive closed work items" })).toBeInTheDocument();
     expect(screen.getByTestId("automations-extension")).toBeEmptyDOMElement();
   });

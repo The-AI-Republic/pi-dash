@@ -234,6 +234,15 @@ export const Route = createFileRoute("/$ws/_gated")({
   },
 });
 
+/**
+ * Settings pages pin their key handling (PSET-062): no page chords or
+ * sequences open anything there. The palette chord stays global, since
+ * the palette is shell navigation rather than a settings shortcut.
+ */
+export function isSettingsPagePath(pathname: string): boolean {
+  return pathname.includes("/settings/projects/");
+}
+
 function lastParam(matches: Array<{ params: Record<string, unknown> }>, name: string): string | null {
   for (let index = matches.length - 1; index >= 0; index--) {
     const value = matches[index]?.params[name];
@@ -396,6 +405,7 @@ function WorkspaceShell({
   return (
     <AppShell
       commands={[signOutCommand({ userLabel, onSignOut })]}
+      suppressPageShortcuts={isSettingsPagePath(currentPath)}
       searchScope={searchScope}
       onSelectSearchResult={handleSelectSearchResult}
       topBar={
