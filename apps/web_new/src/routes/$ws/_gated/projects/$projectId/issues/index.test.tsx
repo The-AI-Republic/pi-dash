@@ -399,13 +399,15 @@ afterEach(() => {
 });
 
 describe("project issues screen", () => {
-  it("composes the layout root with the project title and its rows", () => {
+  it("composes the layout root with the project title and its rows", async () => {
     const now = new Date().toISOString();
     renderScreen({}, 1, [issueRow({ created_at: now, updated_at: now })]);
 
     expect(screen.getByRole("heading", { name: "Website" })).toBeInTheDocument();
     expect(screen.getByTestId("layout-switcher-segmented")).toBeInTheDocument();
-    const row = screen.getByLabelText("WEB-42");
+    // The list is a lazy leaf; the route chunk shows the list skeleton until
+    // its module resolves (NEWFRONT-669, size gate).
+    const row = await screen.findByLabelText("WEB-42");
     expect(row).toHaveTextContent("Fix login");
     expect(row).toHaveClass("h-11");
     expect(row).not.toHaveClass("h-8");

@@ -16,9 +16,7 @@ import * as React from "react";
 
 import { isProjectGateError } from "../../../../../../../features/auth/index.js";
 import {
-  AnalyticsEntry,
   DisplayControl,
-  IssueList,
   IssuesLayoutRoot,
   ListSkeleton,
   issuesQueryOptions,
@@ -34,6 +32,20 @@ import { projectViewQueryOptions } from "../../../../../../../features/issues/fi
 import { viewExpression } from "../../../../../../../features/issues/filters/rich/views.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
 
+// First paint loads the header and the layout shell only. The list pulls in
+// the row virtualizer, and the analytics control opens a dialog, so neither
+// is needed until the screen mounts; each gets its own chunk, keeping the
+// route inside the initial-JS budget (Quality gates).
+const LazyIssueList = React.lazy(() =>
+  import("../../../../../../../features/issues/components/IssueList.js").then((module) => ({
+    default: module.IssueList,
+  }))
+);
+const LazyAnalyticsEntry = React.lazy(() =>
+  import("../../../../../../../features/issues/analytics/AnalyticsEntry.js").then((module) => ({
+    default: module.AnalyticsEntry,
+  }))
+);
 const LazyIssueFilters = React.lazy(() => import("../../../../../../../features/issues/filters/rich/IssueFilters.js"));
 
 function ViewIssuesEmptyState(): React.ReactElement {
@@ -150,7 +162,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
       />
     );
     const analytics = (
-      <AnalyticsEntry
+      <LazyAnalyticsEntry
         workspaceSlug={params.ws}
         projectId={params.projectId}
         projectName={project.name}
@@ -179,11 +191,13 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
               prefs={prefs}
             />
           ) : (
-            <IssueList
-              issues={issues.results}
-              projectIdentifier={project.identifier}
-              layout={search.layout ?? "list"}
-            />
+            <React.Suspense fallback={<ListSkeleton />}>
+              <LazyIssueList
+                issues={issues.results}
+                projectIdentifier={project.identifier}
+                layout={search.layout ?? "list"}
+              />
+            </React.Suspense>
           )
         }
         emptyState={<ViewIssuesEmptyState />}
@@ -192,7 +206,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/views/$vie
         displayControl={displayControl}
         filterControl={richFilter?.control}
         filterRow={richFilter?.row}
-        analyticsControl={analytics}
+        analyticsControl={<React.Suspense fallback={null}>{analytics}</React.Suspense>}
       />
     );
     return (
