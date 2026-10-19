@@ -8,7 +8,15 @@ import * as matchers from "@testing-library/jest-dom/matchers";
 import { cleanup } from "@testing-library/react";
 import { afterEach, expect } from "vitest";
 
+import { installTestStorage } from "./testSupport/memoryStorage.js";
+
 expect.extend(matchers);
+
+// Guarantee: every jsdom test file starts with a fresh in-memory profile,
+// whatever Node's own global localStorage is (Node 26 leaves an undefined
+// one without --localstorage-file and a process-wide one with it). Suites
+// stub it per test; Node-env suites get no storage.
+installTestStorage(globalThis as { document?: unknown; localStorage?: unknown });
 
 // jsdom lacks Range geometry: ProseMirror scrolls the selection into view
 // on every transaction, which reads rects off a Range. The stubs report
