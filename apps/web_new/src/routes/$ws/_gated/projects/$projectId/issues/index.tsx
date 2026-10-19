@@ -29,23 +29,15 @@ import {
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { GanttTimeline } from "../../../../../../features/issues/gantt/GanttTimeline.js";
+import {
+  IssueListFallback,
+  LazyAnalyticsEntry,
+  LazyIssueList,
+  preloadIssueListLeaves,
+} from "../../../../../../features/issues/components/lazyLeaves.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
-// First paint loads the header and the layout shell only. The list pulls in
-// the row virtualizer, and the analytics control opens a dialog, so neither
-// is needed until the screen mounts; each gets its own chunk, keeping the
-// route inside the initial-JS budget (Quality gates).
-const LazyIssueList = React.lazy(() =>
-  import("../../../../../../features/issues/components/IssueList.js").then((module) => ({
-    default: module.IssueList,
-  }))
-);
-const LazyAnalyticsEntry = React.lazy(() =>
-  import("../../../../../../features/issues/analytics/AnalyticsEntry.js").then((module) => ({
-    default: module.AnalyticsEntry,
-  }))
-);
 const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
@@ -97,6 +89,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           orderByOf(record)
         )
       );
+      // The list and analytics leaves ride their own chunk (Quality gates);
+      // await it with the data so the first commit is the screen itself.
+      await preloadIssueListLeaves();
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -240,7 +235,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
             );
           }
           return (
-            <React.Suspense fallback={<ListSkeleton />}>
+            <React.Suspense fallback={<IssueListFallback />}>
               <LazyIssueList
                 issues={issues.results}
                 projectIdentifier={project.identifier}
