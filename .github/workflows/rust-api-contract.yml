@@ -14,6 +14,10 @@ on:
     paths:
       - "rust-api/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   collect:
     runs-on: ubuntu-latest

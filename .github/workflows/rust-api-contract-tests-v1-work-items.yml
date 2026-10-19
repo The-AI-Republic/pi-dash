@@ -16,6 +16,10 @@ on:
       - "apps/api/**"
       - ".github/workflows/rust-api-contract-tests-v1-work-items.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   v1-work-items:
     runs-on: ubuntu-latest

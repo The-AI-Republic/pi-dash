@@ -20,6 +20,10 @@ on:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-tasks-cleanup-rust.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   tasks-cleanup-rust-replay:
     name: tasks_cleanup oracle vs Rust worker

@@ -18,6 +18,10 @@ on:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-ops-instance.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   ops-instance:
     name: ops instance CLI parity

@@ -23,6 +23,10 @@ on:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-tasks-mail-rust.yml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   tasks-mail-rust-replay:
     name: tasks_mail oracle vs Rust worker
