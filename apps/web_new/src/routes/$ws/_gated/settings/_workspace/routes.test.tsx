@@ -36,12 +36,12 @@ const Layout = LayoutRoute.options.component;
 if (Layout === undefined) throw new Error("missing settings layout component");
 const LayoutComponent: RouteComponent = Layout;
 
-// The general section ships its own page (NEWFRONT-535); every other
-// section still resolves through the shell's registration seam.
+// The general and integrations sections ship their own pages (NEWFRONT-535,
+// NEWFRONT-539); every other section still resolves through the shell's
+// registration seam.
 const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["members", "members", MembersRoute.options.component as RouteComponent],
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
-  ["integrations", "integrations", IntegrationsRoute.options.component as RouteComponent],
 ];
 
 // The roster chunk registers its body when the route loads it; the test
@@ -142,6 +142,18 @@ describe("workspace settings section routes", () => {
     expect(await screen.findByTestId("members-load-failed")).toBeInTheDocument();
     expect(requested.some((url) => url.endsWith("/api/workspaces/acme/members/"))).toBe(true);
     expect(requested.some((url) => url.endsWith("/api/workspaces/acme/invitations/"))).toBe(true);
+  });
+
+  it("renders the integrations page from its own route", async () => {
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: IntegrationsRoute.options.component as RouteComponent,
+      leafPath: "integrations",
+      transport: settingsTransport({ role: 20 }),
+    });
+    expect(await screen.findByTestId("workspace-settings-integrations")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "GitLab" })).toBeInTheDocument();
   });
 
   it("mounts the webhooks list page for its own address", async () => {

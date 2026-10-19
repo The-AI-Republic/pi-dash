@@ -624,6 +624,8 @@ function cardElement(overrides: LocatorStub = {}): LocatorStub {
   const self: LocatorStub = {
     ...element(overrides),
     ...overrides,
+    first: () => self,
+    locator: () => self,
     getByRole: () => self,
     getByText: () => self,
   };
