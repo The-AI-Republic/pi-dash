@@ -483,7 +483,7 @@ describe("SpreadsheetLayout", () => {
     expect(screen.getByRole("button", { name: "Add work item" })).toBeDisabled();
   });
 
-  it("loads the next page when the viewport reaches the bottom", { timeout: 20000 }, async () => {
+  it("loads the next page when the viewport reaches the bottom", async () => {
     const firstRows = Array.from({ length: 20 }, (_, index) => issue(ID1, `Fix login ${index}`, index + 1));
     const first = page(firstRows, { next_page_results: true, next_cursor: "next", total_count: 21 });
     const second = page([issue(ID2, "Second", 21)], { total_count: 21 });
@@ -497,7 +497,7 @@ describe("SpreadsheetLayout", () => {
     await waitFor(() => expect(state.calls.some((call) => call.url.includes("cursor=next"))).toBe(true));
   });
 
-  it("renders skeleton rows while the next page loads", { timeout: 20000 }, async () => {
+  it("renders skeleton rows while the next page loads", async () => {
     const firstRows = Array.from({ length: 20 }, (_, index) => issue(ID1, `Fix login ${index}`, index + 1));
     const first = page(firstRows, { next_page_results: true, next_cursor: "next", total_count: 21 });
     const second = page([issue(ID2, "Second", 21)], { total_count: 21 });
@@ -513,7 +513,7 @@ describe("SpreadsheetLayout", () => {
     state.release?.();
   });
 
-  it("does not request another page while one is already loading", { timeout: 20000 }, async () => {
+  it("does not request another page while one is already loading", async () => {
     const firstRows = Array.from({ length: 20 }, (_, index) => issue(ID1, `Fix login ${index}`, index + 1));
     const first = page(firstRows, { next_page_results: true, next_cursor: "next", total_count: 21 });
     const second = page([issue(ID2, "Second", 21)], { total_count: 21 });

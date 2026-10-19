@@ -103,8 +103,10 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
   is ~7 000 tests; on a loaded host the slow tail is queueing time, not test
   work. The budget is a load allowance, not a hang allowance — it stays under
   a minute, and it relaxes no assertion. A suite may ask for a _shorter_
-  budget, but not a longer one; a longer per-file time outlives the global
-  ceiling and is inert.
+  budget with its per-test or per-describe `timeout` option. A longer one also
+  works and wins over the global ceiling (`vi.setConfig({ testTimeout })` does
+  the same for a whole file), but it outlives this measured budget, so do not
+  add one without a measurement that justifies it.
 - Full-suite evidence: run on the branch with the machine's load noted, and
   stream rather than truncate the output:
   `pnpm --filter web_new test 2>&1 | tee "$TMPDIR/.web_new-full.log"`.
