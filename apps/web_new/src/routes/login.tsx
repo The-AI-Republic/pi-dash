@@ -15,15 +15,13 @@ import * as React from "react";
 
 import { edition, isEditionPublicRouteEnabled, type Edition } from "../core/edition/index.js";
 import {
-  asString,
   decidePageGate,
   isOnboardedProfile,
   loadGateInputs,
   loadLandingTarget,
   ONBOARDING_PATH,
-  parseReturnPath,
 } from "../core/session/index.js";
-import { DesktopSignInScreen, EntryScreen } from "../features/auth/index.js";
+import { DesktopSignInScreen, EntryScreen, parseLoginSearch } from "../features/auth/index.js";
 import { platform } from "../core/platform/index.js";
 
 /** Bare forward to the home route; any query params are dropped. */
@@ -43,41 +41,6 @@ export function rendersLoginInPlace(candidate: Edition): boolean {
     platform.kind === "web" &&
     (candidate.slots?.cloudLoginCard !== undefined || isEditionPublicRouteEnabled(candidate, "/login"))
   );
-}
-
-/** Search the login page reads: entry params plus the desktop failure fields. */
-export interface LoginSearch {
-  next?: string | undefined;
-  unsafeNext?: string | undefined;
-  email?: string | undefined;
-  error_code?: string | undefined;
-  invitation_id?: string | undefined;
-  slug?: string | undefined;
-  /** Sanitized return target (the desktop landing reads this spelling). */
-  nextPath?: string | undefined;
-  error?: string | undefined;
-  errorDescription?: string | undefined;
-}
-
-/** Lenient parser: invalid params fall back to absent instead of throwing. */
-export function parseLoginSearch(search: Record<string, unknown>): LoginSearch {
-  const { next, unsafeNext } = parseReturnPath(search);
-  const email = asString(search["email"]);
-  const errorCode = asString(search["error_code"]);
-  const invitationId = asString(search["invitation_id"]);
-  const slug = asString(search["slug"]);
-  const error = asString(search["error"]);
-  const errorDescription = asString(search["error_description"]);
-  return {
-    ...(next === undefined ? {} : { next, nextPath: next }),
-    ...(unsafeNext === undefined ? {} : { unsafeNext }),
-    ...(email === undefined ? {} : { email }),
-    ...(errorCode === undefined ? {} : { error_code: errorCode }),
-    ...(invitationId === undefined ? {} : { invitation_id: invitationId }),
-    ...(slug === undefined ? {} : { slug }),
-    ...(error === undefined ? {} : { error }),
-    ...(errorDescription === undefined ? {} : { errorDescription }),
-  };
 }
 
 export const Route = createFileRoute("/login")({

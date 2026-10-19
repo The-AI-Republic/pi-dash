@@ -347,6 +347,27 @@ describe("prerenderThroughServer", () => {
     expect(createViteServer).not.toHaveBeenCalled();
     expect(fail).toHaveBeenCalledWith(expect.stringContaining(`[prerender] ${outDir}/index.html is missing`));
   });
+
+  it("uses the default failure reporter when none is injected", async () => {
+    const createViteServer = vi.fn();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const previous = process.exitCode;
+    process.exitCode = undefined;
+    const outDir = mkdtempSync(join(tmpdir(), "prerender-server-default-"));
+    created.push(outDir);
+    try {
+      const wrote = await prerenderThroughServer({ createViteServer, outDir, log: vi.fn() });
+      expect(wrote).toBe(false);
+      expect(createViteServer).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith(
+        `[prerender] ${outDir}/index.html is missing; run \`vite build --mode web\` first.`
+      );
+      expect(process.exitCode).toBe(1);
+    } finally {
+      process.exitCode = previous;
+      error.mockRestore();
+    }
+  });
 });
 
 describe("readShell", () => {
