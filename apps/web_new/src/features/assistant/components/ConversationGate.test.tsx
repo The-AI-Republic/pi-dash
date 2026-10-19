@@ -125,6 +125,7 @@ describe("ConversationGate", () => {
   it("shows the setup card and the locked composer without a key", async () => {
     renderGate({ config: KEYLESS });
     expect(await screen.findByTestId("assistant-setup-card")).toBeInTheDocument();
+    expect(screen.getByTestId("assistant-thread")).toHaveAttribute("data-settled", "true");
     expect(screen.queryByTestId("assistant-empty-hint")).not.toBeInTheDocument();
     expect(screen.getByTestId("assistant-composer-reason")).toHaveTextContent(
       "Please set your API key in Settings first to start using AI Assistant."

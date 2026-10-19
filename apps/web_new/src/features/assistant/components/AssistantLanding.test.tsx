@@ -151,6 +151,7 @@ describe("AssistantLanding", () => {
   it("swaps in the setup card without a key and hides the chat entry", async () => {
     renderLanding({ config: KEYLESS });
     expect(await screen.findByTestId("assistant-setup-card")).toBeInTheDocument();
+    expect(screen.getByTestId("assistant-landing")).toHaveAttribute("data-settled", "true");
     expect(screen.queryByRole("heading", { name: "How can I help you today?" })).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Message the assistant" })).not.toBeInTheDocument();
   });
@@ -171,9 +172,13 @@ describe("AssistantLanding", () => {
       </QueryClientProvider>
     );
     expect(screen.getByTestId("assistant-landing")).toBeInTheDocument();
+    // Cold open: the column paints before the read, and its settled marker
+    // tells the driver not to read the spinner as "no greeting".
+    expect(screen.getByTestId("assistant-landing")).toHaveAttribute("data-settled", "false");
     expect(screen.queryByTestId("assistant-setup-card")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "How can I help you today?" })).not.toBeInTheDocument();
-    // The refused read resolves to a failure; the card never flips into setup.
+    // The refused read settles into neither branch; the marker still flips.
+    await waitFor(() => expect(screen.getByTestId("assistant-landing")).toHaveAttribute("data-settled", "true"));
     await waitFor(() => expect(screen.queryByTestId("assistant-setup-card")).not.toBeInTheDocument());
   });
 

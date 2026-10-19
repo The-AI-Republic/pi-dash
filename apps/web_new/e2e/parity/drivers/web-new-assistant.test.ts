@@ -93,15 +93,19 @@ function stubRoute(method: string, url: string) {
 }
 
 describe("assistant navigation methods", () => {
-  it("opens the landing, settles the load state and waits for the column", async () => {
+  it("opens the landing, settles the load state and waits for the resolved column", async () => {
     const goto = vi.fn(async () => null);
     const waitForLoadState = vi.fn(async () => undefined);
-    const waitFor = vi.fn(async (_options?: unknown) => undefined);
+    const columnWait = vi.fn(async (_options?: unknown) => undefined);
+    const settledWait = vi.fn(async (_options?: unknown) => undefined);
     const page = pageOf({
       goto,
       waitForLoadState,
       locator: (selector: string) => {
-        if (selector === '[data-testid="assistant-landing"]') return locator({ waitFor });
+        if (selector === '[data-testid="assistant-landing"]') return locator({ waitFor: columnWait });
+        if (selector === '[data-testid="assistant-landing"][data-settled="true"]') {
+          return locator({ waitFor: settledWait });
+        }
         return locator();
       },
     });
@@ -111,23 +115,33 @@ describe("assistant navigation methods", () => {
 
     expect(goto).toHaveBeenCalledWith("/acme/assistant");
     expect(waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
-    expect(waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
+    // The column alone paints while the config read is pending, so the open
+    // must also wait for the settled marker (AGT-038–041 cold open).
+    expect(columnWait).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(settledWait).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
-  it("opens a conversation by id", async () => {
+  it("opens a conversation by id and waits for its settled state", async () => {
     const goto = vi.fn(async () => null);
-    const waitFor = vi.fn(async (_options?: unknown) => undefined);
+    const threadWait = vi.fn(async (_options?: unknown) => undefined);
+    const settledWait = vi.fn(async (_options?: unknown) => undefined);
     const page = pageOf({
       goto,
-      locator: (selector: string) =>
-        selector === '[data-testid="assistant-thread"]' ? locator({ waitFor }) : locator(),
+      locator: (selector: string) => {
+        if (selector === '[data-testid="assistant-thread"]') return locator({ waitFor: threadWait });
+        if (selector === '[data-testid="assistant-thread"][data-settled="true"]') {
+          return locator({ waitFor: settledWait });
+        }
+        return locator();
+      },
     });
     const driver = new WebNewDriver(page);
 
     await driver.assistantOpenThread("acme", "thread-1");
 
     expect(goto).toHaveBeenCalledWith("/acme/assistant/thread-1");
-    expect(waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(threadWait).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(settledWait).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 
   it("opens the workspace home and settles on the main region", async () => {
@@ -688,16 +702,19 @@ describe("assistant dashboard card", () => {
     await expect(driver.assistantCardSuggestions()).resolves.toEqual([]);
   });
 
-  it("reads the recents' titles and hrefs", async () => {
+  it("reads the recents' titles and hrefs from the recents list only", async () => {
     const links = [
       locator({ innerText: async () => " Newest ", getAttribute: async () => "/acme/assistant/2" }),
       locator({ innerText: async () => "Older", getAttribute: async () => null }),
     ];
+    const scoped = vi.fn((selector: string) =>
+      selector === "ul a"
+        ? locator({ count: async () => links.length, nth: (i: number) => links[i]! })
+        : // Any broader scope would also pick up the keyless setup link.
+          locator({ count: async () => links.length + 1, nth: () => links[0]! })
+    );
     const page = pageOf({
-      locator: (selector: string) =>
-        selector === "#home-assistant-card"
-          ? locator({ locator: () => locator({ count: async () => links.length, nth: (i: number) => links[i]! }) })
-          : locator(),
+      locator: (selector: string) => (selector === "#home-assistant-card" ? locator({ locator: scoped }) : locator()),
     });
     const driver = new WebNewDriver(page);
 
@@ -705,6 +722,7 @@ describe("assistant dashboard card", () => {
       { title: "Newest", href: "/acme/assistant/2" },
       { title: "Older", href: "" },
     ]);
+    expect(scoped).toHaveBeenCalledWith("ul a");
   });
 
   it("returns no recents when the card is absent", async () => {
@@ -713,18 +731,17 @@ describe("assistant dashboard card", () => {
     await expect(driver.assistantCardRecents()).resolves.toEqual([]);
   });
 
-  it("clicks a recent by index", async () => {
+  it("clicks a recent by index inside the recents list", async () => {
     const click = vi.fn(async () => undefined);
+    const scoped = vi.fn((_selector: string) => locator({ nth: () => locator({ click }) }));
     const page = pageOf({
-      locator: (selector: string) =>
-        selector === "#home-assistant-card"
-          ? locator({ locator: () => locator({ nth: () => locator({ click }) }) })
-          : locator(),
+      locator: (selector: string) => (selector === "#home-assistant-card" ? locator({ locator: scoped }) : locator()),
     });
     const driver = new WebNewDriver(page);
 
-    await driver.assistantCardClickRecent(0);
+    await driver.assistantCardClickRecent(1);
 
+    expect(scoped).toHaveBeenCalledWith("ul a");
     expect(click).toHaveBeenCalledTimes(1);
   });
 });

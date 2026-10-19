@@ -28,6 +28,9 @@ export interface AssistantLandingProps {
   workspaceSlug: string;
 }
 
+// The config read decides the branch; the parity driver's cold-open wait
+// polls each surface's `data-settled` attribute so a pending read cannot
+// read as "no greeting" or "no setup card".
 export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): React.ReactElement {
   const config = useAssistantConfig(workspaceSlug);
   const start = useStartConversation();
@@ -57,6 +60,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
     <div className="flex h-full w-full overflow-auto px-(--space-4)">
       <div
         data-testid="assistant-landing"
+        data-settled={config.isPending ? "false" : "true"}
         className="m-auto flex w-full max-w-2xl flex-col gap-(--space-6) py-(--space-8)"
       >
         {config.isPending ? (

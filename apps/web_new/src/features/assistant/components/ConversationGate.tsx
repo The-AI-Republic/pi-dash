@@ -67,6 +67,7 @@ export function ConversationGate({
       <div
         data-testid="assistant-thread"
         data-thread-id={threadId}
+        data-settled={config.isPending ? "false" : "true"}
         className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col gap-(--space-4) overflow-y-auto px-(--space-6) py-(--space-6)"
       >
         {hasTranscript ? (

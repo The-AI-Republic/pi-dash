@@ -8826,6 +8826,18 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('[data-testid="assistant-rail"]').first();
   }
 
+  /**
+   * Wait for one assistant surface that starts on a config read: present,
+   * then past its pending branch. The cold open paints the column before
+   * the read resolves, so waiting for the column alone lets a scenario
+   * read "no greeting / no setup card" off the spinner (AGT-038–041).
+   */
+  private async assistantWaitSettled(selector: string): Promise<void> {
+    const surface = this.page.locator(selector).first();
+    await surface.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.locator(`${selector}[data-settled="true"]`).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   /** The dashboard card's single-line entry input. */
   private assistantHomeCardInput() {
     return this.page.locator('input[placeholder*="Ask Pi Dash to do something"]');
@@ -8844,12 +8856,12 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     // The greeting/setup swap rides on the config read, so settle on the
     // landing column; scenarios poll for the stable branch.
-    await this.page.locator('[data-testid="assistant-landing"]').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.assistantWaitSettled('[data-testid="assistant-landing"]');
   }
   async assistantOpenThread(workspaceSlug: string, threadId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/assistant/${threadId}`);
     await this.page.waitForLoadState("domcontentloaded");
-    await this.page.locator('[data-testid="assistant-thread"]').first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.assistantWaitSettled('[data-testid="assistant-thread"]');
   }
   async assistantOpenHome(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}`);
@@ -9049,7 +9061,9 @@ export class WebNewDriver implements ParityDriver {
   }
   async assistantCardRecents(): Promise<{ title: string; href: string }[]> {
     if (!(await this.assistantCardVisible())) return [];
-    const links = this.assistantHomeCard().locator("a");
+    // Only the recents list counts: the keyless setup reminder is also an
+    // anchor inside the card and must not displace the newest thread.
+    const links = this.assistantHomeCard().locator("ul a");
     const total = await links.count();
     const out: { title: string; href: string }[] = [];
     for (let i = 0; i < total; i++) {
@@ -9062,7 +9076,7 @@ export class WebNewDriver implements ParityDriver {
     return out;
   }
   async assistantCardClickRecent(index: number): Promise<void> {
-    await this.assistantHomeCard().locator("a").nth(index).click();
+    await this.assistantHomeCard().locator("ul a").nth(index).click();
   }
   async assistantStubStream(_threadId: string, _frames: AssistantStreamFrame[]): Promise<void> {
     return todo("assistantStubStream");
