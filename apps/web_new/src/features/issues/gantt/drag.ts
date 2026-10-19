@@ -52,26 +52,27 @@ export function deriveReorder(
 
   const order = [...ids];
   order.splice(sourceIndex, 1);
+  // The target is still in the list: it differs from the source, and only
+  // the source was removed.
   const anchor = order.indexOf(targetId);
-  if (anchor === -1) return null;
   const insertAt = placement === "after" ? anchor + 1 : anchor;
   order.splice(insertAt, 0, sourceId);
   if (order.every((id, index) => id === ids[index])) return null;
 
   const ranks = new Map(entries.map((entry) => [entry.id, entry.sortOrder]));
-  const rankOf = (id: string | undefined): number | null => {
-    if (id === undefined) return null;
-    const rank = ranks.get(id);
-    return rank === undefined ? null : rank;
-  };
+  const rankOf = (id: string | undefined): number | undefined => (id === undefined ? undefined : ranks.get(id));
   const previous = rankOf(order[insertAt - 1]);
   const next = rankOf(order[insertAt + 1]);
 
-  let sortOrder: number;
-  if (previous !== null && next !== null) sortOrder = (previous + next) / 2;
-  else if (next !== null) sortOrder = next - RANK_STEP;
-  else if (previous !== null) sortOrder = previous + RANK_STEP;
-  else sortOrder = RANK_STEP;
+  // A present neighbour always carries a rank (ids come from entries),
+  // and the list always has at least two ids here, so at least one end
+  // exists: first row, last row, or the midpoint between two neighbours.
+  const sortOrder =
+    previous !== undefined && next !== undefined
+      ? (previous + next) / 2
+      : next !== undefined
+        ? next - RANK_STEP
+        : (previous as number) + RANK_STEP;
 
   return { order, sortOrder };
 }
@@ -182,7 +183,8 @@ export function resizedDates(row: GestureDates, side: "left" | "right", dayDelta
 export function handlePreviewDate(row: GestureDates, side: "left" | "right", dayDelta = 0): string | null {
   const base = baseWindow(row);
   if (base === null) return null;
-  return side === "left" ? addDays(base.startDate ?? "", dayDelta) : addDays(base.targetDate ?? "", dayDelta);
+  // baseWindow always returns both ends, so the dragged one is present.
+  return addDays((side === "left" ? base.startDate : base.targetDate) as string, dayDelta);
 }
 
 /** Tooltip date for the add-block control at a day column (ISS-054). */

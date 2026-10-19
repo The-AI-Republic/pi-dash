@@ -101,6 +101,13 @@ export function barBox(row: GanttRow, range: GanttRange, zoom: GanttZoom): Gantt
   return null;
 }
 
+/** Box for a window whose both ends are known (a live drag's window). */
+export function datedBarBox(startIso: string, targetIso: string, range: GanttRange, zoom: GanttZoom): GanttBarBox {
+  const dayWidth = DAY_WIDTHS[zoom];
+  const days = diffDays(targetIso, startIso) + 1;
+  return { left: dayOffset(startIso, range, zoom), width: days * dayWidth };
+}
+
 /** Whether a bar lies entirely left or right of the visible strip. */
 export function barInView(box: GanttBarBox, scrollLeft: number, viewportWidth: number): boolean {
   return box.left + box.width > scrollLeft && box.left < scrollLeft + viewportWidth;

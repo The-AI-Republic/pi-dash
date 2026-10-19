@@ -11,6 +11,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { DRAG_THRESHOLD_PX } from "./drag.js";
 import { GanttSidebar } from "./GanttSidebar.js";
 import { ROW_HEIGHT, type GanttRow } from "./rows.js";
 
@@ -201,6 +202,65 @@ describe("GanttSidebar reorder (ISS-050)", () => {
     first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
     second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
     fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    expect(onReorder).toHaveBeenCalledWith("row-1", "row-2", "after");
+  });
+
+  it("marks a window-level travel so the click it ends does not open the row", () => {
+    const onReorder = vi.fn();
+    const { onOpenRow } = renderSidebar({ reorder: { onReorder } });
+    const [first] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement];
+    // Travel past the threshold without ever hovering another row: no
+    // drop target, so no reorder, but the gesture still owns its click.
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(document, { clientY: 22 + DRAG_THRESHOLD_PX });
+    fireEvent.mouseUp(first);
+    fireEvent.click(within(first).getByRole("link"));
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(onOpenRow).not.toHaveBeenCalled();
+  });
+
+  it("shows no drop indicator until the pointer has travelled", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    // A hover inside the threshold is not travel: no indicator, and the
+    // release stays a click.
+    fireEvent.mouseMove(second, { clientY: 22 + DRAG_THRESHOLD_PX - 1 });
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+    fireEvent.mouseUp(second);
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it("ignores a drop back onto the dragged row", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(first, { clientY: 60 });
+    fireEvent.mouseUp(first);
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+  });
+
+  it("shows the indicator on the target's half and hides it on re-hover", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 60 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toHaveAttribute("data-placement", "before");
+    // Same target, now below its midpoint: the line moves to the bottom,
+    // and a repeated hover at the same spot changes nothing.
+    fireEvent.mouseMove(second, { clientY: 80 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toHaveAttribute("data-placement", "after");
     fireEvent.mouseMove(second, { clientY: 80 });
     fireEvent.mouseUp(second);
     expect(onReorder).toHaveBeenCalledWith("row-1", "row-2", "after");

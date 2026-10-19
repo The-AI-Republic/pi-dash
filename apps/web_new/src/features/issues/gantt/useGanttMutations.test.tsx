@@ -139,6 +139,16 @@ describe("withIssueOrder", () => {
     expect(withIssueOrder(null, ["a"])).toBeNull();
     expect(withIssueOrder([ROWS[0]], ["a"])).toEqual([ROWS[0]]);
   });
+
+  it("keeps a row the new order does not name at its relative place", () => {
+    // The list cache may hold a temp create the sequence does not know;
+    // it must not be silently dropped or pull ranked rows out of order.
+    const temp = { ...ROWS[0], id: "temp-1", name: "Pending" } as (typeof ROWS)[number];
+    const result = withIssueOrder({ results: [...ROWS, temp], total_count: 4 }, ["c", "a", "b"]) as {
+      results: Array<{ id: string }>;
+    };
+    expect(result.results.map((entry) => entry.id)).toEqual(["c", "a", "b", "temp-1"]);
+  });
 });
 
 describe("useGanttMutations dates", () => {
@@ -172,6 +182,15 @@ describe("useGanttMutations dates", () => {
     await waitFor(() => expect(h.calls.some((call) => call.method === "POST")).toBe(true));
     const post = h.calls.find((call) => call.method === "POST");
     expect(post?.body).toEqual({ updates: [{ id: "c", target_date: "2026-10-10" }] });
+    act(() => h.release());
+  });
+
+  it("sends only the start when a batch write keeps only that end", async () => {
+    const h = setup();
+    act(() => h.mutations().resizeBar("b", { startDate: "2026-10-02", endDate: null }));
+    await waitFor(() => expect(h.calls.some((call) => call.method === "POST")).toBe(true));
+    const post = h.calls.find((call) => call.method === "POST");
+    expect(post?.body).toEqual({ updates: [{ id: "b", start_date: "2026-10-02" }] });
     act(() => h.release());
   });
 

@@ -608,6 +608,30 @@ describe("GanttChart bar gestures (ISS-051–053)", () => {
     expect(onDatesChange).not.toHaveBeenCalled();
   });
 
+  it("opens a bar from the keyboard but not an unconfirmed one", () => {
+    const h = renderChart({ canEdit: true });
+    fireEvent.keyDown(barOf("row-1"), { key: "Enter" });
+    expect(h.onOpenRow).toHaveBeenCalledWith(expect.objectContaining({ id: "row-1" }));
+    h.onOpenRow.mockClear();
+    fireEvent.keyDown(barOf("row-1"), { key: " " });
+    expect(h.onOpenRow).toHaveBeenCalledTimes(1);
+    cleanup();
+    const seeded = renderChart({
+      canEdit: true,
+      rows: [
+        row({
+          id: "temp-1",
+          name: "Pending",
+          startIso: WEEK_RANGE.startIso,
+          targetIso: WEEK_RANGE.startIso,
+          unconfirmed: true,
+        }),
+      ],
+    });
+    fireEvent.keyDown(barOf("temp-1"), { key: "Enter" });
+    expect(seeded.onOpenRow).not.toHaveBeenCalled();
+  });
+
   it("still opens a bar that was clicked rather than dragged", () => {
     const h = renderChart({ canEdit: true });
     fireEvent.click(barOf("row-1"));
@@ -718,6 +742,21 @@ describe("GanttChart resize preview (ISS-052/053)", () => {
     fireEvent.mouseDown(handle, { button: 0, clientX: 100 });
     fireEvent.mouseMove(document, { clientX: 140 });
     expect(screen.getByTestId("gantt-resize-preview").textContent?.trim()).not.toBe("");
+    fireEvent.mouseUp(document);
+  });
+
+  it("previews the target under the right handle and nothing for a body move", () => {
+    renderChart({ canEdit: true, onDatesChange: vi.fn() });
+    const right = screen.getAllByTestId("gantt-resize-right")[0]!;
+    fireEvent.mouseEnter(right);
+    expect(screen.getByTestId("gantt-resize-preview").textContent).toBe(formatDay(addDays(WEEK_RANGE.startIso, 5)));
+    fireEvent.mouseLeave(right);
+    // Dragging the body moves the bar but belongs to no handle: no pill.
+    const bar = document.querySelector<HTMLElement>("#gantt-block-row-1");
+    if (bar === null) throw new Error("no bar");
+    fireEvent.mouseDown(bar, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 140 });
+    expect(screen.queryByTestId("gantt-resize-preview")).not.toBeInTheDocument();
     fireEvent.mouseUp(document);
   });
 });

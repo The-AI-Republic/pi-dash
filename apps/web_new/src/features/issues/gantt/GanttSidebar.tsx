@@ -222,14 +222,17 @@ export function GanttSidebar({
     [updateDrag]
   );
 
+  // A drag only starts with a binding, so the listeners capture the one it
+  // started under and never have to re-check the optional prop.
   React.useEffect(() => {
-    if (drag === null) return;
+    if (drag === null || reorder === null) return;
+    const binding = reorder;
     const finish = (commit: boolean) => {
       const current = dragRef.current;
       updateDrag(null);
       if (current === null || !current.travelled || current.targetId === null) return;
       if (!commit) return;
-      reorder?.onReorder(current.sourceId, current.targetId, current.placement);
+      binding.onReorder(current.sourceId, current.targetId, current.placement);
     };
     const onMove = (event: MouseEvent) => {
       const current = dragRef.current;

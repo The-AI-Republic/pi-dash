@@ -25,6 +25,7 @@ import {
   resizedDates,
   snappedDayDelta,
   type GestureDates,
+  type ResizeResult,
 } from "./drag.js";
 import { GanttHeader } from "./GanttHeader.js";
 import { GanttSidebar, type ReorderBinding } from "./GanttSidebar.js";
@@ -33,6 +34,7 @@ import {
   ROW_HEIGHT,
   barInView,
   barBox,
+  datedBarBox,
   hasBar,
   rowWindow,
   type GanttBarBox,
@@ -212,14 +214,9 @@ function Bar({
     return hoveredSide === "left" ? row.startIso : row.targetIso;
   }, [canEdit, drag, hoveredSide, row.startIso, row.targetIso]);
   const boxNow =
-    drag === null
-      ? box
-      : (() => {
-          const start = drag.dates.startDate;
-          const target = drag.dates.targetDate;
-          if (start === null || target === null) return box;
-          return barBox({ ...row, startIso: start, targetIso: target }, range, zoom) ?? box;
-        })();
+    drag !== null && drag.dates.startDate !== null && drag.dates.targetDate !== null
+      ? datedBarBox(drag.dates.startDate, drag.dates.targetDate, range, zoom)
+      : box;
   return (
     <div
       id={`gantt-block-${row.id}`}
@@ -398,29 +395,29 @@ function GanttLanes({
     setDrag({ issueId: row.id, side, startX: event.clientX, origin, dates: origin, write: origin });
   };
 
+  // The listener set is re-registered for every gesture state, so the
+  // handlers below always see the live gesture.
   React.useEffect(() => {
     if (drag === null) return;
     const onMove = (event: MouseEvent) => {
       if (Math.abs(event.clientX - drag.startX) >= DRAG_THRESHOLD_PX) suppressed.current = true;
       const delta = snappedDayDelta(event.clientX - drag.startX, dayWidth);
       if (drag.side === "move") {
+        // Half-dated rows draw a bar but do not move (ISS-051).
         const dates = movedDates(drag.origin, delta);
-        if (dates !== null) setDrag((current) => (current === null ? current : { ...current, dates, write: dates }));
+        if (dates !== null) setDrag({ ...drag, dates, write: dates });
         return;
       }
-      const resized = resizedDates(drag.origin, drag.side, delta);
-      if (resized !== null)
-        setDrag((current) =>
-          current === null ? current : { ...current, dates: resized.window, write: resized.write }
-        );
+      // A bar only mounts on a row with at least one date, so a resize
+      // always has a window to draw.
+      const resized = resizedDates(drag.origin, drag.side, delta) as ResizeResult;
+      setDrag({ ...drag, dates: resized.window, write: resized.write });
     };
     const onUp = () => {
-      const current = drag;
       setDrag(null);
       const changed =
-        current.write.startDate !== current.origin.startDate || current.write.targetDate !== current.origin.targetDate;
-      if (changed)
-        onDatesChange(current.issueId, { startDate: current.write.startDate, endDate: current.write.targetDate });
+        drag.write.startDate !== drag.origin.startDate || drag.write.targetDate !== drag.origin.targetDate;
+      if (changed) onDatesChange(drag.issueId, { startDate: drag.write.startDate, endDate: drag.write.targetDate });
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -435,7 +432,7 @@ function GanttLanes({
       globalThis.removeEventListener("mouseup", onUp);
       globalThis.removeEventListener("keydown", onKey);
     };
-  }, [dayWidth, drag, onDatesChange]);
+  }, [dayWidth, drag, onDatesChange, setDrag]);
 
   return (
     <div data-testid="gantt-lanes">

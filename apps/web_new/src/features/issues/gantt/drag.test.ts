@@ -142,6 +142,11 @@ describe("movedDates (ISS-051)", () => {
     });
   });
 
+  it("has no length until both ends exist", () => {
+    expect(windowDays({ startDate: "2026-10-01", targetDate: null })).toBeNull();
+    expect(windowDays({ startDate: null, targetDate: "2026-10-03" })).toBeNull();
+  });
+
   it("preserves the inclusive duration", () => {
     const before = { startDate: "2026-10-01", targetDate: "2026-10-03" };
     expect(windowDays(movedDates(before, -2)!)).toBe(windowDays(before));

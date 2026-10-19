@@ -6787,9 +6787,14 @@ export class WebNewDriver implements ParityDriver {
         : { x: box.x + box.width - 1, y: box.y + box.height / 2 };
     await this.page.mouse.move(at.x, at.y);
     await this.page.waitForTimeout(300);
-    // The handle carries its date as the accessible title/explicit label.
-    const aria = (await handle.getAttribute("aria-label")) ?? (await handle.getAttribute("title")) ?? "";
-    return aria === "" ? null : aria;
+    // Read the floating preview the handle reveals, not the handle's own
+    // label (which carries the current date and would pass without a
+    // preview at all, ISS-052).
+    const preview = bar.getByTestId("gantt-resize-preview").first();
+    if ((await preview.count()) === 0) return null;
+    if (!(await preview.isVisible())) return null;
+    const text = (await preview.innerText()).trim();
+    return text === "" ? null : text;
   }
 
   async ganttHandlesVisible(issueName: string): Promise<boolean> {

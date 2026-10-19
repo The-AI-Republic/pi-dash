@@ -1359,7 +1359,8 @@ describe("gantt sidebar reorder (ISS-050)", () => {
 describe("gantt bar gestures (ISS-051–053)", () => {
   const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
 
-  function gesturePage() {
+  function gesturePage(options: { preview?: boolean } = {}) {
+    const preview = options.preview ?? true;
     const handle = (label: string) =>
       locator({
         count: async () => 1,
@@ -1370,7 +1371,18 @@ describe("gantt bar gestures (ISS-051–053)", () => {
       count: async () => 1,
       boundingBox: async () => ({ x: 100, y: 10, width: 120, height: 24 }),
       scrollIntoViewIfNeeded: async () => undefined,
-      getByTestId: (id: string) => handle(id === "gantt-resize-left" ? "Oct 3, 2026" : "Oct 5, 2026"),
+      getByTestId: (id: string) => {
+        if (id === "gantt-resize-preview") {
+          return locator({
+            count: async () => (preview ? 1 : 0),
+            isVisible: async () => preview,
+            innerText: async () => "Oct 3, 2026",
+          });
+        }
+        // The handle's own label carries the current date, so a driver that
+        // read it would pass with no preview rendered at all.
+        return handle(id === "gantt-resize-left" ? "Oct 3, 2026" : "Oct 5, 2026");
+      },
     });
     const link = locator({
       count: async () => 1,
@@ -1417,10 +1429,17 @@ describe("gantt bar gestures (ISS-051–053)", () => {
     await expect(new WebNewDriver(gesturePage()).ganttResizeBar("First", "right", -1)).resolves.toBeUndefined();
   });
 
-  it("reads the handle's preview date and visibility", async () => {
+  it("reads the floating preview date and handle visibility", async () => {
     const driver = new WebNewDriver(gesturePage());
     await expect(driver.ganttResizePreview("First", "left")).resolves.toBe("Oct 3, 2026");
     await expect(driver.ganttHandlesVisible("First")).resolves.toBe(true);
+  });
+
+  it("reports no preview when the chart renders none", async () => {
+    // The handle label is still present; only the floating pill is absent.
+    await expect(new WebNewDriver(gesturePage({ preview: false })).ganttResizePreview("First", "left")).resolves.toBe(
+      null
+    );
   });
 });
 
