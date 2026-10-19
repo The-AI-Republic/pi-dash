@@ -87,9 +87,12 @@ const harness = vi.hoisted(() => ({
   instanceDown: false,
   rail: undefined as unknown,
   routerState: {
-    matches: [{ params: {} }],
+    matches: [{ params: {}, routeId: "/$ws/_gated" }],
     location: { pathname: "/acme/projects/p1/issues" },
-  } as { matches: Array<{ params: Record<string, unknown> }>; location: { pathname: string } },
+  } as {
+    matches: Array<{ params: Record<string, unknown>; routeId: string }>;
+    location: { pathname: string };
+  },
 }));
 
 // Shell-query stand-in: this suite owns the layout wiring (sign-out entry
@@ -193,6 +196,9 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const React = await import("react");
   return {
     ...original,
+    // Router-context wirings live with the layout in the app; this suite
+    // mounts the component without a RouterProvider.
+    useSessionExpiredRedirect: () => undefined,
     AppShell: (props: {
       commands?: PidashCommand[];
       topBar?: React.ReactNode;
@@ -641,7 +647,10 @@ describe("gated layout shell wiring", () => {
     harness.personalizeDialog = null;
     harness.updatesDialog = null;
     harness.rail = undefined;
-    harness.routerState = { matches: [{ params: {} }], location: { pathname: "/acme/projects/p1/issues" } };
+    harness.routerState = {
+      matches: [{ params: {}, routeId: "/$ws/_gated" }],
+      location: { pathname: "/acme/projects/p1/issues" },
+    };
   }
 
   beforeEach(() => {
@@ -727,7 +736,10 @@ describe("gated layout shell wiring", () => {
   });
 
   it("registers the project jumps inside a project without the archives jump", async () => {
-    harness.routerState.matches = [{ params: {} }, { params: { projectId: "p1" } }];
+    harness.routerState.matches = [
+      { params: {}, routeId: "/$ws/_gated" },
+      { params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" },
+    ];
     renderShell();
     await waitFor(() =>
       expect(commandIds()).toEqual([
@@ -760,7 +772,10 @@ describe("gated layout shell wiring", () => {
   });
 
   it("hides flag-gated project jumps when their tabs are off", async () => {
-    harness.routerState.matches = [{ params: {} }, { params: { projectId: "p1" } }];
+    harness.routerState.matches = [
+      { params: {}, routeId: "/$ws/_gated" },
+      { params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" },
+    ];
     harness.projectViews = {
       cycle_view: false,
       module_view: false,
@@ -968,7 +983,10 @@ describe("gated layout shell wiring", () => {
 
   it("scopes the palette search to the child project", () => {
     harness.routerState = {
-      matches: [{ params: {} }, { params: { projectId: "p1" } }],
+      matches: [
+        { params: {}, routeId: "/$ws/_gated" },
+        { params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" },
+      ],
       location: { pathname: "/acme/projects/p1/issues" },
     };
     renderShell();
@@ -1006,9 +1024,39 @@ describe("gated layout shell wiring", () => {
     });
   });
 
+  it("hands the window to workspace settings instead of the workspace chrome", () => {
+    harness.routerState = {
+      matches: [
+        { params: {}, routeId: "/$ws/_gated" },
+        { params: {}, routeId: "/$ws/_gated/settings/_workspace" },
+        { params: {}, routeId: "/$ws/_gated/settings/_workspace/members/" },
+      ],
+      location: { pathname: "/acme/settings/members/" },
+    };
+    renderShell();
+    expect(harness.topBar).toBeNull();
+    expect(harness.sidebar).toBeNull();
+    // The settings pages keep the workspace wirings AppShell hosts
+    // (session-expiry redirect and the toast host), without the chrome.
+    expect(screen.getByRole("region", { name: "Notifications" })).toBeInTheDocument();
+  });
+
+  it("keeps the workspace chrome for project settings beneath the same prefix", () => {
+    harness.routerState = {
+      matches: [
+        { params: {}, routeId: "/$ws/_gated" },
+        { params: { projectId: "p1" }, routeId: "/$ws/_gated/settings/projects/$projectId/labels" },
+      ],
+      location: { pathname: "/acme/settings/projects/p1/labels" },
+    };
+    renderShell();
+    expect(harness.topBar).not.toBeNull();
+    expect(harness.sidebar).not.toBeNull();
+  });
+
   it("names the active project section from the route match", () => {
     harness.routerState = {
-      matches: [{ params: { projectId: "p1" } }],
+      matches: [{ params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" }],
       location: { pathname: "/acme/projects/p1/issues" },
     };
     renderShell();
@@ -1184,7 +1232,7 @@ describe("gated layout shell wiring", () => {
 
   it("passes the projects group slot its collection and handlers (SHELL-048)", () => {
     harness.routerState = {
-      matches: [{ params: { projectId: "p1" } }],
+      matches: [{ params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" }],
       location: { pathname: "/acme/projects/p1/issues" },
     };
     renderShell();

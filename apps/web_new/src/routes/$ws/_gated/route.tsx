@@ -56,6 +56,7 @@ import type { SearchResultHit } from "../../../shared/commands/index.js";
 import {
   APP_VERSION,
   AppShell,
+  getToastManager,
   HelpMenu,
   isNotificationsPath,
   isRailUndocked,
@@ -66,12 +67,15 @@ import {
   UserMenu,
   useNarrowViewport,
   useRailState,
+  useSessionExpiredRedirect,
   useShellChrome,
   useShortcutsDialog,
   WorkspaceSwitcher,
   type RailDockItem,
   type SwitcherWorkspace,
 } from "../../../shared/shell/index.js";
+import { isWorkspaceSettingsRouteId } from "../../../features/workspace-settings/index.js";
+import { ToastHost } from "@pidash/kit";
 import { resolveSearchTarget } from "./searchTarget.js";
 
 // Deferred below the initial shell chain (Quality gates budget): the
@@ -176,6 +180,29 @@ export const Route = createFileRoute("/$ws/_gated")({
     const matches = useRouterState({ select: (state) => state.matches });
     const pathname = useRouterState({ select: (state) => state.location.pathname });
     const signOut = useSignOut();
+    // Workspace settings replace the ordinary workspace chrome with their
+    // own frame (WSET-001/002): the layout still runs its auth gate, then
+    // hands the window to the settings shell or its denial view. The
+    // match decides this, not the pathname, so sibling areas under
+    // `settings/` (project settings) keep the chrome. The background
+    // agent-runtime supervisor (RUN-044) stays mounted on desktop: it is
+    // not chrome and settings add no desktop-only branch (WSET-040).
+    if (matches.some((match) => isWorkspaceSettingsRouteId(match.routeId))) {
+      return (
+        <>
+          <React.Suspense fallback={null}>
+            <LazyRuntimeSupervisor />
+          </React.Suspense>
+          {/* Settings replace AppShell's chrome, not its workspace
+              wirings: an expired session leaves them like any signed-in
+              page and notices keep the one ToastHost. */}
+          <SettingsSurfaceChrome />
+          <React.Suspense fallback={null}>
+            <Outlet />
+          </React.Suspense>
+        </>
+      );
+    }
 
     return (
       <>
@@ -213,6 +240,12 @@ function lastParam(matches: Array<{ params: Record<string, unknown> }>, name: st
     if (typeof value === "string") return value;
   }
   return null;
+}
+
+/** App-shell wirings the settings pages would otherwise lose. */
+function SettingsSurfaceChrome(): React.ReactElement {
+  useSessionExpiredRedirect();
+  return <ToastHost manager={getToastManager()} />;
 }
 
 function WorkspaceShell({
