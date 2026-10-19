@@ -4,10 +4,12 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { RouterProvider, createRouter } from "@tanstack/react-router";
+import { QueryClientProvider } from "@tanstack/react-query";
 
 import { createAppClient } from "./core/api/index.js";
 import { platform } from "./core/platform/index.js";
 import { createCachePersistor, createQueryClient, persistReferenceOnly } from "./core/query/index.js";
+import { InstanceAppGate } from "./features/instance/index.js";
 import { routeTree } from "./routeTree.gen";
 import { PIDASH_TARGET } from "./target";
 import "./styles/app.css";
@@ -52,6 +54,10 @@ if (import.meta.env.DEV) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <QueryClientProvider client={queryClient}>
+      <InstanceAppGate>
+        <RouterProvider router={router} />
+      </InstanceAppGate>
+    </QueryClientProvider>
   </StrictMode>
 );
