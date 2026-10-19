@@ -127,6 +127,19 @@ export function writeStoredPalette(palette: CustomPalette): void {
   }
 }
 
+/**
+ * Drop the locally stored custom palette. Used when undoing a rejected
+ * custom save so the next boot cannot paint the refused colors before
+ * the profile read arrives (NEWFRONT-434 target).
+ */
+export function clearStoredPalette(): void {
+  try {
+    storage()?.removeItem(THEME_PALETTE_STORAGE_KEY);
+  } catch {
+    // Dismissed: the server copy still holds the accepted colors.
+  }
+}
+
 /** The profile theme bag narrowed to what the shell reads and writes. */
 export interface ThemeBag {
   value: ThemeValue;

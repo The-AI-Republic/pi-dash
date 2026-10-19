@@ -12,6 +12,7 @@ export {
 export type { CustomThemeDesignerProps } from "./CustomThemeDesigner.js";
 export {
   buildThemeBag,
+  clearStoredPalette,
   isDarkValue,
   parseThemeValue,
   readStoredPalette,

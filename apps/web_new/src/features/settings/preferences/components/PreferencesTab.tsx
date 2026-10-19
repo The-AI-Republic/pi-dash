@@ -9,7 +9,6 @@
 // Every row reads the shared session caches, so a pick here reshapes the
 // clocks, dates and calendars other screens render from the same sources.
 
-import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { useLocale } from "../../../../core/i18n/index.js";
@@ -140,6 +139,8 @@ export function PreferencesTab(): React.ReactElement {
                   onSave={saveCustom}
                   onPreview={setPreview}
                 />
+                {/* Typing paints the swatches only; nothing reaches the
+                    document, local storage or the profile until "Set theme". */}
                 <div data-testid="custom-theme-preview" className="flex items-center gap-(--space-2)">
                   <span className="text-meta text-(--text-muted)">
                     {preview === null ? "Type both colors to see them here." : "Preview"}
@@ -156,9 +157,6 @@ export function PreferencesTab(): React.ReactElement {
                         className="inline-block size-5 rounded-(--radius-control) border border-(--border)"
                         style={{ backgroundColor: preview.background }}
                       />
-                      <Button type="button" variant="secondary" onClick={() => void theme.setTheme("custom", preview)}>
-                        Preview on the app
-                      </Button>
                     </>
                   )}
                 </div>

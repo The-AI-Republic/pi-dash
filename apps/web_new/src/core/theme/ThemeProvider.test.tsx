@@ -347,6 +347,79 @@ describe("ThemeProvider", () => {
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
   });
 
+  it("drops a rejected custom palette from local storage", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const transport = async (url: string, init: { method: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => "application/json" },
+          text: async () => '{"csrf_token":"csrf"}',
+        };
+      }
+      if (init.method === "PATCH") {
+        return {
+          status: 500,
+          url,
+          headers: { get: () => "application/json" },
+          text: async () => '{"detail":"boom"}',
+        };
+      }
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(profileFixture({ theme: "light" })),
+      };
+    };
+    createAppClient("https://api.test", transport as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("light"));
+    await user.click(screen.getByRole("button", { name: "pick custom" }));
+    await waitFor(() => expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light"));
+    // The next boot must not paint the refused colors.
+    expect(window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY)).toBeNull();
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-primary")).toBe("");
+  });
+
+  it("restores the accepted palette when a later custom save is rejected", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const accepted = { primary: "#102030", background: "#405060", darkPalette: true };
+    let patches = 0;
+    const { queryClient } = harness({
+      profile: { theme: "custom", ...accepted },
+      patch: () => {
+        patches += 1;
+        // The new palette is refused; the accepted one stays in place.
+        throw new Error("boom");
+      },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("custom"));
+    await waitFor(() => expect(window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY)).toBe(JSON.stringify(accepted)));
+    await user.click(screen.getByRole("button", { name: "pick custom" }));
+    await waitFor(() => expect(patches).toBe(1));
+    await waitFor(() => expect(window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY)).toBe(JSON.stringify(accepted)));
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-primary")).toBe("#102030");
+  });
+
   it("re-applies the saved custom palette when custom is picked again", async () => {
     const user = userEvent.setup();
     matchMediaStub(false);

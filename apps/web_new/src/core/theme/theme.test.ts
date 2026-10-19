@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildThemeBag,
+  clearStoredPalette,
   isDarkValue,
   parseThemeValue,
   readStoredPalette,
@@ -217,6 +218,21 @@ describe("theme model", () => {
         THEME_PALETTE_STORAGE_KEY,
         JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: true })
       );
+    });
+
+    it("clears the stored palette and survives denied storage", () => {
+      const removeItem = vi.fn();
+      vi.stubGlobal("localStorage", { getItem: () => null, removeItem });
+      clearStoredPalette();
+      expect(removeItem).toHaveBeenCalledWith(THEME_PALETTE_STORAGE_KEY);
+      vi.stubGlobal("localStorage", {
+        removeItem: () => {
+          throw new Error("denied");
+        },
+      });
+      expect(() => clearStoredPalette()).not.toThrow();
+      vi.stubGlobal("localStorage", undefined);
+      expect(() => clearStoredPalette()).not.toThrow();
     });
   });
 });

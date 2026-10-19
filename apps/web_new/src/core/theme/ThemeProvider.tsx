@@ -25,6 +25,7 @@ import { sessionKeys, useProfile } from "../session/index.js";
 import { applyResolvedTheme, prefersDarkScheme } from "./apply.js";
 import {
   buildThemeBag,
+  clearStoredPalette,
   readStoredPalette,
   readStoredTheme,
   readThemeBag,
@@ -180,6 +181,10 @@ export function ThemeProvider({ children, notifyError }: ThemeProviderProps): Re
           const previous = committed.current!;
           applyResolvedTheme(previous.scheme, previous.choice.custom, rootElement());
           writeStoredTheme(previous.choice.value);
+          // Undo the local palette too: a rejected custom save must not
+          // paint its colors on the next boot (NEWFRONT-434 target).
+          if (previous.choice.custom === undefined) clearStoredPalette();
+          else writeStoredPalette(previous.choice.custom);
           setChoice(previous.choice);
           setApplied({ scheme: previous.scheme, custom: previous.choice.custom });
           return false;

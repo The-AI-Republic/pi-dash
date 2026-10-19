@@ -173,19 +173,17 @@ describe("PreferencesTab", () => {
     expect(harness.theme.setTheme).not.toHaveBeenCalled();
   });
 
-  it("previews a valid pair and applies it to the app on request", () => {
+  it("previews a typed pair in the swatches without saving anything", () => {
     harness.theme.value = "custom";
     harness.theme.custom = { primary: "#102030", background: "#405060", darkPalette: false };
     render(<PreferencesTab />);
+    fireEvent.change(screen.getByLabelText("Primary color"), { target: { value: "#AABBCC" } });
     const preview = screen.getByTestId("custom-theme-preview");
-    expect(within(preview).getByLabelText("Primary preview")).toHaveStyle({ backgroundColor: "#102030" });
+    expect(within(preview).getByLabelText("Primary preview")).toHaveStyle({ backgroundColor: "#aabbcc" });
     expect(within(preview).getByLabelText("Background preview")).toHaveStyle({ backgroundColor: "#405060" });
-    fireEvent.click(within(preview).getByRole("button", { name: "Preview on the app" }));
-    expect(harness.theme.setTheme).toHaveBeenCalledWith("custom", {
-      primary: "#102030",
-      background: "#405060",
-      darkPalette: false,
-    });
+    // Typing is a preview only: nothing reaches the engine (and so neither
+    // the profile nor local storage) until "Set theme".
+    expect(harness.theme.setTheme).not.toHaveBeenCalled();
   });
 
   it("saves the custom palette, then confirms and reloads once the write lands", async () => {
