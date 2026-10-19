@@ -119,6 +119,37 @@ describe("QuickAdd", () => {
     expect(screen.getByPlaceholderText("Work item title")).toHaveValue("");
   });
 
+  it("attaches cycle and module grouping values through the bridge", async () => {
+    const user = userEvent.setup();
+    setup({ prefill: { priority: "high", cycle_id: CYCLE, module_ids: ["module-1"] } });
+    submitOnSuccess();
+    fireEvent.click(screen.getByRole("button", { name: /New work item/ }));
+    await user.type(screen.getByPlaceholderText("Work item title"), "Grouped{enter}");
+    expect(mocks.mutate.mock.calls[0]?.[0]).toEqual({
+      projectId: PROJECT,
+      payload: { name: "Grouped", priority: "high" },
+    });
+    await waitFor(() =>
+      expect(mocks.attach).toHaveBeenCalledWith({ client: "stub" }, "acme", PROJECT, "created-1", {
+        cycleId: CYCLE,
+        moduleId: "module-1",
+      })
+    );
+  });
+
+  it("keeps the route target ahead of a section grouping value", async () => {
+    const user = userEvent.setup();
+    setup({ cycleId: "route-cycle", prefill: { cycle_id: CYCLE } });
+    submitOnSuccess();
+    fireEvent.click(screen.getByRole("button", { name: /New work item/ }));
+    await user.type(screen.getByPlaceholderText("Work item title"), "Routed{enter}");
+    await waitFor(() =>
+      expect(mocks.attach).toHaveBeenCalledWith({ client: "stub" }, "acme", PROJECT, "created-1", {
+        cycleId: "route-cycle",
+      })
+    );
+  });
+
   it("keeps the section state instead of applying the default state", async () => {
     const user = userEvent.setup();
     setup({ prefill: { state_id: "state-todo" }, defaultStateId: "state-default" });

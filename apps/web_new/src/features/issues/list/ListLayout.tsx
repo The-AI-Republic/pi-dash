@@ -234,25 +234,33 @@ export function ListLayout({
 
   async function submitCreate(name: string, prefill: Record<string, string | string[]>): Promise<void> {
     try {
+      // A cycle/module grouping value is a membership, not a create field:
+      // the create endpoint ignores it, so it goes through the bridge after
+      // the row lands. Route context wins over the section value.
+      const groupedCycle = typeof prefill["cycle_id"] === "string" ? prefill["cycle_id"] : undefined;
+      const groupedModules = Array.isArray(prefill["module_ids"]) ? prefill["module_ids"] : undefined;
+      const fields = { ...prefill };
+      delete fields["cycle_id"];
+      delete fields["module_ids"];
+      const targetCycle = cycleId ?? groupedCycle;
+      const targetModule = moduleId ?? groupedModules?.[0];
       const created = await create.mutateAsync({
         projectId,
         payload: {
           name,
-          ...prefill,
-          ...(prefill["state_id"] === undefined &&
+          ...fields,
+          ...(fields["state_id"] === undefined &&
           projectDetails?.default_state !== null &&
           projectDetails?.default_state !== undefined
             ? { state_id: projectDetails.default_state }
             : {}),
-          ...(cycleId === undefined ? {} : { cycle_id: cycleId }),
-          ...(moduleId === undefined ? {} : { module_ids: [moduleId] }),
         },
       });
-      if (cycleId !== undefined) {
-        await addIssueToCycle(client, workspaceSlug, projectId, cycleId, created.id).catch(() => undefined);
+      if (targetCycle !== undefined) {
+        await addIssueToCycle(client, workspaceSlug, projectId, targetCycle, created.id).catch(() => undefined);
       }
-      if (moduleId !== undefined) {
-        await addIssuesToModule(client, workspaceSlug, projectId, moduleId, [created.id]).catch(() => undefined);
+      if (targetModule !== undefined) {
+        await addIssuesToModule(client, workspaceSlug, projectId, targetModule, [created.id]).catch(() => undefined);
       }
       setCreateState(null);
     } catch {

@@ -62,14 +62,18 @@ function nameMap(rows: ReadonlyArray<{ id: string; name: string }>): Map<string,
  * identifier prefix).
  */
 export function useListReferences({ workspaceSlug, projectId, dimension }: ListReferenceInput): ListReferences {
-  const needs = (key: string): boolean => dimension === null || dimension === key;
+  // Grouping decides section titles, but the row strip always reads the
+  // same references: cycling/module membership gates the read-only state,
+  // and labels, cycles and modules render as row values. Fetch them for
+  // every grouping (including flat) so an ungrouped list never renders an
+  // empty reference map or treats every cycle member as completed.
   const states = usePickerStates(workspaceSlug, projectId, true);
-  const members = usePickerProjectMembers(workspaceSlug, projectId, needs("assignees"));
-  const directory = usePickerWorkspaceMembers(workspaceSlug, needs("assignees"));
-  const projects = usePickerProjects(workspaceSlug, needs("project") || needs("team_project"));
-  const cycles = usePickerCycles(workspaceSlug, projectId, needs("cycle"));
-  const modules = usePickerModules(workspaceSlug, projectId, needs("module"));
-  const labels = useLabels(workspaceSlug, projectId, needs("labels"));
+  const members = usePickerProjectMembers(workspaceSlug, projectId, true);
+  const directory = usePickerWorkspaceMembers(workspaceSlug, true);
+  const projects = usePickerProjects(workspaceSlug, true);
+  const cycles = usePickerCycles(workspaceSlug, projectId, true);
+  const modules = usePickerModules(workspaceSlug, projectId, true);
+  const labels = useLabels(workspaceSlug, projectId, true);
   const me = useMe();
 
   const stateRows = states.data ?? [];
@@ -136,10 +140,11 @@ export function useListReferences({ workspaceSlug, projectId, dimension }: ListR
     projects: projectRows,
     isLoading:
       states.isPending ||
-      (needs("project") || needs("team_project") ? projects.isPending : false) ||
+      projects.isPending ||
       labels.isPending ||
-      (needs("assignees") && (members.isPending || directory.isPending)) ||
-      (needs("cycle") && cycles.isPending) ||
-      (needs("module") && modules.isPending),
+      members.isPending ||
+      directory.isPending ||
+      cycles.isPending ||
+      modules.isPending,
   };
 }

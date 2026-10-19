@@ -79,18 +79,28 @@ export function QuickAdd({
   function submit(): void {
     const name = title.trim();
     if (name === "") return;
+    // A cycle/module grouping value is a membership, not a create field:
+    // the create endpoint ignores it, so it goes through the bridge after
+    // the row lands. Route context wins over the section value.
+    const groupedCycle = typeof prefill["cycle_id"] === "string" ? prefill["cycle_id"] : undefined;
+    const groupedModules = Array.isArray(prefill["module_ids"]) ? prefill["module_ids"] : undefined;
+    const rest = { ...prefill };
+    delete rest["cycle_id"];
+    delete rest["module_ids"];
     const fields = {
-      ...prefill,
-      ...(prefill["state_id"] === undefined && defaultStateId !== null ? { state_id: defaultStateId } : {}),
+      ...rest,
+      ...(rest["state_id"] === undefined && defaultStateId !== null ? { state_id: defaultStateId } : {}),
     };
+    const targetCycle = cycleId ?? groupedCycle;
+    const targetModule = moduleId ?? groupedModules?.[0];
     create.mutate(
       { projectId, payload: { ...fields, name }, ...(groupKey === undefined ? {} : { tempGroupKey: groupKey }) },
       {
         onSuccess: (created) => {
           setTitle("");
           void attachCreatedIssue(getAppClient(), workspaceSlug, projectId, created.id, {
-            ...(cycleId === undefined ? {} : { cycleId }),
-            ...(moduleId === undefined ? {} : { moduleId }),
+            ...(targetCycle === undefined ? {} : { cycleId: targetCycle }),
+            ...(targetModule === undefined ? {} : { moduleId: targetModule }),
           }).catch(() => undefined);
           onCreated?.(created.id);
         },

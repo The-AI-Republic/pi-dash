@@ -146,15 +146,19 @@ describe("useListReferences", () => {
     expect(result.current.stateRows).toEqual([]);
   });
 
-  it("ignores assignee, cycle and module loads the dimension does not need", () => {
+  it("reads every strip reference even when the grouping does not need it", () => {
     mocks.members.mockReturnValue({ data: undefined, isPending: true });
     mocks.directory.mockReturnValue({ data: undefined, isPending: true });
     mocks.cycles.mockReturnValue({ data: undefined, isPending: true });
     mocks.modules.mockReturnValue({ data: undefined, isPending: true });
-    const { result } = renderHook(() =>
-      useListReferences({ workspaceSlug: "acme", projectId: PROJECT, dimension: "state" })
-    );
-    expect(result.current.isLoading).toBe(false);
+    renderHook(() => useListReferences({ workspaceSlug: "acme", projectId: PROJECT, dimension: "state" }));
+    expect(mocks.states).toHaveBeenCalledWith("acme", PROJECT, true);
+    expect(mocks.members).toHaveBeenCalledWith("acme", PROJECT, true);
+    expect(mocks.directory).toHaveBeenCalledWith("acme", true);
+    expect(mocks.projects).toHaveBeenCalledWith("acme", true);
+    expect(mocks.cycles).toHaveBeenCalledWith("acme", PROJECT, true);
+    expect(mocks.modules).toHaveBeenCalledWith("acme", PROJECT, true);
+    expect(mocks.labels).toHaveBeenCalledWith("acme", PROJECT, true);
   });
 
   it("counts a needed dimension's pending read as loading", () => {

@@ -423,7 +423,7 @@ describe("ListLayout", () => {
     await waitFor(() => expect(mocks.createMutation).toHaveBeenCalled());
     expect(mocks.createMutation).toHaveBeenCalledWith({
       projectId: PROJECT,
-      payload: { name: "New item", state_id: STATE, cycle_id: CYCLE, module_ids: [MODULE] },
+      payload: { name: "New item", state_id: STATE },
     });
     expect(mocks.addToCycle).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, CYCLE, ISSUE);
     expect(mocks.addToModule).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE, [ISSUE]);
@@ -459,10 +459,10 @@ describe("ListLayout", () => {
     await waitFor(() =>
       expect(mocks.createMutation).toHaveBeenCalledWith({
         projectId: PROJECT,
-        payload: { name: "Bucket item", state_id: STATE, cycle_id: CYCLE },
+        payload: { name: "Bucket item", state_id: STATE },
       })
     );
-    expect(mocks.addToCycle).not.toHaveBeenCalled();
+    expect(mocks.addToCycle).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, CYCLE, ISSUE);
   });
 
   it("excludes current cycle members from the add-existing search", async () => {
