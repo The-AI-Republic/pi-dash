@@ -10878,6 +10878,16 @@ export class WebNewDriver implements ParityDriver {
       .getByRole("switch", { name: WebNewDriver.emailPrefNames[pref], exact: true });
   }
 
+  /** Close every visible toast through its own dismiss control. */
+  private async dismissToastStack(): Promise<void> {
+    const stack = this.page.getByTestId("toast-stack");
+    for (let guard = 0; guard < 5; guard += 1) {
+      const dismiss = stack.getByRole("button", { name: "Dismiss notification" }).first();
+      if ((await dismiss.count()) === 0) return;
+      await dismiss.click({ timeout: 2_000 }).catch(() => undefined);
+    }
+  }
+
   private static readonly emailPrefNames: Record<NotificationsEmailPref, string> = {
     property_change: "Property changes",
     state_change: "State changes",
@@ -10943,17 +10953,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async notificationsEmailPreferencesToggle(pref: NotificationsEmailPref): Promise<void> {
-    // Toasts stack bottom-right over the page and take pointer events; a
-    // leftover toast from the previous step would swallow the click, so
-    // Esc closes the visible cards first (the kit toast closes on Esc).
-    const visibleToasts = this.page.locator('[data-testid="toast-notification"]');
-    for (let guard = 0; guard < 5 && (await visibleToasts.count()) > 0; guard += 1) {
-      await this.page.keyboard.press("Escape");
-      await visibleToasts
-        .first()
-        .waitFor({ state: "detached", timeout: 2_000 })
-        .catch(() => undefined);
-    }
+    // Toasts stack over the page and take pointer events; a leftover toast
+    // from the previous step would swallow the click, so each visible card
+    // is dismissed through its own dismiss control first.
+    await this.dismissToastStack();
     const saveWait = this.page.waitForResponse(
       (response) =>
         response.request().method() === "PATCH" && response.url().includes("/users/me/notification-preferences/"),
