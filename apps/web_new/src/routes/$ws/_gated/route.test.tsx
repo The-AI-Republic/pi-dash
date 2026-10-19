@@ -738,7 +738,7 @@ describe("gated layout shell wiring", () => {
 
   it("pins key handling off under the project settings area", () => {
     harness.routerState = {
-      matches: [{ params: {} }],
+      matches: [{ params: {}, routeId: "/$ws/_gated" }],
       location: { pathname: "/acme/settings/projects/p1/states/" },
     };
     renderShell();
