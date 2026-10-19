@@ -27,6 +27,7 @@ SEED_SECONDARY_EMAIL = "contract.probe@example.com"
 SEED_AUTOSET_EMAIL = "contract.autoset@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
+SEED_DEV_WORKSPACE_SLUG = "contract-dev"
 SEED_PROJECT_IDENTIFIER = "CT"
 SEED_DESKTOP_SESSION_KEY = os.environ.get("PIDASH_CONTRACT_DESKTOP_SESSION_KEY", "contractdesktopsession000001")
 
@@ -51,6 +52,7 @@ def refuse(target):
 def seed():
     from django.contrib.auth.hashers import make_password  # noqa: E402
     from pi_dash.db.models import (  # noqa: E402
+        APIToken,
         Issue,
         IssueActivity,
         Label,
@@ -1081,6 +1083,110 @@ def seed():
             note("chat-approval-repaired", local_id, False)
         else:
             note("chat-approval", local_id, approval_created)
+
+    # Developer integration fixtures (NEWFRONT-533). The GitHub connect and
+    # GitLab register endpoints verify credentials against the live provider
+    # before storing anything, so the contract suites cannot create these
+    # rows over HTTP. Seed them directly instead: a connected GitHub workspace
+    # integration with a PAT account, plus a GitLab PAT account that a suite
+    # disconnects. They live in their own workspace so the shared
+    # contract-acme keeps the "no provider account" shape the project
+    # repository suite (NEWFRONT-569) asserts there.
+    dev_workspace, dev_workspace_created = Workspace.objects.get_or_create(
+        slug=SEED_DEV_WORKSPACE_SLUG,
+        defaults={"name": "Contract Dev", "owner": user},
+    )
+    note("workspace", dev_workspace.slug, dev_workspace_created)
+    _, dev_membership_created = WorkspaceMember.objects.get_or_create(
+        workspace=dev_workspace,
+        member=user,
+        defaults={"role": 20, "is_active": True},
+    )
+    note("workspace-member", f"{dev_workspace.slug}/{user.email}", dev_membership_created)
+
+    from pi_dash.db.models import GitProviderAccount, Integration, WorkspaceIntegration
+    from pi_dash.license.utils.encryption import encrypt_data
+
+    github_integration, _ = Integration.objects.get_or_create(
+        provider="github",
+        defaults={
+            "title": "GitHub",
+            "verified": True,
+            "description": {"summary": "Mirror GitHub issues into Pi Dash projects."},
+        },
+    )
+    shim_token, _ = APIToken.objects.get_or_create(
+        user=user,
+        workspace=dev_workspace,
+        label=f"github-integration-shim-{dev_workspace.id}",
+        defaults={
+            "user_type": 1,
+            "is_active": False,
+            "description": "GitHub integration FK shim; not an auth token.",
+        },
+    )
+    github_ws, github_ws_created = WorkspaceIntegration.objects.update_or_create(
+        workspace=dev_workspace,
+        integration=github_integration,
+        defaults={
+            "actor": user,
+            "api_token": shim_token,
+            "config": {
+                "auth_type": "pat",
+                "token": encrypt_data("contract-github-pat"),
+                "github_user_login": "contract-gh",
+                "verified_at": "2026-01-02T03:04:05+00:00",
+            },
+        },
+    )
+    note("github-integration", str(github_ws.pk), github_ws_created)
+
+    github_account, github_account_created = GitProviderAccount.objects.update_or_create(
+        workspace=dev_workspace,
+        provider=GitProviderAccount.Provider.GITHUB,
+        host_url="https://github.com",
+        external_account_login="contract-gh",
+        defaults={
+            "auth_type": GitProviderAccount.AuthType.PAT,
+            "external_account_id": "533001",
+            "display_name": "Contract GitHub",
+            "capabilities": {
+                "read_repositories": True,
+                "read_issues": True,
+                "write_comments": True,
+                "manage_webhooks": True,
+                "clone": True,
+            },
+            "workspace_integration": github_ws,
+            "status": GitProviderAccount.Status.CONNECTED,
+            "verified_at": "2026-01-02T03:04:05+00:00",
+            "last_check_error": "",
+        },
+    )
+    note("github-account", str(github_account.pk), github_account_created)
+
+    gitlab_account, gitlab_account_created = GitProviderAccount.objects.update_or_create(
+        workspace=dev_workspace,
+        provider=GitProviderAccount.Provider.GITLAB,
+        host_url="https://gitlab.com",
+        external_account_login="contract-gitlab",
+        defaults={
+            "auth_type": GitProviderAccount.AuthType.PAT,
+            "external_account_id": "533002",
+            "display_name": "Contract GitLab",
+            "capabilities": {
+                "read_repositories": True,
+                "read_issues": True,
+                "write_comments": True,
+                "manage_webhooks": True,
+                "clone": False,
+            },
+            "status": GitProviderAccount.Status.CONNECTED,
+            "verified_at": "2026-01-02T03:04:05+00:00",
+            "last_check_error": "",
+        },
+    )
+    note("gitlab-account", str(gitlab_account.pk), gitlab_account_created)
 
     return {
         "email": user.email,
