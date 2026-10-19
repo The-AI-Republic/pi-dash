@@ -225,6 +225,17 @@ describe("EditPodDialog", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("keeps the generic update sentence when the request never reached the server", async () => {
+    setup(pod());
+    contractMocks.updatePod.mockRejectedValue(
+      new ApiError({ status: 0, code: "aborted", message: "Request was aborted" })
+    );
+    await screen.findByRole("heading", { name: EDIT_POD_TITLE });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "heavier" } });
+    await save();
+    await waitFor(() => expect(notify.notifyError).toHaveBeenCalledWith(POD_ERROR_TITLE, POD_UPDATE_FAILED));
+  });
+
   it("falls back to the generic update message for other failures", async () => {
     setup(pod());
     contractMocks.updatePod.mockRejectedValue(new Error("offline"));

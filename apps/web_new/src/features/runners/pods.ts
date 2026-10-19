@@ -7,7 +7,7 @@
 // is the difference between the form and the stored row — an unchanged
 // form sends nothing at all.
 
-import { isApiError, type Pod, type PodPatch } from "@pidash/api-client";
+import { isApiError, type ApiError, type Pod, type PodPatch } from "@pidash/api-client";
 
 /** Separator the server inserts between the project identifier and the suffix. */
 export const POD_NAME_SEPARATOR = "_";
@@ -99,21 +99,60 @@ export const POD_DELETE_GUARDS: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The refusal sentence a server response carried, if any. Pod endpoints
+ * answer with `{"error": "..."}`, so the text lives on the body. A failure
+ * that never reached a server (`status` 0: offline, timeout, abort) has
+ * only a transport message and no refusal to quote.
+ */
+function serverRefusalText(error: ApiError): string | null {
+  const body = error.body;
+  if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+    const said = (body as Record<string, unknown>)["error"];
+    if (typeof said === "string" && said.trim() !== "") return said.trim();
+  }
+  if (error.status > 0 && error.message.trim() !== "") return error.message.trim();
+  return null;
+}
+
+/**
+ * The guard code a refusal names. The shared client passes a server code
+ * through `code` only for some body shapes; pod refusals carry it beside
+ * `error`, so read the body as well before giving up.
+ */
+function refusalCode(error: ApiError): string | null {
+  if (Object.hasOwn(POD_DELETE_GUARDS, error.code)) return error.code;
+  const body = error.body;
+  if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+    const code = (body as Record<string, unknown>)["code"];
+    if (typeof code === "string" && Object.hasOwn(POD_DELETE_GUARDS, code)) return code;
+  }
+  return null;
+}
+
+/**
  * The sentence to show for a failed pod deletion: the guard that fired
  * when we recognize its code, otherwise whatever the server said, and
  * finally the generic message.
  */
 export function podDeleteErrorMessage(error: unknown): string {
   if (isApiError(error)) {
-    const guard = POD_DELETE_GUARDS[error.code];
-    if (guard !== undefined) return guard;
-    if (error.message.trim() !== "") return error.message;
+    const code = refusalCode(error);
+    if (code !== null) return POD_DELETE_GUARDS[code] as string;
+    const said = serverRefusalText(error);
+    if (said !== null) return said;
   }
   return POD_DELETE_FAILED;
 }
 
-/** The same choice for create and edit failures. */
+/**
+ * The same choice for create and edit failures: a server's refusal when it
+ * said one, otherwise the caller's own sentence. A dropped connection has
+ * nothing to do with the form, so it keeps the generic message.
+ */
 export function podWriteErrorMessage(error: unknown, fallback: string): string {
-  if (isApiError(error) && error.message.trim() !== "") return error.message;
+  if (isApiError(error)) {
+    const said = serverRefusalText(error);
+    if (said !== null) return said;
+  }
   return fallback;
 }

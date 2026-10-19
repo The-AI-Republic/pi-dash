@@ -145,6 +145,49 @@ describe("podDeleteErrorMessage", () => {
     );
   });
 
+  it("reads the guard code from the server body when the client left it out", () => {
+    // The server refuses with `{"error": "...", "code": "..."}`; the shared
+    // client keeps that code on the body, not on `code`.
+    for (const [code, guard] of Object.entries(POD_DELETE_GUARDS)) {
+      const refusal = new ApiError({
+        status: 409,
+        code: "http",
+        message: "raw server text",
+        body: { error: "raw server text", code },
+      });
+      expect(podDeleteErrorMessage(refusal)).toBe(guard);
+    }
+    const detail = new ApiError({
+      status: 409,
+      code: "http",
+      message: "raw server text",
+      body: { error: "raw server text", code: "pod_has_runners" },
+    });
+    expect(podDeleteErrorMessage(detail)).toContain("pod's runners");
+  });
+
+  it("ignores a body code it does not recognize", () => {
+    const other = new ApiError({
+      status: 409,
+      code: "http",
+      message: "server said no",
+      body: { error: "server said no", code: "something_else" },
+    });
+    expect(podDeleteErrorMessage(other)).toBe("server said no");
+    const notACode = new ApiError({
+      status: 409,
+      code: "http",
+      message: "server said no",
+      body: { code: 42 },
+    });
+    expect(podDeleteErrorMessage(notACode)).toBe("server said no");
+    const noRecord = new ApiError({ status: 409, code: "http", message: "server said no", body: ["a"] });
+    expect(podDeleteErrorMessage(noRecord)).toBe("server said no");
+    expect(podDeleteErrorMessage(new ApiError({ status: 0, code: "network", message: "Failed to fetch" }))).toBe(
+      POD_DELETE_FAILED
+    );
+  });
+
   it("falls back to the server message, then the generic sentence", () => {
     expect(podDeleteErrorMessage(new ApiError({ status: 500, code: "http", message: "server said no" }))).toBe(
       "server said no"
@@ -167,5 +210,42 @@ describe("podWriteErrorMessage", () => {
     expect(podWriteErrorMessage(new ApiError({ status: 0, code: "http", message: "" }), POD_UPDATE_FAILED)).toBe(
       POD_UPDATE_FAILED
     );
+  });
+
+  it("treats a transport failure's message as noise, not a server sentence", () => {
+    for (const code of ["network", "timeout", "aborted"]) {
+      const transport = new ApiError({ status: 0, code, message: "Failed to fetch" });
+      expect(podWriteErrorMessage(transport, POD_CREATE_FAILED)).toBe(POD_CREATE_FAILED);
+      expect(podWriteErrorMessage(transport, POD_UPDATE_FAILED)).toBe(POD_UPDATE_FAILED);
+    }
+  });
+
+  it("reads the server's sentence from the body when it carries one", () => {
+    const refusal = new ApiError({
+      status: 400,
+      code: "http",
+      message: "Failed to fetch",
+      body: { error: "name already used" },
+    });
+    expect(podWriteErrorMessage(refusal, POD_CREATE_FAILED)).toBe("name already used");
+    const blankBodyError = new ApiError({
+      status: 400,
+      code: "http",
+      message: "",
+      body: { error: "  " },
+    });
+    expect(podWriteErrorMessage(blankBodyError, POD_UPDATE_FAILED)).toBe(POD_UPDATE_FAILED);
+    expect(
+      podWriteErrorMessage(new ApiError({ status: 400, code: "http", message: " ", body: null }), POD_UPDATE_FAILED)
+    ).toBe(POD_UPDATE_FAILED);
+    expect(
+      podWriteErrorMessage(new ApiError({ status: 400, code: "http", message: "", body: "text" }), POD_UPDATE_FAILED)
+    ).toBe(POD_UPDATE_FAILED);
+    expect(
+      podWriteErrorMessage(
+        new ApiError({ status: 400, code: "http", message: "", body: { code: "x" } }),
+        POD_UPDATE_FAILED
+      )
+    ).toBe(POD_UPDATE_FAILED);
   });
 });

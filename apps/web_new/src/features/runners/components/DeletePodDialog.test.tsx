@@ -119,7 +119,11 @@ describe("DeletePodDialog", () => {
     ["default_pod_undeletable", "default pod"],
   ])("translates the %s refusal and keeps the dialog", async (code, fragment) => {
     const { onCancel, onDeleted } = setup(TARGET);
-    contractMocks.deletePod.mockRejectedValue(new ApiError({ status: 409, code, message: "raw server text" }));
+    // The wire shape the server sends: the code sits beside `error`, and
+    // the shared client keeps `code` generic for that body.
+    contractMocks.deletePod.mockRejectedValue(
+      new ApiError({ status: 409, code: "http", message: "raw server text", body: { error: "raw server text", code } })
+    );
     await screen.findByRole("heading", { name: DELETE_POD_TITLE });
     confirm();
     await waitFor(() => expect(notify.notifyError).toHaveBeenCalledWith(POD_ERROR_TITLE, POD_DELETE_GUARDS[code]));
@@ -142,6 +146,15 @@ describe("DeletePodDialog", () => {
   it("falls back to the generic sentence for a transport failure", async () => {
     setup(TARGET);
     contractMocks.deletePod.mockRejectedValue(new Error("offline"));
+    await screen.findByRole("heading", { name: DELETE_POD_TITLE });
+    confirm();
+    await waitFor(() => expect(notify.notifyError).toHaveBeenCalledWith(POD_ERROR_TITLE, POD_DELETE_FAILED));
+    expect(notify.notifyError).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a dropped connection's message instead of quoting it", async () => {
+    setup(TARGET);
+    contractMocks.deletePod.mockRejectedValue(new ApiError({ status: 0, code: "network", message: "Failed to fetch" }));
     await screen.findByRole("heading", { name: DELETE_POD_TITLE });
     confirm();
     await waitFor(() => expect(notify.notifyError).toHaveBeenCalledWith(POD_ERROR_TITLE, POD_DELETE_FAILED));

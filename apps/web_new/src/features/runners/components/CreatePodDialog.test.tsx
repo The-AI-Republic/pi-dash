@@ -184,6 +184,15 @@ describe("CreatePodDialog", () => {
     expect(screen.getByRole("heading", { name: CREATE_POD_TITLE })).toBeInTheDocument();
   });
 
+  it("keeps the generic sentence when the request never reached the server", async () => {
+    setup();
+    contractMocks.createPod.mockRejectedValue(new ApiError({ status: 0, code: "network", message: "Failed to fetch" }));
+    await chooseProject("Web app");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "beefy" } });
+    fireEvent.click(screen.getByRole("button", { name: CREATE_POD_SUBMIT }));
+    await waitFor(() => expect(notify.notifyError).toHaveBeenCalledWith(POD_ERROR_TITLE, POD_CREATE_FAILED));
+  });
+
   it("toasts the generic sentence for a non-API failure", async () => {
     setup();
     contractMocks.createPod.mockRejectedValue(new Error(""));
