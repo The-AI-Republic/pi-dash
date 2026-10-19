@@ -444,6 +444,16 @@ describe("SidebarPropertiesB rows", () => {
     expect(screen.getByRole("option", { name: /Another candidate/ })).toBeInTheDocument();
   });
 
+  it("patches the parent picked in the dialog", async () => {
+    const { client, queryClient, writes } = harness();
+    renderRows(client, queryClient);
+    fireEvent.click(within(screen.getByRole("group", { name: "Parent" })).getByRole("button"));
+    fireEvent.change(await screen.findByLabelText("Search work items"), { target: { value: "Parent" } });
+    fireEvent.click(await screen.findByRole("option", { name: /Parent epic/ }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]!.body).toEqual({ parent_id: PARENT });
+  });
+
   it("names the parent's identifier once its read lands and can remove it inline", async () => {
     const { client, queryClient, writes } = harness();
     renderRows(client, queryClient, { issue: issueFixture({ parent_id: PARENT }) });

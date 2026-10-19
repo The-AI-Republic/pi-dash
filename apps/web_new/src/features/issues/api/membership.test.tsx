@@ -187,10 +187,12 @@ describe("useIssueCycleWrite", () => {
     expect(queryClient.getQueryData(detailKey)).toMatchObject({ cycle_id: CYCLE });
   });
 
-  it("patches row lists cached under the workspace scope, not only detail and envelopes", async () => {
+  it("patches row lists cached under the workspace scope and leaves foreign entries alone", async () => {
     const { queryClient } = setup();
     const rowsKey = [...issueKeys.all(SLUG), "list", "rows"] as const;
+    const foreignKey = [...issueKeys.all(SLUG), "list", "foreign"] as const;
     queryClient.setQueryData(rowsKey, [detail({ cycle_id: CYCLE, module_ids: [MODULE_A] }), { id: "other" }]);
+    queryClient.setQueryData(foreignKey, "not a row");
     handleRef.cycle!.updateCycle(OTHER_CYCLE);
     await waitFor(() =>
       expect(queryClient.getQueryData(rowsKey)).toEqual([
@@ -198,6 +200,7 @@ describe("useIssueCycleWrite", () => {
         { id: "other" },
       ])
     );
+    expect(queryClient.getQueryData(foreignKey)).toBe("not a row");
   });
 
   it("re-reads the cycle list after the bridge settles", async () => {
