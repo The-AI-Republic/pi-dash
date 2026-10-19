@@ -585,10 +585,10 @@ function RangeSlot({
   const ends: RangeValue = pending ?? customRange(value);
   const incomplete = isRangeIncomplete(ends);
   // Relative windows lead the trigger when they are the only pick; a
-  // custom pair reads as its ends.
+  // custom pair reads as its ends. A preset-only value always has a label.
   const label =
     pending === null && presets.length > 0 && ends.start === null && ends.end === null
-      ? (dateValueLabel(value) ?? EMPTY_SLOT_LABEL)
+      ? (dateValueLabel(value) as string)
       : rangeLabel(ends);
   const focusCalendar = (): void => {
     setOpen(true);

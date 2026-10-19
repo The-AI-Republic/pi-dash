@@ -1532,7 +1532,13 @@ section also runs on the same control — title with its applied count
 (presets plus a single Custom entry), chevron collapse, the search box
 over the relative windows, the five-row cap and the no-matches
 placeholder — with the Custom row and calendar below the rows
-(ISS-094 now holds for the date value lists too).
+(ISS-094 now holds for the date value lists too). The control has two
+parts: `FilterSection` for pickable rows, and `FilterSectionFrame`
+(title bar plus collapsible body) for a section whose body is not a
+row list, which is what the display dropdown's property pills and
+switches use; those two keep the frame's own collapse rather than a
+no-op toggle, and the frame gives them the same title bar as every
+other section.
 
 The date dimensions keep both lookup families. "is" / "is not" and
 "between" / "not between" are offered, because the JSON filter set

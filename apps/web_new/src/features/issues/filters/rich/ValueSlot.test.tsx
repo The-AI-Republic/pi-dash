@@ -1599,6 +1599,102 @@ describe("ValueSlot date presets and custom range", () => {
   });
 });
 
+describe("ValueSlot pending range", () => {
+  it("keeps a selected relative window visible while both ends are pending", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{
+            ...condition("1_weeks;after;fromnow"),
+            property: "start_date",
+            operator: "range",
+          }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /1 week from now/ }));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const days = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ });
+    await user.click(days[5]!);
+    // A half-filled pair reads as its one end, not as the stored preset.
+    expect(screen.queryByText("Range")).toBeInTheDocument();
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent(`${days[5]!.getAttribute("data-day")} → …`);
+  });
+});
+
+describe("ValueSlot between-range details", () => {
+  it("toggles a relative window inside the paired editor", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const preset = await screen.findByRole("checkbox", { name: "1 week from now" });
+    expect(preset).toHaveAttribute("aria-checked", "false");
+    await user.click(preset);
+    expect(onChange).toHaveBeenLastCalledWith("1_weeks;after;fromnow");
+  });
+
+  it("recomposes a stored pair when the paired editor switches shape", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("2026-02-01,2026-02-10"), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2026-02-01 → 2026-02-10/ }));
+    // Base UI mounts the trigger twice; the second one is the popup on top.
+    await user.click((await screen.findAllByTestId("rich-value-trigger"))[1]!);
+    await user.click(screen.getByRole("radio", { name: "After" }));
+    // The first stored end becomes the open lower bound; the other end drops.
+    expect(onChange).toHaveBeenLastCalledWith("2026-02-01;after");
+    expect(screen.getByTestId("rich-date-calendar")).toBeInTheDocument();
+  });
+
+  it("commits one directed day from the one-day calendar inside the paired editor", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(await screen.findByRole("radio", { name: "Before" }));
+    const calendar = screen.getByTestId("rich-date-calendar");
+    const day = within(calendar)
+      .getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })
+      .find((option) => option.getAttribute("data-in-month") === "true" && !option.hasAttribute("disabled"))!;
+    await user.click(day);
+    expect(onChange).toHaveBeenLastCalledWith(`${day.getAttribute("data-day")};before`);
+  });
+});
+
 describe("ValueSlot custom date modes", () => {
   it.each([
     ["exact", "On"],

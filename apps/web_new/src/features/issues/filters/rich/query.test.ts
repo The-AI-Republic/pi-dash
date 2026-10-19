@@ -167,6 +167,15 @@ describe("date conditions travel as legacy list parameters", () => {
     });
   });
 
+  it("keeps an exact day in JSON under the between lookup", () => {
+    expect(withRichFilters({}, { start_date__range: ["1_weeks;after;fromnow", "2026-02-10"] })).toEqual({
+      filters: {
+        filters: '{"start_date__exact":"2026-02-10"}',
+        start_date: "1_weeks;after;fromnow",
+      },
+    });
+  });
+
   it("applies an empty and to the query unchanged", () => {
     const query = { perPage: 10 };
     expect(withRichFilters(query, {})).toBe(query);

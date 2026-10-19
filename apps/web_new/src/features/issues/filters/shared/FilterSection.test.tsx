@@ -8,7 +8,7 @@ import { CircleDot } from "lucide-react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { FILTER_SECTION_CAP, FilterSection, type FilterSectionOption } from "./FilterSection.js";
+import { FILTER_SECTION_CAP, FilterSection, FilterSectionFrame, type FilterSectionOption } from "./FilterSection.js";
 
 const ROWS: FilterSectionOption[] = [
   { id: "a", label: "Alpha" },
@@ -232,6 +232,39 @@ describe("FilterSection", () => {
     renderSection({ applied: [], checked: ["c"], count: 0 });
     expect(screen.getByRole("heading", { name: "Cycle" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Charlie" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("keeps a non-list body collapsible inside the shared frame", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    const { rerender } = render(
+      <FilterSectionFrame title="Options" countLabel="Options" open onToggle={onToggle} testId="frame">
+        <button type="button">Switch one</button>
+      </FilterSectionFrame>
+    );
+    expect(screen.getByRole("heading", { name: "Options" })).toBeInTheDocument();
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Collapse Options section" }));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+    rerender(
+      <FilterSectionFrame title="Options" countLabel="Options" open={false} onToggle={onToggle} testId="frame">
+        <button type="button">Switch one</button>
+      </FilterSectionFrame>
+    );
+    expect(screen.queryByRole("button", { name: "Switch one" })).not.toBeInTheDocument();
+  });
+
+  it("manages its own collapse when the host controls nothing", async () => {
+    const user = userEvent.setup();
+    render(
+      <FilterSectionFrame title="Options" countLabel="Options" testId="frame">
+        <button type="button">Switch one</button>
+      </FilterSectionFrame>
+    );
+    await user.click(screen.getByRole("button", { name: "Collapse Options section" }));
+    expect(screen.queryByRole("button", { name: "Switch one" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand Options section" }));
+    expect(screen.getByRole("button", { name: "Switch one" })).toBeInTheDocument();
   });
 
   it("exposes the section title for host styling hooks", () => {

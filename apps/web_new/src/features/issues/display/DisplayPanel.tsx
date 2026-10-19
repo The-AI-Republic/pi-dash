@@ -13,7 +13,7 @@ import { Check } from "lucide-react";
 import * as React from "react";
 
 import type { LayoutKind } from "../layouts/kinds.js";
-import { FilterSection, type FilterSectionOption } from "../filters/shared/FilterSection.js";
+import { FilterSection, FilterSectionFrame, type FilterSectionOption } from "../filters/shared/FilterSection.js";
 import {
   DISPLAY_SECTION_TITLES,
   DISPLAY_SWITCH_LABELS,
@@ -151,13 +151,10 @@ export function DisplayPanel({
   return (
     <div data-testid="display-options-panel" className="divide-y divide-(--border) px-(--space-2)">
       {matrix.properties.length > 0 ? (
-        <FilterSection
+        <FilterSectionFrame
           key={`properties:${layout}`}
           title={DISPLAY_SECTION_TITLES.properties}
-          kind="multi"
-          applied={[]}
-          options={[]}
-          onToggle={() => {}}
+          countLabel={DISPLAY_SECTION_TITLES.properties}
           testId="display-section-properties"
           className="py-(--space-4)"
         >
@@ -181,7 +178,7 @@ export function DisplayPanel({
               );
             })}
           </div>
-        </FilterSection>
+        </FilterSectionFrame>
       ) : null}
       {matrix.groupBy !== null ? (
         <SingleChoiceSection
@@ -218,13 +215,10 @@ export function DisplayPanel({
         />
       ) : null}
       {matrix.switches.length > 0 ? (
-        <FilterSection
+        <FilterSectionFrame
           key={`options:${layout}`}
           title={DISPLAY_SECTION_TITLES.options}
-          kind="multi"
-          applied={[]}
-          options={[]}
-          onToggle={() => {}}
+          countLabel={DISPLAY_SECTION_TITLES.options}
           testId="display-section-options"
           className="py-(--space-4)"
         >
@@ -238,7 +232,7 @@ export function DisplayPanel({
               />
             ))}
           </div>
-        </FilterSection>
+        </FilterSectionFrame>
       ) : null}
     </div>
   );

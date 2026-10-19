@@ -24,12 +24,6 @@ import type { RichExpression } from "./expression.js";
 /** Date fields forwarded as bare list parameters rather than JSON leaves. */
 export const LEGACY_DATE_FIELDS = ["start_date", "target_date"] as const;
 
-/** A relative window's direction in the legacy date grammar, if it has one. */
-function presetDirection(entry: string): "after" | "before" | null {
-  const [, direction] = entry.split(";");
-  return direction === "after" || direction === "before" ? direction : null;
-}
-
 /**
  * The entries of a date value the bare parameter can carry truthfully.
  * Every one of them is a positive bound there (`after` reads `gte`,
@@ -43,7 +37,10 @@ function forwardableDateEntries(value: unknown): string[] {
   const mode = customDateMode(value);
   const parts = dateValueParts(value);
   const open = mode === "after" || mode === "before" ? parts.custom : [];
-  const presets = parts.presets.filter((entry) => presetDirection(entry) === "after");
+  // The offered presets are forward windows (`...;after;fromnow`); the bare
+  // parameter reads an entry without a direction as a positive bound too.
+  // A preset stored as a "before" window stays in the JSON tree.
+  const presets = parts.presets.filter((entry) => entry.split(";")[1] !== "before");
   return [...presets, ...open];
 }
 
@@ -71,10 +68,9 @@ function customDateLeaf(stem: string, value: unknown): RichExpression | null {
   // entry, so nothing of it stays behind.
   if (mode === "after" || mode === "before") return null;
   const { start, end } = customRange(value);
-  if (mode === "range") {
-    if (start !== null && end !== null) return { [`${stem}__range`]: `${start},${end}` };
-    return null;
-  }
+  // `customDateMode` reads any two custom entries as a pair, so the range
+  // mode always has both ends here.
+  if (mode === "range" && start !== null && end !== null) return { [`${stem}__range`]: `${start},${end}` };
   const day = start ?? end;
   return day === null ? null : { [`${stem}__exact`]: day };
 }

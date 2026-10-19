@@ -245,6 +245,25 @@ describe("DisplayPanel", () => {
     expect(calls.onToggleProperty).toHaveBeenCalledWith("state", true);
   });
 
+  it("collapses the property pills and switches inside the shared frame", async () => {
+    const user = userEvent.setup();
+    renderPanel("list");
+    await user.click(screen.getByRole("button", { name: "Collapse Display Properties section" }));
+    expect(within(section("properties")).queryByRole("button", { name: "Assignee" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand Display Properties section" }));
+    await user.click(screen.getByRole("button", { name: "Collapse Options section" }));
+    expect(within(section("options")).queryByRole("button", { name: "Show empty groups" })).not.toBeInTheDocument();
+    // A non-list body carries no search box, unlike the choice sections.
+    expect(within(section("properties")).queryByRole("searchbox")).not.toBeInTheDocument();
+  });
+
+  it("clears grouping when the stored group picks None", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderPanel("list", { state: { groupBy: "state" } });
+    await user.click(within(section("group")).getByRole("button", { name: "None" }));
+    expect(calls.onGroupBy).toHaveBeenCalledWith(null);
+  });
+
   it("leaves every order unchecked for an unknown stored sort", () => {
     renderPanel("list", { state: { orderBy: "future_sort" } });
     const options = within(section("order"))

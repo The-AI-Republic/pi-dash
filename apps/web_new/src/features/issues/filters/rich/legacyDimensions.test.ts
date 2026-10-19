@@ -165,11 +165,14 @@ describe("custom date shapes", () => {
       "2026-02-10;after",
     ]);
     expect(composeCustomDate([], "before", null, null)).toBeNull();
+    expect(composeCustomDate([], "after", null, null)).toBeNull();
   });
 
   it("labels each open direction and the pair by its ends", () => {
     expect(dateValueLabel(["2026-02-10"])).toBe("2026-02-10");
     expect(dateValueLabel(["2026-02-10;after"])).toBe("After 2026-02-10");
     expect(dateValueLabel("2026-02-01,2026-02-10")).toBe("2026-02-01 → 2026-02-10");
+    // A lone upper bound reads as the start once the lower one is empty.
+    expect(dateValueLabel(["2026-02-10;before"])).toBe("Before 2026-02-10");
   });
 });

@@ -133,6 +133,56 @@ function OptionRow({
   );
 }
 
+/** Props of the section frame: the title bar and the body it reveals. */
+export interface FilterSectionFrameProps {
+  title: string;
+  /** Rendered heading text; usually the title with its applied count. */
+  countLabel: string;
+  /** Controlled open state; absent keeps the frame's own. */
+  open?: boolean | undefined;
+  onToggle?: (() => void) | undefined;
+  testId?: string | undefined;
+  className?: string | undefined;
+  children: React.ReactNode;
+}
+
+/**
+ * The section's title bar and collapsible body, without the row machinery.
+ * The shared section wraps it; a host whose body is not a pickable list
+ * (the display panel's pills and switches) uses it directly so the chrome
+ * still matches.
+ */
+export function FilterSectionFrame({
+  title,
+  countLabel,
+  open,
+  onToggle,
+  testId,
+  className,
+  children,
+}: FilterSectionFrameProps): React.ReactElement {
+  const [ownOpen, setOwnOpen] = React.useState(true);
+  const expanded = open ?? ownOpen;
+  const toggle = onToggle ?? ((): void => setOwnOpen(!ownOpen));
+  return (
+    <section data-testid={testId} data-section-title={title} aria-label={title} className={className}>
+      <div className="flex items-center justify-between gap-(--space-2)">
+        <h3 className="text-caption text-(--text-muted)">{countLabel}</h3>
+        <button
+          type="button"
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${title} section`}
+          aria-expanded={expanded}
+          onClick={toggle}
+          className="grid size-5 shrink-0 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
+        >
+          {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+        </button>
+      </div>
+      {expanded ? <div className="mt-(--space-1)">{children}</div> : null}
+    </section>
+  );
+}
+
 /**
  * The shared section. It owns collapse, the search text, and the cap; the
  * host owns which rows exist and which are applied.
@@ -174,19 +224,14 @@ export function FilterSection({
   const count = countOverride ?? applied.length;
   const countLabel = count > 0 ? `${title} (${count})` : title;
   return (
-    <section data-testid={testId} data-section-title={title} aria-label={title} className={className}>
-      <div className="flex items-center justify-between gap-(--space-2)">
-        <h3 className="text-caption text-(--text-muted)">{countLabel}</h3>
-        <button
-          type="button"
-          aria-label={`${open ? "Collapse" : "Expand"} ${title} section`}
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-          className="grid size-5 shrink-0 place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle)"
-        >
-          {open ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
-        </button>
-      </div>
+    <FilterSectionFrame
+      title={title}
+      countLabel={countLabel}
+      open={open}
+      onToggle={() => setOpen(!open)}
+      testId={testId}
+      className={className}
+    >
       {open ? (
         <div
           className="mt-(--space-1)"
@@ -250,6 +295,6 @@ export function FilterSection({
           )}
         </div>
       ) : null}
-    </section>
+    </FilterSectionFrame>
   );
 }

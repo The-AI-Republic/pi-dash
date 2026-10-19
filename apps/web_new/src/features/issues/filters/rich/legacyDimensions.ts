@@ -151,11 +151,14 @@ export function clearCustomDate(value: unknown): unknown {
   return joinDateValue(dateValueParts(value).presets);
 }
 
-/** Custom days only (presets removed), in stored order, as bare ISO days. */
+/**
+ * Custom days only (presets removed), in stored order, as bare ISO days.
+ * `dateEntries` drops blank entries, so every split has a day to read.
+ */
 export function customDays(value: unknown): string[] {
   return dateEntries(value)
     .filter((entry) => !isDatePreset(entry))
-    .map((entry) => entry.split(";")[0] ?? "")
+    .map((entry) => entry.split(";")[0]!)
     .filter((entry) => ISO_DAY.test(entry));
 }
 
@@ -181,6 +184,7 @@ export function composeCustomDate(
         : mode === "before"
           ? [start === null ? null : customEndEntry(start)]
           : [start];
+  // Nothing picked leaves no custom entry; the presets stay.
   return joinDateValue([...presets, ...custom.filter((entry): entry is string => entry !== null)]);
 }
 
@@ -210,18 +214,22 @@ export function customRange(value: unknown): { start: string | null; end: string
 }
 
 /** Trigger text and chip label: preset names, then the custom range. */
+// A value always carries at least one entry when a label is asked for, so
+// the presets and the custom half never both read empty.
 export function dateValueLabel(value: unknown): string | null {
   const parts = dateValueParts(value);
-  const labels = parts.presets.map(
-    (preset) => DATE_PRESETS.find((candidate) => candidate.value === preset)?.label ?? preset
-  );
+  // A preset's label always exists: the list above is the only source of
+  // preset values, and `dateValueParts` only classifies those as presets.
+  const labels = parts.presets.map((preset) => DATE_PRESETS.find((candidate) => candidate.value === preset)!.label);
   const range = customRange(value);
   const mode = customDateMode(value);
   if (mode === "range" && range.start !== null && range.end !== null) labels.push(`${range.start} → ${range.end}`);
   else if (mode === "after" && range.start !== null) labels.push(`After ${range.start}`);
   else if (mode === "before" && range.end !== null) labels.push(`Before ${range.end}`);
+  // One custom entry always reads into the start: an exact day and an
+  // after-bound are lower bounds, and a lone before-bound is the second
+  // undirected day that `customRange` assigns to the start when empty.
   else if (range.start !== null) labels.push(range.start);
-  else if (range.end !== null) labels.push(range.end);
   for (const entry of dateEntries(value)) {
     if (!isDatePreset(entry) && !isCustomDateEntry(entry)) labels.push(entry);
   }

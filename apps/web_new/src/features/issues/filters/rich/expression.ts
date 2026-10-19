@@ -633,7 +633,7 @@ function catalogField(input: {
  * Stems are the filter set's field names; entity-backed fields resolve
  * their labels from the shared pickers, so reads stay lazy on open.
  */
-export function valueInputFields(surface: RichFilterSurface = "project"): RichFilterField[] {
+export function valueInputFields(surface: RichFilterSurface): RichFilterField[] {
   const fields = [
     {
       ...catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
@@ -666,7 +666,7 @@ export function valueInputFields(surface: RichFilterSurface = "project"): RichFi
 /** Merge the value-input fields into the base catalogue without duplicates. */
 export function withValueInputFields(
   fields: readonly RichFilterField[],
-  surface: RichFilterSurface = "project"
+  surface: RichFilterSurface
 ): RichFilterField[] {
   const known = new Set(fields.map((field) => field.stem));
   return [...fields, ...valueInputFields(surface).filter((field) => !known.has(field.stem))];
