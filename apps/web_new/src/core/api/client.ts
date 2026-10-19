@@ -33,14 +33,18 @@ let appBaseUrl: string | null = null;
  * Tests pass a stub transport; the app always uses platform.fetch.
  */
 export function createAppClient(baseUrl: string = defaultBaseUrl(), transport?: Transport): ApiClient {
+  // Resolve the transport once so the provider sibling always sends through
+  // the same channel as the app client — platform.fetch in both builds,
+  // including the desktop shell's HTTP bridge (DESK-020).
+  const resolvedTransport = transport ?? toApiTransport(platform);
   const client = createClient({
     baseUrl,
-    transport: transport ?? toApiTransport(platform),
+    transport: resolvedTransport,
     middleware: [createSessionMiddleware()],
   });
   appClient = client;
   providerClient = null;
-  appTransport = transport ?? null;
+  appTransport = resolvedTransport;
   appBaseUrl = baseUrl;
   setSessionClient(client);
   return client;
@@ -54,13 +58,13 @@ export function createAppClient(baseUrl: string = defaultBaseUrl(), transport?: 
  * the app client, so a real expired session keeps signing out.
  */
 export function getProviderWriteClient(): ApiClient {
-  if (!appClient) {
+  if (!appClient || appTransport === null) {
     throw new Error("App client is not configured yet. Call createAppClient at bootstrap.");
   }
   if (providerClient === null) {
     providerClient = createClient({
       baseUrl: appBaseUrl ?? appClient.baseUrl,
-      ...(appTransport === null ? {} : { transport: appTransport }),
+      transport: appTransport,
     });
   }
   return providerClient;

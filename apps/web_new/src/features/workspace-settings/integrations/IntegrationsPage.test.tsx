@@ -3,10 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Integrations page (parity/specs/workspace-settings.md §15–§17,
-// WSET-016–018): the admin banner and both cards, the denial for members,
-// the pending role, and the success/failure notices each provider write
-// raises. A stub transport stands in for Django so the page runs through
-// the real query and mutation hooks.
+// WSET-016–018): the banner and both cards as the shell body, and the
+// success/failure notices each provider write raises. The layout owns the
+// admin gate, so the denial is proven in routes.test.tsx, not here. A stub
+// transport stands in for Django so the page runs through the real query
+// and mutation hooks.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -14,17 +15,9 @@ import type { Transport, TransportResponse } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { permissions, notices } = vi.hoisted(() => ({
-  permissions: {
-    current: { isLoading: false, isAdmin: true, isMember: true, canEdit: true, role: 20 as number | null },
-  },
+const { notices } = vi.hoisted(() => ({
   notices: { success: vi.fn(), error: vi.fn() },
 }));
-
-vi.mock("../../../core/session/index.js", async (importOriginal) => {
-  const original = await importOriginal<Record<string, unknown>>();
-  return { ...original, usePermissions: () => permissions.current };
-});
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<Record<string, unknown>>();
@@ -32,7 +25,6 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { SettingsNotAuthorized } from "../components/SettingsNotAuthorized.js";
 import {
   GITHUB_CONNECTED_NOTICE,
   GITHUB_CONNECT_FAILED_NOTICE,
@@ -139,13 +131,12 @@ function renderPage() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  permissions.current = { isLoading: false, isAdmin: true, isMember: true, canEdit: true, role: 20 };
 });
 
 afterEach(() => resetAppClient());
 
 describe("integrations page", () => {
-  it("shows the banner heading and both provider cards for an admin", async () => {
+  it("shows the banner heading and both provider cards", async () => {
     createAppClient("https://api.test", backend().transport);
     renderPage();
     expect(screen.getByRole("heading", { name: INTEGRATIONS_HEADING, level: 2 })).toBeInTheDocument();
@@ -154,32 +145,6 @@ describe("integrations page", () => {
     expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "GitLab" })).toBeInTheDocument();
     expect(await screen.findByText(/fine-grained PAT/)).toBeInTheDocument();
-  });
-
-  it("refuses a member with the shared not-authorized view and no cards", () => {
-    permissions.current = { isLoading: false, isAdmin: false, isMember: true, canEdit: true, role: 15 };
-    createAppClient("https://api.test", backend().transport);
-    renderPage();
-    expect(screen.getByText(SettingsNotAuthorized.name.length > 0 ? /not authorized/i : /x/)).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "GitHub" })).not.toBeInTheDocument();
-  });
-
-  it("refuses a guest with no workspace role", () => {
-    permissions.current = { isLoading: false, isAdmin: false, isMember: false, canEdit: false, role: null };
-    createAppClient("https://api.test", backend().transport);
-    renderPage();
-    expect(screen.getByRole("heading", { name: /not authorized/i })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "GitHub" })).not.toBeInTheDocument();
-  });
-
-  it("shows the pending state while the role resolves", () => {
-    permissions.current = { isLoading: true, isAdmin: false, isMember: false, canEdit: false, role: null };
-    createAppClient("https://api.test", backend().transport);
-    renderPage();
-    expect(screen.getByTestId("workspace-settings-integrations-pending")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: INTEGRATIONS_HEADING, level: 2 })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "GitLab" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/not authorized/i)).not.toBeInTheDocument();
   });
 
   it("shows a retry when a provider read fails", async () => {

@@ -8,8 +8,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Transport, TransportResponse } from "@pidash/api-client";
 
+import type { Platform } from "../platform/index.js";
 import { useSessionStore } from "../session/store.js";
 import { createAppClient, getAppClient, getProviderWriteClient, resetAppClient } from "./client.js";
+
+const platformHarness = vi.hoisted(() => ({
+  current: {} as Partial<Platform>,
+}));
+
+vi.mock("../platform/index.js", async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
+  return {
+    ...original,
+    get platform() {
+      return platformHarness.current;
+    },
+  };
+});
 
 function response(status: number, body: string): TransportResponse {
   return {
@@ -24,7 +39,11 @@ beforeEach(() => {
   useSessionStore.setState({ status: "authenticated", returnUrl: null });
 });
 
-afterEach(() => resetAppClient());
+afterEach(() => {
+  platformHarness.current = {};
+  resetAppClient();
+  vi.unstubAllGlobals();
+});
 
 describe("provider write client", () => {
   it("shares the origin and transport but skips the session-expiry middleware", async () => {
@@ -68,24 +87,31 @@ describe("provider write client", () => {
     expect(() => getProviderWriteClient()).toThrow(/not configured/i);
   });
 
-  it("lets the platform transport serve provider writes when bootstrap passed none", async () => {
-    const sent: string[] = [];
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
-      sent.push(String(input));
-      return new Response(JSON.stringify({ detail: "bad token" }), {
-        status: 401,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    try {
-      createAppClient("https://api.test");
-      await expect(
-        getProviderWriteClient().sendJson("POST", "/api/workspaces/acme/integrations/github/connect/", { json: {} })
-      ).rejects.toThrow();
-      expect(sent.some((url) => url.includes("/integrations/github/connect/"))).toBe(true);
-      expect(useSessionStore.getState().status).toBe("authenticated");
-    } finally {
-      vi.unstubAllGlobals();
-    }
+  it("sends provider writes through the platform transport when bootstrap passed none", async () => {
+    const platformCalls: string[] = [];
+    platformHarness.current = {
+      kind: "desktop",
+      apiOrigin: "https://api.desktop.test",
+      fetch: async (url) => {
+        platformCalls.push(String(url));
+        return new Response(JSON.stringify({ detail: "bad token" }), {
+          status: 401,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    };
+    const webFetch = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", webFetch);
+
+    createAppClient();
+    await expect(
+      getProviderWriteClient().sendJson("POST", "/api/workspaces/acme/integrations/github/connect/", { json: {} })
+    ).rejects.toThrow();
+
+    // The desktop build must reach the API through the shell bridge, never
+    // through the page's own fetch (a different origin, no credentials).
+    expect(platformCalls.some((url) => url.includes("/integrations/github/connect/"))).toBe(true);
+    expect(webFetch).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().status).toBe("authenticated");
   });
 });

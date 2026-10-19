@@ -2,20 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace integrations page (parity/specs/workspace-settings.md §15–§17,
-// WSET-016–018). Admin-only: the settings layout already refuses members
-// and guests, and this page repeats the check so it stays correct when
-// mounted on its own. The shell owns the section frame; this page renders
-// the informational banner naming the section above one card per
-// supported git provider, and each card owns its own read, its own
-// writes and its own notices.
+// WSET-016–018). The settings layout owns the single admin gate and the
+// section frame; this page is the shell body. It renders the informational
+// banner naming the section above one card per supported git provider,
+// and each card owns its own read, its own writes and its own notices.
 
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { usePermissions } from "../../../core/session/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
-import { SettingsNotAuthorized } from "../components/SettingsNotAuthorized.js";
 import {
   GITHUB_CONNECTED_NOTICE,
   GITHUB_CONNECTED_NOTICE_BODY,
@@ -25,7 +21,6 @@ import {
   GITHUB_DISCONNECTED_NOTICE_BODY,
   GITHUB_DISCONNECT_FAILED_BODY,
   GITHUB_DISCONNECT_FAILED_NOTICE,
-  GITHUB_LOADING_STATUS,
   GithubCard,
 } from "./GithubCard.js";
 import {
@@ -39,10 +34,8 @@ import {
   GITLAB_DISCONNECT_FAILED_NOTICE,
   GitlabCard,
 } from "./GitlabCard.js";
-import { ProviderCard } from "./ProviderCard.js";
 import {
   gitProviderAccountsQueryOptions,
-  GITHUB_PROVIDER_NAME,
   githubIntegrationQueryOptions,
   useConnectGithub,
   useDisconnectGithub,
@@ -59,26 +52,7 @@ export interface IntegrationsPageProps {
 }
 
 export function IntegrationsPage({ workspaceSlug }: IntegrationsPageProps): React.ReactElement {
-  const permissions = usePermissions(workspaceSlug);
-  // The layout refuses members and guests before this page mounts; the
-  // repeat check keeps a direct mount honest. A loading role renders the
-  // frame's quiet state rather than flashing provider content or a denial.
-  if (permissions.isLoading) return <IntegrationsPending />;
-  if (!permissions.isAdmin) return <SettingsNotAuthorized workspaceSlug={workspaceSlug} />;
   return <IntegrationsScreen workspaceSlug={workspaceSlug} />;
-}
-
-function IntegrationsPending(): React.ReactElement {
-  return (
-    <div
-      data-testid="workspace-settings-integrations-pending"
-      aria-busy="true"
-      className="flex flex-col gap-(--space-6)"
-    >
-      <IntegrationsBanner />
-      <ProviderCard provider="github" name={GITHUB_PROVIDER_NAME} status={GITHUB_LOADING_STATUS} />
-    </div>
-  );
 }
 
 /** The informational banner: the section heading and what connecting does. */
