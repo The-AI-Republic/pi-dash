@@ -189,6 +189,30 @@ describe("integrations page", () => {
     expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(2);
   });
 
+  it("re-reads the GitLab accounts when its retry runs", async () => {
+    let accountsReads = 0;
+    const transport: Transport = async (url) => {
+      const path = new URL(url).pathname;
+      if (path === `/api/workspaces/${SLUG}/integrations/github/`) return json(200, { connected: false });
+      if (path === `/api/workspaces/${SLUG}/integrations/git/accounts/`) {
+        accountsReads += 1;
+        return accountsReads === 1 ? json(500, { detail: "boom" }) : json(200, { accounts: [] });
+      }
+      return json(404, { detail: "not found" });
+    };
+    createAppClient("https://api.test", transport);
+    renderPage();
+    expect(await screen.findByText("We could not load the GitLab accounts.")).toBeInTheDocument();
+    const gitlabCard = screen.getByTestId("integration-card-gitlab");
+    await userEvent.click(within(gitlabCard).getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByText(
+        "Connect a GitLab token with API access to bind repositories and mirror GitLab issues into your projects."
+      )
+    ).toBeInTheDocument();
+    expect(accountsReads).toBeGreaterThan(1);
+  });
+
   it("connects GitHub with a notice, clears the field and re-reads the status", async () => {
     const api = backend();
     createAppClient("https://api.test", api.transport);

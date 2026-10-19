@@ -5,7 +5,7 @@
 // GitHub card (parity/specs/workspace-settings.md §16, WSET-017): the
 // loading, read-failure, disconnected and connected forms; the Connect
 // gate; a verified token clearing the field; a rejected token keeping it.
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -100,6 +100,15 @@ describe("GitHub card", () => {
     await userEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(onConnect).toHaveBeenCalled());
     expect(field).toHaveValue("github_pat_bad");
+  });
+
+  it("ignores a submit that races an already pending connect", () => {
+    const onConnect = vi.fn(async () => true);
+    renderCard({ connectPending: true, onConnect });
+    const field = screen.getByLabelText(GITHUB_TOKEN_LABEL);
+    fireEvent.change(field, { target: { value: "github_pat_race" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Connect" }).closest("form") as HTMLFormElement);
+    expect(onConnect).not.toHaveBeenCalled();
   });
 
   it("disables the form while a connect is in flight", () => {

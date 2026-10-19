@@ -5,7 +5,7 @@
 // token answers 401, which is not an expired session: writes made through
 // the provider client leave the session alone, while every other request
 // still expires it through the app client's middleware.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Transport, TransportResponse } from "@pidash/api-client";
 
 import { useSessionStore } from "../session/store.js";
@@ -66,5 +66,26 @@ describe("provider write client", () => {
 
   it("throws before bootstrap like the app client", () => {
     expect(() => getProviderWriteClient()).toThrow(/not configured/i);
+  });
+
+  it("lets the platform transport serve provider writes when bootstrap passed none", async () => {
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      sent.push(String(input));
+      return new Response(JSON.stringify({ detail: "bad token" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    try {
+      createAppClient("https://api.test");
+      await expect(
+        getProviderWriteClient().sendJson("POST", "/api/workspaces/acme/integrations/github/connect/", { json: {} })
+      ).rejects.toThrow();
+      expect(sent.some((url) => url.includes("/integrations/github/connect/"))).toBe(true);
+      expect(useSessionStore.getState().status).toBe("authenticated");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -6,7 +6,7 @@
 // read failure, disconnected form (optional host), the connected account
 // naming login and host, and per-account disconnect.
 import type { GitProviderAccount } from "@pidash/api-client";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -128,6 +128,14 @@ describe("GitLab card", () => {
     await userEvent.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(onConnect).toHaveBeenCalled());
     expect(field).toHaveValue("glpat-bad");
+  });
+
+  it("ignores a submit that races an already pending registration", () => {
+    const onConnect = vi.fn(async () => true);
+    renderCard({ connectPending: true, onConnect });
+    fireEvent.change(screen.getByLabelText(GITLAB_TOKEN_LABEL), { target: { value: "glpat-race" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Connect" }).closest("form") as HTMLFormElement);
+    expect(onConnect).not.toHaveBeenCalled();
   });
 
   it("disables the form while a registration is in flight", () => {
