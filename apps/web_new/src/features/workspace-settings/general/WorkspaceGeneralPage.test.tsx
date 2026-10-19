@@ -190,6 +190,17 @@ describe("WorkspaceGeneralPage", () => {
     expect(screen.getByRole("button", { name: "Edit logo" })).toBeInTheDocument();
   });
 
+  it("opens the logo dialog from the identity action", async () => {
+    stubApi();
+    renderPage(testClient());
+    await screen.findByTestId("workspace-general-identity");
+    const user = userEvent.setup();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Upload logo" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Upload image" })).toBeInTheDocument();
+  });
+
   it("copies the address and confirms", async () => {
     stubApi();
     renderPage(testClient());
