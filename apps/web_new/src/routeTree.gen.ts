@@ -40,6 +40,7 @@ import { Route as GodModeDashboardAuthenticationRouteRouteImport } from './route
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
 import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god-mode/_dashboard/workspace/route'
+import { Route as SettingsProfileApiTokensRouteImport } from './routes/settings/profile/api-tokens'
 import { Route as SettingsProfileNotificationsRouteImport } from './routes/settings/profile/notifications'
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
@@ -250,6 +251,12 @@ const GodModeDashboardWorkspaceRouteRoute =
     id: '/workspace',
     path: '/workspace',
     getParentRoute: () => GodModeDashboardRouteRoute,
+  } as any)
+const SettingsProfileApiTokensRoute =
+  SettingsProfileApiTokensRouteImport.update({
+    id: '/settings/profile/api-tokens',
+    path: '/settings/profile/api-tokens',
+    getParentRoute: () => rootRouteImport,
   } as any)
 const SettingsProfileNotificationsRoute =
   SettingsProfileNotificationsRouteImport.update({
@@ -595,6 +602,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/settings/profile/api-tokens': typeof SettingsProfileApiTokensRoute
   '/settings/profile/notifications': typeof SettingsProfileNotificationsRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
@@ -674,6 +682,7 @@ export interface FileRoutesByTo {
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/settings/profile/api-tokens': typeof SettingsProfileApiTokensRoute
   '/settings/profile/notifications': typeof SettingsProfileNotificationsRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -758,6 +767,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/ai': typeof GodModeDashboardAiRoute
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
+  '/settings/profile/api-tokens': typeof SettingsProfileApiTokensRoute
   '/settings/profile/notifications': typeof SettingsProfileNotificationsRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
@@ -845,6 +855,7 @@ export interface FileRouteTypes {
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
+    | '/settings/profile/api-tokens'
     | '/settings/profile/notifications'
     | '/$ws/'
     | '/$ws/projects/$projectId'
@@ -924,6 +935,7 @@ export interface FileRouteTypes {
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
+    | '/settings/profile/api-tokens'
     | '/settings/profile/notifications'
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
@@ -1007,6 +1019,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/ai'
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
+    | '/settings/profile/api-tokens'
     | '/settings/profile/notifications'
     | '/$ws/_gated/'
     | '/$ws/_gated/projects/$projectId'
@@ -1082,6 +1095,7 @@ export interface RootRouteChildren {
   AccountsSetPasswordRoute: typeof AccountsSetPasswordRoute
   AccountsSignUpRoute: typeof AccountsSignUpRoute
   AuthDeviceRoute: typeof AuthDeviceRoute
+  SettingsProfileApiTokensRoute: typeof SettingsProfileApiTokensRoute
   SettingsProfileNotificationsRoute: typeof SettingsProfileNotificationsRoute
 }
 
@@ -1303,6 +1317,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/god-mode/workspace'
       preLoaderRoute: typeof GodModeDashboardWorkspaceRouteRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
+    }
+    '/settings/profile/api-tokens': {
+      id: '/settings/profile/api-tokens'
+      path: '/settings/profile/api-tokens'
+      fullPath: '/settings/profile/api-tokens'
+      preLoaderRoute: typeof SettingsProfileApiTokensRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/settings/profile/notifications': {
       id: '/settings/profile/notifications'
@@ -2001,6 +2022,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountsSetPasswordRoute: AccountsSetPasswordRoute,
   AccountsSignUpRoute: AccountsSignUpRoute,
   AuthDeviceRoute: AuthDeviceRoute,
+  SettingsProfileApiTokensRoute: SettingsProfileApiTokensRoute,
   SettingsProfileNotificationsRoute: SettingsProfileNotificationsRoute,
 }
 export const routeTree = rootRouteImport

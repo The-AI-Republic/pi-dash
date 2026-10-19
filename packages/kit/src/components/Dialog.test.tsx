@@ -51,6 +51,16 @@ describe("Dialog", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("leaves the header close control out when the caller orders its own actions", () => {
+    render(
+      <Dialog title="Key created" open onOpenChange={() => undefined} closeButton={false}>
+        <p>Secret</p>
+      </Dialog>
+    );
+    expect(screen.getByRole("dialog", { name: "Key created" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close dialog" })).toBeNull();
+  });
+
   it("uses the default body spacing below the title block", () => {
     render(
       <Dialog title="Confirm" open onOpenChange={() => undefined}>
