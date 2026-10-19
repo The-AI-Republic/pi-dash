@@ -163,6 +163,17 @@ describe("enable switch", () => {
     expect(notifyError).toHaveBeenCalledWith("Could not update the install", "Admins only");
   });
 
+  it("leaves an unsettled list unsettled after a successful flip", async () => {
+    contracts.updateSchedulerBinding.mockResolvedValue({ ...binding(), enabled: true });
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData<SchedulerBinding[] | undefined>(bindingKeys.list(SLUG, PROJECT), undefined);
+    const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: true });
+    });
+    expect(notifySuccess).toHaveBeenCalledWith("Install updated");
+  });
+
   it("keeps a missing cache empty when the optimistic write runs cold", async () => {
     contracts.updateSchedulerBinding.mockResolvedValue({ ...binding(), enabled: true });
     const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
@@ -171,6 +182,25 @@ describe("enable switch", () => {
       await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: true });
     });
     expect(queryClient.getQueryData(bindingKeys.list(SLUG, PROJECT))).toBeUndefined();
+  });
+
+  it("leaves rows it does not own untouched during the optimistic flip", async () => {
+    contracts.updateSchedulerBinding.mockResolvedValue({ ...binding({ id: "b2" }), enabled: false });
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(bindingKeys.list(SLUG, PROJECT), [binding(), binding({ id: "b2" })]);
+    const { result } = renderHook(() => useToggleSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    let promise: Promise<void> = Promise.resolve();
+    act(() => {
+      promise = result.current.mutateAsync({ projectId: PROJECT, bindingId: "b2", enabled: false });
+    });
+    await waitFor(() =>
+      expect(queryClient.getQueryData<SchedulerBinding[]>(bindingKeys.list(SLUG, PROJECT))?.[1]?.enabled).toBe(false)
+    );
+    const rows = queryClient.getQueryData<SchedulerBinding[]>(bindingKeys.list(SLUG, PROJECT));
+    expect(rows?.[0]?.enabled).toBe(true);
+    await act(async () => {
+      await promise;
+    });
   });
 });
 

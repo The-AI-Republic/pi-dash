@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError, type ProjectDetails, type Scheduler } from "@pidash/api-client";
 import * as React from "react";
@@ -26,7 +26,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 vi.mock("../../shared/shell/index.js", () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 
 import { notifyError, notifySuccess } from "../../shared/shell/index.js";
-import { BulkInstallDialog, joinedProjects } from "./BulkInstallDialog.js";
+import { BulkInstallDialog, joinedProjects, projectName } from "./BulkInstallDialog.js";
 
 const SLUG = "acme";
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
@@ -268,6 +268,71 @@ describe("BulkInstallDialog", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("ignores a second submit while the first is in flight", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    contracts.createSchedulerBinding.mockReturnValue(new Promise(() => undefined));
+    const { user } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Installing…" })).toBeInTheDocument());
+    fireEvent.submit(screen.getByRole("form"));
+    await waitFor(() => expect(contracts.createSchedulerBinding).toHaveBeenCalledTimes(1));
+  });
+
+  it("stops the install check when the dialog closes before it settles", async () => {
+    let settle: (rows: unknown[]) => void = () => undefined;
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    contracts.listSchedulerBindings.mockReturnValue(
+      new Promise<unknown[]>((resolve) => {
+        settle = resolve;
+      })
+    );
+    function Host(): React.ReactElement {
+      const [current, setCurrent] = React.useState<Scheduler | null>(SCHEDULER);
+      return <BulkInstallDialog workspaceSlug={SLUG} scheduler={current} onClose={() => setCurrent(null)} />;
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Host />
+      </QueryClientProvider>
+    );
+    await openPicker(user);
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("form")).not.toBeInTheDocument();
+    settle([]);
+  });
+
+  it("shows the install check while target detection runs", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    contracts.listSchedulerBindings.mockReturnValue(new Promise(() => undefined));
+    const { user } = renderDialog();
+    const listbox = await openPicker(user);
+    expect(within(listbox).getByText("Checking installs…")).toBeInTheDocument();
+  });
+
+  it("notes an unreadable start time before writing and keeps the dialog open", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, name: "Alpha" })]);
+    const { user, onClose } = renderDialog();
+    const listbox = await openPicker(user);
+    await waitFor(() => expect(within(listbox).getByLabelText(/Alpha/)).not.toBeDisabled());
+    await user.click(within(listbox).getByLabelText(/Alpha/));
+    await user.clear(screen.getByLabelText("Starts at"));
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    expect(await screen.findByText("Start time is required.")).toBeInTheDocument();
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("names a failing target by its row, or its id when the row is gone", () => {
+    const alpha = project({ id: ALPHA, name: "Alpha" });
+    expect(projectName([alpha], ALPHA)).toBe("Alpha");
+    expect(projectName([alpha], BETA)).toBe(BETA);
+  });
+
   it("installs on every picked target and closes when all succeed", async () => {
     contracts.listProjectDetails.mockResolvedValue([
       project({ id: ALPHA, name: "Alpha" }),
@@ -337,6 +402,15 @@ describe("BulkInstallDialog", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Install" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
+  });
+
+  it("closes on Escape without writing", async () => {
+    contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA })]);
+    const { user, onClose } = renderDialog();
+    expect((await screen.findAllByText("Install Weekly review")).length).toBeGreaterThan(0);
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
   });
 
   it("lets the cancel button close without writing", async () => {

@@ -122,12 +122,9 @@ export function timeZoneOptions(): string[] {
       zones = [];
     }
   }
-  const seen = new Set<string>([DEFAULT_TZID, ...zones]);
-  return [...seen].sort((left, right) => {
-    if (left === DEFAULT_TZID) return -1;
-    if (right === DEFAULT_TZID) return 1;
-    return left.localeCompare(right);
-  });
+  // UTC pins to the top; the rest read alphabetically.
+  const order = (zone: string): string => (zone === DEFAULT_TZID ? "" : zone);
+  return [...new Set<string>([DEFAULT_TZID, ...zones])].sort((left, right) => order(left).localeCompare(order(right)));
 }
 
 const WEEKDAYS: Record<string, string> = {
@@ -180,7 +177,8 @@ function countSentence(parts: Map<string, string>): string {
   const count = parts.get("COUNT");
   if (count === undefined) return "";
   const numeric = Number(count);
-  return Number.isFinite(numeric) && numeric > 0 ? ` for ${numeric} ${numeric === 1 ? "time" : "times"}` : "";
+  if (!Number.isFinite(numeric) || numeric < 1) return "";
+  return ` for ${numeric} ${numeric === 1 ? "time" : "times"}`;
 }
 
 /**
@@ -206,7 +204,7 @@ export function describeRrule(rrule: string): string {
 
   const interval = Number(parts.get("INTERVAL") ?? "1");
   if (!Number.isFinite(interval) || interval < 1) return rule;
-  const cadence = interval === 1 ? `Every ${nouns[0]}` : `Every ${interval} ${interval === 1 ? nouns[0] : nouns[1]}`;
+  const cadence = interval === 1 ? `Every ${nouns[0]}` : `Every ${interval} ${nouns[1]}`;
 
   const days = parts.get("BYDAY");
   const dayText = days === undefined ? null : weekdaySentence(days.split(","));

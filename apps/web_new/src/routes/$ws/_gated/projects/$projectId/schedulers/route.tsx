@@ -22,7 +22,7 @@ export interface SchedulerSectionTab {
 }
 
 function trimTrailing(pathname: string): string {
-  return pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  return pathname.replace(/\/+$/, "");
 }
 
 /**

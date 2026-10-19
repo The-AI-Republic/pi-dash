@@ -22,7 +22,7 @@ import {
   bulkSelectionSummary,
   bulkSuccessTitle,
   filterProjects,
-  firstFailureMessage,
+  failureSummary,
   partitionInstallOutcomes,
   toggleAllBulkTargets,
   toggleBulkTarget,
@@ -42,6 +42,49 @@ export interface BulkInstallDialogProps {
 /** The projects a workspace member may target for an install. */
 export function joinedProjects(projects: readonly ProjectDetails[]): ProjectDetails[] {
   return projects.filter((project) => project.member_role !== null && project.archived_at === null);
+}
+
+/** The project's display name, or its raw id when the row is unknown. */
+export function projectName(projects: readonly ProjectDetails[], projectId: string): string {
+  const match = projects.find((project) => project.id === projectId);
+  return match === undefined ? projectId : match.name;
+}
+
+function listboxBody(
+  loading: boolean,
+  visible: readonly ProjectDetails[],
+  selection: BulkSelection,
+  onChange: (next: BulkSelection) => void
+): React.ReactNode {
+  if (loading) {
+    return <li className="text-body px-(--space-3) py-(--space-2) text-(--text-muted)">Checking installs…</li>;
+  }
+  if (visible.length === 0) {
+    return (
+      <li className="text-body px-(--space-3) py-(--space-2) text-(--text-muted)">No projects match your search.</li>
+    );
+  }
+  return visible.map((project) => {
+    const locked = selection.installed.includes(project.id);
+    const checked = locked || selection.picked.includes(project.id);
+    return (
+      <li key={project.id}>
+        <label className="text-body flex cursor-pointer items-center gap-(--space-3) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-(--text) hover:bg-(--subtle)">
+          <input
+            type="checkbox"
+            checked={checked}
+            disabled={locked}
+            onChange={() => onChange(toggleBulkTarget(selection, project.id))}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{project.name}</span>
+            <span className="text-meta block text-(--text-muted)">{project.identifier}</span>
+            {locked ? <span className="text-meta block text-(--text-muted)">Installed</span> : null}
+          </span>
+        </label>
+      </li>
+    );
+  });
 }
 
 interface PickerProps {
@@ -107,35 +150,7 @@ function BulkProjectPicker({ projects, selection, loading, onChange }: PickerPro
             </Button>
           </div>
           <ul role="listbox" aria-label="Projects" aria-multiselectable="true" className="overflow-y-auto">
-            {loading ? (
-              <li className="text-body px-(--space-3) py-(--space-2) text-(--text-muted)">Checking installs…</li>
-            ) : visible.length === 0 ? (
-              <li className="text-body px-(--space-3) py-(--space-2) text-(--text-muted)">
-                No projects match your search.
-              </li>
-            ) : (
-              visible.map((project) => {
-                const locked = selection.installed.includes(project.id);
-                const checked = locked || selection.picked.includes(project.id);
-                return (
-                  <li key={project.id}>
-                    <label className="text-body flex cursor-pointer items-center gap-(--space-3) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-(--text) hover:bg-(--subtle)">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={locked}
-                        onChange={() => onChange(toggleBulkTarget(selection, project.id))}
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate">{project.name}</span>
-                        <span className="text-meta block text-(--text-muted)">{project.identifier}</span>
-                      </span>
-                      {locked ? <span className="text-meta text-(--text-muted)">Installed</span> : null}
-                    </label>
-                  </li>
-                );
-              })
-            )}
+            {listboxBody(loading, visible, selection, onChange)}
           </ul>
         </div>
       ) : null}
@@ -215,11 +230,8 @@ function BulkInstallForm({
       );
     }
     if (partition.failed.length > 0) {
-      const names = partition.failed
-        .map((failure) => joined.find((project) => project.id === failure.targetId)?.name ?? failure.targetId)
-        .join(", ");
-      const first = firstFailureMessage(partition);
-      notifyError(bulkFailureTitle(partition.failed.length), first === null ? names : `${names} — ${first}`);
+      const names = partition.failed.map((failure) => projectName(joined, failure.targetId)).join(", ");
+      notifyError(bulkFailureTitle(partition.failed.length), `${names} — ${failureSummary(partition)}`);
       const failedIds = partition.failed.map((failure) => failure.targetId);
       setSelection((current) => ({
         picked: failedIds,
@@ -248,7 +260,7 @@ function BulkInstallForm({
           />
           <span className="text-h3 text-(--text)">Install {scheduler.name}</span>
         </div>
-        {scheduler.description === "" ? null : <p className="text-body text-(--text-muted)">{scheduler.description}</p>}
+        <p className="text-body text-(--text-muted)">{scheduler.description}</p>
       </div>
 
       {joined.length === 0 ? (

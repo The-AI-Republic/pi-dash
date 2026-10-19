@@ -89,9 +89,15 @@ export function InstallsList({
   const [flipping, setFlipping] = React.useState<string | null>(null);
 
   const project = projects.data?.find((row) => row.id === projectId);
-  const admin = roles.isSuccess && isProjectAdmin(roles.data?.[projectId] ?? null);
-  const canManage = admin;
-  const showActions = canManage && (onEditInstall !== undefined || onUninstallInstall !== undefined);
+  const canManage = roles.isSuccess && isProjectAdmin(roles.data[projectId] ?? null);
+  const actions: Array<{ key: "edit" | "uninstall"; label: string; run: (binding: SchedulerBinding) => void }> = [];
+  if (canManage && onEditInstall !== undefined) {
+    actions.push({ key: "edit", label: "Edit", run: onEditInstall });
+  }
+  if (canManage && onUninstallInstall !== undefined) {
+    actions.push({ key: "uninstall", label: "Uninstall", run: onUninstallInstall });
+  }
+  const showActions = actions.length > 0;
   const loading = bindings.isPending || roles.isPending;
   const title = project?.name === undefined ? "Schedulers" : `${project.name} · Schedulers`;
 
@@ -101,7 +107,6 @@ export function InstallsList({
   });
 
   const setEnabled = (binding: SchedulerBinding, enabled: boolean): void => {
-    if (flipping !== null) return;
     setFlipping(binding.id);
     toggle.mutate({ projectId, bindingId: binding.id, enabled }, { onSettled: () => setFlipping(null) });
   };
@@ -231,16 +236,16 @@ export function InstallsList({
                       >
                         {showActions ? (
                           <div className="flex items-center justify-end gap-(--space-2)">
-                            {onEditInstall === undefined ? null : (
-                              <Button size="small" variant="ghost" onClick={() => onEditInstall(binding)}>
-                                Edit
+                            {actions.map((action) => (
+                              <Button
+                                key={action.key}
+                                size="small"
+                                variant={action.key === "edit" ? "ghost" : "danger"}
+                                onClick={() => action.run(binding)}
+                              >
+                                {action.label}
                               </Button>
-                            )}
-                            {onUninstallInstall === undefined ? null : (
-                              <Button size="small" variant="danger" onClick={() => onUninstallInstall(binding)}>
-                                Uninstall
-                              </Button>
-                            )}
+                            ))}
                           </div>
                         ) : null}
                       </td>

@@ -114,6 +114,22 @@ describe("time zones", () => {
   });
 });
 
+describe("browserTimeZone", () => {
+  it("falls back to UTC when the browser cannot report a zone", () => {
+    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockImplementation(() => {
+      throw new Error("no zone");
+    });
+    expect(browserTimeZone()).toBe(DEFAULT_TZID);
+  });
+
+  it("falls back to UTC on an empty zone name", () => {
+    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockImplementation(
+      () => ({ timeZone: "" }) as Intl.ResolvedDateTimeFormatOptions
+    );
+    expect(browserTimeZone()).toBe(DEFAULT_TZID);
+  });
+});
+
 describe("describeRrule", () => {
   it("describes single and recurring rules", () => {
     expect(describeRrule("")).toBe("Fires once at the start time");
@@ -131,6 +147,11 @@ describe("describeRrule", () => {
     expect(describeRrule("FREQ=MINUTELY")).toBe("Every minute");
   });
 
+  it("reads a negative and a zero interval as unreadable", () => {
+    expect(describeRrule("FREQ=DAILY;INTERVAL=-1")).toBe("FREQ=DAILY;INTERVAL=-1");
+    expect(describeRrule("FREQ=DAILY;INTERVAL=0")).toBe("FREQ=DAILY;INTERVAL=0");
+  });
+
   it("returns unreadable rules verbatim", () => {
     expect(describeRrule("FREQ=NOPE")).toBe("FREQ=NOPE");
     expect(describeRrule("FREQ=SECONDLY")).toBe("FREQ=SECONDLY");
@@ -142,5 +163,6 @@ describe("describeRrule", () => {
     expect(describeRrule("FREQ=MONTHLY;BYMONTHDAY=first")).toBe("FREQ=MONTHLY;BYMONTHDAY=first");
     expect(describeRrule("FREQ=DAILY;;BYHOUR=9")).toBe("Every day at 09:00");
     expect(describeRrule("FREQ=DAILY;UNTIL=garbage")).toBe("Every day");
+    expect(describeRrule("FREQ=DAILY;COUNT=0")).toBe("Every day");
   });
 });

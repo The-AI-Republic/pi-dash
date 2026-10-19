@@ -34,8 +34,7 @@ function SchedulersSettingsBody({
   projectId: string;
 }): React.ReactElement {
   const { role, workspaceAdmin } = useProjectSettings();
-  if (!isAdminStanding(role)) {
-    return (
+  if (!isAdminStanding(role)) {    return (
       <section aria-label="Schedulers" className="flex flex-col gap-(--space-3) px-(--space-6) py-(--space-8)">
         <h1 className="text-h2 text-(--text)">Oops! You are not authorized to view this page</h1>
         <p className="text-body text-(--text-muted)">Only project admins can manage these settings.</p>
@@ -83,8 +82,13 @@ function SchedulersSettingsPanel({
         open={creating}
         onClose={() => setCreating(false)}
         canInstall
+<<<<<<< HEAD
         canAuthor={canAuthor}
         installedSchedulerIds={(bindings.data ?? []).map((binding: SchedulerBinding) => binding.scheduler)}
+=======
+        canAuthor={canAuthor}
+        installedSchedulerIds={(bindings.data ?? []).map((binding: SchedulerBinding) => binding.scheduler)}
+>>>>>>> dcdbaf7ad (NEWFRONT-584: cover branches, align oracle selectors, fix author in-flight state)
         onInstalled={() => {
           void bindings.refetch();
         }}

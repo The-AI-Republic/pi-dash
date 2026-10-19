@@ -10,7 +10,7 @@ import {
   bulkSuccessTitle,
   eligibleDefinitions,
   filterProjects,
-  firstFailureMessage,
+  failureSummary,
   partitionInstallOutcomes,
   toggleAllBulkTargets,
   toggleBulkTarget,
@@ -61,7 +61,7 @@ describe("partitionInstallOutcomes", () => {
       { targetId: "b", ok: false, message: "Bad rule" },
       { targetId: "c", ok: false, message: "Already installed" },
     ]);
-    expect(firstFailureMessage(partition)).toBe("Bad rule");
+    expect(failureSummary(partition)).toBe("Bad rule; Already installed");
   });
 
   it("falls back through empty fields, blank messages, strings and unknown reasons", () => {
@@ -82,7 +82,7 @@ describe("partitionInstallOutcomes", () => {
       "The install was refused.",
       "No standing",
     ]);
-    expect(firstFailureMessage(partitionInstallOutcomes(["a"], [{ status: "fulfilled", value: null }]))).toBeNull();
+    expect(failureSummary(partitionInstallOutcomes(["a"], [{ status: "fulfilled", value: null }]))).toBe("");
   });
 
   it("treats a missing result as a refusal", () => {

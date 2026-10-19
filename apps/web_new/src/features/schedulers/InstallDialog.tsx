@@ -88,10 +88,11 @@ export function validateDefinitionDraft(draft: DefinitionDraft): DefinitionError
     color: draft.color,
     isEnabled: true,
   });
+  // The draft rules only ever name these four fields; description is free
+  // text and the color input cannot produce an invalid value.
   const mapped: DefinitionErrors = {};
   if (errors.name !== undefined) mapped.name = errors.name;
   if (errors.slug !== undefined) mapped.handle = errors.slug;
-  if (errors.description !== undefined) mapped.description = errors.description;
   if (errors.prompt !== undefined) mapped.prompt = errors.prompt;
   if (errors.color !== undefined) mapped.color = errors.color;
   return mapped;
@@ -120,14 +121,19 @@ export function InstallForm({
 }: InstallFormProps): React.ReactElement {
   const install = useInstallSchedulerBinding(workspaceSlug);
   const [mode, setMode] = React.useState<InstallMode>(() => initialInstallMode(canAuthor, installable.length));
-  const [definitionId, setDefinitionId] = React.useState<string>(installable[0]?.id ?? "");
+  // The picker's value is the user's choice, or the first option until they
+  // make one. Keeping it derived means a catalog that lands after the dialog
+  // opens still gets a valid selection without a state-sync effect.
+  const [chosenId, setChosenId] = React.useState<string | undefined>();
   const [flipped, setFlipped] = React.useState<Scheduler | undefined>();
   const [definition, setDefinition] = React.useState<DefinitionDraft>(emptyDefinition);
   const [handleTouched, setHandleTouched] = React.useState(false);
   const [definitionErrors, setDefinitionErrors] = React.useState<DefinitionErrors>({});
-  const [definitionIdError, setDefinitionIdError] = React.useState<string | undefined>();
   const schedule = useScheduleDraft(emptySchedule());
-  const pending = install.isPending;
+  // The author path waits on the definition write before it can install, so
+  // that leg needs its own in-flight flag for the submit label and lockout.
+  const [authoring, setAuthoring] = React.useState(false);
+  const pending = install.isPending || authoring;
   const options = React.useMemo(
     () =>
       flipped === undefined || installable.some((scheduler) => scheduler.id === flipped.id)
@@ -136,19 +142,9 @@ export function InstallForm({
     [flipped, installable]
   );
   const installEmpty = options.length === 0;
+  const definitionId = chosenId ?? options[0]?.id ?? "";
 
-  React.useEffect(() => {
-    // A definition created here joins the catalog; offer it when the
-    // dialog is on the install path with nothing chosen yet.
-    if (mode === "install" && definitionId === "" && options.length > 0) {
-      setDefinitionId(options[0]?.id ?? "");
-    }
-  }, [definitionId, options, mode]);
-
-  const switchMode = (next: "install" | "create"): void => {
-    setDefinitionIdError(undefined);
-    setMode(next);
-  };
+  const switchMode = (next: "install" | "create"): void => setMode(next);
 
   const changeDefinition = <K extends keyof DefinitionDraft>(field: K, value: DefinitionDraft[K]): void => {
     setDefinition((current) => ({ ...current, [field]: value }));
@@ -170,6 +166,7 @@ export function InstallForm({
   }
 
   async function authorAndInstall(payload: SchedulePayload): Promise<void> {
+    setAuthoring(true);
     let created: Scheduler;
     try {
       created = await createScheduler(getAppClient(), workspaceSlug, {
@@ -181,6 +178,7 @@ export function InstallForm({
         is_enabled: true,
       });
     } catch (error) {
+      setAuthoring(false);
       const handleMessage = definitionFieldError(error, "slug");
       if (handleMessage !== undefined) {
         setDefinitionErrors((current) => ({ ...current, handle: handleMessage }));
@@ -204,8 +202,10 @@ export function InstallForm({
         "Its definition is in the workspace catalog. Install it from the Install existing path."
       );
       setFlipped(created);
+      setChosenId(created.id);
       setMode("install");
-      setDefinitionId(created.id);
+    } finally {
+      setAuthoring(false);
     }
   }
 
@@ -215,9 +215,6 @@ export function InstallForm({
       const errors = validateDefinitionDraft(definition);
       setDefinitionErrors(errors);
       if (Object.keys(errors).length > 0) return;
-    } else if (definitionId === "") {
-      setDefinitionIdError("Pick a scheduler.");
-      return;
     }
     if (!schedule.validate()) return;
     const payload = schedule.payload();
@@ -285,23 +282,19 @@ export function InstallForm({
       {mode === "install" ? (
         installEmpty ? (
           <p className="text-body text-(--text-muted)">
-            Every enabled workspace definition is installed here already. Create a new one to schedule more work.
+            Every enabled workspace scheduler is already installed here. Create a new one to schedule more work.
           </p>
         ) : (
           <div className="flex flex-col gap-(--space-2)">
-            <label htmlFor="project-install-definition" className="text-body font-medium text-(--text)">
+            <label htmlFor="binding-scheduler" className="text-body font-medium text-(--text)">
               Scheduler
             </label>
             <select
-              id="project-install-definition"
+              id="binding-scheduler"
               value={definitionId}
               disabled={pending}
-              aria-invalid={definitionIdError === undefined ? undefined : true}
               className="text-body h-(--control-height) w-full rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) text-(--text) disabled:cursor-not-allowed disabled:opacity-50"
-              onChange={(event) => {
-                setDefinitionId(event.target.value);
-                setDefinitionIdError(undefined);
-              }}
+              onChange={(event) => setChosenId(event.target.value)}
             >
               {options.map((scheduler) => (
                 <option key={scheduler.id} value={scheduler.id}>
@@ -309,16 +302,10 @@ export function InstallForm({
                 </option>
               ))}
             </select>
-            {definitionIdError === undefined ? (
-              <p className="text-meta text-(--text-muted)">
-                Enabled definitions this project has not installed yet.{" "}
-                {canAuthor ? null : "Ask a workspace admin to add more to the catalog."}
-              </p>
-            ) : (
-              <p role="alert" className="text-meta text-(--danger)">
-                {definitionIdError}
-              </p>
-            )}
+            <p className="text-meta text-(--text-muted)">
+              Enabled definitions this project has not installed yet.{" "}
+              {canAuthor ? null : "Ask a workspace admin to add more to the catalog."}
+            </p>
           </div>
         )
       ) : (
@@ -361,7 +348,6 @@ export function InstallForm({
             value={definition.description}
             rows={2}
             disabled={pending}
-            {...(definitionErrors.description === undefined ? {} : { error: definitionErrors.description })}
             onChange={(event) => changeDefinition("description", event.target.value)}
           />
           <Textarea
@@ -377,7 +363,6 @@ export function InstallForm({
             type="color"
             value={definition.color}
             disabled={pending}
-            {...(definitionErrors.color === undefined ? {} : { error: definitionErrors.color })}
             onChange={(event) => changeDefinition("color", event.target.value)}
           />
         </div>
@@ -395,20 +380,15 @@ export function InstallForm({
         <Button variant="ghost" disabled={pending} onClick={onClose}>
           Cancel
         </Button>
-        <Button
-          type="submit"
-          variant="primary"
-          loading={pending}
-          disabled={pending || !canInstall || (mode === "install" && installEmpty)}
-        >
-          {mode === "create"
-            ? pending
-              ? "Creating & installing…"
-              : "Create & install"
-            : pending
-              ? "Installing…"
-              : "Install"}
-        </Button>
+        {mode === "install" ? (
+          <Button type="submit" variant="primary" loading={pending} disabled={pending || !canInstall || installEmpty}>
+            {pending ? "Installing…" : "Install"}
+          </Button>
+        ) : (
+          <Button type="submit" variant="primary" loading={pending} disabled={pending || !canInstall}>
+            {pending ? "Creating & installing…" : "Create & install"}
+          </Button>
+        )}
       </div>
     </form>
   );
@@ -424,7 +404,7 @@ export function InstallDialog({
   installedSchedulerIds,
   onInstalled,
 }: InstallDialogProps): React.ReactElement {
-  const schedulers = useSchedulers(workspaceSlug, { enabled: open });
+  const schedulers = useSchedulers(workspaceSlug, open);
   const installable = React.useMemo(
     () => eligibleDefinitions(schedulers.data ?? [], installedSchedulerIds),
     [schedulers.data, installedSchedulerIds]

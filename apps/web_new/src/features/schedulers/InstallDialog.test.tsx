@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ApiError, type Scheduler } from "@pidash/api-client";
 import * as React from "react";
@@ -158,6 +158,16 @@ describe("install path rules", () => {
     ).toEqual({});
   });
 
+  it("falls back for a bare or malformed failure", () => {
+    expect(failureMessage("boom")).toBe("Check your connection and try again.");
+    expect(failureMessage(new ApiError({ status: 500, code: "server_error", message: "Server exploded" }))).toBe(
+      "Server exploded"
+    );
+    expect(failureMessage(new ApiError({ status: 500, code: "server_error", message: "  " }))).toBe(
+      "The install was refused."
+    );
+  });
+
   it("reads server field detail and failure messages", () => {
     const error = new ApiError({
       status: 400,
@@ -196,6 +206,12 @@ describe("InstallForm install path", () => {
     expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
   });
 
+  it("keeps the submit inert without install rights", async () => {
+    renderForm({ canAuthor: false, canInstall: false });
+    expect(screen.getByRole("button", { name: "Install" })).toBeDisabled();
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+  });
+
   it("refuses a missing start and keeps the dialog open", async () => {
     renderForm({ canAuthor: false });
     const { user } = { user: userEvent.setup() };
@@ -232,6 +248,22 @@ describe("InstallForm install path", () => {
     await user.click(screen.getByRole("button", { name: "Install" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Rule is invalid."));
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("ignores a second submit while the write is in flight", async () => {
+    contracts.createSchedulerBinding.mockReturnValue(new Promise(() => undefined));
+    const { user } = renderForm({ canAuthor: false });
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Installing…" })).toBeInTheDocument());
+    fireEvent.submit(screen.getByRole("form", { name: "New Scheduler" }));
+    await waitFor(() => expect(contracts.createSchedulerBinding).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not submit without install rights", async () => {
+    const { user } = renderForm({ canAuthor: false, canInstall: false });
+    fireEvent.submit(screen.getByRole("form", { name: "New Scheduler" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
   });
 
   it("disables the submit while a write is in flight", async () => {
@@ -334,6 +366,34 @@ describe("InstallForm author path", () => {
     await waitFor(() => expect(contracts.createSchedulerBinding).toHaveBeenCalledTimes(2));
   });
 
+  it("explains an empty install path when the user switches to it", async () => {
+    const { user } = renderForm({ canAuthor: true, installable: [] });
+    expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Install existing" }));
+    expect(screen.getByText(/Every enabled workspace scheduler is already installed/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Scheduler")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Install" })).toBeDisabled();
+  });
+
+  it("stops deriving the handle once the user edits it", async () => {
+    const { user } = renderForm({ canAuthor: true });
+    await user.click(screen.getByRole("tab", { name: "Create new" }));
+    await user.clear(screen.getByLabelText("Slug"));
+    await user.type(screen.getByLabelText("Slug"), "my-own-handle");
+    await user.type(screen.getByLabelText("Name"), "Weekly");
+    expect(screen.getByLabelText("Slug")).toHaveValue("my-own-handle");
+  });
+
+  it("shows the working label while the author path is in flight", async () => {
+    contracts.createScheduler.mockReturnValue(new Promise(() => undefined));
+    const { user } = renderForm({ canAuthor: true, installable: [] });
+    const prompt = screen.getByLabelText("Prompt");
+    await user.type(screen.getByLabelText("Name"), "Slow");
+    await user.type(prompt, "Run");
+    await user.click(screen.getByRole("button", { name: "Create & install" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Creating & installing…" })).toBeDisabled());
+  });
+
   it("leaves the author-only dialog on create when there is nothing installable and can author", () => {
     renderForm({ canAuthor: true, installable: [] });
     expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true");
@@ -371,6 +431,30 @@ describe("InstallDialog", () => {
       expect(screen.getByRole("tab", { name: "Create new" })).toHaveAttribute("aria-selected", "true")
     );
     expect(screen.queryByLabelText("Scheduler")).not.toBeInTheDocument();
+  });
+
+  it("asks the caller to close when the dialog is dismissed", async () => {
+    contracts.listSchedulers.mockResolvedValue([scheduler()]);
+    const onClose = vi.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InstallDialog
+          workspaceSlug={SLUG}
+          projectId={PROJECT}
+          open
+          onClose={onClose}
+          canInstall
+          canAuthor
+          installedSchedulerIds={[]}
+          onInstalled={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    await screen.findByRole("form", { name: "New Scheduler" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
   it("does not mount the form while closed", () => {

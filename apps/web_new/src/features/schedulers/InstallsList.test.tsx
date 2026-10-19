@@ -231,6 +231,21 @@ describe("InstallsList", () => {
     expect(screen.getByRole("switch")).toHaveAttribute("aria-disabled", "true");
   });
 
+  it("treats a project missing from the role map as a non-admin", async () => {
+    setup({ role: ROLE_ADMIN, projectRole: 20, notAuthorized: true });
+    await screen.findByText("Weekly review");
+    expect(screen.queryByRole("button", { name: "New Scheduler" })).not.toBeInTheDocument();
+  });
+
+  it("shows only the actions the caller supplies", async () => {
+    const onEditInstall = vi.fn();
+    const { user } = setup({ role: ROLE_ADMIN, projectRole: 20, props: { onEditInstall } });
+    await screen.findByText("Weekly review");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    expect(onEditInstall).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Uninstall" })).not.toBeInTheDocument();
+  });
+
   it("invites creation on an empty list and hides the copy from members", async () => {
     setup({ role: ROLE_ADMIN, projectRole: 20, bindings: [] });
     expect(await screen.findByText("No schedulers installed on this project yet")).toBeInTheDocument();

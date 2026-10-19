@@ -19,7 +19,7 @@ const { navigate, hooks } = vi.hoisted(() => ({
     permissions: { isAdmin: false },
     roles: { isSuccess: true, isPending: false, data: {} as Record<string, number> },
     membership: { isSuccess: true, isPending: false },
-    bindings: { data: [] as SchedulerBinding[], refetch: vi.fn() },
+    bindings: { data: [] as SchedulerBinding[] | undefined, refetch: vi.fn() },
   },
 }));
 
@@ -57,11 +57,13 @@ vi.mock("../../../../../../features/schedulers/index.js", () => ({
     canInstall,
     canAuthor,
     installedSchedulerIds,
+    onInstalled,
   }: {
     open: boolean;
     canInstall: boolean;
     canAuthor: boolean;
     installedSchedulerIds: string[];
+    onInstalled: () => void;
   }) => (
     <div
       data-testid="install-dialog"
@@ -69,7 +71,11 @@ vi.mock("../../../../../../features/schedulers/index.js", () => ({
       data-can-install={canInstall}
       data-can-author={canAuthor}
       data-installed={installedSchedulerIds.join(",")}
-    />
+    >
+      <button type="button" onClick={onInstalled}>
+        Settle list
+      </button>
+    </div>
   ),
 }));
 
@@ -112,6 +118,13 @@ describe("schedulers list route", () => {
     expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-open", "true");
   });
 
+  it("treats an unsettled install list as empty", () => {
+    hooks.roles = { isSuccess: true, isPending: false, data: { p1: 20 } };
+    hooks.bindings = { data: undefined, refetch: vi.fn() };
+    renderRoute();
+    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-installed", "");
+  });
+
   it("keeps a plain member read-only and non-authoring", () => {
     hooks.roles = { isSuccess: true, isPending: false, data: { p1: 15 } };
     renderRoute();
@@ -134,6 +147,13 @@ describe("schedulers list route", () => {
     const dialog = screen.getByTestId("install-dialog");
     expect(dialog).toHaveAttribute("data-can-install", "false");
     expect(dialog).toHaveAttribute("data-can-author", "true");
+  });
+
+  it("settles the install list after a successful install", async () => {
+    const user = userEvent.setup();
+    renderRoute();
+    await user.click(screen.getByRole("button", { name: "Settle list" }));
+    expect(hooks.bindings.refetch).toHaveBeenCalled();
   });
 
   it("navigates a row to the install detail address", async () => {

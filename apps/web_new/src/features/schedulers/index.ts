@@ -57,7 +57,7 @@ export {
   bulkSuccessTitle,
   eligibleDefinitions,
   filterProjects,
-  firstFailureMessage,
+  failureSummary,
   partitionInstallOutcomes,
   toggleAllBulkTargets,
   toggleBulkTarget,

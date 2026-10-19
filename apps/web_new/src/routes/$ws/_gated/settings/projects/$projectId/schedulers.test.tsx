@@ -80,11 +80,13 @@ vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal)
     canInstall,
     canAuthor,
     installedSchedulerIds,
+    onInstalled,
   }: {
     open: boolean;
     canInstall: boolean;
     canAuthor: boolean;
     installedSchedulerIds: string[];
+    onInstalled: () => void;
   }) => (
     <div
       data-testid="install-dialog"
@@ -92,7 +94,11 @@ vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal)
       data-can-install={canInstall}
       data-can-author={canAuthor}
       data-installed={installedSchedulerIds.join(",")}
-    />
+    >
+      <button type="button" onClick={onInstalled}>
+        Settle list
+      </button>
+    </div>
   ),
 }));
 
@@ -160,12 +166,14 @@ describe("schedulers settings route", () => {
     expect(harness.navigate).toHaveBeenCalledWith({
       href: `/acme/projects/${harness.params.projectId}/schedulers/b1`,
     });
+
+    await user.click(screen.getByRole("button", { name: "Settle list" }));
+    expect(harness.bindings.refetch).toHaveBeenCalled();
   });
 
   it("lets a workspace admin author definitions from the settings panel", async () => {
     harness.workspaceRole = 20;
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
-    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-can-author", "true");
-  });
+    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-can-author", "true");  });
 });

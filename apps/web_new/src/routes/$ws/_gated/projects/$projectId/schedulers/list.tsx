@@ -30,8 +30,9 @@ export function ProjectSchedulersListComponent(): React.ReactElement {
 
   // Management needs both standing reads to succeed and the project role
   // to be admin; a failed read refuses rather than enabling controls.
-  const canManage = roles.isSuccess && membership.isSuccess && isProjectAdmin(roles.data?.[projectId] ?? null);
-  const installedIds = (bindings.data ?? []).map((binding) => binding.scheduler);
+  const canManage = roles.isSuccess && membership.isSuccess && isProjectAdmin(roles.data[projectId] ?? null);
+  const installed = bindings.data ?? [];
+  const installedIds = installed.map((binding) => binding.scheduler);
 
   function openInstall(binding: SchedulerBinding): void {
     void navigate({ href: `/${ws}/projects/${projectId}/schedulers/${binding.id}` });

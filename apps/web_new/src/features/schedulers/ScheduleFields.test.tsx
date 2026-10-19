@@ -77,7 +77,7 @@ describe("ScheduleFields", () => {
     expect(screen.getByLabelText("Recurrence (RRULE)")).toBeDisabled();
     expect(screen.getByLabelText("Project context (optional)")).toBeDisabled();
     expect(screen.getByRole("switch")).toHaveAttribute("aria-disabled", "true");
-    fireEvent.change(screen.getByLabelText("Time zone"), { target: { value: "UTC" } });
+    fireEvent.change(screen.getByLabelText("Time zone"), { target: { value: "" } });
     expect(change).toHaveBeenCalledWith("timeZone", "UTC");
   });
 

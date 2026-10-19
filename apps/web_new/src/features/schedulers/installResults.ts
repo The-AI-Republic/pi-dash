@@ -62,9 +62,9 @@ function failureText(reason: unknown): string {
   return "The install was refused.";
 }
 
-/** The first failure's message, or null when every target succeeded. */
-export function firstFailureMessage(partition: InstallPartition): string | null {
-  return partition.failed[0]?.message ?? null;
+/** Every failure message joined, in target order; empty when none failed. */
+export function failureSummary(partition: InstallPartition): string {
+  return partition.failed.map((failure) => failure.message).join("; ");
 }
 
 /** Notice title for the success half of a bulk install. */
