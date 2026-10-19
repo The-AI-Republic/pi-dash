@@ -141,6 +141,8 @@ export interface WorkItemCreateDialogProps {
   projects: WorkItemCreateProject[];
   /** Pre-selected target, e.g. the project whose page opened the dialog. */
   initialProjectId?: string;
+  /** Prefix for the success toast's "View work item" action. */
+  projectIdentifier?: string | undefined;
   /** Workspace create standing; guests never open the form. */
   canCreate?: boolean;
   /** Fired after a create lands, with the server's row id. */
@@ -319,6 +321,7 @@ export function WorkItemCreateDialog({
   workspaceSlug,
   projects,
   initialProjectId,
+  projectIdentifier,
   canCreate = true,
   onCreated,
   initialValues,
@@ -719,6 +722,7 @@ export function WorkItemCreateDialog({
       {
         projectId,
         payload: buildCreatePayload(named),
+        ...(projectIdentifier === undefined ? {} : { projectIdentifier }),
       },
       {
         onSettled: () => {

@@ -18,6 +18,8 @@ import { attachCreatedIssue } from "./mutations.js";
 export interface QuickAddProps {
   workspaceSlug: string;
   projectId: string;
+  /** Project identifier prefix for the created item's toast link. */
+  projectIdentifier?: string | undefined;
   /** Cycle/module target appended after create. */
   cycleId?: string | undefined;
   moduleId?: string | undefined;
@@ -36,6 +38,7 @@ export interface QuickAddProps {
 export function QuickAdd({
   workspaceSlug,
   projectId,
+  projectIdentifier,
   cycleId,
   moduleId,
   prefill,
@@ -94,7 +97,12 @@ export function QuickAdd({
     const targetCycle = cycleId ?? groupedCycle;
     const targetModule = moduleId ?? groupedModules?.[0];
     create.mutate(
-      { projectId, payload: { ...fields, name }, ...(groupKey === undefined ? {} : { tempGroupKey: groupKey }) },
+      {
+        projectId,
+        payload: { ...fields, name },
+        ...(projectIdentifier === undefined ? {} : { projectIdentifier }),
+        ...(groupKey === undefined ? {} : { tempGroupKey: groupKey }),
+      },
       {
         onSuccess: (created) => {
           setTitle("");

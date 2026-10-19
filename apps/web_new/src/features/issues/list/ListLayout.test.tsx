@@ -32,7 +32,7 @@ vi.mock("../components/WorkItemCreateDialog.js", () => ({
   WorkItemCreateDialog: (props: {
     open: boolean;
     workspaceSlug: string;
-    projects: Array<{ id: string; name: string }>;
+    projects: Array<{ id: string; name: string; memberRole?: number | null; archived?: boolean }>;
     initialProjectId?: string;
     initialValues?: Record<string, unknown>;
     onCreated?: (id: string) => void;
@@ -44,6 +44,7 @@ vi.mock("../components/WorkItemCreateDialog.js", () => ({
         aria-label="Create new work item"
         data-project={props.initialProjectId ?? ""}
         data-values={JSON.stringify(props.initialValues ?? {})}
+        data-projects={JSON.stringify(props.projects)}
       >
         <button type="button" onClick={() => props.onCreated?.("created-1")}>
           create
@@ -440,7 +441,13 @@ describe("ListLayout", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Create work item" }));
     const dialog = await screen.findByTestId("create-dialog");
     expect(dialog).toHaveAttribute("data-project", PROJECT);
-    expect(JSON.parse(dialog.getAttribute("data-values") ?? "{}")).toEqual({});
+    expect(JSON.parse(dialog.getAttribute("data-projects") ?? "[]")).toEqual([
+      { id: PROJECT, name: "Website", identifier: "WEB", memberRole: 15, archived: false },
+    ]);
+    expect(JSON.parse(dialog.getAttribute("data-values") ?? "{}")).toEqual({
+      cycleId: CYCLE,
+      moduleIds: [MODULE],
+    });
     await user.click(screen.getByRole("button", { name: "create" }));
     await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
   });

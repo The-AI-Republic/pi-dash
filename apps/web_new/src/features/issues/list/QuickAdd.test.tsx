@@ -88,6 +88,7 @@ describe("QuickAdd", () => {
       defaultStateId: "state-default",
       cycleId: CYCLE,
       moduleId: "module-1",
+      projectIdentifier: "WEB",
       onCreated,
     });
     submitOnSuccess();
@@ -105,6 +106,7 @@ describe("QuickAdd", () => {
           label_ids: ["label-1"],
           state_id: "state-default",
         },
+        projectIdentifier: "WEB",
         tempGroupKey: "high",
       },
       expect.any(Object)

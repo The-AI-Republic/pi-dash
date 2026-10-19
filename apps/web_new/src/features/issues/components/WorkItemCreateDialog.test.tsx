@@ -110,10 +110,10 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
-  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
+  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn(), notifySuccessWithAction: vi.fn() };
 });
 
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
 
 const SLUG = "acme";
 const PROJECT_ATLAS = "223e4567-e89b-12d3-a456-426614174001";
@@ -905,6 +905,20 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     fireEvent.click(saveButton);
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
     expect(posts(h.sent)).toHaveLength(1);
+  });
+
+  it("offers the created item as a toast follow-up when the caller knows the prefix", async () => {
+    const user = userEvent.setup();
+    setup({}, { projectIdentifier: "ATL" });
+    await user.type(titleField(), "Linked report");
+    save();
+    await waitFor(() =>
+      expect(notifySuccessWithAction).toHaveBeenCalledWith(
+        "Work item created successfully",
+        undefined,
+        expect.objectContaining({ actionLabel: "View work item" })
+      )
+    );
   });
 
   it("accepts the next submit once the in-flight create failed", async () => {

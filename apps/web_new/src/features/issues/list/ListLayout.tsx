@@ -239,7 +239,13 @@ export function ListLayout({
   const menu = cycleId !== undefined || moduleId !== undefined;
 
   function openCreate(prefill: Record<string, string | string[]>): void {
-    setCreateState({ open: true, initialValues: createInitialValues(prefill) });
+    const initialValues = createInitialValues(prefill);
+    // A cycle/module page creates into that entity even when the list is
+    // grouped by some other dimension. The shared dialog attaches these
+    // memberships after the create lands (ISS-012).
+    if (cycleId !== undefined) initialValues.cycleId = cycleId;
+    if (moduleId !== undefined) initialValues.moduleIds = [moduleId];
+    setCreateState({ open: true, initialValues });
   }
 
   function closeCreate(): void {
@@ -374,6 +380,7 @@ export function ListLayout({
                   <LazyQuickAdd
                     workspaceSlug={workspaceSlug}
                     projectId={projectId}
+                    projectIdentifier={projectIdentifier}
                     cycleId={cycleId}
                     moduleId={moduleId}
                     prefill={sectionPrefill(prefs.groupBy, section)}
@@ -411,8 +418,21 @@ export function ListLayout({
               if (!open) closeCreate();
             }}
             workspaceSlug={workspaceSlug}
-            projects={project === null ? [] : [project]}
+            projects={
+              project === null
+                ? []
+                : [
+                    {
+                      id: project.id,
+                      name: project.name,
+                      identifier: project.identifier,
+                      memberRole: project.member_role,
+                      archived: project.archived_at !== null,
+                    },
+                  ]
+            }
             initialProjectId={projectId}
+            projectIdentifier={projectIdentifier}
             initialValues={createState.initialValues}
             onCreated={closeCreate}
           />

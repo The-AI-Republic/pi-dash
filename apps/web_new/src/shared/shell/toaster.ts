@@ -20,6 +20,21 @@ export function notifySuccess(title: string, description?: string): void {
   showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
 }
 
+/** Success toast with one optional follow-up action. */
+export interface ToastFollowUp {
+  actionLabel: string;
+  onAction: () => void;
+}
+
+export function notifySuccessWithAction(title: string, description: string | undefined, followUp: ToastFollowUp): void {
+  showToast(getToastManager(), {
+    title,
+    ...(description === undefined ? {} : { description }),
+    actionLabel: followUp.actionLabel,
+    onAction: followUp.onAction,
+  });
+}
+
 export function notifyInfo(title: string, description?: string): void {
   showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
 }

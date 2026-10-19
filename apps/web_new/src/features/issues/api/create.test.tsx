@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "./keys.js";
 import {
+  createdWorkItemPath,
   useCreateWorkItem,
   WORK_ITEM_CREATED_TITLE,
   WORK_ITEM_CREATE_FAILED_TITLE,
@@ -19,9 +20,10 @@ import {
 vi.mock("../../../shared/shell/index.js", () => ({
   notifyError: vi.fn(),
   notifySuccess: vi.fn(),
+  notifySuccessWithAction: vi.fn(),
 }));
 
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 
@@ -128,6 +130,19 @@ describe("useCreateWorkItem", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(screen.getByText("create:error")).toBeInTheDocument();
+  });
+
+  it("offers a view action when the caller knows the project prefix", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" }, projectIdentifier: "WEB" });
+    await waitFor(() =>
+      expect(notifySuccessWithAction).toHaveBeenCalledWith(
+        WORK_ITEM_CREATED_TITLE,
+        undefined,
+        expect.objectContaining({ actionLabel: "View work item" })
+      )
+    );
+    expect(createdWorkItemPath("acme", "WEB", 7)).toBe("/acme/browse/WEB-7");
   });
 });
 
