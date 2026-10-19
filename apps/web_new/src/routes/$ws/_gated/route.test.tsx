@@ -1240,7 +1240,7 @@ describe("gated layout shell wiring", () => {
 
   it("mounts the workspace create entry with the shell's projects and standing", () => {
     harness.routerState = {
-      matches: [{ params: { projectId: "p1" } }],
+      matches: [{ params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" }],
       location: { pathname: "/acme/projects/p1/issues" },
     };
     renderShell();
@@ -1253,7 +1253,10 @@ describe("gated layout shell wiring", () => {
   });
 
   it("gives the workspace create entry no page project outside a project route", () => {
-    harness.routerState = { matches: [{ params: {} }], location: { pathname: "/acme/drafts" } };
+    harness.routerState = {
+      matches: [{ params: {}, routeId: "/$ws/_gated/drafts" }],
+      location: { pathname: "/acme/drafts" },
+    };
     renderShell();
     expect(harness.createEntry?.initialProjectId).toBeNull();
     expect(harness.createEntry?.canCreate).toBe(true);
@@ -1262,7 +1265,7 @@ describe("gated layout shell wiring", () => {
   it("keeps the workspace create entry off for guests even beside a project", () => {
     harness.role = 5;
     harness.routerState = {
-      matches: [{ params: { projectId: "p1" } }],
+      matches: [{ params: { projectId: "p1" }, routeId: "/$ws/_gated/projects/$projectId/issues/" }],
       location: { pathname: "/acme/projects/p1/issues" },
     };
     renderShell();

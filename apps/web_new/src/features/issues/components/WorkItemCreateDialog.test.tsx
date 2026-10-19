@@ -460,10 +460,17 @@ function stubTransport(options: StubOptions = {}) {
           ? [
               {
                 id: STATE_ID,
+                workspace: WORKSPACE_ID,
+                project: PROJECT_ATLAS,
                 name: "Points",
+                description: "",
                 type: "points",
                 last_used: true,
-                points: [{ id: PARENT_ID, key: 1, value: "3" }],
+                points: [{ id: PARENT_ID, key: 1, value: "3", description: "" }],
+                created_at: "2026-01-01T00:00:00Z",
+                updated_at: "2026-01-01T00:00:00Z",
+                created_by: null,
+                updated_by: null,
               },
             ]
           : []
