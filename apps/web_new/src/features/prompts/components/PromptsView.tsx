@@ -1,13 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Prompts sections browser (parity/specs/agents.md §6, AGT-023). The page
-// lists every prompt section with its effective body and provenance, an
-// anchor side nav, and the editor for the scope under edit. A loading
+// Prompts page (parity/specs/agents.md §6-7, AGT-023, AGT-032). Two tabs:
+// the sections browser lists every prompt section with its effective
+// body and provenance, an anchor side nav, and the editor for the scope
+// under edit; the receipt tab shows the assembled templates. A loading
 // line covers the resolving lists, a banner the failed member lists, and
-// an admin-only warning the failed baseline (AGT-032 states, owned by
-// the receipt slice NEWFRONT-599 — this view renders them, that slice
-// proves them).
+// an admin-only warning the failed baseline.
 
 import { Button } from "@pidash/kit";
 import * as React from "react";
@@ -16,6 +15,8 @@ import { usePermissions } from "../../../core/session/index.js";
 import { usePromptSectionLists } from "../api/queries.js";
 import type { PromptEditorScope, PromptViewerGates } from "../lib/sections.js";
 import { SectionCard } from "./SectionCard.js";
+import { PromptsTabs, type PromptTab } from "./PromptsTabs.js";
+import { ReceiptView } from "./ReceiptView.js";
 
 /** Loading line while the required lists resolve. */
 export const PROMPTS_LOADING_TEXT = "Loading…";
@@ -37,13 +38,30 @@ interface OpenEditor {
 export function PromptsView({ workspaceSlug }: PromptsViewProps): React.ReactElement {
   const { isAdmin, canEdit } = usePermissions(workspaceSlug);
   const lists = usePromptSectionLists(workspaceSlug, isAdmin);
+  const [tab, setTab] = React.useState<PromptTab>("sections");
   const [openEditor, setOpenEditor] = React.useState<OpenEditor | null>(null);
+
+  const selectTab = (next: PromptTab): void => {
+    setTab(next);
+    setOpenEditor(null);
+  };
+
+  if (tab === "receipt") {
+    return (
+      <div className="flex flex-col gap-(--space-4)">
+        <h1 className="text-h2 text-(--text)">Prompts</h1>
+        <PromptsTabs active={tab} onSelect={selectTab} />
+        <ReceiptView workspaceSlug={workspaceSlug} isAdmin={isAdmin} />
+      </div>
+    );
+  }
   const viewer: PromptViewerGates = { isAdmin, canEdit, baselineLoaded: lists.baselineLoaded };
 
   if (lists.memberPending) {
     return (
       <div className="flex flex-col gap-(--space-4)">
         <h1 className="text-h2 text-(--text)">Prompts</h1>
+        <PromptsTabs active={tab} onSelect={selectTab} />
         <p className="text-body text-(--text-muted)">{PROMPTS_LOADING_TEXT}</p>
       </div>
     );
@@ -52,6 +70,7 @@ export function PromptsView({ workspaceSlug }: PromptsViewProps): React.ReactEle
     return (
       <div className="flex flex-col gap-(--space-4)">
         <h1 className="text-h2 text-(--text)">Prompts</h1>
+        <PromptsTabs active={tab} onSelect={selectTab} />
         <p role="alert" className="text-body text-(--danger)">
           {PROMPTS_LOAD_FAILED_TEXT}
         </p>
@@ -67,6 +86,7 @@ export function PromptsView({ workspaceSlug }: PromptsViewProps): React.ReactEle
     return (
       <div className="flex flex-col gap-(--space-4)">
         <h1 className="text-h2 text-(--text)">Prompts</h1>
+        <PromptsTabs active={tab} onSelect={selectTab} />
         <p className="text-body text-(--text-muted)">{PROMPTS_LOADING_TEXT}</p>
       </div>
     );
@@ -74,6 +94,7 @@ export function PromptsView({ workspaceSlug }: PromptsViewProps): React.ReactEle
   return (
     <div className="flex flex-col gap-(--space-6)">
       <h1 className="text-h2 text-(--text)">Prompts</h1>
+      <PromptsTabs active={tab} onSelect={selectTab} />
       {lists.baselineFailed ? (
         <p role="alert" className="text-body text-(--warning)">
           {PROMPTS_BASELINE_WARNING_TEXT}

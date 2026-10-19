@@ -13,7 +13,7 @@ import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/index
 import { sessionKeys } from "../../../core/session/queries.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { listPromptSections: vi.fn() },
+  contractMocks: { listPromptSections: vi.fn(), getCompiledPrompt: vi.fn(), upsertPromptSection: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -25,6 +25,7 @@ vi.mock("../../../shared/shell/index.js", () => ({
   notifySuccess: vi.fn(),
 }));
 
+import { RECEIPTS_LOADING_TEXT, RECEIPTS_FAILED_TEXT } from "./ReceiptView.js";
 import {
   PROMPTS_BASELINE_WARNING_TEXT,
   PROMPTS_LOAD_FAILED_TEXT,
@@ -84,6 +85,12 @@ function seedRole(queryClient: QueryClient, role: number): void {
   ]);
 }
 
+function mockCompiled(): void {
+  contractMocks.getCompiledPrompt.mockImplementation((_client: unknown, _slug: string, kind: string) =>
+    Promise.resolve({ kind, scope: "user", template_body: `${kind} assembled` })
+  );
+}
+
 function renderView(role: number): QueryClient {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   seedRole(queryClient, role);
@@ -97,6 +104,7 @@ function renderView(role: number): QueryClient {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCompiled();
   createAppClient("https://api.test", () => new Promise<never>(() => {}));
 });
 
@@ -218,6 +226,64 @@ describe("PromptsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByLabelText("Prompt section text")).not.toBeInTheDocument());
     expect(screen.getByText("effective body")).toBeInTheDocument();
+  });
+
+  it("switches to the receipt tab and back, closing any open editor", async () => {
+    mockKinds(
+      () => [row()],
+      () => [row()]
+    );
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    expect(screen.getByRole("tab", { name: "Sections" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Customize for me" }));
+    expect(screen.getByLabelText("Prompt section text")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    expect(screen.getByRole("tab", { name: "Receipt" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(3));
+    expect(screen.getByRole("navigation", { name: "Prompt receipt" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Sections" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    expect(screen.queryByLabelText("Prompt section text")).not.toBeInTheDocument();
+  });
+
+  it("re-reads the receipt assemblies after a section save", async () => {
+    mockKinds(
+      () => [row()],
+      () => [row()]
+    );
+    contractMocks.upsertPromptSection.mockResolvedValue({ section_key: "autonomy" });
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(3));
+    const compiledCalls = contractMocks.getCompiledPrompt.mock.calls.length;
+    fireEvent.click(screen.getByRole("tab", { name: "Sections" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Customize for me" }));
+    fireEvent.change(screen.getByLabelText("Prompt section text"), { target: { value: "edited body" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(contractMocks.upsertPromptSection).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    await waitFor(() => expect(contractMocks.getCompiledPrompt.mock.calls.length).toBeGreaterThan(compiledCalls));
+  });
+
+  it("keeps the tabs while the receipt tab loads or fails", async () => {
+    contractMocks.getCompiledPrompt.mockReturnValue(new Promise<never>(() => {}));
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    expect(screen.getByText(RECEIPTS_LOADING_TEXT)).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Receipt" })).toBeInTheDocument();
+  });
+
+  it("shows the receipt failure banner with the tabs still reachable", async () => {
+    contractMocks.getCompiledPrompt.mockRejectedValue(new Error("boom"));
+    renderView(ROLE_ADMIN);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Autonomy" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("tab", { name: "Receipt" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(RECEIPTS_FAILED_TEXT));
+    expect(screen.getByRole("tab", { name: "Sections" })).toBeInTheDocument();
   });
 
   it("scopes the open editor to one card", async () => {

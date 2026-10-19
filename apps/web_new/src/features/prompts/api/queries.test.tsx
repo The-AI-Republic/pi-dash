@@ -12,7 +12,7 @@ import { createAppClient, getAppClient, resetAppClient } from "../../../core/api
 import { LIST_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { listPromptSections: vi.fn() },
+  contractMocks: { listPromptSections: vi.fn(), getCompiledPrompt: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -20,8 +20,13 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, ...contractMocks };
 });
 
-import { promptSectionKeys } from "./keys.js";
-import { promptSectionsQueryOptions, usePromptSectionLists } from "./queries.js";
+import { promptReceiptKeys, promptSectionKeys } from "./keys.js";
+import {
+  compiledPromptQueryOptions,
+  promptSectionsQueryOptions,
+  usePromptReceipts,
+  usePromptSectionLists,
+} from "./queries.js";
 
 const SLUG = "acme";
 
@@ -176,5 +181,94 @@ describe("usePromptSectionLists", () => {
     const calls = contractMocks.listPromptSections.mock.calls.length;
     result.current.refetchMember();
     await waitFor(() => expect(contractMocks.listPromptSections.mock.calls.length).toBeGreaterThan(calls));
+  });
+});
+
+describe("promptReceiptKeys", () => {
+  it("nests compiled reads under their own workspace subtree", () => {
+    expect(promptReceiptKeys.all(SLUG)).toEqual([...workspaceScope(SLUG), "prompts", "receipts"]);
+    expect(promptReceiptKeys.compiled(SLUG, "scheduler")).toEqual([...promptReceiptKeys.all(SLUG), "scheduler"]);
+  });
+});
+
+describe("compiledPromptQueryOptions", () => {
+  it("reads the viewer's own assembled template with list freshness", async () => {
+    const compiled = { kind: "review", scope: "user" as const, template_body: "assembled" };
+    contractMocks.getCompiledPrompt.mockResolvedValue(compiled);
+    const options = compiledPromptQueryOptions(getAppClient(), SLUG, "review");
+    expect(options.queryKey).toEqual(promptReceiptKeys.compiled(SLUG, "review"));
+    expect(options.staleTime).toBe(LIST_STALE_TIME_MS);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(compiled);
+    expect(contractMocks.getCompiledPrompt).toHaveBeenCalledWith(expect.anything(), SLUG, "review", {
+      scope: "user",
+    });
+  });
+});
+
+describe("usePromptReceipts", () => {
+  function mockReceipts(options: { failCompiled?: boolean; failSections?: string; pending?: boolean } = {}): void {
+    contractMocks.getCompiledPrompt.mockImplementation((_client: unknown, _slug: string, kind: string) =>
+      options.pending
+        ? new Promise<never>(() => {})
+        : options.failCompiled
+          ? Promise.reject(new Error("compiled failed"))
+          : Promise.resolve({
+              kind,
+              scope: "user",
+              template_body: `${kind} template`,
+              ...(kind === "review" ? { automatic_template_body: "review automatic" } : {}),
+            })
+    );
+    contractMocks.listPromptSections.mockImplementation(
+      (_client: unknown, _slug: string, request: { kind?: string; scope?: string }) =>
+        options.pending
+          ? new Promise<never>(() => {})
+          : options.failSections === request.kind
+            ? Promise.reject(new Error("sections failed"))
+            : Promise.resolve(listResponse(request.kind ?? "coding-task", "user", [row()]))
+    );
+  }
+
+  it("pairs every kind's sections with its compiled template in page order", async () => {
+    mockReceipts();
+    const { result } = renderHook(() => usePromptReceipts(SLUG), { wrapper: wrapper(freshClient()) });
+    await waitFor(() => expect(result.current.pending).toBe(false));
+    expect(result.current.failed).toBe(false);
+    expect(result.current.entries.map((entry) => entry.kind)).toEqual(["coding-task", "review", "scheduler"]);
+    expect(result.current.entries[1]?.compiled.template_body).toBe("review template");
+    expect(result.current.entries[1]?.sections.sections).toHaveLength(1);
+    expect(result.current.entries[2]?.compiled.automatic_template_body).toBeUndefined();
+  });
+
+  it("reports pending until every read settles", () => {
+    mockReceipts({ pending: true });
+    const { result } = renderHook(() => usePromptReceipts(SLUG), { wrapper: wrapper(freshClient()) });
+    expect(result.current.pending).toBe(true);
+    expect(result.current.failed).toBe(false);
+    expect(result.current.entries).toEqual([]);
+  });
+
+  it("reports a compiled failure", async () => {
+    mockReceipts({ failCompiled: true });
+    const { result } = renderHook(() => usePromptReceipts(SLUG), { wrapper: wrapper(freshClient()) });
+    await waitFor(() => expect(result.current.failed).toBe(true));
+    expect(result.current.pending).toBe(false);
+  });
+
+  it("reports a section-list failure on the receipt side", async () => {
+    mockReceipts({ failSections: "scheduler" });
+    const { result } = renderHook(() => usePromptReceipts(SLUG), { wrapper: wrapper(freshClient()) });
+    await waitFor(() => expect(result.current.failed).toBe(true));
+  });
+
+  it("refetches every receipt read", async () => {
+    mockReceipts();
+    const { result } = renderHook(() => usePromptReceipts(SLUG), { wrapper: wrapper(freshClient()) });
+    await waitFor(() => expect(result.current.pending).toBe(false));
+    const compiledCalls = contractMocks.getCompiledPrompt.mock.calls.length;
+    const sectionCalls = contractMocks.listPromptSections.mock.calls.length;
+    result.current.refetch();
+    await waitFor(() => expect(contractMocks.getCompiledPrompt.mock.calls.length).toBeGreaterThan(compiledCalls));
+    await waitFor(() => expect(contractMocks.listPromptSections.mock.calls.length).toBeGreaterThan(sectionCalls));
   });
 });

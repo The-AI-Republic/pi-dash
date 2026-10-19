@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 
 const { contractMocks } = vi.hoisted(() => ({
-  contractMocks: { upsertPromptSection: vi.fn(), revertPromptSection: vi.fn() },
+  contractMocks: { upsertPromptSection: vi.fn(), revertPromptSection: vi.fn(), previewPrompt: vi.fn() },
 }));
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
@@ -215,6 +215,69 @@ describe("SectionEditor", () => {
     expect(screen.getByLabelText("Prompt section text")).toHaveValue("baseline body");
     await user.click(screen.getByRole("button", { name: "Show default" }));
     expect(screen.getByText("baseline default")).toBeInTheDocument();
+  });
+
+  it("offers no kind switcher for a single-kind section", () => {
+    renderEditor({ scope: "user" });
+    expect(screen.queryByTestId("draft-preview-kind-coding-task")).not.toBeInTheDocument();
+    expect(screen.getByText("Draft preview")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Preview draft" })).toBeDisabled();
+  });
+
+  it("switches preview kinds when the section spans several kinds", async () => {
+    contractMocks.previewPrompt.mockResolvedValue({ kind: "review", prompt: "review draft render" });
+    const user = userEvent.setup();
+    renderEditor({
+      scope: "user",
+      section: section({ kinds: ["coding-task", "review"] }),
+    });
+    expect(screen.getByTestId("draft-preview-kind-coding-task")).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByTestId("draft-preview-kind-review"));
+    expect(screen.getByTestId("draft-preview-kind-review")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("draft-preview-kind-coding-task")).toHaveAttribute("aria-pressed", "false");
+    await user.type(screen.getByPlaceholderText("Issue id (UUID)"), "issue-9");
+    await user.click(screen.getByRole("button", { name: "Preview draft" }));
+    await waitFor(() => expect(contractMocks.previewPrompt).toHaveBeenCalledTimes(1));
+    expect(contractMocks.previewPrompt).toHaveBeenCalledWith(expect.anything(), SLUG, "review", {
+      issue_id: "issue-9",
+      scope: "user",
+      section_key: "autonomy",
+      body: "effective body",
+    });
+    await waitFor(() => expect(screen.getByTestId("draft-preview-result")).toHaveTextContent("review draft render"));
+  });
+
+  it("previews the in-progress edit, not the seed, for a scheduler section", async () => {
+    contractMocks.previewPrompt.mockResolvedValue({ kind: "scheduler", prompt: "scheduler render" });
+    const user = userEvent.setup();
+    renderEditor({
+      scope: "workspace",
+      section: section({ kinds: ["scheduler"], workspace: row({ body: "baseline body" }) }),
+    });
+    await user.clear(screen.getByLabelText("Prompt section text"));
+    await user.type(screen.getByLabelText("Prompt section text"), "unsaved edit");
+    await user.type(screen.getByPlaceholderText("Scheduler install id (UUID)"), "binding-7");
+    await user.click(screen.getByRole("button", { name: "Preview draft" }));
+    await waitFor(() =>
+      expect(contractMocks.previewPrompt).toHaveBeenCalledWith(expect.anything(), SLUG, "scheduler", {
+        binding_id: "binding-7",
+        scope: "workspace",
+        section_key: "autonomy",
+        body: "unsaved edit",
+      })
+    );
+  });
+
+  it("lands draft-preview failures inline without disturbing the draft", async () => {
+    contractMocks.previewPrompt.mockRejectedValue(new Error("parity draft render failure"));
+    const user = userEvent.setup();
+    renderEditor({ scope: "user" });
+    await user.type(screen.getByPlaceholderText("Issue id (UUID)"), "issue-1");
+    await user.click(screen.getByRole("button", { name: "Preview draft" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("draft-preview-error")).toHaveTextContent("parity draft render failure")
+    );
+    expect(screen.getByLabelText("Prompt section text")).toHaveValue("effective body");
   });
 
   it("renders an empty default without any row", async () => {
