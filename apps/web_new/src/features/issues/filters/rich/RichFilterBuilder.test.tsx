@@ -160,7 +160,6 @@ describe("rich filter builder empty state", () => {
       "Created by",
       "Mentions",
       "Label",
-      "Project",
       "Cycle",
       "Module",
       "Target date",
@@ -173,15 +172,15 @@ describe("rich filter builder empty state", () => {
     const { patches } = setup({});
     await user.click(screen.getByTestId("rich-filter-add"));
     await user.click(await screen.findByRole("option", { name: "Priority" }));
-    const priority = await screen.findByRole("listbox", { name: "Priority values" });
-    expect(within(priority).getAllByRole("option").length).toBe(5);
+    const priority = await screen.findByRole("region", { name: "Priority" });
+    expect(within(priority).getAllByRole("checkbox").length).toBe(5);
 
     // Switching the same pill to State Group lists that set by itself too.
     const pill = screen.getByTestId("rich-condition");
     await user.click(within(pill).getByRole("button", { name: /Priority/ }));
     await user.click(await screen.findByRole("option", { name: "State Group" }));
-    const groups = await screen.findByRole("listbox", { name: "State Group values" });
-    expect(within(groups).getByRole("option", { name: "Started" })).toBeInTheDocument();
+    const groups = await screen.findByRole("region", { name: "State Group" });
+    expect(within(groups).getByRole("checkbox", { name: "Started" })).toBeInTheDocument();
     expect(patches).toHaveLength(0);
   });
 
@@ -216,8 +215,8 @@ describe("rich filter builder empty state", () => {
     await user.click(await screen.findByRole("option", { name: "State" }));
 
     // The empty slot is the first place to type or pick, so it lists by itself.
-    const list = await screen.findByRole("listbox", { name: "State values" });
-    expect(within(list).getByRole("option", { name: "Todo" })).toBeInTheDocument();
+    const list = await screen.findByRole("region", { name: "State" });
+    expect(within(list).getByRole("checkbox", { name: "Todo" })).toBeInTheDocument();
   });
 });
 
@@ -235,10 +234,10 @@ describe("rich filter builder populated state", () => {
     );
     // A complete stored pick never pops its list open on mount.
     await screen.findByRole("button", { name: /Todo/ });
-    expect(screen.queryByRole("listbox", { name: "State values" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "State" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Todo/ }));
-    await user.click(await screen.findByRole("option", { name: "In progress" }));
+    await user.click(await screen.findByRole("checkbox", { name: "In progress" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toEqual({
       rich_filters: { state_id__in: "323e4567-e89b-12d3-a456-426614174002,423e4567-e89b-12d3-a456-426614174003" },
@@ -282,7 +281,7 @@ describe("rich filter builder populated state", () => {
     expect(patches).toHaveLength(0);
 
     // The new empty State Group slot lists its fixed values by itself.
-    await user.click(await screen.findByRole("option", { name: "Started" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Started" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]).toEqual({
       rich_filters: { and: [{ priority__in: "none" }, { state_group__in: "started" }] },
@@ -336,7 +335,7 @@ describe("rich filter builder populated state", () => {
     const { patches, release, hold } = setup({ priority__in: "none" }, { hold: true });
     await user.click(screen.getByRole("button", { name: "Add filter" }));
     await user.click(await screen.findByRole("option", { name: "State Group" }));
-    await user.click(await screen.findByRole("option", { name: "Started" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Started" }));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(hold).toBe(true);
 
@@ -501,6 +500,7 @@ describe("view row wiring", () => {
     // The day becomes the range's first end; the half-built pair is not
     // stored, and the pair editor reopens for the missing end.
     await waitFor(() => expect(patches).toEqual([{ rich_filters: {} }]));
+    // The between lookup opens its two-end editor with the day as the first end.
     const calendar = await screen.findByTestId("rich-range-calendar");
     expect(screen.getByTestId("rich-value-trigger").parentElement).toHaveAttribute("data-incomplete", "true");
     await user.click(within(calendar).getByRole("button", { name: "February 12, 2026" }));
@@ -649,7 +649,7 @@ describe("temporary builder instances", () => {
     await user.click(screen.getByTestId("rich-filter-add"));
     await user.click(await screen.findByRole("option", { name: "Priority" }));
     // An empty static pick lists its values without another click.
-    await user.click(await screen.findByRole("option", { name: "Urgent" }));
+    await user.click(await screen.findByRole("checkbox", { name: "Urgent" }));
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
     // A second condition proves the in-memory list keeps accumulating.
     await user.click(screen.getByRole("button", { name: "Add filter" }));

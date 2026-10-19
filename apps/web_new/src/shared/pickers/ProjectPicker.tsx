@@ -10,7 +10,8 @@ import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption }
 import { Layers } from "lucide-react";
 import * as React from "react";
 
-import { selectProjectMark, selectProjectOptions, type ProjectOption } from "./projects.js";
+import { ProjectMark as ProjectMarkTile } from "./ProjectMark.js";
+import { selectProjectOptions, type ProjectOption } from "./projects.js";
 import { usePickerProjects } from "./reference.js";
 
 interface ProjectPickerBase {
@@ -37,14 +38,7 @@ export type ProjectPickerProps = ProjectPickerBase &
   );
 
 function ProjectMark({ option }: { option: ProjectOption }): React.ReactElement {
-  return (
-    <span
-      aria-hidden="true"
-      className="text-meta flex size-6 shrink-0 items-center justify-center rounded-(--radius-control) bg-(--subtle) font-medium text-(--text-muted)"
-    >
-      {selectProjectMark(option.logoProps, option.identifier)}
-    </span>
-  );
+  return <ProjectMarkTile logoProps={option.logoProps} identifier={option.identifier} size={24} />;
 }
 
 function toComboboxOption(option: ProjectOption): ComboboxOption {

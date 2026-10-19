@@ -8,6 +8,7 @@
 // shape, so the list query and the saved-view contract consume it directly.
 
 import type { PriorityLevel } from "../../../../shared/pickers/priorities.js";
+import { dateEntries, dateValueLabel, isDatePreset } from "./legacyDimensions.js";
 
 /** Field kinds the core builder can represent. Value editing arrives with ISS-100–103. */
 export type RichFilterKind = "single" | "multi" | "date" | "date_range";
@@ -205,8 +206,10 @@ function payloadValue(value: unknown): unknown {
 let collectionStems: ReadonlySet<string> | null = null;
 
 function collectionField(stem: string): boolean {
+  // Every surface's dimensions count: a record written on one surface may
+  // be read on another, and the collection lookup is shared.
   collectionStems ??= new Set(
-    richFilterFields()
+    withValueInputFields(DEFAULT_FIELDS, "my_issues")
       .filter((field) => field.kind === "multi" || field.kind === "single")
       .map((field) => field.stem)
   );
@@ -338,6 +341,13 @@ export interface RichFilterField {
   staticValues?: readonly { value: string; label: string }[];
   /** Where the value list comes from; absent means the static values. */
   source?: "states" | "members" | "labels" | "projects" | "cycles" | "modules";
+  /**
+   * Surfaces this dimension belongs to. Absent means every project issues
+   * surface; `my_issues` marks fields only the personal work-items page
+   * offers (ISS-093), and `project` marks fields every surface but it
+   * offers (ISS-091: project is a cross-project dimension).
+   */
+  surfaces?: readonly RichFilterSurface[];
 }
 
 const DEFAULT_FIELDS: readonly RichFilterField[] = [
@@ -422,32 +432,47 @@ const DEFAULT_FIELDS: readonly RichFilterField[] = [
   },
 ];
 
-/** Drop the dimensions a project with those features switched off must not offer. */
+/**
+ * Drop the dimensions a surface must not offer: cycle and module when the
+ * project has those features switched off, and any dimension whose entry
+ * names other surfaces only.
+ */
 export function hideRichFilterFields(
   fields: readonly RichFilterField[],
-  input: { hideCycle?: boolean; hideModule?: boolean }
+  input: { hideCycle?: boolean; hideModule?: boolean; surface?: RichFilterSurface }
 ): RichFilterField[] {
+  const surface = input.surface ?? "project";
   return fields.filter((field) => {
     if (field.stem === "cycle_id" && (input.hideCycle ?? false)) return false;
     if (field.stem === "module_id" && (input.hideModule ?? false)) return false;
+    if (field.surfaces !== undefined && !field.surfaces.includes(surface)) return false;
     return true;
   });
 }
 
 /**
- * The field catalogue for one project surface: the core choice fields
- * plus the value-input fields this slice edits (ISS-100–103). Cycle and
- * module disappear when their project features are off.
+ * The field catalogue for one surface: the core choice fields plus the
+ * value-input fields (ISS-100–103, ISS-089–093). Cycle and module
+ * disappear when their project features are off. The personal work-items
+ * surface adds its subscriber dimension; project surfaces never offer it.
  */
-export function richFilterFields(input?: { hideCycle?: boolean; hideModule?: boolean }): RichFilterField[] {
-  const fields = withValueInputFields(DEFAULT_FIELDS);
-  return hideRichFilterFields(fields, input ?? {});
+export function richFilterFields(input?: {
+  hideCycle?: boolean;
+  hideModule?: boolean;
+  surface?: RichFilterSurface;
+}): RichFilterField[] {
+  const surface = input?.surface ?? "project";
+  const fields = withValueInputFields(DEFAULT_FIELDS, surface);
+  return hideRichFilterFields(fields, { ...input, surface });
 }
 
 /** Find a field by its stored stem. */
 export function findField(fields: readonly RichFilterField[], stem: string): RichFilterField | null {
   return fields.find((field) => field.stem === stem) ?? null;
 }
+
+/** The surface a catalogue is built for. */
+export type RichFilterSurface = "project" | "my_issues";
 
 /** A condition whose property no longer resolves. */
 export function isUnresolvableCondition(condition: RichCondition, fields: readonly RichFilterField[]): boolean {
@@ -521,6 +546,11 @@ export function isValueComplete(kind: RichFilterKind, value: unknown): boolean {
  * kind alone cannot decide whether the editor is finished.
  */
 export function isValueCompleteForOperator(field: RichFilterField, operator: string, value: unknown): boolean {
+  // A relative window is a complete date pick on its own, whatever form
+  // the operator would otherwise expect (ISS-092).
+  if (field.kind === "date" || field.kind === "date_range") {
+    if (dateEntries(value).some((entry) => isDatePreset(entry))) return true;
+  }
   if (operator === "range") return isValueComplete("date_range", value);
   if (operator === "exact" && field.kind === "date_range") return isValueComplete("date", value);
   // A stored collection filter may arrive under `exact` with one scalar
@@ -535,6 +565,14 @@ export function isValueCompleteForOperator(field: RichFilterField, operator: str
 
 /** Human label for one stored value, or null when the entity no longer resolves. */
 export function valueLabel(field: RichFilterField, value: unknown): string | null {
+  // Relative windows and directed custom days spell their own names, and a
+  // custom pair keeps the arrow between its ends. A lone bare day under a
+  // range field stays unresolvable rather than reading as a complete range.
+  if (field.kind === "date" || field.kind === "date_range") {
+    const entries = dateEntries(value);
+    const directed = entries.some((entry) => entry.includes(";") && !isDatePreset(entry));
+    if (entries.some((entry) => isDatePreset(entry)) || directed || entries.length > 1) return dateValueLabel(value);
+  }
   if (field.kind === "date_range") {
     return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "string"
       ? `${value[0]} → ${value[1]}`
@@ -585,21 +623,51 @@ function catalogField(input: {
  * one bounded date (target date, no clear control, offered as both a single
  * day and a two-end range like the old filter) and a bounded date range
  * (start date, which also offers the plain is lookup the oracle drives).
+ * Both date fields keep the negated pairs the list endpoint's filter set
+ * accepts for `__exact` / `__range` leaves (ISS-092); a relative preset
+ * that is stored under a negation stays in the JSON tree rather than being
+ * turned into a positive bare-bound parameter.
+ * Projects is a cross-project dimension: the old project filter never
+ * offers it on an issues list inside one project, and the gating scenario
+ * pins its absence there (ISS-091).
  * Stems are the filter set's field names; entity-backed fields resolve
  * their labels from the shared pickers, so reads stay lazy on open.
  */
-export function valueInputFields(): RichFilterField[] {
-  return [
-    catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
+export function valueInputFields(surface: RichFilterSurface): RichFilterField[] {
+  const fields = [
+    {
+      ...catalogField({ stem: "project_id", label: "Project", kind: "multi", source: "projects" }),
+      surfaces: ["my_issues"] as const,
+    },
     catalogField({ stem: "cycle_id", label: "Cycle", kind: "multi", source: "cycles" }),
     catalogField({ stem: "module_id", label: "Module", kind: "multi", source: "modules" }),
-    catalogField({ stem: "target_date", label: "Target date", kind: "date", operators: ["exact", "range"] }),
-    catalogField({ stem: "start_date", label: "Start date", kind: "date_range", operators: ["exact", "range"] }),
+    catalogField({
+      stem: "target_date",
+      label: "Target date",
+      kind: "date",
+      operators: ["exact", "range"],
+    }),
+    catalogField({
+      stem: "start_date",
+      label: "Start date",
+      kind: "date_range",
+      operators: ["exact", "range"],
+    }),
   ];
+  if (surface === "my_issues") {
+    fields.push({
+      ...catalogField({ stem: "subscriber_id", label: "Subscriber", kind: "multi", source: "members" }),
+      surfaces: ["my_issues"] as const,
+    });
+  }
+  return fields;
 }
 
 /** Merge the value-input fields into the base catalogue without duplicates. */
-export function withValueInputFields(fields: readonly RichFilterField[]): RichFilterField[] {
+export function withValueInputFields(
+  fields: readonly RichFilterField[],
+  surface: RichFilterSurface
+): RichFilterField[] {
   const known = new Set(fields.map((field) => field.stem));
-  return [...fields, ...valueInputFields().filter((field) => !known.has(field.stem))];
+  return [...fields, ...valueInputFields(surface).filter((field) => !known.has(field.stem))];
 }

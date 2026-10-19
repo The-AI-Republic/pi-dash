@@ -315,8 +315,21 @@ describe("condition operations", () => {
 });
 
 describe("field catalogue", () => {
-  it("offers the core fields plus the value-input fields this slice edits", () => {
+  it("offers the project issues dimensions, with Projects held to cross-project surfaces", () => {
     expect(richFilterFields().map((field) => field.stem)).toEqual([
+      "state_id",
+      "state_group",
+      "priority",
+      "assignee_id",
+      "created_by_id",
+      "mention_id",
+      "label_id",
+      "cycle_id",
+      "module_id",
+      "target_date",
+      "start_date",
+    ]);
+    expect(richFilterFields({ surface: "my_issues" }).map((field) => field.stem)).toEqual([
       "state_id",
       "state_group",
       "priority",
@@ -329,6 +342,7 @@ describe("field catalogue", () => {
       "module_id",
       "target_date",
       "start_date",
+      "subscriber_id",
     ]);
   });
 
@@ -350,7 +364,6 @@ describe("field catalogue", () => {
       "created_by_id",
       "mention_id",
       "label_id",
-      "project_id",
       "cycle_id",
       "module_id",
     ]) {
@@ -358,6 +371,7 @@ describe("field catalogue", () => {
     }
     expect(findField(richFilterFields(), "target_date")?.kind).toBe("date");
     expect(findField(richFilterFields(), "start_date")?.kind).toBe("date_range");
+    expect(findField(richFilterFields({ surface: "my_issues" }), "project_id")?.kind).toBe("multi");
   });
 
   it("carries optional bounds for the date kinds", () => {
@@ -404,6 +418,19 @@ describe("field catalogue", () => {
   it("returns null for an unknown stem", () => {
     expect(findField(richFilterFields(), "missing")).toBeNull();
   });
+
+  it("offers the subscriber dimension only on the personal work-items surface", () => {
+    expect(findField(richFilterFields(), "subscriber_id")).toBeNull();
+    expect(findField(richFilterFields({ surface: "project" }), "subscriber_id")).toBeNull();
+    expect(findField(richFilterFields({ surface: "my_issues" }), "subscriber_id")).toMatchObject({
+      label: "Subscriber",
+      kind: "multi",
+      source: "members",
+      surfaces: ["my_issues"],
+    });
+    const personal = richFilterFields({ surface: "my_issues" });
+    expect(new Set(personal.map((field) => field.stem)).size).toBe(personal.length);
+  });
 });
 
 describe("operators", () => {
@@ -414,10 +441,9 @@ describe("operators", () => {
     ]);
   });
 
-  it("offers the negation pair and leaves the operator menu unlocked", () => {
+  it("offers the negation pair and leaves a collection operator menu unlocked", () => {
     expect(isOperatorLocked(PRIORITY)).toBe(false);
     expect(isOperatorLocked(START)).toBe(false);
-    expect(operatorOptions(START).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
   });
 
   it("offers a target date both as one day and as a range", () => {
@@ -425,6 +451,19 @@ describe("operators", () => {
     expect(target.defaultOperator).toBe("exact");
     expect(target.operators).toEqual(["exact", "range"]);
     expect(operatorOptions(target).map((option) => option.label)).toEqual(["is", "is not", "between", "not between"]);
+  });
+
+  it("keeps the negated date lookups the JSON filter set accepts", () => {
+    const start = findField(richFilterFields(), "start_date")!;
+    const target = findField(richFilterFields(), "target_date")!;
+    expect(operatorOptions(start).sort((left, right) => left.label.localeCompare(right.label))).toEqual([
+      { base: "range", negated: false, label: "between" },
+      { base: "exact", negated: false, label: "is" },
+      { base: "exact", negated: true, label: "is not" },
+      { base: "range", negated: true, label: "not between" },
+    ]);
+    expect(start.allowNegative).toBe(true);
+    expect(target.allowNegative).toBe(true);
   });
 
   it("locks a field that declares no negated form", () => {
@@ -505,6 +544,12 @@ describe("value completeness and labels", () => {
     expect(valueLabel({ ...dateField, kind: "date" }, "2026-01-01")).toBe("2026-01-01");
     expect(valueLabel({ ...START, kind: "date_range" }, ["2026-01-01", "2026-01-02"])).toBe("2026-01-01 → 2026-01-02");
     expect(valueLabel({ ...START, kind: "date_range" }, "2026-01-01")).toBeNull();
+    // A custom day carries its direction, and a custom pair reads either
+    // from a plain comma string or from the array the slot writes.
+    expect(valueLabel(START, "2026-01-01;after")).toBe("After 2026-01-01");
+    expect(valueLabel(START, "2026-01-31;before")).toBe("Before 2026-01-31");
+    expect(valueLabel(START, ["2026-01-01", "2026-01-31"])).toBe("2026-01-01 → 2026-01-31");
+    expect(valueLabel(START, "2026-01-01,2026-01-31")).toBe("2026-01-01 → 2026-01-31");
   });
 });
 

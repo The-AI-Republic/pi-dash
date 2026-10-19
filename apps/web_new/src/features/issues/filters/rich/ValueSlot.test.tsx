@@ -25,10 +25,12 @@ afterEach(() => {
 });
 
 const FIELDS = richFilterFields();
+const PERSONAL_FIELDS = richFilterFields({ surface: "my_issues" });
 const PRIORITY = findField(FIELDS, "priority")!;
 const STATE = findField(FIELDS, "state_id")!;
 const TARGET = findField(FIELDS, "target_date")!;
 const START = findField(FIELDS, "start_date")!;
+const PROJECT_FIELD = findField(PERSONAL_FIELDS, "project_id")!;
 const PROJECT = "123e4567-e89b-12d3-a456-426614174000";
 const STATE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const ME_ID = "11111111-1111-4111-8111-111111111111";
@@ -237,8 +239,8 @@ describe("ValueSlot", () => {
       )
     );
     // No trigger click: an empty slot already shows its list.
-    const list = await screen.findByRole("listbox", { name: "State values" });
-    await user.click(within(list).getByRole("option", { name: "Todo" }));
+    const list = await screen.findByRole("region", { name: "State" });
+    await user.click(within(list).getByRole("checkbox", { name: "Todo" }));
     expect(onChange).toHaveBeenCalledWith([STATE_ID]);
   });
 
@@ -250,7 +252,7 @@ describe("ValueSlot", () => {
       )
     );
     expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
-    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Priority" })).not.toBeInTheDocument();
   });
 
   it("adds a second pick to a stored one-pick exact without dropping the first", async () => {
@@ -263,7 +265,7 @@ describe("ValueSlot", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Urgent/ }));
-    await user.click(await screen.findByRole("option", { name: "High" }));
+    await user.click(await screen.findByRole("checkbox", { name: "High" }));
     expect(onChange).toHaveBeenLastCalledWith(["urgent", "high"]);
   });
 
@@ -280,7 +282,7 @@ describe("ValueSlot", () => {
       )
     );
     expect(screen.getByRole("button", { name: /Urgent/ })).toBeInTheDocument();
-    expect(screen.queryByRole("listbox", { name: "Priority values" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Priority" })).not.toBeInTheDocument();
   });
 
   it("shows the placeholder and picks a static multi value", async () => {
@@ -300,9 +302,9 @@ describe("ValueSlot", () => {
     expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
     // An empty pick lists its options without another click; clicking the
     // trigger again would collapse it.
-    const list = await screen.findByRole("listbox", { name: "Priority values" });
-    expect(within(list).getAllByRole("option")).toHaveLength(5);
-    await user.click(within(list).getByRole("option", { name: "Urgent" }));
+    const list = await screen.findByRole("region", { name: "Priority" });
+    expect(within(list).getAllByRole("checkbox")).toHaveLength(5);
+    await user.click(within(list).getByRole("checkbox", { name: "Urgent" }));
     expect(onChange).toHaveBeenCalledWith(["urgent"]);
   });
 
@@ -321,7 +323,7 @@ describe("ValueSlot", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Urgent/ }));
-    await user.click(await screen.findByRole("option", { name: "High" }));
+    await user.click(await screen.findByRole("checkbox", { name: "High" }));
     expect(onChange).toHaveBeenLastCalledWith(["urgent", "high"]);
   });
 
@@ -340,7 +342,7 @@ describe("ValueSlot", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Urgent/ }));
-    await user.click(await screen.findByRole("option", { name: /Urgent/ }));
+    await user.click(await screen.findByRole("checkbox", { name: /Urgent/ }));
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
@@ -356,8 +358,8 @@ describe("ValueSlot", () => {
         />
       )
     );
-    const list = await screen.findByRole("listbox", { name: "State Group values" });
-    const options = within(list).getAllByRole("option");
+    const list = await screen.findByRole("region", { name: "State Group" });
+    const options = within(list).getAllByRole("checkbox");
     expect(options).toHaveLength(5);
     for (const option of options) expect(option.querySelector("svg")).not.toBeNull();
   });
@@ -382,7 +384,7 @@ describe("ValueSlot", () => {
         />
       )
     );
-    expect(await screen.findByText("No matching values")).toBeInTheDocument();
+    expect(await screen.findByText("No matches found")).toBeInTheDocument();
   });
 
   it("leaves a static value with no icon unshaped", async () => {
@@ -406,9 +408,9 @@ describe("ValueSlot", () => {
         />
       )
     );
-    const list = await screen.findByRole("listbox", { name: "Custom values" });
-    expect(within(list).getAllByRole("option")).toHaveLength(1);
-    expect(within(list).getByRole("option", { name: "One" }).querySelector("svg")).toBeNull();
+    const list = await screen.findByRole("region", { name: "Custom" });
+    expect(within(list).getAllByRole("checkbox")).toHaveLength(1);
+    expect(within(list).getByRole("checkbox", { name: "One" }).querySelector("svg")).toBeNull();
   });
 
   it("shows the first two picks plus the overflow count", () => {
@@ -443,7 +445,7 @@ describe("ValueSlot", () => {
     );
     expect(screen.getByRole("button", { name: /Todo/ })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Todo/ }));
-    expect(await screen.findByRole("option", { name: "Todo" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("checkbox", { name: "Todo" })).toHaveAttribute("aria-checked", "true");
   });
 });
 
@@ -477,8 +479,11 @@ describe("ValueSlot single select", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /One/ }));
-    await user.click(await screen.findByRole("option", { name: "Two" }));
+    const group = await screen.findByRole("radiogroup", { name: "Custom values" });
+    await user.click(within(group).getByRole("radio", { name: "Two" }));
     expect(onChange).toHaveBeenLastCalledWith("two");
+    // One pick completes a single-choice slot, so its list closes.
+    expect(screen.queryByRole("radiogroup", { name: "Custom values" })).not.toBeInTheDocument();
   });
 
   it("clears when the current value is picked again", async () => {
@@ -496,7 +501,7 @@ describe("ValueSlot single select", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /One/ }));
-    await user.click(await screen.findByRole("option", { name: /One/ }));
+    await user.click(await screen.findByRole("radio", { name: /One/ }));
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
@@ -632,13 +637,13 @@ describe("ValueSlot member and label sources", () => {
         />
       )
     );
-    const list = await screen.findByRole("listbox", { name: "Assignees values" });
+    const list = await screen.findByTestId("rich-section-assignee_id");
     expect(
       within(list)
-        .getAllByRole("option")
+        .getAllByRole("checkbox")
         .map((option) => option.textContent)
     ).toEqual([expect.stringMatching(/You$/), expect.stringMatching(/Ana$/), expect.stringMatching(/Zoe$/)]);
-    await user.click(within(list).getByRole("option", { name: /Ana/ }));
+    await user.click(within(list).getByRole("checkbox", { name: /Ana/ }));
     expect(onChange).toHaveBeenCalledWith([ANA]);
   });
 
@@ -656,10 +661,10 @@ describe("ValueSlot member and label sources", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Zoe/ }));
-    const list = await screen.findByRole("listbox", { name: "Created by values" });
+    const list = await screen.findByTestId("rich-section-created_by_id");
     expect(
       within(list)
-        .getAllByRole("option")
+        .getAllByRole("checkbox")
         .map((option) => option.textContent)
     ).toEqual([expect.stringMatching(/Zoe$/), expect.stringMatching(/You$/), expect.stringMatching(/Ana$/)]);
   });
@@ -679,13 +684,13 @@ describe("ValueSlot member and label sources", () => {
       )
     );
     await user.click(screen.getByRole("button", { name: /Zeta/ }));
-    const list = await screen.findByRole("listbox", { name: "Label values" });
+    const list = await screen.findByTestId("rich-section-label_id");
     expect(
       within(list)
-        .getAllByRole("option")
+        .getAllByRole("checkbox")
         .map((option) => option.textContent)
     ).toEqual(["Zeta", "Alpha"]);
-    await user.click(within(list).getByRole("option", { name: /Alpha/ }));
+    await user.click(within(list).getByRole("checkbox", { name: /Alpha/ }));
     expect(onChange).toHaveBeenCalledWith(["label-z", "label-a"]);
   });
 
@@ -736,7 +741,7 @@ describe("ValueSlot member and label sources", () => {
         }
       )
     );
-    const option = await screen.findByRole("option", { name: /Ana/ });
+    const option = await screen.findByRole("checkbox", { name: /Ana/ });
     expect(option.querySelector(`img[src="${AVATAR}"]`)).not.toBeNull();
   });
 
@@ -808,10 +813,10 @@ describe("ValueSlot project, cycle and module sources", () => {
   }
 
   it.each([
-    ["project_id", PROJECT, "Apollo"],
-    ["cycle_id", CYCLE, "Sprint 4"],
-    ["module_id", MODULE, "Billing"],
-  ] as const)("lists %s options only once opened", async (stem, id, name) => {
+    [PROJECT_FIELD, PROJECT, "Apollo"],
+    [findField(FIELDS, "cycle_id")!, CYCLE, "Sprint 4"],
+    [findField(FIELDS, "module_id")!, MODULE, "Billing"],
+  ] as const)("lists $stem options only once opened", async (field, id, name) => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     render(
@@ -819,8 +824,8 @@ describe("ValueSlot project, cycle and module sources", () => {
         <ValueSlot
           workspaceSlug="acme"
           projectId={PROJECT}
-          field={findField(FIELDS, stem)!}
-          condition={{ key: "a", property: stem, operator: "in", negated: false, value: null }}
+          field={field}
+          condition={{ key: "a", property: field.stem, operator: "in", negated: false, value: null }}
           onChange={onChange}
         />,
         route
@@ -828,23 +833,23 @@ describe("ValueSlot project, cycle and module sources", () => {
     );
     // Lazy: the empty slot opens by itself and only then reads.
     expect(screen.getByRole("button", { name: /^--$/ })).toBeInTheDocument();
-    expect(await screen.findByRole("option", { name })).toBeInTheDocument();
-    await user.click(screen.getByRole("option", { name }));
+    expect(await screen.findByRole("checkbox", { name })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name }));
     expect(onChange).toHaveBeenCalledWith([id]);
   });
 
   it.each([
-    ["project_id", PROJECT, "Apollo"],
-    ["cycle_id", CYCLE, "Sprint 4"],
-    ["module_id", MODULE, "Billing"],
-  ] as const)("resolves a stored %s id to its name", async (stem, id, name) => {
+    [PROJECT_FIELD, PROJECT, "Apollo"],
+    [findField(FIELDS, "cycle_id")!, CYCLE, "Sprint 4"],
+    [findField(FIELDS, "module_id")!, MODULE, "Billing"],
+  ] as const)("resolves a stored $stem id to its name", async (field, id, name) => {
     render(
       coldWrap(
         <ValueSlot
           workspaceSlug="acme"
           projectId={PROJECT}
-          field={findField(FIELDS, stem)!}
-          condition={{ key: "a", property: stem, operator: "in", negated: false, value: [id] }}
+          field={field}
+          condition={{ key: "a", property: field.stem, operator: "in", negated: false, value: [id] }}
           onChange={() => {}}
         />,
         route
@@ -926,7 +931,7 @@ describe("ValueSlot failure and suspended rows", () => {
         }
       )
     );
-    const suspended = await screen.findByRole("option", { name: /Zoe/ });
+    const suspended = await screen.findByRole("checkbox", { name: /Zoe/ });
     expect(suspended).toBeDisabled();
     await user.click(suspended);
     expect(onChange).not.toHaveBeenCalled();
@@ -1197,5 +1202,711 @@ describe("ValueSlot date editors", () => {
     expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent("2026-02-10 → 2026-02-12");
     expect(screen.getByTestId("rich-value-trigger").parentElement).not.toHaveAttribute("data-incomplete", "true");
     expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+  });
+});
+
+describe("ValueSlot cycle lifecycle and ordering", () => {
+  const RUNNING = "c23e4567-e89b-12d3-a456-42661417400e";
+  const UPCOMING = "c23e4567-e89b-12d3-a456-42661417400f";
+
+  function cycleRow(id: string, name: string, status: string | undefined) {
+    return { id, project_id: PROJECT, name, is_favorite: false, ...(status === undefined ? {} : { status }) };
+  }
+
+  function renderCycles(node: React.ReactElement) {
+    return render(
+      coldWrap(node, (url) => {
+        if (url.endsWith("/cycles/")) {
+          return [
+            cycleRow(UPCOMING, "Zulu", "UPCOMING"),
+            cycleRow(RUNNING, "alpha", "ACTIVE"),
+            cycleRow("c23e4567-e89b-12d3-a456-42661417400a", "Beta", "DRAFT"),
+            cycleRow("c23e4567-e89b-12d3-a456-42661417400b", "Gone", "COMPLETED"),
+          ];
+        }
+        return null;
+      })
+    );
+  }
+
+  it("lists completed cycles with their glyph and pulses only the running one", async () => {
+    renderCycles(
+      <ValueSlot
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        field={findField(FIELDS, "cycle_id")!}
+        condition={{ key: "a", property: "cycle_id", operator: "in", negated: false, value: [RUNNING] }}
+        onChange={() => {}}
+      />
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /c23e4567-e89b-12d3-a456-42661417400e/ }));
+    const completed = screen.getByRole("checkbox", { name: "Gone" });
+    expect(completed.querySelector('[data-testid="cycle-glyph-completed"]')).toHaveAttribute("data-running", "false");
+    const running = screen.getByRole("checkbox", { name: "alpha" });
+    expect(running.querySelector('[data-testid="cycle-glyph-current"]')).toHaveAttribute("data-running", "true");
+    expect(screen.getByTestId("cycle-glyph-upcoming")).toHaveAttribute("data-running", "false");
+    expect(screen.getByTestId("cycle-glyph-draft")).toHaveAttribute("data-running", "false");
+  });
+
+  it("orders the applied cycle first and the rest alphabetically", async () => {
+    renderCycles(
+      <ValueSlot
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        field={findField(FIELDS, "cycle_id")!}
+        condition={{ key: "a", property: "cycle_id", operator: "in", negated: false, value: [RUNNING] }}
+        onChange={() => {}}
+      />
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /c23e4567-e89b-12d3-a456-42661417400e/ }));
+    expect(screen.getAllByRole("checkbox").map((option) => option.textContent?.trim())).toEqual([
+      "alpha",
+      "Beta",
+      "Gone",
+      "Zulu",
+    ]);
+  });
+});
+
+describe("ValueSlot project and module ordering", () => {
+  it("orders applied projects first, then names alphabetically", async () => {
+    const user = userEvent.setup();
+    const SECOND = "223e4567-e89b-12d3-a456-426614174002";
+    function row(id: string, name: string, identifier: string) {
+      return {
+        id,
+        name,
+        identifier,
+        sort_order: null,
+        logo_props: {},
+        member_role: 15,
+        intake_count: 0,
+        archived_at: null,
+        workspace: PROJECT,
+        cycle_view: true,
+        issue_views_view: true,
+        module_view: true,
+        page_view: false,
+        inbox_view: false,
+        is_default: false,
+        guest_view_all_features: false,
+        project_lead: null,
+        network: 0,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        created_by: null,
+        updated_by: null,
+      };
+    }
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PROJECT_FIELD}
+          condition={{ key: "a", property: "project_id", operator: "in", negated: false, value: [SECOND] }}
+          onChange={() => {}}
+        />,
+        (url) =>
+          url.endsWith("/projects/")
+            ? [
+                row(PROJECT, "zephyr", "ZEP"),
+                row(SECOND, "Orion", "ORI"),
+                row("323e4567-e89b-12d3-a456-426614174003", "Apollo", "APO"),
+              ]
+            : null
+      )
+    );
+    await user.click(await screen.findByRole("button", { name: /223e4567-e89b-12d3-a456-426614174002/ }));
+    // Each row leads with its logo mark: the identifier's initial here.
+    expect(screen.getAllByRole("checkbox").map((option) => option.textContent?.trim())).toEqual([
+      "OOrion",
+      "AApollo",
+      "Zzephyr",
+    ]);
+  });
+
+  it("orders applied modules first, then names alphabetically", async () => {
+    const user = userEvent.setup();
+    const SECOND = "d23e4567-e89b-12d3-a456-42661417400e";
+    function row(id: string, name: string) {
+      return { id, project_id: PROJECT, name, status: "planned", is_favorite: false };
+    }
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "module_id")!}
+          condition={{ key: "a", property: "module_id", operator: "in", negated: false, value: [SECOND] }}
+          onChange={() => {}}
+        />,
+        (url) =>
+          url.endsWith("/modules/")
+            ? [
+                row("d23e4567-e89b-12d3-a456-42661417400d", "zebra"),
+                row(SECOND, "Billing"),
+                row("d23e4567-e89b-12d3-a456-42661417400f", "Analytics"),
+              ]
+            : null
+      )
+    );
+    await user.click(await screen.findByRole("button", { name: /d23e4567-e89b-12d3-a456-42661417400e/ }));
+    expect(screen.getAllByRole("checkbox").map((option) => option.textContent?.trim())).toEqual([
+      "Billing",
+      "Analytics",
+      "zebra",
+    ]);
+  });
+});
+
+describe("ValueSlot shared section chrome", () => {
+  it("shows the field title with its applied count and reads rows as checkboxes", async () => {
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition(["urgent", "high"])}
+          onChange={() => {}}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Urgent, High/ }));
+    const section = await screen.findByRole("region", { name: "Priority" });
+    expect(within(section).getByRole("heading", { name: "Priority (2)" })).toBeInTheDocument();
+    expect(within(section).getByRole("checkbox", { name: "Urgent" })).toHaveAttribute("aria-checked", "true");
+    expect(within(section).getByRole("checkbox", { name: "High" })).toHaveAttribute("aria-checked", "true");
+    expect(within(section).getByRole("checkbox", { name: "Low" })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("searches the section by its own box and shows the no-matches placeholder", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition()}
+          onChange={() => {}}
+        />
+      )
+    );
+    const section = await screen.findByRole("region", { name: "Priority" });
+    const search = within(section).getByRole("searchbox", { name: "Search Priority" });
+    await user.type(search, "med");
+    expect(within(section).getAllByRole("checkbox")).toHaveLength(1);
+    expect(within(section).getByRole("checkbox", { name: "Medium" })).toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, "zzz");
+    expect(within(section).queryAllByRole("checkbox")).toHaveLength(0);
+    expect(within(section).getByText("No matches found")).toBeInTheDocument();
+  });
+
+  it("collapses and reopens the section through its chevron", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PRIORITY}
+          condition={condition()}
+          onChange={() => {}}
+        />
+      )
+    );
+    const section = await screen.findByRole("region", { name: "Priority" });
+    await user.click(within(section).getByRole("button", { name: "Collapse Priority section" }));
+    expect(within(section).queryAllByRole("checkbox")).toHaveLength(0);
+    await user.click(within(section).getByRole("button", { name: "Expand Priority section" }));
+    expect(within(section).getAllByRole("checkbox")).toHaveLength(5);
+  });
+});
+
+describe("ValueSlot section cap", () => {
+  it("reads back at five rows and reveals the rest with View all", async () => {
+    const user = userEvent.setup();
+    function row(index: number) {
+      return {
+        id: `d23e4567-e89b-12d3-a456-42661417400${index.toString(16)}`,
+        project_id: PROJECT,
+        name: `Module ${index}`,
+        status: "planned",
+        is_favorite: false,
+      };
+    }
+    const modules = Array.from({ length: 7 }, (_, index) => row(index));
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "module_id")!}
+          condition={{ key: "a", property: "module_id", operator: "in", negated: false, value: [] }}
+          onChange={() => {}}
+        />,
+        (url) => (url.endsWith("/modules/") ? modules : null)
+      )
+    );
+    // An empty slot opens by itself, reading at the shared cap.
+    await screen.findAllByRole("checkbox");
+    expect(screen.getAllByRole("checkbox")).toHaveLength(5);
+    await user.click(screen.getByRole("button", { name: "View all" }));
+    expect(screen.getAllByRole("checkbox")).toHaveLength(7);
+    expect(screen.getByRole("button", { name: "View less" })).toBeInTheDocument();
+  });
+});
+
+describe("ValueSlot date presets and custom range", () => {
+  it("ticking Custom opens the calendar and focuses its first day", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2_weeks;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2 weeks from now/ }));
+    await user.click(screen.getByRole("checkbox", { name: "Custom" }));
+    await waitFor(() => {
+      const focused = document.activeElement;
+      expect(focused).not.toBeNull();
+      expect(focused).toHaveAttribute("data-day");
+      expect(screen.getByTestId("rich-date-calendar").contains(focused)).toBe(true);
+    });
+  });
+
+  it("toggles a relative window and keeps the custom day", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    fireEvent.click(screen.getByRole("button", { name: /2026-02-10/ }));
+    await screen.findByTestId("rich-date-calendar");
+    await user.click(screen.getByRole("checkbox", { name: "2 weeks from now" }));
+    expect(onChange).toHaveBeenLastCalledWith(["2026-02-10", "2_weeks;after;fromnow"]);
+  });
+
+  it("removes a relative window when it is ticked off", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("1_weeks;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    expect(screen.getByRole("button", { name: /1 week from now/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /1 week from now/ }));
+    await user.click(screen.getByRole("checkbox", { name: "1 week from now" }));
+    expect(onChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("unticks the Custom row to drop the custom range and keep the presets", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{
+            ...condition(["1_weeks;after;fromnow", "2026-02-01;after", "2026-02-10;before"]),
+            property: "start_date",
+            operator: "range",
+          }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2026-02-01 → 2026-02-10/ }));
+    const custom = screen.getByRole("checkbox", { name: "Custom" });
+    expect(custom).toHaveAttribute("aria-checked", "true");
+    await user.click(custom);
+    expect(onChange).toHaveBeenLastCalledWith("1_weeks;after;fromnow");
+  });
+
+  it("reads the Custom row as unticked when the value holds only presets", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2_months;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2 months from now/ }));
+    expect(screen.getByRole("checkbox", { name: "Custom" })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("keeps a relative window and adds a custom range under the between lookup", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{
+            ...condition("1_months;after;fromnow"),
+            property: "start_date",
+            operator: "range",
+          }}
+          onChange={onChange}
+        />
+      )
+    );
+    // A preset alone completes the slot, so it stays closed until opened.
+    const trigger = screen.getByRole("button", { name: /1 month from now/ });
+    expect(trigger).toHaveAttribute("data-empty", "false");
+    await user.click(trigger);
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const days = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ });
+    await user.click(days[9]!);
+    await user.click(days[11]!);
+    const [first, second] = [days[9]!.getAttribute("data-day"), days[11]!.getAttribute("data-day")];
+    expect(onChange).toHaveBeenLastCalledWith(["1_months;after;fromnow", first, second]);
+  });
+});
+
+describe("ValueSlot pending range", () => {
+  it("keeps a selected relative window visible while both ends are pending", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{
+            ...condition("1_weeks;after;fromnow"),
+            property: "start_date",
+            operator: "range",
+          }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /1 week from now/ }));
+    const calendar = await screen.findByTestId("rich-range-calendar");
+    const days = within(calendar).getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ });
+    await user.click(days[5]!);
+    // A half-filled pair reads as its one end, not as the stored preset.
+    expect(screen.queryByText("Range")).toBeInTheDocument();
+    expect(screen.getByTestId("rich-value-trigger")).toHaveTextContent(`${days[5]!.getAttribute("data-day")} → …`);
+  });
+});
+
+describe("ValueSlot between-range details", () => {
+  it("toggles a relative window inside the paired editor", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const preset = await screen.findByRole("checkbox", { name: "1 week from now" });
+    expect(preset).toHaveAttribute("aria-checked", "false");
+    await user.click(preset);
+    expect(onChange).toHaveBeenLastCalledWith("1_weeks;after;fromnow");
+  });
+
+  it("recomposes a stored pair when the paired editor switches shape", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("2026-02-01,2026-02-10"), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2026-02-01 → 2026-02-10/ }));
+    // Base UI mounts the trigger twice; the second one is the popup on top.
+    await user.click((await screen.findAllByTestId("rich-value-trigger"))[1]!);
+    await user.click(screen.getByRole("radio", { name: "After" }));
+    // The first stored end becomes the open lower bound; the other end drops.
+    expect(onChange).toHaveBeenLastCalledWith("2026-02-01;after");
+    expect(screen.getByTestId("rich-date-calendar")).toBeInTheDocument();
+  });
+
+  it("commits one directed day from the one-day calendar inside the paired editor", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition(null), property: "start_date", operator: "range" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(await screen.findByRole("radio", { name: "Before" }));
+    const calendar = screen.getByTestId("rich-date-calendar");
+    const day = within(calendar)
+      .getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })
+      .find((option) => option.getAttribute("data-in-month") === "true" && !option.hasAttribute("disabled"))!;
+    await user.click(day);
+    expect(onChange).toHaveBeenLastCalledWith(`${day.getAttribute("data-day")};before`);
+  });
+});
+
+describe("ValueSlot custom date modes", () => {
+  it.each([
+    ["exact", "On"],
+    ["after", "After"],
+    ["before", "Before"],
+  ] as const)("stores the picked day as %s", async (mode, label) => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2_weeks;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2 weeks from now/ }));
+    expect(screen.getAllByRole("radio").map((option) => option.getAttribute("aria-label"))).toEqual([
+      "On",
+      "After",
+      "Before",
+    ]);
+    await user.click(screen.getByRole("radio", { name: label }));
+    const calendar = screen.getByTestId("rich-date-calendar");
+    const day = within(calendar)
+      .getAllByRole("button", { name: /^\w+ \d+, \d{4}$/ })
+      .find((option) => option.getAttribute("data-in-month") === "true" && !option.hasAttribute("disabled"))!;
+    const iso = day.getAttribute("data-day")!;
+    await user.click(day);
+    const suffix = mode === "exact" ? "" : `;${mode}`;
+    expect(onChange).toHaveBeenLastCalledWith(["2_weeks;after;fromnow", `${iso}${suffix}`]);
+  });
+
+  it("reopens a stored open bound in its own mode and relabels the trigger", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("2026-02-10;before"), property: "start_date", operator: "exact" }}
+          onChange={onChange}
+        />
+      )
+    );
+    const trigger = screen.getByRole("button", { name: /Before 2026-02-10/ });
+    await user.click(trigger);
+    expect(screen.getByRole("radio", { name: "Before" })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("radio", { name: "After" }));
+    expect(onChange).toHaveBeenLastCalledWith("2026-02-10;after");
+  });
+
+  it("offers the paired form only under the between lookup and keeps its range mode", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("1_weeks;after;fromnow"), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /1 week from now/ }));
+    expect(screen.getAllByRole("radio").map((option) => option.getAttribute("aria-label"))).toEqual([
+      "On",
+      "After",
+      "Before",
+      "Range",
+    ]);
+    expect(screen.getByRole("radio", { name: "Range" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("rich-range-calendar")).toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "After" }));
+    expect(screen.getByTestId("rich-date-calendar")).toBeInTheDocument();
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+  });
+
+  it("reads the paired form under the one-day lookup on its first day", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2026-02-01,2026-02-10"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2026-02-01/ }));
+    expect(screen.getByRole("radio", { name: "On" })).toHaveAttribute("aria-checked", "true");
+    const calendar = screen.getByTestId("rich-date-calendar");
+    await user.selectOptions(within(calendar).getByRole("combobox", { name: "Month" }), "1");
+    await user.selectOptions(within(calendar).getByRole("combobox", { name: "Year" }), "2026");
+    expect(within(calendar).getByRole("button", { name: "February 1, 2026" })).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("ValueSlot date sections use the shared chrome", () => {
+  it("leads the one-day section with its title, count and search", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={TARGET}
+          condition={{ ...condition("2_weeks;after;fromnow"), property: "target_date", operator: "exact" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /2 weeks from now/ }));
+    const section = screen.getByTestId("rich-section-target_date");
+    expect(within(section).getByRole("heading")).toHaveTextContent("Target date (1)");
+    const search = within(section).getByRole("searchbox", { name: "Search Target date" });
+    await user.type(search, "zzz");
+    expect(within(section).getByText("No matches found")).toBeInTheDocument();
+    // The custom row stays below the searched rows.
+    expect(within(section).getByRole("checkbox", { name: "Custom" })).toBeInTheDocument();
+  });
+
+  it("collapses a date section and keeps its calendar out of sight", async () => {
+    const user = userEvent.setup();
+    render(
+      wrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={START}
+          condition={{ ...condition("1_months;after;fromnow"), property: "start_date", operator: "range" }}
+          onChange={() => {}}
+        />
+      )
+    );
+    await user.click(screen.getByRole("button", { name: /1 month from now/ }));
+    await user.click(screen.getByRole("button", { name: "Collapse Start date section" }));
+    expect(screen.queryByTestId("rich-range-calendar")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Expand Start date section" }));
+    expect(screen.getByTestId("rich-range-calendar")).toBeInTheDocument();
+  });
+});
+
+describe("ValueSlot project marks", () => {
+  function projectRow(id: string, name: string, identifier: string, logoProps: Record<string, unknown>) {
+    return {
+      id,
+      name,
+      identifier,
+      logo_props: logoProps,
+      sort_order: null,
+      member_role: 15,
+      intake_count: 0,
+      archived_at: null,
+      workspace: PROJECT,
+      cycle_view: true,
+      issue_views_view: true,
+      module_view: true,
+      page_view: false,
+      inbox_view: false,
+      is_default: false,
+      guest_view_all_features: false,
+      project_lead: null,
+      network: 0,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      created_by: null,
+      updated_by: null,
+    };
+  }
+
+  it("draws the configured icon in its own color beside an emoji and an initial", async () => {
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={PROJECT_FIELD}
+          condition={{ key: "a", property: "project_id", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />,
+        (url) =>
+          url.endsWith("/projects/")
+            ? [
+                projectRow("223e4567-e89b-12d3-a456-426614174001", "Iconic", "ICO", {
+                  in_use: "icon",
+                  icon: { name: "rocket_launch", color: "#f97316" },
+                }),
+                projectRow("223e4567-e89b-12d3-a456-426614174002", "Emoji", "EMO", {
+                  in_use: "emoji",
+                  emoji: { value: "🚀" },
+                }),
+                projectRow("223e4567-e89b-12d3-a456-426614174003", "Plain", "Pla", {}),
+              ]
+            : null
+      )
+    );
+    await screen.findByRole("checkbox", { name: "Iconic" });
+    const marks = screen.getAllByTestId("project-mark");
+    // Applied-first ordering leaves alphabetical: Emoji, Iconic, Plain.
+    expect(marks.map((mark) => mark.getAttribute("data-mark"))).toEqual(["emoji", "icon", "initial"]);
+    expect(marks[0]).toHaveTextContent("🚀");
+    expect(marks[1]!.querySelector("svg")).not.toBeNull();
+    expect(marks[1]!.querySelector("svg")!.getAttribute("stroke")).toBe("#f97316");
+    expect(marks[2]).toHaveTextContent("P");
   });
 });

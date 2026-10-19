@@ -586,9 +586,10 @@ Persisted through user-properties (workspace scope where the surface
 is workspace-level). The shared chrome all these sections use —
 title plus chevron collapse, checkbox versus radio options with
 optional icon or pulse, applied count, shared search box, view-all
-past five, empty placeholder (ISS-094) — has no live surface on any
-main issues page; §22 decides its disposition. Oracle:
-`filters-dimensions.spec.ts`.
+past five, empty placeholder (ISS-094) — has no legacy per-dimension
+surface on the main issues page. In the new frontend it is the section
+control behind the condition-row builder's value popovers and the
+display dropdown (§22). Oracle: `filters-dimensions.spec.ts`.
 
 Above secondary lists, one applied-filter chip renders per active
 value (ISS-095): a marker (icon, avatar, color swatch) plus its label,
@@ -1515,6 +1516,71 @@ scenario to the sub-issue rows spec asserting collapse, search, the
 five-row cap with its expand control, checkbox-versus-radio choice,
 and the applied count inside that dropdown; the row stays not-started
 until the slice lands and turns built with it.
+
+Implementation note (NEWFRONT-629): the slice built the chrome as the
+shared section control under the issues filters and adopted it in the
+two surfaces that exist today — the condition-row builder's rich value
+lists and the display dropdown. Both read title, applied count, chevron
+collapse, the search box, the five-row cap with view all/less, the
+no-matches placeholder, and icon and pulse marks from the one control.
+
+One refusal is deliberate rather than a gap: the display dropdown
+keeps `aria-pressed` rows over checkbox/radio semantics and does not
+cap its fixed, short option sets. Both are recorded here so a later
+pass does not read them as the chrome going unused. Every date
+section also runs on the same control — title with its applied count
+(presets plus a single Custom entry), chevron collapse, the search box
+over the relative windows, the five-row cap and the no-matches
+placeholder — with the Custom row and calendar below the rows
+(ISS-094 now holds for the date value lists too). The control has two
+parts: `FilterSection` for pickable rows, and `FilterSectionFrame`
+(title bar plus collapsible body) for a section whose body is not a
+row list, which is what the display dropdown's property pills and
+switches use; those two keep the frame's own collapse rather than a
+no-op toggle, and the frame gives them the same title bar as every
+other section.
+
+The date dimensions keep both lookup families. "is" / "is not" and
+"between" / "not between" are offered, because the JSON filter set
+accepts `__exact` and `__range` leaves under `not`; a negated date
+leaf is never lifted into the bare parameters, which only read
+positive bounds (`<day>;after` is a lower bound, `<day>;before` an
+upper one). The custom half keeps the old dialog's three one-day
+shapes and its pair: On stores the day exactly (`2026-02-10`), After
+and Before store one open bound (`2026-02-10;after`,
+`2026-02-10;before`), and Range under "between" stores two plain days
+(`a,b`). A stored value reopens in its own shape. Presets and the
+custom half combine, and unticking Custom removes only the custom
+half.
+
+Encoding follows what the list endpoint can resolve truthfully. A
+forward relative window (`<n>_<unit>s;after;fromnow`) and an open
+custom bound travel as the bare `start_date` / `target_date` entries,
+joined with commas; any leftover custom day or pair stays in the JSON
+tree as `__exact` / `__range`, and a backward relative window stays
+in the JSON tree because the bare parameter cannot carry its
+direction. Completed cycles list with the completed glyph, and a date
+section's Custom row opens and focuses the calendar when ticked with
+no custom day stored.
+
+Project (ISS-091) is a cross-project dimension: the old issues
+filters never offer it inside one project's issue list, so the
+catalogue exposes it only on the personal work-items surface, where
+it lists every joined project (applied first, then alphabetical, five
+rows with view all) and persists `project_id`. Project rows draw the
+stored mark in this order: the picked emoji, else the configured
+icon, else the short code's initial. Icon names come from the old
+icon set; the new frontend maps each name onto its closest Lucide
+glyph and keeps the stored color, and a name outside that map falls
+back to the initial rather than an empty tile.
+
+The sub-issue widget does not exist in the new frontend yet; its
+filter dropdown adopts the same control when that widget is built
+(NEWFRONT-647), which is the only outstanding place ISS-094 renders.
+ISS-093 is registered the same way: the personal work-items
+catalogue offers the `subscriber_id` dimension, and the my-work-items
+page that renders the catalogue belongs to the profile pages
+(NEWFRONT-573).
 
 ISS-165 carries the same StrictMode note (nested peek unreachable on
 the dev stack) and is covered by the main#533 target below.

@@ -7,6 +7,8 @@
 // matches names and short codes.
 import type { ProjectList } from "@pidash/api-client";
 
+import { projectMark, projectMarkText } from "./projectIcon.js";
+
 /** One project row in display order. */
 export interface ProjectOption {
   id: string;
@@ -43,18 +45,10 @@ export function selectProjectOptions(input: ProjectOptionsInput): ProjectOption[
 }
 
 /**
- * The logo tile's mark: the picked emoji glyph, else the short code's
- * initial. Mirrors the projects feature's logo reading (it owns
- * ProjectLogo; shared/ cannot import features/) without sharing code.
+ * The logo tile's text mark: the picked emoji glyph, else the short code's
+ * initial. Icon picks have no text form; callers render them through
+ * `ProjectMark`, which maps the stored icon name to its glyph (ISS-091).
  */
 export function selectProjectMark(logoProps: Record<string, unknown>, identifier: string): string {
-  if (logoProps["in_use"] === "emoji") {
-    const emoji = logoProps["emoji"];
-    if (typeof emoji === "object" && emoji !== null) {
-      const value = (emoji as Record<string, unknown>)["value"];
-      if (typeof value === "string" && value.trim() !== "") return value;
-    }
-  }
-  const initial = identifier.trim().slice(0, 1).toUpperCase();
-  return initial === "" ? "?" : initial;
+  return projectMarkText(projectMark(logoProps), identifier);
 }

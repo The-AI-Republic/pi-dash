@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Value-list shaping for the legacy filter dimensions
-// (parity/specs/issues.md §9, ISS-082–088). Member dimensions keep the
+// (parity/specs/issues.md §9, ISS-082–092). Member dimensions keep the
 // applied rows on top, then the signed-in member, then display-name
-// order; labels keep applied rows on top and sort the rest by name.
+// order; labels, cycles, modules and projects keep applied rows on top
+// and sort the rest by name.
 import type { Label } from "@pidash/api-client";
 
 import type { MemberOption } from "../../../../shared/pickers/index.js";
@@ -34,6 +35,45 @@ export function orderMemberOptions(
     if (leftMe !== rightMe) return leftMe ? -1 : 1;
     return left.searchText.toLowerCase().localeCompare(right.searchText.toLowerCase());
   });
+}
+
+/** A row with a stable id and a display name. */
+export interface NamedRow {
+  id: string;
+  name: string;
+}
+
+/**
+ * Applied rows first, then alphabetical by name, case-insensitively.
+ * Ties keep the incoming order, so an already sorted source stays stable.
+ * Cycles, modules and projects all read this way (ISS-089–091).
+ */
+export function orderAppliedByName<T extends NamedRow>(rows: readonly T[], chosen: readonly string[]): T[] {
+  const chosenSet = new Set(chosen);
+  // Each name lowers once and compares once. Lowering both sides of every
+  // comparison makes the comparator contradictory for names that fold to
+  // the same key (both directions read as "greater"), which leaves the
+  // order engine-dependent.
+  const keyed = rows.map((row) => ({ row, key: row.name.toLocaleLowerCase() }));
+  return keyed
+    .sort((left, right) => {
+      const leftApplied = chosenSet.has(left.row.id);
+      const rightApplied = chosenSet.has(right.row.id);
+      if (leftApplied !== rightApplied) return leftApplied ? -1 : 1;
+      return left.key.localeCompare(right.key);
+    })
+    .map(({ row }) => row);
+}
+
+/**
+ * The cycle filter's rows (ISS-089): every project cycle the server lists,
+ * finished ones included, because the dimension marks each lifecycle and
+ * the completed glyph has to be reachable. This differs from the shared
+ * cycle picker, which hides completed cycles, so callers build the rows
+ * here rather than through `selectCycleOptions`.
+ */
+export function cycleFilterRows(cycles: readonly { id: string; name: string }[]): { id: string; name: string }[] {
+  return cycles.map((cycle) => ({ id: cycle.id, name: cycle.name }));
 }
 
 /** Applied labels first, then alphabetical by name. */
