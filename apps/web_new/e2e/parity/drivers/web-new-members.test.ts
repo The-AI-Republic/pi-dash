@@ -217,6 +217,22 @@ describe("members roster driver", () => {
     expect(await driver.wsSettingsMembersSearchValue()).toBe("ada");
   });
 
+  it("probes the search with Escape and keeps its value and presence", async () => {
+    const fill = vi.fn(async () => undefined);
+    const focus = vi.fn(async () => undefined);
+    const press = vi.fn(async () => undefined);
+    const page = pageOf({
+      getByPlaceholder: () =>
+        locator({ fill, focus, inputValue: async () => "zzz-no-match", isVisible: async () => true }),
+      keyboard: { press },
+    });
+    const probe = await new WebNewDriver(page).wsSettingsMembersSearchEscapeProbe("zzz-no-match");
+    expect(fill).toHaveBeenCalledWith("zzz-no-match", expect.anything());
+    expect(focus).toHaveBeenCalled();
+    expect(press).toHaveBeenCalledWith("Escape");
+    expect(probe).toEqual({ value: "zzz-no-match", visible: true });
+  });
+
   it("opens the filter panel and toggles the four role options", async () => {
     const click = vi.fn(async () => undefined);
     const page = pageOf({

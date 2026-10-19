@@ -17240,8 +17240,19 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsPressKeys");
   }
 
-  async wsSettingsMembersSearchEscapeProbe(_query: string): Promise<{ value: string; visible: boolean }> {
-    return todo("wsSettingsMembersSearchEscapeProbe");
+  async wsSettingsMembersSearchEscapeProbe(query: string): Promise<{ value: string; visible: boolean }> {
+    // The roster search is a persistent text field (WSET-037): Escape
+    // must leave both its value and its presence alone. The top bar's
+    // command search ("Search commands...") belongs to the shell.
+    const field = this.page.getByPlaceholder("Search...", { exact: true });
+    await field.fill(query, { timeout: WebNewDriver.WAIT_MS });
+    await field.focus();
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(250);
+    return {
+      value: await field.inputValue().catch(() => "<gone>"),
+      visible: await field.isVisible().catch(() => false),
+    };
   }
 
   async wsSettingsWatchListRequests(): Promise<void> {

@@ -87,7 +87,7 @@ export function MembersPage({ workspaceSlug }: MembersPageProps): React.ReactEle
               className="pointer-events-none absolute left-(--space-3) text-(--text-muted)"
             />
             <input
-              type="search"
+              type="text"
               autoFocus
               value={filters.search}
               placeholder="Search..."

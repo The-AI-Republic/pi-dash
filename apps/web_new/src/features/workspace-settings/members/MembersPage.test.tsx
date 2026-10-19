@@ -262,6 +262,35 @@ describe("MembersPage roster", () => {
     expect(within(rowFor("departed@example.com")).getByText("Suspended")).toBeInTheDocument();
   });
 
+  it("is a persistent text field: Escape neither clears nor collapses it (WSET-037)", async () => {
+    setup();
+    await waitFor(() => expect(emails()).toHaveLength(4));
+    const search = screen.getByPlaceholderText("Search...");
+    expect(search).toHaveAttribute("type", "text");
+    await userEvent.type(search, "parity");
+    search.focus();
+    await userEvent.keyboard("{Escape}");
+    expect(search).toBeInTheDocument();
+    expect(search).toHaveValue("parity");
+    expect(search).toHaveFocus();
+    expect(emails()).toEqual(["parity-mention@example.com", "parity-guest@example.com"]);
+  });
+
+  it("does not re-read the roster on a returning focus or reconnect (§38)", async () => {
+    const { calls } = setup();
+    await waitFor(() => expect(emails()).toHaveLength(4));
+    const memberReads = (): number => calls.filter((url) => url.endsWith(`/api/workspaces/${SLUG}/members/`)).length;
+    const inviteReads = (): number =>
+      calls.filter((url) => url.endsWith(`/api/workspaces/${SLUG}/invitations/`)).length;
+    expect(memberReads()).toBe(1);
+    expect(inviteReads()).toBe(1);
+    fireEvent.focus(window);
+    fireEvent.online(window);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(memberReads()).toBe(1);
+    expect(inviteReads()).toBe(1);
+  });
+
   it("searches by email without touching the roster data", async () => {
     const { calls } = setup();
     await waitFor(() => expect(emails()).toHaveLength(4));
@@ -305,14 +334,34 @@ describe("MembersPage row identity", () => {
     expect(row.querySelector('[data-avatar-kind="initial"]')).not.toBeNull();
   });
 
-  it("uses the photo when the member set one and hides an unknown auth medium", async () => {
+  it("uses the photo when the member set one", async () => {
     setup();
     await waitFor(() => expect(emails()).toHaveLength(4));
     const guest = rowFor("parity-guest@example.com");
     expect(guest.querySelector('[data-avatar-kind="image"]')).not.toBeNull();
-    expect(within(guest).getAllByRole("cell")[4]).toBeEmptyDOMElement();
     const link = within(guest).getByRole("link");
     expect(link).toHaveAttribute("href", `/${SLUG}/profile/${GUEST_ID}/`);
+  });
+
+  it("hides the authentication cell for a medium the column does not name", async () => {
+    setup({
+      roster: [
+        rosterRow({
+          id: "323e4567-e89b-12d3-a456-426614174009",
+          userId: "223e4567-e89b-12d3-a456-426614174009",
+          first: "Sam",
+          last: "L",
+          display: "Sam L",
+          email: "saml@example.com",
+          role: 15,
+          medium: "saml",
+        }),
+      ],
+    });
+    await waitFor(() => expect(emails()).toHaveLength(1));
+    const cells = within(rowFor("saml@example.com")).getAllByRole("cell");
+    expect(cells[4]).toBeEmptyDOMElement();
+    expect(cells[4]).not.toHaveTextContent("saml");
   });
 
   it("dims suspended rows: no link, no auth, no joining date, Suspended role", async () => {

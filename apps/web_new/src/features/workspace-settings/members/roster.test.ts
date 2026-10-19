@@ -181,7 +181,11 @@ describe("roster labels", () => {
     expect(authMediumLabel("gitlab")).toBe("GitLab");
     expect(authMediumLabel("google")).toBe("Google");
     expect(authMediumLabel("gitea")).toBe("Gitea");
-    expect(authMediumLabel("saml")).toBe("saml");
+    // Unknown media are not named: the column hides instead of echoing a
+    // raw provider code (§8).
+    for (const medium of ["saml", "oidc", "Email"]) {
+      expect(authMediumLabel(medium)).toBeNull();
+    }
     expect(authMediumLabel(null)).toBeNull();
     expect(authMediumLabel(undefined)).toBeNull();
     expect(authMediumLabel("")).toBeNull();

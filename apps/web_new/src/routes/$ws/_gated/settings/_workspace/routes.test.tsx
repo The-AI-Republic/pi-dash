@@ -14,6 +14,7 @@ import * as React from "react";
 import type { RouteComponent } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { registerMembersSettingsPage } from "../../../../../features/workspace-settings/members/index.js";
 import {
   registerWorkspaceSettingsPage,
   resetWorkspaceSettingsPages,
@@ -83,6 +84,7 @@ describe("workspace settings section routes", () => {
     });
 
     it(`leaves the ${section} frame quiet while its body is unregistered`, async () => {
+      resetWorkspaceSettingsPages();
       renderSettingsRoute({
         layoutComponent: LayoutComponent,
         component,
