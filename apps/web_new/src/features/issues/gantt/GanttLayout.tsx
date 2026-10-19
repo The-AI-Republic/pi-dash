@@ -1,22 +1,39 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline layout entry (parity/specs/issues.md §6, ISS-044–049). The
+// Timeline layout entry (parity/specs/issues.md §6, ISS-044–055). The
 // layout root renders this with the entity's display preferences: it
 // orders the already-fetched rows (manual order by default), colors bars
 // from the project's states, docks the shared peek panel for a clicked
-// row and hands the rest to the chart. Issue loading, pagination and the
-// empty states stay in the layout root; drag, resize, add-block,
-// quick-add, bar chrome and permissions belong to the sibling slices.
+// row, and owns the timeline's write seams — sidebar reorder in manual
+// sort, bar move/resize, block planting and the sticky quick-add. Edit
+// standing gates every one of them; the read-only chart stays whole.
 
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
+import { useCreateWorkItem } from "../api/create.js";
+import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
+import { deriveReorder, type DropPlacement } from "./drag.js";
 import { GanttChart } from "./GanttChart.js";
 import { GanttPeekPanel } from "./GanttPeekPanel.js";
+import { GanttQuickAdd } from "./GanttQuickAdd.js";
+import { canEditTimeline } from "./permissions.js";
 import { buildRows, type GanttRow } from "./rows.js";
-import { stateColorOf, useGanttPeek, useGanttStates } from "./useGanttData.js";
+import { addDays } from "./scale.js";
+import { stateColorOf, useGanttPeek, useGanttStates, useProjectMemberRole } from "./useGanttData.js";
+import { useGanttMutations } from "./useGanttMutations.js";
+
+/**
+ * Orders that make the sidebar reorder meaningful (ISS-050). Only the
+ * ascending manual rank enables drag: a descending `-sort_order` list
+ * would insert a rank that the server's ascending sort cannot reproduce,
+ * so the gesture is inert there.
+ */
+export function isManualOrder(orderBy: string | null | undefined): boolean {
+  return orderBy === "sort_order";
+}
 
 export interface GanttLayoutProps {
   workspaceSlug: string;
@@ -28,6 +45,8 @@ export interface GanttLayoutProps {
   prefs: DisplayPrefs;
   /** Profile's first day of the week (ISS-045). */
   weekStart: number;
+  /** True for a completed cycle: the quick-add is hidden (ISS-055). */
+  completedCycle?: boolean;
 }
 
 /** Map ordered rows to their state color, skipping uncolored states. */
@@ -66,11 +85,51 @@ export function GanttLayout({
   totalCount,
   prefs,
   weekStart,
+  completedCycle = false,
 }: GanttLayoutProps): React.ReactElement {
   const rows = React.useMemo(() => orderedRows(issues, prefs, projectIdentifier), [issues, prefs, projectIdentifier]);
   const states = useGanttStates(workspaceSlug, projectId);
   const barColors = React.useMemo(() => barColorsFor(rows, states), [rows, states]);
   const { peek, openRow, closePeek } = useGanttPeek(workspaceSlug);
+  const projectRole = useProjectMemberRole(workspaceSlug, projectId);
+  const mutations = useGanttMutations(workspaceSlug, projectId);
+  const create = useCreateWorkItem(workspaceSlug);
+  const canEdit = canEditTimeline({
+    projectRole,
+    archived: false,
+  });
+
+  const reorder = React.useMemo(
+    () =>
+      canEdit && isManualOrder(prefs.orderBy)
+        ? {
+            onReorder: (sourceId: string, targetId: string, placement: DropPlacement) => {
+              const result = deriveReorder(
+                rows.map((row) => ({ id: row.id, sortOrder: row.sortOrder })),
+                sourceId,
+                targetId,
+                placement
+              );
+              if (result !== null) mutations.reorder(sourceId, result.sortOrder, result.order);
+            },
+          }
+        : null,
+    [canEdit, mutations, prefs.orderBy, rows]
+  );
+
+  const today = todayIsoDay();
+  const quickAdd = canEdit ? (
+    <GanttQuickAdd
+      enabled={canEdit}
+      completedCycle={completedCycle}
+      onCreate={(title) =>
+        create.mutateAsync({
+          projectId,
+          payload: { name: title, start_date: today, target_date: addDays(today, 1) },
+        })
+      }
+    />
+  ) : undefined;
 
   return (
     <div data-testid="gantt-layout" className="flex h-full min-h-0 flex-col">
@@ -82,6 +141,11 @@ export function GanttLayout({
         barColors={barColors}
         peekedId={peek?.row.id ?? null}
         onOpenRow={openRow}
+        reorder={reorder}
+        canEdit={canEdit}
+        onDatesChange={(issueId, dates) => mutations.moveBar(issueId, dates)}
+        onPlantBlock={(issueId, dates) => mutations.plantBlock(issueId, dates)}
+        quickAdd={quickAdd}
       />
       {peek !== null ? (
         <GanttPeekPanel workspaceSlug={workspaceSlug} projectId={projectId} row={peek.row} onClose={closePeek} />

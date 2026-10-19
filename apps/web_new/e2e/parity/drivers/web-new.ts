@@ -6482,6 +6482,14 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async ganttDayWidth(): Promise<number> {
+    // Week and Month draw one cell per day; read the exact rendered
+    // width straight off a column. Quarter cells span months, so its
+    // width still comes from the month segment arithmetic below.
+    const column = this.page.getByTestId("gantt-day-columns").locator("[data-day]").first();
+    if ((await column.count()) > 0) {
+      const box = await column.boundingBox();
+      if (box !== null && box.width > 0) return box.width;
+    }
     const zoom = await this.ganttActiveZoom();
     if (zoom === "unknown") throw new Error("[parity] cannot measure day width for an unknown zoom.");
     if (zoom === "Quarter") {
@@ -6637,64 +6645,204 @@ export class WebNewDriver implements ParityDriver {
     return rows.map((row) => row.name);
   }
 
-  async ganttDragRowBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("ganttDragRowBefore");
+  private async ganttSidebarRowByName(issueName: string): Promise<Locator> {
+    const rows = this.page.getByTestId("gantt-sidebar-row");
+    const total = await rows.count();
+    for (let index = 0; index < total; index += 1) {
+      const row = rows.nth(index);
+      const link = row.locator('a[id^="issue-"]').first();
+      if ((await link.count()) === 0) continue;
+      const aria = (await link.getAttribute("aria-label")) ?? "";
+      if (aria === issueName) return row;
+    }
+    throw new Error(`[parity] no timeline sidebar row titled ${JSON.stringify(issueName)}.`);
   }
 
-  async ganttAttemptRowBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("ganttAttemptRowBefore");
+  private async ganttRowBox(
+    issueName: string
+  ): Promise<{ box: { x: number; y: number; width: number; height: number }; row: Locator }> {
+    const row = await this.ganttSidebarRowByName(issueName);
+    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const box = await row.boundingBox();
+    if (box === null) throw new Error("[parity] timeline sidebar row has no box.");
+    return { box, row };
+  }
+
+  private async ganttRowDrag(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.ganttRowBox(sourceName);
+    const target = await this.ganttRowBox(targetName);
+    // Grab the row's link (the chart's pointer handlers sit on the row)
+    // and land in the target's upper half so the drop reads "before".
+    const from = { x: source.box.x + source.box.width / 2, y: source.box.y + source.box.height / 2 };
+    const onto = { x: target.box.x + target.box.width / 2, y: target.box.y + 4 };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 8 });
+    await this.page.waitForTimeout(150);
+    await this.page.mouse.up();
+  }
+
+  async ganttDragRowBefore(sourceName: string, targetName: string): Promise<void> {
+    await this.ganttRowDrag(sourceName, targetName);
+    await expect
+      .poll(
+        async () => {
+          const order = await this.ganttSidebarOrder();
+          const at = order.indexOf(sourceName);
+          return at !== -1 && order.indexOf(targetName) === at + 1;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
+  }
+
+  async ganttAttemptRowBefore(sourceName: string, targetName: string): Promise<void> {
+    await this.ganttRowDrag(sourceName, targetName);
+    await this.page.waitForTimeout(3_000);
   }
 
   private async ganttIssueIdByName(issueName: string): Promise<string> {
     const link = await this.ganttRowLink(issueName);
-    const id = (await link.getAttribute("id")) as string;
+    const id = (await link.getAttribute("id")) ?? "";
     const match = /^issue-(.+)$/.exec(id);
-    if (!match?.[1]) throw new Error(`[parity] unexpected timeline row id ${JSON.stringify(id)}.`);
+    if (!match || !match[1]) throw new Error(`[parity] unexpected timeline row id ${JSON.stringify(id)}.`);
     return match[1];
   }
 
   async ganttBarExists(issueName: string): Promise<boolean> {
     const issueId = await this.ganttIssueIdByName(issueName);
-    const bar = this.page.locator(`button#gantt-block-${issueId}`).first();
+    const bar = this.page.locator(`#gantt-block-${issueId}`).first();
     if ((await bar.count()) === 0) return false;
     const box = await bar.boundingBox();
     return box !== null && box.width > 0;
   }
 
-  async ganttDragBar(_issueName: string, _dayDelta: number): Promise<void> {
-    return todo("ganttDragBar");
+  private async ganttBarBox(
+    issueName: string
+  ): Promise<{ bar: Locator; box: { x: number; y: number; width: number; height: number } }> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.page.locator(`#gantt-block-${issueId}`).first();
+    await bar.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const box = await bar.boundingBox();
+    if (box === null) throw new Error("[parity] timeline bar has no box.");
+    return { bar, box };
   }
 
-  async ganttAttemptBarMove(_issueName: string, _dayDelta: number): Promise<void> {
-    return todo("ganttAttemptBarMove");
+  private async ganttGesture(
+    from: { x: number; y: number },
+    to: { x: number; y: number },
+    opted?: () => Promise<void>
+  ): Promise<void> {
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(to.x, to.y, { steps: 8 });
+    if (opted) await opted();
+    await this.page.mouse.up();
   }
 
-  async ganttResizeBar(_issueName: string, _side: "left" | "right", _dayDelta: number): Promise<void> {
-    return todo("ganttResizeBar");
+  async ganttDragBar(issueName: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const dayWidth = await this.ganttDayWidth();
+    const { box } = await this.ganttBarBox(issueName);
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const to = { x: from.x + dayDelta * dayWidth, y: from.y };
+    await this.ganttGesture(from, to);
+    await this.page.waitForTimeout(500);
   }
 
-  async ganttResizePreview(_issueName: string, _side: "left" | "right"): Promise<string | null> {
-    return todo("ganttResizePreview");
+  async ganttAttemptBarMove(issueName: string, dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar drag needs a nonzero day delta.");
+    const dayWidth = await this.ganttDayWidth();
+    const { box } = await this.ganttBarBox(issueName);
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await this.ganttGesture(from, { x: from.x + dayDelta * dayWidth, y: from.y });
+    await this.page.waitForTimeout(3_000);
   }
 
-  async ganttHandlesVisible(_issueName: string): Promise<boolean> {
-    return todo("ganttHandlesVisible");
+  async ganttResizeBar(issueName: string, side: "left" | "right", dayDelta: number): Promise<void> {
+    if (dayDelta === 0) throw new Error("[parity] bar resize needs a nonzero day delta.");
+    const dayWidth = await this.ganttDayWidth();
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.page.locator(`#gantt-block-${issueId}`).first();
+    const marker = side === "left" ? "gantt-resize-left" : "gantt-resize-right";
+    const handleLocator = bar.getByTestId(marker).first();
+    await handleLocator.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const box = await handleLocator.boundingBox();
+    if (box === null) throw new Error("[parity] timeline resize handle has no box.");
+    const from = { x: side === "left" ? box.x + 2 : box.x + box.width - 2, y: box.y + box.height / 2 };
+    await this.ganttGesture(from, { x: from.x + dayDelta * dayWidth, y: from.y });
+    await this.page.waitForTimeout(500);
   }
 
-  async ganttRowAddVisible(_issueName: string): Promise<boolean> {
-    return todo("ganttRowAddVisible");
+  async ganttResizePreview(issueName: string, side: "left" | "right"): Promise<string | null> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.page.locator(`#gantt-block-${issueId}`).first();
+    const handle = bar.getByTestId(`gantt-resize-${side}`).first();
+    if ((await handle.count()) === 0) return null;
+    const box = await handle.boundingBox();
+    if (box === null) return null;
+    const at =
+      side === "left"
+        ? { x: box.x + 1, y: box.y + box.height / 2 }
+        : { x: box.x + box.width - 1, y: box.y + box.height / 2 };
+    await this.page.mouse.move(at.x, at.y);
+    await this.page.waitForTimeout(300);
+    // Read the floating preview the handle reveals, not the handle's own
+    // label (which carries the current date and would pass without a
+    // preview at all, ISS-052).
+    const preview = bar.getByTestId("gantt-resize-preview").first();
+    if ((await preview.count()) === 0) return null;
+    if (!(await preview.isVisible())) return null;
+    const text = (await preview.innerText()).trim();
+    return text === "" ? null : text;
   }
 
-  async ganttAddBlock(_issueName: string, _dayOffset: number): Promise<void> {
-    return todo("ganttAddBlock");
+  async ganttHandlesVisible(issueName: string): Promise<boolean> {
+    const issueId = await this.ganttIssueIdByName(issueName);
+    const bar = this.page.locator(`#gantt-block-${issueId}`).first();
+    return (await bar.getByTestId("gantt-resize-left").count()) > 0;
   }
 
-  async ganttQuickAdd(_title: string): Promise<void> {
-    return todo("ganttQuickAdd");
+  private async ganttChartPointForRow(issueName: string, dayOffset: number): Promise<{ x: number; y: number }> {
+    const dayWidth = await this.ganttDayWidth();
+    const { box } = await this.ganttRowBox(issueName);
+    const strip = await this.page.getByTestId("gantt-day-columns").first().boundingBox();
+    if (strip === null) throw new Error("[parity] timeline strip has no box.");
+    return { x: strip.x + dayOffset * dayWidth + 2, y: box.y + box.height / 2 };
+  }
+
+  async ganttRowAddVisible(issueName: string): Promise<boolean> {
+    const at = await this.ganttChartPointForRow(issueName, 2);
+    await this.page.mouse.move(at.x, at.y);
+    await this.page.waitForTimeout(300);
+    const add = this.page.getByTestId("gantt-add-block").first();
+    return (await add.count()) > 0 && (await add.isVisible());
+  }
+
+  async ganttAddBlock(issueName: string, dayOffset: number): Promise<void> {
+    const at = await this.ganttChartPointForRow(issueName, dayOffset);
+    await this.page.mouse.move(at.x, at.y);
+    const add = this.page.getByTestId("gantt-add-block").first();
+    await add.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.mouse.click(at.x, at.y);
+    await expect.poll(() => this.ganttBarExists(issueName), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
+  }
+
+  async ganttQuickAdd(title: string): Promise<void> {
+    await this.page.getByTestId("gantt-quick-add").getByText("New work item", { exact: true }).click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    const field = this.page.getByPlaceholder("Work item title");
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await field.fill(title);
+    await field.press("Enter");
+    await expect.poll(() => this.ganttBarExists(title), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async ganttHasQuickAdd(): Promise<boolean> {
-    return todo("ganttHasQuickAdd");
+    const entry = this.page.getByTestId("gantt-quick-add").first();
+    if ((await entry.count()) === 0) return false;
+    return await entry.isVisible();
   }
 
   async ganttBarInfo(_issueName: string): Promise<{ tinted: boolean; masked: boolean; namePinned: boolean } | null> {

@@ -7,10 +7,11 @@
 // window, hover/peek marks, click behavior (open, or leave modified
 // clicks to the browser), the inert pulsing row for an unconfirmed create
 // and the loading placeholder.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { DRAG_THRESHOLD_PX } from "./drag.js";
 import { GanttSidebar } from "./GanttSidebar.js";
 import { ROW_HEIGHT, type GanttRow } from "./rows.js";
 
@@ -23,6 +24,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     targetIso: null,
     durationDays: null,
     stateId: null,
+    sortOrder: 1,
     archived: false,
     unconfirmed: false,
     ...overrides,
@@ -175,5 +177,158 @@ describe("GanttSidebar", () => {
     const spacers = container.querySelectorAll<HTMLElement>("[aria-hidden='true']");
     expect(spacers).toHaveLength(2);
     for (const spacer of spacers) expect(spacer.style.height).toBe("0px");
+  });
+});
+
+describe("GanttSidebar reorder (ISS-050)", () => {
+  it("derives a drop on the target row's upper half as before", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const rows = screen.getAllByTestId("gantt-sidebar-row");
+    const [first, , third] = rows as [HTMLElement, HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    third.getBoundingClientRect = () => ({ top: 88, height: 44, bottom: 132 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(third, { clientY: 92 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toHaveAttribute("data-placement", "before");
+    fireEvent.mouseUp(third);
+    expect(onReorder).toHaveBeenCalledWith("row-1", "row-3", "before");
+  });
+
+  it("uses the lower half for an after drop", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    expect(onReorder).toHaveBeenCalledWith("row-1", "row-2", "after");
+  });
+
+  it("marks a window-level travel so the click it ends does not open the row", () => {
+    const onReorder = vi.fn();
+    const { onOpenRow } = renderSidebar({ reorder: { onReorder } });
+    const [first] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement];
+    // Travel past the threshold without ever hovering another row: no
+    // drop target, so no reorder, but the gesture still owns its click.
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(document, { clientY: 22 + DRAG_THRESHOLD_PX });
+    fireEvent.mouseUp(first);
+    fireEvent.click(within(first).getByRole("link"));
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(onOpenRow).not.toHaveBeenCalled();
+  });
+
+  it("shows no drop indicator until the pointer has travelled", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    // A hover inside the threshold is not travel: no indicator, and the
+    // release stays a click.
+    fireEvent.mouseMove(second, { clientY: 22 + DRAG_THRESHOLD_PX - 1 });
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+    fireEvent.mouseUp(second);
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it("cancels a travelled drag on Escape without reordering", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseUp(second);
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+  });
+
+  it("ignores a drop back onto the dragged row", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(first, { clientY: 60 });
+    fireEvent.mouseUp(first);
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+  });
+
+  it("shows the indicator on the target's half and hides it on re-hover", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 60 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toHaveAttribute("data-placement", "before");
+    // Same target, now below its midpoint: the line moves to the bottom,
+    // and a repeated hover at the same spot changes nothing.
+    fireEvent.mouseMove(second, { clientY: 80 });
+    expect(screen.getByTestId("gantt-drop-indicator")).toHaveAttribute("data-placement", "after");
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    expect(onReorder).toHaveBeenCalledWith("row-1", "row-2", "after");
+  });
+
+  it("does not reorder without a drag or without the binding", () => {
+    const onReorder = vi.fn();
+    const { unmount } = renderSidebar({ reorder: { onReorder } });
+    const [first] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement];
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseUp(first);
+    expect(onReorder).not.toHaveBeenCalled();
+    unmount();
+    renderSidebar();
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+  });
+
+  it("drops a drag that ends without a target and cancels on Escape", () => {
+    const onReorder = vi.fn();
+    renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseUp(second);
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("gantt-drop-indicator")).not.toBeInTheDocument();
+  });
+
+  it("keeps the row link inert for the click that ends a drag", () => {
+    const onReorder = vi.fn();
+    const { onOpenRow } = renderSidebar({ reorder: { onReorder } });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    first.getBoundingClientRect = () => ({ top: 0, height: 44, bottom: 44 }) as DOMRect;
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    fireEvent.click(within(first).getByRole("link"));
+    expect(onOpenRow).not.toHaveBeenCalled();
+  });
+
+  it("refuses to drag an unconfirmed row", () => {
+    const onReorder = vi.fn();
+    renderSidebar({
+      rows: [row({ id: "temp-abc", name: "Draft", unconfirmed: true }), row()],
+      reorder: { onReorder },
+    });
+    const [first, second] = screen.getAllByTestId("gantt-sidebar-row") as [HTMLElement, HTMLElement];
+    second.getBoundingClientRect = () => ({ top: 44, height: 44, bottom: 88 }) as DOMRect;
+    fireEvent.mouseDown(first, { button: 0, clientY: 22 });
+    fireEvent.mouseMove(second, { clientY: 80 });
+    fireEvent.mouseUp(second);
+    expect(onReorder).not.toHaveBeenCalled();
   });
 });

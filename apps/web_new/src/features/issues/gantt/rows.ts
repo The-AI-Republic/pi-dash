@@ -27,12 +27,14 @@ export interface GanttRow {
   /** Inclusive day count; null until both dates are set. */
   durationDays: number | null;
   stateId: string | null;
+  /** Manual rank behind sidebar reorder (ISS-050). */
+  sortOrder: number;
   archived: boolean;
   /**
    * An optimistic create that the server has not confirmed yet (ISS-006).
-   * Such a row has no server identity, so it stays visible as a pulsing
-   * placeholder but cannot be linked, peeked or planted on the strip
-   * (ISS-049: rows are disabled for unconfirmed cards).
+   * Such a row has no server identity, so its bar is inert — no link,
+   * peek, reorder or drag — but a quick-add that seeds dates still draws
+   * that bar immediately (ISS-055).
    */
   unconfirmed: boolean;
 }
@@ -63,15 +65,20 @@ export function buildRows(issues: readonly IssueListItem[], projectIdentifier: s
       targetIso,
       durationDays: startIso !== null && targetIso !== null ? diffDays(targetIso, startIso) + 1 : null,
       stateId: issue.state_id,
+      sortOrder: issue.sort_order,
       archived: issue.archived_at !== null,
       unconfirmed: isTempRowId(issue.id),
     };
   });
 }
 
-/** Whether a row should draw a bar at all (unconfirmed rows have no dates). */
+/**
+ * Whether a row should draw a bar at all. A confirmed row draws when
+ * either date exists; an unconfirmed quick-add draws as soon as its
+ * seeded dates arrive, so the new bar appears before the server confirms
+ * it (ISS-055). Rows without dates draw nothing.
+ */
 export function hasBar(row: GanttRow): boolean {
-  if (row.unconfirmed) return false;
   return row.startIso !== null || row.targetIso !== null;
 }
 
@@ -92,6 +99,13 @@ export function barBox(row: GanttRow, range: GanttRange, zoom: GanttZoom): Gantt
     };
   }
   return null;
+}
+
+/** Box for a window whose both ends are known (a live drag's window). */
+export function datedBarBox(startIso: string, targetIso: string, range: GanttRange, zoom: GanttZoom): GanttBarBox {
+  const dayWidth = DAY_WIDTHS[zoom];
+  const days = diffDays(targetIso, startIso) + 1;
+  return { left: dayOffset(startIso, range, zoom), width: days * dayWidth };
 }
 
 /** Whether a bar lies entirely left or right of the visible strip. */

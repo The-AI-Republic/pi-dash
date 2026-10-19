@@ -1300,3 +1300,255 @@ describe("gantt driver route delays", () => {
     await expect(new WebNewDriver(page).ganttOpenRowPeek("Second")).resolves.toBeUndefined();
   });
 });
+
+describe("gantt sidebar reorder (ISS-050)", () => {
+  interface FakeRow {
+    name: string;
+  }
+
+  function fakePage(order: { rows: FakeRow[] }, options: { reorderOnDrop?: boolean } = {}) {
+    const rowLocator = (index: number): StubLocator => {
+      const name = order.rows[index]?.name ?? "";
+      const link = locator({
+        getAttribute: async (key: string) => (key === "aria-label" ? name : `issue-id-${name}`),
+        innerText: async () => `WEB-${index + 1} ${name}`,
+      });
+      const node = locator({
+        boundingBox: async () => ({ x: 0, y: index * 44, width: 200, height: 44 }),
+        innerText: async () => `WEB-${index + 1} ${name}`,
+        scrollIntoViewIfNeeded: async () => undefined,
+        locator: () => link,
+        getByTestId: () => locator({ count: async () => 0 }),
+      });
+      return node;
+    };
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "gantt-sidebar-row"
+          ? locator({
+              count: async () => order.rows.length,
+              nth: (index: number) => rowLocator(index),
+            })
+          : locator(),
+      locator: () => locator({ count: async () => 0 }),
+      mouse: {
+        move: async () => undefined,
+        down: async () => undefined,
+        up: async () => {
+          if (options.reorderOnDrop !== false && order.rows.length > 1) {
+            order.rows = [order.rows[1]!, order.rows[0]!, ...order.rows.slice(2)];
+          }
+        },
+      },
+    });
+    return page;
+  }
+
+  it("drags a row before its target and polls the new order", async () => {
+    const order = { rows: [{ name: "First" }, { name: "Second" }, { name: "Third" }] };
+    await new WebNewDriver(fakePage(order)).ganttDragRowBefore("Second", "First");
+    expect(order.rows.map((row) => row.name)).toEqual(["Second", "First", "Third"]);
+  });
+
+  it("attempts a drop without polling the order", async () => {
+    const order = { rows: [{ name: "First" }, { name: "Second" }] };
+    await expect(new WebNewDriver(fakePage(order)).ganttAttemptRowBefore("Second", "First")).resolves.toBeUndefined();
+  });
+});
+
+describe("gantt bar gestures (ISS-051–053)", () => {
+  const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
+
+  function gesturePage(options: { preview?: boolean } = {}) {
+    const preview = options.preview ?? true;
+    const handle = (label: string) =>
+      locator({
+        count: async () => 1,
+        boundingBox: async () => ({ x: 100, y: 10, width: 12, height: 24 }),
+        getAttribute: async () => label,
+      });
+    const bar: StubLocator = locator({
+      count: async () => 1,
+      boundingBox: async () => ({ x: 100, y: 10, width: 120, height: 24 }),
+      scrollIntoViewIfNeeded: async () => undefined,
+      getByTestId: (id: string) => {
+        if (id === "gantt-resize-preview") {
+          return locator({
+            count: async () => (preview ? 1 : 0),
+            isVisible: async () => preview,
+            innerText: async () => "Oct 3, 2026",
+          });
+        }
+        // The handle's own label carries the current date, so a driver that
+        // read it would pass with no preview rendered at all.
+        return handle(id === "gantt-resize-left" ? "Oct 3, 2026" : "Oct 5, 2026");
+      },
+    });
+    const link = locator({
+      count: async () => 1,
+      getAttribute: async () => `issue-${ISSUE}`,
+      innerText: async () => "WEB-1 First",
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "gantt-day-columns") {
+          return locator({
+            locator: () =>
+              locator({
+                first: () =>
+                  locator({ count: async () => 1, boundingBox: async () => ({ x: 300, y: 0, width: 40, height: 44 }) }),
+              }),
+          });
+        }
+        return locator();
+      },
+      locator: (selector: string) => {
+        if (selector === `#gantt-block-${ISSUE}`) return bar;
+        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
+        return locator();
+      },
+      mouse: { move: async () => undefined, down: async () => undefined, up: async () => undefined },
+    });
+    return page;
+  }
+
+  it("drags a bar by whole days", async () => {
+    await expect(new WebNewDriver(gesturePage()).ganttDragBar("First", 2)).resolves.toBeUndefined();
+  });
+
+  it("rejects a zero-day bar drag", async () => {
+    await expect(new WebNewDriver(gesturePage()).ganttDragBar("First", 0)).rejects.toThrow(/nonzero/);
+  });
+
+  it("attempts a bar move without asserting the result", async () => {
+    await expect(new WebNewDriver(gesturePage()).ganttAttemptBarMove("First", 1)).resolves.toBeUndefined();
+  });
+
+  it("resizes from either handle", async () => {
+    await expect(new WebNewDriver(gesturePage()).ganttResizeBar("First", "left", 2)).resolves.toBeUndefined();
+    await expect(new WebNewDriver(gesturePage()).ganttResizeBar("First", "right", -1)).resolves.toBeUndefined();
+  });
+
+  it("reads the floating preview date and handle visibility", async () => {
+    const driver = new WebNewDriver(gesturePage());
+    await expect(driver.ganttResizePreview("First", "left")).resolves.toBe("Oct 3, 2026");
+    await expect(driver.ganttHandlesVisible("First")).resolves.toBe(true);
+  });
+
+  it("reports no preview when the chart renders none", async () => {
+    // The handle label is still present; only the floating pill is absent.
+    await expect(new WebNewDriver(gesturePage({ preview: false })).ganttResizePreview("First", "left")).resolves.toBe(
+      null
+    );
+  });
+});
+
+describe("gantt add-block (ISS-054)", () => {
+  const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
+
+  function addPage() {
+    const link = locator({
+      count: async () => 1,
+      getAttribute: async (key: string) => (key === "aria-label" ? "Undated" : `issue-${ISSUE}`),
+      innerText: async () => "WEB-2 Undated",
+    });
+    const row = locator({
+      boundingBox: async () => ({ x: 0, y: 0, width: 200, height: 44 }),
+      scrollIntoViewIfNeeded: async () => undefined,
+      innerText: async () => "WEB-2 Undated",
+      locator: () => link,
+    });
+    return pageOf({
+      getByTestId: (id: string) => {
+        if (id === "gantt-sidebar-row") return locator({ count: async () => 1, nth: () => row });
+        if (id === "gantt-day-columns") {
+          return locator({
+            locator: () =>
+              locator({
+                first: () =>
+                  locator({
+                    count: async () => 1,
+                    boundingBox: async () => ({ x: 300, y: 0, width: 400, height: 44 }),
+                  }),
+              }),
+            first: () => locator({ boundingBox: async () => ({ x: 300, y: 0, width: 400, height: 44 }) }),
+          });
+        }
+        return locator();
+      },
+      locator: (selector: string) => {
+        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
+        if (selector === `#gantt-block-${ISSUE}`) {
+          return locator({ count: async () => 1, boundingBox: async () => ({ x: 300, y: 0, width: 40, height: 24 }) });
+        }
+        return locator();
+      },
+      mouse: {
+        move: async () => undefined,
+        click: async () => undefined,
+        down: async () => undefined,
+        up: async () => undefined,
+      },
+    });
+  }
+
+  it("reports the add control on hover and plants a block", async () => {
+    const driver = new WebNewDriver(addPage());
+    await expect(driver.ganttRowAddVisible("Undated")).resolves.toBe(true);
+    await expect(driver.ganttAddBlock("Undated", 2)).resolves.toBeUndefined();
+  });
+});
+
+describe("gantt quick-add (ISS-055)", () => {
+  const ISSUE = "123e4567-e89b-12d3-a456-426614174000";
+
+  function quickPage() {
+    const link = locator({
+      count: async () => 1,
+      getAttribute: async (key: string) => (key === "aria-label" ? "Fresh" : `issue-${ISSUE}`),
+      innerText: async () => "WEB-1 Fresh",
+    });
+    const row = locator({
+      boundingBox: async () => ({ x: 0, y: 0, width: 200, height: 44 }),
+      scrollIntoViewIfNeeded: async () => undefined,
+      innerText: async () => "WEB-1 Fresh",
+      locator: () => link,
+    });
+    const field = locator({
+      waitFor: async () => undefined,
+      fill: async () => undefined,
+      press: async () => undefined,
+    });
+    return pageOf({
+      getByTestId: (id: string) =>
+        id === "gantt-quick-add"
+          ? locator({
+              getByText: () => locator({ click: async () => undefined }),
+              count: async () => 1,
+              isVisible: async () => true,
+            })
+          : id === "gantt-sidebar-row"
+            ? locator({ count: async () => 1, nth: () => row })
+            : locator(),
+      getByPlaceholder: () => field,
+      locator: (selector: string) => {
+        if (selector === '#gantt-sidebar a[id^="issue-"]') return locator({ count: async () => 1, nth: () => link });
+        if (selector === `#gantt-block-${ISSUE}`) {
+          return locator({ count: async () => 1, boundingBox: async () => ({ x: 300, y: 0, width: 40, height: 24 }) });
+        }
+        return locator();
+      },
+      mouse: { move: async () => undefined, down: async () => undefined, up: async () => undefined },
+    });
+  }
+
+  it("opens the sticky entry, submits a title and sees the bar", async () => {
+    await expect(new WebNewDriver(quickPage()).ganttQuickAdd("Fresh")).resolves.toBeUndefined();
+  });
+
+  it("reports whether the sticky entry is present", async () => {
+    await expect(new WebNewDriver(quickPage()).ganttHasQuickAdd()).resolves.toBe(true);
+    const absent = pageOf({ getByTestId: () => locator({ count: async () => 0, isVisible: async () => false }) });
+    await expect(new WebNewDriver(absent).ganttHasQuickAdd()).resolves.toBe(false);
+  });
+});
