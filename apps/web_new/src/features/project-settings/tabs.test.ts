@@ -155,6 +155,12 @@ describe("addresses", () => {
     expect(resolveSettingsAddress(`/other/settings/projects/${PID}/members`, WS)).toBeUndefined();
   });
 
+  it("rejects an address with an empty project segment", () => {
+    expect(resolveSettingsAddress(`/${WS}/settings/projects/`, WS)).toBeUndefined();
+    expect(resolveSettingsAddress(`/${WS}/settings/projects`, WS)).toBeUndefined();
+    expect(resolveSettingsAddress(`/${WS}/settings/projects//`, WS)).toBeUndefined();
+  });
+
   it("mark only the canonical slash form active", () => {
     const general = findTabByKey("general");
     const members = findTabByKey("members");
@@ -163,6 +169,13 @@ describe("addresses", () => {
     expect(isTabActive(`/${WS}/settings/projects/${PID}`, WS, PID, general)).toBe(false);
     expect(isTabActive(`/${WS}/settings/projects/${PID}/members/`, WS, PID, members)).toBe(true);
     expect(isTabActive(`/${WS}/settings/projects/${PID}/members`, WS, PID, members)).toBe(false);
+  });
+
+  it("does not mark a sub-address or an unknown path as its tab", () => {
+    const members = findTabBySuffix("/members");
+    if (members === undefined) throw new Error("registry lost the members tab");
+    expect(isTabActive(`/${WS}/settings/projects/${PID}/members/details/`, WS, PID, members)).toBe(false);
+    expect(isTabActive(`/${WS}/projects/${PID}/settings/members/`, WS, PID, members)).toBe(false);
   });
 
   it("find a visible tab for the role", () => {
