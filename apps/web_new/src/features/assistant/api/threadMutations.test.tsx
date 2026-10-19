@@ -78,6 +78,7 @@ describe("useSendMessage", () => {
     });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const cancel = vi.spyOn(queryClient, "cancelQueries");
     const { result } = renderHook(() => useSendMessage(), { wrapper: wrapper(queryClient) });
     result.current.mutate({ workspaceSlug: "acme", threadId: "t1", content: "hello" });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
@@ -86,7 +87,22 @@ describe("useSendMessage", () => {
       url: "https://api.test/api/workspaces/acme/ai-assistant/threads/t1/messages/",
       method: "POST",
     });
+    // An in-flight list read from before the send must not land with the old
+    // `has_active_turn`; it is cancelled before the refresh is asked for.
+    expect(cancel).toHaveBeenCalledWith({ queryKey: assistantKeys.threads("acme") });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: assistantKeys.threads("acme") });
+  });
+
+  it("still refreshes the thread list when the send is refused", async () => {
+    appClientWith(async () => ({ error: "turn_active" }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const cancel = vi.spyOn(queryClient, "cancelQueries");
+    const { result } = renderHook(() => useSendMessage(), { wrapper: wrapper(queryClient) });
+    result.current.mutate({ workspaceSlug: "acme", threadId: "t1", content: "hello" });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: assistantKeys.threads("acme") });
+    expect(cancel).not.toHaveBeenCalled();
   });
 });
 
@@ -107,5 +123,8 @@ describe("useStopTurn", () => {
       method: "POST",
     });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: threadKey("acme", "t1") });
+    // The list carries `has_active_turn`, the confirmation that settles a
+    // cancel which leaves no new row behind.
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: assistantKeys.threads("acme") });
   });
 });

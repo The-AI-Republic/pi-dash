@@ -10456,7 +10456,10 @@ export class WebNewDriver implements ParityDriver {
     return bubbles;
   }
   async assistantBubbleHtml(index: number): Promise<string> {
-    return this.assistantTranscriptRow(index).locator("[data-role]").first().innerHTML();
+    // The bubble's own element carries the role and the error tint, so read
+    // its outer HTML; innerHTML would hide the classes on the bubble itself.
+    const bubble = this.assistantTranscriptRow(index).locator("[data-role]").first();
+    return bubble.evaluate((node) => node.outerHTML);
   }
   async assistantToolActivities(): Promise<AssistantToolActivity[]> {
     return todo("assistantToolActivities");

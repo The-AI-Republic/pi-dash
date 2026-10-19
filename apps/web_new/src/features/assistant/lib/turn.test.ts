@@ -64,6 +64,13 @@ describe("mergeTranscript", () => {
   });
 });
 
+describe("mergeMessage", () => {
+  it("ignores a shorter streaming envelope over built text", () => {
+    const state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "Hello" }));
+    expect(mergeMessage(state, message({ content: "" }))).toBe(state);
+  });
+});
+
 describe("applyAssistantEvent", () => {
   it("appends deltas in arrival order and skips a replayed sequence", () => {
     const seen = new Set<number>();
@@ -105,6 +112,38 @@ describe("applyAssistantEvent", () => {
     } as AssistantEvent;
     state = applyAssistantEvent(state, tool, new Set());
     expect(Object.keys(state.rows).sort()).toEqual(["m1", "m2"]);
+  });
+
+  it("keeps streamed text when a reconnect replays message_created", () => {
+    const seen = new Set<number>();
+    const created = {
+      id: 10,
+      thread: "t1",
+      message: "m1",
+      seq: 10,
+      kind: "message_created",
+      payload: { turn_id: "turn", message: message({ content: "" }) },
+      created_at: "2026-01-01T00:00:00Z",
+    } as AssistantEvent;
+    let state = applyAssistantEvent(EMPTY_TRANSCRIPT, created, seen);
+    state = applyAssistantEvent(state, delta("m1", 101, "Hello "), seen);
+    state = applyAssistantEvent(state, delta("m1", 102, "world"), seen);
+    // Reconnect: the server replays from zero, starting with the created row
+    // exactly as it looked then, followed by the same deltas.
+    state = applyAssistantEvent(state, created, seen);
+    state = applyAssistantEvent(state, delta("m1", 101, "Hello "), seen);
+    state = applyAssistantEvent(state, delta("m1", 102, "world"), seen);
+    expect(state.rows.m1?.content).toBe("Hello world");
+  });
+
+  it("keeps a terminal reply when an older replay re-sends its created row", () => {
+    const seen = new Set<number>();
+    let state = mergeMessage(EMPTY_TRANSCRIPT, message({ content: "", status: "streaming" }));
+    state = mergeMessage(state, message({ content: "answer", status: "completed" }));
+    const replay = { ...delta("m1", 20, ""), kind: "message_created" } as AssistantEvent;
+    state = applyAssistantEvent(state, replay, seen);
+    expect(state.rows.m1?.status).toBe("completed");
+    expect(state.rows.m1?.content).toBe("answer");
   });
 
   it("skips envelope-only events and message events without a row", () => {

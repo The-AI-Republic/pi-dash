@@ -49,7 +49,18 @@ export function useSendMessage() {
   return useMutation<AssistantSendResponse, Error, SendMessageVars>({
     mutationFn: ({ workspaceSlug, threadId, content }) =>
       sendAssistantMessage(getAppClient(), workspaceSlug, threadId, content),
-    onSettled: (_data, _error, { workspaceSlug }) => {
+    onSuccess: (_data, { workspaceSlug }) => {
+      // A list read started before this send could still land and report the
+      // old `has_active_turn`; drop it so the view only trusts a read of the
+      // state after the turn was queued, then ask for that read.
+      const threads = assistantKeys.threads(workspaceSlug);
+      void queryClient
+        .cancelQueries({ queryKey: threads })
+        .then(() => queryClient.invalidateQueries({ queryKey: threads }));
+    },
+    onError: (_error, { workspaceSlug }) => {
+      // A refused send changed nothing, but the first-message title may have
+      // moved the thread; the stale read is harmless and simply refreshed.
       void queryClient.invalidateQueries({ queryKey: assistantKeys.threads(workspaceSlug) });
     },
   });
@@ -71,6 +82,9 @@ export function useStopTurn() {
     mutationFn: ({ workspaceSlug, threadId }) => cancelAssistantTurn(getAppClient(), workspaceSlug, threadId),
     onSuccess: (_data, { workspaceSlug, threadId }) => {
       void queryClient.invalidateQueries({ queryKey: threadKey(workspaceSlug, threadId) });
+      // The cancel is acknowledged; re-read the list so its `has_active_turn`
+      // can confirm the end even when the turn leaves no new row behind.
+      void queryClient.invalidateQueries({ queryKey: assistantKeys.threads(workspaceSlug) });
     },
   });
 }

@@ -22,6 +22,17 @@ export interface TranscriptState {
 export const EMPTY_TRANSCRIPT: TranscriptState = { rows: {} };
 
 /**
+ * Whether `incoming` may replace `current`: a terminal row always wins,
+ * otherwise the longer text wins. A reconnect replays `message_created`
+ * with the row as it looked at creation (empty, streaming), so replacing
+ * unconditionally would wipe everything the deltas have built since.
+ */
+function wins(incoming: AssistantMessage, current: AssistantMessage | undefined): boolean {
+  if (current === undefined) return true;
+  return incoming.status !== "streaming" || incoming.content.length >= current.content.length;
+}
+
+/**
  * Merge one stored page into the table. A live row that is already ahead of
  * the page (more text, or already terminal) is kept: polling must never
  * rewind a message the stream has been building.
@@ -30,10 +41,7 @@ export function mergeTranscript(state: TranscriptState, page: readonly Assistant
   let changed = false;
   const rows: Record<string, AssistantMessage> = { ...state.rows };
   for (const incoming of page) {
-    const current = rows[incoming.id];
-    const take =
-      current === undefined || incoming.status === "completed" || incoming.content.length >= current.content.length;
-    if (take) {
+    if (wins(incoming, rows[incoming.id])) {
       rows[incoming.id] = incoming;
       changed = true;
     }
@@ -43,6 +51,7 @@ export function mergeTranscript(state: TranscriptState, page: readonly Assistant
 
 /** Merge a single row (the send's echoed user message, an event payload). */
 export function mergeMessage(state: TranscriptState, message: AssistantMessage): TranscriptState {
+  if (!wins(message, state.rows[message.id])) return state;
   return { rows: { ...state.rows, [message.id]: message } };
 }
 

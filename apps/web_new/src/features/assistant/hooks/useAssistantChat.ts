@@ -15,6 +15,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { subscribeAssistantEvents } from "../api/events.js";
+import { assistantThreadsQueryOptions } from "../api/queries.js";
 import { transcriptKey } from "../api/threadKeys.js";
 import { assistantTranscriptQueryOptions } from "../api/transcript.js";
 import { sendFailureLine, useSendMessage, useStopTurn } from "../api/threadMutations.js";
@@ -99,28 +100,98 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
   // A terminal event is authoritative even before the poll catches up: the
   // stored page can still end on the user row for a moment, and reading that
   // as "in flight" would keep the composer locked after the server is done.
-  const terminalSeen = React.useRef(false);
+  // State, not a ref: the event often arrives while `busy` is already false
+  // (a cold load), and unlocking has to re-render on its own.
+  const [terminalSeen, setTerminalSeen] = React.useState(false);
   // Sequence the turn started at: a reply already in the transcript when the
   // turn began says nothing about this turn, so the settle check ignores it.
   const startedAfter = React.useRef(0);
 
+  // When the latest turn started, on this clock. A thread-list read taken at
+  // or after this point is the server's answer about that turn; an older one
+  // predates it and cannot settle anything.
+  const [startedAt, setStartedAt] = React.useState(0);
+
   const messages = React.useMemo(() => transcriptRows(state), [state]);
   const stateRef = React.useRef(state);
   stateRef.current = state;
-  const running = busy || (turnPending(messages) && !terminalSeen.current);
+
+  // The thread list carries `has_active_turn`, the only server read that
+  // says a turn is over even when stopping added no transcript row (a cancel
+  // before the assistant row exists, or after a tool row). The rail shares
+  // this cache and its screens read the same list.
+  const pending = turnPending(messages) && !terminalSeen;
+  // Poll the list while a turn looks in flight: a local start (busy) and a
+  // trailing user row from a cold load both need the server's answer.
+  const threads = useQuery({
+    ...assistantThreadsQueryOptions(getAppClient(), workspaceSlug),
+    refetchInterval: false,
+  });
+  const threadRow = threads.data?.find((thread) => thread.id === threadId);
+  const serverFresh = threadRow !== undefined && threads.dataUpdatedAt >= startedAt;
+  const serverActive = threadRow?.has_active_turn;
+  const [settledFor, setSettledFor] = React.useState<number | null>(null);
+  // A local turn (busy) settles only on a list read requested after it
+  // began and that says no turn runs: a cached read from before the send
+  // still reports the thread as idle and must not clear it.
+  const serverSettled = busy
+    ? serverFresh && serverActive === false && settledFor === startedAt
+    : serverFresh && serverActive === false;
+  let running = false;
+  if (!terminalSeen) {
+    if (busy) {
+      // A fresh read that says no turn runs settles a stop whose cancel
+      // finalized the turn without adding a row.
+      running = !serverSettled;
+    } else if (pending) {
+      // No local start (a cold load, another tab). A trailing user row is
+      // ambiguous: the server decides, and stays optimistic until it answers.
+      running = serverActive === true || !serverFresh;
+    }
+  }
 
   const page = useQuery({
     ...assistantTranscriptQueryOptions(getAppClient(), workspaceSlug, threadId, TRANSCRIPT_PAGE_SIZE),
     refetchInterval: running ? TURN_POLL_MS : false,
   });
 
+  // The list poll continues only while a local start or an unconfirmed tail
+  // user row still needs the server's answer; once it says "no turn", both
+  // the transcript and the list can go quiet.
+  const awaitingServer = busy || (pending && !serverSettled);
+  const refetchThreads = threads.refetch;
+  // Only a read requested after the turn began counts: a stale read still
+  // reports the thread as idle and must not settle the turn it predates.
+  // Started during render so the effect's first read is stamped correctly.
+  const startedRef = React.useRef(startedAt);
+  if (startedAt > startedRef.current) startedRef.current = startedAt;
+  React.useEffect(() => {
+    if (!awaitingServer) return;
+    let active = true;
+    const read = (): void => {
+      const turnStarted = startedRef.current;
+      void refetchThreads().then((result) => {
+        if (!active) return;
+        const row = result.data?.find((thread) => thread.id === threadId);
+        if (row?.has_active_turn === false) setSettledFor(turnStarted);
+      });
+    };
+    read();
+    const timer = setInterval(read, TURN_POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [awaitingServer, refetchThreads, threadId]);
+
   React.useEffect(() => {
     dispatch({ type: "reset" });
     seen.current = new Set();
-    terminalSeen.current = false;
+    setTerminalSeen(false);
     startedAfter.current = 0;
     setBusy(false);
     setError(null);
+    setStartedAt(0);
   }, [workspaceSlug, threadId]);
 
   React.useEffect(() => {
@@ -136,11 +207,18 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     if (lastRow.seq > startedAfter.current) setBusy(false);
   }, [busy, messages]);
 
+  // Clear the local in-flight flag once the server confirms the turn ended,
+  // so the next tick starts from the stored transcript alone.
+  React.useEffect(() => {
+    if (busy && serverSettled) setBusy(false);
+  }, [busy, serverSettled]);
+
   const markTurn = React.useCallback((next: "started" | "terminal") => {
-    terminalSeen.current = next === "terminal";
+    setTerminalSeen(next === "terminal");
     if (next === "started") {
       const newest = transcriptRows(stateRef.current).at(-1);
       startedAfter.current = newest?.seq ?? 0;
+      setStartedAt(Date.now());
     }
     setBusy(next === "started");
   }, []);

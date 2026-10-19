@@ -34,8 +34,7 @@ export type AssistantStreamOpener = (url: string, init: StreamInit) => EventStre
  * lines is still accepted so the parser can be exercised on wire text.
  */
 export function readAssistantEvents(data: string): AssistantEvent[] {
-  const wire = /^\s*(?::|data:|event:|id:|retry:)/.test(data);
-  const frames = wire ? parseAssistantEventFrames(data) : [parseJson(data)];
+  const frames = parseJson(data);
   const events: AssistantEvent[] = [];
   for (const frame of frames) {
     const parsed = AssistantEvent.safeParse(frame);
@@ -45,11 +44,15 @@ export function readAssistantEvents(data: string): AssistantEvent[] {
   return events;
 }
 
-function parseJson(data: string): unknown {
+function parseJson(data: string): unknown[] {
   try {
-    return JSON.parse(data) as unknown;
+    return [JSON.parse(data) as unknown];
   } catch {
-    throw new Error(`assistant event frame is not JSON: ${data.slice(0, 120)}`);
+    // A browser reader may still hand over a raw block with `data:` lines.
+    if (!/^\s*(?::|data:|event:|id:|retry:)/m.test(data)) {
+      throw new Error(`assistant event frame is not JSON: ${data.slice(0, 120)}`);
+    }
+    return parseAssistantEventFrames(data);
   }
 }
 

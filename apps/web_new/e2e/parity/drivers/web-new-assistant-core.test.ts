@@ -127,15 +127,22 @@ describe("transcript reads", () => {
   });
 
   it("reads one bubble's rendered HTML by index", async () => {
-    const innerHTML = vi.fn(async () => "<h1>Styled</h1>");
+    const evaluate = vi.fn(async (fn: (node: Element) => unknown) =>
+      fn({
+        outerHTML: '<div data-role="assistant" class="text-danger"><h1>Styled</h1></div>',
+      } as unknown as Element)
+    );
     const page = pageOf({
       locator: (selector: string) =>
         selector === '[data-testid="assistant-transcript"]'
-          ? locator({ locator: () => locator({ locator: () => locator({ innerHTML }) }) })
+          ? locator({ locator: () => locator({ locator: () => locator({ evaluate }) }) })
           : locator(),
     });
     const driver = new WebNewDriver(page);
-    await expect(driver.assistantBubbleHtml(0)).resolves.toBe("<h1>Styled</h1>");
+    const html = await driver.assistantBubbleHtml(0);
+    expect(html).toBe('<div data-role="assistant" class="text-danger"><h1>Styled</h1></div>');
+    // The error tint lives on the bubble element, so the read must carry it.
+    expect(html).toContain("text-danger");
   });
 
   it("reads the empty state from the thread body and null once rows render", async () => {

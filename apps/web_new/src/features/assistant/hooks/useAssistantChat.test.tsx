@@ -12,6 +12,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { assistantKeys } from "../api/keys.js";
 import { transcriptKey } from "../api/threadKeys.js";
 import { TURN_POLL_MS, useAssistantChat } from "./useAssistantChat.js";
 
@@ -50,11 +51,47 @@ function row(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
   };
 }
 
-function setup(initial: AssistantMessage[]) {
+interface SetupOptions {
+  /** The thread list's `has_active_turn`; the default follows `active`. */
+  active?: boolean;
+}
+
+function threadList(active: boolean) {
+  return [
+    {
+      id: THREAD_ID,
+      title: "Thread",
+      is_archived: false,
+      has_active_turn: active,
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z",
+    },
+  ];
+}
+
+function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
   let sends = 0;
   let reads = 0;
+  let cancels = 0;
+  let listReads = 0;
+  // `active` is what the server answers about the running turn; tests flip
+  // it to prove the settle path does not need a new transcript row.
+  const server = { active: options.active ?? true };
   createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
     const path = new URL(url).pathname;
+    if (path.endsWith("/ai-assistant/threads/") && init.method !== "POST") {
+      listReads += 1;
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(threadList(server.active)),
+      };
+    }
+    if (path.endsWith("/cancel/") && init.method === "POST") {
+      cancels += 1;
+      return { status: 204, url, headers: { get: () => null }, text: async () => "" };
+    }
     if (path.endsWith("/messages/") && init.method === "POST") {
       sends += 1;
       return {
@@ -88,7 +125,15 @@ function setup(initial: AssistantMessage[]) {
       </QueryClientProvider>
     ),
   });
-  return { ...hook, queryClient, sends: () => sends, reads: () => reads };
+  return {
+    ...hook,
+    queryClient,
+    server,
+    sends: () => sends,
+    reads: () => reads,
+    cancels: () => cancels,
+    listReads: () => listReads,
+  };
 }
 
 afterEach(() => {
@@ -238,6 +283,70 @@ describe("useAssistantChat", () => {
       ])
     );
     await waitFor(() => expect(result.current.messages.at(-1)?.id).toBe("a"));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("unlocks after stop when the cancel finalizes the turn without a new row", async () => {
+    const { result, server, cancels } = setup([row()]);
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => result.current.stop());
+    await waitFor(() => expect(cancels()).toBe(1));
+    // The server ends the turn: no assistant or error row is ever added, so
+    // only the thread list's `has_active_turn` can settle the composer.
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+    expect(result.current.messages.map((message) => message.id)).toEqual(["u1"]);
+  });
+
+  it("stays locked after stop while the server still reports a running turn", async () => {
+    const { result, cancels } = setup([row()]);
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => result.current.stop());
+    await waitFor(() => expect(cancels()).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, TURN_POLL_MS * 2));
+    expect(result.current.running).toBe(true);
+  });
+
+  it("treats a cold-load trailing user row as running while the server says a turn is active", async () => {
+    const { result, server } = setup([row()], { active: true });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+  });
+
+  it("does not read an already-ended turn's tail user row as running once the server answers", async () => {
+    // A cold load whose last user row belongs to a turn that has ended.
+    const { result } = setup([row()], { active: false });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    await waitFor(() => expect(result.current.running).toBe(false));
+  });
+
+  it("ignores a thread-list read that predates the turn it settles", async () => {
+    const { result, queryClient } = setup([row({ id: "a", role: "assistant", seq: 2, content: "done" })], {
+      active: true,
+    });
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    // A stale list (older than the send) must not clear a turn that just started.
+    act(() =>
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 12,
+        thread: THREAD_ID,
+        message: null,
+        seq: 12,
+        kind: "turn_started",
+        payload: { turn_id: "turn" },
+        created_at: "2026-01-01T00:00:00Z",
+      })
+    );
+    await waitFor(() => expect(result.current.running).toBe(true));
+    act(() => {
+      queryClient.setQueryData(assistantKeys.threads("acme"), threadList(false), { updatedAt: 1 });
+    });
     expect(result.current.running).toBe(true);
   });
 

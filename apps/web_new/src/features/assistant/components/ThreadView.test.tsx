@@ -76,11 +76,32 @@ interface HarnessOptions {
   cancel?: () => Promise<unknown>;
 }
 
+let serverHasActiveTurn = true;
+
 function renderThread(options: HarnessOptions = {}) {
   const sent: unknown[] = [];
   const cancels: string[] = [];
+  serverHasActiveTurn = true;
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     const path = new URL(url).pathname;
+    if (path.endsWith("/ai-assistant/threads/") && init.method !== "POST") {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () =>
+          JSON.stringify([
+            {
+              id: THREAD_ID,
+              title: "Thread",
+              is_archived: false,
+              has_active_turn: serverHasActiveTurn,
+              created_at: "2026-10-01T00:00:00Z",
+              updated_at: "2026-10-01T00:00:00Z",
+            },
+          ]),
+      };
+    }
     if (path.endsWith("/messages/") && init.method === "POST") {
       sent.push(JSON.parse(init.body ?? "{}"));
       if (options.send !== undefined) return options.send(JSON.parse(init.body ?? "{}"));
@@ -139,6 +160,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetAppClient();
+  serverHasActiveTurn = true;
 });
 
 describe("ThreadView transcript", () => {
@@ -264,8 +286,21 @@ describe("ThreadView composer", () => {
     expect(screen.getByRole("button", { name: "Stop response" })).toBeInTheDocument();
   });
 
+  it("unlocks after stop when the server reports the turn ended without a new row", async () => {
+    const list = [row({ id: "u", role: "user", content: "ask", seq: 1 })];
+    const harness = renderThread({ messages: list });
+    await screen.findByRole("button", { name: "Stop response" });
+    fireEvent.click(screen.getByRole("button", { name: "Stop response" }));
+    await waitFor(() => expect(harness.cancels).toHaveLength(1));
+    // The cancel finalizes the turn with no assistant or error row; the
+    // thread list's `has_active_turn: false` is the only confirmation.
+    serverHasActiveTurn = false;
+    expect(await screen.findByRole("button", { name: "Send message" }, { timeout: 4000 })).toBeInTheDocument();
+  });
+
   it("unlocks when a cancelled event arrives", async () => {
     renderThread({ messages: [row({ id: "u", role: "user", content: "ask", seq: 1 })] });
+
     await screen.findByRole("button", { name: "Stop response" });
     emit({
       id: 9,
