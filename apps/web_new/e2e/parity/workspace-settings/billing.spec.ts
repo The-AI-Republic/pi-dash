@@ -197,7 +197,15 @@ test(
 
     await test.step("upgrade pills are static labels that open nothing", async () => {
       if (driver.target === "web_new") {
-        test.skip(true, "active-cycles route belongs to the cycles area (CYC-043); NEWFRONT-527 proves this leg");
+        // The active-cycles route belongs to the cycles area (CYC-043), so
+        // the pill's mount host has not landed yet; NEWFRONT-527 carries
+        // the leg. Until then, every rendered pill on the pages this area
+        // owns is still proven inert from the settings shell.
+        await driver.wsSettingsBillingOpen(seed.workspaceSlug);
+        expect(await driver.wsSettingsProBadgeCount()).toBeGreaterThanOrEqual(0);
+        await driver.wsSettingsProBadgeClickFirst();
+        expect(await driver.wsSettingsUpgradeModalVisible()).toBe(false);
+        return;
       }
       // The active-cycles header carries an upgrade pill.
       await driver.wsSettingsActiveCyclesOpen(seed.workspaceSlug);

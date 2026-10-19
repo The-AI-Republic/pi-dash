@@ -257,6 +257,14 @@ import type {
   SettingsGeneralField,
 } from "./parity-driver";
 
+/** Whether the billing address settled on its page or the denial view. */
+export function billingPageSettled(root: { querySelector: (selector: string) => unknown }): boolean {
+  return (
+    root.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
+    root.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null
+  );
+}
+
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
@@ -17007,13 +17015,7 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsBillingOpen(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/settings/billing`);
     await this.page.waitForLoadState("domcontentloaded");
-    await this.page.waitForFunction(
-      () =>
-        document.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
-        document.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null,
-      null,
-      { timeout: WebNewDriver.WAIT_MS }
-    );
+    await this.page.waitForFunction(billingPageSettled, null, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async wsSettingsBillingNotAuthorized(): Promise<boolean> {

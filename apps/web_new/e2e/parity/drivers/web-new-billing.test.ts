@@ -9,7 +9,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 
-import { WebNewDriver } from "./web-new";
+import { billingPageSettled, WebNewDriver } from "./web-new";
 
 interface StubLocator {
   count?: () => Promise<number>;
@@ -83,6 +83,20 @@ describe("billing driver", () => {
     expect(waitForFunction).toHaveBeenCalledTimes(1);
   });
 
+  it("settles on either the plans body or the denial view", () => {
+    const seen: string[] = [];
+    const root = (found: string | null) => ({
+      querySelector: (selector: string) => {
+        seen.push(selector);
+        return selector.includes(found ?? "\u0000") ? {} : null;
+      },
+    });
+    expect(billingPageSettled(root("workspace-settings-billing"))).toBe(true);
+    expect(billingPageSettled(root("workspace-settings-not-authorized"))).toBe(true);
+    expect(billingPageSettled(root(null))).toBe(false);
+    expect(seen).toContain('[data-testid="workspace-settings-billing"]');
+  });
+
   it("reads the denial view from its own surface", async () => {
     const notAuthorized = locator({ count: async () => 1, isVisible: async () => true });
     const page = pageOf({ locator: vi.fn(() => notAuthorized) });
@@ -114,7 +128,10 @@ describe("billing driver", () => {
     });
     const popular = locator({
       count: async () => 1,
-      evaluate: async () => "Pro",
+      evaluate: async (fn) =>
+        fn({
+          closest: () => ({ querySelector: () => ({ textContent: "Pro" }) }),
+        } as unknown as Element),
     });
     const page = pageOf({
       locator: vi.fn((selector: string) =>
@@ -307,6 +324,181 @@ describe("billing driver", () => {
     expect(await driver.wsSettingsProBadgeCount()).toBe(2);
     await driver.wsSettingsProBadgeClickFirst();
     expect(pill.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports no popular plan when the marker read fails", async () => {
+    const marker = locator({
+      count: async () => 1,
+      evaluate: async () => {
+        throw new Error("detached");
+      },
+    });
+    const page = pageOf({ locator: vi.fn(() => marker), getByText: vi.fn(() => marker) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsBillingPopularPlan()).toBeNull();
+  });
+
+  it("finds both switch halves on an initialized card", async () => {
+    const card = locator({
+      count: async () => 1,
+      getByRole: () => locator({ count: async () => 1 }),
+    });
+    const page = pageOf({ locator: vi.fn(() => card) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsBillingFrequencyVisible("Pro")).toBe(true);
+  });
+
+  it("reports a yearly selection from the pressed yearly half", async () => {
+    const buttons = new Map<string, StubLocator>([
+      ["Monthly", locator({ getAttribute: async () => "false" })],
+      ["Yearly", locator({ getAttribute: async () => "true" })],
+    ]);
+    const card = locator({
+      count: async () => 1,
+      getByRole: (role: string, options: { name?: string } | undefined) =>
+        buttons.get(String(options?.name ?? "")) ?? locator({ count: async () => 0 }),
+    });
+    const page = pageOf({ locator: vi.fn(() => card), getByRole: vi.fn(() => locator({ count: async () => 0 })) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsBillingSelectedFrequency("Pro")).toBe("year");
+  });
+
+  it("clicks the monthly half when month is requested", async () => {
+    const monthly = locator({ click: vi.fn(async () => undefined) });
+    const card = locator({
+      count: async () => 1,
+      getAttribute: async () => "month",
+      getByRole: (role: string, options: { name?: string } | undefined) =>
+        options?.name === "Monthly" ? monthly : locator({ count: async () => 0 }),
+    });
+    const page = pageOf({ locator: vi.fn(() => card) });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsBillingSelectFrequency("Pro", "month");
+    expect(monthly.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports no sections and an unexpanded comparison when the toggle read fails", async () => {
+    const toggle = locator({
+      count: async () => 1,
+      getAttribute: async () => {
+        throw new Error("detached");
+      },
+    });
+    const page = pageOf({ locator: vi.fn(() => toggle) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsBillingComparisonVisible()).toBe(false);
+    expect(await driver.wsSettingsBillingComparisonSections()).toEqual([]);
+  });
+
+  it("flips the comparison without waiting when the label never read", async () => {
+    const click = vi.fn(async () => undefined);
+    const toggle = locator({ count: async () => 0, click });
+    const page = pageOf({ locator: vi.fn(() => toggle) });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsBillingToggleCompare();
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops blank comparison section headings", async () => {
+    const toggle = locator({
+      count: async () => 1,
+      getAttribute: async () => "true",
+    });
+    const sections = locator({
+      evaluateAll: async (fn) =>
+        fn(
+          [{ textContent: " Project + work tracking " }, { textContent: "  " }].map(
+            (entry) => entry as unknown as Element
+          )
+        ),
+    });
+    const page = pageOf({
+      locator: vi.fn((selector: string) => (selector.includes("billing-comparison-section-") ? sections : toggle)),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsBillingComparisonSections()).toEqual(["Project + work tracking"]);
+  });
+
+  it("returns null when the popup never leaves about:blank", async () => {
+    const popup = { url: () => "about:blank", close: vi.fn(async () => undefined) };
+    const action = locator({ count: async () => 1 });
+    const card = locator({ count: async () => 1, locator: () => action });
+    let clock = 0;
+    const realNow = Date.now;
+    vi.spyOn(Date, "now").mockImplementation(() => {
+      clock += 7_500;
+      return clock;
+    });
+    try {
+      const page = pageOf({
+        locator: vi.fn(() => card),
+        waitForEvent: vi.fn(async () => popup),
+        waitForTimeout: vi.fn(async () => undefined),
+      });
+      const driver = new WebNewDriver(page);
+      expect(await driver.wsSettingsBillingPlanButtonPopupUrl("Pro")).toBeNull();
+      expect(popup.close).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.spyOn(Date, "now").mockRestore();
+      void realNow;
+    }
+  });
+
+  it("reads a surrounding plan and its title from an upgrade dialog", async () => {
+    const heading = locator({ count: async () => 1, innerText: async () => "Upgrade to a paid plan" });
+    const dialog = locator({
+      count: async () => 1,
+      isVisible: async () => true,
+      getByRole: () => heading,
+      filter: () => dialog,
+    });
+    const page = pageOf({ getByRole: vi.fn(() => dialog), keyboard: { press: vi.fn(async () => undefined) } });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsUpgradeModalVisible()).toBe(true);
+    expect(await driver.wsSettingsUpgradeModalTitle()).toBe("Upgrade to a paid plan");
+  });
+
+  it("sends Escape to a stray dialog and tolerates it staying", async () => {
+    const visible = { value: true };
+    const dialog = locator({
+      count: async () => 1,
+      isVisible: async () => visible.value,
+    });
+    const page = pageOf({ getByRole: vi.fn(() => dialog), keyboard: { press: vi.fn(async () => undefined) } });
+    const driver = new WebNewDriver(page);
+    const press = vi.fn(async () => {
+      visible.value = false;
+    });
+    (page.keyboard as unknown as { press: typeof press }).press = press;
+    await driver.wsSettingsUpgradeModalClose();
+    expect(press).toHaveBeenCalledWith("Escape");
+  });
+
+  it("waits for the user-menu trigger before clicking it", async () => {
+    const trigger = locator({
+      count: async () => 0,
+      isVisible: async () => false,
+      click: vi.fn(async () => undefined),
+      waitFor: vi.fn(async () => undefined),
+    });
+    const menu = locator({ count: async () => 0 });
+    const page = pageOf({
+      locator: vi.fn((selector: string) => (selector.includes("sidebar-user-menu") ? trigger : menu)),
+      getByRole: vi.fn(() => menu),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsUserMenuOpenCommunity("acme");
+    expect(trigger.waitFor).toHaveBeenCalledTimes(1);
+    expect(trigger.click).toHaveBeenCalledTimes(1);
+    expect(await driver.userMenuTexts()).toEqual([]);
+  });
+
+  it("does nothing when there is no pro pill to click", async () => {
+    const pill = locator({ count: async () => 0, click: vi.fn(async () => undefined) });
+    const page = pageOf({ locator: vi.fn(() => pill) });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsProBadgeClickFirst();
+    expect(pill.click).not.toHaveBeenCalled();
   });
 
   it("reads the full page text collapsed to one line", async () => {
