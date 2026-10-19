@@ -51,6 +51,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     targetIso: null,
     durationDays: null,
     stateId: null,
+    sortOrder: 1,
     archived: false,
     unconfirmed: false,
     ...overrides,

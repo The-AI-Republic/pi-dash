@@ -238,6 +238,31 @@ export {
 export type { GanttDay, GanttRange, GanttSegment, GanttZoom } from "./gantt/scale.js";
 export { useGanttViewport, clampScroll, FALLBACK_VIEWPORT_WIDTH } from "./gantt/useGanttViewport.js";
 export type { GanttViewport } from "./gantt/useGanttViewport.js";
+export { GanttQuickAdd } from "./gantt/GanttQuickAdd.js";
+export type { GanttQuickAddProps } from "./gantt/GanttQuickAdd.js";
+export { canEditTimeline } from "./gantt/permissions.js";
+export type { TimelineStanding } from "./gantt/permissions.js";
+export {
+  DRAG_THRESHOLD_PX,
+  RANK_STEP,
+  baseWindow,
+  dayIndexAt,
+  deriveReorder,
+  handlePreviewDate,
+  movedDates,
+  plantedDates,
+  resizedDates,
+  snappedDayDelta,
+  windowDays,
+} from "./gantt/drag.js";
+export type { DropPlacement, GestureDates, ReorderEntry, ReorderResult } from "./gantt/drag.js";
+export {
+  GANTT_DATES_FAILED_TITLE,
+  GANTT_REORDER_FAILED_TITLE,
+  useGanttMutations,
+  withIssueOrder,
+} from "./gantt/useGanttMutations.js";
+export type { GanttMutations } from "./gantt/useGanttMutations.js";
 export { AnalyticsEntry, groupCounts } from "./analytics/AnalyticsEntry.js";
 export type { AnalyticsEntryProps } from "./analytics/AnalyticsEntry.js";
 export type { SpreadsheetLayoutProps } from "./spreadsheet/SpreadsheetLayout.js";

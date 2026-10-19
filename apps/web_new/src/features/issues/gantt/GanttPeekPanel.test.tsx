@@ -47,6 +47,7 @@ const ROW: GanttRow = {
   targetIso: "2026-10-05",
   durationDays: 5,
   stateId: null,
+  sortOrder: 1,
   archived: false,
   unconfirmed: false,
 };

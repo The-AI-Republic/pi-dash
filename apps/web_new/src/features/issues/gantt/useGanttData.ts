@@ -14,6 +14,7 @@ import * as React from "react";
 import type { State } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { useProjectRoles } from "../../auth/index.js";
 import { useNarrowViewport } from "../../../shared/shell/index.js";
 import type { GanttRow } from "./rows.js";
 
@@ -30,6 +31,16 @@ export function useGanttStates(workspaceSlug: string, projectId: string): State[
     staleTime: 5 * 60_000,
   });
   return query.data ?? [];
+}
+
+/**
+ * The caller's project role, or null when they hold no membership row.
+ * The per-workspace role map is already warmed by the gated route, so the
+ * timeline gates its edit affordances without another request pattern.
+ */
+export function useProjectMemberRole(workspaceSlug: string, projectId: string): number | null {
+  const roles = useProjectRoles(workspaceSlug);
+  return roles.data?.[projectId] ?? null;
 }
 
 /** Pick the state that colors a row's bar. */

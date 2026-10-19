@@ -8,14 +8,25 @@
 // draws as a marked column (its week at Month zoom, its month at Quarter
 // zoom) and the strip extends endlessly at either horizontal edge.
 // Fullscreen renders the same chart inside the full-screen portal.
+// Edit standing (ISS-050–055/058) turns on the bar gestures, the add-block
+// control on undated lanes and the sticky quick-add; without it the chart
+// is read-only.
 
 import { cn } from "@pidash/kit";
 import * as React from "react";
 
 import { FULL_SCREEN_PORTAL_ID, OverlayPortal } from "../../../shared/shell/index.js";
-import { todayIsoDay } from "../dropdowns/calendar.js";
+import { formatDay, todayIsoDay } from "../dropdowns/calendar.js";
+import {
+  addBlockDate,
+  movedDates,
+  plantedDates as plantedDatesFor,
+  resizedDates,
+  snappedDayDelta,
+  type GestureDates,
+} from "./drag.js";
 import { GanttHeader } from "./GanttHeader.js";
-import { GanttSidebar } from "./GanttSidebar.js";
+import { GanttSidebar, type ReorderBinding } from "./GanttSidebar.js";
 import {
   HEADER_HEIGHT,
   ROW_HEIGHT,
@@ -59,6 +70,16 @@ export interface GanttChartProps {
   onOpenRow: (row: GanttRow) => void;
   /** Rows still arriving from the next page. */
   loadingMore?: boolean;
+  /** Manual-sort reorder seam; null disables row dragging (ISS-050). */
+  reorder?: ReorderBinding | null;
+  /** Project admin/member standing: bars drag and lanes plant (ISS-058). */
+  canEdit?: boolean;
+  /** Persist a moved or resized bar's dates (ISS-051–053). */
+  onDatesChange?: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
+  /** Plant a block on an undated row (ISS-054). */
+  onPlantBlock?: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
+  /** Sticky quick-add entry (ISS-055); absent hides the control. */
+  quickAdd?: React.ReactNode;
 }
 
 interface SurfaceProps extends GanttChartProps {
@@ -69,6 +90,15 @@ interface SurfaceProps extends GanttChartProps {
   /** Why the surface is mounted (drives the page background tone). */
   fullscreen: boolean;
   onToggleFullscreen: () => void;
+}
+
+/** A live bar gesture, with the dates it will commit. */
+interface BarDrag {
+  issueId: string;
+  side: "move" | "left" | "right";
+  startX: number;
+  origin: GestureDates;
+  dates: GestureDates;
 }
 
 function SegmentRow({
@@ -139,6 +169,157 @@ function DayTintLayer({
   );
 }
 
+function Bar({
+  row,
+  box,
+  drag,
+  colors,
+  canEdit,
+  onOpen,
+  onBeginDrag,
+  range,
+  zoom,
+}: {
+  row: GanttRow;
+  box: GanttBarBox;
+  drag: BarDrag | null;
+  colors: Readonly<Record<string, string>> | undefined;
+  canEdit: boolean;
+  onOpen: () => void;
+  onBeginDrag: (event: React.MouseEvent, side: "move" | "left" | "right") => void;
+  range: Parameters<typeof dayColumns>[0];
+  zoom: GanttZoom;
+}): React.ReactElement {
+  // While a gesture runs the bar follows the pointer; on release the
+  // persisted dates flow back through the list cache (ISS-051).
+  const [hoveredSide, setHoveredSide] = React.useState<"left" | "right" | null>(null);
+  const previewIso = React.useMemo(() => {
+    if (!canEdit) return null;
+    if (drag !== null) {
+      return drag.side === "left" ? drag.dates.startDate : drag.side === "right" ? drag.dates.targetDate : null;
+    }
+    if (hoveredSide === null) return null;
+    return hoveredSide === "left" ? row.startIso : row.targetIso;
+  }, [canEdit, drag, hoveredSide, row.startIso, row.targetIso]);
+  const boxNow =
+    drag === null
+      ? box
+      : (() => {
+          const start = drag.dates.startDate;
+          const target = drag.dates.targetDate;
+          if (start === null || target === null) return box;
+          return barBox({ ...row, startIso: start, targetIso: target }, range, zoom) ?? box;
+        })();
+  return (
+    <div
+      id={`gantt-block-${row.id}`}
+      data-testid="gantt-bar"
+      role="button"
+      tabIndex={0}
+      aria-label={row.name}
+      title={row.name}
+      style={{
+        left: boxNow.left,
+        width: boxNow.width,
+        backgroundColor: colors?.[row.id] ?? "var(--accent)",
+      }}
+      onClick={() => {
+        if (drag === null) onOpen();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onOpen();
+      }}
+      onMouseDown={(event) => onBeginDrag(event, "move")}
+      className="group/bar absolute top-1/2 h-6 -translate-y-1/2 cursor-pointer overflow-visible rounded-(--radius-control) opacity-90 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
+    >
+      <span className="text-caption block truncate px-(--space-2) leading-6 text-(--on-accent)">{row.name}</span>
+      {canEdit ? (
+        <>
+          <span
+            data-testid="gantt-resize-left"
+            aria-label={row.startIso === null ? undefined : formatDay(row.startIso)}
+            onMouseDown={(event) => onBeginDrag(event, "left")}
+            onMouseEnter={() => setHoveredSide("left")}
+            onMouseLeave={() => setHoveredSide(null)}
+            className="absolute top-0 -left-1.5 h-full w-3 cursor-col-resize"
+          />
+          <span
+            data-testid="gantt-resize-right"
+            aria-label={row.targetIso === null ? undefined : formatDay(row.targetIso)}
+            onMouseDown={(event) => onBeginDrag(event, "right")}
+            onMouseEnter={() => setHoveredSide("right")}
+            onMouseLeave={() => setHoveredSide(null)}
+            className="absolute top-0 -right-1.5 h-full w-3 cursor-col-resize"
+          />
+          {previewIso !== null ? (
+            <span
+              data-testid="gantt-resize-preview"
+              className="text-caption shadow pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 rounded-(--radius-control) bg-(--surface) px-(--space-1) whitespace-nowrap text-(--text)"
+            >
+              {formatDay(previewIso)}
+            </span>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function UndatedLane({
+  canEdit,
+  rangeStartIso,
+  zoom,
+  onPlant,
+}: {
+  canEdit: boolean;
+  rangeStartIso: string;
+  zoom: GanttZoom;
+  onPlant: (dates: { startDate: string | null; endDate: string | null }) => void;
+}): React.ReactElement {
+  const [hover, setHover] = React.useState<{ x: number; date: string } | null>(null);
+  if (!canEdit) {
+    return (
+      <span className="text-caption absolute inset-y-0 left-0 flex items-center px-(--space-3) text-(--text-muted)/70">
+        No dates
+      </span>
+    );
+  }
+  return (
+    <div
+      data-testid="gantt-undated-lane"
+      className="absolute inset-0"
+      onMouseMove={(event) => {
+        const box = event.currentTarget.getBoundingClientRect();
+        const x = event.clientX - box.left;
+        const dayIndex = Math.max(0, Math.floor(x / DAY_WIDTHS[zoom]));
+        setHover({ x, date: addBlockDate({ startIso: rangeStartIso }, dayIndex) });
+      }}
+      onMouseLeave={() => setHover(null)}
+    >
+      <span className="text-caption pointer-events-none absolute inset-y-0 left-0 flex items-center px-(--space-3) text-(--text-muted)/70">
+        No dates
+      </span>
+      {hover !== null ? (
+        <button
+          type="button"
+          data-testid="gantt-add-block"
+          aria-label={`Add a block on ${formatDay(hover.date)}`}
+          title={formatDay(hover.date)}
+          style={{ left: hover.x }}
+          onClick={() => {
+            const dayIndex = Math.max(0, Math.floor(hover.x / DAY_WIDTHS[zoom]));
+            const dates = plantedDatesFor(rangeStartIso, dayIndex, zoom);
+            onPlant({ startDate: dates.startDate, endDate: dates.targetDate });
+          }}
+          className="absolute top-1/2 grid size-7 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-(--radius-control) border border-(--border) bg-(--bg) text-(--text)"
+        >
+          +
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function GanttLanes({
   rows,
   zoom,
@@ -153,6 +334,10 @@ function GanttLanes({
   windowEnd,
   viewportLeft,
   viewportWidth,
+  canEdit,
+  onDatesChange,
+  onPlantBlock,
+  rangeStartIso,
 }: {
   rows: readonly GanttRow[];
   zoom: GanttZoom;
@@ -169,8 +354,51 @@ function GanttLanes({
   /** Visible strip slice, in strip coordinates. */
   viewportLeft: number;
   viewportWidth: number;
+  canEdit: boolean;
+  onDatesChange: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
+  onPlantBlock: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
+  rangeStartIso: string;
 }): React.ReactElement {
   const visible = rows.slice(windowStart, windowEnd);
+  const [drag, setDrag] = React.useState<BarDrag | null>(null);
+  const dayWidth = DAY_WIDTHS[zoom];
+
+  const beginDrag = (event: React.MouseEvent, row: GanttRow, side: "move" | "left" | "right") => {
+    if (!canEdit || row.unconfirmed) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const origin = { startDate: row.startIso, targetDate: row.targetIso };
+    setDrag({ issueId: row.id, side, startX: event.clientX, origin, dates: origin });
+  };
+
+  React.useEffect(() => {
+    if (drag === null) return;
+    const onMove = (event: MouseEvent) => {
+      const delta = snappedDayDelta(event.clientX - drag.startX, dayWidth);
+      const dates = drag.side === "move" ? movedDates(drag.origin, delta) : resizedDates(drag.origin, drag.side, delta);
+      if (dates !== null) setDrag((current) => (current === null ? current : { ...current, dates }));
+    };
+    const onUp = () => {
+      const current = drag;
+      setDrag(null);
+      const changed =
+        current.dates.startDate !== current.origin.startDate || current.dates.targetDate !== current.origin.targetDate;
+      if (changed)
+        onDatesChange(current.issueId, { startDate: current.dates.startDate, endDate: current.dates.targetDate });
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDrag(null);
+    };
+    globalThis.addEventListener("mousemove", onMove);
+    globalThis.addEventListener("mouseup", onUp);
+    globalThis.addEventListener("keydown", onKey);
+    return () => {
+      globalThis.removeEventListener("mousemove", onMove);
+      globalThis.removeEventListener("mouseup", onUp);
+      globalThis.removeEventListener("keydown", onKey);
+    };
+  }, [dayWidth, drag, onDatesChange]);
+
   return (
     <div data-testid="gantt-lanes">
       <div style={{ height: windowStart * ROW_HEIGHT }} aria-hidden="true" />
@@ -200,28 +428,24 @@ function GanttLanes({
                 className="absolute inset-x-(--space-3) top-1/2 h-4 -translate-y-1/2 animate-pulse rounded-(--radius-control) bg-(--subtle)/60"
               />
             ) : box === null ? (
-              <span className="text-caption absolute inset-y-0 left-0 flex items-center px-(--space-3) text-(--text-muted)/70">
-                No dates
-              </span>
+              <UndatedLane
+                canEdit={canEdit}
+                rangeStartIso={rangeStartIso}
+                zoom={zoom}
+                onPlant={(dates) => onPlantBlock(row.id, dates)}
+              />
             ) : (
-              <button
-                type="button"
-                id={`gantt-block-${row.id}`}
-                data-testid="gantt-bar"
-                aria-label={row.name}
-                title={row.name}
-                style={{
-                  left: box.left,
-                  width: box.width,
-                  backgroundColor: barColors?.[row.id] ?? "var(--accent)",
-                }}
-                onClick={() => onOpenRow(row)}
-                className="absolute top-1/2 h-6 -translate-y-1/2 cursor-pointer overflow-hidden rounded-(--radius-control) opacity-90 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)"
-              >
-                <span className="text-caption block truncate px-(--space-2) leading-6 text-(--on-accent)">
-                  {row.name}
-                </span>
-              </button>
+              <Bar
+                row={row}
+                box={box}
+                drag={drag?.issueId === row.id ? drag : null}
+                colors={barColors}
+                canEdit={canEdit}
+                onOpen={() => onOpenRow(row)}
+                onBeginDrag={(event, side) => beginDrag(event, row, side)}
+                range={range}
+                zoom={zoom}
+              />
             )}
             {box !== null && !barInView(box, viewportLeft, viewportWidth) ? (
               <button
@@ -251,6 +475,11 @@ function GanttSurface({
   peekedId = null,
   onOpenRow,
   loadingMore = false,
+  reorder = null,
+  canEdit = false,
+  onDatesChange,
+  onPlantBlock,
+  quickAdd,
   todayIso,
   viewport,
   hoveredId,
@@ -380,6 +609,7 @@ function GanttSurface({
                 loadingMore={loadingMore}
                 windowStart={window.start}
                 windowEnd={window.end}
+                reorder={reorder}
               />
             )}
           </div>
@@ -430,11 +660,16 @@ function GanttSurface({
                 windowEnd={window.end}
                 viewportLeft={stripLeft}
                 viewportWidth={stripViewport}
+                canEdit={canEdit}
+                onDatesChange={onDatesChange ?? (() => undefined)}
+                onPlantBlock={onPlantBlock ?? (() => undefined)}
+                rangeStartIso={range.startIso}
               />
             )}
           </div>
         </div>
       </div>
+      {quickAdd ?? null}
       <span className="sr-only" data-testid="gantt-range">
         {`${range.startIso} + ${range.dayCount} days`}
       </span>

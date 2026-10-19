@@ -23,10 +23,16 @@ function asListData(value: unknown): ListCacheData | undefined {
 }
 
 /** A synthetic list row for an unconfirmed create; layouts overlay it. */
-export function tempIssueRow(tempId: string, name: string): IssueListItem {
+export function tempIssueRow(
+  tempId: string,
+  name: string,
+  dates: { startDate: string | null; targetDate: string | null } = { startDate: null, targetDate: null }
+): IssueListItem {
   return {
     id: tempId,
     name,
+    start_date: dates.startDate,
+    target_date: dates.targetDate,
     state_id: null,
     sort_order: 0,
     completed_at: null,

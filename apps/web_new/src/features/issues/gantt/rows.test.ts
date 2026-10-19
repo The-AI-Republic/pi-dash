@@ -97,6 +97,7 @@ describe("barBox", () => {
     targetIso: "2026-10-05",
     durationDays: 3,
     stateId: null,
+    sortOrder: 1,
     archived: false,
     unconfirmed: false,
   };

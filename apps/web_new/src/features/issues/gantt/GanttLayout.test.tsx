@@ -13,6 +13,8 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { sessionKeys } from "../../../core/session/queries.js";
+import { authKeys } from "../../auth/queries.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { issueKeys } from "../api/keys.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
@@ -77,7 +79,14 @@ function prefs(overrides: Partial<DisplayPrefs> = {}): DisplayPrefs {
 }
 
 function renderLayout(
-  options: { orderBy?: string; narrow?: boolean; totalCount?: number; issues?: IssueListItem[] } = {}
+  options: {
+    orderBy?: string;
+    narrow?: boolean;
+    totalCount?: number;
+    issues?: IssueListItem[];
+    projectRole?: number | null;
+    completedCycle?: boolean;
+  } = {}
 ) {
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div>`;
   vi.stubGlobal("matchMedia", () => ({
@@ -103,6 +112,13 @@ function renderLayout(
     },
   ]);
   queryClient.setQueryData(issueKeys.detail(SLUG, ISSUES[0]!.id), { ...issue(), id: ISSUES[0]!.id });
+  queryClient.setQueryData(sessionKeys.workspaces, [
+    { id: "ws-1", name: "Acme", slug: SLUG, logo_url: null, total_members: 3, role: 15 },
+  ]);
+  queryClient.setQueryData(
+    authKeys.projectRoles(SLUG),
+    options.projectRole === null ? {} : { [PROJECT]: options.projectRole ?? 15 }
+  );
   render(
     <QueryClientProvider client={queryClient}>
       <React.Suspense fallback={<p>suspended</p>}>
@@ -114,6 +130,7 @@ function renderLayout(
           totalCount={options.totalCount ?? (options.issues ?? ISSUES).length}
           prefs={prefs({ orderBy: options.orderBy ?? "sort_order" })}
           weekStart={0}
+          {...(options.completedCycle === undefined ? {} : { completedCycle: options.completedCycle })}
         />
       </React.Suspense>
     </QueryClientProvider>
@@ -217,5 +234,42 @@ describe("GanttLayout", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
     expect(document.querySelector(`[data-lane="${ISSUES[0]!.id}"]`)).not.toHaveAttribute("data-peeked");
+  });
+});
+
+describe("GanttLayout edit standing (ISS-050–055)", () => {
+  it("omits every edit affordance without standing", () => {
+    renderLayout({ projectRole: null });
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("gantt-resize-left")).toHaveLength(0);
+    expect(screen.queryAllByTestId("gantt-undated-lane")).toHaveLength(0);
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+  });
+
+  it("gives a project member the bars, add lane, quick-add and reorder", () => {
+    renderLayout({
+      projectRole: 15,
+      issues: [issue({ start_date: "2026-10-01", target_date: "2026-10-05" }), ...ISSUES.slice(1)],
+    });
+    expect(screen.getAllByTestId("gantt-resize-left")).toHaveLength(1);
+    expect(screen.getAllByTestId("gantt-undated-lane")).toHaveLength(2);
+    expect(screen.getByTestId("gantt-quick-add")).toBeInTheDocument();
+    expect(screen.getByTestId("gantt-sidebar")).toHaveAttribute("data-reorder", "true");
+  });
+
+  it("keeps a member's timeline read-only outside manual order", () => {
+    renderLayout({
+      projectRole: 15,
+      orderBy: "-created_at",
+      issues: [issue({ start_date: "2026-10-01", target_date: "2026-10-05" }), ...ISSUES.slice(1)],
+    });
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+    // Bars still move and lanes still plant outside manual order.
+    expect(screen.getAllByTestId("gantt-resize-left")).toHaveLength(1);
+  });
+
+  it("hides the quick-add in a completed cycle", () => {
+    renderLayout({ projectRole: 15, completedCycle: true });
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
   });
 });

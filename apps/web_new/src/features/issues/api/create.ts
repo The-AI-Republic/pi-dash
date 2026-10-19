@@ -36,7 +36,14 @@ export function useCreateWorkItem(workspaceSlug: string) {
     mutationFn: async (input) => {
       const tempId = createTempId();
       const listsPrefix = issueKeys.lists(workspaceSlug, input.projectId);
-      insertTempRow(queryClient, listsPrefix, tempIssueRow(tempId, input.payload.name));
+      insertTempRow(
+        queryClient,
+        listsPrefix,
+        tempIssueRow(tempId, input.payload.name, {
+          startDate: input.payload.start_date ?? null,
+          targetDate: input.payload.target_date ?? null,
+        })
+      );
       try {
         return await createIssue(getAppClient(), workspaceSlug, input.projectId, input.payload);
       } catch (error) {

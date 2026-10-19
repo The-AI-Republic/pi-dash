@@ -27,6 +27,8 @@ export interface GanttRow {
   /** Inclusive day count; null until both dates are set. */
   durationDays: number | null;
   stateId: string | null;
+  /** Manual rank behind sidebar reorder (ISS-050). */
+  sortOrder: number;
   archived: boolean;
   /**
    * An optimistic create that the server has not confirmed yet (ISS-006).
@@ -63,6 +65,7 @@ export function buildRows(issues: readonly IssueListItem[], projectIdentifier: s
       targetIso,
       durationDays: startIso !== null && targetIso !== null ? diffDays(targetIso, startIso) + 1 : null,
       stateId: issue.state_id,
+      sortOrder: issue.sort_order,
       archived: issue.archived_at !== null,
       unconfirmed: isTempRowId(issue.id),
     };

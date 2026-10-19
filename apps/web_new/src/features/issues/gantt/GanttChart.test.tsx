@@ -8,11 +8,12 @@
 // two-tier header, today's mark, the zoom switcher with its re-center,
 // edge extension in both directions, the fullscreen portal and the
 // loading/empty placeholders.
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
+import { formatDay } from "../dropdowns/calendar.js";
 import { GanttChart, SIDEBAR_WIDTH } from "./GanttChart.js";
 import { ROW_OVERSCAN, ROW_HEIGHT } from "./rows.js";
 import type { GanttRow } from "./rows.js";
@@ -37,6 +38,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     targetIso: null,
     durationDays: null,
     stateId: null,
+    sortOrder: 1,
     archived: false,
     unconfirmed: false,
     ...overrides,
@@ -454,5 +456,137 @@ describe("GanttChart loading and empty states", () => {
     renderChart();
     expect(screen.getByTestId("gantt-today-highlight")).toBeInTheDocument();
     expect(timelineWidth(WEEK_RANGE, "week")).toBeGreaterThan(0);
+  });
+});
+
+describe("GanttChart bar gestures (ISS-051–053)", () => {
+  function barOf(id: string): HTMLElement {
+    const bar = document.querySelector<HTMLElement>(`#gantt-block-${id}`);
+    if (bar === null) throw new Error(`no bar for ${id}`);
+    return bar;
+  }
+
+  it("moves a fully dated bar by whole days and commits on release", () => {
+    const onDatesChange = vi.fn();
+    renderChart({ canEdit: true, onDatesChange });
+    const bar = barOf("row-1");
+    fireEvent.mouseDown(bar, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 220 });
+    expect(bar).toHaveStyle({ left: `${6 * DAY_WIDTHS.week}px` });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).toHaveBeenCalledWith("row-1", {
+      startDate: addDays(WEEK_RANGE.startIso, 6),
+      endDate: addDays(WEEK_RANGE.startIso, 8),
+    });
+  });
+
+  it("resizes the left handle and keeps the target", () => {
+    const onDatesChange = vi.fn();
+    renderChart({ canEdit: true, onDatesChange });
+    fireEvent.mouseDown(screen.getAllByTestId("gantt-resize-left")[0]!, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 60 });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).toHaveBeenCalledWith("row-1", {
+      startDate: addDays(WEEK_RANGE.startIso, 2),
+      endDate: addDays(WEEK_RANGE.startIso, 5),
+    });
+  });
+
+  it("resizes the right handle and keeps the start", () => {
+    const onDatesChange = vi.fn();
+    renderChart({ canEdit: true, onDatesChange });
+    fireEvent.mouseDown(screen.getAllByTestId("gantt-resize-right")[0]!, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 180 });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).toHaveBeenCalledWith("row-1", {
+      startDate: addDays(WEEK_RANGE.startIso, 3),
+      endDate: addDays(WEEK_RANGE.startIso, 7),
+    });
+  });
+
+  it("does not commit when the gesture ends where it started", () => {
+    const onDatesChange = vi.fn();
+    renderChart({ canEdit: true, onDatesChange });
+    fireEvent.mouseDown(barOf("row-1"), { button: 0, clientX: 100 });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).not.toHaveBeenCalled();
+  });
+
+  it("cancels a gesture on Escape", () => {
+    const onDatesChange = vi.fn();
+    renderChart({ canEdit: true, onDatesChange });
+    fireEvent.mouseDown(barOf("row-1"), { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 220 });
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).not.toHaveBeenCalled();
+  });
+
+  it("renders no handles and never commits without edit standing", () => {
+    const onDatesChange = vi.fn();
+    renderChart({ onDatesChange });
+    expect(screen.queryAllByTestId("gantt-resize-left")).toHaveLength(0);
+    fireEvent.mouseDown(barOf("row-1"), { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 220 });
+    fireEvent.mouseUp(document);
+    expect(onDatesChange).not.toHaveBeenCalled();
+  });
+
+  it("still opens a bar that was clicked rather than dragged", () => {
+    const h = renderChart({ canEdit: true });
+    fireEvent.click(barOf("row-1"));
+    expect(h.onOpenRow).toHaveBeenCalledWith(expect.objectContaining({ id: "row-1" }));
+  });
+});
+
+describe("GanttChart add-block (ISS-054)", () => {
+  function undatedLane(): HTMLElement {
+    const lane = screen.getAllByTestId("gantt-undated-lane")[0];
+    if (lane === undefined) throw new Error("no undated lane");
+    lane.getBoundingClientRect = () => ({ left: 0, top: 0, width: 800, height: 44, right: 800, bottom: 44 }) as DOMRect;
+    return lane;
+  }
+
+  it("follows the pointer with a dated add control and plants one day", () => {
+    const onPlantBlock = vi.fn();
+    renderChart({ canEdit: true, onPlantBlock });
+    const lane = undatedLane();
+    fireEvent.mouseMove(lane, { clientX: 2 * DAY_WIDTHS.week });
+    const add = screen.getByTestId("gantt-add-block");
+    expect(add).toHaveAttribute("title", expect.stringMatching(/\d{4}|[A-Z][a-z]+ \d/));
+    fireEvent.click(add);
+    expect(onPlantBlock).toHaveBeenCalledWith("row-2", {
+      startDate: addDays(WEEK_RANGE.startIso, 2),
+      endDate: addDays(WEEK_RANGE.startIso, 3),
+    });
+  });
+
+  it("hides the add control when the pointer leaves or standing is gone", () => {
+    renderChart({ canEdit: true, onPlantBlock: vi.fn() });
+    const lane = undatedLane();
+    fireEvent.mouseMove(lane, { clientX: 80 });
+    expect(screen.getByTestId("gantt-add-block")).toBeInTheDocument();
+    fireEvent.mouseLeave(lane);
+    expect(screen.queryByTestId("gantt-add-block")).not.toBeInTheDocument();
+    cleanup();
+    renderChart({ onPlantBlock: vi.fn() });
+    expect(screen.queryAllByTestId("gantt-undated-lane")).toHaveLength(0);
+    expect(screen.getAllByText("No dates").length).toBeGreaterThan(0);
+  });
+});
+
+describe("GanttChart resize preview (ISS-052/053)", () => {
+  it("shows the handle date on hover and follows a drag", () => {
+    renderChart({ canEdit: true, onDatesChange: vi.fn() });
+    expect(screen.queryByTestId("gantt-resize-preview")).not.toBeInTheDocument();
+    const handle = screen.getAllByTestId("gantt-resize-left")[0]!;
+    fireEvent.mouseEnter(handle);
+    expect(screen.getByTestId("gantt-resize-preview").textContent).toBe(formatDay(addDays(WEEK_RANGE.startIso, 3)));
+    fireEvent.mouseLeave(handle);
+    expect(screen.queryByTestId("gantt-resize-preview")).not.toBeInTheDocument();
+    fireEvent.mouseDown(handle, { button: 0, clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 140 });
+    expect(screen.getByTestId("gantt-resize-preview").textContent?.trim()).not.toBe("");
+    fireEvent.mouseUp(document);
   });
 });
