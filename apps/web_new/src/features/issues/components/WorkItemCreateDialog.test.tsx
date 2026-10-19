@@ -24,6 +24,12 @@ import { ISSUE_DEDUPE_FLAG } from "../create/dedupe.js";
 import { loadWorkItemDraft } from "../lib/createDraft.js";
 import { WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
+// These cases drive the whole strip through real menus, calendars and a
+// debounced editor; each interaction is a full popover round trip. Under a
+// loaded CI worker the full-property case needs well over the 5 s default,
+// so give the file headroom without relaxing any assertion.
+vi.setConfig({ testTimeout: 30_000 });
+
 // The real editor is a lazy tiptap surface with its own suite. The dialog
 // only composes it, so a textarea stands in and reports HTML through the
 // same change callback; the sanitizer helpers stay real.
