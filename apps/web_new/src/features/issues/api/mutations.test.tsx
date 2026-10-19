@@ -187,6 +187,56 @@ describe("issue patch updaters", () => {
     expect(applyIssuePatchLite(undefined, ISSUE, { name: "New" })).toBeUndefined();
   });
 
+  it("paints every writable row field, so a property edit reads back immediately", () => {
+    const painted = applyIssuePatchDetail(issueRow(), {
+      state_id: "623e4567-e89b-12d3-a456-426614174005",
+      priority: "low",
+      assignee_ids: ["323e4567-e89b-12d3-a456-426614174002"],
+      label_ids: ["423e4567-e89b-12d3-a456-426614174003"],
+      estimate_point: null,
+      start_date: "2026-01-01",
+      target_date: null,
+      parent_id: null,
+      sort_order: 7,
+    });
+    expect(painted).toMatchObject({
+      state_id: "623e4567-e89b-12d3-a456-426614174005",
+      priority: "low",
+      assignee_ids: ["323e4567-e89b-12d3-a456-426614174002"],
+      label_ids: ["423e4567-e89b-12d3-a456-426614174003"],
+      estimate_point: null,
+      start_date: "2026-01-01",
+      target_date: null,
+      parent_id: null,
+      sort_order: 7,
+    });
+  });
+
+  it("leaves write-only and execution-target fields out of the detail paint", () => {
+    const painted = applyIssuePatchDetail(issueRow({ assigned_pod_id: null, agent_executor: "local_runner" }), {
+      git_work_branch: "pi-dash/wip",
+      assigned_pod_id: "923e4567-e89b-12d3-a456-426614174009",
+      agent_executor: "cloud_agent",
+    });
+    expect(painted?.agent_executor).toBe("local_runner");
+    expect(painted?.assigned_pod_id).toBeNull();
+    expect(painted).not.toHaveProperty("git_work_branch");
+  });
+
+  it("paints property fields on the matching list row", () => {
+    const painted = applyIssuePatchList(listPage(), ISSUE, {
+      state_id: "623e4567-e89b-12d3-a456-426614174005",
+      priority: "urgent",
+      assignee_ids: ["323e4567-e89b-12d3-a456-426614174002"],
+    });
+    expect(painted?.results[0]).toMatchObject({
+      state_id: "623e4567-e89b-12d3-a456-426614174005",
+      priority: "urgent",
+      assignee_ids: ["323e4567-e89b-12d3-a456-426614174002"],
+    });
+    expect(applyIssuePatchList(listPage(), OTHER, { priority: "urgent" })).toEqual(listPage());
+  });
+
   it("renames the matching list row only", () => {
     const renamed = applyIssuePatchList(listPage(), ISSUE, { name: "New" });
     expect(renamed?.results[0]?.name).toBe("New");

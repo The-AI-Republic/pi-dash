@@ -36,12 +36,39 @@ export function saveFailureDetail(error: unknown): string {
   return ISSUE_SAVE_FALLBACK;
 }
 
+/**
+ * Row fields a property patch may paint optimistically. `git_work_branch`
+ * stays out (write-only), and every field named here is read back by the
+ * detail and list projections, so a painted value matches the server row.
+ */
+const PATCHED_ROW_FIELDS = [
+  "name",
+  "state_id",
+  "priority",
+  "assignee_ids",
+  "label_ids",
+  "estimate_point",
+  "start_date",
+  "target_date",
+  "parent_id",
+  "sort_order",
+] as const satisfies readonly (keyof IssuePatch)[];
+
+function pickRowPatch(patch: IssuePatch): Record<string, unknown> {
+  const picked: Record<string, unknown> = {};
+  for (const field of PATCHED_ROW_FIELDS) {
+    if (patch[field] !== undefined) picked[field] = patch[field];
+  }
+  return picked;
+}
+
 /** Next detail cache with the patch painted on. */
 export function applyIssuePatchDetail(previous: Issue | undefined, patch: IssuePatch): Issue | undefined {
   if (previous === undefined) return undefined;
+  const painted = pickRowPatch(patch);
   return {
     ...previous,
-    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...painted,
     ...(patch.description_html !== undefined ? { description_html: patch.description_html } : {}),
   };
 }
@@ -62,17 +89,18 @@ export function applyIssuePatchLite(
   };
 }
 
-/** Next list page with the renamed row painted on. */
+/** Next list page with the patched row fields painted on. */
 export function applyIssuePatchList(
   previous: IssueListResponse | undefined,
   issueId: string,
   patch: IssuePatch
 ): IssueListResponse | undefined {
-  const name = patch.name;
-  if (previous === undefined || name === undefined) return previous;
+  if (previous === undefined) return previous;
+  const painted = pickRowPatch(patch);
+  if (Object.keys(painted).length === 0) return previous;
   return {
     ...previous,
-    results: previous.results.map((row) => (row.id === issueId ? { ...row, name } : row)),
+    results: previous.results.map((row) => (row.id === issueId ? { ...row, ...painted } : row)),
   };
 }
 

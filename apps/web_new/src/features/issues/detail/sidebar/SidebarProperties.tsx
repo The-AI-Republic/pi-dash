@@ -40,14 +40,18 @@ export const PROPERTY_SAVE_FAILED_TITLE = "Couldn't update the work item";
 const ROW_VARIANT: ButtonVariant = "ghost";
 
 /**
- * The issue's current execution target: a non-pod executor pins that
- * agent; otherwise the pinned pod is the target, and no pin means the
- * project default (no selection row until the server pins one).
+ * The issue's current execution target. The per-issue override wins;
+ * a null override inherits the project's default executor, exactly as
+ * the server resolves it (`issue.agent_executor or
+ * project.default_agent_executor`), so the row states where a run will
+ * actually go. An agent target renders as that agent; a local target
+ * renders the pinned pod, and no pin means the project's default pod.
  */
 export function selectExecutionSelection(
-  issue: Pick<Issue, "agent_executor" | "assigned_pod_id">
+  issue: Pick<Issue, "agent_executor" | "assigned_pod_id">,
+  project: Pick<SidebarProject, "default_agent_executor">
 ): ExecutionSelection | null {
-  const executor = issue.agent_executor;
+  const executor = issue.agent_executor ?? project.default_agent_executor;
   if (executor === "cloud_agent" || executor === "managed_runner") {
     return { type: "agent", executor };
   }
@@ -85,7 +89,7 @@ export function SidebarProperties({
     enabled: issue.created_by !== null || issue.assignee_ids.length > 0,
   });
   const creator = selectCreator(directory.data, issue.created_by);
-  const selection = selectExecutionSelection(issue);
+  const selection = selectExecutionSelection(issue, project);
 
   return (
     <div className="flex flex-col gap-(--space-1)">

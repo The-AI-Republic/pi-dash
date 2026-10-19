@@ -18,8 +18,11 @@ import { SidebarProperties, SidebarPropertiesSkeleton } from "./SidebarPropertie
 
 export const PROPERTIES_LOAD_FAILED = "Couldn't load the properties.";
 
-/** The fields the sidebar reads; both the detail and the list project rows answer them. */
-export type SidebarProject = Pick<ProjectDetail, "agent_executor_options">;
+/**
+ * The fields the sidebar reads: the offered execution targets and the
+ * default executor an issue with no override inherits.
+ */
+export type SidebarProject = Pick<ProjectDetail, "agent_executor_options" | "default_agent_executor">;
 
 export interface IssuePropertiesSidebarProps {
   workspaceSlug: string;

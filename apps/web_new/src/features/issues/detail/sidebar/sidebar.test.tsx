@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { Issue, ProjectDetail, TransportInit } from "@pidash/api-client";
 import * as React from "react";
@@ -16,6 +16,7 @@ import { notifyError } from "../../../../shared/shell/index.js";
 import { pickerStatesQueryOptions } from "../../../../shared/pickers/reference.js";
 import { workspaceMembersQueryOptions } from "../../../projects/index.js";
 import { issueKeys } from "../../api/keys.js";
+import { issueDetailQueryOptions } from "../../api/queries.js";
 import { CreatedByRow } from "./CreatedByRow.js";
 import { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, selectCreator } from "./creator.js";
 import { IssuePropertiesSidebar, PROPERTIES_LOAD_FAILED } from "./IssuePropertiesSidebar.js";
@@ -234,16 +235,25 @@ interface HarnessOptions {
   statesStatus?: number;
   podsStatus?: number;
   directory?: unknown;
+  /** Keeps the issue PATCH open until the returned release runs. */
+  holdPatch?: boolean;
 }
 
 function harness(options: HarnessOptions = {}) {
   const writes: Array<{ url: string; body: unknown }> = [];
   const reads: string[] = [];
+  let releasePatch: (() => void) | null = null;
+  const patchGate = options.holdPatch
+    ? new Promise<void>((resolve) => {
+        releasePatch = resolve;
+      })
+    : null;
   const conversation = async (url: string, init: TransportInit) => {
     if (init.method === "GET") reads.push(url);
     if (url.includes(`/issues/${OTHER_ISSUE}/`)) throw new Error(`unexpected other issue ${url}`);
     if (init.method === "PATCH" && url.includes(`/issues/${ISSUE}/`)) {
       writes.push({ url, body: JSON.parse(init.body ?? "{}") });
+      if (patchGate !== null) await patchGate;
       const status = options.patchStatus ?? 204;
       return {
         status,
@@ -317,7 +327,7 @@ function harness(options: HarnessOptions = {}) {
   setSessionClient(client);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["session", "me"], ME_PAYLOAD);
-  return { client, queryClient, writes, reads };
+  return { client, queryClient, writes, reads, releasePatch: () => releasePatch?.() };
 }
 
 function wrap(node: React.ReactElement, queryClient: QueryClient) {
@@ -396,21 +406,148 @@ describe("SidebarRow", () => {
 });
 
 describe("selectExecutionSelection", () => {
+  const localProject = { default_agent_executor: "local_runner" };
+
   it("pins cloud and managed agents over the pod", () => {
-    expect(selectExecutionSelection(issueFixture({ agent_executor: "cloud_agent" }))).toEqual({
+    expect(selectExecutionSelection(issueFixture({ agent_executor: "cloud_agent" }), localProject)).toEqual({
       type: "agent",
       executor: "cloud_agent",
     });
-    expect(selectExecutionSelection(issueFixture({ agent_executor: "managed_runner" }))).toEqual({
+    expect(selectExecutionSelection(issueFixture({ agent_executor: "managed_runner" }), localProject)).toEqual({
       type: "agent",
       executor: "managed_runner",
     });
   });
 
   it("reads the pod for the local executor and nothing for an unpinned local item", () => {
-    expect(selectExecutionSelection(issueFixture())).toEqual({ type: "pod", podId: POD_A });
-    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: null }))).toBeNull();
-    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: undefined }))).toBeNull();
+    expect(selectExecutionSelection(issueFixture(), localProject)).toEqual({ type: "pod", podId: POD_A });
+    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: null }), localProject)).toBeNull();
+    expect(selectExecutionSelection(issueFixture({ assigned_pod_id: undefined }), localProject)).toBeNull();
+  });
+
+  it("inherits a cloud project default when the issue pins no executor", () => {
+    expect(
+      selectExecutionSelection(issueFixture({ agent_executor: null }), { default_agent_executor: "cloud_agent" })
+    ).toEqual({ type: "agent", executor: "cloud_agent" });
+  });
+
+  it("inherits a managed project default when the issue pins no executor", () => {
+    expect(
+      selectExecutionSelection(issueFixture({ agent_executor: null, assigned_pod_id: null }), {
+        default_agent_executor: "managed_runner",
+      })
+    ).toEqual({ type: "agent", executor: "managed_runner" });
+  });
+
+  it("keeps an explicit issue override over the project default", () => {
+    expect(
+      selectExecutionSelection(issueFixture({ agent_executor: "local_runner", assigned_pod_id: POD_B }), {
+        default_agent_executor: "cloud_agent",
+      })
+    ).toEqual({ type: "pod", podId: POD_B });
+  });
+});
+
+/**
+ * The rows as the detail route renders them: the issue comes from the
+ * detail cache through the same query the page uses, so an optimistic
+ * paint is visible exactly as a reader would see it while the PATCH is
+ * still in flight.
+ */
+function CachedSidebar({
+  client,
+  editable = true,
+  project = projectFixture(),
+}: {
+  client: ReturnType<typeof createAppClient>;
+  editable?: boolean;
+  project?: ProjectDetail;
+}): React.ReactElement {
+  const issue = useQuery({ ...issueDetailQueryOptions(client, SLUG, PROJECT, ISSUE), enabled: true });
+  if (issue.data === undefined) return <p>loading issue</p>;
+  return (
+    <SidebarProperties
+      workspaceSlug={SLUG}
+      projectId={PROJECT}
+      issue={issue.data}
+      project={project}
+      editable={editable}
+    />
+  );
+}
+
+function seedDetail(queryClient: QueryClient, overrides: Partial<Issue> = {}): void {
+  queryClient.setQueryData(issueKeys.detail(SLUG, ISSUE), issueFixture(overrides));
+}
+
+describe("SidebarProperties immediate updates", () => {
+  it("moves the state row before the PATCH settles", async () => {
+    const { client, queryClient, releasePatch, writes } = harness({ holdPatch: true });
+    seedDetail(queryClient);
+    wrap(<CachedSidebar client={client} />, queryClient);
+    // States load lazily on open, so the trigger reads the picked name
+    // once the list has answered; the row itself reads the issue cache.
+    fireEvent.click(within(row("State")).getByRole("button"));
+    await waitFor(() => expect(within(row("State")).getByText("Done")).toBeInTheDocument());
+    fireEvent.click(await screen.findByRole("option", { name: "In progress" }));
+    await waitFor(() => expect(within(row("State")).getByText("In progress")).toBeInTheDocument());
+    expect(queryClient.getQueryData<Issue>(issueKeys.detail(SLUG, ISSUE))?.state_id).toBe(STARTED_STATE);
+    expect(writes[0]?.body).toEqual({ state_id: STARTED_STATE });
+    releasePatch();
+    await waitFor(() => expect(within(row("State")).getByText("In progress")).toBeInTheDocument());
+  });
+
+  it("names the assignee before the PATCH settles", async () => {
+    const { client, queryClient, releasePatch, writes } = harness({ holdPatch: true });
+    seedDetail(queryClient);
+    wrap(<CachedSidebar client={client} />, queryClient);
+    expect(within(row("Assignees")).getByRole("button")).toHaveTextContent("Add assignees");
+    fireEvent.click(within(row("Assignees")).getByRole("button"));
+    fireEvent.click(await screen.findByRole("option", { name: "Ada L" }));
+    await waitFor(() =>
+      expect(queryClient.getQueryData<Issue>(issueKeys.detail(SLUG, ISSUE))?.assignee_ids).toEqual([ADA])
+    );
+    expect(row("Assignees")).toHaveTextContent("Ada L");
+    expect(writes).toHaveLength(1);
+    releasePatch();
+  });
+
+  it("shows the picked priority before the PATCH settles", async () => {
+    const { client, queryClient, releasePatch } = harness({ holdPatch: true });
+    seedDetail(queryClient);
+    wrap(<CachedSidebar client={client} />, queryClient);
+    expect(within(row("Priority")).getByRole("button")).toHaveTextContent("High");
+    fireEvent.click(within(row("Priority")).getByRole("button"));
+    fireEvent.click(await screen.findByRole("option", { name: "Low" }));
+    await waitFor(() => expect(within(row("Priority")).getByRole("button")).toHaveTextContent("Low"));
+    releasePatch();
+  });
+
+  it("rolls all three rows back when the PATCH fails", async () => {
+    for (const [label, option, restore] of [
+      ["State", "In progress", "Done"],
+      ["Priority", "Low", "High"],
+    ] as const) {
+      const { client, queryClient } = harness({ patchStatus: 500 });
+      seedDetail(queryClient);
+      const { unmount } = wrap(<CachedSidebar client={client} />, queryClient);
+      fireEvent.click(within(row(label)).getByRole("button"));
+      fireEvent.click(await screen.findByRole("option", { name: option }));
+      await waitFor(() => expect(notifyError).toHaveBeenCalled());
+      expect(within(row(label)).getByRole("button")).toHaveTextContent(restore);
+      unmount();
+      vi.clearAllMocks();
+    }
+  });
+
+  it("rolls the assignee row back when the PATCH fails", async () => {
+    const { client, queryClient } = harness({ patchStatus: 500 });
+    seedDetail(queryClient);
+    wrap(<CachedSidebar client={client} />, queryClient);
+    fireEvent.click(within(row("Assignees")).getByRole("button"));
+    fireEvent.click(await screen.findByRole("option", { name: "Ada L" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    await waitFor(() => expect(within(row("Assignees")).getByText("Add assignees")).toBeInTheDocument());
   });
 });
 
@@ -599,6 +736,48 @@ describe("SidebarProperties", () => {
     fireEvent.click(await screen.findByRole("option", { name: "Low" }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]!.body).toEqual({ priority: "low" });
+  });
+
+  it("shows the inherited cloud target for an issue with no executor override", async () => {
+    const project = projectFixture({ default_agent_executor: "cloud_agent" });
+    const { queryClient } = harness({ project });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ agent_executor: null })}
+        project={project}
+        editable
+      />,
+      queryClient
+    );
+    fireEvent.click(within(row("Runs on")).getByRole("button"));
+    await screen.findByRole("option", { name: /Pi Dash Cloud Agent/ });
+    // The trigger names the inherited agent, not the pod the issue
+    // happens to carry.
+    expect(within(row("Runs on")).getByText("Pi Dash Cloud Agent")).toBeInTheDocument();
+    expect(within(row("Runs on")).queryByText("WEB_pod_a")).not.toBeInTheDocument();
+  });
+
+  it("shows the inherited managed target for an issue with no executor override", async () => {
+    const project = projectFixture({
+      agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
+      default_agent_executor: "managed_runner",
+    });
+    const { queryClient } = harness({ project });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ agent_executor: null, assigned_pod_id: null })}
+        project={project}
+        editable
+      />,
+      queryClient
+    );
+    fireEvent.click(within(row("Pod")).getByRole("button"));
+    await screen.findByRole("option", { name: /Pi Dash Agent/ });
+    expect(within(row("Pod")).getByText("Pi Dash Agent (desktop)")).toBeInTheDocument();
   });
 
   it("patches a pod pick to the pod plus the local executor", async () => {
