@@ -12,6 +12,7 @@ const harness = vi.hoisted(() => ({
   pages: {} as Record<string, unknown>,
   me: undefined as Record<string, unknown> | undefined,
   scheme: "light" as string,
+  customDark: false,
 }));
 
 vi.mock("../../../../core/session/index.js", async (importOriginal) => ({
@@ -21,7 +22,7 @@ vi.mock("../../../../core/session/index.js", async (importOriginal) => ({
 
 vi.mock("../../../../core/theme/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../../core/theme/index.js")>()),
-  useResolvedScheme: () => ({ scheme: harness.scheme, customDark: false }),
+  useResolvedScheme: () => ({ scheme: harness.scheme, customDark: harness.customDark }),
 }));
 
 vi.mock("../api.js", async (importOriginal) => ({
@@ -145,9 +146,9 @@ describe("OwnActivityTab", () => {
     expect(image).toHaveAttribute("src", "/empty-state/activity/activity-light.svg");
   });
 
-  it("swaps to the dark illustration on a dark or custom scheme", () => {
+  it("swaps to the dark illustration on a dark scheme", () => {
     ready({ data: { pages: [{ results: [] }] } });
-    harness.scheme = "custom";
+    harness.scheme = "dark";
     const { unmount } = render(<OwnActivityTab now={NOW} />);
     expect(screen.getByTitle(ACTIVITY_EMPTY_TITLE)).toHaveAttribute("src", "/empty-state/activity/activity-dark.svg");
     unmount();
@@ -156,8 +157,22 @@ describe("OwnActivityTab", () => {
     expect(screen.getByTitle(ACTIVITY_EMPTY_TITLE)).toHaveAttribute("src", "/empty-state/activity/activity-dark.svg");
   });
 
+  it("follows the custom palette's base for the illustration", () => {
+    ready({ data: { pages: [{ results: [] }] } });
+    harness.scheme = "custom";
+    harness.customDark = false;
+    const { unmount } = render(<OwnActivityTab now={NOW} />);
+    // A custom theme on a light base keeps the light art.
+    expect(screen.getByTitle(ACTIVITY_EMPTY_TITLE)).toHaveAttribute("src", "/empty-state/activity/activity-light.svg");
+    unmount();
+    harness.customDark = true;
+    render(<OwnActivityTab now={NOW} />);
+    expect(screen.getByTitle(ACTIVITY_EMPTY_TITLE)).toHaveAttribute("src", "/empty-state/activity/activity-dark.svg");
+  });
+
   it("keeps the light illustration for either light scheme", () => {
     ready({ data: { pages: [{ results: [] }] } });
+    harness.customDark = false;
     harness.scheme = "light-contrast";
     render(<OwnActivityTab now={NOW} />);
     expect(screen.getByTitle(ACTIVITY_EMPTY_TITLE)).toHaveAttribute("src", "/empty-state/activity/activity-light.svg");

@@ -94,13 +94,13 @@ beforeEach(() => {
     resolved: "dark",
     custom: undefined,
     isSaving: false,
-    setTheme: vi.fn(),
+    setTheme: vi.fn(async () => true),
   };
   harness.locale = {
     tag: "en",
     supported: [{ tag: "en", label: "English" }],
     isSaving: false,
-    setLanguage: vi.fn(),
+    setLanguage: vi.fn(async () => true),
   };
   harness.profile = PROFILE;
   harness.me = ME;
@@ -142,17 +142,15 @@ describe("PreferencesTab", () => {
     expect(harness.theme.setTheme).toHaveBeenCalledTimes(1);
   });
 
-  it("re-applies the saved palette when custom is picked", async () => {
+  it("picks custom through the engine, which re-applies the saved palette", async () => {
     harness.theme.value = "light";
     harness.theme.custom = { primary: "#102030", background: "#405060", darkPalette: true };
     render(<PreferencesTab />);
     fireEvent.click(trigger("Theme"));
     fireEvent.click(await screen.findByRole("option", { name: "Custom theme" }));
-    expect(harness.theme.setTheme).toHaveBeenCalledWith("custom", {
-      primary: "#102030",
-      background: "#405060",
-      darkPalette: true,
-    });
+    // The engine carries the saved colors; the tab never sends a palette
+    // of its own, so a member without saved colors stores only the name.
+    expect(harness.theme.setTheme).toHaveBeenCalledWith("custom");
   });
 
   it("starts the designer from the profile bag when the engine has no palette", () => {
@@ -164,12 +162,15 @@ describe("PreferencesTab", () => {
     expect(screen.getByLabelText("Background color")).toHaveValue("#ddeeff");
   });
 
-  it("starts the designer from the defaults for a member who never customized", () => {
+  it("starts the designer from the defaults without persisting them", () => {
     harness.theme.value = "custom";
     harness.theme.custom = undefined;
     render(<PreferencesTab />);
+    // The fallback pair is a starting point for the form, not a save:
+    // opening the tab must leave the profile bag alone.
     expect(screen.getByLabelText("Primary color")).toHaveValue("#5e6ad2");
     expect(screen.getByLabelText("Background color")).toHaveValue("#ffffff");
+    expect(harness.theme.setTheme).not.toHaveBeenCalled();
   });
 
   it("previews a valid pair and applies it to the app on request", () => {
@@ -187,9 +188,16 @@ describe("PreferencesTab", () => {
     });
   });
 
-  it("saves the custom palette, confirms and reloads", () => {
+  it("saves the custom palette, then confirms and reloads once the write lands", async () => {
     harness.theme.value = "custom";
     harness.theme.custom = { primary: "#102030", background: "#405060", darkPalette: true };
+    let settle: (saved: boolean) => void = () => undefined;
+    harness.theme.setTheme.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settle = resolve;
+        })
+    );
     render(<PreferencesTab />);
     fireEvent.change(screen.getByLabelText("Primary color"), { target: { value: "#AABBCC" } });
     fireEvent.click(screen.getByRole("button", { name: "Set theme" }));
@@ -198,8 +206,23 @@ describe("PreferencesTab", () => {
       background: "#405060",
       darkPalette: true,
     });
+    // The reload would abort the profile write, so nothing happens yet.
+    expect(harness.notifySuccess).not.toHaveBeenCalled();
+    expect(harness.reload).not.toHaveBeenCalled();
+    settle(true);
+    await waitFor(() => expect(harness.reload).toHaveBeenCalledTimes(1));
     expect(harness.notifySuccess).toHaveBeenCalledWith(CUSTOM_SAVED_TITLE, CUSTOM_SAVED_MESSAGE);
-    expect(harness.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the page on a rejected custom save", async () => {
+    harness.theme.value = "custom";
+    harness.theme.custom = { primary: "#102030", background: "#405060", darkPalette: true };
+    harness.theme.setTheme.mockResolvedValue(false);
+    render(<PreferencesTab />);
+    fireEvent.click(screen.getByRole("button", { name: "Set theme" }));
+    await waitFor(() => expect(harness.theme.setTheme).toHaveBeenCalled());
+    expect(harness.notifySuccess).not.toHaveBeenCalled();
+    expect(harness.reload).not.toHaveBeenCalled();
   });
 
   it("disables the theme row while a write is in flight", () => {
@@ -210,18 +233,42 @@ describe("PreferencesTab", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
-  it("switches language and confirms", () => {
+  it("switches language and confirms once the write lands", async () => {
     harness.locale.tag = "fr";
     harness.locale.supported = [
       { tag: "en", label: "English" },
       { tag: "fr", label: "Français" },
     ];
+    let settle: (saved: boolean) => void = () => undefined;
+    harness.locale.setLanguage.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          settle = resolve;
+        })
+    );
     render(<PreferencesTab />);
     expect(trigger("Language")).toHaveTextContent("Français");
     fireEvent.click(trigger("Language"));
     fireEvent.click(screen.getByRole("option", { name: "English" }));
     expect(harness.locale.setLanguage).toHaveBeenCalledWith("en");
-    expect(harness.notifySuccess).toHaveBeenCalledWith(LANGUAGE_SAVED_TITLE);
+    expect(harness.notifySuccess).not.toHaveBeenCalled();
+    settle(true);
+    await waitFor(() => expect(harness.notifySuccess).toHaveBeenCalledWith(LANGUAGE_SAVED_TITLE));
+  });
+
+  it("leaves the error report alone when the language write is refused", async () => {
+    harness.locale.tag = "fr";
+    harness.locale.supported = [
+      { tag: "en", label: "English" },
+      { tag: "fr", label: "Français" },
+    ];
+    harness.locale.setLanguage.mockResolvedValue(false);
+    render(<PreferencesTab />);
+    fireEvent.click(trigger("Language"));
+    fireEvent.click(screen.getByRole("option", { name: "English" }));
+    await waitFor(() => expect(harness.locale.setLanguage).toHaveBeenCalledWith("en"));
+    expect(harness.notifySuccess).not.toHaveBeenCalled();
+    expect(harness.notifyError).not.toHaveBeenCalled();
   });
 
   it("shows the raw tag when this build offers no label", () => {

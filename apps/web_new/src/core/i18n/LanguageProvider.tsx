@@ -34,10 +34,11 @@ export interface LocaleContextValue {
   isSaving: boolean;
   /**
    * Switch language: stamps the document and stores locally at once,
-   * then persists to the profile. Unknown tags and failed writes
-   * toast and keep the current tag.
+   * then persists to the profile. Unknown tags and failed writes toast
+   * and keep the current tag. Resolves true once the write lands and
+   * false when it is rejected, so a caller can confirm only on success.
    */
-  setLanguage: (tag: string) => void;
+  setLanguage: (tag: string) => Promise<boolean>;
 }
 
 const LocaleContext = React.createContext<LocaleContextValue | null>(null);
@@ -72,15 +73,18 @@ export function LanguageProvider({ children, notifyError }: LanguageProviderProp
   });
 
   const setLanguage = React.useCallback(
-    (next: string) => {
+    (next: string): Promise<boolean> => {
       if (!isSupportedLocale(next)) {
         notifyError("Couldn't update the language", `“${next}” is not available in this build.`);
-        return;
+        return Promise.resolve(false);
       }
       setTag(next);
       applyDocumentLanguage(next);
       writeStoredLanguage(next);
-      save.mutate(next);
+      return save.mutateAsync(next).then(
+        () => true,
+        () => false
+      );
     },
     [save, notifyError]
   );

@@ -47,10 +47,13 @@ export interface ThemeContextValue {
   isSaving: boolean;
   /**
    * Choose a theme: applies and stores locally at once, then persists
-   * to the profile. A failed write toasts and restores the last accepted
-   * choice together with the document theme.
+   * to the profile. Resolves true once the write lands and false when
+   * it fails (the toaster reports the failure and the last accepted
+   * choice comes back with the document theme). Callers that must act
+   * on the stored result, such as reloading after a custom save, await
+   * this instead of racing the write.
    */
-  setTheme: (value: ThemeValue, custom?: CustomPalette | undefined) => void;
+  setTheme: (value: ThemeValue, custom?: CustomPalette | undefined) => Promise<boolean>;
 }
 
 const ThemeContext = React.createContext<ThemeContextValue | null>(null);
@@ -157,16 +160,20 @@ export function ThemeProvider({ children, notifyError }: ThemeProviderProps): Re
 
   const cachedBag = profileQuery.data?.theme;
   const setTheme = React.useCallback(
-    (value: ThemeValue, custom: CustomPalette | undefined = undefined) => {
-      // Picking custom without new colors re-applies the saved palette.
+    (value: ThemeValue, custom: CustomPalette | undefined = undefined): Promise<boolean> => {
+      // Picking custom without new colors re-applies the saved palette;
+      // a member with no saved palette keeps the pick bare, so the server
+      // bag gains only the theme name until the designer is saved.
       const saved = value === "custom" ? (custom ?? readThemeBag(cachedBag).custom) : undefined;
       const next: Choice = { value, custom: saved };
       const scheme = applyState(next);
-      save.mutate(buildThemeBag(value, saved, cachedBag ?? {}), {
-        onSuccess: () => {
+      return save
+        .mutateAsync(buildThemeBag(value, saved, cachedBag ?? {}))
+        .then(() => {
           committed.current = { choice: next, scheme };
-        },
-        onError: () => {
+          return true;
+        })
+        .catch(() => {
           // The toaster already reported this write; here the failed pick
           // is undone completely so the app keeps matching the switcher
           // (NEWFRONT-434 target).
@@ -175,8 +182,8 @@ export function ThemeProvider({ children, notifyError }: ThemeProviderProps): Re
           writeStoredTheme(previous.choice.value);
           setChoice(previous.choice);
           setApplied({ scheme: previous.scheme, custom: previous.choice.custom });
-        },
-      });
+          return false;
+        });
     },
     [save, cachedBag, applyState]
   );

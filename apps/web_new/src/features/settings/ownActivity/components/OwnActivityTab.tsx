@@ -25,9 +25,13 @@ export const ACTIVITY_LOAD_MORE_LABEL = "Load more";
 export const ACTIVITY_EMPTY_TITLE = "No activity yet";
 export const ACTIVITY_EMPTY_DESCRIPTION = "Once you create, comment on or move work items, your changes show up here.";
 
-/** Art scheme: any dark document mark selects the dark illustration. */
-export function activityArtScheme(scheme: string): "light" | "dark" {
-  return scheme === "light" || scheme === "light-contrast" ? "light" : "dark";
+/**
+ * Art scheme: the illustration follows the resolved base, so a custom
+ * theme paints the dark art only when its palette is the dark base.
+ */
+export function activityArtScheme(scheme: string, customDark = false): "light" | "dark" {
+  if (scheme === "custom") return customDark ? "dark" : "light";
+  return scheme === "dark" || scheme === "dark-contrast" ? "dark" : "light";
 }
 
 export interface OwnActivityTabProps {
@@ -38,7 +42,7 @@ export interface OwnActivityTabProps {
 export function OwnActivityTab({ now = new Date() }: OwnActivityTabProps): React.ReactElement {
   const pages = useOwnActivityPages();
   const me = useMe();
-  const { scheme } = useResolvedScheme();
+  const { scheme, customDark } = useResolvedScheme();
   const rows = React.useMemo(() => ownActivityRows(pages.data?.pages ?? []), [pages.data]);
   const timezone = me.data?.user_timezone;
 
@@ -63,7 +67,7 @@ export function OwnActivityTab({ now = new Date() }: OwnActivityTabProps): React
         <EmptyState
           variant="illustrated"
           art={{ category: "activity", type: "activity" }}
-          scheme={activityArtScheme(scheme)}
+          scheme={activityArtScheme(scheme, customDark)}
           title={ACTIVITY_EMPTY_TITLE}
           description={ACTIVITY_EMPTY_DESCRIPTION}
         />

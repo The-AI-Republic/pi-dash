@@ -85,7 +85,7 @@ export function themePickerPage(): PalettePage {
             title: choice.label,
             run: () => {
               closePalette();
-              setTheme(choice.value);
+              void setTheme(choice.value);
             },
           })),
           query
@@ -169,7 +169,7 @@ export function languagePickerPage(): PalettePage {
             title: choice.label,
             run: () => {
               closePalette();
-              setLanguage(choice.tag);
+              void setLanguage(choice.tag);
             },
           })),
           query

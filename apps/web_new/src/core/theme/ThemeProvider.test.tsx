@@ -375,6 +375,106 @@ describe("ThemeProvider", () => {
     );
   });
 
+  it("sends only the name when custom is picked with no saved palette", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const { queryClient, patches } = harness({ profile: { theme: "light" } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <ValueProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("value")).toHaveTextContent("light"));
+    await user.click(screen.getByRole("button", { name: "re-pick custom" }));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("custom");
+    // The designer's fallback colors are a starting point, not a save.
+    expect(document.documentElement.style.getPropertyValue("--theme-custom-primary")).toBe("");
+    await waitFor(() => expect(patches).toEqual([{ theme: "custom" }]));
+    expect(window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY)).toBeNull();
+  });
+
+  it("reports whether the profile write landed", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const { queryClient } = harness({ profile: { theme: "light" } });
+    const landings: Array<Promise<boolean>> = [];
+    function LandingProbe(): React.ReactElement {
+      const theme = useTheme();
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            landings.push(theme.setTheme("dark"));
+          }}
+        >
+          pick dark
+        </button>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <LandingProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("button", { name: "pick dark" }));
+    expect(landings).toHaveLength(1);
+    await expect(landings[0]).resolves.toBe(true);
+  });
+
+  it("reports a rejected write instead of leaving the caller waiting", async () => {
+    const user = userEvent.setup();
+    matchMediaStub(false);
+    const transport = async (url: string, init: { method: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => "application/json" },
+          text: async () => '{"csrf_token":"csrf"}',
+        };
+      }
+      if (init.method === "PATCH") {
+        return { status: 500, url, headers: { get: () => "application/json" }, text: async () => '{"detail":"boom"}' };
+      }
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(profileFixture({ theme: "light" })),
+      };
+    };
+    createAppClient("https://api.test", transport as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const landings: Array<Promise<boolean>> = [];
+    function LandingProbe(): React.ReactElement {
+      const theme = useTheme();
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            landings.push(theme.setTheme("dark"));
+          }}
+        >
+          pick dark
+        </button>
+      );
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ThemeProvider notifyError={() => undefined}>
+          <LandingProbe />
+        </ThemeProvider>
+      </QueryClientProvider>
+    );
+    await user.click(screen.getByRole("button", { name: "pick dark" }));
+    await expect(landings[0]).resolves.toBe(false);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
   it("stores the picked palette beside the choice", async () => {
     const user = userEvent.setup();
     matchMediaStub(false);

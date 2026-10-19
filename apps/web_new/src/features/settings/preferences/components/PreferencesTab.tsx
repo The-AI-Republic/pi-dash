@@ -70,9 +70,11 @@ export function PreferencesTab(): React.ReactElement {
   const zonesQuery = useTimezones();
   const [preview, setPreview] = React.useState<CustomPalette | null>(null);
 
-  // The designer, and a custom pick, start from the applied palette, else
-  // the saved bag, else the defaults for a member who never customized.
-  const savedPalette = customPaletteOrDefault(theme.custom ?? readThemeBag(profile.data?.theme).custom);
+  // The applied palette, else the saved bag, else nothing for a member
+  // who never customized. A custom pick persists only real saved colors;
+  // the designer still starts a new member from usable defaults.
+  const savedPalette = theme.custom ?? readThemeBag(profile.data?.theme).custom;
+  const designerPalette = customPaletteOrDefault(savedPalette);
   const weekStart = normalizeWeekStart(profile.data?.start_of_the_week);
   const timezone = me.data?.user_timezone ?? "";
 
@@ -82,23 +84,29 @@ export function PreferencesTab(): React.ReactElement {
   );
 
   function pickTheme(value: ThemeValue): void {
-    // A custom pick carries the saved colors, so re-picking custom shows
-    // them immediately instead of the fallback pair.
-    if (value === "custom") theme.setTheme("custom", savedPalette);
-    else theme.setTheme(value);
+    // The engine carries the saved palette itself, so re-picking custom
+    // shows the saved colors and a new member's pick stores only the name.
+    void theme.setTheme(value);
   }
 
   function saveCustom(palette: CustomPalette): void {
-    theme.setTheme("custom", palette);
-    notifySuccess(CUSTOM_SAVED_TITLE, CUSTOM_SAVED_MESSAGE);
-    // The palette is applied already; reloading re-enters the app so
-    // every cached surface boots from the stored colors.
-    reloadDocument();
+    // Reloading races the profile write: wait for it to land, otherwise
+    // the reload aborts the request and the colors never persist.
+    void theme.setTheme("custom", palette).then((saved) => {
+      if (!saved) return;
+      notifySuccess(CUSTOM_SAVED_TITLE, CUSTOM_SAVED_MESSAGE);
+      // The palette is applied already; reloading re-enters the app so
+      // every cached surface boots from the stored colors.
+      reloadDocument();
+    });
   }
 
   function pickLanguage(tag: string): void {
-    locale.setLanguage(tag);
-    notifySuccess(LANGUAGE_SAVED_TITLE);
+    // The engine reports its own failures, so confirm only once the
+    // profile write lands.
+    void locale.setLanguage(tag).then((saved) => {
+      if (saved) notifySuccess(LANGUAGE_SAVED_TITLE);
+    });
   }
 
   return (
@@ -127,7 +135,7 @@ export function PreferencesTab(): React.ReactElement {
             {designerVisible(theme.value) ? (
               <div className="flex flex-col gap-(--space-3)">
                 <CustomThemeDesigner
-                  initial={savedPalette}
+                  initial={designerPalette}
                   saving={theme.isSaving}
                   onSave={saveCustom}
                   onPreview={setPreview}
@@ -148,7 +156,7 @@ export function PreferencesTab(): React.ReactElement {
                         className="inline-block size-5 rounded-(--radius-control) border border-(--border)"
                         style={{ backgroundColor: preview.background }}
                       />
-                      <Button type="button" variant="secondary" onClick={() => theme.setTheme("custom", preview)}>
+                      <Button type="button" variant="secondary" onClick={() => void theme.setTheme("custom", preview)}>
                         Preview on the app
                       </Button>
                     </>
