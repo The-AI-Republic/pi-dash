@@ -98,6 +98,21 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
 
 - Unit (`vitest run`): pure logic and components with stub transports.
   Node env by default; DOM suites add `// @vitest-environment jsdom`.
+- Per-test budget: 30 s globally (`testTimeout`/`hookTimeout` in
+  `vitest.config.ts`, constants in `src/testing/testBudget.ts`). A full run
+  is ~7 000 tests; on a loaded host the slow tail is queueing time, not test
+  work. The budget is a load allowance, not a hang allowance — it stays under
+  a minute, and it relaxes no assertion. A suite may ask for a _shorter_
+  budget with its per-test or per-describe `timeout` option. A longer one also
+  works and wins over the global ceiling (`vi.setConfig({ testTimeout })` does
+  the same for a whole file), but it outlives this measured budget, so do not
+  add one without a measurement that justifies it.
+- Full-suite evidence: run on the branch with the machine's load noted, and
+  stream rather than truncate the output:
+  `pnpm --filter web_new test 2>&1 | tee "$TMPDIR/.web_new-full.log"`.
+  Two consecutive green full runs are the bar for a shared change; a run that
+  fails only with `Test timed out` under load is presumed a budget/queueing
+  failure and must be re-run, not patched by skipping tests.
 - Contract (`PIDASH_CONTRACT_BASE_URL=…`): api-client suites against a
   scratch Django seeded with `packages/api-client/contract/seed-contracts.py`.
 - E2E smoke (`pnpm --filter web_new test:e2e`, env-gated): Playwright,
