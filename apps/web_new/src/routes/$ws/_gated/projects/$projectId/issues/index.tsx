@@ -25,16 +25,28 @@ import {
   parseIssueSearch,
   AnalyticsEntry,
   prefsQueryOptions,
+  resolveActiveLayout,
+  useWeekStart,
   type LayoutKind,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { GanttTimeline } from "../../../../../../features/issues/gantt/GanttTimeline.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
+import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
 const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
+
+// The sheet is a heavy leaf (picker cells, sort menus, virtualizer). Keep
+// it out of the initial route chunk; the stored layout decides when to
+// request it.
+const LazySpreadsheetLayout = React.lazy(() =>
+  import("../../../../../../features/issues/spreadsheet/SpreadsheetLayout.js").then((module) => ({
+    default: module.SpreadsheetLayout,
+  }))
+);
 
 function ProjectIssuesEmptyState(): React.ReactElement {
   return (
@@ -124,7 +136,6 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         orderByOf(preferences)
       )
     );
-
     React.useEffect(
       () =>
         registerCommands([
@@ -154,7 +165,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
 
     // Layout slices extend the offered list with their renderer; the
     // Display control resolves the same active layout from it.
-    const offered: readonly LayoutKind[] = ["list", "gantt_chart"];
+    const offered: readonly LayoutKind[] = ["list", "gantt_chart", "spreadsheet"];
+    const weekStart = useWeekStart();
+    const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
     const display = (
       <DisplayControl
         workspaceSlug={params.ws}
@@ -181,24 +194,47 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         totalCount={issues.total_count}
         resultCount={issues.results.length}
         offered={offered}
-        renderLayout={(layout, prefs) =>
-          layout === "gantt_chart" ? (
-            <GanttTimeline
-              workspaceSlug={params.ws}
-              projectId={params.projectId}
-              projectIdentifier={project.identifier}
-              issues={issues.results}
-              totalCount={issues.total_count}
-              prefs={prefs}
-            />
-          ) : (
+        renderLayout={(layout, prefs) => {
+          const active = resolveActiveLayout(layout, offered);
+          if (active === "gantt_chart") {
+            return (
+              <GanttTimeline
+                workspaceSlug={params.ws}
+                projectId={params.projectId}
+                projectIdentifier={project.identifier}
+                issues={issues.results}
+                totalCount={issues.total_count}
+                prefs={prefs}
+              />
+            );
+          }
+          if (active === "spreadsheet") {
+            return (
+              <React.Suspense fallback={<ListSkeleton />}>
+                <LazySpreadsheetLayout
+                  workspaceSlug={params.ws}
+                  projectId={params.projectId}
+                  projectIdentifier={project.identifier}
+                  entity={{ scope: "project", projectId: params.projectId }}
+                  prefs={prefs}
+                  canEdit={canEdit}
+                  hideCycle={!project.cycle_view}
+                  hideModule={!project.module_view}
+                  hideEstimate={project.estimate === null}
+                  richExpression={preferences.rich_filters}
+                  weekStart={weekStart}
+                />
+              </React.Suspense>
+            );
+          }
+          return (
             <IssueList
               issues={issues.results}
               projectIdentifier={project.identifier}
               layout={search.layout ?? "list"}
             />
-          )
-        }
+          );
+        }}
         emptyState={<ProjectIssuesEmptyState />}
         noMatchState={<ProjectIssuesNoMatchState />}
         headerActions={display}

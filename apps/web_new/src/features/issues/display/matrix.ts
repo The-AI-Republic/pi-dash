@@ -196,6 +196,8 @@ export function layoutDisplayMatrix(layout: LayoutKind): LayoutDisplayMatrix {
 export interface DisplayFeatureFlags {
   hideCycle: boolean;
   hideModule: boolean;
+  /** The project has no estimate system, so estimate surfaces stay hidden. */
+  hideEstimate?: boolean;
 }
 
 /**

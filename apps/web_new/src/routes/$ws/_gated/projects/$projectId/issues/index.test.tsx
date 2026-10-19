@@ -23,12 +23,23 @@ import {
   type PrefsRecord,
 } from "../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
+import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
 import * as queryModule from "../../../../../../core/query/optimistic.js";
 import * as shellModule from "../../../../../../shared/shell/index.js";
 import { authKeys } from "../../../../../../features/auth/queries.js";
 import { sessionKeys } from "../../../../../../core/session/queries.js";
+import { sheetIssuesQueryOptions } from "../../../../../../features/issues/spreadsheet/data.js";
+import { pickerCyclesQueryOptions } from "../../../../../../shared/pickers/reference.js";
 import { Route } from "./index.js";
+
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...original,
+    Link: ({ children }: { children?: React.ReactNode }) => <a href="#work-item">{children}</a>,
+  };
+});
 
 const PARAMS = { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" };
 const ENTITY = { scope: "project", projectId: PARAMS.projectId } as const;
@@ -255,6 +266,13 @@ function prefsSeed(): PrefsRecord {
   };
 }
 
+function spreadsheetPrefsSeed(): PrefsRecord {
+  return {
+    ...prefsSeed(),
+    display_filters: { layout: "spreadsheet", group_by: null, order_by: "-created_at" },
+  };
+}
+
 // Seeded render: the loaders own fetching, so the transport throws if a
 // query misses its seed instead of hanging the suite on a timeout.
 function renderScreen(
@@ -265,6 +283,8 @@ function renderScreen(
     richFilters?: Record<string, unknown>;
     project?: Partial<Project>;
     role?: number | null;
+    prefs?: PrefsRecord;
+    unfilteredSheetRows?: IssueListItem[];
     displayFilters?: Record<string, unknown>;
     projects?: Project[];
   } = {}
@@ -276,6 +296,7 @@ function renderScreen(
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
+  vi.spyOn(Route, "useNavigate").mockReturnValue((() => undefined) as never);
   queryClient.setQueryData(
     projectsQueryOptions(apiClient, PARAMS.ws).queryKey,
     options.projects ?? [{ ...projectSeed(), ...options.project }]
@@ -293,8 +314,13 @@ function renderScreen(
     ]);
     queryClient.setQueryData(authKeys.projectRoles(PARAMS.ws), { [PARAMS.projectId]: options.role ?? 20 });
   }
+  const prefs = options.prefs ?? {
+    ...prefsSeed(),
+    ...(options.displayFilters === undefined ? {} : { display_filters: options.displayFilters }),
+    rich_filters: options.richFilters ?? {},
+  };
   queryClient.setQueryData(
-    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, options.richFilters).queryKey,
+    issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, search, prefs.rich_filters, orderByOf(prefs)).queryKey,
     {
       grouped_by: null,
       sub_grouped_by: null,
@@ -308,11 +334,53 @@ function renderScreen(
       results: rows,
     } satisfies IssueListResponse
   );
-  queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
-    ...prefsSeed(),
-    display_filters: options.displayFilters ?? { layout: "list", group_by: null, order_by: "sort_order" },
-    rich_filters: options.richFilters ?? {},
-  });
+  queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, prefs);
+  queryClient.setQueryData(
+    sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {
+      orderBy: "-created_at",
+      richExpression: prefs.rich_filters,
+    }).queryKey,
+    {
+      pages: [
+        {
+          grouped_by: null,
+          sub_grouped_by: null,
+          total_count: totalCount,
+          next_cursor: "",
+          prev_cursor: "",
+          next_page_results: false,
+          prev_page_results: false,
+          count: rows.length,
+          total_results: totalCount,
+          results: rows,
+        } satisfies IssueListResponse,
+      ],
+      pageParams: [""],
+    }
+  );
+  if (options.unfilteredSheetRows !== undefined) {
+    queryClient.setQueryData(
+      sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, { orderBy: "-created_at" }).queryKey,
+      {
+        pages: [
+          {
+            grouped_by: null,
+            sub_grouped_by: null,
+            total_count: options.unfilteredSheetRows.length,
+            next_cursor: "",
+            prev_cursor: "",
+            next_page_results: false,
+            prev_page_results: false,
+            count: options.unfilteredSheetRows.length,
+            total_results: options.unfilteredSheetRows.length,
+            results: options.unfilteredSheetRows,
+          } satisfies IssueListResponse,
+        ],
+        pageParams: [""],
+      }
+    );
+  }
+  queryClient.setQueryData(pickerCyclesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId).queryKey, []);
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
   render(
@@ -510,6 +578,56 @@ describe("project issues screen", () => {
     if (!errorComponent) throw new Error("missing errorComponent");
     render(React.createElement(errorComponent, { error: "nope", reset: () => {} }));
     expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
+  });
+
+  it("offers the spreadsheet layout and renders it from the stored preference", async () => {
+    renderScreen({}, 1, [issueRow()], { prefs: spreadsheetPrefsSeed() });
+
+    expect(await screen.findByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("Work items")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add work item" })).toBeEnabled();
+  });
+
+  it("hides the spreadsheet estimate column when the project has no estimate system", async () => {
+    renderScreen({}, 1, [issueRow()], { project: { estimate: null }, prefs: spreadsheetPrefsSeed() });
+
+    await screen.findByRole("table");
+    expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).not.toContain("Estimate");
+  });
+
+  it("renders the stored rich filter's sheet rows rather than the unfiltered sheet", async () => {
+    const matching = issueRow({ id: ISSUE_UUID, name: "Urgent row", sequence_id: 42 });
+    const excluded = issueRow({
+      id: "323e4567-e89b-12d3-a456-426614174002",
+      name: "Low row",
+      sequence_id: 43,
+      priority: "low",
+    });
+    renderScreen({}, 1, [matching], {
+      prefs: { ...spreadsheetPrefsSeed(), rich_filters: { priority__in: "urgent" } },
+      unfilteredSheetRows: [matching, excluded],
+    });
+
+    await screen.findByRole("table");
+    expect(screen.getByText("Urgent row")).toBeInTheDocument();
+    expect(screen.queryByText("Low row")).not.toBeInTheDocument();
+  });
+
+  it("renders the spreadsheet read-only for guests and archived projects", async () => {
+    const now = new Date().toISOString();
+    renderScreen({}, 1, [issueRow({ created_at: now, updated_at: now })], {
+      project: { member_role: 5 },
+      prefs: spreadsheetPrefsSeed(),
+    });
+    expect(await screen.findByRole("button", { name: "Add work item" })).toBeDisabled();
+  });
+
+  it("renders the spreadsheet read-only for an archived project", async () => {
+    renderScreen({}, 1, [issueRow()], {
+      project: { archived_at: "2026-01-01T00:00:00Z" },
+      prefs: spreadsheetPrefsSeed(),
+    });
+    expect(await screen.findByRole("button", { name: "Add work item" })).toBeDisabled();
   });
 
   it("renders the interim empty state when the project has no issues", () => {

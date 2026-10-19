@@ -37,6 +37,8 @@ export const Project = z.object({
   cycle_view: z.boolean(),
   issue_views_view: z.boolean(),
   module_view: z.boolean(),
+  // The serializer is fields="__all__"; older list fixtures predate it.
+  estimate: z.optional(nullableUuid()),
   page_view: z.boolean(),
   inbox_view: z.boolean(),
   is_default: z.boolean(),
