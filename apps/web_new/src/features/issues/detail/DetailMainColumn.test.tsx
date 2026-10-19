@@ -7,7 +7,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { DESCRIPTION_LABEL } from "./IssueDescriptionField.js";
@@ -240,6 +240,7 @@ describe("DetailMainColumn", () => {
     const user = userEvent.setup();
     const { patches } = renderColumn();
     await user.click(screen.getByRole("button", { name: "Edit description" }));
+    await vi.dynamicImportSettled();
     const editable = await screen.findByLabelText(DESCRIPTION_LABEL);
     // The field autofocuses once the lazy editor mounts; typing before
     // that move lands can have the focus change swallow keystrokes.
@@ -252,7 +253,7 @@ describe("DetailMainColumn", () => {
     expect(JSON.parse(patches[0]?.body ?? "{}")).toEqual({
       description_html: "<p>Current words more</p>",
     });
-  });
+  }, 30_000);
 
   it("renders the header and below-description slots", () => {
     renderColumn({ topSlot: <p>header slot</p>, belowDescription: <p>widget slot</p> });

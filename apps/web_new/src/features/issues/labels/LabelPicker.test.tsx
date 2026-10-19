@@ -28,6 +28,14 @@ const BID = "123e4567-e89b-12d3-a456-42661417400b";
 const KID = "123e4567-e89b-12d3-a456-42661417400d";
 const NEWID = "123e4567-e89b-12d3-a456-42661417400e";
 
+// Base UI mounts the popover in a follow-up task and the option list
+// renders after that; under a full-suite run the pair can outlast the
+// 1 s default wait, so the settled list gets an explicit budget. The
+// suite timeout sits above that budget, since vitest otherwise stops
+// the test at its 5 s default before the wait can report.
+const POPOVER_TIMEOUT = { timeout: 10_000 };
+const POPOVER_TEST_TIMEOUT = 30_000;
+
 function labelRow(id: string, name: string, sort: number, parent: string | null = null): Label {
   return { id, project_id: PROJECT, workspace_id: WORKSPACE, name, color: "#FF6900", parent, sort_order: sort };
 }
@@ -132,7 +140,7 @@ afterEach(() => {
   resetAppClient();
 });
 
-describe("LabelPicker options", () => {
+describe("LabelPicker options", { timeout: POPOVER_TEST_TIMEOUT }, () => {
   it("fetches lazily and lists grouped options with selection pressed", async () => {
     const user = userEvent.setup();
     const { calls } = setup({}, { value: [KID] });
@@ -200,7 +208,7 @@ describe("LabelPicker options", () => {
   });
 });
 
-describe("LabelPicker keyboard submit", () => {
+describe("LabelPicker keyboard submit", { timeout: POPOVER_TEST_TIMEOUT }, () => {
   it("selects the exact match instead of creating", async () => {
     const user = userEvent.setup();
     const { calls, onChange } = setup();
@@ -233,12 +241,7 @@ describe("LabelPicker keyboard submit", () => {
   });
 });
 
-// Base UI mounts the popover in a follow-up task and the option list
-// renders after that; under a full-suite run the pair can outlast the
-// 1 s default wait, so the settled list gets an explicit budget.
-const POPOVER_TIMEOUT = { timeout: 10_000 };
-
-describe("LabelPicker inline create", () => {
+describe("LabelPicker inline create", { timeout: POPOVER_TEST_TIMEOUT }, () => {
   it("creates and selects a fresh name for admins", async () => {
     const user = userEvent.setup();
     const { calls, onChange } = setup({ roles: { [PROJECT]: 20 }, memberRole: 15 });

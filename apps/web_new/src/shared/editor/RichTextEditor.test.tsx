@@ -15,6 +15,12 @@ import { RichTextEditor } from "./RichTextEditor.js";
 // find budget is what made the fallback test racy under load.
 const LOAD_TIMEOUT = { timeout: 10_000 };
 
+// A find budget above vitest's 5 s default test timeout is inert: the
+// test dies before the find can fail with its own message. Every test
+// here waits on the same lazily imported editor chunk, so the whole
+// suite gets a backstop above LOAD_TIMEOUT.
+const EDITOR_TEST_TIMEOUT = 30_000;
+
 function renderEditor(props: Partial<React.ComponentProps<typeof RichTextEditor>> = {}) {
   const onChange = vi.fn();
   render(
@@ -26,18 +32,20 @@ function renderEditor(props: Partial<React.ComponentProps<typeof RichTextEditor>
 }
 
 async function editorSurface(label: string): Promise<HTMLElement> {
+  await vi.dynamicImportSettled();
   const editable = await screen.findByLabelText(label, undefined, LOAD_TIMEOUT);
   expect(editable).toHaveAttribute("contenteditable", "true");
   return editable;
 }
 
-describe("RichTextEditor", () => {
+describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
   it("shows a fallback while the editor chunk loads, then the content", async () => {
     render(
       <React.Suspense fallback={<p>loading the editor</p>}>
         <RichTextEditor initialHtml="<p>Stored words</p>" label="Body" onChange={() => {}} />
       </React.Suspense>
     );
+    await vi.dynamicImportSettled();
     expect(await screen.findByText("Stored words", undefined, LOAD_TIMEOUT)).toBeInTheDocument();
   });
 
@@ -47,6 +55,7 @@ describe("RichTextEditor", () => {
     // replace the editable node and drop a caret (or element handle)
     // taken on the first commit; the surface must be final once visible.
     renderEditor({ initialHtml: "<p>steady words</p>" });
+    await vi.dynamicImportSettled();
     const [painted] = await screen.findAllByText("steady words", undefined, LOAD_TIMEOUT);
     // The editor manager schedules its one-tick reconciliation with a
     // 1 ms timer; these later timers run after it, so by the first the

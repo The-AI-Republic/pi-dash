@@ -67,10 +67,12 @@ afterEach(() => {
 });
 
 // Both dialogs ride lazily imported chunks; the first import can take
-// seconds while the whole suite competes for the CPU.
+// seconds while the whole suite competes for the CPU. The test timeout
+// sits above the find budget so vitest does not stop the test first.
 const LAZY_DIALOG_TIMEOUT = { timeout: 10_000 };
+const LAZY_DIALOG_TEST_TIMEOUT = 30_000;
 
-describe("ProjectQuickActions", () => {
+describe("ProjectQuickActions", { timeout: LAZY_DIALOG_TEST_TIMEOUT }, () => {
   it("offers admins publish, copy, archives and settings", () => {
     setup({ isAdmin: true, isAuthorized: true });
     openMenu();
@@ -93,6 +95,7 @@ describe("ProjectQuickActions", () => {
     setup();
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Publish project" }));
+    await vi.dynamicImportSettled();
     expect(await screen.findByRole("heading", { name: "Publish project" }, LAZY_DIALOG_TIMEOUT)).toBeInTheDocument();
   });
 
@@ -100,6 +103,7 @@ describe("ProjectQuickActions", () => {
     setup({ isAdmin: false, isAuthorized: false });
     openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Leave project" }));
+    await vi.dynamicImportSettled();
     expect(await screen.findByRole("heading", { name: "Leave project" }, LAZY_DIALOG_TIMEOUT)).toBeInTheDocument();
   });
 
