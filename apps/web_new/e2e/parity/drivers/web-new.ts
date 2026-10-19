@@ -21719,34 +21719,78 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Cloud login, SSO + session (NEWFRONT-438, CLOUD-011..020).
-  // --- Stubs: the cloud login area has not landed in apps/web_new yet.
+  // --- CLOUD-011..014 landed with NEWFRONT-652; the session rows
+  // --- (CLOUD-015..020) still throw until their slice lands.
+
+  private cloudSignInSeen: string[] = [];
+
+  private cloudLoginCard(): Locator {
+    return this.page.getByRole("heading", { name: "Sign in to Pi Dash" }).locator("xpath=ancestor::section[1]");
+  }
 
   async cloudLoginCardFacts(): Promise<CloudLoginCardFacts> {
-    return todo("cloudLoginCardFacts");
+    const card = this.cloudLoginCard();
+    await card.waitFor({ timeout: 60_000 });
+    const alert = card.getByRole("alert");
+    const terms = card.getByRole("link", { name: "Terms" });
+    const privacy = card.getByRole("link", { name: "Privacy Policy" });
+    const home = this.page.locator('a[href="/home"]').first();
+    const norm = (value: string | null): string => (value ?? "").replace(/\s+/g, " ").trim();
+    return {
+      heading: norm(await card.getByRole("heading").first().innerText()),
+      accountLine: norm(await card.locator("p").first().innerText()),
+      continueActions: await card.getByRole("button").count(),
+      continueHref: (await card.getByRole("link", { name: /continue with/i }).getAttribute("href")) ?? "",
+      termsHref: ((await terms.count()) > 0 ? await terms.first().getAttribute("href") : null) ?? null,
+      privacyHref: ((await privacy.count()) > 0 ? await privacy.first().getAttribute("href") : null) ?? null,
+      homeHref: ((await home.count()) > 0 ? await home.getAttribute("href") : null) ?? null,
+      alertText: ((await alert.count()) > 0 ? norm(await alert.first().innerText()) : "") || null,
+    };
   }
 
   async cloudArmSignInCapture(): Promise<void> {
-    return todo("cloudArmSignInCapture");
+    this.cloudSignInSeen = [];
+    await this.page.unroute("**/api/auth/sign-in/**");
+    await this.page.route("**/api/auth/sign-in/**", async (route) => {
+      this.cloudSignInSeen.push(route.request().url());
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><title>sign-in stub</title>",
+      });
+    });
   }
 
   async cloudSignInRequests(): Promise<string[]> {
-    return todo("cloudSignInRequests");
+    return [...this.cloudSignInSeen];
   }
 
-  async cloudAwaitSignInRequest(_previousCount: number): Promise<string> {
-    return todo("cloudAwaitSignInRequest");
+  async cloudAwaitSignInRequest(previousCount: number): Promise<string> {
+    // Poll the capture log rather than waiting on the next request: the
+    // silent resume may already have left before the first assertion.
+    const started = Date.now();
+    while (Date.now() - started < 60_000) {
+      const next = this.cloudSignInSeen[previousCount];
+      if (next !== undefined) return next;
+      await this.page.waitForTimeout(250);
+    }
+    throw new Error("[parity] no sign-in handoff left the app.");
   }
 
   async cloudClickLoginContinue(): Promise<void> {
-    return todo("cloudClickLoginContinue");
+    const card = this.cloudLoginCard();
+    await card.waitFor({ timeout: 60_000 });
+    await card.getByRole("button", { name: /continue with/i }).click();
   }
 
   async cloudExplicitLogoutMarker(): Promise<boolean> {
-    return todo("cloudExplicitLogoutMarker");
+    return this.page.evaluate(() => window.sessionStorage.getItem("pidash:explicitly-logged-out") === "1");
   }
 
   async cloudSuppressSilentSso(): Promise<void> {
-    return todo("cloudSuppressSilentSso");
+    await this.page.addInitScript(() => {
+      window.sessionStorage.setItem("pidash:explicitly-logged-out", "1");
+    });
   }
 
   async cloudArmRefreshCounter(): Promise<void> {
@@ -21758,7 +21802,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cloudSignOutViaAccountMenu(): Promise<void> {
-    return todo("cloudSignOutViaAccountMenu");
+    await this.clickAccountMenuItem("Sign out");
+    await this.cloudLoginCard().waitFor({ timeout: 60_000 });
   }
 
   async cloudFailRefresh(): Promise<void> {

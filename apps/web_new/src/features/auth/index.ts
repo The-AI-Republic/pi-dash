@@ -180,6 +180,21 @@ export {
   SingleInvitation,
 } from "./components/SingleInvitation.js";
 export type { SingleInvitationProps } from "./components/SingleInvitation.js";
+export { CloudLoginCard } from "./components/CloudLoginCard.js";
+export type { CloudLoginCardProps } from "./components/CloudLoginCard.js";
+export {
+  clearExplicitLogout,
+  cloudHandoffTarget,
+  cloudSignInUrl,
+  CLOUD_SIGN_IN_HREF,
+  EXPLICIT_LOGOUT_KEY,
+  markExplicitLogout,
+  parseCloudLoginSearch,
+  readExplicitLogout,
+  resolveCloudReturnTarget,
+  shouldAttemptSilentSignIn,
+} from "./cloudLogin.js";
+export type { CloudLoginSearch } from "./cloudLogin.js";
 export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
 export type { AuthBannerProps, SignInCardProps } from "./components/SignInCard.js";
 export { SignUpCard } from "./components/SignUpCard.js";

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerRuntimeSignOutHooks } from "../../core/session/index.js";
 import { registerStoreReset, useSessionStore } from "../../core/session/store.js";
@@ -13,11 +13,16 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { notifyError } from "../../shared/shell/index.js";
+import { EXPLICIT_LOGOUT_KEY } from "./cloudLogin.js";
 import { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
 
 beforeEach(() => {
   useSessionStore.setState({ status: "authenticated", returnUrl: null });
   vi.mocked(notifyError).mockClear();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 function stubClient(post: () => Promise<unknown>) {
@@ -84,6 +89,40 @@ describe("performSignOut", () => {
     const wipeOrder = clearLocalSession.mock.invocationCallOrder[0] ?? 0;
     expect(postOrder).toBeLessThan(wipeOrder);
     expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("records the tab-scoped explicit-logout marker after a successful POST", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).resolves.toBe("/");
+    expect(entries.get(EXPLICIT_LOGOUT_KEY)).toBe("1");
+  });
+
+  it("leaves no marker when the POST failed", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const client = stubClient(async () => {
+      throw new Error("boom");
+    });
+
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).rejects.toThrow("boom");
+    expect(entries.has(EXPLICIT_LOGOUT_KEY)).toBe(false);
+  });
+
+  it("signs out when storage access throws", async () => {
+    vi.stubGlobal("sessionStorage", undefined);
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).resolves.toBe("/");
   });
 
   it("swallows a failed local teardown and still lands", async () => {
