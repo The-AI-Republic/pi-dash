@@ -36,6 +36,7 @@ export {
   useToggleWidget,
 } from "./api/widgetUpdates.js";
 export type { WidgetReorderInput, WidgetToggle } from "./api/widgetUpdates.js";
+export { isAssistantConfigured } from "../assistant/index.js";
 export { HomeAllOffState } from "./components/HomeAllOffState.js";
 export { HomeAssistantCard } from "./components/HomeAssistantCard.js";
 export type { HomeAssistantCardProps } from "./components/HomeAssistantCard.js";
@@ -86,4 +87,3 @@ export { normalizeQuickLinkAddress, quickLinkDisplayName, validateQuickLinkForm 
 export type { NormalizedQuickLink, QuickLinkForm, QuickLinkValidation } from "./lib/quicklinks.js";
 export { orderWidgetPrefs, visibleWidgetPrefs, widgetSectionKind } from "./lib/widgets.js";
 export type { WidgetSectionKind } from "./lib/widgets.js";
-export { assistantLandingHref, isAssistantConfigured } from "./lib/assistant.js";
