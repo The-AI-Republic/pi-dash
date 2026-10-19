@@ -45,7 +45,6 @@ import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_
 import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god-mode/_dashboard/workspace/route'
 import { Route as SettingsProfileIndexRouteImport } from './routes/settings/profile/index'
 import { Route as SettingsProfileTabRouteImport } from './routes/settings/profile/$tab'
-import { Route as SettingsProfileApiTokensRouteImport } from './routes/settings/profile/api-tokens'
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
 import { Route as WsGatedAppsIndexRouteImport } from './routes/$ws/_gated/apps/index'
@@ -283,12 +282,6 @@ const SettingsProfileTabRoute = SettingsProfileTabRouteImport.update({
   path: '/$tab',
   getParentRoute: () => SettingsProfileRouteRoute,
 } as any)
-const SettingsProfileApiTokensRoute =
-  SettingsProfileApiTokensRouteImport.update({
-    id: '/api-tokens',
-    path: '/api-tokens',
-    getParentRoute: () => SettingsProfileRouteRoute,
-  } as any)
 const WsGatedAiDevMachinesIndexRoute =
   WsGatedAiDevMachinesIndexRouteImport.update({
     id: '/',
@@ -643,7 +636,6 @@ export interface FileRoutesByFullPath {
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
-  '/settings/profile/api-tokens': typeof SettingsProfileApiTokensRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/settings/profile/': typeof SettingsProfileIndexRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
@@ -728,7 +720,6 @@ export interface FileRoutesByTo {
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
-  '/settings/profile/api-tokens': typeof SettingsProfileApiTokensRoute
   '/settings/profile': typeof SettingsProfileIndexRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
@@ -819,7 +810,6 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
-  '/settings/profile/api-tokens': typeof SettingsProfileApiTokensRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/settings/profile/': typeof SettingsProfileIndexRoute
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
@@ -913,7 +903,6 @@ export interface FileRouteTypes {
     | '/god-mode/email'
     | '/god-mode/general'
     | '/settings/profile/$tab'
-    | '/settings/profile/api-tokens'
     | '/$ws/'
     | '/settings/profile/'
     | '/$ws/projects/$projectId'
@@ -998,7 +987,6 @@ export interface FileRouteTypes {
     | '/god-mode/email'
     | '/god-mode/general'
     | '/settings/profile/$tab'
-    | '/settings/profile/api-tokens'
     | '/settings/profile'
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
@@ -1088,7 +1076,6 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
     | '/settings/profile/$tab'
-    | '/settings/profile/api-tokens'
     | '/$ws/_gated/'
     | '/settings/profile/'
     | '/$ws/_gated/projects/$projectId'
@@ -1423,13 +1410,6 @@ declare module '@tanstack/react-router' {
       path: '/$tab'
       fullPath: '/settings/profile/$tab'
       preLoaderRoute: typeof SettingsProfileTabRouteImport
-      parentRoute: typeof SettingsProfileRouteRoute
-    }
-    '/settings/profile/api-tokens': {
-      id: '/settings/profile/api-tokens'
-      path: '/api-tokens'
-      fullPath: '/settings/profile/api-tokens'
-      preLoaderRoute: typeof SettingsProfileApiTokensRouteImport
       parentRoute: typeof SettingsProfileRouteRoute
     }
     '/$ws/_gated/ai-dev-machines/': {
@@ -2124,13 +2104,11 @@ const GodModeRouteRouteWithChildren = GodModeRouteRoute._addFileChildren(
 
 interface SettingsProfileRouteRouteChildren {
   SettingsProfileTabRoute: typeof SettingsProfileTabRoute
-  SettingsProfileApiTokensRoute: typeof SettingsProfileApiTokensRoute
   SettingsProfileIndexRoute: typeof SettingsProfileIndexRoute
 }
 
 const SettingsProfileRouteRouteChildren: SettingsProfileRouteRouteChildren = {
   SettingsProfileTabRoute: SettingsProfileTabRoute,
-  SettingsProfileApiTokensRoute: SettingsProfileApiTokensRoute,
   SettingsProfileIndexRoute: SettingsProfileIndexRoute,
 }
 

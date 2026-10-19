@@ -6,7 +6,7 @@
 // the shell over the tab outlet, the tab read from the address, the
 // sidebar shortcuts, and the unknown-tab fallback.
 import { QueryClient } from "@tanstack/react-query";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import * as React from "react";
 import { isRedirect, type RouteComponent } from "@tanstack/react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -17,12 +17,12 @@ vi.mock("../../../features/settings/pageEntries.js", async (importOriginal) => {
 });
 
 import { resetProfileSettingsPages } from "../../../features/settings/lib/registry.js";
-import { useProfileSettingsSessionGuard } from "../../../features/settings/pageEntries.js";
+import { registerBuiltInSettingsTabs, useProfileSettingsSessionGuard } from "../../../features/settings/pageEntries.js";
 import { resetProfileRouteHarness, renderProfileSettingsRoute } from "../-routeHarness.js";
 import { createAppClient } from "../../../core/api/client.js";
 import { useSessionStore } from "../../../core/session/store.js";
 import { loadProfileSettingsLayout } from "../../../features/settings/loadProfileSettings.js";
-import { Route as TokensRoute } from "./api-tokens.js";
+import { Route as TabRoute } from "./$tab.js";
 import { Route, tabFromPathname } from "./route.js";
 
 const Layout = Route.options.component;
@@ -221,15 +221,36 @@ describe("profile settings layout", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/settings/profile/api-tokens"));
   });
 
-  it("mounts the tokens leaf inside the shell through the route tree", async () => {
+  it("mounts the token tab body inside the shell through the tab seam", async () => {
+    registerBuiltInSettingsTabs();
     renderProfileSettingsRoute({
       layoutComponent: LayoutComponent,
-      leafComponent: TokensRoute.options.component as RouteComponent,
-      leafPath: "api-tokens",
+      leafComponent: TabRoute.options.component as RouteComponent,
+      leafPath: "$tab",
       initialPath: "/settings/profile/api-tokens",
       transport: transport(),
     });
     expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Personal Access Tokens" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Personal Access Tokens" })).toHaveAttribute("aria-current", "page");
+    // The page lives in the shell's content pane, not in a second full-page
+    // frame (the static route used to add its own <main> and toast host).
+    expect(
+      within(screen.getByTestId("profile-settings-content")).getByRole("heading", { name: "Personal Access Tokens" })
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("main")).toHaveLength(1);
+    expect(screen.getAllByTestId("toast-stack")).toHaveLength(1);
+  });
+
+  it("mounts the token tab body from the trailing-slash address too", async () => {
+    registerBuiltInSettingsTabs();
+    renderProfileSettingsRoute({
+      layoutComponent: LayoutComponent,
+      leafComponent: TabRoute.options.component as RouteComponent,
+      leafPath: "$tab",
+      initialPath: "/settings/profile/api-tokens/",
+      transport: transport(),
+    });
     expect(await screen.findByRole("heading", { name: "Personal Access Tokens" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Personal Access Tokens" })).toHaveAttribute("aria-current", "page");
   });
