@@ -3,22 +3,26 @@
 // See the LICENSE file for details.
 // Runners overview (NEWFRONT-540, RUN-002/RUN-010/RUN-011). One table of the
 // scope's runners with its pod, status, platform, version and heartbeat, plus
-// a Details link and the two destructive row actions behind confirmations.
-// The pod section and the add-runner entry arrive with their own slices; this
-// screen owns the runner table the pods slice filters.
+// a Details link and the two destructive row actions behind confirmations,
+// plus the pods section above it (NEWFRONT-542) and its three dialogs. The
+// add-runner entry arrives with its own slice.
 
 import { Button } from "@pidash/kit";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import type { Runner } from "@pidash/api-client";
+import type { Pod, Runner } from "@pidash/api-client";
 import { notifyError } from "../../../shared/shell/index.js";
 import type { PodFilterState } from "../podFilter.js";
 import { runnersBase, type RunnersScopeInput } from "../scope.js";
 import { runnerDisplayStatus } from "../status.js";
-import { PodFilterBar } from "./RunnersPodFilter.js";
+import { CreatePodDialog } from "./CreatePodDialog.js";
+import { DeletePodDialog } from "./DeletePodDialog.js";
+import { EditPodDialog } from "./EditPodDialog.js";
 import { RunnerConfirmDialog } from "./RunnerConfirmDialog.js";
 import { RunnerStatusBadge } from "./RunnerStatusBadge.js";
+import { PodFilterBar } from "./RunnersPodFilter.js";
+import { RunnersPods } from "./RunnersPods.js";
 
 export const RUNNERS_EMPTY_TEXT = "No runners yet. Add a runner to give this scope its first one.";
 export const RUNNER_ACTION_FAILED_TITLE = "Error!";
@@ -56,6 +60,10 @@ export interface RunnersOverviewProps {
   scope: RunnersScopeInput;
   /** Rows and the pod selection narrowing them (RUN-012). */
   filter: PodFilterState;
+  /** Pods of the scope and the pod read's progress (RUN-012). */
+  pods: Pod[] | undefined;
+  podsLoading: boolean;
+  podsFailed: boolean;
   onDelete: (runnerId: string) => Promise<void>;
   onRevoke: (runnerId: string) => Promise<void>;
 }
@@ -63,12 +71,32 @@ export interface RunnersOverviewProps {
 /** The confirmation waiting for an answer; the runner row is its target. */
 type PendingAction = { action: "delete" | "revoke"; runner: Runner };
 
-export function RunnersOverview({ scope, filter, onDelete, onRevoke }: RunnersOverviewProps): React.ReactElement {
+type PodDialog = { mode: "create" } | { mode: "edit" | "delete"; pod: Pod } | null;
+
+export function RunnersOverview({
+  scope,
+  filter,
+  pods,
+  podsLoading,
+  podsFailed,
+  onDelete,
+  onRevoke,
+}: RunnersOverviewProps): React.ReactElement {
   const navigate = useNavigate();
   const runners = filter.runners;
   const base = runnersBase(scope);
   const [pending, setPending] = React.useState<PendingAction | null>(null);
   const [working, setWorking] = React.useState(false);
+  const [podDialog, setPodDialog] = React.useState<PodDialog>(null);
+
+  function closePodDialog(): void {
+    setPodDialog(null);
+  }
+
+  function afterPodDeleted(podId: string): void {
+    // A filter on a pod that no longer exists would hide every row.
+    if (filter.selectedPodId === podId) filter.clear();
+  }
 
   async function confirm(action: PendingAction): Promise<void> {
     setWorking(true);
@@ -90,6 +118,16 @@ export function RunnersOverview({ scope, filter, onDelete, onRevoke }: RunnersOv
       className="flex flex-col gap-(--space-6) p-(--space-6)"
     >
       <h1 className="text-h2 text-(--text)">Runners</h1>
+      <RunnersPods
+        pods={pods}
+        loading={podsLoading}
+        failed={podsFailed}
+        selectedPodId={filter.selectedPodId}
+        onToggle={filter.toggle}
+        onCreate={() => setPodDialog({ mode: "create" })}
+        onEdit={(pod) => setPodDialog({ mode: "edit", pod })}
+        onDelete={(pod) => setPodDialog({ mode: "delete", pod })}
+      />
       {filter.selectedPod === null ? null : <PodFilterBar selectedPod={filter.selectedPod} onClear={filter.clear} />}
       <div className="overflow-x-auto rounded-(--radius-control) border border-(--border)">
         <table className="text-body w-full text-left">
@@ -156,6 +194,22 @@ export function RunnersOverview({ scope, filter, onDelete, onRevoke }: RunnersOv
           </tbody>
         </table>
       </div>
+      <CreatePodDialog
+        workspaceSlug={scope.workspaceSlug}
+        open={podDialog?.mode === "create"}
+        onClose={closePodDialog}
+      />
+      <EditPodDialog
+        workspaceSlug={scope.workspaceSlug}
+        pod={podDialog?.mode === "edit" ? podDialog.pod : null}
+        onClose={closePodDialog}
+      />
+      <DeletePodDialog
+        workspaceSlug={scope.workspaceSlug}
+        pod={podDialog?.mode === "delete" ? podDialog.pod : null}
+        onCancel={closePodDialog}
+        onDeleted={afterPodDeleted}
+      />
       {pending === null ? null : (
         <RunnerConfirmDialog
           open
