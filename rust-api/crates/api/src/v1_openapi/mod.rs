@@ -117,36 +117,78 @@ pub(crate) struct ThrottleVerdict {
     pub wait: Option<f64>,
 }
 
+/// One window's worth of eviction lag: a never-seen-again ident's key is shed
+/// on the first sweep at least this many `check_throttle` calls after its last
+/// hit. Small enough to keep the map to roughly one window of traffic, large
+/// enough that the sweep stays off the hot path.
+const SWEEP_INTERVAL: u64 = 256;
+
 /// The handler-shared throttle store: one timestamp history (newest first,
-/// like DRF's cached list) per `throttle_anon_<ident>` key.
-fn store() -> &'static Mutex<HashMap<String, Vec<f64>>> {
-    static STORE: OnceLock<Mutex<HashMap<String, Vec<f64>>>> = OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+/// like DRF's cached list) per `throttle_anon_<ident>` key, plus a call
+/// counter driving the periodic eviction sweep.
+#[derive(Default)]
+struct ThrottleStore {
+    histories: HashMap<String, Vec<f64>>,
+    calls: u64,
 }
 
-/// Run the DRF loop for one anonymous ident at `now` (epoch seconds, like
-/// DRF's `timer()`): trim entries `<= now - duration`, allow iff fewer
-/// than quota remain, recording `now` on success. Denials do not record.
-pub(crate) fn check_throttle(ident: &str, now: f64) -> ThrottleVerdict {
-    let spec = throttle::ANON_THROTTLE;
-    let key = throttle::cache_key(ident);
-    let mut histories = store().lock().expect("throttle store lock");
-    let history = histories.entry(key).or_default();
-    let horizon = now - spec.window_secs as f64;
-    history.retain(|&at| at > horizon);
-    if throttle::allow_request(history, now, spec.requests, spec.window_secs) {
-        history.insert(0, now);
-        ThrottleVerdict {
-            allowed: true,
-            wait: None,
+impl ThrottleStore {
+    /// Run the DRF loop for one anonymous ident at `now` (epoch seconds, like
+    /// DRF's `timer()`): trim entries `<= now - duration`, allow iff fewer
+    /// than quota remain, recording `now` on success. Denials do not record.
+    ///
+    /// Django keeps this history in the default django-redis cache, where
+    /// `SimpleRateThrottle.throttle_success` sets the `throttle_anon_<ident>`
+    /// key with a `duration` TTL, so the key vanishes one window after the
+    /// last allowed hit. The port must shed keys the same way or the map grows
+    /// one entry per distinct `X-Forwarded-For` value forever — an anonymous
+    /// memory-exhaustion DoS (PIDASHCONV-1206). Every [`SWEEP_INTERVAL`] calls
+    /// this drops each entry whose whole history has left the window, giving
+    /// an ident never seen again the same lifetime as Django's cache entry.
+    fn check(&mut self, ident: &str, now: f64) -> ThrottleVerdict {
+        let spec = throttle::ANON_THROTTLE;
+        let key = throttle::cache_key(ident);
+        let horizon = now - spec.window_secs as f64;
+        let verdict = {
+            let history = self.histories.entry(key).or_default();
+            history.retain(|&at| at > horizon);
+            if throttle::allow_request(history, now, spec.requests, spec.window_secs) {
+                history.insert(0, now);
+                ThrottleVerdict {
+                    allowed: true,
+                    wait: None,
+                }
+            } else {
+                let wait = throttle::throttle_wait(history, now, spec.requests, spec.window_secs);
+                ThrottleVerdict {
+                    allowed: false,
+                    wait,
+                }
+            }
+        };
+        self.calls += 1;
+        if self.calls % SWEEP_INTERVAL == 0 {
+            self.histories.retain(|_, history| match history.first() {
+                Some(&newest) => newest > horizon,
+                None => false,
+            });
         }
-    } else {
-        let wait = throttle::throttle_wait(history, now, spec.requests, spec.window_secs);
-        ThrottleVerdict {
-            allowed: false,
-            wait,
-        }
+        verdict
     }
+}
+
+/// The process-wide throttle store, shared by every handler.
+fn store() -> &'static Mutex<ThrottleStore> {
+    static STORE: OnceLock<Mutex<ThrottleStore>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(ThrottleStore::default()))
+}
+
+/// Run the DRF loop for one anonymous ident against the process-wide store.
+pub(crate) fn check_throttle(ident: &str, now: f64) -> ThrottleVerdict {
+    store()
+        .lock()
+        .expect("throttle store lock")
+        .check(ident, now)
 }
 
 /// Now as epoch seconds for [`check_throttle`].
@@ -559,6 +601,62 @@ mod tests {
         }
         assert!(!check_throttle("mod-alice", now).allowed);
         assert!(check_throttle("mod-bob", now).allowed);
+    }
+
+    /// PIDASHCONV-1206: an ident whose window has passed is not kept forever.
+    /// Django's django-redis key expires one window after the last allowed
+    /// hit; the port sheds it on the next sweep instead of holding it until
+    /// restart.
+    #[test]
+    fn store_drops_ident_once_its_window_has_passed() {
+        let mut store = ThrottleStore::default();
+        let now = 1_700_000_000.0;
+        for _ in 0..30 {
+            assert!(store.check("mod-expiry", now).allowed);
+        }
+        assert!(!store.check("mod-expiry", now).allowed);
+        let key = throttle::cache_key("mod-expiry");
+        assert!(store.histories.contains_key(&key));
+
+        // A different ident a window later; driving SWEEP_INTERVAL calls
+        // triggers the sweep, and the expired key must go.
+        for _ in 0..SWEEP_INTERVAL {
+            store.check("mod-sweep", now + 120.0);
+        }
+        assert!(
+            !store.histories.contains_key(&key),
+            "an ident whose window has passed stayed in the store"
+        );
+    }
+
+    /// PIDASHCONV-1206: rotating many distinct idents cannot grow the store
+    /// without bound — keys for idents never seen again are swept once their
+    /// window has passed, so memory tracks one window of traffic like Django.
+    #[test]
+    fn store_sweeps_idents_never_seen_again() {
+        let mut store = ThrottleStore::default();
+        let now = 1_700_000_000.0;
+        let rotated: Vec<String> = (0..50).map(|i| format!("mod-rotate-{i}")).collect();
+        for ident in &rotated {
+            assert!(store.check(ident, now).allowed);
+        }
+        assert_eq!(store.histories.len(), rotated.len());
+
+        // Fresh traffic a full window later drives the periodic sweep; the
+        // rotated idents are never seen again and their keys must be gone.
+        for _ in 0..SWEEP_INTERVAL {
+            store.check("mod-sweep-driver", now + 120.0);
+        }
+        for ident in &rotated {
+            assert!(
+                !store.histories.contains_key(&throttle::cache_key(ident)),
+                "rotated ident {ident} was never swept after its window passed"
+            );
+        }
+        // The live ident's key survives: its newest hit is inside the window.
+        assert!(store
+            .histories
+            .contains_key(&throttle::cache_key("mod-sweep-driver")));
     }
 
     /// Ident vectors: X-Forwarded-For wins (whitespace-stripped), else the
