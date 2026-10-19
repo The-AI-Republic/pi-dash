@@ -1104,6 +1104,19 @@ describe("gated layout shell wiring", () => {
     expect(React.isValidElement(harness.updateControl)).toBe(true);
   });
 
+  it("loads the update control from its own chunk inside the sidebar slot (DESK-018)", async () => {
+    renderShell();
+    const slot = render(<Suspense fallback={<span>loading control</span>}>{harness.updateControl}</Suspense>);
+    try {
+      // Resolving the lazy factory imports the real chunk; on the web
+      // platform it asks for no update and leaves the slot empty.
+      await waitFor(() => expect(screen.queryByText("loading control")).not.toBeInTheDocument());
+      expect(slot.container).toBeEmptyDOMElement();
+    } finally {
+      slot.unmount();
+    }
+  });
+
   it("resolves edition sidebar entries against the workspace slug (CLOUD-021)", () => {
     edition.sidebar = [{ id: "apps", label: "Apps", to: "/apps/" }];
     renderShell();
