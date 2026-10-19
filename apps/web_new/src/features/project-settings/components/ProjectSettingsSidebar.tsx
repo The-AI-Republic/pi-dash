@@ -8,7 +8,7 @@
 // canonical form carries the selected marker; the equivalent no-slash
 // address renders the same tab with nothing marked (bug NEWFRONT-396).
 
-import { Link } from "@tanstack/react-router";
+import { Link, useLinkProps } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import * as React from "react";
 
@@ -30,9 +30,43 @@ const SELECTED_CLASS = "bg-layer-transparent-selected";
 const IDLE_CLASS = "text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)";
 
 type RouterLinkProps = Parameters<typeof Link>[0];
+type RouterLinkOptions = Parameters<typeof useLinkProps>[0];
 
 function hrefLinkProps(href: string): RouterLinkProps {
   return { to: href } as RouterLinkProps;
+}
+
+interface SettingsTabLinkProps {
+  href: string;
+  active: boolean;
+  className: string;
+  testId: string;
+  children: React.ReactNode;
+}
+
+/**
+ * One rail entry. `useLinkProps` keeps the router's click, modifier-key and
+ * preload behavior, but the rendered anchor owns `aria-current`: the router
+ * marks a link current whenever its target is an ancestor of the address,
+ * which would double the marker on every settings sub-page (General is an
+ * ancestor of all of them). The marker follows the slash-sensitive tab
+ * highlight instead, so exactly one entry reports the current page.
+ */
+function SettingsTabLink({ href, active, className, testId, children }: SettingsTabLinkProps): React.ReactElement {
+  // The router returns anchor props typed against its own React copy; cast
+  // keeps the spread compatible with the app's React types.
+  const linkProps = useLinkProps({ to: href } as RouterLinkOptions) as React.AnchorHTMLAttributes<HTMLAnchorElement>;
+  return (
+    <a
+      {...linkProps}
+      aria-current={active ? "page" : undefined}
+      data-testid={testId}
+      data-active={active ? "true" : "false"}
+      className={className}
+    >
+      {children}
+    </a>
+  );
 }
 
 export interface ProjectSettingsSidebarProps {
@@ -100,15 +134,14 @@ export function ProjectSettingsSidebar({
                 const active = isTabActive(pathname, workspaceSlug, projectId, tab);
                 return (
                   <li key={tab.key}>
-                    <Link
-                      {...hrefLinkProps(href)}
-                      aria-current={active ? "page" : undefined}
-                      data-testid={`project-settings-tab-${tab.key}`}
-                      data-active={active ? "true" : "false"}
+                    <SettingsTabLink
+                      href={href}
+                      active={active}
+                      testId={`project-settings-tab-${tab.key}`}
                       className={`text-body flex w-full items-center rounded-(--radius-control) px-(--space-3) py-(--space-2) ${active ? SELECTED_CLASS : IDLE_CLASS}`}
                     >
                       {tab.label}
-                    </Link>
+                    </SettingsTabLink>
                   </li>
                 );
               })}
