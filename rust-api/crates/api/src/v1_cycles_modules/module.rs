@@ -5253,8 +5253,36 @@ async fn proxy_through(
 
 /// Parse one UUID path param, proxying to Django on failure (routing
 /// precedes auth).
+///
+/// Django routes every module path param through its `<uuid:...>` converter
+/// (`apps/api/pi_dash/api/urls/module.py`), whose regex is lowercase-hyphenated
+/// only and compiled case-sensitively, so any other spelling resolver-404s
+/// before auth. `Uuid::parse_str` also accepts uppercase, simple, braced and
+/// `urn:uuid:` spellings, so gate on the raw segment and send every other
+/// spelling down the proxy for Django's own resolver 404 (PIDASHCONV-1095 /
+/// PIDASHCONV-1132 precedent, PIDASHCONV-1193).
 fn path_uuid(raw: &str) -> Result<uuid::Uuid, ()> {
+    if !is_canonical_uuid(raw) {
+        return Err(());
+    }
     raw.parse::<uuid::Uuid>().map_err(|_| ())
+}
+
+/// Whether a path segment is spelled the way Django's `UUIDConverter` routes
+/// it: lowercase hex, hyphenated, exactly 36 characters
+/// (`django/urls/converters.py`; the `v1_cli_auth` PIDASHCONV-1095, license
+/// PIDASHCONV-1132 and `app_issues` PB-0340 precedents).
+fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
 }
 
 /// `GET .../modules/`.
@@ -5498,6 +5526,24 @@ mod tests {
         ));
         assert_eq!(activate_timezone(None).expect("none"), chrono_tz::UTC);
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
+    }
+
+    #[test]
+    fn path_uuid_accepts_canonical_spelling_only() {
+        // PIDASHCONV-1193: every spelling Django's `<uuid:...>` converter
+        // refuses must fall through to the proxy (routing precedes auth),
+        // not reach a handler that binds the parsed UUID into SQL.
+        assert!(path_uuid("12345678-1234-1234-1234-1234567890ab").is_ok());
+        for raw in [
+            "12345678-1234-1234-1234-1234567890AB",
+            "123456781234123412341234567890ab",
+            "{12345678-1234-1234-1234-1234567890ab}",
+            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
+            "not-a-uuid",
+            "",
+        ] {
+            assert!(path_uuid(raw).is_err(), "{raw}");
+        }
     }
 
     fn app() -> axum::Router {
