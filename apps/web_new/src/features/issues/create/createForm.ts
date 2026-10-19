@@ -73,6 +73,31 @@ export interface CreateProjectOption {
   archived: boolean;
 }
 
+/** A caller's project row, before the optional fields are filled in. */
+export interface CreateProjectLike {
+  id: string;
+  name: string;
+  identifier?: string | undefined;
+  memberRole?: number | null | undefined;
+  archived?: boolean | undefined;
+}
+
+/** Fill in a caller's project row (ISS-117/ISS-123). */
+export function toCreateProjectOption(project: CreateProjectLike): CreateProjectOption {
+  return {
+    id: project.id,
+    name: project.name,
+    identifier: project.identifier ?? project.name.slice(0, 3).toUpperCase(),
+    memberRole: project.memberRole ?? null,
+    archived: project.archived ?? false,
+  };
+}
+
+/** Projects the entry points may offer, from a caller's own rows. */
+export function selectCreatableWorkItemProjects(projects: readonly CreateProjectLike[]): CreateProjectOption[] {
+  return selectCreatableProjects(projects.map(toCreateProjectOption));
+}
+
 /**
  * Projects that may receive a new work item (ISS-117/ISS-123): joined
  * member-or-admin projects, minus archived ones. A guest membership never
@@ -82,6 +107,11 @@ export function selectCreatableProjects(projects: readonly CreateProjectOption[]
   return projects.filter(
     (project) => !project.archived && project.memberRole !== null && project.memberRole >= ROLE_MEMBER
   );
+}
+
+/** Whether the dialog may file under a project id (ISS-123). */
+export function isCreatableProjectId(projectId: string, available: readonly CreateProjectOption[]): boolean {
+  return available.some((project) => project.id === projectId);
 }
 
 /** Keep a preferred project when it is still offered, else the first one. */

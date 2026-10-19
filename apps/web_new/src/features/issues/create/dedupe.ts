@@ -59,15 +59,55 @@ export function useDuplicateSearch(workspaceSlug: string, projectId: string, tit
   });
 }
 
-/** Matches of the same title exactly, in the project the form targets. */
+/**
+ * Title words worth comparing. Short grammar words carry no meaning and
+ * would otherwise make every item sharing "the" a duplicate.
+ */
+const STOP_WORDS = new Set(["a", "an", "and", "for", "in", "of", "on", "the", "to", "with"]);
+
+/** The compared words of a title: lower-case, punctuation folded away. */
+export function titleWords(title: string): string[] {
+  return title
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((word) => word !== "" && !STOP_WORDS.has(word));
+}
+
+/**
+ * Whether two titles name the same work, typed differently: identical
+ * once case, punctuation and spacing are folded; one is a single word
+ * the other also uses ("Login" / "Login page crashes"); or they share
+ * more than half their meaningful words ("Fix login redirect" /
+ * "Login redirect loop"). Sharing one word of two is not enough.
+ */
+export function isNearDuplicateTitle(candidate: string, title: string): boolean {
+  const left = titleWords(candidate);
+  const right = titleWords(title);
+  if (left.length === 0 || right.length === 0) return false;
+  if (left.join(" ") === right.join(" ")) return true;
+  if (left.length === 1 || right.length === 1) {
+    const [shorter, longer] = left.length === 1 ? [left, right] : [right, left];
+    const word = shorter[0]!;
+    return word.length >= 3 && longer.includes(word);
+  }
+  const shared = left.filter((word) => right.includes(word)).length;
+  // The shorter title must agree on more than half its words, so a
+  // single shared word of two is not enough.
+  return shared * 2 > Math.min(left.length, right.length);
+}
+
+/**
+ * Near-duplicate rows in the project the form targets. The search is
+ * full-text, so it can also match a body word; the title comparison is
+ * what decides, and rows from another project never count (ISS-121).
+ */
 export function selectDuplicateMatches(
   hits: readonly IssueSearchHit[],
   title: string,
   projectId: string
 ): IssueSearchHit[] {
-  const wanted = title.trim().toLowerCase();
-  if (wanted === "") return [];
-  return hits.filter((hit) => hit.project_id === projectId && hit.name.trim().toLowerCase() === wanted);
+  if (title.trim() === "") return [];
+  return hits.filter((hit) => hit.project_id === projectId && isNearDuplicateTitle(hit.name, title));
 }
 
 /**

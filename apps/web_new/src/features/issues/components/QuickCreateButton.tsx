@@ -11,6 +11,7 @@ import { Button } from "@pidash/kit";
 import { Plus } from "lucide-react";
 import * as React from "react";
 
+import { selectCreatableWorkItemProjects } from "../create/createForm.js";
 import type { WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
 const LazyWorkItemCreateDialog = React.lazy(() =>
@@ -28,12 +29,16 @@ export interface QuickCreateButtonProps {
 
 export function QuickCreateButton({ workspaceSlug, projects, canCreate }: QuickCreateButtonProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
+  // A joined project is not enough: only member-or-admin rows may file a
+  // work item, so a member who is a guest everywhere keeps the entry
+  // disabled, exactly like the issues header (ISS-117/ISS-123).
+  const creatable = React.useMemo(() => selectCreatableWorkItemProjects(projects), [projects]);
   return (
     <>
       <Button
         variant="primary"
         className="w-full"
-        disabled={!canCreate || projects.length === 0}
+        disabled={!canCreate || creatable.length === 0}
         onClick={() => setOpen(true)}
         data-testid="sidebar-quick-create"
       >

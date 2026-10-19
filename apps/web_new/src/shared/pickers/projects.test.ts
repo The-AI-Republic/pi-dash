@@ -56,6 +56,18 @@ describe("selectProjectOptions", () => {
     });
     expect(excluded.map((option) => option.id)).toEqual([OTHER]);
   });
+
+  it("never offers a row outside the caller's allow list", () => {
+    const rows = [projectRow(SEED, "Seed", "SEED"), projectRow(OTHER, "Other", "OTH")];
+    expect(selectProjectOptions({ projects: rows, includeIds: [OTHER], selectedIds: [] }).map((o) => o.id)).toEqual([
+      OTHER,
+    ]);
+    expect(selectProjectOptions({ projects: rows, includeIds: [], selectedIds: [SEED] })).toEqual([]);
+    expect(selectProjectOptions({ projects: rows, includeIds: [SEED], excludeIds: [SEED], selectedIds: [] })).toEqual(
+      []
+    );
+    expect(selectProjectOptions({ projects: rows, selectedIds: [] }).map((o) => o.id)).toEqual([SEED, OTHER]);
+  });
 });
 
 describe("selectProjectMark", () => {

@@ -1009,6 +1009,30 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
     expect(h.sent).toHaveLength(0);
   });
 
+  it("forgets the kept title when the prompt discards", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Gone for good");
+    expect(loadWorkItemDraft(SLUG)?.title).toBe("Gone for good");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    const prompt = await screen.findByRole("dialog", { name: "Save this draft?" });
+    await user.click(within(prompt).getByRole("button", { name: "Discard" }));
+    // Discard means discard: the next open must start blank rather than
+    // restore the title the user just threw away (ISS-120).
+    expect(loadWorkItemDraft(SLUG)).toBeNull();
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("also forgets the kept title when Escape is confirmed as discard", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(titleField(), "Escape me");
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    const prompt = await screen.findByRole("dialog", { name: "Save this draft?" });
+    await user.click(within(prompt).getByRole("button", { name: "Discard" }));
+    expect(loadWorkItemDraft(SLUG)).toBeNull();
+  });
+
   it("returns to the form on Cancel and keeps the values", async () => {
     const user = userEvent.setup();
     const h = setup();
@@ -1073,6 +1097,17 @@ describe("WorkItemCreateDialog duplicate seam (ISS-121)", () => {
     expect(screen.queryByText(/possible duplicate/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("complementary", { name: "Possible duplicates" })).not.toBeInTheDocument();
     expect(h.calls.some((call) => call.url.includes("duplicate"))).toBe(false);
+  });
+
+  it("finds the near-duplicate title the cloud leg seeds", async () => {
+    edition.flags[ISSUE_DEDUPE_FLAG] = true;
+    const user = userEvent.setup();
+    setup();
+    // The transport seeds "Parent work"; the typed word is a rephrasing of
+    // it, which is what §23 expects the cloud leg to surface (ISS-121).
+    await user.type(titleField(), "parent");
+    expect(await screen.findByRole("button", { name: "1 possible duplicate" }, { timeout: 4000 })).toBeInTheDocument();
+    delete edition.flags[ISSUE_DEDUPE_FLAG];
   });
 
   it("surfaces the panel when the edition flag turns the seam on", async () => {
@@ -1149,6 +1184,21 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     expect(screen.queryByText("Cycle")).not.toBeInTheDocument();
     expect(screen.queryByText("Modules")).not.toBeInTheDocument();
     expect(screen.queryByText("Estimate")).not.toBeInTheDocument();
+  });
+
+  it("keeps the Atlas target when the picker cannot offer a guest row", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.type(titleField(), "Stays in Atlas");
+    fireEvent.click(screen.getByRole("button", { name: "Atlas" }));
+    const list = await screen.findByRole("listbox", { name: "Projects" });
+    // The dialog's change handler is the last gate: a guest row can
+    // neither be picked nor become the submit target (ISS-123).
+    expect(within(list).queryByRole("option", { name: /Guestland/ })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(h.calls.some((call) => call.url.endsWith(`/projects/${PROJECT_GUEST}/issues/`))).toBe(false);
   });
 
   it("hides guest and archived projects from the selector", async () => {

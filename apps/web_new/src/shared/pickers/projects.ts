@@ -22,11 +22,14 @@ export interface ProjectOption {
 export interface ProjectOptionsInput {
   projects: ProjectList;
   excludeIds?: readonly string[] | undefined;
+  /** When set, projects outside this list are never offered. */
+  includeIds?: readonly string[] | undefined;
   selectedIds: readonly string[];
 }
 
 export function selectProjectOptions(input: ProjectOptionsInput): ProjectOption[] {
   const options = input.projects
+    .filter((project) => input.includeIds === undefined || input.includeIds.includes(project.id))
     .filter((project) => !(input.excludeIds?.includes(project.id) ?? false))
     .map((project) => ({
       id: project.id,

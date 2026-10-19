@@ -58,6 +58,13 @@ describe("QuickCreateButton", () => {
     expect(screen.getByRole("button", { name: "New work item" })).toBeDisabled();
   });
 
+  it("stays disabled when every joined project is a guest membership", () => {
+    // A workspace member who can only guest in the projects they joined
+    // may not file work anywhere, so the entry stays off (ISS-117).
+    setup([PROJECTS[1]!, PROJECTS[2]!], true);
+    expect(screen.getByRole("button", { name: "New work item" })).toBeDisabled();
+  });
+
   it("carries each project's own membership into the dialog's create list", () => {
     // A workspace admin who is only a guest on a project must not be able
     // to file there (ISS-117), so the rows carry their own roles.

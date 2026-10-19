@@ -17,7 +17,11 @@ import { usePickerProjects } from "./reference.js";
 interface ProjectPickerBase {
   workspaceSlug: string;
   /** Projects hidden from the list (the modal excludes nothing). */
-  excludeProjectIds?: readonly string[];
+  excludeProjectIds?: readonly string[] | undefined;
+  /** When set, only these projects are offered. Unlike an exclusion
+   * list this is safe before the read resolves: the picker cannot show
+   * a row the caller has not named. */
+  includeProjectIds?: readonly string[] | undefined;
   disabled?: boolean;
   /** Button variant of the default trigger. */
   variant?: ButtonVariant;
@@ -54,6 +58,7 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
   const {
     workspaceSlug,
     excludeProjectIds,
+    includeProjectIds,
     disabled = false,
     variant = "secondary",
     iconOnly = false,
@@ -77,9 +82,10 @@ export function ProjectPicker(props: ProjectPickerProps): React.ReactElement {
       selectProjectOptions({
         projects: projects.data ?? [],
         excludeIds: excludeProjectIds,
+        includeIds: includeProjectIds,
         selectedIds: props.multiple ? props.value : props.value === null ? [] : [props.value],
       }),
-    [projects.data, excludeProjectIds, props.multiple, props.value]
+    [projects.data, excludeProjectIds, includeProjectIds, props.multiple, props.value]
   );
   const loading = open && !disabled && projects.isPending;
   const errorText = projects.isError ? "Couldn't load projects." : undefined;

@@ -29,7 +29,6 @@ import {
   ProjectPicker,
   StatePicker,
   usePickerProject,
-  usePickerProjects,
   type ExecutionSelection,
   type PriorityLevel,
 } from "../../../shared/pickers/index.js";
@@ -60,12 +59,14 @@ import {
   emptyCreateForm,
   hasDraftWorthKeeping,
   hasMembership,
+  isCreatableProjectId,
   membershipForForm,
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
   selectCreatableProjects,
   targetProjectId,
+  toCreateProjectOption,
   titleError,
   type CreateFormState,
 } from "../create/createForm.js";
@@ -104,16 +105,6 @@ export interface WorkItemCreateDialogProps {
 /** Accessible name of the description editor and its heading. */
 const DESCRIPTION_LABEL = "Description";
 
-function toOption(project: WorkItemCreateProject) {
-  return {
-    id: project.id,
-    name: project.name,
-    identifier: project.identifier ?? project.name.slice(0, 3).toUpperCase(),
-    memberRole: project.memberRole ?? null,
-    archived: project.archived ?? false,
-  };
-}
-
 /** A blank form for one project, keeping the workspace's kept title. */
 function freshForm(workspaceSlug: string, projectId: string | null, name = ""): CreateFormState {
   const state = emptyCreateForm(projectId);
@@ -147,7 +138,7 @@ export function WorkItemCreateDialog({
   const assistant = useAssistantConfig(workspaceSlug, open);
   const weekStart = useWeekStart();
 
-  const creatable = React.useMemo(() => selectCreatableProjects(projects.map(toOption)), [projects]);
+  const creatable = React.useMemo(() => selectCreatableProjects(projects.map(toCreateProjectOption)), [projects]);
   const [form, setForm] = React.useState<CreateFormState>(() =>
     freshForm(workspaceSlug, resolveProjectId(creatable, initialProjectId ?? null))
   );
@@ -171,7 +162,6 @@ export function WorkItemCreateDialog({
   // this ref closes the same-tick window so a double submit posts once.
   const submitting = React.useRef(false);
 
-  const projectsQuery = usePickerProjects(workspaceSlug, open);
   const projectConfig = usePickerProject(workspaceSlug, form.projectId ?? "", form.projectId !== null);
   const detail = projectConfig.data;
   const estimates = usePickerEstimates(workspaceSlug, form.projectId ?? "", form.projectId !== null && open);
@@ -229,13 +219,11 @@ export function WorkItemCreateDialog({
   // own standing check; the roles are identical on both sides.
   const allowed = canCreate && creatable.length > 0;
   const projectId = targetProjectId(form.projectId, creatable);
-  // The picker reads the joined-project list itself; hide every project
-  // this form may not file under so the selector offers only the rows the
-  // dialog would accept (ISS-123).
-  const hiddenProjectIds = React.useMemo(() => {
-    const allowedIds = new Set(creatable.map((project) => project.id));
-    return (projectsQuery.data ?? []).filter((project) => !allowedIds.has(project.id)).map((project) => project.id);
-  }, [creatable, projectsQuery.data]);
+  // The picker reads the joined-project list itself; an allow list keeps
+  // it to the rows the dialog would accept (ISS-123). A deny list would
+  // leave the window before that read resolves open to guest projects,
+  // so the form names what it may offer instead of what it may not.
+  const creatableIds = React.useMemo(() => creatable.map((project) => project.id), [creatable]);
   const busy = create.isPending || generating || saveDraft.isPending;
 
   function patch(next: Partial<CreateFormState>): void {
@@ -250,6 +238,10 @@ export function WorkItemCreateDialog({
 
   function pickProject(projectId: string): void {
     if (projectId === form.projectId) return;
+    // The form may only file where it holds create permission; a value
+    // from outside the offered rows is ignored even if a caller renders
+    // the picker with its own list.
+    if (!isCreatableProjectId(projectId, creatable)) return;
     // Dependent fields belong to the old project: reset the strip and the
     // editor, and keep the kept title/project draft in step.
     setForm(freshForm(workspaceSlug, projectId, form.name));
@@ -262,6 +254,13 @@ export function WorkItemCreateDialog({
   function finishClose(): void {
     setDiscardOpen(false);
     onOpenChange(false);
+  }
+
+  // Discard throws the form away, including the kept title that the
+  // next open would otherwise restore (ISS-120).
+  function discardAndClose(): void {
+    clearWorkItemDraft(workspaceSlug);
+    finishClose();
   }
 
   function requestClose(): void {
@@ -439,7 +438,7 @@ export function WorkItemCreateDialog({
               workspaceSlug={workspaceSlug}
               value={form.projectId}
               onChange={pickProject}
-              excludeProjectIds={hiddenProjectIds}
+              includeProjectIds={creatableIds}
               disabled={busy}
             />
             <DuplicatePanel matches={duplicates.matches} />
@@ -593,7 +592,7 @@ export function WorkItemCreateDialog({
         saving={saveDraft.isPending}
         error={draftError}
         onCancel={() => setDiscardOpen(false)}
-        onDiscard={finishClose}
+        onDiscard={discardAndClose}
         onSaveDraft={saveAndClose}
       />
     </>

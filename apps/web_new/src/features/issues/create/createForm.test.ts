@@ -12,14 +12,17 @@ import {
   emptyCreateForm,
   hasDraftWorthKeeping,
   hasMembership,
+  isCreatableProjectId,
   isTitleAcceptable,
   membershipForForm,
   normalizeTitle,
   resetForCreateMore,
   resolveProjectId,
   selectCreatableProjects,
+  selectCreatableWorkItemProjects,
   targetProjectId,
   titleError,
+  toCreateProjectOption,
   TITLE_MAX_LENGTH,
   UNTITLED_DRAFT_NAME,
   type CreateFormState,
@@ -247,6 +250,28 @@ describe("hasDraftWorthKeeping", () => {
 
   it.each(dirty)("counts %s", (_label, override) => {
     expect(hasDraftWorthKeeping(form(override))).toBe(true);
+  });
+});
+
+describe("selectCreatableWorkItemProjects", () => {
+  it("fills a caller's rows and keeps only member-or-admin projects", () => {
+    const rows = [
+      { id: "p1", name: "Atlas", memberRole: 15 },
+      { id: "p2", name: "Guestland", memberRole: 5 },
+      { id: "p3", name: "Old", memberRole: 20, archived: true },
+      { id: "p4", name: "Bare" },
+    ];
+    expect(selectCreatableWorkItemProjects(rows).map((row) => row.id)).toEqual(["p1"]);
+    expect(toCreateProjectOption(rows[3]!)).toMatchObject({ identifier: "BAR", memberRole: null, archived: false });
+  });
+});
+
+describe("isCreatableProjectId", () => {
+  it("accepts only a project from the create list", () => {
+    const available = [project({ id: "p1" })];
+    expect(isCreatableProjectId("p1", available)).toBe(true);
+    expect(isCreatableProjectId("guest", available)).toBe(false);
+    expect(isCreatableProjectId("p1", [])).toBe(false);
   });
 });
 

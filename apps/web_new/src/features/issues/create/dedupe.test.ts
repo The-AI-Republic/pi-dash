@@ -22,8 +22,10 @@ import {
   ISSUE_DEDUPE_FLAG,
   duplicateSearchKey,
   isDebouncing,
+  isNearDuplicateTitle,
   selectDuplicateMatches,
   shouldSearchDuplicates,
+  titleWords,
   useDuplicateMatches,
 } from "./dedupe.js";
 
@@ -140,14 +142,46 @@ describe("duplicate search shaping", () => {
     expect(isDebouncing("Fix", "Fix")).toBe(false);
   });
 
-  it("matches only an exact, case-insensitive title in the same project", () => {
+  it("matches near-duplicate titles in the same project and nothing else", () => {
     const rows = [
       hit(HIT_A, "Fix Login"),
-      hit(HIT_B, "Fix login again"),
+      hit(HIT_B, "Fix logout"),
+      hit(HIT_C, "Login flow"),
       { ...hit(HIT_C, "Fix login"), project_id: "423e4567-e89b-12d3-a456-426614174003" },
     ];
     expect(selectDuplicateMatches(rows, " fix LOGIN ", PROJECT).map((row) => row.id)).toEqual([HIT_A]);
+    expect(selectDuplicateMatches(rows, "fix login", PROJECT).map((row) => row.id)).not.toContain(HIT_B);
     expect(selectDuplicateMatches(rows, "   ", PROJECT)).toEqual([]);
+  });
+});
+
+describe("isNearDuplicateTitle", () => {
+  it("folds case, punctuation and spacing", () => {
+    expect(isNearDuplicateTitle("Fix: login!", "fix login")).toBe(true);
+    expect(isNearDuplicateTitle("  Fix   login ", "Fix login")).toBe(true);
+  });
+
+  it("treats one shared word of two as different work", () => {
+    expect(isNearDuplicateTitle("Fix login", "Fix logout")).toBe(false);
+    expect(isNearDuplicateTitle("Login page crashes", "Login redirect loop")).toBe(false);
+  });
+
+  it("matches when most of the shorter title agrees", () => {
+    expect(isNearDuplicateTitle("Fix login redirect", "login redirect loop")).toBe(true);
+    expect(isNearDuplicateTitle("Login page crashes on submit", "Login page crashes after submit")).toBe(true);
+  });
+
+  it("lets a single word find titles that use it", () => {
+    expect(isNearDuplicateTitle("Login page crashes", "login")).toBe(true);
+    expect(isNearDuplicateTitle("Login", "Logout")).toBe(false);
+    // A one- or two-letter word is too common to mean anything.
+    expect(isNearDuplicateTitle("Go", "Go to settings")).toBe(false);
+  });
+
+  it("ignores grammar words and empty titles", () => {
+    expect(titleWords("The fix for the login")).toEqual(["fix", "login"]);
+    expect(isNearDuplicateTitle("the", "a")).toBe(false);
+    expect(isNearDuplicateTitle("", "Fix login")).toBe(false);
   });
 });
 

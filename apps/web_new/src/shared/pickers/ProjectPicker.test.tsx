@@ -173,6 +173,31 @@ describe("ProjectPicker", () => {
     expect(optionNames()).toEqual(["Other project"]);
   });
 
+  it("offers only the caller's allow list", async () => {
+    const { queryClient } = harness(PROJECTS);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} includeProjectIds={[OTHER]} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    expect(await screen.findByRole("option", { name: "Other project" })).toBeInTheDocument();
+    expect(optionNames()).toEqual(["Other project"]);
+  });
+
+  it("cannot show a row outside the allow list while the read is pending", () => {
+    // A pending read leaves no rows at all; an allow list can only narrow
+    // them once they land, so nothing outside the list can flash first.
+    const { queryClient } = harness(PROJECTS);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProjectPicker workspaceSlug="acme" value={null} onChange={() => undefined} includeProjectIds={[OTHER]} />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Select project" }));
+    screen.queryAllByRole("option").forEach((option) => expect(option).toHaveAccessibleName("Other project"));
+  });
+
   it("reports failed loads and blocks reads while disabled", async () => {
     const failed = harness({ detail: "boom" }, 500);
     const first = render(
