@@ -198,6 +198,36 @@ describe("links widget", () => {
     expect(calls.some((call) => call.method === "DELETE" && call.url.includes(LINK))).toBe(true);
   });
 
+  it("reports a failed create and keeps the modal open", async () => {
+    const user = userEvent.setup();
+    renderWidget({ links: [], writeStatus: 400 });
+    await user.click(await screen.findByRole("button", { name: "Add link" }));
+    await user.type(screen.getByLabelText("URL"), "example.com/new");
+    await user.click(screen.getByRole("button", { name: "Add link" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't add the link", expect.anything()));
+    expect(screen.getByRole("dialog", { name: "Add link" })).toBeInTheDocument();
+  });
+
+  it("reports a failed edit and keeps the modal open", async () => {
+    const user = userEvent.setup();
+    renderWidget({ links: [linkRow()], writeStatus: 400 });
+    await user.click(await screen.findByRole("button", { name: "Link actions for Design doc" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit link" });
+    await user.click(within(dialog).getByRole("button", { name: "Save link" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't update the link", expect.anything()));
+    expect(screen.getByRole("dialog", { name: "Edit link" })).toBeInTheDocument();
+  });
+
+  it("reports a failed removal and keeps the row", async () => {
+    const user = userEvent.setup();
+    renderWidget({ links: [linkRow()], writeStatus: 400 });
+    await user.click(await screen.findByRole("button", { name: "Link actions for Design doc" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't remove the link", expect.anything()));
+    expect(screen.getByText("Design doc")).toBeInTheDocument();
+  });
+
   it("hides add and row controls from guests but keeps the anchor and copy", async () => {
     renderWidget({ links: [linkRow()] }, false);
     expect(await screen.findByText("Design doc")).toBeInTheDocument();
