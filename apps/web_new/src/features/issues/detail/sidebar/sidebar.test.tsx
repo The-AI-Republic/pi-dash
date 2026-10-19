@@ -238,7 +238,9 @@ interface HarnessOptions {
 
 function harness(options: HarnessOptions = {}) {
   const writes: Array<{ url: string; body: unknown }> = [];
+  const reads: string[] = [];
   const conversation = async (url: string, init: TransportInit) => {
+    if (init.method === "GET") reads.push(url);
     if (url.includes(`/issues/${OTHER_ISSUE}/`)) throw new Error(`unexpected other issue ${url}`);
     if (init.method === "PATCH" && url.includes(`/issues/${ISSUE}/`)) {
       writes.push({ url, body: JSON.parse(init.body ?? "{}") });
@@ -315,7 +317,7 @@ function harness(options: HarnessOptions = {}) {
   setSessionClient(client);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["session", "me"], ME_PAYLOAD);
-  return { client, queryClient, writes };
+  return { client, queryClient, writes, reads };
 }
 
 function wrap(node: React.ReactElement, queryClient: QueryClient) {
@@ -355,6 +357,19 @@ describe("creator display", () => {
     expect(selectCreator(DIRECTORY, STARRED)).toEqual({ name: UNKNOWN_CREATOR_NAME, avatarUrl: null, masked: false });
     expect(selectCreator(undefined, ADA)).toEqual({ name: UNKNOWN_CREATOR_NAME, avatarUrl: null, masked: false });
     expect(selectCreator(DIRECTORY, null)).toBeNull();
+  });
+
+  it("renders nothing without a creator, and initials without an avatar", () => {
+    const { container, rerender } = wrap(<CreatedByRow creator={null} />, new QueryClient());
+    expect(container).toBeEmptyDOMElement();
+    rerender(
+      React.createElement(
+        QueryClientProvider,
+        { client: new QueryClient() },
+        <CreatedByRow creator={{ name: "Ada L", avatarUrl: null, masked: false }} />
+      )
+    );
+    expect(within(row("Created by")).getByRole("img", { name: "Ada L" })).toHaveTextContent("AL");
   });
 
   it("renders the creator read-only with no control", () => {
@@ -419,6 +434,22 @@ describe("SidebarProperties", () => {
     }
     await waitFor(() => expect(row("Created by")).toHaveTextContent("Ada L"));
     expect(within(row("Created by")).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("skips the member directory when nobody has to be named", async () => {
+    const { queryClient, reads } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ created_by: null, assignee_ids: [] })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reads.some((url) => url.endsWith(`/workspaces/${SLUG}/members/`))).toBe(false);
   });
 
   it("hides the created-by row when the item records no creator", async () => {
