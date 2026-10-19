@@ -4,11 +4,11 @@
 // Editor extension sets (UI kit and editor page). Tiptap arrives only
 // through dynamic import() (Stack: heavy dependencies never join the
 // eager closure), so each surface exposes an async loader. The
-// description set below covers the detail core (ISS-147); the slices
-// that own mentions, uploads, task lists and highlighting (ISS-127,
-// ISS-197) extend it with their own loaders. The compatibility
-// fixtures (compat.test.ts) load this same set, so what the tests pin
-// is exactly what the editor runs.
+// description set below covers the detail core (ISS-147); the composer
+// adds inline images with the comment set (ISS-197), and the slices
+// that own mentions, task lists and highlighting extend it further.
+// The compatibility fixtures (compat.test.ts) load this same set, so
+// what the tests pin is exactly what the editor runs.
 
 /** Description editing: paragraphs, headings, lists, code, links. */
 export async function loadDescriptionExtensions() {
@@ -20,4 +20,13 @@ export async function loadDescriptionExtensions() {
   // navigating away mid-edit. Serialized links keep the extension's
   // default target/rel (pinned in compat.test.ts).
   return [StarterKit, Link.configure({ openOnClick: false })];
+}
+
+/** Comment editing: the description set plus inline images (ISS-197). */
+export async function loadCommentExtensions() {
+  const [{ default: Image }, base] = await Promise.all([
+    import("@tiptap/extension-image"),
+    loadDescriptionExtensions(),
+  ]);
+  return [...base, Image.configure({ inline: false, allowBase64: false })];
 }

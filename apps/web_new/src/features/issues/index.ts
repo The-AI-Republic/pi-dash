@@ -79,6 +79,38 @@ export { selectCreatableProjects, TITLE_MAX_LENGTH as CREATE_TITLE_MAX_LENGTH } 
 export type { CreateFormState, CreateProjectOption } from "./create/createForm.js";
 export type { WorkItemCreateDialogProps, WorkItemCreateProject } from "./components/WorkItemCreateDialog.js";
 export { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./api/browse.js";
+export { CommentCard, commentDomId, commentMenuItems } from "./comments/CommentCard.js";
+export type { CommentAccessFlags, CommentCardProps } from "./comments/CommentCard.js";
+export { CommentComposer } from "./comments/CommentComposer.js";
+export type { CommentComposerProps } from "./comments/CommentComposer.js";
+export { CommentEditForm } from "./comments/CommentEditForm.js";
+export type { CommentEditFormProps } from "./comments/CommentEditForm.js";
+export { CommentThread, commentIdFromHash, commentLinkFor } from "./comments/CommentThread.js";
+export type { CommentLocation, CommentThreadProps } from "./comments/CommentThread.js";
+export {
+  commentsQueryOptions,
+  foldPatch,
+  accessPatch,
+  useCreateComment,
+  useDeleteComment,
+  useIssueComments,
+  useUpdateComment,
+  useUploadCommentImage,
+} from "./comments/api.js";
+export type { CommentScope, ComposerImage, CreateCommentInput } from "./comments/api.js";
+export {
+  commentAuthorAvatar,
+  commentAuthorName,
+  commentDeepLink,
+  commentMenuEntries,
+  isCommentAuthor,
+  isCommentBodyEmpty,
+  isCommentFolded,
+  toggledAccess,
+  withFold,
+} from "./comments/model.js";
+export type { CommentMenuEntry, CommentMenuFlags } from "./comments/model.js";
+
 export type { LiteResolution } from "./api/browse.js";
 export {
   descriptionVersionQueryOptions,

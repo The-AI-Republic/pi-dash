@@ -2276,8 +2276,24 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // ---- Issue detail (NEWFRONT-121): stubs until the area lands. ----
-  async openIssueDetail(_workspaceSlug: string, _issueSeqOrProjectId: string, _issueId?: string): Promise<void> {
-    return todo("openIssueDetail");
+  async openIssueDetail(workspaceSlug: string, issueSeqOrProjectId: string, issueId?: string): Promise<void> {
+    if (issueId === undefined) {
+      await this.page.goto(`/${workspaceSlug}/browse/${issueSeqOrProjectId}`);
+    } else {
+      // The id route is the legacy short link; it redirects to the
+      // canonical browse address once the server resolves the key.
+      if (this.page.url().includes("/browse/")) await this.page.reload();
+      else {
+        await this.page.goto(`/${workspaceSlug}/projects/${issueSeqOrProjectId}/issues/${issueId}`);
+        await this.page.waitForLoadState("domcontentloaded");
+      }
+      await this.page.waitForURL(/\/browse\//, { timeout: WebNewDriver.WAIT_MS }).catch(() => {
+        throw new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
+      });
+    }
+    await this.page.getByRole("heading", { name: "Comments", exact: true }).waitFor({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
   async openReadOnlyIssueDetail(_workspaceSlug: string, _issueSeq: string): Promise<void> {
     return todo("openReadOnlyIssueDetail");
@@ -2826,12 +2842,35 @@ export class WebNewDriver implements ParityDriver {
     return todo("activityOpenFirstEntryLink");
   }
 
-  // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). Stubs until
-  // --- the matching area lands in apps/web_new; the oracle driver above
-  // --- stays untouched.
+  // --- Issue activity & comments (NEWFRONT-122, ISS-194–206). The
+  // --- comment rows (ISS-197–202) are live here; the feed rows (194–196,
+  // --- 203–206) land with their own slice.
+
+  /** A comment card, addressed by the words it shows. */
+  private commentCard(text: string): Locator {
+    return this.page.getByRole("article", { hasText: text }).first();
+  }
+
+  private composerBox(): Locator {
+    return this.page.getByRole("group", { name: "Add comment" }).first();
+  }
+
+  private composerEditor(): Locator {
+    return this.composerBox().locator('[contenteditable="true"]').first();
+  }
+
+  private async openCommentMenu(cardText: string): Promise<void> {
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    const card = this.commentCard(cardText);
+    await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await card.hover({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    const trigger = card.locator('button[aria-haspopup="menu"]').first();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
 
   async activityCommentTexts(): Promise<string[]> {
-    return todo("activityCommentTexts");
+    return this.page.locator('[id^="comment-"]').allInnerTexts();
   }
 
   async activityHasCreationEntry(): Promise<boolean> {
@@ -2851,59 +2890,124 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityComposerIsAboveFeed(): Promise<boolean> {
-    return todo("activityComposerIsAboveFeed");
+    const composerBox = await this.composerBox().boundingBox();
+    const firstCardBox = await this.page.locator('[id^="comment-"]').first().boundingBox();
+    if (composerBox === null || firstCardBox === null)
+      throw new Error("[parity] composer or feed card has no layout box.");
+    return composerBox.y < firstCardBox.y;
   }
 
   async activityComposerText(): Promise<string> {
-    return todo("activityComposerText");
+    return (await this.composerEditor().innerText()).trim();
   }
 
-  async activityPostComment(_bodyText: string): Promise<void> {
-    return todo("activityPostComment");
+  async activityPostComment(bodyText: string): Promise<void> {
+    const editor = this.composerEditor();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.fill(bodyText, { timeout: WebNewDriver.WAIT_MS });
+    await editor.press("Enter", { timeout: WebNewDriver.WAIT_MS });
+    await this.commentCard(bodyText).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async activityOpenCommentMenu(_cardText: string): Promise<void> {
-    return todo("activityOpenCommentMenu");
+  async activityOpenCommentMenu(cardText: string): Promise<void> {
+    await this.openCommentMenu(cardText);
   }
 
   async activityMenuItems(): Promise<string[]> {
-    return todo("activityMenuItems");
+    return this.page.getByRole("menuitem").allInnerTexts();
   }
 
-  async activityClickMenuItem(_name: string): Promise<void> {
-    return todo("activityClickMenuItem");
+  async activityClickMenuItem(name: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async activityEditComment(_oldText: string, _newText: string): Promise<void> {
-    return todo("activityEditComment");
+  async activityEditComment(oldText: string, newText: string): Promise<void> {
+    await this.openCommentMenu(oldText);
+    await this.activityClickMenuItem("Edit");
+    const editor = this.page.locator('[id^="comment-"] [contenteditable="true"]').first();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.press("ControlOrMeta+a", { timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(newText, { timeout: WebNewDriver.WAIT_MS });
+    await editor
+      .locator("xpath=ancestor::form[1]")
+      .getByRole("button", { name: "Save comment", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.commentCard(newText).getByText("(edited)", { exact: false }).first().waitFor({
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
-  async sawToast(_text: string): Promise<boolean> {
-    return todo("sawToast");
+  async sawToast(text: string): Promise<boolean> {
+    return (await this.page.locator("body").innerText()).includes(text);
   }
 
-  async activityCancelEdit(_cardText: string): Promise<void> {
-    return todo("activityCancelEdit");
+  async activityCancelEdit(cardText: string): Promise<void> {
+    const card = this.commentCard(cardText);
+    await card.getByRole("button", { name: "Cancel editing", exact: true }).first().click({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await card
+      .locator('[contenteditable="true"]')
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async activityCommentHighlighted(_cardText: string): Promise<boolean> {
-    return todo("activityCommentHighlighted");
+  async activityCommentHighlighted(cardText: string): Promise<boolean> {
+    // The highlight rides on the wrapper around the card for a few
+    // seconds after the deep link lands.
+    return this.commentCard(cardText)
+      .evaluate((el) => {
+        const wrapper = el.parentElement;
+        return wrapper !== null && wrapper.className.includes("ring-1");
+      })
+      .catch(() => false);
   }
 
-  async activityChipTooltipText(_cardText: string, _emoji: string, _expectedName: string): Promise<string> {
-    return todo("activityChipTooltipText");
+  async activityChipTooltipText(cardText: string, emoji: string, expectedName: string): Promise<string> {
+    await this.commentCard(cardText)
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction((name) => document.body.innerText.includes(name), expectedName, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    return this.page.evaluate((name) => {
+      const candidates = Array.from(document.querySelectorAll("body *")).filter((el) =>
+        (el as HTMLElement).innerText?.includes(name)
+      );
+      candidates.sort((a, b) => a.innerHTML.length - b.innerHTML.length);
+      return ((candidates[0] as HTMLElement | undefined)?.innerText ?? "").slice(0, 200);
+    }, expectedName);
   }
 
-  async activityCommentBodyVisible(_cardText: string): Promise<boolean> {
-    return todo("activityCommentBodyVisible");
+  async activityCommentBodyVisible(cardText: string): Promise<boolean> {
+    const card = this.commentCard(cardText);
+    try {
+      await card.waitFor({ timeout: 5_000 });
+    } catch {
+      return false;
+    }
+    return (await card.innerText()).includes(cardText);
   }
 
   async activityExpandFoldedComment(_cardText: string): Promise<void> {
-    return todo("activityExpandFoldedComment");
+    await this.page
+      .getByRole("button", { name: /Click to expand/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async activityCopyCommentLink(_cardText: string): Promise<string> {
-    return todo("activityCopyCommentLink");
+  async activityCopyCommentLink(cardText: string): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.openCommentMenu(cardText);
+    await this.activityClickMenuItem("Copy link");
+    await this.page.waitForFunction(() => navigator.clipboard.readText().then((text) => text.length > 0), null, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
   async activityAddCommentReaction(_cardText: string): Promise<{ emoji: string; code: string }> {

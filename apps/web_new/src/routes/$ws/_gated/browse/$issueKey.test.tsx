@@ -219,6 +219,7 @@ interface BrowseExtras {
   estimate?: string | null;
   intake?: boolean;
   liteStatus?: number;
+  published?: boolean;
 }
 
 function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
@@ -260,6 +261,47 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
     } else if (url.endsWith("/projects/")) {
       status = 200;
       body = JSON.stringify([projectRow()]);
+    } else if (url.includes("/history/")) {
+      status = 200;
+      body = JSON.stringify([
+        {
+          id: "423e4567-e89b-12d3-a456-426614174003",
+          issue: ISSUE_ID,
+          project: PROJECT_ID,
+          workspace: UUID,
+          actor: UUID,
+          actor_detail: {
+            id: UUID,
+            first_name: "Ada",
+            last_name: "L",
+            avatar: "",
+            avatar_url: null,
+            display_name: "Ada L",
+            is_bot: false,
+          },
+          comment_html: "<p>Detail thread</p>",
+          comment_stripped: "Detail thread",
+          comment_json: {},
+          attachments: [],
+          labels: [],
+          access: "INTERNAL",
+          edited_at: null,
+          comment_reactions: [],
+          speaker_type: "human",
+          speaker_label: "",
+          speaker_agent_run_id: null,
+          parent: null,
+          external_source: null,
+          external_id: null,
+          is_synced: false,
+          description: null,
+          created_at: "2024-02-03T04:05:06Z",
+          updated_at: "2024-02-03T04:05:06Z",
+          created_by: UUID,
+          updated_by: null,
+          deleted_at: null,
+        },
+      ]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
@@ -270,6 +312,7 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
         const overrides: Record<string, unknown> =
           extras.details === "archived" ? { archived_at: "2024-03-04T05:06:07Z" } : {};
         if (extras.estimate !== undefined) overrides["estimate"] = extras.estimate;
+        if (extras.published === true) overrides["anchor"] = "board";
         body = JSON.stringify([detailsRow(overrides)]);
       } else {
         body = "[]";
@@ -357,6 +400,25 @@ describe("browse route", () => {
     renderBrowse(true, undefined, { details: "member", me: true });
     const box = await screen.findByRole("textbox", { name: "Title" });
     expect(box).toHaveValue("Fix login");
+  });
+
+  it("mounts the comment thread under the description with the composer", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    expect(await screen.findByRole("heading", { name: "Comments" })).toBeInTheDocument();
+    expect(await screen.findByText("Detail thread")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
+    expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
+  });
+
+  it("shows the comment access switch on a published project", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, published: true });
+    expect(await screen.findByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
+  });
+
+  it("drops the comment composer on an archived issue but keeps its cards", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    expect(await screen.findByText("Detail thread")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Add comment" })).not.toBeInTheDocument();
   });
 
   it("shows the history line read-only for archived issues", async () => {

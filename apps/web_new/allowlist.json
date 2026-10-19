@@ -6,6 +6,7 @@
     "@tanstack/react-query",
     "@tanstack/react-router",
     "@tiptap/core",
+    "@tiptap/extension-image",
     "@tiptap/extension-link",
     "@tiptap/pm",
     "@tiptap/react",
