@@ -40,21 +40,21 @@ export const CONFIRM_REMOVE_ACTION = "Confirm remove";
 export const CANCEL_ACTION = "Cancel";
 
 export const SWITCHED_TITLE = "Switched";
-export const SWITCH_FAILED_TITLE = "Could not switch";
-export const MODEL_FAILED_TITLE = "Could not change model";
+export const SWITCH_FAILED_TITLE = "Switch failed";
+export const MODEL_FAILED_TITLE = "Model change failed";
 export const REMOVE_CONFIRM_TITLE = "Remove this connection?";
 export const REMOVE_CONFIRM_BODY =
   "Its key is deleted right away. Nothing else changes, and you can connect it again later.";
 export const REMOVED_TITLE = "Removed";
 export const REMOVE_FAILED_TITLE = "Could not remove";
-export const DISCONNECT_FAILED_TITLE = "Could not disconnect";
+export const DISCONNECT_FAILED_TITLE = "Disconnect failed";
 export const DISCONNECTED_TITLE = "OpenAI account disconnected";
 export const DISCONNECTED_BODY =
   "The stored credential was removed. Connect the account again whenever you want to use it.";
-export const TEST_OK_TITLE = "Connection OK";
+export const TEST_OK_TITLE = "Connection works";
 export const TEST_OK_BODY = "The provider accepted a request with this connection.";
 export const TEST_FAILED_TITLE = "Connection failed";
-export const TEST_FAILED_FALLBACK = "Unknown error";
+export const TEST_FAILED_FALLBACK = "Unexpected response";
 
 export const PROVIDER_LABEL = "Provider";
 export const COMPATIBLE_PROVIDER_LABEL = "OpenAI-compatible";
@@ -70,13 +70,13 @@ export const BYOK_MISSING_MODEL = "Name the model the assistant should call.";
 export const BYOK_MISSING_KEY = "Paste the key for this provider.";
 export const ADDED_TITLE = "Connection added";
 export const ADD_FAILED_TITLE = "Could not add connection";
-export const ADD_FAILED_FALLBACK = "Invalid configuration";
+export const ADD_FAILED_FALLBACK = "The server rejected the configuration";
 export const ADD_SAVING_ACTION = "Adding…";
 
 export const POPUP_BLOCKED_TITLE = "Popup blocked";
 export const POPUP_BLOCKED_BODY = "The sign-in window could not open. Allow pop-ups for this site and try again.";
 export const SIGN_IN_START_FAILED_TITLE = "Could not start ChatGPT sign-in";
-export const SIGN_IN_START_FAILED_FALLBACK = "Unknown error";
+export const SIGN_IN_START_FAILED_FALLBACK = "No detail returned";
 export const SIGN_IN_CLOSED_TITLE = "Sign-in window closed";
 export const SIGN_IN_CLOSED_BODY = "The sign-in window closed before OpenAI answered. Start it again.";
 export const SIGN_IN_OK_TITLE = "OpenAI account ready";

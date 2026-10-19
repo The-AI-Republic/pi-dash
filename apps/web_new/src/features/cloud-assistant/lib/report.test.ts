@@ -36,7 +36,7 @@ describe("startFailureNotice", () => {
   it("falls back for a rejected start with no detail", () => {
     expect(startFailureNotice({ kind: "rejected", error: new Error("") })).toEqual({
       title: "Could not start ChatGPT sign-in",
-      body: "Unknown error",
+      body: "No detail returned",
     });
   });
 });

@@ -191,7 +191,7 @@ describe("CloudAssistantTab", () => {
     });
     renderTab();
     await user.click(await screen.findByRole("radio", { name: "OpenAI account" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not switch", "Not connected"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Switch failed", "Not connected"));
   });
 
   it("saves a renamed self-supplied model silently and reports a refusal", async () => {
@@ -215,7 +215,7 @@ describe("CloudAssistantTab", () => {
     fail = true;
     await user.clear(field);
     await user.type(field, "broken-model{Enter}");
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not change model", "Unknown model"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Model change failed", "Unknown model"));
   });
 
   it("tests the active connection and reports both outcomes", async () => {
@@ -231,7 +231,7 @@ describe("CloudAssistantTab", () => {
     await user.click(await screen.findByRole("button", { name: "Test" }));
     await waitFor(() =>
       expect(notifySuccess).toHaveBeenCalledWith(
-        "Connection OK",
+        "Connection works",
         "The provider accepted a request with this connection."
       )
     );
@@ -254,7 +254,7 @@ describe("CloudAssistantTab", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "provider_unreachable"));
     answer = { ok: false };
     await user.click(screen.getByRole("button", { name: "Test" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "Unknown error"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Connection failed", "Unexpected response"));
   });
 
   it("reports a test request that never reached the server", async () => {
@@ -328,7 +328,7 @@ describe("CloudAssistantTab", () => {
     );
     fail = true;
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not disconnect", "Server error"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Disconnect failed", "Server error"));
   });
 
   it("saves the key form, trims it, and returns to the list", async () => {

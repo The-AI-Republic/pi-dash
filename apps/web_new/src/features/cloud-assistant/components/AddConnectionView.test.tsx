@@ -88,7 +88,9 @@ describe("AddConnectionView", () => {
 
   it("uses the fallback copy for an empty refusal", () => {
     setup({ error: "" });
-    expect(screen.getByRole("alert")).toHaveTextContent("Could not add connection: Invalid configuration");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Could not add connection: The server rejected the configuration"
+    );
   });
 
   it("shows progress and blocks a second submit while saving", () => {
