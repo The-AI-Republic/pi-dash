@@ -106,7 +106,7 @@ export function autoSelectMachine(
   alreadyTouched: boolean
 ): string | null {
   if (alreadyTouched || machines.length === 0 || current !== MANUAL_MACHINE) return null;
-  return machines[0].id;
+  return machines[0]!.id;
 }
 
 /**
@@ -175,7 +175,7 @@ export function agentGating(machine: ConnectedMachine | undefined): { disabled: 
     hint:
       disabled.length === 0
         ? null
-        : "Some agents need a newer daemon on this machine. Upgrade pidash on the machine to use them.",
+        : "This machine can run only some of these agents. Update pidash on it to unlock the rest.",
   };
 }
 

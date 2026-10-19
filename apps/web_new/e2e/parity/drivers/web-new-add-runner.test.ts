@@ -224,7 +224,7 @@ describe("addRunner close and phases", () => {
     const back = stubLocator({ count: vi.fn(async () => 1) });
     const cancel = stubLocator({ count: vi.fn(async () => 1) });
     const dialog = stubLocator({
-      innerText: vi.fn(async () => "Runner creation failed: boom"),
+      innerText: vi.fn(async () => "Could not create the runner: boom"),
       getByRole: vi.fn((_role: string, options?: { name?: string }) => {
         if (options?.name === "Generate Runner") return stubLocator({ count: vi.fn(async () => 0) });
         return options?.name === "Back" ? back : cancel;
@@ -264,8 +264,8 @@ describe("addRunner close and phases", () => {
     };
 
     await expect(phase("Runner created").addRunnerRemotePhase()).resolves.toBe("ok");
-    await expect(phase("Runner creation failed: boom").addRunnerRemotePhase()).resolves.toBe("error");
-    await expect(phase("did not report back in time").addRunnerRemotePhase()).resolves.toBe("timeout");
+    await expect(phase("Could not create the runner: boom").addRunnerRemotePhase()).resolves.toBe("error");
+    await expect(phase("The dev machine has not answered yet").addRunnerRemotePhase()).resolves.toBe("timeout");
     await expect(phase("Waiting for the dev machine").addRunnerRemotePhase()).resolves.toBe("creating");
     await expect(phase("Runner created").addRunnerRemoteRunnerName()).resolves.toBe("new-runner");
     await expect(phase("Runner created").addRunnerRemoteText()).resolves.toBe("Runner created");

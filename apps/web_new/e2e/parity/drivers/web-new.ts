@@ -10319,8 +10319,8 @@ export class WebNewDriver implements ParityDriver {
         .catch(() => "")) ?? ""
     ).trim();
     if (body.includes("Runner created")) return "ok";
-    if (body.includes("Runner creation failed")) return "error";
-    if (body.includes("did not report back in time")) return "timeout";
+    if (body.includes("Could not create the runner")) return "error";
+    if (body.includes("has not answered yet")) return "timeout";
     return "creating";
   }
 
@@ -10348,7 +10348,7 @@ export class WebNewDriver implements ParityDriver {
 
   async addRunnerRemoteManual(): Promise<void> {
     await this.addRunnerDialog()
-      .getByRole("button", { name: "Show manual command", exact: true })
+      .getByRole("button", { name: "Use CLI instead", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
 

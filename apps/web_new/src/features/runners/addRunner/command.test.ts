@@ -107,6 +107,7 @@ describe("buildRunnerCommand", () => {
       cloudUrl: "",
       workspaceSlug: "",
       projectIdentifier: "",
+      agent: "",
     };
     expect(buildRunnerCommand("posix", empty)).toBe("pidash runner add");
     expect(buildRunnerCommand("cmd", empty)).toBe("pidash runner add");

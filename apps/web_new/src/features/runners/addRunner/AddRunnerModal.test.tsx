@@ -176,7 +176,7 @@ describe("form entry (RUN-006)", () => {
   it("rejects a bad name and accepts a good one", async () => {
     harness();
     await pickPicker("Project", "Acme");
-    await userEvent.type(screen.getByLabelText("Name (optional)"), "has space", { timeout: 5_000 });
+    await userEvent.type(screen.getByLabelText("Name (optional)"), "has space");
     await submit();
     expect(screen.getByRole("alert")).toHaveTextContent("Runner name cannot contain spaces.");
     await userEvent.clear(screen.getByLabelText("Name (optional)"));
@@ -258,16 +258,31 @@ describe("machine path (RUN-007, RUN-009)", () => {
     const list = await screen.findByRole("listbox", { name: "Agent" });
     expect(within(list).getByRole("option", { name: "Grok" })).toBeDisabled();
     expect(within(list).getByRole("option", { name: "Codex" })).not.toBeDisabled();
-    expect(screen.getByText(/newer daemon/)).toBeInTheDocument();
+    expect(screen.getByText(/can run only some of these agents/)).toBeInTheDocument();
   });
 
-  it("snaps the agent when the picked machine cannot run it", async () => {
+  it("snaps the agent when the auto-selected machine cannot run it", async () => {
     machineRows.push(machine({ supported_agents: ["codex"] }));
     harness();
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
+    expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Codex");
+    await userEvent.click(screen.getByRole("button", { name: "Agent" }));
+    const list = await screen.findByRole("listbox", { name: "Agent" });
+    expect(within(list).getByRole("option", { name: "Claude Code" })).toBeDisabled();
     await pickPicker("Dev machine", MANUAL_MACHINE_LABEL);
     expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent(MANUAL_MACHINE_LABEL);
-    expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Claude Code");
+    expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Codex");
+  });
+
+  it("snaps the agent when a hand-picked machine cannot run it", async () => {
+    machineRows.push(
+      machine({ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", label: "Alpha", supported_agents: ["claude-code"] }),
+      machine({ id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", label: "Beta", supported_agents: ["codex"] })
+    );
+    harness();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Alpha"));
+    await pickPicker("Dev machine", "Beta");
+    expect(screen.getByRole("button", { name: "Agent" })).toHaveTextContent("Codex");
   });
 
   it("shows load error banners without blocking the form", () => {
@@ -287,10 +302,10 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Agent" }));
     const list = await screen.findByRole("listbox", { name: "Agent" });
     expect(within(list).getByRole("option", { name: "Grok" })).not.toBeDisabled();
-    expect(screen.queryByText(/newer daemon/)).toBeNull();
+    expect(screen.queryByText(/can run only some of these agents/)).toBeNull();
   });
 
-  it("falls back to manual when the chosen machine goes offline", async () => {
+  it("falls back to manual when the chosen machine goes offline and keeps that choice on reconnect", async () => {
     machineRows.push(machine());
     const { view } = harness();
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
@@ -299,6 +314,14 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent(MANUAL_MACHINE_LABEL)
     );
+    machineData = [machine()];
+    view.rerender(<AddRunnerModal open onOpenChange={() => undefined} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent(MANUAL_MACHINE_LABEL)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    view.rerender(<AddRunnerModal open onOpenChange={() => undefined} />);
+    expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent(MANUAL_MACHINE_LABEL);
   });
 
   it("posts every optional field the form collected", async () => {
@@ -361,7 +384,7 @@ describe("machine path (RUN-007, RUN-009)", () => {
     machineRows.push(machine());
     harness();
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
-    expect(screen.queryByRole("button", { name: "Show manual command" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Use CLI instead" })).toBeNull();
   });
 
   it("reports a success without a runner name", async () => {
@@ -375,7 +398,7 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await pickPicker("Project", "Acme");
     await submit();
     expect(await screen.findByRole("heading", { name: "Runner created" })).toBeInTheDocument();
-    expect(screen.getByText(/is now running on/)).toBeInTheDocument();
+    expect(screen.getByText(/is live on/)).toBeInTheDocument();
   });
 
   it("reports a failure with no detail", async () => {
@@ -388,7 +411,7 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
     await pickPicker("Project", "Acme");
     await submit();
-    expect(await screen.findByText("Runner creation failed.")).toBeInTheDocument();
+    expect(await screen.findByText("Could not create the runner.")).toBeInTheDocument();
   });
 
   it("carries the values into the manual command after a failure", async () => {
@@ -402,9 +425,9 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
     await pickPicker("Project", "Acme");
     await submit();
-    await waitFor(() => expect(screen.getByText(/Runner creation failed/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Could not create the runner/)).toBeInTheDocument());
     expect(screen.getByText(new RegExp(DAEMON_TOO_OLD_TEXT.slice(0, 20)))).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Show manual command" }));
+    await userEvent.click(screen.getByRole("button", { name: "Use CLI instead" }));
     expect(screen.getByTestId("add-runner-command-text")).toHaveTextContent("--project ACME");
   });
 
@@ -419,7 +442,7 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
     await pickPicker("Project", "Acme");
     await submit();
-    expect(await screen.findByText(/did not report back in time/)).toBeInTheDocument();
+    expect(await screen.findByText(/has not answered yet/)).toBeInTheDocument();
   });
 
   it("stops polling when the dialog closes during creation", async () => {
@@ -437,7 +460,7 @@ describe("machine path (RUN-007, RUN-009)", () => {
       }
     );
     await submit();
-    expect(await screen.findByText(/Creating runner/)).toBeInTheDocument();
+    expect(await screen.findByText(/Setting up a runner/)).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(onOpenChange).toHaveBeenCalledWith(false);
     await waitFor(() => expect(cancellationObserved).toBe(true));
@@ -469,7 +492,7 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
     await pickPicker("Project", "Acme");
     await submit();
-    await waitFor(() => expect(screen.getByText(/Runner creation failed/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Could not create the runner/)).toBeInTheDocument());
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(screen.getByRole("button", { name: "Generate Runner" })).toBeInTheDocument();
   });

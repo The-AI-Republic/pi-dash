@@ -8,7 +8,7 @@
 // the command panel.
 
 import { Button, Combobox, Dialog, Input, type ComboboxOption } from "@pidash/kit";
-import type { CreateRunnerStatus, DevMachine } from "@pidash/api-client";
+import type { CreateRunnerOnMachineInput, CreateRunnerStatus, DevMachine } from "@pidash/api-client";
 import * as React from "react";
 
 import { useRunnersArea } from "../area.js";
@@ -121,19 +121,31 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
     setMachineTouched(false);
   }, [open]);
 
-  // One-shot machine auto-selection once the list arrives.
+  // One-shot machine auto-selection once the list arrives, with the agent
+  // gated for the machine that was chosen. A modal-driven fallback to manual
+  // also counts as settled: a machine reconnecting later must not override a
+  // choice the user has already seen.
   React.useEffect(() => {
     if (!open) return;
-    const picked = autoSelectMachine(values.devMachineId, connectedForPicker, machineTouched);
-    if (picked !== null) setValues((current) => ({ ...current, devMachineId: picked }));
-  }, [connectedForPicker, machineTouched, open, values.devMachineId]);
-
-  // A chosen machine that drops offline falls back to manual.
-  React.useEffect(() => {
-    if (!open) return;
+    if (!machineTouched) {
+      const picked = autoSelectMachine(values.devMachineId, connectedForPicker, false);
+      if (picked !== null) {
+        const machine = connectedForPicker.find((candidate) => candidate.id === picked);
+        setMachineTouched(true);
+        setValues((current) => ({
+          ...current,
+          devMachineId: picked,
+          agent: settleAgent(current.agent, machine),
+        }));
+        return;
+      }
+    }
     const settled = settleMachineSelection(values.devMachineId, connectedForPicker);
-    if (settled !== values.devMachineId) setValues((current) => ({ ...current, devMachineId: settled }));
-  }, [connectedForPicker, open, values.devMachineId]);
+    if (settled !== values.devMachineId) {
+      setMachineTouched(true);
+      setValues((current) => ({ ...current, devMachineId: settled }));
+    }
+  }, [connectedForPicker, machineTouched, open, values.devMachineId]);
 
   // Prefill the locked project from the route once the list arrives.
   React.useEffect(() => {
@@ -240,7 +252,7 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
     const fields = fieldsFor(values);
     const transport = createRunnerTransport();
     let requestId = "";
-    const input = {
+    const input: CreateRunnerOnMachineInput = {
       workspace: area.workspaceId,
       project: fields.projectIdentifier,
       ...(fields.podName ? { pod: fields.podName } : {}),
@@ -563,25 +575,24 @@ function RemotePanel({ state, onClose, onDone, onBack, onManual }: RemotePanelPr
       <div>
         {state.phase === "creating" ? (
           <p className="text-body text-(--text-muted)">
-            Creating runner on <span className="font-medium text-(--text)">{state.machineLabel}</span>. Waiting for the
-            dev machine to report back. This usually takes a few seconds.
+            Setting up a runner on <span className="font-medium text-(--text)">{state.machineLabel}</span>. The dev
+            machine is checking in; this usually finishes in a moment.
           </p>
         ) : null}
         {state.phase === "ok" ? (
           <p className="text-body text-(--text-muted)">
             {state.runnerName === undefined ? null : <code className="text-meta">{state.runnerName} </code>}
-            is now running on <span className="font-medium text-(--text)">{state.machineLabel}</span>.
+            is live on <span className="font-medium text-(--text)">{state.machineLabel}</span>.
           </p>
         ) : null}
         {state.phase === "error" ? (
           <p className="text-body text-(--danger)">
-            Runner creation failed{state.error === undefined || state.error === "" ? "." : `: ${state.error}`}
+            Could not create the runner{state.error === undefined || state.error === "" ? "." : `: ${state.error}`}
           </p>
         ) : null}
         {state.phase === "timeout" ? (
           <p className="text-body text-(--text-muted)">
-            The dev machine did not report back in time. The runner may still appear shortly — check the runners list,
-            or run the command manually.
+            The dev machine has not answered yet. The runner may appear shortly; you can also run the command yourself.
           </p>
         ) : null}
       </div>
@@ -599,7 +610,7 @@ function RemotePanel({ state, onClose, onDone, onBack, onManual }: RemotePanelPr
             <Button variant="secondary" onClick={onBack}>
               Back
             </Button>
-            <Button onClick={onManual}>Show manual command</Button>
+            <Button onClick={onManual}>Use CLI instead</Button>
           </>
         )}
       </div>

@@ -168,7 +168,7 @@ describe("agent gating", () => {
   it("disables unsupported agents and explains the upgrade", () => {
     const gating = agentGating({ id: "m", label: "m", supportedAgents: ["claude-code", "codex"] });
     expect(gating.disabled).toEqual(["cursor-agent", "open-claw", "grok", "muse-code"]);
-    expect(gating.hint).toContain("newer daemon");
+    expect(gating.hint).toContain("Update pidash");
   });
 
   it("hides the hint when the machine supports everything", () => {

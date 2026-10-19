@@ -28,7 +28,7 @@ export interface CommandFields {
   podName?: string | undefined;
   runnerName?: string | undefined;
   workingDir?: string | undefined;
-  agent?: string | undefined;
+  agent: string;
   model?: string | undefined;
   reasoningEffort?: string | undefined;
 }
