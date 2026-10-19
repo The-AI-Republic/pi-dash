@@ -368,15 +368,15 @@ describe("cache edges", () => {
     expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toBeUndefined();
   });
 
-  it("leaves an unread list unpopulated after a create", async () => {
-    stubClient((call) => ({
-      status: call.method === "POST" ? 201 : 200,
-      body: call.method === "POST" ? comment() : [],
-    }));
+  it("leaves an unread thread to its own first read after an update", async () => {
+    const updated = comment({ labels: ["fold"] });
+    stubClient((call) => ({ status: 200, body: call.method === "PATCH" ? updated : [] }));
     const { queryClient, wrapper } = harness();
-    const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
-    await result.current.mutateAsync({ html: "<p>Hi</p>", access: "INTERNAL" });
-    expect(notifySuccess).toHaveBeenCalledWith(COMMENT_CREATED_TITLE);
+    const { result } = renderHook(() => useUpdateComment(SCOPE, COMMENT_UPDATE_FAILED_TITLE, COMMENT_UPDATED_TITLE), {
+      wrapper,
+    });
+    await result.current.mutateAsync({ commentId: COMMENT, patch: { labels: ["fold"] } });
+    expect(notifySuccess).toHaveBeenCalledWith(COMMENT_UPDATED_TITLE);
     expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toBeUndefined();
   });
 
