@@ -213,6 +213,19 @@ export {
 } from "./contracts/reference.js";
 export type { LabelCreate, LabelPatch } from "./contracts/reference.js";
 export {
+  ProjectMemberAdmin,
+  ProjectMemberRole,
+  ProjectMemberRoleList,
+  addProjectMembers,
+  createState,
+  deleteState,
+  markStateDefault,
+  removeProjectMember,
+  updateProjectMember,
+  updateState,
+} from "./contracts/project-settings-writes.js";
+export type { ProjectMemberAddInput, StateCreateInput, StateUpdateInput } from "./contracts/project-settings-writes.js";
+export {
   ISSUE_PRIORITIES,
   GlobalIssueListResponse,
   GlobalIssueRow,
