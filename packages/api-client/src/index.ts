@@ -1004,3 +1004,56 @@ export type {
   LocalChatTransport,
   LocalChatUnsubscribe,
 } from "./contracts/local-chat.js";
+export {
+  GitAccountDisconnected,
+  GitProviderAccount,
+  GitProviderAccountList,
+  GithubIntegrationStatus,
+  connectGithubIntegration,
+  disconnectGithubIntegration,
+  disconnectGitProviderAccount,
+  getGithubIntegration,
+  isVerified,
+  listGitProviderAccounts,
+  registerGitProviderAccount,
+} from "./contracts/integrations.js";
+export type {
+  GitAccountAuthType,
+  GitAccountProvider,
+  GitAccountStatus,
+  GithubConnectInput,
+  RegisterGitProviderAccountInput,
+} from "./contracts/integrations.js";
+export {
+  CreatedWorkspaceWebhook,
+  WorkspaceWebhook,
+  WorkspaceWebhookList,
+  allWebhookEvents,
+  createWorkspaceWebhook,
+  deleteWorkspaceWebhook,
+  getWorkspaceWebhook,
+  listWorkspaceWebhooks,
+  regenerateWorkspaceWebhookSecret,
+  updateWorkspaceWebhook,
+  webhookUsesAllEvents,
+} from "./contracts/webhooks.js";
+export type { CreateWorkspaceWebhookInput, UpdateWorkspaceWebhookInput } from "./contracts/webhooks.js";
+export {
+  CreatedPersonalApiToken,
+  PersonalApiToken,
+  PersonalApiTokenList,
+  createPersonalApiToken,
+  deletePersonalApiToken,
+  listPersonalApiTokens,
+} from "./contracts/api-tokens.js";
+export type { CreatePersonalApiTokenInput } from "./contracts/api-tokens.js";
+export {
+  BILLING_FREQUENCIES,
+  BILLING_PLANS,
+  BillingPlanAction,
+  billingPlanAction,
+  billingPlanDiscount,
+  billingPlanIsPopular,
+  billingPlanPrice,
+} from "./contracts/billing-plans.js";
+export type { BillingFrequency, BillingPlan } from "./contracts/billing-plans.js";
