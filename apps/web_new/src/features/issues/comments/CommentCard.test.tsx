@@ -322,4 +322,21 @@ describe("CommentCard", () => {
     if (first !== undefined && "onSelect" in first) first.onSelect();
     expect(handlers.onToggleFold).toHaveBeenCalled();
   });
+
+  it("cancels an edit opened from the menu", async () => {
+    const user = userEvent.setup();
+    createAppClient("https://api.test", async () => ({
+      status: 204,
+      url: "",
+      headers: { get: () => null },
+      text: async () => "",
+    }));
+    renderCard();
+    await openMenu(user);
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
+    expect(await screen.findByLabelText("Edit comment")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel editing" }));
+    expect(screen.queryByLabelText("Edit comment")).not.toBeInTheDocument();
+    expect(screen.getByText("Hello", { exact: false })).toBeInTheDocument();
+  });
 }, 20_000);

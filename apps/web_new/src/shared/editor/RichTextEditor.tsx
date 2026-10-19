@@ -138,6 +138,8 @@ async function loadEditor(
   function TiptapEditor({ onReady, ...rest }: RichTextEditorProps): React.ReactElement {
     const handleRef = React.useRef(onReady);
     handleRef.current = onReady;
+    // Callers keep the newest handle: an editor instance can be replaced
+    // before the body settles, and the live one is the last announced.
     const onEditorReady = React.useCallback((editor: EditorLike) => {
       handleRef.current?.(toHandle(editor));
     }, []);

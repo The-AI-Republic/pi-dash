@@ -284,4 +284,55 @@ describe("CommentEditForm", () => {
     fireEvent.change(input, { target: { files: [new File(["x"], "bad.svg", { type: "image/svg+xml" })] } });
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't upload the image", "Invalid file type."));
   });
+
+  it("blocks an empty submit and saves only once while a save is out", async () => {
+    const user = userEvent.setup();
+    let release: (() => void) | null = null;
+    const onSave = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    stubTransport();
+    renderForm({ onSave });
+    const box = await screen.findByLabelText("Edit comment");
+    const form = screen.getByRole("button", { name: "Save comment" }).closest("form")!;
+    fireEvent.input(box, { target: { value: "" } });
+    fireEvent.submit(form);
+    expect(onSave).not.toHaveBeenCalled();
+    fireEvent.input(box, { target: { value: "Once" } });
+    await user.click(screen.getByRole("button", { name: "Save comment" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    fireEvent.submit(form);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    (release as (() => void) | null)?.();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).not.toBeDisabled());
+  });
+
+  it("notices an image that uploads but cannot attach while editing", async () => {
+    stubTransport((_method, url) => {
+      if (url.includes("/bulk/")) return { status: 500, body: { error: "Asset missing" } };
+      if (url.includes("/assets/v2/")) {
+        return {
+          status: 200,
+          body: {
+            asset_id: "asset-3",
+            asset_url: "/api/assets/v2/workspaces/acme/projects/p-1/asset-3/",
+            upload_data: { url: "https://s3.test/u", fields: {} },
+          },
+        };
+      }
+      return { status: 204, body: "" };
+    });
+    vi.stubGlobal("fetch", async () => ({ ok: true, status: 204 }));
+    renderForm();
+    await surface();
+    fireEvent.change(screen.getByLabelText("Add an image to the comment"), {
+      target: { files: [new File(["x"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith("Couldn't finish the comment upload", "Asset missing")
+    );
+  });
 }, 20_000);

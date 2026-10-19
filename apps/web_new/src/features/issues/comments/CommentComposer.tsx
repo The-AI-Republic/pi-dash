@@ -141,6 +141,7 @@ export function CommentComposer({
                 .mutateAsync({ file })
                 .then((image) => {
                   assetsRef.current = [...assetsRef.current, image.assetId];
+                  // The editor may have unmounted while the upload was out.
                   handleRef.current?.insertImage(image.src);
                 })
                 .catch(() => undefined);

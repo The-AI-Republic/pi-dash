@@ -62,14 +62,13 @@ export interface CommentThreadProps {
   published: boolean;
   /** Intake items carry no deep links (ISS-202). */
   isIntake?: boolean;
+  /** Signed-in user, for authorship only; defaults to the session. */
+  viewerId?: string | null;
 }
 
 function useCommentHighlight(comments: IssueComment[]): string | null {
-  const [activeId, setActiveId] = React.useState<string | null>(() =>
-    typeof window === "undefined" ? null : commentIdFromHash(window.location.hash)
-  );
+  const [activeId, setActiveId] = React.useState<string | null>(() => commentIdFromHash(window.location.hash));
   React.useEffect(() => {
-    if (typeof window === "undefined") return;
     const sync = (): void => {
       setActiveId(commentIdFromHash(window.location.hash));
     };
@@ -99,10 +98,11 @@ export function CommentThread({
   archived,
   published,
   isIntake = false,
+  viewerId: viewerOverride,
 }: CommentThreadProps): React.ReactElement {
   const scope = { workspaceSlug, projectId, issueId };
   const me = useMe();
-  const viewerId = me.data?.id ?? null;
+  const viewerId = viewerOverride !== undefined ? viewerOverride : (me.data?.id ?? null);
   const comments = useIssueComments(scope);
   const create = useCreateComment(scope);
   const remove = useDeleteComment(scope);
@@ -145,7 +145,7 @@ export function CommentThread({
         <p className="text-body text-(--danger)">Couldn&apos;t load the comments.</p>
       ) : (
         <div className="flex flex-col gap-(--space-6)">
-          {(comments.data ?? []).map((comment) => (
+          {comments.data.map((comment) => (
             <div
               key={comment.id}
               className={cn(

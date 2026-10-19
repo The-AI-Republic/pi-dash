@@ -190,9 +190,29 @@ describe("CommentThread", () => {
   }, 20000);
 
   it("shows skeleton rows while the history is loading", async () => {
-    stubTransport(() => ({ status: 200, body: [] }));
+    let answer: ((value: { status: number; body: unknown }) => void) | undefined;
+    createAppClient("https://api.test", async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "x" }),
+        };
+      }
+      const result = await new Promise<{ status: number; body: unknown }>((resolve) => {
+        answer = resolve;
+      });
+      return {
+        status: result.status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(result.body),
+      };
+    });
     renderThread();
     expect(document.querySelector('[aria-busy="true"]')).not.toBeNull();
+    (answer as ((value: { status: number; body: unknown }) => void) | undefined)?.({ status: 200, body: [] });
     await waitFor(() => expect(document.querySelector('[aria-busy="true"]')).toBeNull());
   });
 
@@ -360,5 +380,83 @@ describe("CommentThread", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Fold comment" }, { timeout: 5000 }));
     await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
     expect(JSON.parse(calls.find((call) => call.method === "PATCH")?.body ?? "{}")).toEqual({ labels: ["fold"] });
+  });
+
+  it("falls back to its own copy when the clipboard gives no reason", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error(""))) },
+    });
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    fireEvent.click(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }, { timeout: 5000 }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        COMMENT_LINK_COPY_FAILED_TITLE,
+        "The browser refused the clipboard write."
+      )
+    );
+  });
+
+  it("posts a new comment from the thread composer", async () => {
+    const calls = stubTransport((call) =>
+      call.method === "POST" ? { status: 201, body: comment() } : { status: 200, body: [comment()] }
+    );
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    const box = within(screen.getByRole("group", { name: "Add comment" })).getByLabelText("Add comment");
+    fireEvent.input(box, { target: { value: "Fresh words" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(calls.some((call) => call.method === "POST")).toBe(true));
+    expect(JSON.parse(calls.find((call) => call.method === "POST")?.body ?? "{}")).toEqual({
+      comment_html: "<p>Fresh words</p>",
+      access: "INTERNAL",
+    });
+  });
+
+  it("offers no author entries while the profile is still loading", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CommentThread
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          issueId={ISSUE}
+          archived={false}
+          published
+          viewerId={null}
+        />
+      </QueryClientProvider>
+    );
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    fireEvent.click(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 }));
+    const entries = await screen.findAllByRole("menuitem", undefined, { timeout: 5000 });
+    expect(entries.map((entry) => entry.textContent)).toEqual([
+      "Copy link",
+      "Switch to public comment",
+      "Fold comment",
+    ]);
+  });
+
+  it("saves an edited body from the thread's card", async () => {
+    const calls = stubTransport((call) =>
+      call.method === "PATCH"
+        ? { status: 200, body: comment({ comment_html: "<p>Edited words</p>" }) }
+        : { status: 200, body: [comment()] }
+    );
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    fireEvent.click(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Edit" }, { timeout: 5000 }));
+    const box = await screen.findByLabelText("Edit comment", undefined, { timeout: 5000 });
+    fireEvent.input(box, { target: { value: "Edited words" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save comment" }));
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    expect(JSON.parse(calls.find((call) => call.method === "PATCH")?.body ?? "{}")).toEqual({
+      comment_html: "<p>Edited words</p>",
+    });
   });
 }, 20_000);

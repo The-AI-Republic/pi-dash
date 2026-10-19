@@ -91,12 +91,16 @@ function renderComposer(
   vi.stubGlobal("fetch", async () => ({ ok: true, status: 204 }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const onCreate = vi.fn(async () => undefined);
-  render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <CommentComposer workspaceSlug="acme" projectId="p-1" showAccess onCreate={onCreate} {...props} />
     </QueryClientProvider>
   );
-  return { onCreate: (props.onCreate as typeof onCreate | undefined) ?? onCreate, calls };
+  return {
+    onCreate: (props.onCreate as typeof onCreate | undefined) ?? onCreate,
+    calls,
+    unmount: view.unmount,
+  };
 }
 
 async function editor(): Promise<HTMLElement> {
@@ -144,6 +148,18 @@ describe("CommentComposer", () => {
     expect(onCreate).not.toHaveBeenCalled();
   });
 
+  it("leaves the Enter that commits an IME composition to the input", async () => {
+    const { onCreate } = renderComposer();
+    const box = await editor();
+    box.focus();
+    await userEvent.setup().keyboard("im");
+    fireEvent.input(box, { target: { value: "imon" } });
+    const composing = new KeyboardEvent("keydown", { key: "Enter", bubbles: true });
+    Object.defineProperty(composing, "isComposing", { value: true });
+    fireEvent.keyDown(box, composing);
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
   it("does nothing on an empty body", async () => {
     const user = userEvent.setup();
     const { onCreate } = renderComposer();
@@ -182,6 +198,8 @@ describe("CommentComposer", () => {
     await user.keyboard("{Enter}");
     await user.keyboard("{Enter}");
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "Comment" }));
+    expect(onCreate).toHaveBeenCalledTimes(1);
     release?.();
     await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled());
     expect(await editor()).toHaveValue("");
@@ -196,8 +214,8 @@ describe("CommentComposer", () => {
     await waitFor(() => expect(box).toHaveValue("Keep me"));
     await user.keyboard("{Enter}");
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).not.toBeDisabled());
     expect(await editor()).toHaveValue("Keep me");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).not.toBeDisabled());
   });
 
   it("shows the access switch only on published projects and posts the choice", async () => {
@@ -207,6 +225,9 @@ describe("CommentComposer", () => {
     expect(screen.getByRole("radio", { name: COMPOSER_INTERNAL_LABEL })).toHaveAttribute("aria-checked", "true");
     await user.click(screen.getByRole("radio", { name: COMPOSER_EXTERNAL_LABEL }));
     expect(screen.getByRole("radio", { name: COMPOSER_EXTERNAL_LABEL })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("radio", { name: COMPOSER_INTERNAL_LABEL }));
+    expect(screen.getByRole("radio", { name: COMPOSER_INTERNAL_LABEL })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("radio", { name: COMPOSER_EXTERNAL_LABEL }));
     const box = await editor();
     box.focus();
     await user.keyboard("Public note");
@@ -262,5 +283,27 @@ describe("CommentComposer", () => {
     expect(calls).toHaveLength(0);
     fireEvent.change(input, { target: { files: [new File(["x"], "bad.svg", { type: "image/svg+xml" })] } });
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't upload the image", "Invalid file type."));
+  });
+
+  it("keeps the uploaded asset when the editor is gone", async () => {
+    const { onCreate, unmount } = renderComposer({}, (url) => {
+      if (url.includes("/projects/p-1/") && !url.includes("/bulk/")) {
+        return {
+          status: 200,
+          body: {
+            asset_id: "asset-7",
+            asset_url: "/api/assets/v2/workspaces/acme/projects/p-1/asset-7/",
+            upload_data: { url: "https://s3.test/upload", fields: {} },
+          },
+        };
+      }
+      return { status: 204, body: "" };
+    });
+    await editor();
+    const input = screen.getByLabelText("Add an image to the comment");
+    unmount();
+    fireEvent.change(input, { target: { files: [new File(["img"], "late.png", { type: "image/png" })] } });
+    await waitFor(() => expect(notifyError).not.toHaveBeenCalled());
+    expect(onCreate).not.toHaveBeenCalled();
   });
 }, 20_000);

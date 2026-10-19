@@ -7,7 +7,7 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { RichTextEditor } from "./RichTextEditor.js";
+import { CommentRichTextEditor, RichTextEditor } from "./RichTextEditor.js";
 
 // The editor arrives through a dynamic import (tipTap, its extensions).
 // A full-suite run can keep that import in flight for seconds, so the
@@ -127,5 +127,36 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     renderEditor({ initialHtml: "<p>styled</p>", className: "mt-4" });
     const editable = await editorSurface("Body");
     expect(editable.closest("div.relative")).toHaveClass("mt-4");
+  });
+
+  it("hands the comment editor a handle that inserts an image", async () => {
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p>with image</p>"
+          label="Comment"
+          onChange={() => {}}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    await editorSurface("Comment");
+    await vi.waitFor(() => expect(handles.length).toBeGreaterThan(0));
+    // The newest handle is the live editor; an earlier one may be stale.
+    handles[handles.length - 1]?.insertImage("https://cdn.test/shot.png");
+    await vi.waitFor(() => expect(document.querySelector("img")).not.toBeNull());
+    expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.test/shot.png");
+  });
+
+  it("mounts without a ready handler", async () => {
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor initialHtml="<p>no handle</p>" label="Plain" onChange={() => {}} />
+      </React.Suspense>
+    );
+    expect(await editorSurface("Plain")).toHaveTextContent("no handle");
   });
 });

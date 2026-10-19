@@ -124,16 +124,15 @@ export function useUpdateComment(scope: CommentScope, failureTitle: string, succ
     },
     onSuccess: (comment) => {
       notifySuccess(successTitle);
-      queryClient.setQueryData<IssueComment[]>(
-        issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),
-        (previous) =>
-          previous === undefined
-            ? previous
-            : patchCommentList(previous, comment.id, {
-                ...authorPatch(comment),
-                labels: comment.labels,
-                access: comment.access,
-              })
+      const key = issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId);
+      // An unread thread puts the row in place for its own first read,
+      // which then merges the server list over it.
+      queryClient.setQueryData<IssueComment[]>(key, (previous) =>
+        patchCommentList(previous ?? [], comment.id, {
+          ...authorPatch(comment),
+          labels: comment.labels,
+          access: comment.access,
+        })
       );
     },
     onError: (error: Error, _variables, snapshots: QuerySnapshot[] | undefined) => {

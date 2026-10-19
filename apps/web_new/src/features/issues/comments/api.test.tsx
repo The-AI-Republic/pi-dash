@@ -28,8 +28,10 @@ import {
   accessPatch,
   commentFailureDetail,
   commentsQueryOptions,
+  COMMENT_FAILURE_FALLBACK,
   foldPatch,
   paintComment,
+  removeCommentRow,
   useCreateComment,
   useDeleteComment,
   useIssueComments,
@@ -271,7 +273,9 @@ describe("useCreateComment", () => {
     const created = comment({ id: "823e4567-e89b-12d3-a456-426614174008", created_at: "2026-10-17T00:00:00Z" });
     const { queryClient, wrapper } = harness();
     queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
-    const { calls } = stubClient(() => ({ status: 201, body: created }));
+    const { calls } = stubClient((call) =>
+      call.url.includes("/history/") ? { status: 200, body: [comment(), created] } : { status: 201, body: created }
+    );
     const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
     await result.current.mutateAsync({ html: "<p>Hi</p>", access: "EXTERNAL", assetIds: ["asset-1"] });
     expect(notifySuccess).toHaveBeenCalledWith(COMMENT_CREATED_TITLE);
@@ -353,6 +357,32 @@ describe("useUploadCommentImage", () => {
       .mutateAsync({ file: new File(["x"], "shot.svg", { type: "image/svg+xml" }) })
       .catch(() => undefined);
     expect(notifyError).toHaveBeenCalledWith(COMMENT_IMAGE_UPLOAD_FAILED_TITLE, "Invalid file type.");
+  });
+});
+
+describe("cache edges", () => {
+  it("paints and removes do nothing when the list was never read", async () => {
+    const { queryClient } = harness();
+    expect(await paintComment(queryClient, SCOPE, COMMENT, { labels: ["fold"] })).toEqual([]);
+    expect(await removeCommentRow(queryClient, SCOPE, COMMENT)).toEqual([]);
+    expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toBeUndefined();
+  });
+
+  it("leaves an unread list unpopulated after a create", async () => {
+    stubClient((call) => ({
+      status: call.method === "POST" ? 201 : 200,
+      body: call.method === "POST" ? comment() : [],
+    }));
+    const { queryClient, wrapper } = harness();
+    const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
+    await result.current.mutateAsync({ html: "<p>Hi</p>", access: "INTERNAL" });
+    expect(notifySuccess).toHaveBeenCalledWith(COMMENT_CREATED_TITLE);
+    expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toBeUndefined();
+  });
+
+  it("gives a bare Error the fallback copy and keeps an ApiError's own words", () => {
+    expect(commentFailureDetail(new Error(""))).toBe(COMMENT_FAILURE_FALLBACK);
+    expect(commentFailureDetail(new Error("Offline"))).toBe(COMMENT_FAILURE_FALLBACK);
   });
 });
 
