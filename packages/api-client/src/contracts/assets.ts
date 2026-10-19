@@ -175,3 +175,24 @@ export async function deleteLegacyWorkspaceFileAsset(
   const response = await client.delete(`/api/workspaces/file-assets/${workspaceId}/${assetKey}/`);
   return response.status;
 }
+
+/**
+ * DELETE /api/assets/v2/user-assets/<asset_id>/ — drops one user-owned
+ * image (204) and unwires it from the owning account: the server clears
+ * the avatar or cover reference as a side effect. The profile avatar
+ * dialog removes through this path for an asset URL.
+ */
+export async function deleteUserAsset(client: ApiClient, assetId: string): Promise<number> {
+  const response = await client.delete(`/api/assets/v2/user-assets/${encodeURIComponent(assetId)}/`);
+  return response.status;
+}
+
+/**
+ * DELETE /api/users/file-assets/<asset_key>/ — drops a legacy user image
+ * stored as a plain file key (204). The avatar dialog removes through
+ * this path when the stored reference is not a v2 asset URL.
+ */
+export async function deleteLegacyUserFileAsset(client: ApiClient, assetKey: string): Promise<number> {
+  const response = await client.delete(`/api/users/file-assets/${encodeURIComponent(assetKey)}/`);
+  return response.status;
+}

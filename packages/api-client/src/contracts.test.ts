@@ -165,7 +165,9 @@ import {
   updateNotificationPreferences,
 } from "./contracts/notifications.js";
 import {
+  deleteLegacyUserFileAsset,
   deleteLegacyWorkspaceFileAsset,
+  deleteUserAsset,
   deleteWorkspaceLogoAsset,
   uploadUserAvatar,
   uploadWorkspaceLogo,
@@ -2756,6 +2758,33 @@ describe("assets contracts", () => {
     expect(seen[0]?.url).toBe("https://uploads.test/signed");
     expect(seen[0]?.init.method).toBe("POST");
     expect(seen[0]?.init.body).toBeInstanceOf(FormData);
+  });
+
+  it("deletes a current user asset through the v2 path", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status: 204 });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteUserAsset(client, "asset-7")).resolves.toBe(204);
+    expect(transport.calls.some((call) => call.init.method === "DELETE")).toBe(true);
+    const call = transport.calls.find((entry) => entry.init.method === "DELETE");
+    expect(call?.url).toBe("https://api.test/api/assets/v2/user-assets/asset-7/");
+  });
+
+  it("deletes a legacy user file asset through the user-file path", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ status: 204 });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteLegacyUserFileAsset(client, "old/avatar key")).resolves.toBe(204);
+    const call = transport.calls.find((entry) => entry.init.method === "DELETE");
+    expect(call?.url).toBe("https://api.test/api/users/file-assets/old%2Favatar%20key/");
   });
 });
 

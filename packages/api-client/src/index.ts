@@ -5,7 +5,9 @@
 export {
   SignedUserAsset,
   USER_ASSET_TYPES,
+  deleteLegacyUserFileAsset,
   deleteLegacyWorkspaceFileAsset,
+  deleteUserAsset,
   deleteWorkspaceLogoAsset,
   uploadUserAsset,
   uploadUserAvatar,

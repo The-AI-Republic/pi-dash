@@ -159,7 +159,13 @@ settings page, and no store action opens a dialog. The live app still
 switches through buttons and still mounts the dialog (pinned as row Gaps);
 the slice builds only the target: full page, no dialog. The shell slice
 owns the tab-registration seam every sibling settings tab renders through,
-and keeps it stable. Oracle: `settings-shell.spec.ts`.
+and keeps it stable. As built, the seam is a synchronous registry keyed by
+the nine tab ids: a sibling slice registers its body for its own id from
+its route module (unregistering on unmount), and the shell renders
+whatever is registered, with a quiet loading frame until a body arrives.
+The general, security and notifications bodies ship with the shell; the
+remaining six ids are reserved for their slices and need no change to the
+shell or the route files. Oracle: `settings-shell.spec.ts`.
 
 Legacy addresses forward to their matching tabs with query parameters
 carried over: the bare settings address lands on the general tab, the old
