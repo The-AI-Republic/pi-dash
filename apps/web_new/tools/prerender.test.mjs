@@ -24,6 +24,7 @@ import {
   main,
   outputDirFrom,
   prerenderThroughServer,
+  readShell,
   runPrerender,
   spaFallback,
   writeMarketingSite,
@@ -334,6 +335,44 @@ describe("prerenderThroughServer", () => {
     expect(wrote).toBe(false);
     expect(close).toHaveBeenCalledTimes(1);
     expect(() => readFileSync(join(outDir, "robots.txt"))).toThrow();
+  });
+
+  it("reports a missing shell without creating the Vite server", async () => {
+    const createViteServer = vi.fn();
+    const fail = vi.fn();
+    const outDir = mkdtempSync(join(tmpdir(), "prerender-server-empty-"));
+    created.push(outDir);
+    const wrote = await prerenderThroughServer({ createViteServer, outDir, fail, log: vi.fn() });
+    expect(wrote).toBe(false);
+    expect(createViteServer).not.toHaveBeenCalled();
+    expect(fail).toHaveBeenCalledWith(expect.stringContaining(`[prerender] ${outDir}/index.html is missing`));
+  });
+});
+
+describe("readShell", () => {
+  it("returns the served document and reports nothing", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "prerender-shell-"));
+    try {
+      writeFileSync(join(outDir, "index.html"), SHELL);
+      const fail = vi.fn();
+      expect(readShell(outDir, fail)).toBe(SHELL);
+      expect(fail).not.toHaveBeenCalled();
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null after reporting when the output directory is empty", () => {
+    const outDir = mkdtempSync(join(tmpdir(), "prerender-shell-missing-"));
+    try {
+      const fail = vi.fn();
+      expect(readShell(outDir, fail)).toBeNull();
+      expect(fail).toHaveBeenCalledWith(
+        `[prerender] ${outDir}/index.html is missing; run \`vite build --mode web\` first.`
+      );
+    } finally {
+      rmSync(outDir, { recursive: true, force: true });
+    }
   });
 });
 

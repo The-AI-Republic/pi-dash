@@ -152,6 +152,27 @@ export function writeMarketingSite({ outDir, shell, pages, siteOrigin }) {
 }
 
 /**
+ * Read the shell `vite build` wrote. Returns null (after reporting) when it
+ * is absent; callers check this before doing expensive work so a build that
+ * skipped Vite fails immediately instead of booting a module server to find
+ * out the output directory is empty.
+ */
+export function readShell(outDir, fail) {
+  try {
+    return readFileSync(join(outDir, "index.html"), "utf8");
+  } catch {
+    fail(`[prerender] ${outDir}/index.html is missing; run \`vite build --mode web\` first.`);
+    return null;
+  }
+}
+
+/** Report a build failure the way the CLI does: stderr plus a failed exit code. */
+function defaultFail(message) {
+  console.error(message);
+  process.exitCode = 1;
+}
+
+/**
  * The whole build step, with its environment injected so the flow is
  * testable without Vite: read the served shell, ask the edition whether it
  * owns the public surface, render the pages, then write them out.
@@ -162,18 +183,11 @@ export async function runPrerender({
   loadEdition,
   loadPages,
   log = console.log,
-  fail = (message) => {
-    console.error(message);
-    process.exitCode = 1;
-  },
+  fail = defaultFail,
+  shell,
 } = {}) {
-  let shell;
-  try {
-    shell = readFileSync(join(outDir, "index.html"), "utf8");
-  } catch {
-    fail(`[prerender] ${outDir}/index.html is missing; run \`vite build --mode web\` first.`);
-    return false;
-  }
+  const servedShell = shell === undefined ? readShell(outDir, fail) : shell;
+  if (servedShell === null) return false;
 
   // The static surface belongs to the edition (CLOUD-003–005): the OSS
   // module declares none of it, so a community build writes no marketing
@@ -183,7 +197,7 @@ export async function runPrerender({
     return false;
   }
   const pages = await loadPages();
-  writeMarketingSite({ outDir, shell, pages, siteOrigin });
+  writeMarketingSite({ outDir, shell: servedShell, pages, siteOrigin });
   log(`[prerender] wrote ${pages.length} marketing pages + robots.txt + sitemap.xml for ${siteOrigin}`);
   return true;
 }
@@ -201,6 +215,13 @@ export async function prerenderThroughServer({
   log = console.log,
   fail,
 } = {}) {
+  // Check the served shell before booting Vite: a build whose output is
+  // missing has nothing to prerender into, and creating the module server
+  // first turns that cheap failure into a slow one.
+  const report = fail ?? defaultFail;
+  const shell = readShell(resolve(outDir ?? distDir), report);
+  if (shell === null) return false;
+
   const server = await createViteServer({
     root: appRoot,
     appType: "custom",
@@ -213,7 +234,8 @@ export async function prerenderThroughServer({
       outDir,
       siteOrigin,
       log,
-      fail,
+      fail: report,
+      shell,
       loadEdition: async () => (await server.ssrLoadModule("/src/core/edition/index.ts")).edition,
       loadPages: async () =>
         (await server.ssrLoadModule("/src/features/marketing/prerender.tsx")).renderAllMarketingPages(siteOrigin),
