@@ -17,6 +17,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("@tanstack/react-router", () => ({
+  useLinkProps: ({ to }: { to?: string }) => ({ href: to }),
   useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) =>
     select({ location: { pathname: harness.pathname } }),
   Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => (

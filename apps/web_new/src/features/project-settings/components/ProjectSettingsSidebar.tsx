@@ -8,7 +8,7 @@
 // canonical form carries the selected marker; the equivalent no-slash
 // address renders the same tab with nothing marked (bug NEWFRONT-396).
 
-import { Link } from "@tanstack/react-router";
+import { Link, useLinkProps, type UseLinkPropsOptions } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 import * as React from "react";
 
@@ -33,6 +33,38 @@ type RouterLinkProps = Parameters<typeof Link>[0];
 
 function hrefLinkProps(href: string): RouterLinkProps {
   return { to: href } as RouterLinkProps;
+}
+
+/**
+ * A rail entry that owns its current-page marker. The router sets
+ * `aria-current` for every fuzzy ancestor match, which would mark General
+ * on each sub-tab; building the link through `useLinkProps` keeps
+ * navigation and preload semantics while this component decides the
+ * single current entry from the slash-sensitive `active` flag.
+ */
+function RailLink({
+  href,
+  active,
+  testId,
+  children,
+}: {
+  href: string;
+  active: boolean;
+  testId: string;
+  children: React.ReactNode;
+}): React.ReactElement {
+  const linkProps = useLinkProps({ to: href } as UseLinkPropsOptions);
+  return (
+    <a
+      {...(linkProps as React.AnchorHTMLAttributes<HTMLAnchorElement>)}
+      aria-current={active ? "page" : undefined}
+      data-testid={testId}
+      data-active={active ? "true" : "false"}
+      className={`text-body flex w-full items-center rounded-(--radius-control) px-(--space-3) py-(--space-2) ${active ? SELECTED_CLASS : IDLE_CLASS}`}
+    >
+      {children}
+    </a>
+  );
 }
 
 export interface ProjectSettingsSidebarProps {
@@ -100,15 +132,9 @@ export function ProjectSettingsSidebar({
                 const active = isTabActive(pathname, workspaceSlug, projectId, tab);
                 return (
                   <li key={tab.key}>
-                    <Link
-                      {...hrefLinkProps(href)}
-                      aria-current={active ? "page" : undefined}
-                      data-testid={`project-settings-tab-${tab.key}`}
-                      data-active={active ? "true" : "false"}
-                      className={`text-body flex w-full items-center rounded-(--radius-control) px-(--space-3) py-(--space-2) ${active ? SELECTED_CLASS : IDLE_CLASS}`}
-                    >
+                    <RailLink href={href} active={active} testId={`project-settings-tab-${tab.key}`}>
                       {tab.label}
-                    </Link>
+                    </RailLink>
                   </li>
                 );
               })}

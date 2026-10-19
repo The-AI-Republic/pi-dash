@@ -10,6 +10,7 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@tanstack/react-router", () => ({
+  useLinkProps: (props: { to?: string } & Record<string, unknown>) => ({ href: props.to }),
   Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => (
     <a
       href={props.to}
