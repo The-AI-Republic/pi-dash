@@ -56,7 +56,7 @@ export const MEMBERS_RETRY_LABEL = "Try again";
 /** Admin-only invite entry (§10). */
 export const MEMBERS_ADD_LABEL = "Add member";
 /** Copy confirmation for an invitation link (§11). */
-export const INVITE_LINK_COPIED_TITLE = "Link copied!";
+export const INVITE_LINK_COPIED_TITLE = "Invite link copied";
 
 export interface MembersPageProps {
   workspaceSlug: string;

@@ -192,12 +192,15 @@ describe("MembersPage invite entry (WSET-009)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Add member" }));
     const dialog = await screen.findByRole("dialog");
     await userEvent.type(within(dialog).getByRole("textbox", { name: "Email" }), "new-person@example.com");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Send invites" }));
     await waitFor(() =>
       expect(calls).toContainEqual({ method: "POST", url: `https://api.test/api/workspaces/${SLUG}/invitations/` })
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(toast.notifySuccess).toHaveBeenCalledWith("Invitations sent", "Invitations sent successfully.");
+    expect(toast.notifySuccess).toHaveBeenCalledWith(
+      "Invitations sent",
+      "Invitations sent. Each invitee will receive their own email."
+    );
   });
 
   it("keeps the dialog and its input when the server refuses the batch", async () => {
@@ -206,7 +209,7 @@ describe("MembersPage invite entry (WSET-009)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Add member" }));
     const dialog = await screen.findByRole("dialog");
     await userEvent.type(within(dialog).getByRole("textbox", { name: "Email" }), "oracle@example.com");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "Send invites" }));
     await waitFor(() => expect(toast.notifyError).toHaveBeenCalledWith("Error!", expect.any(String)));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(within(screen.getByRole("dialog")).getByRole("textbox", { name: "Email" })).toHaveValue(
@@ -284,7 +287,7 @@ describe("MembersPage pending invitations (WSET-010)", () => {
     await openPendingMenu("ada@example.com");
     await userEvent.click(await screen.findByRole("menuitem", { name: "Copy link" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("https://app.test/invite/tok"));
-    await waitFor(() => expect(toast.notifySuccess).toHaveBeenCalledWith("Link copied!"));
+    await waitFor(() => expect(toast.notifySuccess).toHaveBeenCalledWith("Invite link copied"));
   });
 
   it("stays silent when the clipboard refuses", async () => {
@@ -321,7 +324,10 @@ describe("MembersPage pending invitations (WSET-010)", () => {
       })
     );
     await waitFor(() =>
-      expect(toast.notifySuccess).toHaveBeenCalledWith("Success!", "Invitation removed successfully.")
+      expect(toast.notifySuccess).toHaveBeenCalledWith(
+        "Success!",
+        "Invitation removed. That address is no longer pending."
+      )
     );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });

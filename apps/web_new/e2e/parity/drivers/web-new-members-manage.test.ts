@@ -225,7 +225,7 @@ describe("invite dialog driver", () => {
           return locator({
             count: async () => (submitted ? 1 : 0),
             isVisible: async () => true,
-            innerText: async () => "Invitations sent\nInvitations sent successfully.",
+            innerText: async () => "Invitations sent\nInvitations sent. Each invitee will receive their own email.",
           });
         return locator();
       },

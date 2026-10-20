@@ -70,7 +70,7 @@ describe("InviteDialog", () => {
 
   it("adds Member-defaulted rows and drops them, keeping one row alive", async () => {
     setup();
-    await userEvent.click(screen.getByRole("button", { name: "Add more" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add another person" }));
     expect(rows()).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: "Invitee role" })).toHaveLength(2);
     await userEvent.click(screen.getAllByRole("button", { name: "Remove this invitee" })[1]!);
@@ -80,7 +80,7 @@ describe("InviteDialog", () => {
   it("paints the invalid message under its row and sends nothing", async () => {
     const { onSubmit } = setup();
     await typeRow(0, "not-an-email");
-    await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send invites" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Email is invalid");
     expect(onSubmit).not.toHaveBeenCalled();
     expect(field(0)).toHaveValue("not-an-email");
@@ -88,11 +88,11 @@ describe("InviteDialog", () => {
 
   it("requires an address and clears the message once the row is edited", async () => {
     const { onSubmit } = setup();
-    await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send invites" }));
     expect(await screen.findByText("Email is required")).toBeInTheDocument();
     await typeRow(0, "ada@example.com");
     expect(screen.queryByText("Email is required")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send invites" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith([{ email: "ada@example.com", role: 15 }]));
   });
 
@@ -100,12 +100,12 @@ describe("InviteDialog", () => {
     const { onSubmit } = setup();
     await typeRow(0, "ada@example.com");
     await pickRowRole("Guest");
-    await userEvent.click(screen.getByRole("button", { name: "Add more" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add another person" }));
     await typeRow(1, "grace@example.com");
     const trigs = screen.getAllByRole("button", { name: "Invitee role" });
     await userEvent.click(trigs[1]!);
     await userEvent.click(await screen.findByRole("option", { name: "Admin" }));
-    await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send invites" }));
     await waitFor(() =>
       expect(onSubmit).toHaveBeenCalledWith([
         { email: "ada@example.com", role: 5 },
@@ -117,9 +117,9 @@ describe("InviteDialog", () => {
   it("reports a second malformed row alongside the first row's message", async () => {
     setup();
     await typeRow(0, "ada@example.com");
-    await userEvent.click(screen.getByRole("button", { name: "Add more" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add another person" }));
     await typeRow(1, "broken@");
-    await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
+    await userEvent.click(screen.getByRole("button", { name: "Send invites" }));
     expect(await screen.findAllByRole("alert")).toHaveLength(1);
     expect(screen.getAllByRole("alert")[0]).toHaveTextContent("Email is invalid");
   });
@@ -140,9 +140,9 @@ describe("InviteDialog", () => {
 
   it("locks every control while the send is in flight", () => {
     setup({ pending: true });
-    expect(screen.getByRole("button", { name: "Send invitations" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send invites" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Add more" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add another person" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Invitee role" })).toBeDisabled();
     expect(field(0)).not.toBeDisabled();
   });

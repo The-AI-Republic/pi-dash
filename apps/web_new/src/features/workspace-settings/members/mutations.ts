@@ -29,9 +29,9 @@ import { rosterKeys } from "./api.js";
 
 /** Pinned notice copy (§10–§13). */
 export const INVITATIONS_SENT_TITLE = "Invitations sent";
-export const INVITATIONS_SENT_MESSAGE = "Invitations sent successfully.";
+export const INVITATIONS_SENT_MESSAGE = "Invitations sent. Each invitee will receive their own email.";
 export const INVITATION_REMOVED_TITLE = "Success!";
-export const INVITATION_REMOVED_MESSAGE = "Invitation removed successfully.";
+export const INVITATION_REMOVED_MESSAGE = "Invitation removed. That address is no longer pending.";
 export const WRITE_FAILED_TITLE = "Error!";
 
 /** Fallbacks when the failure carries no readable reason. */

@@ -17462,7 +17462,7 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsInviteAddRow(): Promise<void> {
     const before = await this.wsSettingsInviteRowCount();
     await this.wsSettingsOpenDialog()
-      .getByRole("button", { name: "Add more", exact: true })
+      .getByRole("button", { name: "Add another person", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.wsSettingsAwaitInviteRowCount(before + 1, "append");
   }
@@ -17499,9 +17499,7 @@ export class WebNewDriver implements ParityDriver {
     // toast or inline error from an earlier submit can still be up.
     const toastBefore = toastKey(await this.rulesLastToast());
     const errorsBefore = await dialog.locator('[role="alert"]').count();
-    await dialog
-      .getByRole("button", { name: "Send invitations", exact: true })
-      .click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button", { name: "Send invites", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
     for (;;) {
       if (!(await this.wsSettingsInviteVisible())) return;

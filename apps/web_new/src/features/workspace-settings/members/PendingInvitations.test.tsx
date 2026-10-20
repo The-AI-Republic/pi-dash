@@ -84,7 +84,7 @@ describe("PendingInvitations", () => {
       "grace@example.com",
       "ada@example.com",
     ]);
-    expect(within(pendingRows()[1]!).getByText("Pending")).toBeInTheDocument();
+    expect(within(pendingRows()[1]!).getByText("Awaiting acceptance")).toBeInTheDocument();
   });
 
   it("narrows to the search and counts what remains", async () => {

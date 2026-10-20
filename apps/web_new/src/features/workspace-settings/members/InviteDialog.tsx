@@ -27,7 +27,7 @@ import {
   type InviteRow,
 } from "./inviteForm.js";
 
-export const INVITE_DIALOG_TITLE = "Invite people to collaborate";
+export const INVITE_DIALOG_TITLE = "Invite teammates to this workspace";
 export const INVITE_DIALOG_DESCRIPTION =
   "Send workspace invitations. Each invitee keeps the role chosen beside their address.";
 
@@ -125,7 +125,7 @@ export function InviteDialog({
             Cancel
           </Button>
           <Button variant="primary" loading={pending} onClick={submit}>
-            Send invitations
+            Send invites
           </Button>
         </>
       }
@@ -181,7 +181,7 @@ export function InviteDialog({
             onClick={() => setRows((current) => appendInviteRow(current, initialInviteRole(actorRole)))}
           >
             <Plus size={14} strokeWidth={1.5} aria-hidden="true" />
-            Add more
+            Add another person
           </Button>
         </div>
       </div>

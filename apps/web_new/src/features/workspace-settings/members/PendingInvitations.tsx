@@ -82,7 +82,7 @@ export function PendingInvitations({
               >
                 <Avatar name={invitation.email} initial={invitationInitial(invitation.email)} size="medium" />
                 <span className="min-w-0 flex-1 truncate text-(--text)">{invitation.email}</span>
-                <span className="text-meta text-(--text-muted)">Pending</span>
+                <span className="text-meta text-(--text-muted)">Awaiting acceptance</span>
                 <InvitationRoleControl
                   invitation={invitation}
                   actorRole={actorRole}
