@@ -377,6 +377,7 @@ describe("AttachmentsWidget upload", () => {
     });
     expect(xhrs).toHaveLength(1);
     expect(screen.queryByText("two.png")).not.toBeInTheDocument();
+    expect(section.className).not.toContain("outline-dashed");
     xhrs[0]?.finish();
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
   });

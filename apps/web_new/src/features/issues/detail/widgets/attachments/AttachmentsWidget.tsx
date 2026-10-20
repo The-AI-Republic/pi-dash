@@ -158,26 +158,25 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
 
     React.useImperativeHandle(ref, () => ({ openPicker }));
 
-    const dragHandlers =
-      editable && pendingName === null
-        ? {
-            onDragEnter: (event: React.DragEvent) => {
-              event.preventDefault();
-              setDragging(true);
-            },
-            onDragOver: (event: React.DragEvent) => {
-              event.preventDefault();
-            },
-            onDragLeave: (event: React.DragEvent) => {
-              if (event.currentTarget === event.target) setDragging(false);
-            },
-            onDrop: (event: React.DragEvent) => {
-              event.preventDefault();
-              setDragging(false);
-              acceptFiles(Array.from(event.dataTransfer.files));
-            },
-          }
-        : {};
+    const dragHandlers = editable
+      ? {
+          onDragEnter: (event: React.DragEvent) => {
+            event.preventDefault();
+            if (pendingName === null) setDragging(true);
+          },
+          onDragOver: (event: React.DragEvent) => {
+            event.preventDefault();
+          },
+          onDragLeave: (event: React.DragEvent) => {
+            if (event.currentTarget === event.target) setDragging(false);
+          },
+          onDrop: (event: React.DragEvent) => {
+            event.preventDefault();
+            setDragging(false);
+            acceptFiles(Array.from(event.dataTransfer.files));
+          },
+        }
+      : {};
 
     return (
       <section
