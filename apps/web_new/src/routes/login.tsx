@@ -74,7 +74,6 @@ function LoginScreen(): React.ReactElement | null {
     const search = Route.useSearch();
     return <DesktopSignInScreen error={search.error} errorDescription={search.errorDescription} />;
   }
-  if (!rendersLoginInPlace(edition)) return null;
   const CloudLoginCard = edition.slots?.cloudLoginCard;
   if (CloudLoginCard === undefined) return null;
   return <CloudLoginCard />;

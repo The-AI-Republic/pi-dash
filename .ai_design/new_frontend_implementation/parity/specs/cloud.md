@@ -190,7 +190,10 @@ candidate target is accepted only when it is an app-local path: it must
 start with a single leading slash (protocol-relative values are rejected),
 must not contain backslashes (browsers normalize them into separators), and
 must still resolve to the app's own origin once parsed — anything else is
-discarded and the flow falls back to the root. Bounces to sign-in carry the
+discarded and the flow falls back to the root. The parsed path is checked
+again after URL normalization, so encoded dot segments that would collapse
+into a protocol-relative path (for example `/%2e%2e//evil.example/x`) and
+encoded backslashes are discarded too. Bounces to sign-in carry the
 preserved location as the root's `next_path` parameter (omitted when the
 location is the root itself); a fixed list of public and auth addresses
 (root, marketing pages, login and its legacy aliases, sign-up and
@@ -223,7 +226,7 @@ bounce. A 401 response first triggers one cookie rotation via
 `POST /api/auth/refresh/` plus a single replay of the original request:
 concurrent 401s share one in-flight refresh, each request replays at most
 once, and the refresh call itself is never replayed. Only a rejected
-refresh or replay (a 401/403 *response*) sends the user to sign-in with the
+refresh or replay (a 401/403 _response_) sends the user to sign-in with the
 current location preserved as the login target; public and auth pages never
 bounce. Transport failures, timeouts, and server errors leave the page in
 place — they say nothing about the session, so the next user action simply

@@ -86,10 +86,6 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
     throw error;
   }
   clearSession(queryClient);
-  // CLOUD-014: this tab signed out on purpose, so a later /login visit
-  // shows the card instead of resuming silently. Tab-scoped and
-  // best-effort; other tabs keep their own state.
-  markExplicitLogout(tabSessionStorage());
   if (teardown !== undefined) {
     try {
       await teardown.clearLocalSession();
@@ -98,6 +94,11 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
       // strand the user on a dead session.
     }
   }
+  // CLOUD-014: this tab signed out on purpose, so a later /login visit
+  // shows the card instead of resuming silently. Written after the desktop
+  // webview wipe, which clears sessionStorage; tab-scoped and best-effort,
+  // so other tabs keep their own state.
+  markExplicitLogout(tabSessionStorage());
   return signOutLandingTarget(platform.kind);
 }
 

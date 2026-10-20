@@ -22,6 +22,9 @@ const UNSAFE_TARGETS = [
   "http://localhost:13038/downgrade",
   "/\\evil.example/steal",
   "workspace/issues/1",
+  "/%2e%2e//evil.example/x",
+  "/a/%2e%2e/%2f/evil.example",
+  "/%5c%5cevil.example/steal",
 ];
 
 test(

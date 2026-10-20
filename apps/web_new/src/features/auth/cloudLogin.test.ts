@@ -63,16 +63,36 @@ describe("resolveCloudReturnTarget", () => {
       "https://evil.example/steal",
       "http://localhost:13038/downgrade",
       "/\\evil.example/steal",
+      "/a\\evil.example/steal",
+      "/\t/evil.example/x",
       "workspace/issues/1",
+      "/%2e%2e//evil.example/x",
+      "/%2e%2e/%2f/evil.example",
+      "/a/%2e%2e//evil.example/x",
+      "/%5c%5cevil.example/steal",
     ]) {
       expect(resolveCloudReturnTarget(unsafe, ORIGIN)).toBeNull();
     }
+  });
+
+  it("rejects a value the parser normalizes onto an off-origin path", () => {
+    expect(resolveCloudReturnTarget("/%zz", ORIGIN)).toBeNull();
+    expect(resolveCloudReturnTarget("/a/%2e%2e//evil.example/steal", ORIGIN)).toBeNull();
+    expect(resolveCloudReturnTarget("/a/%2e%2e/%2f/evil.example", ORIGIN)).toBeNull();
   });
 
   it("rejects missing values", () => {
     expect(resolveCloudReturnTarget(null, ORIGIN)).toBeNull();
     expect(resolveCloudReturnTarget(undefined, ORIGIN)).toBeNull();
     expect(resolveCloudReturnTarget("", ORIGIN)).toBeNull();
+  });
+
+  it("rejects a value that resolves to another origin", () => {
+    expect(resolveCloudReturnTarget("/\\evil.example/steal", ORIGIN)).toBeNull();
+  });
+
+  it("rejects a percent-encoded backslash after normalization", () => {
+    expect(resolveCloudReturnTarget("/%5c%5cevil.example/steal", ORIGIN)).toBeNull();
   });
 
   it("rejects a value that cannot be parsed", () => {
@@ -107,6 +127,10 @@ describe("cloudHandoffTarget", () => {
   it("keeps a deep target with its query", () => {
     const target = "/cloud-ws/projects/abc/issues?peek=activity&tab=comments";
     expect(cloudHandoffTarget(target, ORIGIN)).toBe(target);
+  });
+
+  it("normalizes the root itself without dropping it", () => {
+    expect(cloudHandoffTarget("/", ORIGIN)).toBe("/");
   });
 });
 

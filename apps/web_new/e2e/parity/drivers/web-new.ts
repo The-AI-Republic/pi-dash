@@ -3920,16 +3920,28 @@ export class WebNewDriver implements ParityDriver {
     for (let attempt = 0; attempt < 3; attempt++) {
       await this.dismissTourIfShown();
       try {
-        await this.page.getByRole("button", { name: "Account actions" }).click({ timeout: 15_000 });
-        await this.page.getByRole("menuitem", { name }).click({ timeout: 15_000 });
+        await this.openCloudAccountMenu();
+        const item = this.page.getByRole("menuitem", { name }).first();
+        await item.waitFor({ timeout: 15_000 });
+        await item.evaluate((el) => (el as HTMLElement).click());
         return;
       } catch {
         await this.page.keyboard.press("Escape").catch(() => {});
       }
     }
     await this.dismissTourIfShown();
-    await this.page.getByRole("button", { name: "Account actions" }).click();
-    await this.page.getByRole("menuitem", { name }).click();
+    await this.openCloudAccountMenu();
+    await this.page.getByRole("menuitem", { name }).first().click();
+  }
+
+  /** The sidebar account card, or the compact avatar when the sidebar is closed. */
+  private async openCloudAccountMenu(): Promise<void> {
+    const sidebar = this.page.locator('[data-testid="sidebar-user-menu"]');
+    const trigger = (await sidebar.count()) > 0 ? sidebar.first() : this.page.getByTestId("topbar-user-menu");
+    // The sidebar trigger can sit outside the test viewport, so dispatch the
+    // click on the element itself rather than using a viewport-gated click.
+    await trigger.waitFor({ timeout: 15_000 });
+    await trigger.evaluate((el) => (el as HTMLElement).click());
   }
 
   async signOutViaAccountMenu(): Promise<void> {

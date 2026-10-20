@@ -194,4 +194,16 @@ describe("CloudLoginCard", () => {
     // Without a readable marker the visit still resumes.
     expect(location.replace).toHaveBeenCalledTimes(1);
   });
+
+  it("survives session storage that throws on access", () => {
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      get() {
+        throw new Error("denied");
+      },
+    });
+    location.search = "?next_path=%2Fdocs";
+    render(<CloudLoginCard />);
+    expect(location.replace).toHaveBeenCalledTimes(1);
+  });
 });

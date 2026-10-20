@@ -9,6 +9,8 @@
 
 import { cloudSignInHandoffUrl } from "@pidash/api-client";
 
+import { safeNextPath } from "../../core/session/guards.js";
+
 /** Tab-scoped marker: this tab signed out explicitly (shared with CLOUD-016). */
 export const EXPLICIT_LOGOUT_KEY = "pidash:explicitly-logged-out";
 
@@ -45,16 +47,28 @@ export function parseCloudLoginSearch(search: string): CloudLoginSearch {
  * one-time tokens. Values that fail any rule resolve to null.
  */
 export function resolveCloudReturnTarget(raw: string | null | undefined, origin: string): string | null {
-  if (raw === null || raw === undefined || raw.length === 0) return null;
-  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return null;
+  if (safeNextPath(raw) === undefined) return null;
+  if ((raw as string).includes("\\")) return null;
   let parsed: URL;
   try {
-    parsed = new URL(raw, origin);
+    parsed = new URL(raw as string, origin);
   } catch {
     return null;
   }
   if (parsed.origin !== origin) return null;
-  return `${parsed.pathname}${parsed.search}` || "/";
+  const normalized = parsed.pathname;
+  // Dot segments are decoded before URL normalization, so a value such as
+  // `/%2e%2e//evil.example/x` arrives here as a protocol-relative path.
+  // Re-apply the app-local rules to what the parser produced.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(normalized);
+  } catch {
+    return null;
+  }
+  if (!normalized.startsWith("/") || normalized.startsWith("//") || normalized.includes("\\")) return null;
+  if (decoded.includes("\\") || decoded.startsWith("//")) return null;
+  return `${normalized}${parsed.search}`;
 }
 
 /** Trim trailing slashes so `/login/` guards the same as `/login`. */
