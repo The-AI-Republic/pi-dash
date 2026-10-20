@@ -203,12 +203,22 @@ describe("remote failures", () => {
     expect(remoteFailureText(undefined)).toContain("Could not reach the cloud");
   });
 
+  it("reads the server reason out of the shared client's http code", () => {
+    expect(remoteFailureText("http", "machine_offline")).toContain("went offline");
+    expect(remoteFailureText("http", "unsupported_agent")).toBe(DAEMON_TOO_OLD_TEXT);
+    expect(remoteFailureText("http", "boom")).toBe("boom");
+    expect(remoteFailureText("http", "")).toContain("Could not reach the cloud");
+    expect(remoteFailureText("network", "network down")).toContain("Could not reach the cloud");
+    expect(remoteFailureText("unsupported_agent", "ignored")).toBe(DAEMON_TOO_OLD_TEXT);
+  });
+
   it("maps the daemon's raw write-back to the upgrade hint", () => {
     expect(isUnknownAgentError('unknown agent kind "grok"')).toBe(true);
     expect(isUnknownAgentError("other")).toBe(false);
     expect(isUnknownAgentError(undefined)).toBe(false);
     expect(remoteStatusError('unknown agent kind "grok"')).toBe(DAEMON_TOO_OLD_TEXT);
     expect(remoteStatusError("parity boom")).toBe("parity boom");
+    expect(remoteStatusError("machine_offline")).toContain("went offline");
     expect(remoteStatusError(undefined)).toBe("");
   });
 });

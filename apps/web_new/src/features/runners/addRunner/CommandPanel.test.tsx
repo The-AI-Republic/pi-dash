@@ -75,7 +75,7 @@ describe("AddRunnerCommandPanel", () => {
     writeText.mockRejectedValue(new Error("blocked"));
     render(<AddRunnerCommandPanel fields={FIELDS} originFallback={false} />);
     fireEvent.click(screen.getByRole("button", { name: "Copy command" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Error!", COPY_FAILED_MESSAGE));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Copy failed", COPY_FAILED_MESSAGE));
     expect(screen.getByRole("button", { name: "Copy command" })).toBeInTheDocument();
   });
 

@@ -169,19 +169,26 @@ describe("addRunner option reads", () => {
   });
 
   it("surfaces project and name validation text", async () => {
-    const project = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Pick a project.") });
+    const project = stubLocator({
+      count: vi.fn(async () => 1),
+      innerText: vi.fn(async () => "Choose the project this runner belongs to."),
+    });
     const name = stubLocator({
       count: vi.fn(async () => 1),
-      innerText: vi.fn(async () => "Runner name cannot contain spaces."),
+      innerText: vi.fn(async () => "Names can't contain spaces."),
+    });
+    const alert = stubLocator({
+      filter: vi.fn((options: { hasText: RegExp }) => (options.hasText.source === "space" ? name : project)),
     });
     const dialog = stubLocator({
-      getByRole: vi.fn(() => project),
+      getByRole: vi.fn(() => alert),
       getByText: vi.fn(() => name),
+      getByTestId: vi.fn(() => stubLocator()),
     });
     const driver = new WebNewDriver(pageStub({ getByRole: () => dialog }));
 
-    await expect(driver.addRunnerProjectError()).resolves.toBe("Pick a project.");
-    await expect(driver.addRunnerNameError()).resolves.toBe("Runner name cannot contain spaces.");
+    await expect(driver.addRunnerProjectError()).resolves.toBe("Choose the project this runner belongs to.");
+    await expect(driver.addRunnerNameError()).resolves.toBe("Names can't contain spaces.");
   });
 
   it("returns null when no error renders", async () => {
@@ -310,6 +317,9 @@ describe("addRunner command panel", () => {
       getByText: vi.fn(() =>
         stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Using the current browser origin") })
       ),
+      getByTestId: vi.fn(() =>
+        stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "No API base URL was configured") })
+      ),
     });
     return { dialog, page: pageStub({ getByRole: () => dialog }), copy, pre };
   }
@@ -331,7 +341,7 @@ describe("addRunner command panel", () => {
     await driver.addRunnerCopy();
     await expect(driver.addRunnerCopyState()).resolves.toBe("Copy command");
     await expect(driver.addRunnerReadClipboard()).resolves.toBe("");
-    await expect(driver.addRunnerOriginNote()).resolves.toBe("Using the current browser origin");
+    await expect(driver.addRunnerOriginNote()).resolves.toBe("No API base URL was configured");
     expect(copy.click).toHaveBeenCalled();
     expect(page.evaluate).toHaveBeenCalled();
   });

@@ -13,11 +13,11 @@ import { notifyError } from "../../../shared/shell/index.js";
 import { cn } from "@pidash/kit";
 import { buildRunnerCommand, SHELL_CHOICES, type CommandFields, type ShellKind } from "./command.js";
 
-export const COPY_FAILED_TITLE = "Error!";
-export const COPY_FAILED_MESSAGE = "Could not copy to clipboard";
+export const COPY_FAILED_TITLE = "Copy failed";
+export const COPY_FAILED_MESSAGE = "The clipboard refused the command. Select it and copy by hand.";
 export const COPY_CONFIRM_MS = 2_000;
 export const ORIGIN_NOTE =
-  "Using the current browser origin as the cloud URL because VITE_API_BASE_URL is not configured.";
+  "No API base URL was configured for this build, so the command targets the origin serving this page.";
 
 export interface CommandPanelProps {
   fields: CommandFields;
@@ -59,7 +59,7 @@ export function AddRunnerCommandPanel({ fields, originFallback }: CommandPanelPr
       data-testid="add-runner-command-panel"
       className="flex flex-col gap-(--space-4) rounded-(--radius-control) border border-(--border) bg-(--subtle) p-(--space-4)"
     >
-      <p className="text-body text-(--text-muted)">Run this on the machine that will host the runner:</p>
+      <p className="text-body text-(--text-muted)">Paste and run this on the machine that will host the runner:</p>
       <div className="flex flex-wrap items-center gap-(--space-2)">
         <span className="text-meta text-(--text-muted)">Shell</span>
         <div
@@ -89,7 +89,11 @@ export function AddRunnerCommandPanel({ fields, originFallback }: CommandPanelPr
       >
         {command}
       </pre>
-      {originFallback ? <p className="text-meta text-(--text-muted)">{ORIGIN_NOTE}</p> : null}
+      {originFallback ? (
+        <p data-testid="add-runner-origin-note" className="text-meta text-(--text-muted)">
+          {ORIGIN_NOTE}
+        </p>
+      ) : null}
       <div>
         <Button size="small" onClick={() => void copy()}>
           {copied ? "Copied!" : "Copy command"}

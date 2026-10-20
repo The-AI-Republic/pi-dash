@@ -399,7 +399,7 @@ function FormPanel({
   return (
     <div className="flex flex-col gap-(--space-4)">
       <p className="text-body text-(--text-muted)">
-        Create a runner on a connected dev machine, or generate a command to run manually.
+        Let a connected dev machine set this runner up, or take the command and run it yourself.
       </p>
 
       <Field label="Dev machine">
@@ -412,8 +412,8 @@ function FormPanel({
         />
         <p className="text-meta text-(--text-muted)">
           {machineOptions.length > 1
-            ? "Connected dev machines can create the runner directly — no copy-paste needed."
-            : "No connected dev machines. Install and start the pidash daemon on your machine, or generate the command to run manually."}
+            ? "This machine can be set up for you — nothing to paste."
+            : "Nothing is connected yet. Start the pidash daemon on a machine to set up there, or copy the command below and run it yourself."}
         </p>
         {machinesError ? <p className="text-meta text-(--danger)">Could not load dev machines.</p> : null}
       </Field>
@@ -446,7 +446,9 @@ function FormPanel({
           triggerLabel={podLabel}
           emptyText="No pods available"
         />
-        <p className="text-meta text-(--text-muted)">Defaults to the project&apos;s default pod.</p>
+        <p className="text-meta text-(--text-muted)">
+          Leave this on the default pod unless the project groups runners differently.
+        </p>
         {podsError ? <p className="text-meta text-(--danger)">Could not load pods.</p> : null}
       </Field>
 
@@ -466,7 +468,7 @@ function FormPanel({
         value={values.workingDir}
         placeholder="local dev machine project working dir"
         onChange={(event) => onField("workingDir", event.target.value)}
-        hint="Local path the daemon runs the agent CLI in — usually the project repo on disk. Defaults to a sandbox under the runner's data dir, which is rarely what you want."
+        hint="Where the agent CLI should run on that machine. Point it at the project checkout; an empty value uses a sandbox that is seldom what you want."
       />
 
       <Field label="Agent">

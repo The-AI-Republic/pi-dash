@@ -10217,7 +10217,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async addRunnerProjectError(): Promise<string | null> {
-    const error = this.addRunnerDialog().getByRole("alert").filter({ hasText: "Pick a project." });
+    const error = this.addRunnerDialog()
+      .getByRole("alert")
+      .filter({ hasText: /project/i });
     if ((await error.count()) === 0) return null;
     return ((
       (await error
@@ -10228,7 +10230,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async addRunnerNameError(): Promise<string | null> {
-    const error = this.addRunnerDialog().getByText("Runner name cannot contain spaces.", { exact: false });
+    const error = this.addRunnerDialog().getByRole("alert").filter({ hasText: /space/i });
     if ((await error.count()) === 0) return null;
     return ((
       (await error
@@ -10473,7 +10475,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async addRunnerOriginNote(): Promise<string | null> {
-    const note = this.addRunnerDialog().getByText("Using the current browser origin", { exact: false });
+    const note = this.addRunnerDialog().getByTestId("add-runner-origin-note");
     if ((await note.count()) === 0) return null;
     return ((
       (await note

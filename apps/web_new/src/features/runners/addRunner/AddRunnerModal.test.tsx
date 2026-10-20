@@ -170,7 +170,7 @@ describe("form entry (RUN-006)", () => {
   it("requires a project before anything else", async () => {
     harness();
     await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent("Pick a project.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Choose the project this runner belongs to.");
   });
 
   it("rejects a bad name and accepts a good one", async () => {
@@ -178,7 +178,7 @@ describe("form entry (RUN-006)", () => {
     await pickPicker("Project", "Acme");
     await userEvent.type(screen.getByLabelText("Name (optional)"), "has space");
     await submit();
-    expect(screen.getByRole("alert")).toHaveTextContent("Runner name cannot contain spaces.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Names can't contain spaces.");
     await userEvent.clear(screen.getByLabelText("Name (optional)"));
     await userEvent.type(screen.getByLabelText("Name (optional)"), "good_name-1");
     await submit();
@@ -506,7 +506,7 @@ describe("manual command (RUN-008)", () => {
     const pre = screen.getByTestId("add-runner-command-text");
     expect(pre).toHaveTextContent("pidash runner add");
     expect(pre).toHaveTextContent("--project ACME");
-    expect(screen.getByText(/VITE_API_BASE_URL/)).toBeInTheDocument();
+    expect(screen.getByTestId("add-runner-origin-note")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "PowerShell" }));
     expect(screen.getByRole("button", { name: "PowerShell" })).toHaveAttribute("aria-pressed", "true");
     expect(pre.textContent).not.toContain("\n");

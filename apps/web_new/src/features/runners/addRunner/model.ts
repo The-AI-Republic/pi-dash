@@ -55,8 +55,8 @@ const NAME_WHITESPACE = /\s/;
 const NAME_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 export const NAME_RULE_TEXT =
-  "Runner name cannot contain spaces. It must start with a letter, digit, or underscore and contain only letters, digits, underscore, dot, or dash.";
-export const PROJECT_REQUIRED_TEXT = "Pick a project.";
+  "Names can't contain spaces. Start with a letter, digit, or underscore, then use only those plus dot and dash.";
+export const PROJECT_REQUIRED_TEXT = "Choose the project this runner belongs to.";
 
 /** Field errors the form can show. */
 export interface AddRunnerErrors {
@@ -211,12 +211,22 @@ export interface RemoteState {
  * daemon's raw `unknown agent kind "…"` write-back both become the daemon
  * upgrade hint; machine-offline is distinct from an unreachable cloud.
  */
-export function remoteFailureText(code: string | undefined): string {
-  if (code === "machine_offline") return "The dev machine went offline before the command could be delivered.";
-  if (code === "unsupported_agent") return DAEMON_TOO_OLD_TEXT;
-  if (code !== undefined && UNKNOWN_AGENT_PATTERN.test(code)) return DAEMON_TOO_OLD_TEXT;
-  return code ?? "Could not reach the cloud to start the runner creation.";
+export function remoteFailureText(code: string | undefined, detail?: string | undefined): string {
+  for (const reason of [code, detail]) {
+    if (reason === undefined) continue;
+    if (reason === "machine_offline") return "The dev machine went offline before the command could be delivered.";
+    if (reason === "unsupported_agent") return DAEMON_TOO_OLD_TEXT;
+    if (UNKNOWN_AGENT_PATTERN.test(reason)) return DAEMON_TOO_OLD_TEXT;
+  }
+  if (code !== undefined && code !== "" && !TRANSPORT_CODES.has(code)) return code;
+  // A 409 body carries `{"error": reason}`; the shared client keeps the
+  // reason in `message` and reports code `http`.
+  if (code === "http" && detail !== undefined && detail !== "") return detail;
+  return "Could not reach the cloud to start the runner creation.";
 }
+
+/** Transport-level codes the shared client uses when the server only sent a reason. */
+const TRANSPORT_CODES = new Set(["http", "network", "timeout", "parse", "contract"]);
 
 export const DAEMON_TOO_OLD_TEXT =
   "The runner daemon on this machine is too old to support the selected agent. Upgrade pidash on the machine and try again.";
@@ -229,9 +239,10 @@ export function isUnknownAgentError(message: string | undefined): boolean {
 }
 
 /**
- * A status write-back that reports a failure. The daemon may answer the raw
- * unknown-agent text instead of a code, so both routes map to the hint.
+ * A status write-back that reports a failure. The write-back can be a machine
+ * code (`machine_offline`), the raw unknown-agent text, or free text; the
+ * same mapping as a thrown create failure applies.
  */
 export function remoteStatusError(error: string | undefined): string {
-  return isUnknownAgentError(error) ? DAEMON_TOO_OLD_TEXT : (error ?? "");
+  return error === undefined ? "" : remoteFailureText(error);
 }

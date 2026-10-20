@@ -45,10 +45,12 @@ export async function runRemoteCreate(input: RemoteCreateInput, deps: RemoteCrea
     const accepted = await deps.createRunner(machineId);
     requestId = accepted.request_id;
   } catch (error) {
-    const code = (error as { code?: string } | undefined)?.code;
-    const cancelled = code === "aborted";
-    if (cancelled) return null;
-    const state: RemoteState = { phase: "error", machineLabel, error: remoteFailureText(code) };
+    const failure = error as { code?: string; message?: string } | undefined;
+    const code = failure?.code;
+    if (code === "aborted") return null;
+    // The shared client reports a 409 `{"error":"machine_offline"}` as
+    // `code: "http"` with the reason in `message`, so read both.
+    const state: RemoteState = { phase: "error", machineLabel, error: remoteFailureText(code, failure?.message) };
     deps.update(state);
     return state;
   }

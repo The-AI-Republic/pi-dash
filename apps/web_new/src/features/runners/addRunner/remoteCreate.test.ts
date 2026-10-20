@@ -48,6 +48,17 @@ describe("runRemoteCreate", () => {
     });
   });
 
+  it("maps an offline status write-back to the offline message", async () => {
+    const d = deps({
+      readStatus: vi.fn(async () => status({ status: "error", error: "machine_offline" })),
+    });
+    expect(await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, d)).toEqual({
+      phase: "error",
+      machineLabel: "L",
+      error: expect.stringContaining("went offline") as unknown as string,
+    });
+  });
+
   it("maps the daemon's unknown-agent write-back to the upgrade hint", async () => {
     const d = deps({
       readStatus: vi.fn(async () => status({ status: "error", error: 'unknown agent kind "grok"' })),
@@ -151,6 +162,16 @@ describe("runRemoteCreate", () => {
     });
     const offlineState = (await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, offline)) as RemoteState;
     expect(offlineState.error).toContain("went offline");
+
+    // The live transport shape: a 409 body `{"error":"machine_offline"}`
+    // arrives as ApiError code "http" with the reason in the message.
+    const viaHttp = deps({
+      createRunner: vi.fn(async () => {
+        throw Object.assign(new Error("machine_offline"), { code: "http" });
+      }),
+    });
+    const httpState = (await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, viaHttp)) as RemoteState;
+    expect(httpState.error).toContain("went offline");
 
     const unreachable = deps({
       createRunner: vi.fn(async () => {
