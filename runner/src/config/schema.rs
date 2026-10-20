@@ -119,6 +119,10 @@ pub struct AgentWatchdogConfig {
     pub kill_after_hours: u64,
 }
 
+/// Upper bound on either watchdog threshold (one year). Far beyond any real
+/// run, and keeps `Instant + kill_after` well clear of overflow.
+pub const MAX_AGENT_WATCHDOG_HOURS: u64 = 24 * 365;
+
 fn default_unhealthy_after_hours() -> u64 {
     24
 }
@@ -683,6 +687,7 @@ impl Config {
         let watchdog = self.daemon.agent_watchdog;
         if watchdog.unhealthy_after_hours == 0
             || watchdog.kill_after_hours < watchdog.unhealthy_after_hours
+            || watchdog.kill_after_hours > MAX_AGENT_WATCHDOG_HOURS
         {
             return Err(ConfigError::InvalidAgentWatchdog {
                 unhealthy_after_hours: watchdog.unhealthy_after_hours,
@@ -900,8 +905,9 @@ impl std::fmt::Display for ConfigError {
                 "configuration error: [daemon.agent_watchdog] has \
                  unhealthy_after_hours = {unhealthy_after_hours} and \
                  kill_after_hours = {kill_after_hours}. unhealthy_after_hours \
-                 must be at least 1, and kill_after_hours must not be lower \
-                 than unhealthy_after_hours."
+                 must be at least 1, kill_after_hours must not be lower \
+                 than unhealthy_after_hours, and neither may exceed \
+                 {MAX_AGENT_WATCHDOG_HOURS} (one year)."
             ),
         }
     }
@@ -978,7 +984,12 @@ mod tests {
 
     #[test]
     fn validate_rejects_inconsistent_agent_watchdog() {
-        for (unhealthy, kill) in [(0, 48), (24, 12)] {
+        for (unhealthy, kill) in [
+            (0, 48),
+            (24, 12),
+            (24, MAX_AGENT_WATCHDOG_HOURS + 1),
+            (u64::MAX, u64::MAX),
+        ] {
             let mut cfg = config_with(vec![]);
             cfg.daemon.agent_watchdog = AgentWatchdogConfig {
                 unhealthy_after_hours: unhealthy,

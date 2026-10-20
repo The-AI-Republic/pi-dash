@@ -2927,6 +2927,11 @@ struct RunMetadata {
     model: Option<String>,
 }
 
+/// How often `pump_events` re-checks a pending approval. A run waiting on a
+/// human is never stalled, but the loop must notice the approval resolving even
+/// when no agent event follows it.
+const APPROVAL_WATCHDOG_RECHECK: Duration = Duration::from_secs(30);
+
 impl AssignWorker {
     async fn run_metadata(&self) -> RunMetadata {
         let snapshot = self.state.observability_snapshot().await;
@@ -3239,10 +3244,13 @@ impl AssignWorker {
         loop {
             // Re-evaluate at every loop entry. A pending approval is a
             // human-wait, which is legitimate silence: it keeps the activity
-            // clock fresh and disarms the deadline, so the clock restarts
-            // when the approval resolves.
-            let watchdog_deadline = if self.approvals.list_pending().await.is_empty() {
-                Some(watchdog.next_deadline().0)
+            // clock fresh, so the clock restarts when the approval resolves.
+            // While one is pending the deadline is only a short re-check, so
+            // an approval answered with no agent event after it still re-arms
+            // the watchdog instead of leaving the loop without a deadline.
+            let awaiting_approval = !self.approvals.list_pending().await.is_empty();
+            let watchdog_deadline = if !awaiting_approval {
+                watchdog.next_deadline().0
             } else {
                 if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
                     self.note_agent_health_change(
@@ -3253,7 +3261,7 @@ impl AssignWorker {
                     )
                     .await;
                 }
-                None
+                tokio::time::Instant::now() + APPROVAL_WATCHDOG_RECHECK
             };
             let run_event_flush_deadline = run_events.flush_deadline();
             tokio::select! {
@@ -3333,12 +3341,10 @@ impl AssignWorker {
                         }
                     }
                 }
-                _ = async {
-                    match watchdog_deadline {
-                        Some(d) => tokio::time::sleep_until(d).await,
-                        None => std::future::pending::<()>().await,
+                _ = tokio::time::sleep_until(watchdog_deadline) => {
+                    if awaiting_approval {
+                        continue;
                     }
-                } => {
                     if watchdog.on_deadline() == WatchdogAction::MarkUnhealthy {
                         self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
                             .await;

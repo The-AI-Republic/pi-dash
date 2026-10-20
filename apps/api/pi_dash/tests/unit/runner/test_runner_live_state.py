@@ -537,3 +537,15 @@ def test_watchdog_does_not_reap_pre_observability_run_with_null_last_event_at(
     )
     reaped = reconcile_stalled_runs()
     assert reaped == 0
+
+
+def test_issue_detail_live_state_carries_agent_health():
+    """The issue page reads the watchdog's verdict and activity stamp, which
+    are the only liveness signals when the runner's observability is off."""
+    from pi_dash.app.serializers.issue import IssueDetailSerializer
+
+    last = timezone.now() - timedelta(hours=25)
+    state = RunnerLiveState(agent_health=AgentHealth.UNHEALTHY, agent_last_activity_at=last)
+    data = IssueDetailSerializer()._serialize_agent_live_state(state)
+    assert data["agent_health"] == "unhealthy"
+    assert data["agent_last_activity_at"] == IssueDetailSerializer()._serialize_datetime(last)

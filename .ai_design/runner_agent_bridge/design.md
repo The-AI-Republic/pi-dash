@@ -815,22 +815,27 @@ every agent kind, measured from the last agent event:
 | `kill_after_hours` (default 48)      | run failed (`timeout`, "agent stalled: no agent events for 48 hours") |
 
 Any agent event resets both clocks and clears the mark. A pending approval
-keeps the clock fresh (a human-wait is legitimate silence). Thresholds live in
+keeps the clock fresh (a human-wait is legitimate silence); while one is
+pending the loop re-checks every 30s, so an approval answered with no agent
+event after it still re-arms the watchdog. Thresholds live in
 `[daemon.agent_watchdog]` in `config.toml`; `validate()` rejects a zero
-unhealthy threshold or a kill threshold below it.
+unhealthy threshold, a kill threshold below it, or either above one year.
 
 Reporting. On every busy poll — regardless of `agent_observability_v1`,
 because health is lifecycle, not opt-in telemetry — the runner sends
 `observed_run_id`, `agent_health` (`healthy` / `unhealthy`) and
 `agent_last_activity_at`. The cloud stores them on `RunnerLiveState` (wiped on
 run change like every snapshot field) and serialises them on the runner's
-`live_state`. Each transition is also pushed to the run's event timeline as a
+`live_state` and the issue detail's agent run `live_state`. Each transition is also pushed to the run's event timeline as a
 `runner/agent_health` event (`runner_agent_health_v1`), written to the local
 run history as a `healthy` / `unhealthy` lifecycle entry, and logged.
 
 The web panel (§4.5.4) shows **Unhealthy** from the runner's verdict and
 **Quiet** (neutral) for a few silent minutes on such runners; runners without
 `agent_health` keep the short **Stalled** heuristic that matches their timer.
+The issue page's agent card shows **Unhealthy** ("AI agent has gone quiet") on
+a running run the runner reports unhealthy, and falls back to
+`agent_last_activity_at` for "last activity" when observability is off.
 
 Not covered on purpose: an agent that freezes after its command finished (the
 child exited but no completion event arrives). It falls to the 48h backstop.
