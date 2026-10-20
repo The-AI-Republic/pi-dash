@@ -24,6 +24,7 @@ import {
 
 import type { AgentHostCheck, AgentRuntimeApi } from "../../../core/platform/index.js";
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
+import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { restoreApprovalModes, stashApprovalModes } from "./approvalModes.js";
 
 /** Server executor kind for the bundled on-machine agent. */
@@ -41,7 +42,7 @@ export class EngineUnavailableError extends Error {
   readonly code: string;
 
   constructor(code: string) {
-    super(`The built-in agent is unavailable (${code}).`);
+    super(agentReasonMessage(code));
     this.name = "EngineUnavailableError";
     this.code = code;
   }
@@ -220,7 +221,7 @@ async function withSessionRecovery<T>(runtime: AgentRuntimeApi, action: () => Pr
 
 function assertHostUsable(doctor: AgentHostCheck): void {
   if (!doctor.runnerPresent || !doctor.enginePresent) {
-    throw new Error("The desktop's bundled agent is missing pieces. Reinstall the app to repair it.");
+    throw new Error("The desktop app's bundled agent is damaged. Reinstall the app to repair it.");
   }
 }
 

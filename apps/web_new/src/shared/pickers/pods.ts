@@ -11,6 +11,8 @@
 // server-side.
 import type { AgentExecutorOption, ExecutorKind, Pod, PodList } from "@pidash/api-client";
 
+import { agentReasonMessage } from "../lib/agentReasons.js";
+
 export const CLOUD_EXECUTOR: ExecutorKind = "cloud_agent";
 export const MANAGED_EXECUTOR: ExecutorKind = "managed_runner";
 export const LOCAL_EXECUTOR: ExecutorKind = "local_runner";
@@ -26,21 +28,13 @@ export function isAgentRowKind(kind: string): kind is AgentRowKind {
   return kind === CLOUD_EXECUTOR || kind === MANAGED_EXECUTOR;
 }
 
-/** Human sentences for the server availability reason codes. */
-const AVAILABILITY_REASONS: Record<string, string> = {
-  cloud_agent_unavailable: "The Cloud Agent is disabled on this instance.",
-  llm_config_missing: "No AI provider configured for your account.",
-  no_local_runner: "No online runner on this project's pods.",
-  managed_runner_disabled: "The desktop agent is disabled on this instance.",
-  desktop_not_connected: "Your desktop app is not connected.",
-  gateway_scopes_missing: "Your desktop session needs reconnecting.",
-  byok_not_supported_on_desktop: "Your BYOK provider isn't supported on the desktop agent.",
-  no_managed_runner_for_project: "No desktop runner enrolled for this project.",
-};
-
-/** Render one reason code; unknown codes surface as-is per the contract. */
+/**
+ * Render one reason code. The shared agent vocabulary owns the sentences so
+ * the picker and the desktop status notice explain a refusal the same way;
+ * unknown codes surface as-is per the contract.
+ */
 export function formatAvailabilityReason(reasonCode: string): string {
-  return AVAILABILITY_REASONS[reasonCode] ?? reasonCode;
+  return agentReasonMessage(reasonCode);
 }
 
 /** One picker row: an agent executor or a pod. */

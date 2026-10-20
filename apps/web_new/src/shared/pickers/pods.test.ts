@@ -3,6 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 import type { AgentExecutorOption, PodList } from "@pidash/api-client";
+import { agentReasonMessage } from "../lib/agentReasons.js";
 import {
   buildExecutionTargets,
   executionSelectionId,
@@ -37,17 +38,25 @@ describe("formatAvailabilityReason", () => {
   it("renders every known code as a sentence", () => {
     expect(formatAvailabilityReason("")).toBe("");
     expect(formatAvailabilityReason("cloud_agent_unavailable")).toContain("Cloud Agent");
-    expect(formatAvailabilityReason("llm_config_missing")).toContain("AI provider");
+    expect(formatAvailabilityReason("llm_config_missing")).toContain("model");
+    // The code serves both agent rows, so its sentence must not claim the
+    // refusal belongs to one of them.
+    expect(formatAvailabilityReason("llm_config_missing")).not.toMatch(/built-in|Cloud Agent/);
     expect(formatAvailabilityReason("no_local_runner")).toContain("runner");
-    expect(formatAvailabilityReason("managed_runner_disabled")).toContain("disabled");
+    expect(formatAvailabilityReason("managed_runner_disabled")).toContain("switched off");
     expect(formatAvailabilityReason("desktop_not_connected")).toContain("not connected");
-    expect(formatAvailabilityReason("gateway_scopes_missing")).toContain("reconnecting");
-    expect(formatAvailabilityReason("byok_not_supported_on_desktop")).toContain("BYOK");
+    expect(formatAvailabilityReason("gateway_scopes_missing")).toContain("gateway");
+    expect(formatAvailabilityReason("byok_not_supported_on_desktop")).toContain("provider key");
     expect(formatAvailabilityReason("no_managed_runner_for_project")).toContain("enrolled");
   });
 
   it("surfaces unknown codes as-is", () => {
     expect(formatAvailabilityReason("tomorrow_problem")).toBe("tomorrow_problem");
+  });
+
+  it("uses the same sentences as the status notice", () => {
+    expect(formatAvailabilityReason("gateway_unavailable")).toBe(agentReasonMessage("gateway_unavailable"));
+    expect(formatAvailabilityReason("desktop_session_required")).toBe(agentReasonMessage("desktop_session_required"));
   });
 });
 
@@ -66,7 +75,7 @@ describe("buildExecutionTargets", () => {
         executor: "managed_runner",
         label: "Pi Dash Agent (desktop)",
         available: false,
-        reason: "Your desktop app is not connected.",
+        reason: "This computer is not connected to the server yet. Sign in again through the desktop app to link it.",
       },
       { kind: "pod", podId: POD_A.id, label: "ACME-Backend", isDefault: true },
       { kind: "pod", podId: POD_B.id, label: "ACME-Tier", isDefault: false },

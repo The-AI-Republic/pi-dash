@@ -18,6 +18,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
 import { useMe } from "../../../core/session/index.js";
+import { agentFailureMessage } from "../../../shared/lib/agentReasons.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { isManagedRunnerAvailable, projectAvailabilityQueryOptions, runtimeKeys } from "./queries.js";
 import { connectProject, refreshRuntime, resumeRuntime } from "./service.js";
@@ -53,8 +54,13 @@ export function selectRuntimeNotice(input: RuntimeNoticeInput): string {
   return input.refreshError ?? RUNTIME_CONNECTED_TEXT;
 }
 
+/**
+ * Notice text for a failed step. A server refusal is rendered through the
+ * shared agent vocabulary, so the reason code becomes a plain-language
+ * explanation of that specific refusal; anything else keeps its message.
+ */
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return agentFailureMessage(error);
 }
 
 /**
