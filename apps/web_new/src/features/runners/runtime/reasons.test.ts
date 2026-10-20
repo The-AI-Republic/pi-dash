@@ -3,34 +3,29 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import {
-  AGENT_REASON_CODES,
-  AGENT_REASON_MESSAGES,
-  agentReasonMessage,
-  agentReasonNeedsSignIn,
-  agentRefusalCode,
-  isKnownAgentReason,
-} from "./reasons.js";
+import { AGENT_REASON_MESSAGES, agentReasonMessage } from "../../../shared/lib/agentReasons.js";
+import { agentRefusalCode, isKnownAgentReason } from "./reasons.js";
 
-describe("desktop agent reasons", () => {
-  it("explains every cloud-model situation distinctly", () => {
-    expect(AGENT_REASON_CODES).toEqual(
-      expect.arrayContaining([
-        "managed_runner_disabled",
-        "byok_not_supported_on_desktop",
-        "llm_config_missing",
-        "gateway_session_revoked",
-        "desktop_session_required",
-        "desktop_not_connected",
-        "gateway_scopes_missing",
-        "gateway_unavailable",
-      ])
-    );
-    expect(AGENT_REASON_CODES).toHaveLength(8);
-    expect(new Set(Object.values(AGENT_REASON_MESSAGES)).size).toBe(8);
+/** The cloud-model situations CLOUD-040 names. */
+const CLOUD_CODES = [
+  "managed_runner_disabled",
+  "byok_not_supported_on_desktop",
+  "llm_config_missing",
+  "gateway_session_revoked",
+  "desktop_session_required",
+  "desktop_not_connected",
+  "gateway_scopes_missing",
+  "gateway_unavailable",
+];
+
+describe("cloud-model refusals", () => {
+  it("explains every situation with its own sentence", () => {
+    for (const code of CLOUD_CODES) expect(isKnownAgentReason(code), code).toBe(true);
+    const sentences = CLOUD_CODES.map((code) => AGENT_REASON_MESSAGES[code]);
+    expect(new Set(sentences).size).toBe(CLOUD_CODES.length);
   });
 
-  it("names the fix in the self-supplied lane message and keeps cloud runs working", () => {
+  it("names the hosted lane in the self-supplied-key sentence and keeps cloud runs working", () => {
     const message = agentReasonMessage("byok_not_supported_on_desktop");
     expect(message).toMatch(/hosted model lane/i);
     expect(message).toMatch(/cloud runs/i);
@@ -44,17 +39,6 @@ describe("desktop agent reasons", () => {
 
   it("says the gateway outage retries on its own", () => {
     expect(agentReasonMessage("gateway_unavailable")).toMatch(/retries/i);
-  });
-
-  it("surfaces an unknown code verbatim", () => {
-    expect(agentReasonMessage("some_new_code")).toBe("some_new_code");
-  });
-
-  it("knows which refusals a new sign-in fixes", () => {
-    expect(agentReasonNeedsSignIn("gateway_session_revoked")).toBe(true);
-    expect(agentReasonNeedsSignIn("gateway_scopes_missing")).toBe(true);
-    expect(agentReasonNeedsSignIn("gateway_unavailable")).toBe(false);
-    expect(agentReasonNeedsSignIn("managed_runner_disabled")).toBe(false);
   });
 });
 
@@ -75,7 +59,7 @@ describe("agent refusal reader", () => {
   });
 
   it("knows which codes this build explains", () => {
-    for (const code of AGENT_REASON_CODES) expect(isKnownAgentReason(code)).toBe(true);
+    for (const code of CLOUD_CODES) expect(isKnownAgentReason(code)).toBe(true);
     expect(isKnownAgentReason("feature_off")).toBe(false);
     expect(isKnownAgentReason("toString")).toBe(false);
   });

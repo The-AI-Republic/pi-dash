@@ -29,7 +29,7 @@ import type { AgentHostCheck, AgentRuntimeApi } from "../../../core/platform/ind
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { restoreApprovalModes, stashApprovalModes } from "./approvalModes.js";
-import { agentReasonMessage, agentRefusalCode, isKnownAgentReason } from "./reasons.js";
+import { agentRefusalCode, isKnownAgentReason } from "./reasons.js";
 
 /** Server executor kind for the bundled on-machine agent. */
 export const MANAGED_RUNNER_KIND = "managed_runner";
