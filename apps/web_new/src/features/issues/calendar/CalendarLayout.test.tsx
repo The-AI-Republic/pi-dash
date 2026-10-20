@@ -10,6 +10,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/index.js";
 import { CalendarLayout } from "./CalendarLayout.js";
 import { CALENDAR_ADD_EXISTING_ITEM, CALENDAR_ADD_ITEM, CALENDAR_TITLE_PLACEHOLDER } from "./CalendarDay.js";
@@ -336,27 +337,31 @@ describe("CalendarLayout", () => {
     expect(screen.queryByText("Sat")).not.toBeInTheDocument();
   });
 
-  it("steps months, jumps to today, and picks a month", async () => {
-    renderLayout();
-    const user = userEvent.setup();
-    const current = monthTitle(today.getFullYear(), today.getMonth());
-    const previous = stepMonth(today.getFullYear(), today.getMonth(), -1);
-    const previousTitle = monthTitle(previous.year, previous.month0);
-    const before = state.calls.length;
+  it(
+    "steps months, jumps to today, and picks a month",
+    async () => {
+      renderLayout();
+      const user = userEvent.setup();
+      const current = monthTitle(today.getFullYear(), today.getMonth());
+      const previous = stepMonth(today.getFullYear(), today.getMonth(), -1);
+      const previousTitle = monthTitle(previous.year, previous.month0);
+      const before = state.calls.length;
 
-    await user.click(screen.getByRole("button", { name: "Previous" }));
-    expect(screen.getByRole("button", { name: previousTitle })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    expect(screen.getByRole("button", { name: current })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Today" }));
-    expect(screen.getByRole("button", { name: current })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Previous" }));
+      expect(screen.getByRole("button", { name: previousTitle })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Next" }));
+      expect(screen.getByRole("button", { name: current })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Next" }));
+      await user.click(screen.getByRole("button", { name: "Today" }));
+      expect(screen.getByRole("button", { name: current })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: current }));
-    await user.click(screen.getByRole("button", { name: "Jan" }));
-    expect(screen.getByRole("button", { name: `January ${today.getFullYear()}` })).toBeInTheDocument();
-    await waitFor(() => expect(state.calls.length).toBeGreaterThan(before));
-  }, 15_000);
+      await user.click(screen.getByRole("button", { name: current }));
+      await user.click(screen.getByRole("button", { name: "Jan" }));
+      expect(screen.getByRole("button", { name: `January ${today.getFullYear()}` })).toBeInTheDocument();
+      await waitFor(() => expect(state.calls.length).toBeGreaterThan(before));
+    },
+    FULL_RUN_TEST_TIMEOUT_MS
+  );
 
   it("steps weeks when week layout is stored", async () => {
     state.prefs = prefs("week");
