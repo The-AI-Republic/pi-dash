@@ -110,6 +110,7 @@ use uuid::Uuid;
 
 use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
 use pidash_db::v1_assets::asset_queries;
 
@@ -146,8 +147,10 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (invalid, revoked, expired, inactive).
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
 /// Resolver 404 for a non-UUID `<uuid:asset_id>` segment (global
-/// `handler404`, `pi_dash/urls.py:15`).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `handler404`, `pi_dash/urls.py:15` -> `app/views/error_404.py`):
+/// `custom_404_view` is a plain Django `JsonResponse`, so the bytes are
+/// `json.dumps` defaults — a space after the colon.
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// POST dedupe-hit message (`asset.py:543-545`).
 pub const DEDUPE_MESSAGE: &str = "Asset with same external id and source already exists";
@@ -934,13 +937,20 @@ async fn publish_metadata(pool: &sqlx::PgPool, asset_id: &Uuid) {
 async fn generic_get(
     State(state): State<AppState>,
     Path((slug, asset_raw)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let _ = body;
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    // Classify the raw segment before auth, exactly like Django's resolver:
+    // canonical serves; parseable-but-non-canonical proxies so Django's
+    // resolver 404 answers; garbage keeps the local prod resolver body.
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return get_server_error("no database pool");
@@ -1234,9 +1244,12 @@ async fn generic_patch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    let asset_id = match classify_uuid_segment(&asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return server_error("no database pool");
@@ -1861,7 +1874,7 @@ mod tests {
             INVALID_TOKEN_BODY,
             r#"{"detail":"Given API token is not valid"}"#
         );
-        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
         assert_eq!(
             DEDUPE_MESSAGE,
             "Asset with same external id and source already exists"

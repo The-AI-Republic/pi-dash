@@ -79,6 +79,7 @@ use crate::license::{query_last, QueryMap, SERVER_ERROR_BODY, UNAUTHENTICATED_BO
 use crate::runner_runs::run_endpoints::drain_lifecycle_effects;
 use crate::runner_runs::LivePorts;
 use crate::state::AppState;
+use crate::uuid_path::is_canonical_uuid;
 
 /// `{"error": "not found"}` — 404 (unknown id, or present-but-unviewable).
 const NOT_FOUND_BODY: &str = r#"{"error":"not found"}"#;
@@ -950,22 +951,6 @@ async fn proxy_through(
     crate::edge::proxy(State(state), req).await
 }
 
-/// Whether the segment is spelled the way Django's `UUIDConverter`
-/// routes: lowercase hex, hyphenated, 36 chars
-/// (`django/urls/converters.py`; the `app_issues` PB-0340 precedent).
-fn is_canonical_uuid(raw: &str) -> bool {
-    if raw.len() != 36 {
-        return false;
-    }
-    raw.bytes().enumerate().all(|(index, byte)| {
-        if index == 8 || index == 13 || index == 18 || index == 23 {
-            byte == b'-'
-        } else {
-            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
-        }
-    })
-}
-
 /// `DELETE /api/v1/runners/<runner_id>/`: by-pk 404, view-guard 404,
 /// manage-guard 403, flag-parse 400, then the delete service and an
 /// empty 204.
@@ -1114,24 +1099,4 @@ pub async fn delete_runner(
         }
     }
     no_content()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_canonical_uuid;
-
-    #[test]
-    fn canonical_uuid_accepts_lowercase_hyphenated_only() {
-        assert!(is_canonical_uuid("12345678-1234-1234-1234-1234567890ab"));
-        for raw in [
-            "12345678-1234-1234-1234-1234567890AB",
-            "123456781234123412341234567890ab",
-            "{12345678-1234-1234-1234-1234567890ab}",
-            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
-            "not-a-uuid",
-            "",
-        ] {
-            assert!(!is_canonical_uuid(raw), "{raw}");
-        }
-    }
 }

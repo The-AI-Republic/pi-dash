@@ -91,9 +91,11 @@ async fn server_patch(
 async fn server_delete(
     State(state): State<AppState>,
     Path(asset_raw): Path<String>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    super::asset_user::handle_delete(state, headers, &asset_raw).await
+    super::asset_user::handle_delete(state, method, uri, headers, &asset_raw).await
 }
 
 #[cfg(test)]

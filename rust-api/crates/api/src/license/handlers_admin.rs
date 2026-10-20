@@ -99,6 +99,7 @@ use crate::middleware::SessionHandle;
 use crate::paginator::py_float_str;
 use crate::serializer::render_datetime_in;
 use crate::state::AppState;
+use crate::uuid_path::is_canonical_uuid;
 use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 
 /// Register the seven owned endpoints. Cutover granularity is the
@@ -1189,23 +1190,6 @@ async fn delete_admin(
         .header(header::CONTENT_TYPE, "application/json")
         .body(axum::body::Body::empty())
         .expect("empty 204 response"))
-}
-
-/// Whether a path segment is spelled the way Django's `UUIDConverter`
-/// routes it: lowercase hex, hyphenated, exactly 36 characters
-/// (`django/urls/converters.py`; the `v1_cli_auth` PIDASHCONV-1095 and
-/// `app_issues` PB-0340 precedents).
-fn is_canonical_uuid(raw: &str) -> bool {
-    if raw.len() != 36 {
-        return false;
-    }
-    raw.bytes().enumerate().all(|(index, byte)| {
-        if index == 8 || index == 13 || index == 18 || index == 23 {
-            byte == b'-'
-        } else {
-            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
-        }
-    })
 }
 
 /// `GET /api/instances/admins/me/` (`admin.py:361-366`): admin
@@ -2324,21 +2308,6 @@ mod tests {
 
     fn denial_body(denial: Denial) -> (StatusCode, String) {
         denial.status_and_body()
-    }
-
-    #[test]
-    fn canonical_uuid_accepts_lowercase_hyphenated_only() {
-        assert!(is_canonical_uuid("12345678-1234-1234-1234-1234567890ab"));
-        for raw in [
-            "12345678-1234-1234-1234-1234567890AB",
-            "123456781234123412341234567890ab",
-            "{12345678-1234-1234-1234-1234567890ab}",
-            "urn:uuid:12345678-1234-1234-1234-1234567890ab",
-            "not-a-uuid",
-            "",
-        ] {
-            assert!(!is_canonical_uuid(raw), "{raw}");
-        }
     }
 
     fn admin_app() -> axum::Router {

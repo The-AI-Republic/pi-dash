@@ -117,6 +117,7 @@ use uuid::Uuid;
 
 use crate::license::form_body::{select_body_kind, BodyKind};
 use crate::state::AppState;
+use crate::uuid_path::{classify_uuid_segment, UuidSegment};
 use pidash_auth::token as auth_token;
 use pidash_db::v1_assets::asset_queries;
 
@@ -142,8 +143,11 @@ pub const UNAUTHENTICATED_BODY: &str =
 /// `APIKeyAuthentication` failure (invalid, revoked, expired, inactive).
 pub const INVALID_TOKEN_BODY: &str = r#"{"detail":"Given API token is not valid"}"#;
 /// Resolver 404 for a non-UUID `<uuid:asset_id>` segment (global
-/// `handler404`, `pi_dash/urls.py:15`).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `handler404`, `pi_dash/urls.py:15` -> `app/views/error_404.py`):
+/// `custom_404_view` is a plain Django `JsonResponse`, so the bytes are
+/// `json.dumps` defaults — a space after the colon (the
+/// `app_workspace`/`runner_sessions` resolver-404 constants).
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// POST entity guard allowlist (`asset.py:126`).
 pub const USER_ENTITY_TYPES: &[&str] = &["USER_AVATAR", "USER_COVER"];
@@ -1131,9 +1135,12 @@ pub(crate) async fn handle_patch(
     asset_raw: &str,
     body: Bytes,
 ) -> Response {
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    let asset_id = match classify_uuid_segment(asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, body).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return server_error("no database pool");
@@ -1211,9 +1218,11 @@ pub(crate) async fn handle_patch(
 async fn user_delete(
     State(state): State<AppState>,
     Path(asset_raw): Path<String>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> Response {
-    handle_delete(state, headers, &asset_raw).await
+    handle_delete(state, method, uri, headers, &asset_raw).await
 }
 
 /// Shared DELETE core (the server twin at `asset.py:387-400` is identical —
@@ -1221,12 +1230,17 @@ async fn user_delete(
 /// touches `request.data` here.
 pub(crate) async fn handle_delete(
     state: AppState,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     asset_raw: &str,
 ) -> Response {
-    let asset_id: Uuid = match asset_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
+    let asset_id = match classify_uuid_segment(asset_raw) {
+        UuidSegment::Canonical(id) => id,
+        UuidSegment::NonCanonical => {
+            return proxy_through(state, method, uri, headers, Bytes::new()).await;
+        }
+        UuidSegment::Garbage => return raw(StatusCode::NOT_FOUND, PAGE_NOT_FOUND_BODY),
     };
     let Some(pool) = pool(&state) else {
         return server_error("no database pool");
@@ -1667,7 +1681,7 @@ mod tests {
             INVALID_TOKEN_BODY,
             r#"{"detail":"Given API token is not valid"}"#
         );
-        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found."}"#);
+        assert_eq!(PAGE_NOT_FOUND_BODY, r#"{"error": "Page not found."}"#);
     }
 
     // Response key order: DRF renders declaration order.
