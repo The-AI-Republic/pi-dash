@@ -30,12 +30,12 @@ describe("startFailureNotice", () => {
         kind: "rejected",
         error: new ApiError({ status: 400, code: "codex_unavailable", message: "Codex is off" }),
       })
-    ).toEqual({ title: "Could not start ChatGPT sign-in", body: "Codex is off" });
+    ).toEqual({ title: "ChatGPT sign-in could not open", body: "Codex is off" });
   });
 
   it("falls back for a rejected start with no detail", () => {
     expect(startFailureNotice({ kind: "rejected", error: new Error("") })).toEqual({
-      title: "Could not start ChatGPT sign-in",
+      title: "ChatGPT sign-in could not open",
       body: "No detail returned",
     });
   });
@@ -47,7 +47,7 @@ describe("finishNotice", () => {
   });
 
   it("distinguishes a timeout from a provider-side failure", () => {
-    expect(finishNotice({ kind: "timeout" })).toMatchObject({ title: "Sign-in timed out" });
+    expect(finishNotice({ kind: "timeout" })).toMatchObject({ title: "ChatGPT sign-in did not finish" });
     expect(finishNotice({ kind: "failed", detail: undefined })).toEqual({
       title: "OpenAI sign-in failed",
       body: "OpenAI reported that the sign-in could not finish. Start it again.",

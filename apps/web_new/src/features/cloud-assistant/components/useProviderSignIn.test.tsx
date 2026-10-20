@@ -155,7 +155,7 @@ describe("useProviderSignIn", () => {
     await act(async () => {
       await result.current.signIn();
     });
-    expect(notifyError).toHaveBeenCalledWith("Could not start ChatGPT sign-in", "Codex sign-in is off");
+    expect(notifyError).toHaveBeenCalledWith("ChatGPT sign-in could not open", "Codex sign-in is off");
     expect(tab.close).toHaveBeenCalledTimes(1);
     expect(tab.replaced).toEqual([]);
     expect(result.current.pending).toBe(false);
@@ -228,7 +228,7 @@ describe("useProviderSignIn", () => {
     time.advance(5 * 60_000 + 1);
     await time.fire();
     expect(notifyError).toHaveBeenCalledWith(
-      "Sign-in timed out",
+      "ChatGPT sign-in did not finish",
       "No answer arrived from OpenAI before the five-minute window ended."
     );
     await act(async () => undefined);

@@ -220,7 +220,7 @@ describe("ConnectionsList", () => {
       ],
       { signInPending: true }
     );
-    expect(screen.getByRole("button", { name: "Waiting for OpenAI…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sign-in in progress…" })).toBeDisabled();
   });
 
   it("carries the stale notice on a hosted row the session cannot reach", () => {

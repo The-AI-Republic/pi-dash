@@ -25,7 +25,7 @@ export const MANAGE_USAGE_LABEL = "Manage plan usage";
 export const MANAGE_USAGE_HREF = "https://chatgpt.com/settings/usage";
 
 export const SIGN_IN_ACTION = "Continue with ChatGPT";
-export const SIGN_IN_PENDING_ACTION = "Waiting for OpenAI…";
+export const SIGN_IN_PENDING_ACTION = "Sign-in in progress…";
 export const SIGN_IN_BODY =
   "Connecting an OpenAI account lets the assistant spend your ChatGPT plan allowance. The provider's page opens in a separate window; the credential is stored encrypted.";
 export const SIGN_IN_UNAVAILABLE_BODY = "OpenAI sign-in is switched off for this deployment.";
@@ -75,7 +75,7 @@ export const ADD_SAVING_ACTION = "Adding…";
 
 export const POPUP_BLOCKED_TITLE = "Popup blocked";
 export const POPUP_BLOCKED_BODY = "The sign-in window could not open. Allow pop-ups for this site and try again.";
-export const SIGN_IN_START_FAILED_TITLE = "Could not start ChatGPT sign-in";
+export const SIGN_IN_START_FAILED_TITLE = "ChatGPT sign-in could not open";
 export const SIGN_IN_START_FAILED_FALLBACK = "No detail returned";
 export const SIGN_IN_CLOSED_TITLE = "Sign-in window closed";
 export const SIGN_IN_CLOSED_BODY = "The sign-in window closed before OpenAI answered. Start it again.";
@@ -84,7 +84,7 @@ export const SIGN_IN_OK_BODY =
   "The OpenAI account is connected, and the assistant will draw on its ChatGPT plan allowance.";
 export const SIGN_IN_FAILED_TITLE = "OpenAI sign-in failed";
 export const SIGN_IN_FAILED_BODY = "OpenAI reported that the sign-in could not finish. Start it again.";
-export const SIGN_IN_TIMEOUT_TITLE = "Sign-in timed out";
+export const SIGN_IN_TIMEOUT_TITLE = "ChatGPT sign-in did not finish";
 export const SIGN_IN_TIMEOUT_BODY = "No answer arrived from OpenAI before the five-minute window ended.";
 
 export const TOOL_SERVERS_HEADING = "Tool servers (MCP)";
