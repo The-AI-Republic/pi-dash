@@ -226,7 +226,7 @@ describe("RuntimeSupervisor", () => {
       new ApiError({ status: 409, code: "http", message: "Conflict", body: { error: "llm_config_missing" } })
     );
     renderSupervisor();
-    expect(await screen.findByText(/^No model is configured for the built-in agent/)).toBeVisible();
+    expect(await screen.findByText(/^No model is configured for AI runs/)).toBeVisible();
   });
 
   it("explains a failed availability poll through the same vocabulary", async () => {

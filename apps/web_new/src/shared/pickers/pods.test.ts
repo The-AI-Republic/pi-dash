@@ -39,6 +39,9 @@ describe("formatAvailabilityReason", () => {
     expect(formatAvailabilityReason("")).toBe("");
     expect(formatAvailabilityReason("cloud_agent_unavailable")).toContain("Cloud Agent");
     expect(formatAvailabilityReason("llm_config_missing")).toContain("model");
+    // The code serves both agent rows, so its sentence must not claim the
+    // refusal belongs to one of them.
+    expect(formatAvailabilityReason("llm_config_missing")).not.toMatch(/built-in|Cloud Agent/);
     expect(formatAvailabilityReason("no_local_runner")).toContain("runner");
     expect(formatAvailabilityReason("managed_runner_disabled")).toContain("switched off");
     expect(formatAvailabilityReason("desktop_not_connected")).toContain("not connected");

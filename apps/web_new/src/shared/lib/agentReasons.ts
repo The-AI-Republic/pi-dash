@@ -18,7 +18,10 @@ export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   managed_runner_disabled: "The built-in agent is switched off on this server.",
   desktop_not_connected:
     "This computer is not connected to the server yet. Sign in again through the desktop app to link it.",
-  llm_config_missing: "No model is configured for the built-in agent yet. Set one up in the AI settings.",
+  // Both the Cloud Agent row and the built-in agent row report this code
+  // (pi_dash.core.agent_execution): the viewer has no model configured, so
+  // the sentence names neither surface.
+  llm_config_missing: "No model is configured for AI runs yet. Set one up in the AI settings.",
   gateway_scopes_missing:
     "Your sign-in is missing permission to reach the model gateway. Sign out, then sign in again to grant it.",
   byok_not_supported_on_desktop:

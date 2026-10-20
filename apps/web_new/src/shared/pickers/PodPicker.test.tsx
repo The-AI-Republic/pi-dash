@@ -162,6 +162,7 @@ describe("PodPicker", () => {
     expect(cloud).toBeDisabled();
     expect(desktop).toBeDisabled();
     expect(cloud.textContent).toContain("No model is configured");
+    expect(cloud.textContent).not.toContain("built-in");
     fireEvent.click(cloud);
     expect(onChange).not.toHaveBeenCalled();
   });
