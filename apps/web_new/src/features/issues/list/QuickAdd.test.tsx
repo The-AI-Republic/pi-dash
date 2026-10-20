@@ -2,6 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   mutate: vi.fn(),
   attach: vi.fn(),
+  invalidate: vi.fn(),
 }));
 
 vi.mock("../api/create.js", () => ({
@@ -23,12 +25,18 @@ vi.mock("../../../core/api/client.js", () => ({
   getAppClient: () => ({ client: "stub" }),
 }));
 
+vi.mock("@tanstack/react-query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-query")>()),
+  useQueryClient: () => ({ invalidateQueries: mocks.invalidate }),
+}));
+
 import { QuickAdd, type QuickAddProps } from "./QuickAdd.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
 
 function setup(overrides: Partial<QuickAddProps> = {}) {
+  const queryClient = new QueryClient();
   const props: QuickAddProps = {
     workspaceSlug: "acme",
     projectId: PROJECT,
@@ -37,7 +45,11 @@ function setup(overrides: Partial<QuickAddProps> = {}) {
     disabled: false,
     ...overrides,
   };
-  render(<QuickAdd {...props} />);
+  render(
+    <QueryClientProvider client={queryClient}>
+      <QuickAdd {...props} />
+    </QueryClientProvider>
+  );
   return props;
 }
 
@@ -137,6 +149,7 @@ describe("QuickAdd", () => {
         moduleId: "module-1",
       })
     );
+    await waitFor(() => expect(mocks.invalidate).toHaveBeenCalledTimes(1));
   });
 
   it("keeps the route target ahead of a section grouping value", async () => {

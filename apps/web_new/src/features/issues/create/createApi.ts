@@ -7,7 +7,7 @@
 // parent picker (ISS-122). Each one keeps the dialog component free of
 // direct client calls.
 
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   addIssueToCycle,
   attachDescriptionAssets,
@@ -35,6 +35,7 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { issueKeys } from "../api/keys.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 import { TITLE_GENERATION_TIMEOUT_MS, type CreateMembership } from "./createForm.js";
 import { changedCycleId, changedModuleIds, type EditMembership } from "./editForm.js";
@@ -185,8 +186,15 @@ export async function applyCreateMembership(
 }
 
 export function useApplyCreateMembership(workspaceSlug: string) {
+  const queryClient = useQueryClient();
   return useMutation<void, Error, CreateMembershipInput>({
     mutationFn: (input) => applyCreateMembership(getAppClient(), workspaceSlug, input),
+    // The create invalidation runs before this bridge write, so refetch
+    // again once the membership lands; otherwise a grouped list still
+    // shows the row in its pre-attach bucket until another refresh.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug) });
+    },
   });
 }
 

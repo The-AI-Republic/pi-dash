@@ -10,9 +10,11 @@
 
 import { Plus } from "lucide-react";
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useCreateWorkItem } from "../api/create.js";
+import { issueKeys } from "../api/keys.js";
 import { attachCreatedIssue } from "./mutations.js";
 
 export interface QuickAddProps {
@@ -49,6 +51,7 @@ export function QuickAdd({
   onCreated,
 }: QuickAddProps): React.ReactElement {
   const create = useCreateWorkItem(workspaceSlug);
+  const queryClient = useQueryClient();
   const [open, setOpen] = React.useState(false);
   const [title, setTitle] = React.useState("");
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -109,7 +112,9 @@ export function QuickAdd({
           void attachCreatedIssue(getAppClient(), workspaceSlug, projectId, created.id, {
             ...(targetCycle === undefined ? {} : { cycleId: targetCycle }),
             ...(targetModule === undefined ? {} : { moduleId: targetModule }),
-          }).catch(() => undefined);
+          })
+            .then(() => queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug) }))
+            .catch(() => undefined);
           onCreated?.(created.id);
         },
       }
