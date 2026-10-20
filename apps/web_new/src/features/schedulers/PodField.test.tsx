@@ -89,11 +89,28 @@ describe("PodField", () => {
     expect(onChange).toHaveBeenLastCalledWith(null);
   });
 
-  it("reads a saved pod that no longer exists as the default without reporting a change", async () => {
+  it("reports the default once the saved pod is known to be gone", async () => {
     contracts.listPods.mockResolvedValue([pod()]);
     const { onChange } = setup({ value: "gone" });
     await screen.findByRole("option", { name: "RKT runner pool" });
     expect(screen.getByLabelText("Pod")).toHaveValue(DEFAULT_POD_VALUE);
+    expect(onChange).toHaveBeenCalledWith(null);
+  });
+
+  it("leaves a live saved pod and the default alone", async () => {
+    contracts.listPods.mockResolvedValue([pod()]);
+    const live = setup({ value: "p1" });
+    await screen.findByRole("option", { name: "RKT runner pool" });
+    const plain = setup({ value: null });
+    await screen.findByRole("option", { name: "RKT runner pool" });
+    expect(live.onChange).not.toHaveBeenCalled();
+    expect(plain.onChange).not.toHaveBeenCalled();
+  });
+
+  it("does not report a change while the pods fail to load", async () => {
+    contracts.listPods.mockRejectedValue(new Error("Offline"));
+    const { onChange } = setup({ value: "gone" });
+    await screen.findByText(/could not be loaded/);
     expect(onChange).not.toHaveBeenCalled();
   });
 

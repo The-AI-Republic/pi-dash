@@ -84,9 +84,10 @@ export function InstallsList({
   const projects = useQuery(projectDetailsQueryOptions(getAppClient(), workspaceSlug));
   const bindings = useSchedulerBindings(workspaceSlug, projectId);
   const toggle = useToggleSchedulerBinding(workspaceSlug);
-  // One in-flight flip at a time per row, so a double click cannot race
-  // two writes against the same install.
-  const [flipping, setFlipping] = React.useState<string | null>(null);
+  // In-flight flips, keyed by install: a row's switch is inert from the
+  // moment its write starts until it settles, while other rows stay free
+  // to flip, so a double click cannot race two writes on one install.
+  const [flipping, setFlipping] = React.useState<ReadonlySet<string>>(() => new Set());
 
   const project = projects.data?.find((row) => row.id === projectId);
   const canManage = roles.isSuccess && isProjectAdmin(roles.data[projectId] ?? null);
@@ -106,9 +107,23 @@ export function InstallsList({
     robots: "noindex, nofollow",
   });
 
+  const release = (bindingId: string): void => {
+    setFlipping((current) => {
+      const next = new Set(current);
+      next.delete(bindingId);
+      return next;
+    });
+  };
+
   const setEnabled = (binding: SchedulerBinding, enabled: boolean): void => {
-    setFlipping(binding.id);
-    toggle.mutate({ projectId, bindingId: binding.id, enabled }, { onSettled: () => setFlipping(null) });
+    setFlipping((current) => new Set(current).add(binding.id));
+    // Per-call promise, not the mutate callback: a second row flipped
+    // while this write is pending replaces the shared observer's
+    // callbacks, which would leave this row gated forever.
+    toggle
+      .mutateAsync({ projectId, bindingId: binding.id, enabled })
+      .catch(() => undefined)
+      .finally(() => release(binding.id));
   };
 
   const intro =
@@ -182,7 +197,7 @@ export function InstallsList({
               ) : (
                 bindings.data.map((binding) => {
                   const enabledLabel = binding.enabled ? "Enabled" : "Disabled";
-                  const rowBusy = flipping === binding.id;
+                  const rowBusy = flipping.has(binding.id);
                   return (
                     <tr
                       key={binding.id}

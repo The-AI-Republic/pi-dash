@@ -4,9 +4,8 @@
 // Project install data for parity/specs/agents.md §2 (AGT-006–009).
 // One workspace-scoped definition list plus one install list per project;
 // any write to an install invalidates both, because the catalog's install
-// count and the project's list must agree after a create, a flip or a
-// removal. The enable switch is the only write this slice ships; the edit
-// and uninstall dialogs live in NEWFRONT-587 and reuse these keys.
+// count and the project's list must agree after a create, a flip, an edit
+// or a removal. The install dialogs and the list share these keys.
 
 import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
