@@ -10,6 +10,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { RUN_DETAIL_LOADING_TEXT, RUN_DETAIL_NONE_TEXT, RUN_DETAIL_UNAVAILABLE_TEXT } from "./RunDetail.js";
+
 const navigate = vi.fn(async () => undefined);
 const notifyError = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -156,18 +158,18 @@ describe("selection", () => {
 describe("detail states", () => {
   it("shows none without a selection", () => {
     renderScreen(1, null);
-    expect(screen.getByText("Select a run on the left.")).toBeInTheDocument();
+    expect(screen.getByText(RUN_DETAIL_NONE_TEXT)).toBeInTheDocument();
   });
 
   it("shows loading while the detail has no data and no error", () => {
     renderScreen(1, "run-1");
-    expect(screen.getByText("Loading run details…")).toBeInTheDocument();
+    expect(screen.getByText(RUN_DETAIL_LOADING_TEXT)).toBeInTheDocument();
   });
 
   it("shows unavailable after a failed read", () => {
     stubQueries({ detail: { data: undefined, isError: true } });
     renderScreen(1, "run-1");
-    expect(screen.getByText(/not available/)).toBeInTheDocument();
+    expect(screen.getByText(RUN_DETAIL_UNAVAILABLE_TEXT)).toBeInTheDocument();
   });
 
   it("shows the loaded run with the scheduler link", () => {

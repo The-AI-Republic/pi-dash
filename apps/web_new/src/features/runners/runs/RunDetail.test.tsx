@@ -67,6 +67,14 @@ function renderDetail(overrides: Partial<React.ComponentProps<typeof RunDetail>>
 }
 
 describe("pane states", () => {
+  it("writes its own pane copy rather than the old page's wording", () => {
+    expect(RUN_DETAIL_NONE_TEXT).toBe("Choose a run from the list to see its transcript.");
+    expect(RUN_DETAIL_LOADING_TEXT).toBe("Fetching this run’s transcript…");
+    expect(RUN_DETAIL_UNAVAILABLE_TEXT).toBe(
+      "No run with this id is reachable here. Check the address, or pick another run from the list."
+    );
+  });
+
   it("renders none, unavailable and loading without a run", () => {
     const { unmount } = render(
       <RunDetail state="none" run={null} cancelling={false} onCancel={vi.fn()} schedulerHref={() => null} />

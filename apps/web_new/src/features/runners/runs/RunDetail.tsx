@@ -25,10 +25,10 @@ import {
 } from "./runsModel.js";
 import { RunStatusBadge } from "./RunStatusBadge.js";
 
-export const RUN_DETAIL_NONE_TEXT = "Select a run on the left.";
-export const RUN_DETAIL_LOADING_TEXT = "Loading run details…";
+export const RUN_DETAIL_NONE_TEXT = "Choose a run from the list to see its transcript.";
+export const RUN_DETAIL_LOADING_TEXT = "Fetching this run’s transcript…";
 export const RUN_DETAIL_UNAVAILABLE_TEXT =
-  "This run is not available. It may have been deleted or belong to a different workspace.";
+  "No run with this id is reachable here. Check the address, or pick another run from the list.";
 export const RUN_CANCEL_TITLE = "Cancel run?";
 export const RUN_CANCEL_CLOUD_BODY =
   "The cloud agent stops at its next safe interruption point, so it may take a moment to finish.";
