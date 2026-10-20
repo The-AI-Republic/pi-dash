@@ -16,6 +16,9 @@ export const PREVIEW_CARD_DELAY_MS = 300;
 /** Gap between the reference and the card, in px. */
 const CARD_GAP_PX = 6;
 
+/** Time a pointer has to reach the card before the reference's leave closes it. */
+const LEAVE_GRACE_MS = 100;
+
 export interface PreviewCardProps {
   /** The reference the card describes; cloned to carry the hover handlers. */
   trigger: React.ReactElement<Record<string, unknown>>;
@@ -49,9 +52,10 @@ export function PreviewCard({
   React.useEffect(() => cancel, [cancel]);
 
   // Opening waits out the delay so a pointer crossing the reference on its
-  // way somewhere else never flashes a card; closing is immediate.
-  const open = (element: Element) => {
+  // way somewhere else never flashes a card.
+  const open = (element: Element | null) => {
     cancel();
+    if (element === null) return;
     if (delay <= 0) {
       setAnchor(element.getBoundingClientRect());
       return;
@@ -63,16 +67,30 @@ export function PreviewCard({
   };
 
   // The card sits beside the reference, so a pointer crossing the gap is
-  // still "on" the pair: entering the card keeps it open, leaving either
-  // half closes it.
+  // still "on" the pair. Leaving the reference waits a beat before closing:
+  // if the pointer landed on the card, its enter cancels the close.
+  const leave = () => {
+    cancel();
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      setAnchor(null);
+    }, LEAVE_GRACE_MS);
+  };
+
+  // Choosing the card takes focus off the reference; that blur must not
+  // tear the card down under the pointer.
+  const blur = () => {
+    if (timer.current !== null) return;
+    setAnchor(null);
+  };
+
   const reference = React.cloneElement(trigger, {
     onPointerEnter: (event: React.PointerEvent<Element>) => {
       open(event.currentTarget);
       (trigger.props.onPointerEnter as ((event: React.PointerEvent<Element>) => void) | undefined)?.(event);
     },
     onPointerLeave: (event: React.PointerEvent<Element>) => {
-      cancel();
-      setAnchor(null);
+      leave();
       (trigger.props.onPointerLeave as ((event: React.PointerEvent<Element>) => void) | undefined)?.(event);
     },
     onFocus: (event: React.FocusEvent<Element>) => {
@@ -80,8 +98,7 @@ export function PreviewCard({
       (trigger.props.onFocus as ((event: React.FocusEvent<Element>) => void) | undefined)?.(event);
     },
     onBlur: (event: React.FocusEvent<Element>) => {
-      cancel();
-      setAnchor(null);
+      blur();
       (trigger.props.onBlur as ((event: React.FocusEvent<Element>) => void) | undefined)?.(event);
     },
   });
@@ -98,7 +115,7 @@ export function PreviewCard({
           )}
           style={cardPosition(anchor, side, align)}
           onPointerEnter={cancel}
-          onPointerLeave={() => setAnchor(null)}
+          onPointerLeave={leave}
         >
           {children}
         </div>

@@ -32,11 +32,6 @@ export const CREATE_TOAST_COPIED_LABEL = "Copied!";
 export const WORK_ITEM_CREATE_FAILED_TITLE = "Couldn't create the work item";
 const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connection and try again.";
 
-/** Browse route for a created row, used by the toast's follow-up action. */
-export function createdWorkItemPath(workspaceSlug: string, projectIdentifier: string, sequenceId: number): string {
-  return `/${workspaceSlug}/browse/${projectIdentifier}-${sequenceId}`;
-}
-
 /** One submit: the target project plus everything the dialog collected. */
 export interface WorkItemCreateInput {
   projectId: string;

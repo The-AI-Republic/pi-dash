@@ -144,6 +144,42 @@ describe("Toast inline actions", () => {
     await waitFor(() => expect(screen.queryByText("Moved")).not.toBeInTheDocument());
   });
 
+  it("runs an inline copy action, swaps to its confirmation, then restores the label", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      const manager = setup();
+      const run = vi.fn(async () => true);
+      showToast(manager, {
+        title: "Saved",
+        timeout: 0,
+        actions: [{ label: "Copy link", run, confirmLabel: "Copied!" }],
+      });
+      await screen.findByText("Saved");
+      await user.click(screen.getByRole("button", { name: "Copy link" }));
+      expect(await screen.findByRole("button", { name: "Copied!" })).toBeInTheDocument();
+      vi.advanceTimersByTime(TOAST_COPIED_RESET_MS);
+      expect(await screen.findByRole("button", { name: "Copy link" })).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("runs an anchor action's own callback and dismisses the notice", async () => {
+    const user = userEvent.setup();
+    const manager = setup();
+    const run = vi.fn();
+    showToast(manager, {
+      title: "Saved",
+      timeout: 0,
+      actions: [{ label: "View work item", href: "/acme/browse/WEB-1/", run }],
+    });
+    await screen.findByText("Saved");
+    await user.click(screen.getByRole("link", { name: "View work item" }));
+    expect(run).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText("Saved")).not.toBeInTheDocument());
+  });
+
   it("keeps the action row until the copy reports success", async () => {
     const user = userEvent.setup();
     const manager = setup();
