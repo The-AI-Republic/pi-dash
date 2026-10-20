@@ -9,6 +9,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { issueKeys } from "../api/keys.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { RelationsWidget } from "./RelationsWidget.js";
 import { RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
@@ -369,6 +370,18 @@ describe("relations widget", () => {
     await user.click(screen.getByRole("button", { name: "Add selected work items" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't add the relations", expect.anything()));
     expect(screen.getByRole("dialog", { name: /Add relates to/i })).toBeInTheDocument();
+  });
+
+  it("refreshes the activity feed after removing a relation", async () => {
+    const user = userEvent.setup();
+    const { calls, queryClient } = renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    const activityKey = issueKeys.activity(WS, PROJECT, ISSUE);
+    await queryClient.setQueryData(activityKey, [{ id: "seed" }]);
+    const stale = queryClient.getQueryState(activityKey);
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Remove relation" }));
+    await waitFor(() => expect(queryClient.getQueryState(activityKey)).not.toBe(stale));
+    expect(calls.some((call) => call.url.includes("/remove-relation/"))).toBe(true);
   });
 
   it("keeps only the copy entry in a guest's row menu", async () => {

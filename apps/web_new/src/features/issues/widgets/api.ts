@@ -92,11 +92,13 @@ export function useRelationCandidates(
   });
 }
 
-function refreshIssueWidgets(queryClient: QueryClient, workspaceSlug: string, issueId: string) {
+function refreshIssueWidgets(queryClient: QueryClient, workspaceSlug: string, projectId: string, issueId: string) {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: issueKeys.widgetRelations(workspaceSlug, issueId) }),
     queryClient.invalidateQueries({ queryKey: issueKeys.widgetLinks(workspaceSlug, issueId) }),
     queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
+    // Relation writes land in the activity feed (ISS-182).
+    queryClient.invalidateQueries({ queryKey: issueKeys.activity(workspaceSlug, projectId, issueId) }),
     queryClient.invalidateQueries({ queryKey: [...issueKeys.all(workspaceSlug), "browse"] }),
     queryClient.invalidateQueries({ queryKey: [...issueKeys.all(workspaceSlug), "list"] }),
   ]).then(() => undefined);
@@ -119,7 +121,7 @@ export function useAddRelations(scope: RelationWriteScope) {
       }),
     onSuccess: () => notifySuccess("Relations added"),
     onError: (error: Error) => notifyError("Couldn't add the relations", error.message),
-    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.issueId),
+    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.projectId, scope.issueId),
   });
 }
 
@@ -160,7 +162,7 @@ export function useRemoveRelation(scope: RelationWriteScope) {
       if (context?.previous !== undefined) queryClient.setQueryData(key, context.previous);
       notifyError("Couldn't remove the relation", error.message);
     },
-    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.issueId),
+    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.projectId, scope.issueId),
   });
 }
 
@@ -183,7 +185,7 @@ export function useCreateLink(scope: LinkWriteScope) {
       createIssueLink(getAppClient(), scope.workspaceSlug, scope.projectId, scope.issueId, input),
     onSuccess: () => notifySuccess("Link added"),
     onError: (error: Error) => notifyError("Couldn't add the link", linkFailureDetail(error)),
-    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.issueId),
+    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.projectId, scope.issueId),
   });
 }
 
@@ -194,7 +196,7 @@ export function useUpdateLink(scope: LinkWriteScope) {
       updateIssueLink(getAppClient(), scope.workspaceSlug, scope.projectId, scope.issueId, input.linkId, input.patch),
     onSuccess: () => notifySuccess("Link updated"),
     onError: (error: Error) => notifyError("Couldn't update the link", linkFailureDetail(error)),
-    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.issueId),
+    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.projectId, scope.issueId),
   });
 }
 
@@ -205,7 +207,7 @@ export function useDeleteLink(scope: LinkWriteScope) {
       deleteIssueLink(getAppClient(), scope.workspaceSlug, scope.projectId, scope.issueId, linkId),
     onSuccess: () => notifySuccess("Link removed"),
     onError: (error: Error) => notifyError("Couldn't remove the link", error.message),
-    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.issueId),
+    onSettled: () => refreshIssueWidgets(queryClient, scope.workspaceSlug, scope.projectId, scope.issueId),
   });
 }
 

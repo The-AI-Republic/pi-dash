@@ -13,6 +13,7 @@ import * as React from "react";
 import { IconButton, Menu } from "@pidash/kit";
 import type { IssueLink } from "@pidash/api-client";
 
+import { timeAgo } from "../../../shared/lib/timeAgo.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { LinkDialog, type LinkDraft } from "./LinkDialog.js";
 import { useCreateLink, useDeleteLink, useIssueLinks, useUpdateLink, newestLinks } from "./api.js";
@@ -35,21 +36,9 @@ export function linkTitle(link: IssueLink): string {
   return title === "" ? link.url : title;
 }
 
-const formatter = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-const MINUTE = 60_000;
-const HOUR = 3_600_000;
-const DAY = 86_400_000;
-
-/** Short relative age; "just now" inside the first minute. */
+/** Relative age from the shared ladder ("just now" through years). */
 export function addedAgo(createdAt: string, nowMs: number = Date.now()): string {
-  const then = Date.parse(createdAt);
-  if (Number.isNaN(then)) return "just now";
-  const elapsed = nowMs - then;
-  if (elapsed < MINUTE) return "just now";
-  if (elapsed < HOUR) return formatter.format(-Math.floor(elapsed / MINUTE), "minute");
-  if (elapsed < DAY) return formatter.format(-Math.floor(elapsed / HOUR), "hour");
-  if (elapsed < 7 * DAY) return formatter.format(-Math.floor(elapsed / DAY), "day");
-  return formatter.format(-Math.floor(elapsed / (30 * DAY)), "month");
+  return timeAgo(createdAt, nowMs);
 }
 
 /** "Added 5 minutes ago by Ada"; bots carry their own label. */

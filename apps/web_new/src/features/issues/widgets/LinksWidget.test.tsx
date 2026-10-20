@@ -64,13 +64,14 @@ describe("link display helpers", () => {
     expect(linkTitle(linkRow({ title: null }))).toBe("https://example.com/doc");
   });
 
-  it("formats relative ages across the minute, hour, day and month bands", () => {
+  it("formats relative ages across the minute, hour, day, month and year bands", () => {
     const now = Date.parse("2024-06-01T12:00:00Z");
     expect(addedAgo("2024-06-01T11:59:30Z", now)).toBe("just now");
     expect(addedAgo("2024-06-01T11:30:00Z", now)).toBe("30 minutes ago");
     expect(addedAgo("2024-06-01T09:00:00Z", now)).toBe("3 hours ago");
     expect(addedAgo("2024-05-30T12:00:00Z", now)).toBe("2 days ago");
     expect(addedAgo("2024-03-01T12:00:00Z", now)).toBe("3 months ago");
+    expect(addedAgo("2022-05-01T12:00:00Z", now)).toBe("2 years ago");
     expect(addedAgo("nonsense", now)).toBe("just now");
   });
 
@@ -114,6 +115,25 @@ describe("links widget", () => {
     expect(bare.closest("a")).toHaveAttribute("target", "_blank");
     expect(bare.closest("a")).toHaveAttribute("rel", "noopener noreferrer");
     expect(screen.getAllByText(/Added .* by Ada L/).length).toBeGreaterThan(0);
+  });
+
+  it("draws the globe fallback for a link whose URL cannot be parsed", async () => {
+    renderWidget({ links: [linkRow({ url: "not a url" })] });
+    const row = await screen.findByTestId(/link-row-/);
+    expect(row.querySelector("img")).toBeNull();
+    expect(row.querySelector("svg")).not.toBeNull();
+  });
+
+  it("closes the dialog and clears the edit target", async () => {
+    const user = userEvent.setup();
+    renderWidget({ links: [linkRow()] });
+    await user.click(await screen.findByRole("button", { name: "Link actions for Design doc" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit link" });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Edit link" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Add link" }));
+    expect(await screen.findByRole("dialog", { name: "Add link" })).toBeInTheDocument();
   });
 
   it("orders rows newest first even when the read is unordered", async () => {
