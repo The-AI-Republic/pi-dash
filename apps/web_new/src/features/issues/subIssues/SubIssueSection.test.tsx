@@ -751,3 +751,105 @@ describe("SubIssueSection dialogs", () => {
     expect(await screen.findByRole("dialog", { name: /Delete this work item/ })).toBeInTheDocument();
   });
 });
+
+describe("SubIssueSection branches", () => {
+  it("offers a guest no row menu and sends no write", async () => {
+    const calls = stubApi();
+    renderSection({ editable: false });
+    await screen.findByText("Child one");
+    expect(screen.queryByRole("button", { name: "Actions for ATL-7" })).not.toBeInTheDocument();
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
+
+  it("draws the loading row until the first page arrives", async () => {
+    const waiting: (() => void)[] = [];
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, 200, { csrf_token: "csrf" });
+      if (url.includes("/sub-issues/")) {
+        await new Promise<void>((resolve) => waiting.push(resolve));
+        return ok(url, 200, page());
+      }
+      if (url.endsWith("/states/")) return ok(url, 200, [state]);
+      return ok(url, 200, {});
+    }) as never);
+    renderSection();
+    expect(await screen.findByText("Loading sub-work items")).toBeInTheDocument();
+    for (const release of waiting) release();
+    expect(await screen.findByText("Child one")).toBeInTheDocument();
+  });
+
+  it("names the read failure and retries it", async () => {
+    let fail = true;
+    const calls: string[] = [];
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, 200, { csrf_token: "csrf" });
+      calls.push(url);
+      if (url.includes("/sub-issues/")) {
+        if (fail) return ok(url, 500, { detail: "down" });
+        return ok(url, 200, page());
+      }
+      if (url.endsWith("/states/")) return ok(url, 200, [state]);
+      return ok(url, 200, {});
+    }) as never);
+    const user = userEvent.setup();
+    renderSection();
+    expect(await screen.findByText("Couldn't load the sub-work items.")).toBeInTheDocument();
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Child one")).toBeInTheDocument();
+    expect(calls.filter((url) => url.includes("/sub-issues/")).length).toBeGreaterThan(1);
+  });
+
+  it("shows the load-more spinner while the next page is in flight", async () => {
+    let release: () => void = () => {};
+    let call = 0;
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, 200, { csrf_token: "csrf" });
+      if (url.includes("/sub-issues/")) {
+        call += 1;
+        if (call === 1) return ok(url, 200, page({ next_cursor: "c2", total_count: 2 }));
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return ok(url, 200, page({ sub_issues: [row({ id: SECOND, name: "Child two", sequence_id: 8 })] }));
+      }
+      if (url.endsWith("/states/")) return ok(url, 200, [state]);
+      return ok(url, 200, {});
+    }) as never);
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("Child one");
+    await user.click(screen.getByTestId("sub-issues-load-more"));
+    const busy = await screen.findByText("Loading more…");
+    expect(busy.closest("button")).toBeDisabled();
+    release();
+    expect(await screen.findByText("Child two")).toBeInTheDocument();
+  });
+
+  it("groups an unassigned child under None", async () => {
+    stubApi({ pages: [page({ sub_issues: [row({ assignee_ids: [] })] })] });
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("Child one");
+    await user.click(screen.getByTestId("sub-issue-display-trigger"));
+    await user.click(within(screen.getByTestId("sub-issue-display-group")).getByRole("radio", { name: "Assignees" }));
+    const headers = await screen.findAllByTestId("sub-issue-group-header");
+    expect(headers.map((header) => header.textContent)).toEqual(["None1"]);
+  });
+
+  it("dismisses the delete confirmation without destroying anything", async () => {
+    const calls = stubApi();
+    const user = userEvent.setup();
+    renderSection();
+    await screen.findByText("Child one");
+    await user.click(screen.getByRole("button", { name: "Actions for ATL-7" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: /Delete this work item/,
+    });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(screen.getByText("Child one")).toBeInTheDocument();
+  });
+});

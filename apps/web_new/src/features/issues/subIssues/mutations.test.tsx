@@ -423,3 +423,24 @@ describe("usePatchSubIssue (ISS-177)", () => {
     expect(notifyError).toHaveBeenCalledWith(SUB_ISSUE_UPDATE_FAILED_TITLE, "server refused");
   });
 });
+
+describe("mutation branch edges", () => {
+  it("ignores a cached entry under the same key that is not a page", () => {
+    stubApi();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(subIssuesKey(WS, PROJECT, PARENT), { notPages: true });
+    const { result } = renderHook(() => useRemoveSubIssue(SCOPE), { wrapper: wrapper(client) });
+    result.current.mutate(row());
+    expect(client.getQueryData(subIssuesKey(WS, PROJECT, PARENT))).toEqual({ notPages: true });
+  });
+
+  it("keeps a page cache whose first page is missing", async () => {
+    stubApi();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(subIssuesKey(WS, PROJECT, PARENT), { pages: [undefined], pageParams: [{}] });
+    const { result } = renderHook(() => useAttachSubIssues(SCOPE), { wrapper: wrapper(client) });
+    result.current.mutate([ADDED]);
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(client.getQueryData(subIssuesKey(WS, PROJECT, PARENT))).toEqual({ pages: [undefined], pageParams: [{}] });
+  });
+});

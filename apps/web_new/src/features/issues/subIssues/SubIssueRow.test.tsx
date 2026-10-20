@@ -394,3 +394,56 @@ describe("lazy children", () => {
     expect(within(section).getByText("Loop")).toBeInTheDocument();
   });
 });
+
+describe("row branches", () => {
+  it("draws the assignee column only while the display keeps it", () => {
+    const member = "923e4567-e89b-12d3-a456-426614174008";
+    const identities = { [member]: { label: "Ada L", avatarUrl: null } };
+    const { unmount } = renderRow({ row: row({ assignee_ids: [member] }), memberIdentities: identities });
+    expect(screen.getByLabelText("Ada L")).toBeInTheDocument();
+    unmount();
+    renderRow({
+      row: row({ assignee_ids: [member] }),
+      memberIdentities: identities,
+      properties: { ...defaultDisplayProperties(), assignee: false },
+    });
+    expect(screen.queryByLabelText("Ada L")).not.toBeInTheDocument();
+  });
+
+  it("draws no property strip when every property column is off", () => {
+    renderRow({
+      properties: { ...defaultDisplayProperties(), state: false, priority: false, start_date: false, due_date: false },
+    });
+    expect(screen.queryByRole("button", { name: /Priority/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "State" })).not.toBeInTheDocument();
+  });
+
+  it("ignores the chevron toggle on a row with no children", () => {
+    renderRow({ row: row({ sub_issues_count: null }) });
+    expect(screen.queryByRole("button", { name: /Expand children/ })).not.toBeInTheDocument();
+  });
+
+  it("labels the load-more row while the next page is in flight", async () => {
+    let release: () => void = () => {};
+    let call = 0;
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, { csrf_token: "csrf" });
+      if (!url.includes("/sub-issues/")) return ok(url, NONE_JSON);
+      call += 1;
+      if (call === 1) {
+        return ok(url, page([row({ id: GRANDCHILD, name: "Grandchild", sequence_id: 9 })], "c2"));
+      }
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return ok(url, page([]));
+    }) as never);
+    const user = userEvent.setup();
+    renderRow({ row: row({ sub_issues_count: 2 }) });
+    await user.click(screen.getByRole("button", { name: "Expand children of ATL-7" }));
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+    expect(await screen.findByRole("button", { name: "Loading more…" })).toBeDisabled();
+    release();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Loading more…" })).not.toBeInTheDocument());
+  });
+});

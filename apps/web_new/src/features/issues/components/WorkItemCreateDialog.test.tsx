@@ -1310,3 +1310,58 @@ describe("WorkItemCreateDialog timeouts", () => {
     expect(h.sent.filter((entry) => (entry as { name?: string }).name !== undefined)).toHaveLength(0);
   });
 });
+
+describe("WorkItemCreateDialog preset parent (ISS-175)", () => {
+  const preset = { id: PARENT_ID, name: "Parent work", identifier: "ATL", sequenceId: 12 };
+
+  it("seeds the parent and keeps it after Create more", async () => {
+    const user = userEvent.setup();
+    const h = setup({}, { initialProjectId: PROJECT_ATLAS, initialParent: preset });
+    const tag = await screen.findByTestId("parent-tag");
+    expect(tag).toHaveTextContent("ATL-12");
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "First child");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "First child", parent_id: PARENT_ID });
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    expect(screen.getByTestId("parent-tag")).toHaveTextContent("ATL-12");
+    await user.type(titleField(), "Second child");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+    expect(posts(h.sent)[1]).toMatchObject({ name: "Second child", parent_id: PARENT_ID });
+  });
+
+  it("locks the project and the parent when asked", async () => {
+    setup(
+      {},
+      { initialProjectId: PROJECT_ATLAS, initialParent: preset, lockedProjectId: PROJECT_ATLAS, lockedParent: true }
+    );
+    expect(screen.getByRole("button", { name: "Atlas" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Remove parent ATL-12" })).toBeDisabled();
+  });
+
+  it("offers only the locked project", async () => {
+    setup({}, { initialProjectId: PROJECT_ATLAS, lockedProjectId: PROJECT_ATLAS });
+    expect(screen.getByRole("button", { name: "Atlas" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Beacon" })).not.toBeInTheDocument();
+  });
+
+  it("clears the form back to no parent on Create more without a preset", async () => {
+    const user = userEvent.setup();
+    const h = setup({}, { initialProjectId: PROJECT_ATLAS });
+    await user.click(screen.getByRole("button", { name: "Add parent" }));
+    await user.click(await screen.findByRole("button", { name: /ATL-12/ }));
+    expect(screen.getByTestId("parent-tag")).toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "One");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    expect(screen.queryByTestId("parent-tag")).not.toBeInTheDocument();
+    await user.type(titleField(), "Two");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+    expect(posts(h.sent)[1]).toEqual({ name: "Two" });
+  });
+});

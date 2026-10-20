@@ -6,7 +6,7 @@
 // project-scoped search with no workspace toggle, a multi-select list,
 // one submit posting the chosen ids, and the empty-pick refusal.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueSearchHit, TransportResponse } from "@pidash/api-client";
 import * as React from "react";
@@ -199,5 +199,37 @@ describe("AddExistingDialog", () => {
     stubApi();
     renderDialog({ open: false });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("AddExistingDialog branches", () => {
+  it("draws a state dot in the hit's color and drops the state badge when absent", async () => {
+    stubApi({ hits: [{ ...hit(ONE, "No state"), state__name: null, state__color: null }] });
+    renderDialog();
+    const option = await screen.findByRole("option", { name: /No state/ });
+    const dot = option.querySelector("span[aria-hidden='true']") as HTMLElement;
+    expect(dot.style.backgroundColor).toBe("var(--text-muted)");
+    expect(within(option).queryByText("In progress")).not.toBeInTheDocument();
+  });
+
+  it("shows the adding label while the attach is in flight", async () => {
+    let release: () => void = () => {};
+    createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) return ok(url, 200, { csrf_token: "csrf" });
+      if (url.includes("/search-issues/")) return ok(url, 200, [hit(ONE, "First candidate")]);
+      if ((init.method ?? "GET") === "POST") {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return ok(url, 201, { sub_issues: [], state_distribution: {} });
+      }
+      return ok(url, 200, {});
+    }) as never);
+    const user = userEvent.setup();
+    renderDialog();
+    await user.click(await screen.findByRole("option", { name: /First candidate/ }));
+    await user.click(screen.getByRole("button", { name: "Add selected work items" }));
+    expect(await screen.findByRole("button", { name: "Add selected work items" })).toHaveTextContent("Adding…");
+    release();
   });
 });

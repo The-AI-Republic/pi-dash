@@ -38,11 +38,19 @@ export interface SubIssuePropertyControlsProps {
   actions: SubIssueRowActions;
 }
 
-/** A priority glyph with its tone, reused as the row trigger. */
-function PriorityTrigger({ level }: { level: PriorityLevel }): React.ReactElement {
+/**
+ * A priority glyph with its tone, reused as the row trigger. The popover
+ * hands its trigger props (click handler, expanded state, ids) to this
+ * element, so they must land on the button rather than be swallowed by
+ * the component's own props type.
+ */
+function PriorityTrigger({
+  level,
+  ...rest
+}: { level: PriorityLevel } & React.ButtonHTMLAttributes<HTMLButtonElement>): React.ReactElement {
   const Icon = PRIORITY_ICONS[level];
   return (
-    <Button variant="ghost" size="small" aria-label={`Priority: ${level}`}>
+    <Button variant="ghost" size="small" aria-label={`Priority: ${level}`} {...rest}>
       <span aria-hidden="true" className={`inline-flex items-center ${PRIORITY_TONES[level]}`}>
         {level === "none" ? (
           <Minus size={14} strokeWidth={1.5} />

@@ -448,3 +448,37 @@ describe("row reads", () => {
     expect(showsMergedDateRange(row(), { ...both, due_date: false })).toBe(false);
   });
 });
+
+describe("branch edges", () => {
+  it("closes a page with no cursor and keeps a full page open without one", () => {
+    const noCursor = envelope({ sub_issues: [row()] });
+    expect(nextSubIssueCursor(noCursor)).toBeNull();
+    expect(subIssuesExhausted(noCursor)).toBe(true);
+  });
+
+  it("sorts rows with no timestamps together and ties in place", () => {
+    const blank = [row({ id: ADA, created_at: undefined }), row({ id: GRACE, created_at: undefined })];
+    const ordered = orderSubIssues(blank, "-updated_at");
+    expect(ordered.map((entry) => entry.id)).toEqual([ADA, GRACE]);
+    expect(orderSubIssues(blank, "-created_at").map((entry) => entry.id)).toEqual([ADA, GRACE]);
+  });
+
+  it("keeps one equal-start-date pair in input order", () => {
+    const sameDay = [row({ id: ADA }), row({ id: GRACE })];
+    expect(orderSubIssues(sameDay, "start_date").map((entry) => entry.id)).toEqual([ADA, GRACE]);
+    expect(
+      orderSubIssues(sameDay, "start_date")
+        .reverse()
+        .map((entry) => entry.id)
+    ).toEqual([GRACE, ADA]);
+  });
+
+  it("ranks a priority outside the ladder last", () => {
+    const rows = [
+      row({ id: ADA, priority: "urgent" }),
+      row({ id: GRACE, priority: "bogus" as never }),
+      row({ id: BACKLOG, priority: "bogus" as never }),
+    ];
+    expect(orderSubIssues(rows, "-priority").map((entry) => entry.id)).toEqual([ADA, GRACE, BACKLOG]);
+  });
+});

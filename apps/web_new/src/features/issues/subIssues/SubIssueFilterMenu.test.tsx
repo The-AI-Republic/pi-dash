@@ -216,3 +216,90 @@ describe("SubIssueFilterMenu", () => {
     expect(screen.getByLabelText("Start date custom day")).toHaveValue("2026-10-05");
   });
 });
+
+describe("SubIssueFilterMenu branches", () => {
+  it("stores a custom day as On when the section has no direction yet", () => {
+    const h = renderMenu();
+    openMenu();
+    fireEvent.change(screen.getByLabelText("Start date custom day"), { target: { value: "2026-10-07" } });
+    expect(h.onSetDate).toHaveBeenCalledWith("start_date", ["2026-10-07"]);
+  });
+
+  it("reports one project choice and names a failed project read", async () => {
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/projects/")) {
+        return { status: 500, url, headers: { get: () => null }, text: async () => "{}" };
+      }
+      return { status: 200, url, headers: { get: () => null }, text: async () => "[]" };
+    }) as never);
+    const onToggle = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SubIssueFilterMenu
+          workspaceSlug={WS}
+          projectId={PROJECT}
+          filters={emptySubIssueFilters()}
+          sources={SOURCES}
+          offered={["project"]}
+          onToggle={onToggle}
+          onSetDate={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    openMenu();
+    expect(await screen.findByText("Couldn't load projects.")).toBeInTheDocument();
+  });
+
+  it("reports one project choice through the shared chrome", async () => {
+    createAppClient("https://api.test", (async (url: string) => {
+      const body = url.endsWith("/projects/")
+        ? [
+            {
+              id: PROJECT,
+              name: "Atlas",
+              identifier: "ATL",
+              sort_order: 1,
+              logo_props: {},
+              member_role: 15,
+              intake_count: 0,
+              archived_at: null,
+              workspace: "323e4567-e89b-12d3-a456-426614174002",
+              cycle_view: true,
+              issue_views_view: true,
+              module_view: true,
+              page_view: true,
+              inbox_view: true,
+              is_default: false,
+              guest_view_all_features: false,
+              project_lead: null,
+              network: 2,
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+              created_by: null,
+              updated_by: null,
+            },
+          ]
+        : [];
+      return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+    }) as never);
+    const onToggle = vi.fn();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <SubIssueFilterMenu
+          workspaceSlug={WS}
+          projectId={PROJECT}
+          filters={emptySubIssueFilters()}
+          sources={SOURCES}
+          offered={["project"]}
+          onToggle={onToggle}
+          onSetDate={vi.fn()}
+        />
+      </QueryClientProvider>
+    );
+    openMenu();
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Atlas" }));
+    expect(onToggle).toHaveBeenCalledWith("project", PROJECT);
+  });
+});
