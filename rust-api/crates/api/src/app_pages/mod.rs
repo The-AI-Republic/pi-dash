@@ -599,9 +599,32 @@ async fn enqueue_best_effort(pool: &PgPool, job: &pidash_jobs::queue::NewJob) {
     }
 }
 
-/// Parse `<uuid:page_id>`: a mismatch proxies to Django's resolver 404
-/// (routing precedes auth — the `app_cycles` precedent).
+/// Whether a path segment is spelled the way Django's `UUIDConverter`
+/// routes it: lowercase hex, hyphenated, exactly 36 characters
+/// (`django/urls/converters.py:25-26`; the `v1_cli_auth` PIDASHCONV-1095
+/// and `license.handlers_admin` PIDASHCONV-1132 precedents). Uppercase,
+/// 32-hex-simple, braced and `urn:uuid:` spellings never reach a view —
+/// `uuid::Uuid::parse_str` would accept all four, so it cannot gate alone.
+fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
+}
+
+/// Parse `<uuid:page_id>`: only a canonically-spelled segment parses; any
+/// other spelling (and any non-uuid) is a mismatch that proxies to Django's
+/// resolver 404 (routing precedes auth — the `app_cycles` precedent).
 fn parse_page_id(raw: &str) -> Result<uuid::Uuid, ()> {
+    if !is_canonical_uuid(raw) {
+        return Err(());
+    }
     raw.parse::<uuid::Uuid>().map_err(|_| ())
 }
 
