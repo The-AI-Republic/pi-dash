@@ -10523,8 +10523,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
-  // --- DESK-026). The desktop area gate reads these on both targets; they sit
-  // --- at the end of the surface so a later area cannot displace them.
+  // --- DESK-026). The desktop area gate reads these through this driver on
+  // --- web_new; a later area that rewrites a stub block must keep them.
 
   /** Everything the page paints, trimmed, for absence scans. */
   async deskRuntimePageText(): Promise<string> {
