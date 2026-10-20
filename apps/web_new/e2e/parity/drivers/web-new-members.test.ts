@@ -517,6 +517,97 @@ describe("project settings members read driver", () => {
     ]);
   });
 
+  it("tolerates rows without cells or a profile link", async () => {
+    const rows = [
+      { querySelectorAll: () => [], querySelector: () => null },
+      {
+        querySelectorAll: () => [{ innerText: " Ada \n Lovelace ", querySelector: () => null }],
+        querySelector: () => null,
+      },
+      {
+        querySelectorAll: () => [
+          {
+            innerText: "A Lovelace",
+            querySelector: () => ({ innerText: "A", getAttribute: () => null }),
+          },
+        ],
+        querySelector: () => null,
+      },
+    ];
+    const evaluateAll = vi.fn(async (fn: (nodes: unknown[]) => unknown) => fn(rows as unknown[]));
+    const page = pageOf({
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role === "table" && options?.name === "Members") {
+          return locator({ count: async () => 1, locator: () => locator({ evaluateAll }) });
+        }
+        return locator();
+      }),
+    });
+    const read = await new WebNewDriver(page).settingsMembersRows();
+    expect(read).toEqual([
+      { fullName: "", displayName: "", email: "", roleLabel: "", joinedText: "", profileHref: null },
+      {
+        fullName: "Ada Lovelace",
+        displayName: "",
+        email: "",
+        roleLabel: "",
+        joinedText: "",
+        profileHref: null,
+      },
+      {
+        fullName: "Lovelace",
+        displayName: "",
+        email: "",
+        roleLabel: "",
+        joinedText: "",
+        profileHref: null,
+      },
+    ]);
+  });
+
+  it("skips filter boxes that are not wrapped in a labelled element", async () => {
+    const panel = locator({
+      waitFor: async () => undefined,
+      getByRole: () =>
+        locator({
+          evaluateAll: async (fn: (nodes: unknown[]) => unknown) =>
+            fn([
+              { closest: () => null },
+              { closest: () => ({ innerText: "  " }) },
+              { closest: () => ({ innerText: "Guest" }) },
+            ]),
+        }),
+    });
+    const page = pageOf({
+      locator: (selector: string) => (selector === '[data-testid="member-filters-panel"]' ? panel : locator()),
+    });
+    expect(await new WebNewDriver(page).settingsMembersFilterOptions()).toEqual(["Guest"]);
+  });
+
+  it("reports an unchecked role when its box is absent", async () => {
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => (role === "checkbox" ? locator({ count: async () => 0 }) : locator())),
+    });
+    expect(await new WebNewDriver(page).settingsMembersFilterChecked("Guest")).toBe(false);
+  });
+
+  it("reads an ascending marker and reports none when the column is absent", async () => {
+    const markers = new Map([["Sort by Full name", "Ascending"]]);
+    const page = pageOf({
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role !== "button") return locator();
+        const present = markers.has(options?.name ?? "");
+        return locator({
+          count: async () => (present ? 1 : 0),
+          getAttribute: async () => markers.get(options?.name ?? "") ?? null,
+        });
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsMembersSortMarker("Full name")).toBe("ascending");
+    expect(await driver.settingsMembersSortMarker("Account type")).toBe("none");
+  });
+
   it("reports no rows before the table paints", async () => {
     const driver = new WebNewDriver(pageOf());
     expect(await driver.settingsMembersRows()).toEqual([]);
