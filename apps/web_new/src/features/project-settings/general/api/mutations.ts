@@ -11,7 +11,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   bindProjectRepository,
   updateProjectSettings,
-  uploadUserAsset,
+  uploadProjectAsset,
   type ByteUpload,
   type ProjectRepositoryBound,
   type ProjectRepositoryStatus,
@@ -88,13 +88,15 @@ export interface EmblemUploadInput {
 }
 
 /**
- * Grant → bytes → confirm one user asset (PSET-007). The upload path is the
- * only artwork the tab accepts besides the emoji/icon mark; there is no
- * cover, gallery or provider search.
+ * Grant → bytes → confirm one project-owned image (PSET-007). The upload
+ * path is the only artwork the tab accepts besides the emoji/icon mark;
+ * there is no cover, gallery or provider search. The asset is created
+ * against the project, never against the signed-in account's profile.
  */
-export function useUploadEmblem() {
+export function useUploadEmblem(slug: string, projectId: string) {
   return useMutation<string, Error, EmblemUploadInput>({
-    mutationFn: ({ file, uploadBytes }) => uploadUserAsset(getAppClient(), "USER_COVER", file, uploadBytes),
+    mutationFn: ({ file, uploadBytes }) =>
+      uploadProjectAsset(getAppClient(), slug, projectId, "PROJECT_COVER", file, uploadBytes),
     onError: () => {
       notifyError(EMBLEM_UPLOAD_FAILED_TITLE, EMBLEM_UPLOAD_FAILED_MESSAGE);
     },

@@ -7,7 +7,7 @@
 // canonical slash form and the role caption.
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tanstack/react-router", () => ({
   useLinkProps: (props: { to?: string } & Record<string, unknown>) => ({ href: props.to }),
@@ -28,6 +28,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permissions.js";
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ProjectSettingsSidebar, roleLabel } from "./ProjectSettingsSidebar.js";
 
 const WS = "acme";
@@ -59,6 +60,10 @@ describe("roleLabel", () => {
 });
 
 describe("ProjectSettingsSidebar", () => {
+  beforeEach(() => createAppClient("https://api.test"));
+
+  afterEach(() => resetAppClient());
+
   it("renders nothing for an outsider", () => {
     const { container } = renderSidebar(null, `${ROOT}/`);
     expect(container).toBeEmptyDOMElement();
@@ -101,6 +106,25 @@ describe("ProjectSettingsSidebar", () => {
     expect(screen.queryByTestId("project-settings-tab-states")).not.toBeInTheDocument();
     expect(screen.queryByTestId("project-settings-group-work-structure")).not.toBeInTheDocument();
     expect(screen.getByText("Guest")).toBeInTheDocument();
+  });
+
+  it("renders an uploaded emblem as an image resolved against the API origin", () => {
+    render(
+      <ProjectSettingsSidebar
+        workspaceSlug={WS}
+        projectId={PID}
+        projectName="Website relaunch"
+        logoProps={{ in_use: "upload", url: "/api/assets/v2/static/emblem/" }}
+        identifier="WEB"
+        role={ROLE_ADMIN}
+        pathname={`${ROOT}/`}
+      />
+    );
+    expect(screen.getByTestId("project-logo")).toHaveAttribute("data-mark", "image");
+    expect(screen.getByTestId("project-logo-image")).toHaveAttribute(
+      "src",
+      "https://api.test/api/assets/v2/static/emblem/"
+    );
   });
 
   it("marks the canonical slash form and nothing else", () => {

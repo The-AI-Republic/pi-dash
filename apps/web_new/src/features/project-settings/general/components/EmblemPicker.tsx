@@ -9,6 +9,7 @@
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 
+import { projectMark } from "../../../../shared/pickers/index.js";
 import { markEmblem } from "../rules.js";
 import { EMBLEM_CHOICES } from "./GeneralIdentity.js";
 
@@ -30,8 +31,10 @@ export function matchEmoji(query: string): readonly string[] {
 export function EmblemPicker({ open, onOpenChange, logoProps, onPick }: EmblemPickerProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
   const choices = matchEmoji(query);
-  const stored = logoProps["in_use"] === "emoji" ? logoProps["emoji"] : undefined;
-  const currentValue = typeof stored === "string" ? stored : (stored as Record<string, unknown> | undefined)?.["value"];
+  // The draft may hold a freshly picked character or a stored decimal
+  // code-point value; both mark the same tile.
+  const mark = projectMark(logoProps);
+  const currentValue = mark.kind === "emoji" ? mark.glyph : undefined;
   return (
     <Dialog
       title="Change emblem"

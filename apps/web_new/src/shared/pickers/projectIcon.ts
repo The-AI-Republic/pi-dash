@@ -75,10 +75,9 @@ import {
 /**
  * A project's mark: an emoji glyph, an uploaded image, an icon name plus
  * color, or the short code's initial. The General tab's emblem control
- * stores an upload as `{ in_use: "upload", url }`; older rows written by the
- * emoji control carry the emoji's decimal codepoints (for example
- * before the upload path carry the emoji's decimal codepoints (for example
- * "128640" for a rocket) rather than the character itself.
+ * stores an upload as `{ in_use: "upload", url }` and an emoji as
+ * `{ in_use: "emoji", emoji: { value } }`, where the value is the emoji's
+ * decimal code points (for example "128640" for a rocket).
  */
 export type ProjectMark =
   | { kind: "emoji"; glyph: string }

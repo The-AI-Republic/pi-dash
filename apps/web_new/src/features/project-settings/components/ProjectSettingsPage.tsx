@@ -9,6 +9,7 @@
 
 import * as React from "react";
 
+import { getAppBaseUrl } from "../../../core/api/client.js";
 import { ProjectLogo } from "../../projects/index.js";
 import { useProjectSettings } from "./ProjectSettingsLayout.js";
 
@@ -22,7 +23,9 @@ export function ProjectSettingsPage({ title, children }: ProjectSettingsPageProp
   return (
     <div className="flex min-h-0 flex-col" data-testid="project-settings-page">
       <header className="flex shrink-0 items-center gap-(--space-3) border-b border-(--border) px-(--space-6) py-(--space-4)">
-        {project === null ? null : <ProjectLogo logoProps={project.logoProps} identifier={project.identifier} />}
+        {project === null ? null : (
+          <ProjectLogo logoProps={project.logoProps} identifier={project.identifier} apiBaseUrl={getAppBaseUrl()} />
+        )}
         <div className="flex min-w-0 flex-col">
           <p className="text-caption truncate text-(--text-muted)">Project settings</p>
           <h1 className="text-h3 truncate text-(--text)">{title}</h1>

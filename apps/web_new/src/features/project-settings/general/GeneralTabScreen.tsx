@@ -24,6 +24,8 @@ import { GeneralDetailsFields } from "./components/GeneralDetailsFields.js";
 import { GeneralIdentity } from "./components/GeneralIdentity.js";
 import { RepositoryRow } from "./components/RepositoryRow.js";
 import {
+  EMBLEM_UPLOAD_FAILED_MESSAGE,
+  EMBLEM_UPLOAD_FAILED_TITLE,
   PROJECT_SAVE_FAILED_TITLE,
   useBindRepository,
   useSaveProjectGeneral,
@@ -64,9 +66,13 @@ function GeneralTabBody({
   const [cadenceDirty, setCadenceDirty] = React.useState(false);
   const [emblemOpen, setEmblemOpen] = React.useState(false);
   const [uploadOpen, setUploadOpen] = React.useState(false);
+  // A refused emblem upload blocks every later save until a new upload
+  // lands: the spec keeps the emblem and the accompanying fields off the
+  // server (PSET-007) rather than saving a half-applied form.
+  const [emblemUploadFailed, setEmblemUploadFailed] = React.useState(false);
   const save = useSaveProjectGeneral(workspaceSlug, projectId);
   const bind = useBindRepository(workspaceSlug, projectId);
-  const upload = useUploadEmblem();
+  const upload = useUploadEmblem(workspaceSlug, projectId);
   const status = useRepositoryStatus(workspaceSlug, projectId, true);
 
   // A stored row arriving after the first render (or replaced by a save)
@@ -102,6 +108,10 @@ function GeneralTabBody({
   const submit = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (!canEdit || save.isPending) return;
+    if (emblemUploadFailed) {
+      notifyError(EMBLEM_UPLOAD_FAILED_TITLE, EMBLEM_UPLOAD_FAILED_MESSAGE);
+      return;
+    }
     const fieldErrors = validateGeneralFields(values);
     if (identifierChanged && precheck.data !== undefined && precheck.data.exists > 0) {
       const unavailable = identifierUnavailable(precheck.data);
@@ -203,7 +213,18 @@ function GeneralTabBody({
         <EmblemUploadDialog
           open={uploadOpen}
           onOpenChange={setUploadOpen}
-          onUpload={(file) => upload.mutateAsync({ file })}
+          onUpload={(file) =>
+            upload.mutateAsync({ file }).then(
+              (url) => {
+                setEmblemUploadFailed(false);
+                return url;
+              },
+              (error: unknown) => {
+                setEmblemUploadFailed(true);
+                throw error;
+              }
+            )
+          }
           onUploaded={(url) => update({ logoProps: uploadedEmblem(url) })}
         />
       ) : null}

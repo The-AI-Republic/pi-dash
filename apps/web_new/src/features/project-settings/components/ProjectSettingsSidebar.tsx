@@ -12,6 +12,7 @@ import { Link, useLinkProps, type UseLinkPropsOptions } from "@tanstack/react-ro
 import { ArrowLeft } from "lucide-react";
 import * as React from "react";
 
+import { getAppBaseUrl } from "../../../core/api/client.js";
 import { ProjectLogo } from "../../projects/index.js";
 import { isTabActive, projectSettingsTabHref, selectSettingsNav, type ProjectRole } from "../tabs.js";
 
@@ -110,7 +111,7 @@ export function ProjectSettingsSidebar({
           <span className="text-caption text-(--text-muted)">Project settings</span>
         </div>
         <div className="flex min-w-0 items-center gap-(--space-2)">
-          <ProjectLogo logoProps={logoProps} identifier={identifier} />
+          <ProjectLogo logoProps={logoProps} identifier={identifier} apiBaseUrl={getAppBaseUrl()} />
           <div className="flex min-w-0 flex-col">
             <span className="text-body truncate font-medium text-(--text)">{projectName}</span>
             <span className="text-caption truncate text-(--text-muted)">{roleLabel(role)}</span>

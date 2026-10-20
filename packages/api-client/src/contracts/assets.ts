@@ -153,6 +153,54 @@ export async function uploadWorkspaceLogo(
 }
 
 /**
+ * Upload one project-owned image and resolve to its public URL. The grant
+ * rides the project's own asset route
+ * (`POST /api/assets/v2/workspaces/<slug>/projects/<project_id>/`), so the
+ * asset row belongs to the project rather than to the signed-in account.
+ * The byte leg posts the signed fields plus the file, and the confirm leg
+ * (`PATCH .../projects/<project_id>/<asset_id>/`) marks it uploaded. The
+ * caller stores the returned URL on the owning row; nothing here rewires a
+ * profile cover. Any failed leg rejects with ApiError.
+ */
+export async function uploadProjectAsset(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  entityType: "PROJECT_COVER",
+  file: File,
+  uploadBytes: ByteUpload = defaultByteUpload
+): Promise<string> {
+  const grantPath = `/api/assets/v2/workspaces/${slug}/projects/${projectId}/`;
+  const envelope = await client.sendJson<unknown>("POST", grantPath, {
+    json: {
+      entity_identifier: projectId,
+      entity_type: entityType,
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    },
+  });
+  const grant = client.parse(SignedUserAsset, envelope.data, `POST ${grantPath}`);
+
+  const payload = new FormData();
+  for (const [key, value] of Object.entries(grant.upload_data.fields)) {
+    payload.append(key, value);
+  }
+  payload.append("file", file);
+  const uploaded = await uploadBytes(grant.upload_data.url, payload);
+  if (!uploaded.ok) {
+    throw new ApiError({
+      status: uploaded.status,
+      code: "http",
+      message: "The image upload was rejected.",
+    });
+  }
+
+  await client.patch(`/api/assets/v2/workspaces/${slug}/projects/${projectId}/${encodeURIComponent(grant.asset_id)}/`);
+  return grant.asset_url;
+}
+
+/**
  * DELETE /api/assets/v2/workspaces/<slug>/<asset_id>/ — drops a current
  * logo asset (204) and unwires it from the workspace. The caller then
  * PATCHes the workspace with an emptied logo field.

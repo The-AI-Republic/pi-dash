@@ -156,9 +156,27 @@ export function shapeBudget(value: string): string {
   return value.replace(/[^\d]/g, "");
 }
 
-/** The logo value the emoji/icon picker writes. */
+/**
+ * The emoji's stored form: its code points in decimal, joined by dashes
+ * (the oracle pins "128640" for a rocket). The mark decoder accepts the
+ * literal character too, but the stored row names the code points.
+ */
+export function unifiedEmoji(emoji: string): string {
+  return [...emoji]
+    .map((part) => part.codePointAt(0))
+    .filter((point): point is number => point !== undefined)
+    .join("-");
+}
+
+/**
+ * The logo value the emoji/icon picker writes. Emoji marks carry the
+ * stored `{ value }` record; icon marks carry their name and color.
+ */
 export function markEmblem(type: "emoji" | "icon", value: unknown): Record<string, unknown> {
-  return { in_use: type, [type]: value };
+  if (type === "emoji") {
+    return { in_use: "emoji", emoji: { value: typeof value === "string" ? unifiedEmoji(value) : value } };
+  }
+  return { in_use: "icon", icon: value };
 }
 
 /** The logo value the upload control writes: an uploaded-mark record. */
@@ -235,13 +253,22 @@ export function buildGeneralPayload({ values, cadenceDirty }: BuildPayloadInput)
     agent_ticking_enabled: values.ticking,
     agent_default_max_ticks: budgetOnSave(values),
   };
-  if (cadenceDirty) {
-    const seconds = Number(values.cadence);
+  // The custom marker is a caption, never a rhythm: a save writes the
+  // stage columns only for a real preset.
+  const seconds = cadenceSeconds(values.cadence);
+  if (cadenceDirty && seconds !== null) {
     payload.agent_default_interval_seconds = seconds;
     payload.agent_review_default_interval_seconds = seconds;
     payload.agent_test_default_interval_seconds = seconds;
   }
   return payload;
+}
+
+/** A cadence choice as whole seconds, or null for the custom marker. */
+export function cadenceSeconds(choice: string): number | null {
+  if (choice === CUSTOM_CADENCE_VALUE) return null;
+  const seconds = Number(choice);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 /** Availability precheck answer → field error, or null when the name is free. */

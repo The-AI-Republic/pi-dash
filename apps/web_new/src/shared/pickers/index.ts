@@ -50,7 +50,7 @@ export type { PriorityLevel, PriorityOption } from "./priorities.js";
 export { ProjectPicker } from "./ProjectPicker.js";
 export type { ProjectPickerProps } from "./ProjectPicker.js";
 export { selectProjectMark, selectProjectOptions, toProjectOption } from "./projects.js";
-export { ProjectMark } from "./ProjectMark.js";
+export { ProjectMark, resolveMarkSource } from "./ProjectMark.js";
 export type { ProjectMarkProps } from "./ProjectMark.js";
 export { projectIconGlyph, projectMark, projectMarkText } from "./projectIcon.js";
 export type { ProjectMark as ProjectMarkSpec } from "./projectIcon.js";

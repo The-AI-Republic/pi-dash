@@ -53,11 +53,11 @@ function setup(
 }
 
 describe("cadenceChoices", () => {
-  it("lists the presets and adds the custom marker only when it applies", () => {
-    expect(cadenceChoices("10800")).toEqual(
+  it("lists the presets and never offers the custom marker as a pick", () => {
+    expect(cadenceChoices()).toEqual(
       CADENCE_OPTIONS.map((option) => ({ id: String(option.seconds), label: option.label }))
     );
-    expect(cadenceChoices(CUSTOM_CADENCE_VALUE).at(-1)).toEqual({ id: CUSTOM_CADENCE_VALUE, label: "Custom" });
+    expect(cadenceChoices().some((option) => option.id === CUSTOM_CADENCE_VALUE)).toBe(false);
   });
 });
 
@@ -103,6 +103,16 @@ describe("ExecutionSection", () => {
     await user.click(screen.getByTestId("general-cadence-trigger"));
     await user.click(screen.getByRole("option", { name: "30 minutes" }));
     expect(onChange).toHaveBeenCalledWith({ cadence: "1800" });
+  });
+
+  it("marks an out-of-band rhythm as custom without offering it as a choice", async () => {
+    const user = userEvent.setup();
+    const { onChange } = setup({ form: { cadence: CUSTOM_CADENCE_VALUE } });
+    expect(screen.getByTestId("general-cadence")).toHaveTextContent("Custom");
+    await user.click(screen.getByTestId("general-cadence-trigger"));
+    expect(screen.queryByRole("option", { name: "Custom" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "6 hours" }));
+    expect(onChange).toHaveBeenCalledWith({ cadence: "21600" });
   });
 
   it("renders an inline budget error", () => {

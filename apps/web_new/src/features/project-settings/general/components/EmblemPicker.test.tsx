@@ -37,14 +37,19 @@ describe("EmblemPicker", () => {
     const user = userEvent.setup();
     const { onPick, onOpenChange } = renderPicker();
     await user.click(screen.getByRole("button", { name: "🌿" }));
-    expect(onPick).toHaveBeenCalledWith({ in_use: "emoji", emoji: "🌿" });
+    expect(onPick).toHaveBeenCalledWith({ in_use: "emoji", emoji: { value: "127807" } });
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("marks the stored choice as pressed", () => {
-    renderPicker({ in_use: "emoji", emoji: "🔥" });
+    renderPicker({ in_use: "emoji", emoji: { value: "🔥" } });
     expect(screen.getByRole("button", { name: "🔥" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "🌿" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("marks a stored decimal code-point value as the same choice", () => {
+    renderPicker({ in_use: "emoji", emoji: { value: "128293" } });
+    expect(screen.getByRole("button", { name: "🔥" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("does not treat an upload or an icon mark as a chosen emoji", () => {

@@ -9,6 +9,7 @@ export {
   deleteLegacyWorkspaceFileAsset,
   deleteUserAsset,
   deleteWorkspaceLogoAsset,
+  uploadProjectAsset,
   uploadUserAsset,
   uploadUserAvatar,
   uploadWorkspaceLogo,

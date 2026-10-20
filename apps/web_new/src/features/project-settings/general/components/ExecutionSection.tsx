@@ -16,7 +16,6 @@ import * as React from "react";
 import {
   CADENCE_OPTIONS,
   cadenceLabel,
-  CUSTOM_CADENCE_LABEL,
   CUSTOM_CADENCE_VALUE,
   executorChoices,
   type GeneralFieldErrors,
@@ -33,12 +32,13 @@ export interface ExecutionSectionProps {
   onChange: (patch: Partial<GeneralFormValues>) => void;
 }
 
-/** Choices for the cadence picker: presets, then the custom marker when it applies. */
-export function cadenceChoices(current: string): Array<{ id: string; label: string }> {
-  const presets = CADENCE_OPTIONS.map((option) => ({ id: String(option.seconds), label: option.label }));
-  return current === CUSTOM_CADENCE_VALUE
-    ? [...presets, { id: CUSTOM_CADENCE_VALUE, label: CUSTOM_CADENCE_LABEL }]
-    : presets;
+/**
+ * Choices for the cadence picker: the presets only. A stored rhythm outside
+ * them is described by the Custom caption on the trigger, never offered as
+ * a pick (it names no interval, so picking it could only write garbage).
+ */
+export function cadenceChoices(): Array<{ id: string; label: string }> {
+  return CADENCE_OPTIONS.map((option) => ({ id: String(option.seconds), label: option.label }));
 }
 
 export function ExecutionSection({
@@ -152,9 +152,11 @@ export function ExecutionSection({
                 <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
               </Button>
             }
-            options={cadenceChoices(values.cadence)}
+            options={cadenceChoices()}
             value={values.cadence}
-            onSelect={(choice) => onChange({ cadence: choice })}
+            onSelect={(choice) => {
+              if (choice !== CUSTOM_CADENCE_VALUE) onChange({ cadence: choice });
+            }}
             listLabel="Run cadence"
             searchEnabled={false}
             emptyText="No cadence options"

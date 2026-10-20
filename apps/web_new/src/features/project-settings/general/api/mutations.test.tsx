@@ -39,7 +39,7 @@ const UUID = "223e4567-e89b-12d3-a456-426614174001";
 const PROJECT_PATH = `/api/workspaces/acme/projects/${UUID}/`;
 const REPOSITORY_PATH = `/api/workspaces/acme/projects/${UUID}/repository/`;
 const BIND_PATH = `/api/workspaces/acme/projects/${UUID}/repository/bind/`;
-const ASSET_PATH = "/api/assets/v2/user-assets/";
+const ASSET_PATH = `/api/assets/v2/workspaces/acme/projects/${UUID}/`;
 
 function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
@@ -181,7 +181,7 @@ function stubApi(options: StubOptions = {}) {
         upload_data: { url: "https://uploads.test/signed", fields: { key: "emblems/asset-1.png" } },
       });
     }
-    if (url === "https://api.test/api/assets/v2/user-assets/asset-1/" && method === "PATCH") {
+    if (url === `https://api.test${ASSET_PATH}asset-1/` && method === "PATCH") {
       return jsonResponse(url, 204, {});
     }
     throw new Error(`unexpected fetch ${method} ${url}`);
@@ -296,10 +296,10 @@ describe("useBindRepository", () => {
 });
 
 describe("useUploadEmblem", () => {
-  it("runs grant, bytes and confirm against the user-asset pipeline", async () => {
+  it("runs grant, bytes and confirm against the project asset pipeline", async () => {
     const { calls } = stubApi({});
     const uploads: string[] = [];
-    const hook = renderHook(() => useUploadEmblem(), { wrapper: wrapper(testClient()) });
+    const hook = renderHook(() => useUploadEmblem("acme", UUID), { wrapper: wrapper(testClient()) });
     const file = new File(["bytes"], "emblem.png", { type: "image/png" });
 
     act(() => {
@@ -314,18 +314,19 @@ describe("useUploadEmblem", () => {
     await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
     expect(hook.result.current.data).toBe("/api/assets/v2/static/asset-1/");
     expect(calls.find((call) => call.url === `https://api.test${ASSET_PATH}`)?.body).toMatchObject({
-      entity_type: "USER_COVER",
-      entity_identifier: "",
+      entity_type: "PROJECT_COVER",
+      entity_identifier: UUID,
       name: "emblem.png",
       type: "image/png",
     });
     expect(uploads).toEqual(["https://uploads.test/signed"]);
     expect(calls.some((call) => call.method === "PATCH" && call.url.endsWith("/asset-1/"))).toBe(true);
+    expect(calls.some((call) => call.url === "https://api.test/api/assets/v2/user-assets/")).toBe(false);
   });
 
   it("toasts the pinned failure copy when the bytes leg is refused", async () => {
     stubApi({});
-    const hook = renderHook(() => useUploadEmblem(), { wrapper: wrapper(testClient()) });
+    const hook = renderHook(() => useUploadEmblem("acme", UUID), { wrapper: wrapper(testClient()) });
     const file = new File(["bytes"], "emblem.png", { type: "image/png" });
 
     act(() => {
@@ -337,7 +338,7 @@ describe("useUploadEmblem", () => {
 
   it("toasts when the grant is refused", async () => {
     stubApi({ grantStatus: 500 });
-    const hook = renderHook(() => useUploadEmblem(), { wrapper: wrapper(testClient()) });
+    const hook = renderHook(() => useUploadEmblem("acme", UUID), { wrapper: wrapper(testClient()) });
     const file = new File(["bytes"], "emblem.png", { type: "image/png" });
 
     act(() => {

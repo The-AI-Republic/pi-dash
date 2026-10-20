@@ -14,6 +14,7 @@ import {
   BASE_BRANCH_TOO_LONG_MESSAGE,
   budgetOnSave,
   buildGeneralPayload,
+  cadenceSeconds,
   canonicalRepositoryUrl,
   cadenceLabel,
   CADENCE_OPTIONS,
@@ -36,6 +37,7 @@ import {
   identifierUnavailable,
   INFINITE_MAX_TICKS,
   markEmblem,
+  unifiedEmoji,
   NAME_REQUIRED_MESSAGE,
   NAME_TAKEN_CODE,
   NAME_TAKEN_MESSAGE,
@@ -276,6 +278,17 @@ describe("buildGeneralPayload", () => {
     expect(payload.agent_test_default_interval_seconds).toBe(1_800);
   });
 
+  it("writes no stage columns for the custom marker, and reads presets as seconds", () => {
+    const payload = buildGeneralPayload({ values: values({ cadence: CUSTOM_CADENCE_VALUE }), cadenceDirty: true });
+    expect("agent_default_interval_seconds" in payload).toBe(false);
+    expect("agent_review_default_interval_seconds" in payload).toBe(false);
+    expect("agent_test_default_interval_seconds" in payload).toBe(false);
+    expect(cadenceSeconds("21600")).toBe(21_600);
+    expect(cadenceSeconds(CUSTOM_CADENCE_VALUE)).toBeNull();
+    expect(cadenceSeconds("not-a-number")).toBeNull();
+    expect(cadenceSeconds("0")).toBeNull();
+  });
+
   it("writes the no-cap sentinel and the switched-off ticking flag", () => {
     const payload = buildGeneralPayload({
       values: values({ noCap: true, budget: "", ticking: false }),
@@ -368,12 +381,22 @@ describe("executorChoices", () => {
 });
 
 describe("emblem values", () => {
-  it("shapes an emoji and an icon mark", () => {
-    expect(markEmblem("emoji", "🌊")).toEqual({ in_use: "emoji", emoji: "🌊" });
+  it("writes an emoji mark as the stored value record of decimal code points", () => {
+    expect(markEmblem("emoji", "🌊")).toEqual({ in_use: "emoji", emoji: { value: "127754" } });
+    expect(markEmblem("emoji", "🚀")).toEqual({ in_use: "emoji", emoji: { value: "128640" } });
+    expect(markEmblem("emoji", "🛰️")).toEqual({ in_use: "emoji", emoji: { value: "128752-65039" } });
+  });
+
+  it("shapes an icon mark", () => {
     expect(markEmblem("icon", { name: "star", color: "#fff" })).toEqual({
       in_use: "icon",
       icon: { name: "star", color: "#fff" },
     });
+  });
+
+  it("joins a multi-codepoint emoji, and leaves a non-string value as given", () => {
+    expect(unifiedEmoji("👩‍🚀")).toBe("128105-8205-128640");
+    expect(markEmblem("emoji", 7)).toEqual({ in_use: "emoji", emoji: { value: 7 } });
   });
 
   it("stores an uploaded emblem as an upload record with its URL", () => {

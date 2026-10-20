@@ -180,6 +180,7 @@ import {
   deleteWorkspaceLogoAsset,
   uploadUserAvatar,
   uploadWorkspaceLogo,
+  uploadProjectAsset,
 } from "./contracts/assets.js";
 import { listCycles, updateCycle } from "./contracts/cycles.js";
 import { listModules, updateModule } from "./contracts/modules.js";
@@ -5350,6 +5351,67 @@ describe("workspace logo asset contracts", () => {
     expect(transport.calls.some((call) => call.url.endsWith(`/api/workspaces/file-assets/${UUID}/logo-key/`))).toBe(
       true
     );
+  });
+});
+
+describe("project asset contracts", () => {
+  const grant = {
+    asset_id: "asset-9",
+    asset_url: "/api/assets/v2/static/asset-9/",
+    upload_data: { url: "https://uploads.test/signed", fields: { key: "emblems/asset-9.png", policy: "p" } },
+  };
+
+  function grantTransport() {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") {
+        return fakeResponse({ status: 200, body: JSON.stringify(grant) });
+      }
+      return fakeResponse({ status: 204, body: "" });
+    });
+  }
+
+  it("grants, posts bytes and confirms against the project route", async () => {
+    const transport = grantTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+    const uploads: Array<{ url: string; body: FormData }> = [];
+    const url = await uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file, async (target, body) => {
+      uploads.push({ url: target, body });
+      return { ok: true, status: 204 };
+    });
+    expect(url).toBe("/api/assets/v2/static/asset-9/");
+    const grantCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(grantCall?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/`);
+    expect(grantCall?.init.body).toBe(
+      JSON.stringify({
+        entity_identifier: UUID2,
+        entity_type: "PROJECT_COVER",
+        name: "emblem.png",
+        size: file.size,
+        type: "image/png",
+      })
+    );
+    expect(uploads[0]?.url).toBe("https://uploads.test/signed");
+    expect(uploads[0]?.body.get("file")).toBe(file);
+    const confirmCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(confirmCall?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/asset-9/`);
+  });
+
+  it("rejects when the signed upload refuses the bytes", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+    const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+    const failure = await uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file, async () => ({
+      ok: false,
+      status: 413,
+    })).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(413);
   });
 });
 

@@ -37,6 +37,7 @@ vi.mock("../components/ProjectSettingsLayout.js", async (importOriginal) => ({
 }));
 
 import { generalKeys } from "./api/queries.js";
+import { authKeys } from "../../auth/index.js";
 import {
   PROJECT_SAVED_MESSAGE,
   PROJECT_SAVED_TITLE,
@@ -61,7 +62,8 @@ const PROJECT_PATH = `/api/workspaces/acme/projects/${UUID}/`;
 const REPOSITORY_PATH = `/api/workspaces/acme/projects/${UUID}/repository/`;
 const BIND_PATH = `/api/workspaces/acme/projects/${UUID}/repository/bind/`;
 const IDENTIFIER_PATH = "/api/workspaces/acme/project-identifiers/";
-const ASSET_PATH = "/api/assets/v2/user-assets/";
+const ASSET_PATH = `/api/assets/v2/workspaces/acme/projects/${UUID}/`;
+const USER_ASSET_PATH = "/api/assets/v2/user-assets/";
 
 function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
@@ -150,12 +152,15 @@ interface StubOptions {
   bindStatus?: number;
   bound?: Record<string, unknown>;
   uploadOk?: boolean;
+  /** Number of leading upload grants that fail before one succeeds. */
+  uploadFailures?: number;
 }
 
 function stubApi(options: StubOptions = {}) {
   const calls: Call[] = [];
   const patchRows = [...(options.patchRows ?? [])];
   let bound = options.bound ?? { bound: false };
+  let uploadFailures = options.uploadFailures ?? 0;
   let currentRow = options.row?.(CREATED_AT) ?? projectRow();
   // The asset byte leg posts to a signed URL outside the app transport.
   vi.stubGlobal(
@@ -231,13 +236,17 @@ function stubApi(options: StubOptions = {}) {
     }
     if (url === `https://api.test${ASSET_PATH}` && method === "POST") {
       if (options.uploadOk === false) return jsonResponse(url, 500, { detail: "no" });
+      if (uploadFailures > 0) {
+        uploadFailures -= 1;
+        return jsonResponse(url, 500, { detail: "no" });
+      }
       return jsonResponse(url, 200, {
         asset_id: "asset-1",
         asset_url: "/api/assets/v2/static/emblem/",
         upload_data: { url: "https://uploads.test/signed", fields: { key: "emblems/asset-1.png" } },
       });
     }
-    if (url === "https://api.test/api/assets/v2/user-assets/asset-1/" && method === "PATCH") {
+    if (url === `https://api.test${ASSET_PATH}asset-1/` && method === "PATCH") {
       return jsonResponse(url, 204, {});
     }
     throw new Error(`unexpected fetch ${method} ${url}`);
@@ -491,15 +500,18 @@ describe("PSET-006 save and validation", () => {
 });
 
 describe("PSET-007 emblem", () => {
-  it("picks an emoji mark and saves it in the logo object", async () => {
+  it("picks an emoji mark and saves it as the stored value record", async () => {
     const user = userEvent.setup();
     const { calls } = await renderLoaded();
     await user.click(screen.getByTestId("general-emblem-open"));
     const picker = await screen.findByRole("dialog", { name: "Change emblem" });
     await user.click(within(picker).getByRole("button", { name: "🔥" }));
+    // The draft header renders the new mark before the save lands.
+    expect(screen.getByTestId("project-mark")).toHaveAttribute("data-mark", "emoji");
+    expect(screen.getByTestId("project-mark")).toHaveTextContent("🔥");
     save();
     await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
-    expect(patchBodyAt(calls).logo_props).toEqual({ in_use: "emoji", emoji: "🔥" });
+    expect(patchBodyAt(calls).logo_props).toEqual({ in_use: "emoji", emoji: { value: "128293" } });
   });
 
   it("filters the emoji grid and reports no match", async () => {
@@ -513,7 +525,7 @@ describe("PSET-007 emblem", () => {
     expect(within(picker).getByText("No emoji match that search.")).toBeInTheDocument();
   });
 
-  it("uploads an image through the user-asset pipeline and marks the draft", async () => {
+  it("uploads an image as a project asset and marks the draft", async () => {
     const { calls } = await renderLoaded();
     await userEvent.setup().click(screen.getByTestId("general-emblem-upload-open"));
     const file = new File(["bytes"], "emblem.png", { type: "image/png" });
@@ -527,8 +539,13 @@ describe("PSET-007 emblem", () => {
     await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
     expect(patchBodyAt(calls).logo_props).toEqual({ in_use: "upload", url: "/api/assets/v2/static/emblem/" });
     expect(calls.find((call) => call.url === `https://api.test${ASSET_PATH}`)?.body).toMatchObject({
-      entity_type: "USER_COVER",
+      entity_type: "PROJECT_COVER",
+      entity_identifier: UUID,
     });
+    expect(calls.some((call) => call.url === `https://api.test${USER_ASSET_PATH}`)).toBe(false);
+    expect(calls.some((call) => call.url === `https://api.test${ASSET_PATH}asset-1/` && call.method === "PATCH")).toBe(
+      true
+    );
   });
 
   it("refuses a non-image file and uploads nothing", async () => {
@@ -540,8 +557,9 @@ describe("PSET-007 emblem", () => {
     expect(calls.some((call) => call.url === `https://api.test${ASSET_PATH}`)).toBe(false);
   });
 
-  it("aborts the whole save when the upload fails", async () => {
+  it("aborts the whole save when the upload fails, even with a valid form", async () => {
     const { calls } = await renderLoaded({ uploadOk: false });
+    fireEvent.change(field("Project name"), { target: { value: "Renamed despite the failure" } });
     await userEvent.setup().click(screen.getByTestId("general-emblem-upload-open"));
     const file = new File(["bytes"], "emblem.png", { type: "image/png" });
     fireEvent.change(screen.getByTestId("general-emblem-file"), { target: { files: [file] } });
@@ -550,6 +568,37 @@ describe("PSET-007 emblem", () => {
     save();
     expect(patchCalls(calls)).toHaveLength(0);
     expect(screen.getByTestId("project-settings-general")).toBeInTheDocument();
+  });
+
+  it("lets a later successful upload clear the block", async () => {
+    const { calls } = await renderLoaded({ uploadFailures: 1 });
+    fireEvent.change(field("Project name"), { target: { value: "Renamed" } });
+    await userEvent.setup().click(screen.getByTestId("general-emblem-upload-open"));
+    fireEvent.change(screen.getByTestId("general-emblem-file"), {
+      target: { files: [new File(["bytes"], "emblem.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(notify.error).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId("general-emblem-file"), {
+      target: { files: [new File(["bytes"], "emblem.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByTestId("project-mark")).toHaveAttribute("data-mark", "image"));
+    save();
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    expect(patchBodyAt(calls)).toMatchObject({ name: "Renamed", logo_props: { in_use: "upload" } });
+  });
+
+  it("seeds the shell's project row so the header and rail follow a new emblem", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = await renderLoaded();
+    await user.click(screen.getByTestId("general-emblem-open"));
+    const picker = await screen.findByRole("dialog", { name: "Change emblem" });
+    await user.click(within(picker).getByRole("button", { name: "🔥" }));
+    save();
+    await waitFor(() =>
+      expect(queryClient.getQueryData(authKeys.project("acme", UUID))).toMatchObject({
+        logo_props: { in_use: "emoji", emoji: { value: "128293" } },
+      })
+    );
   });
 
   it("offers no cover control, gallery or provider search", async () => {

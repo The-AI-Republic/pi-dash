@@ -78,6 +78,16 @@ export function getAppClient(): ApiClient {
   return appClient;
 }
 
+/**
+ * The API origin relative asset paths resolve against. Reads the
+ * bootstrap client when it exists, otherwise the same default the client
+ * would have used, so chrome can render before bootstrap in tests and on
+ * the first paint.
+ */
+export function getAppBaseUrl(): string {
+  return appClient?.baseUrl ?? defaultBaseUrl();
+}
+
 /** Drop the singleton. Tests only; the app never rebuilds its client. */
 export function resetAppClient(): void {
   appClient = null;
