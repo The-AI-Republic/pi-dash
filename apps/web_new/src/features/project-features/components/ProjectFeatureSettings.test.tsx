@@ -101,7 +101,7 @@ describe("ProjectFeatureSettings", () => {
     const user = userEvent.setup();
     renderFeature("views");
     await user.click(screen.getByRole("switch", { name: "Enable views" }));
-    expect(notifyPending).toHaveBeenCalledWith("Updating project feature", "Applying the change…");
+    expect(notifyPending).toHaveBeenCalledWith("Saving the switch", "This will only take a moment.");
     expect(harness.mutate).toHaveBeenCalledWith(
       { projectId: "p1", patch: { issue_views_view: true } },
       expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) })
@@ -123,7 +123,7 @@ describe("ProjectFeatureSettings", () => {
     options.onSuccess();
     expect(mocked.settle).toHaveBeenCalledWith({
       title: "Project feature updated",
-      description: "Project feature updated successfully.",
+      description: "The change applies across this project right away.",
     });
   });
 
@@ -135,7 +135,7 @@ describe("ProjectFeatureSettings", () => {
     options.onError();
     expect(mocked.settle).toHaveBeenCalledWith({
       title: "Error!",
-      description: "Something went wrong while updating project feature. Please try again.",
+      description: "The switch could not be saved. Its stored value is still in place.",
       failed: true,
     });
     await waitFor(() =>

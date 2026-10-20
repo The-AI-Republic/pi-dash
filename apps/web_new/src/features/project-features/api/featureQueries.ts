@@ -26,19 +26,13 @@ import { getAppClient } from "../../../core/api/client.js";
 import { authKeys } from "../../auth/index.js";
 import { projectKeys } from "../../projects/index.js";
 
-/** Heading of the refusal body non-admins see on a feature tab. */
-export const FEATURE_NOT_AUTHORIZED_TITLE = "Not authorized to change features";
-export const FEATURE_NOT_AUTHORIZED_BODY = "Only project admins can turn project features on or off.";
-
-/** Inside a feature tab, above the switch. */
-export const FEATURE_SETTINGS_CONTEXT = "Project settings";
-/** Explainers shared by every tab and probe text. */
-export const FEATURE_UPDATE_PENDING_TITLE = "Updating project feature";
-export const FEATURE_UPDATE_PENDING_MESSAGE = "Applying the change…";
+/** Notice copy shared by every feature tab. */
+export const FEATURE_UPDATE_PENDING_TITLE = "Saving the switch";
+export const FEATURE_UPDATE_PENDING_MESSAGE = "This will only take a moment.";
 export const FEATURE_UPDATE_SUCCESS_TITLE = "Project feature updated";
-export const FEATURE_UPDATE_SUCCESS_MESSAGE = "Project feature updated successfully.";
+export const FEATURE_UPDATE_SUCCESS_MESSAGE = "The change applies across this project right away.";
 export const FEATURE_UPDATE_FAILED_TITLE = "Error!";
-export const FEATURE_UPDATE_FAILED_MESSAGE = "Something went wrong while updating project feature. Please try again.";
+export const FEATURE_UPDATE_FAILED_MESSAGE = "The switch could not be saved. Its stored value is still in place.";
 
 /** The single-field payload a switch writes. */
 export type FeaturePatch = Pick<
