@@ -111,7 +111,18 @@ const ROWS = [
   }),
 ];
 
+const WORKSPACE_ROW = {
+  id: "123e4567-e89b-12d3-a456-426614174000",
+  name: "Acme",
+  slug: SLUG,
+  logo_url: null,
+  total_members: 5,
+  role: 20,
+};
+
 interface StubOptions {
+  /** The caller's numeric workspace role (drives admin-only chrome). */
+  role?: number | null;
   roster?: unknown[];
   invitations?: unknown[];
   rosterStatus?: number;
@@ -133,6 +144,24 @@ function stubTransport(options: StubOptions = {}) {
       text: async () => JSON.stringify(body),
     });
     if (url.endsWith("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+    if (url.endsWith("/api/users/me/")) {
+      return json(200, {
+        id: ADMIN_ID,
+        email: "oracle@example.com",
+        first_name: "Orion",
+        last_name: "Admin",
+        display_name: "Orion Admin",
+        avatar: "",
+        avatar_url: null,
+        is_bot: false,
+        last_login_medium: "email",
+        is_password_autoset: false,
+      });
+    }
+    if (url.endsWith("/api/users/me/workspaces/")) {
+      const role = options.role === undefined ? 20 : options.role;
+      return json(200, role === null ? [] : [{ ...WORKSPACE_ROW, role }]);
+    }
     if (url.endsWith(`/api/workspaces/${SLUG}/members/`)) {
       rosterReads += 1;
       if (options.hangRoster) return new Promise<never>(() => undefined);
@@ -198,17 +227,18 @@ describe("MembersPage loading states", () => {
     let fail = true;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     createAppClient("https://api.test", (async (url: string) => {
-      const status = url.endsWith(`/api/workspaces/${SLUG}/members/`) && fail ? 500 : 200;
-      if (url.endsWith("/auth/get-csrf-token/")) {
-        return { status: 200, url, headers: { get: () => null }, text: async () => "{}" };
-      }
-      return {
-        status,
-        url,
-        headers: { get: () => null },
-        text: async () =>
-          JSON.stringify(url.endsWith(`/api/workspaces/${SLUG}/members/`) ? (status === 200 ? ROWS : {}) : []),
-      };
+      const isRoster = url.endsWith(`/api/workspaces/${SLUG}/members/`);
+      const status = isRoster && fail ? 500 : 200;
+      const body = isRoster
+        ? status === 200
+          ? ROWS
+          : {}
+        : url.endsWith("/api/users/me/")
+          ? { id: ADMIN_ID, email: "oracle@example.com" }
+          : url.endsWith("/api/users/me/workspaces/")
+            ? [WORKSPACE_ROW]
+            : [];
+      return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) };
     }) as never);
     render(
       <QueryClientProvider client={queryClient}>

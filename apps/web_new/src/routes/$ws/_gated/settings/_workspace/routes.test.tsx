@@ -10,13 +10,15 @@
 // (NEWFRONT-537) registers its body from its own chunk, so the registry
 // loop covers it after the chunk registers.
 import { act, cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import type { RouteComponent } from "@tanstack/react-router";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   registerWorkspaceSettingsPage,
   resetWorkspaceSettingsPages,
+  type WorkspaceSettingsPageProps,
   type WorkspaceSettingsSectionKey,
 } from "../../../../../features/workspace-settings/index.js";
 import { registerMembersSettingsPage } from "../../../../../features/workspace-settings/members/index.js";
@@ -39,6 +41,16 @@ const LayoutComponent: RouteComponent = Layout;
 // The general and integrations sections ship their own pages (NEWFRONT-535,
 // NEWFRONT-539); every other section still resolves through the shell's
 // registration seam.
+
+/** Body that reports a completed leave the way the roster page does. */
+function LeaveProbe({ onLeaveWorkspace }: WorkspaceSettingsPageProps): React.ReactElement {
+  return (
+    <button type="button" onClick={onLeaveWorkspace}>
+      Leave for the test
+    </button>
+  );
+}
+
 const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["members", "members", MembersRoute.options.component as RouteComponent],
   ["exports", "exports", ExportsRoute.options.component as RouteComponent],
@@ -171,6 +183,21 @@ describe("workspace settings section routes", () => {
     expect(screen.queryByRole("heading", { name: "GitHub" })).not.toBeInTheDocument();
     expect(requested.some((url) => url.includes("/integrations/github/"))).toBe(false);
     expect(requested.some((url) => url.includes("/integrations/git/accounts/"))).toBe(false);
+  });
+
+  // §13: a successful leave hands navigation to the shell, which lands on
+  // the just-left workspace home (and its gate) rather than the picker.
+  it("sends a leaver to the just-left workspace home", async () => {
+    registerWorkspaceSettingsPage("members", LeaveProbe);
+    const view = renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: MembersRoute.options.component as RouteComponent,
+      leafPath: "members",
+      transport: settingsTransport({ role: 20 }),
+    });
+    const button = await screen.findByRole("button", { name: "Leave for the test" });
+    await userEvent.click(button);
+    await vi.waitFor(() => expect(view.router.state.location.pathname).toBe("/acme"));
   });
 
   it("mounts the webhooks list page for its own address", async () => {

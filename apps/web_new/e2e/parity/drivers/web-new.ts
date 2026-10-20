@@ -17372,115 +17372,409 @@ export class WebNewDriver implements ParityDriver {
       profileHref,
     };
   }
+  // --- Workspace-settings manage half (NEWFRONT-538, WSET-009/010/012/013/015).
+  // --- The bulk dialog, pending group, role writes and the shared remove
+  // --- confirmation all read the app's test ids and labels.
+
+  /** One pending-invitation row by its rendered email. */
+  private wsSettingsInviteRow(email: string): Locator {
+    return this.page.locator(`[data-testid="pending-invitation-row"][data-email="${email}"]`).first();
+  }
+
+  /** The open dialog carrying a heading (toasts never carry one). */
+  private wsSettingsOpenDialog(): Locator {
+    return this.page.locator('div[role="dialog"]:has(h2)').first();
+  }
+
+  /** Visible option rows of the currently open combobox/picker. */
+  private wsSettingsVisibleOptions(): Locator {
+    return this.page.locator('[role="option"]:visible');
+  }
+
+  /** Open one pending row's menu and resolve once its items render. */
+  private async wsSettingsInviteOpenMenu(email: string): Promise<void> {
+    await this.wsSettingsInviteRow(email)
+      .getByRole("button", { name: `Actions for ${email}` })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async wsSettingsInviteOpen(): Promise<void> {
-    return todo("wsSettingsInviteOpen");
+    await this.page.getByRole("button", { name: "Add member", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.locator('input[name="emails.0.email"]').waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsInviteClose(): Promise<void> {
-    return todo("wsSettingsInviteClose");
+    const dialog = this.wsSettingsOpenDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.locator('input[name="emails.0.email"]').waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsInviteVisible(): Promise<boolean> {
-    return todo("wsSettingsInviteVisible");
+    return this.isShown(this.page.locator('input[name="emails.0.email"]'));
   }
+
   async wsSettingsInviteRowCount(): Promise<number> {
-    return todo("wsSettingsInviteRowCount");
+    return this.page.locator('input[name^="emails."][name$=".email"]').count();
   }
-  async wsSettingsInviteFillRow(_index: number, _email: string): Promise<void> {
-    return todo("wsSettingsInviteFillRow");
+
+  async wsSettingsInviteFillRow(index: number, email: string): Promise<void> {
+    await this.page.locator(`input[name="emails.${index}.email"]`).fill(email);
   }
-  async wsSettingsInviteRowValue(_index: number): Promise<string> {
-    return todo("wsSettingsInviteRowValue");
+
+  async wsSettingsInviteRowValue(index: number): Promise<string> {
+    return this.page.locator(`input[name="emails.${index}.email"]`).inputValue();
   }
-  async wsSettingsInviteRowRole(_index: number): Promise<string> {
-    return todo("wsSettingsInviteRowRole");
+
+  /** One dialog row's container, found from its email field. */
+  private wsSettingsInviteFieldRow(index: number): Locator {
+    return this.page.locator(`[data-testid="invite-row-${index}"]`).first();
   }
-  async wsSettingsInviteSetRowRole(_index: number, _roleLabel: string): Promise<void> {
-    return todo("wsSettingsInviteSetRowRole");
+
+  async wsSettingsInviteRowRole(index: number): Promise<string> {
+    return (
+      (await this.wsSettingsInviteFieldRow(index)
+        .getByRole("button", { name: "Invitee role" })
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
-  async wsSettingsInviteRowRoles(_index: number): Promise<string[]> {
-    return todo("wsSettingsInviteRowRoles");
+
+  async wsSettingsInviteSetRowRole(index: number, roleLabel: string): Promise<void> {
+    await this.wsSettingsInviteFieldRow(index)
+      .getByRole("button", { name: "Invitee role" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions()
+      .filter({ hasText: new RegExp(`^${roleLabel}$`) })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  async wsSettingsInviteRowRoles(index: number): Promise<string[]> {
+    const trigger = this.wsSettingsInviteFieldRow(index).getByRole("button", { name: "Invitee role" });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const options = await this.wsSettingsVisibleOptions().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    await this.wsSettingsVisibleOptions().first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return options.map((option) => option.trim()).filter((option) => option.length > 0);
+  }
+
   async wsSettingsInviteAddRow(): Promise<void> {
-    return todo("wsSettingsInviteAddRow");
+    const before = await this.wsSettingsInviteRowCount();
+    await this.wsSettingsOpenDialog()
+      .getByRole("button", { name: "Add more", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitInviteRowCount(before + 1, "append");
   }
-  async wsSettingsInviteRemoveRow(_index: number): Promise<void> {
-    return todo("wsSettingsInviteRemoveRow");
+
+  async wsSettingsInviteRemoveRow(index: number): Promise<void> {
+    const before = await this.wsSettingsInviteRowCount();
+    await this.wsSettingsInviteFieldRow(index)
+      .getByRole("button", { name: "Remove this invitee" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitInviteRowCount(Math.max(before - 1, 1), "drop");
   }
-  async wsSettingsInviteRowError(_index: number): Promise<string | null> {
-    return todo("wsSettingsInviteRowError");
+
+  private async wsSettingsAwaitInviteRowCount(expected: number, action: string): Promise<void> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInviteRowCount()) === expected) return;
+      if (Date.now() > deadline) throw new Error(`[parity] invite dialog never did ${action} a row.`);
+      await this.page.waitForTimeout(100);
+    }
   }
+
+  async wsSettingsInviteRowError(index: number): Promise<string | null> {
+    const error = this.wsSettingsInviteFieldRow(index).locator('[role="alert"]').first();
+    if (!(await this.isShown(error))) return null;
+    const text = ((await error.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
+  }
+
   async wsSettingsInviteSubmit(): Promise<void> {
-    return todo("wsSettingsInviteSubmit");
+    const dialog = this.wsSettingsOpenDialog();
+    const toastKey = (toast: { title: string; message: string } | null): string =>
+      toast === null ? "" : `${toast.title}\n${toast.message}`;
+    // Outcomes are read as changes from the pre-submit state: a stale
+    // toast or inline error from an earlier submit can still be up.
+    const toastBefore = toastKey(await this.rulesLastToast());
+    const errorsBefore = await dialog.locator('[role="alert"]').count();
+    await dialog
+      .getByRole("button", { name: "Send invitations", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (!(await this.wsSettingsInviteVisible())) return;
+      const toast = await this.rulesLastToast();
+      if (toastKey(toast) !== toastBefore) {
+        if (toast !== null && /invitations sent/i.test(`${toast.title}\n${toast.message}`)) {
+          await this.page
+            .locator('input[name="emails.0.email"]')
+            .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+        }
+        return;
+      }
+      if ((await dialog.locator('[role="alert"]').count()) !== errorsBefore) return;
+      if (Date.now() > deadline) throw new Error("[parity] invite submit never closed, toasted, nor flagged a row.");
+      await this.page.waitForTimeout(100);
+    }
   }
+
   async wsSettingsInvitesGroupVisible(): Promise<boolean> {
-    return todo("wsSettingsInvitesGroupVisible");
+    return this.isShown(this.page.locator('[data-testid="pending-invitations"]'));
   }
+
   async wsSettingsInvitesCount(): Promise<number | null> {
-    return todo("wsSettingsInvitesCount");
+    const chip = this.page.locator('[data-testid="pending-invitations-count"]').first();
+    if (!(await this.isShown(chip))) return null;
+    const text = ((await chip.innerText().catch(() => "")) ?? "").trim();
+    const digits = /(\d+)/.exec(text)?.[1];
+    return digits === undefined ? null : Number(digits);
   }
+
   async wsSettingsInvitesVisibleEmails(): Promise<string[]> {
-    return todo("wsSettingsInvitesVisibleEmails");
+    return this.page
+      .locator('[data-testid="pending-invitation-row"]')
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-email") ?? "").filter((email) => email !== ""));
   }
+
   async wsSettingsInvitesToggleGroup(): Promise<void> {
-    return todo("wsSettingsInvitesToggleGroup");
+    const before = await this.wsSettingsInvitesExpanded();
+    await this.page
+      .getByRole("button", { name: /Pending invites/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInvitesExpanded()) !== before) return;
+      if (Date.now() > deadline) throw new Error("[parity] pending group never finished toggling.");
+      await this.page.waitForTimeout(100);
+    }
   }
+
   async wsSettingsInvitesExpanded(): Promise<boolean> {
-    return todo("wsSettingsInvitesExpanded");
+    const toggle = this.page.getByRole("button", { name: /Pending invites/ }).first();
+    if (!(await this.isShown(toggle))) return false;
+    return (await toggle.getAttribute("aria-expanded")) === "true";
   }
-  async wsSettingsInviteRole(_email: string): Promise<string> {
-    return todo("wsSettingsInviteRole");
+
+  async wsSettingsInviteRole(email: string): Promise<string> {
+    return (
+      (await this.wsSettingsInviteRow(email)
+        .getByRole("button", { name: `Role for ${email}` })
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
-  async wsSettingsInviteRoleOptions(_email: string): Promise<string[]> {
-    return todo("wsSettingsInviteRoleOptions");
+
+  async wsSettingsInviteRoleOptions(email: string): Promise<string[]> {
+    const trigger = this.wsSettingsInviteRow(email).getByRole("button", { name: `Role for ${email}` });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const options = await this.wsSettingsVisibleOptions().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    await this.wsSettingsVisibleOptions().first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return options.map((option) => option.trim()).filter((option) => option.length > 0);
   }
-  async wsSettingsInviteSetRole(_email: string, _roleLabel: string): Promise<void> {
-    return todo("wsSettingsInviteSetRole");
+
+  async wsSettingsInviteSetRole(email: string, roleLabel: string): Promise<void> {
+    const patched = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" &&
+          /\/api\/workspaces\/[^/]+\/invitations\/[^/]+\/$/.test(response.url()),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.wsSettingsInviteRow(email)
+      .getByRole("button", { name: `Role for ${email}` })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions()
+      .filter({ hasText: new RegExp(`^${roleLabel}$`) })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await patched;
+    // The row reads the settled role: a success refreshes it onto the new
+    // label, a failure leaves the previous label while an error toast shows.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsInviteRole(email)) === roleLabel) return;
+      const toast = await this.rulesLastToast();
+      if (toast !== null && /error/i.test(toast.title)) return;
+      if (Date.now() > deadline) throw new Error(`[parity] invitation role never settled on ${roleLabel}.`);
+      await this.page.waitForTimeout(100);
+    }
   }
-  async wsSettingsInviteMenuEntries(_email: string): Promise<string[]> {
-    return todo("wsSettingsInviteMenuEntries");
+
+  async wsSettingsInviteMenuEntries(email: string): Promise<string[]> {
+    await this.wsSettingsInviteOpenMenu(email);
+    const entries = await this.page.getByRole("menuitem").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return entries.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
   }
-  async wsSettingsInviteCopyLink(_email: string): Promise<string> {
-    return todo("wsSettingsInviteCopyLink");
+
+  async wsSettingsInviteCopyLink(email: string): Promise<string> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.wsSettingsInviteOpenMenu(email);
+    await this.page.getByRole("menuitem", { name: "Copy link" }).click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const text = await this.page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+      if (text !== "") return text;
+      if (Date.now() > deadline) throw new Error("[parity] invitation copy-link never wrote the clipboard.");
+      await this.page.waitForTimeout(100);
+    }
   }
-  async wsSettingsInviteOpenRemove(_email: string): Promise<void> {
-    return todo("wsSettingsInviteOpenRemove");
+
+  async wsSettingsInviteOpenRemove(email: string): Promise<void> {
+    await this.wsSettingsInviteOpenMenu(email);
+    await this.page.getByRole("menuitem", { name: "Remove", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsOpenDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsRemoveDialogVisible(): Promise<boolean> {
-    return todo("wsSettingsRemoveDialogVisible");
+    return (await this.wsSettingsOpenDialog().count()) > 0;
   }
+
   async wsSettingsRemoveDialogTitle(): Promise<string | null> {
-    return todo("wsSettingsRemoveDialogTitle");
+    const dialog = this.wsSettingsOpenDialog();
+    if ((await dialog.count()) === 0) return null;
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return (((await heading.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }
+
   async wsSettingsRemoveDialogText(): Promise<string | null> {
-    return todo("wsSettingsRemoveDialogText");
+    const dialog = this.wsSettingsOpenDialog();
+    if ((await dialog.count()) === 0) return null;
+    const text = ((await dialog.innerText().catch(() => "")) ?? "").trim() || null;
+    return text as string | null;
   }
+
   async wsSettingsRemoveDialogConfirm(): Promise<void> {
-    return todo("wsSettingsRemoveDialogConfirm");
+    const dialog = this.wsSettingsOpenDialog();
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          (response.request().method() === "DELETE" &&
+            /\/api\/workspaces\/[^/]+\/(members|invitations)\/[^/]+\/$/.test(response.url())) ||
+          (response.request().method() === "POST" &&
+            /\/api\/workspaces\/[^/]+\/members\/leave\/$/.test(response.url())),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await dialog
+      .getByRole("button", { name: /^(Remove|Leave)$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
+    await this.wsSettingsOpenDialog()
+      .waitFor({ state: "detached", timeout: 5_000 })
+      .then(
+        () => undefined,
+        () => undefined
+      );
   }
+
   async wsSettingsRemoveDialogCancel(): Promise<void> {
-    return todo("wsSettingsRemoveDialogCancel");
+    await this.wsSettingsOpenDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsOpenDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
-  async wsSettingsMemberRoleEditable(_email: string): Promise<boolean> {
-    return todo("wsSettingsMemberRoleEditable");
+
+  async wsSettingsMemberRoleEditable(email: string): Promise<boolean> {
+    const row = this.wsSettingsMemberRow(email);
+    if ((await row.count()) === 0) return false;
+    return this.isShown(row.getByRole("button", { name: `Role for ${email}` }));
   }
-  async wsSettingsMemberRoleOptions(_email: string): Promise<string[]> {
-    return todo("wsSettingsMemberRoleOptions");
+
+  async wsSettingsMemberRoleOptions(email: string): Promise<string[]> {
+    const trigger = this.wsSettingsMemberRow(email).getByRole("button", { name: `Role for ${email}` });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const options = await this.wsSettingsVisibleOptions().allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    await this.wsSettingsVisibleOptions().first().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
+    return options.map((option) => option.trim()).filter((option) => option.length > 0);
   }
-  async wsSettingsMemberSetRole(_email: string, _roleLabel: string): Promise<void> {
-    return todo("wsSettingsMemberSetRole");
+
+  async wsSettingsMemberSetRole(email: string, roleLabel: string): Promise<void> {
+    const patched = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "PATCH" && /\/api\/workspaces\/[^/]+\/members\/[^/]+\/$/.test(response.url()),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.wsSettingsMemberRow(email)
+      .getByRole("button", { name: `Role for ${email}` })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsVisibleOptions()
+      .filter({ hasText: new RegExp(`^${roleLabel}$`) })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await patched;
+    // Success settles the label on the refreshed row; a failure leaves the
+    // previous label and shows an error toast.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.wsSettingsMemberRole(email)) === roleLabel) return;
+      const toast = await this.rulesLastToast();
+      if (toast !== null && /error/i.test(toast.title)) return;
+      if (Date.now() > deadline) throw new Error(`[parity] member role never settled on ${roleLabel}.`);
+      await this.page.waitForTimeout(100);
+    }
   }
-  async wsSettingsMemberMenuEntry(_email: string): Promise<string | null> {
-    return todo("wsSettingsMemberMenuEntry");
+
+  /** The account-type cell's text for one row (a role label or Suspended). */
+  private async wsSettingsMemberRole(email: string): Promise<string> {
+    return (
+      (await this.wsSettingsMemberRow(email)
+        .locator("td")
+        .nth(3)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
-  async wsSettingsMemberOpenRemove(_email: string): Promise<void> {
-    return todo("wsSettingsMemberOpenRemove");
+
+  async wsSettingsMemberMenuEntry(email: string): Promise<string | null> {
+    const trigger = this.wsSettingsMemberRow(email).getByRole("button", { name: `Actions for ${email}` });
+    if (!(await this.isShown(trigger))) return null;
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const items = await this.page.getByRole("menuitem").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    const entries = items.map((item) => item.trim()).filter((item) => item.length > 0);
+    return entries[0] ?? null;
   }
+
+  async wsSettingsMemberOpenRemove(email: string): Promise<void> {
+    await this.wsSettingsMemberRow(email)
+      .getByRole("button", { name: `Actions for ${email}` })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menuitem", { name: /^(Remove|Leave)$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsOpenDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async wsSettingsMembersActivityVisible(): Promise<boolean> {
     // No member-activity entry renders in this checkout (spec §8, WSET-011):
     // the members header carries only search and the role filter here.
     return this.isShown(this.page.locator('[data-testid="members-activity"]'));
   }
+
   async wsSettingsMembersBillingVisible(): Promise<boolean> {
-    // The billing entry belongs to NEWFRONT-538; nothing renders yet.
+    // §14: the OSS members header reserves the billing placement and renders
+    // nothing in it for any role, so no upsell affordance is observable.
     return this.isShown(this.page.locator('[data-testid="members-billing"]'));
   }
 

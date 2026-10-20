@@ -367,6 +367,16 @@ bug with intended behavior, or amend the acceptance line to the gate,
 before the gate locks one of them in. A failed leave shows an error
 notice.
 
+Decision (slice NEWFRONT-538): the slice amends the inventory
+acceptance line to the observed gate rather than filing a picker bug.
+The oracle pins the gate (`Not Authorized!` on the just-left workspace
+home with the membership explanation), the old app's behavior is
+coherent for a member who may still see the workspace in a stale list,
+and the gate is what the parity suite can prove. The new app therefore
+navigates to the workspace home after a successful leave, keeps the
+session workspace list as read and renders the not-authorized screen
+with its `Not Authorized!` heading.
+
 ## 14. Billing upsell entry (WSET-015, slice NEWFRONT-538)
 
 The members header reserves a billing action control beside the invite
