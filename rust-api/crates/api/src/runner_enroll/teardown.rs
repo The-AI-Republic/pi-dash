@@ -2484,7 +2484,11 @@ use pidash_services::runner_sessions::guards::alive_threshold;
 /// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
 /// no tx), else the drain loop. A dispatch failure propagates — the row
 /// stays `ASSIGNED` while the caller observes the failure.
-async fn drain_pod_by_id(pool: &PgPool, state: &AppState, pod_id: Uuid) -> Result<(), ()> {
+pub(crate) async fn drain_pod_by_id(
+    pool: &PgPool,
+    state: &AppState,
+    pod_id: Uuid,
+) -> Result<(), ()> {
     let pod: Option<sqlx::postgres::PgRow> = sqlx::query(drain_kernel::DRAIN_POD_BY_ID_LOOKUP_SQL)
         .bind(pod_id)
         .fetch_optional(pool)

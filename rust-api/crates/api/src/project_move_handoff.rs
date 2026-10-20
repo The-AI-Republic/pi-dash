@@ -26,8 +26,8 @@ use pidash_db::tx::Transaction as DbTransaction;
 use pidash_jobs::dispatch::{
     dispatch_after_commit as collect_dispatch, dispatch_agent_run,
     execution_fields as resolve_execution_fields, lock_cloud_creation_capacity as lock_capacity,
-    ActorScope, DeferredAdmissionError, ExecutionFieldsError, ExecutionInputs, ExecutionSeams,
-    ProjectScope,
+    ActorScope, DeferredAdmissionError, DispatchDecision, ExecutionFieldsError, ExecutionInputs,
+    ExecutionSeams, ProjectScope,
 };
 use pidash_services::assistant::seams as assistant_seams;
 use pidash_services::dispatch::{
@@ -1447,9 +1447,16 @@ pub(crate) async fn complete_project_move_handoff(
     drain_publish_effects(pool, state, pairs).await;
     let now = now_micros();
     for id in dispatches {
-        dispatch_agent_run(pool, &cloud, id, now)
+        // `dispatch_agent_run` leaves the runner-plane drain to the caller
+        // (`dispatch.py:61-70` drains the pod inline). Act on the decision
+        // with the same recipe the revoke path uses so the replacement run
+        // is matched to the target pod's idle runner.
+        if let DispatchDecision::PodDrain { pod_id } = dispatch_agent_run(pool, &cloud, id, now)
             .await
-            .map_err(|_| ())?;
+            .map_err(|_| ())?
+        {
+            crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id).await?;
+        }
     }
     for consume in &deferred {
         consume_admission_token(&cache, consume);
