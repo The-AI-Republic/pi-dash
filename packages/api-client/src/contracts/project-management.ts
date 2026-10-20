@@ -78,6 +78,12 @@ export interface ProjectUpdateInput {
    * estimate id of this project turns estimation on, null turns it off.
    */
   estimate?: string | null;
+  /**
+   * Whether project members may edit workflow states (PSET-034). Workspace
+   * and project admins always may; this flag widens that to members. The
+   * states tab flips it through this same project update.
+   */
+  members_can_edit_states?: boolean;
 }
 
 /**
