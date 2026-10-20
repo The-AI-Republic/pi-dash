@@ -580,8 +580,12 @@ module range; a cycle/module with no usable start date returns empty `data` and
 `schema`. Scoped stats rows carry `display_name`, `assignee_id`, `avatar_url`,
 `cancelled_work_items`, `completed_work_items`, `backlog_work_items`,
 `un_started_work_items`, `started_work_items`; the unassigned row has a null
-`display_name` and `assignee_id`. Permission on all three project scoped reads
-is admin/member; guests receive 403.
+`display_name` and `assignee_id`. Project-scoped totals and stats are
+admin/member only, so guests receive 403. Project-scoped charts also permit
+guests at the API (the same permission set as the workspace chart endpoint),
+but no shipped guest surface opens the dialog or requests dialog content; the
+new build keeps the trigger absence in §13 rather than adding a guest-only
+chart path.
 
 ### 16.6 Query keys and fetch policy
 
