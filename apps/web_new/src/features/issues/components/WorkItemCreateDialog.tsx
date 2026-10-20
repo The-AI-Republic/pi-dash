@@ -1084,7 +1084,11 @@ export function WorkItemCreateDialog({
               onChange={pickProject}
               includeProjectIds={creatableIds}
               knownProjects={projectLabels}
-              disabled={busy || lockedProject !== undefined || (editing && edit?.kind !== "draft")}
+              // A stored row keeps the project it was filed under — a draft
+              // changing where it publishes does so through its own picker
+              // entry, and the move entry reads the stored project (the
+              // promote endpoint files under it, ISS-139).
+              disabled={busy || lockedProject !== undefined || (editing && (edit?.kind !== "draft" || moving))}
             />
             {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
           </div>

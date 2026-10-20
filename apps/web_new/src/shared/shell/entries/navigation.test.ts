@@ -49,6 +49,7 @@ describe("navigation entries", () => {
       "shell.open-workspace",
       "shell.go-home",
       "shell.go-projects",
+      "shell.go-drafts",
       "shell.go-archives",
     ]);
     const picker = commands[0]!;
@@ -65,7 +66,8 @@ describe("navigation entries", () => {
       page: WORKSPACE_PICKER_PAGE_ID,
     });
     expect(commands[2]).toMatchObject({ title: "Go to home", sequence: "gh", hint: "Acme" });
-    expect(commands[4]).toMatchObject({ title: "Go to workspace archives", sequence: "gr" });
+    expect(commands[4]).toMatchObject({ title: "Go to workspace drafts", sequence: "gj" });
+    expect(commands[5]).toMatchObject({ title: "Go to workspace archives", sequence: "gr" });
   });
 
   it("hides the archives jump from viewers outside a project", () => {
@@ -145,8 +147,10 @@ describe("navigation entries", () => {
       "/acme/projects/project-id/views",
       "/acme/projects/project-id/intake",
     ]);
-    const archives = buildNavigationCommands(context({ navigate }));
-    archives.find((command) => command.id === "shell.go-archives")!.run();
+    const workspace = buildNavigationCommands(context({ navigate }));
+    workspace.find((command) => command.id === "shell.go-drafts")!.run();
+    expect(navigate).toHaveBeenLastCalledWith("/acme/drafts");
+    workspace.find((command) => command.id === "shell.go-archives")!.run();
     expect(navigate).toHaveBeenLastCalledWith("/acme/projects/archives");
   });
 });

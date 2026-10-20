@@ -436,6 +436,15 @@ describe("first-run screens", () => {
     expect(h.dialog.seen).toBeDefined();
   });
 
+  it("treats an archived joined project as no project", async () => {
+    renderPage({
+      pages: [page([])],
+      projects: [project(PROJECT, "Atlas", { archived_at: "2026-01-01T00:00:00Z" })],
+    });
+    expect(await screen.findByText("No project")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Draft a work item" })).not.toBeInTheDocument();
+  });
+
   it("asks a viewer without a project to create one", async () => {
     const h = renderPage({ pages: [page([])], projects: [project(PROJECT, "Atlas", { member_role: null })] });
     expect(await screen.findByText("No project")).toBeInTheDocument();
@@ -492,6 +501,39 @@ describe("row flows", () => {
     await props?.onPublish?.({ name: "One", project_id: PROJECT });
     await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
     expect(toasts.notifySuccess).toHaveBeenCalledWith("Success", "Draft published to project.");
+  });
+
+  it("re-reads the list after the dialog reports a saved edit", async () => {
+    let reads = 0;
+    createAppClient("https://api.test", (async (url: string) => {
+      const json = (status: number, payload: unknown) => ({
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(payload),
+      });
+      if (url.includes("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+      if (url.includes("/draft-issues/") && !/draft-issues\/[^/?]+/.test(url)) {
+        reads += 1;
+        return json(200, page([draft(DRAFT_1, reads === 1 ? "One" : "One edited")]));
+      }
+      if (url.endsWith("/projects/details/")) return json(200, [project()]);
+      return json(200, {});
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const dialog = dialogStub();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DraftsPage workspaceSlug={SLUG} CreateDialog={dialog.CreateDialog} onCreateProject={vi.fn()} />
+      </QueryClientProvider>
+    );
+    await screen.findByText("One");
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Edit" }));
+    await act(async () => {
+      dialog.seen.at(-1)?.edit?.onChanged?.();
+    });
+    expect(await screen.findByText("One edited")).toBeInTheDocument();
+    expect(reads).toBeGreaterThan(1);
   });
 
   it("edits on double-click and closes on the dialog's request", async () => {

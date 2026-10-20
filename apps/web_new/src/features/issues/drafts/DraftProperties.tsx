@@ -28,6 +28,7 @@ import { usePickerEstimates, usePickerStates } from "../../../shared/pickers/ref
 import {
   asPriority,
   assigneePatch,
+  draftStateId,
   cyclePatch,
   estimatePatch,
   isDraftOverdue,
@@ -73,6 +74,10 @@ export function DraftProperties({
   const projectId = draft.project_id ?? "";
   const states = usePickerStates(workspaceSlug, projectId, projectId !== "");
   const estimates = usePickerEstimates(workspaceSlug, projectId, projectId !== "" && project?.estimate != null);
+  // The picker reads the project default while the draft holds no state
+  // (the old block does), but the overdue tone follows only the state the
+  // draft actually stores — an unset state reads plain.
+  const stateId = draftStateId(draft, project);
   const stateGroup = stateGroupOf(states.data, draft.state_id);
   const overdue = isDraftOverdue(draft.target_date ?? null, stateGroup, today);
   const stop = (event: React.SyntheticEvent): void => {
@@ -90,7 +95,7 @@ export function DraftProperties({
       <StatePicker
         workspaceSlug={workspaceSlug}
         projectId={projectId}
-        value={draft.state_id}
+        value={stateId}
         disabled={disabled}
         placeholder="State"
         onChange={(stateId) => onWrite(statePatch(stateId))}

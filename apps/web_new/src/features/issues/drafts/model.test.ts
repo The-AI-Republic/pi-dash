@@ -17,6 +17,7 @@ import {
   cyclePatch,
   DRAFT_COPY_SUFFIX,
   draftSnapshot,
+  draftStateId,
   estimatePatch,
   isDraftOverdue,
   labelPatch,
@@ -166,6 +167,21 @@ describe("copyDraftInput", () => {
 
   it("carries a numeric estimate as its point id string", () => {
     expect(copyDraftInput(draft({ estimate_point: 5 })).estimate_point).toBe("5");
+  });
+});
+
+describe("draftStateId", () => {
+  it("reads the draft's own state over the project default", () => {
+    expect(draftStateId({ state_id: "state-1" }, { default_state: "default-1" })).toBe("state-1");
+  });
+
+  it("falls back to the project default while the draft holds none", () => {
+    expect(draftStateId({ state_id: null }, { default_state: "default-1" })).toBe("default-1");
+  });
+
+  it("reads nothing without a draft state or a project", () => {
+    expect(draftStateId({ state_id: null }, { default_state: null })).toBeNull();
+    expect(draftStateId({ state_id: null }, undefined)).toBeNull();
   });
 });
 

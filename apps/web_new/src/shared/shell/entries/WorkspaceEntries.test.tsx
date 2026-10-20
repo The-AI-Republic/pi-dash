@@ -104,6 +104,7 @@ describe("WorkspacePaletteEntries", () => {
         "shell.go-home",
         "shell.go-projects",
         "shell.go-archives",
+        "shell.go-drafts",
         "shell.open-project",
         "shell.open-workspace",
         "shell.workspace-invites",

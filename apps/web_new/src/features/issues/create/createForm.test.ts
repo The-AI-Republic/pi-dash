@@ -241,8 +241,18 @@ describe("buildDraftInput", () => {
       label_ids: ["label"],
       start_date: "2026-02-01",
       target_date: "2026-02-02",
+      estimate_point: "point",
       parent_id: "parent",
     });
+  });
+
+  it("keeps a draft's cycle, modules and estimate on the row", () => {
+    const draft = buildDraftInput(
+      form({ cycleId: "cycle-1", moduleIds: ["module-1", "module-2"], estimatePoint: "point" })
+    );
+    expect(draft.cycle_id).toBe("cycle-1");
+    expect(draft.module_ids).toEqual(["module-1", "module-2"]);
+    expect(draft.estimate_point).toBe("point");
   });
 
   it("sends the state and omits a none priority", () => {

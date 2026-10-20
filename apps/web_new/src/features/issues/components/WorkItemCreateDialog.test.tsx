@@ -2524,6 +2524,21 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
     expect(h.onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("locks the project chip in the move entry", async () => {
+    setup(
+      {},
+      {
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Mover" }) },
+        moveToProject: true,
+        onPublish: vi.fn(async () => undefined),
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Mover"));
+    // The promote endpoint files under the draft's stored project, so the
+    // move form must not offer a different one (ISS-139).
+    expect(screen.getByRole("button", { name: /Atlas/ })).toBeDisabled();
+  });
+
   it("keeps the move form open and explains a failed promote", async () => {
     const h = setup(
       {},

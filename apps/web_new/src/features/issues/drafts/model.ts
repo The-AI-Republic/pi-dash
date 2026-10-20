@@ -7,7 +7,7 @@
 // starts from, who may delete a row, and when a due day reads overdue.
 // The network stays in api.ts and the page owns the React state.
 
-import type { DraftIssue, DraftIssueCreateInput } from "@pidash/api-client";
+import type { DraftIssue, DraftIssueCreateInput, ProjectDetails } from "@pidash/api-client";
 
 import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { PRIORITY_LEVELS, type PriorityLevel } from "../../../shared/pickers/priorities.js";
@@ -54,6 +54,20 @@ export function draftSnapshot(draft: DraftIssue): DraftSnapshot {
     estimate_point: draft.estimate_point ?? null,
     parent_id: draft.parent_id,
   };
+}
+
+/**
+ * The state a draft's picker reads: its own pick, or the project's
+ * default while it holds none. The old block draws the default for an
+ * unset draft (its state dropdown falls back to the default), so a
+ * freshly created draft reads "Todo" rather than an empty trigger
+ * (ISS-138 oracle).
+ */
+export function draftStateId(
+  draft: Pick<DraftIssue, "state_id">,
+  project: Pick<ProjectDetails, "default_state"> | undefined
+): string | null {
+  return draft.state_id ?? project?.default_state ?? null;
 }
 
 /** The duplicated payload a copy starts from: same values, name suffixed. */

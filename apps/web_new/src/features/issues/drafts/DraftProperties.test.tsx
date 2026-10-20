@@ -18,6 +18,7 @@ import { DraftProperties, stateGroupOf } from "./DraftProperties.js";
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const STATE = "323e4567-e89b-12d3-a456-426614174002";
+const DEFAULT_STATE = "423e4567-e89b-12d3-a456-426614174003";
 const ESTIMATE = "823e4567-e89b-12d3-a456-426614174007";
 
 const pickers = vi.hoisted(() => ({
@@ -223,6 +224,30 @@ describe("DraftProperties", () => {
     guest.unmount();
     const homeless = renderStrip(draft({ project_id: null }), undefined);
     expect(homeless.calls.every((call) => call["disabled"] === true)).toBe(true);
+  });
+
+  it("reads the project default state while the draft holds none", () => {
+    states.mockReturnValue({
+      data: [
+        { id: STATE, group: "unstarted" },
+        { id: DEFAULT_STATE, group: "unstarted" },
+      ],
+    } as never);
+    estimates.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ state_id: null }), project({ default_state: DEFAULT_STATE }));
+    expect(calls.find((call) => call.name === "state")?.["value"]).toBe(DEFAULT_STATE);
+  });
+
+  it("keeps the overdue tone off an unset draft state even with a default", () => {
+    states.mockReturnValue({ data: [{ id: DEFAULT_STATE, group: "unstarted" }] } as never);
+    estimates.mockReturnValue({ data: [] } as never);
+    stubClient();
+    const { container } = renderStrip(
+      draft({ state_id: null, target_date: "2000-01-01" }),
+      project({ default_state: DEFAULT_STATE })
+    );
+    expect(container.querySelector(".text-\\(--danger\\)")).toBeNull();
   });
 
   it("flags an overdue due day in the danger colour", () => {

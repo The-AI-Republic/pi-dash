@@ -11,7 +11,7 @@
 // one; no joined project invites a project instead.
 
 import { Button, Skeleton } from "@pidash/kit";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, RefreshCw } from "lucide-react";
 import * as React from "react";
 
@@ -28,6 +28,7 @@ import {
   DRAFT_DELETE_FAILED_TITLE,
   DRAFT_DELETE_PERMISSION_BODY,
   DRAFT_DELETE_PERMISSION_TITLE,
+  draftKeys,
   draftListQueryOptions,
   draftTotalCount,
   flattenDraftPages,
@@ -99,6 +100,7 @@ export function identifierOf(projects: readonly ProjectDetails[], projectId: str
 
 export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: DraftsPageProps): React.ReactElement {
   const client = getAppClient();
+  const queryClient = useQueryClient();
   const permissions = usePermissions(workspaceSlug);
   const me = useMe();
   const drafts = useInfiniteQuery(draftListQueryOptions(client, workspaceSlug));
@@ -114,7 +116,10 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
   const total = draftTotalCount(drafts.data);
   const projects = projectDetails.data ?? [];
   const joined = projects.filter((project) => project.member_role !== null);
-  const hasProject = joined.length > 0;
+  // "No project" follows the joined projects the viewer can create work
+  // in, as the old root does: the empty screen names creating or joining
+  // one. Archived projects never count (ISS-141).
+  const hasProject = joined.some((project) => project.archived_at === null);
   const creatable: WorkItemCreateProject[] = React.useMemo(
     () =>
       selectCreatableProjects(
@@ -131,6 +136,14 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
 
   function closeDialog(): void {
     setDialog({ kind: "closed" });
+  }
+
+  // A modal edit writes through the shared edit path, which refreshes the
+  // project issue lists but not this page's cache; re-read so the block
+  // shows the saved values (ISS-139).
+  function refreshAfterEdit(): void {
+    closeDialog();
+    void queryClient.invalidateQueries({ queryKey: draftKeys.list(workspaceSlug) });
   }
 
   function writeField(draft: DraftIssue, patch: DraftFieldPatch): void {
@@ -268,7 +281,7 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
           await promote.mutateAsync({ draftId, input });
           closeDialog();
         }}
-        onEditChanged={closeDialog}
+        onEditChanged={refreshAfterEdit}
       />
       <DeleteDraftDialog
         open={pendingDelete !== null}
