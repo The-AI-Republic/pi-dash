@@ -393,6 +393,11 @@ def reconcile_stalled_runs() -> int:
 
     Runs in ``AWAITING_APPROVAL`` / ``AWAITING_REAUTH`` are excluded so
     operator-driven pauses are never failed by the watchdog.
+
+    Runs whose runner reports ``agent_health`` are excluded too: those
+    runners run the passive-kill activity watchdog themselves (unhealthy at
+    24h, failed at 48h by default) and a quiet agent there may be inside a
+    long tool call. This short backstop only covers older runners.
     Pre-observability runners pass cleanly: their ``last_event_at`` is
     NULL and ``__lt`` excludes NULL.
     """
@@ -428,6 +433,7 @@ def reconcile_stalled_runs() -> int:
             runner__live_state__last_event_at__lt=cutoff,
         )
         .filter(Q(runner__live_state__approvals_pending=0) | Q(runner__live_state__approvals_pending__isnull=True))
+        .filter(runner__live_state__agent_health__isnull=True)
         .select_related("runner")
     )
 

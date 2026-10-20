@@ -1451,6 +1451,18 @@ class ChatMessageDedupe(models.Model):
         ]
 
 
+class AgentHealth(models.TextChoices):
+    """Activity-watchdog health a runner reports for its in-flight run.
+
+    ``UNHEALTHY`` means the agent has emitted no event for the runner's
+    unhealthy threshold (24h by default). The run is still running: the
+    runner only fails it at its kill threshold (48h by default).
+    """
+
+    HEALTHY = "healthy", "Healthy"
+    UNHEALTHY = "unhealthy", "Unhealthy"
+
+
 class RunnerLiveState(models.Model):
     """Volatile per-runner observability snapshot for the active agent run.
 
@@ -1497,6 +1509,14 @@ class RunnerLiveState(models.Model):
     usage = models.JSONField(default=dict, blank=True)
     llm_model = models.CharField(max_length=128, null=True, blank=True)
     turn_count = models.PositiveIntegerField(null=True, blank=True)
+    # Activity-watchdog health, reported on every poll while a run is in
+    # flight regardless of the runner's ``agent_observability_v1`` flag.
+    # NULL means the runner predates the passive-kill watchdog: it still runs
+    # the legacy short stall timer, and ``reconcile_stalled_runs`` keeps
+    # backstopping it. Non-NULL runners own their watchdog, so the cloud
+    # never fails their runs for silence.
+    agent_health = models.CharField(max_length=16, choices=AgentHealth.choices, null=True, blank=True)
+    agent_last_activity_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

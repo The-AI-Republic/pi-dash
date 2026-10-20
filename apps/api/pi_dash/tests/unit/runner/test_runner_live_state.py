@@ -29,6 +29,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    AgentHealth,
     AgentRun,
     AgentRunStatus,
     Pod,
@@ -298,6 +299,66 @@ def test_upsert_handles_get_or_create_for_returning_runner(
     assert RunnerLiveState.objects.filter(runner=runner).count() == 1
 
 
+@pytest.mark.unit
+def test_upsert_stores_agent_health_and_recovers(db, create_user, workspace, pod):
+    """Health rides without the observability scalars and tracks recovery."""
+    runner = _make_runner(create_user, workspace, pod)
+    rid = uuid.uuid4()
+    idle_since = timezone.now() - timedelta(hours=25)
+    upsert_runner_live_state(
+        runner,
+        {
+            "observed_run_id": str(rid),
+            "agent_health": "unhealthy",
+            "agent_last_activity_at": idle_since.isoformat(),
+        },
+    )
+    state = RunnerLiveState.objects.get(runner=runner)
+    assert state.agent_health == AgentHealth.UNHEALTHY
+    assert state.agent_last_activity_at == idle_since
+    assert state.last_event_at is None
+
+    resumed = timezone.now()
+    upsert_runner_live_state(
+        runner,
+        {
+            "observed_run_id": str(rid),
+            "agent_health": "healthy",
+            "agent_last_activity_at": resumed.isoformat(),
+        },
+    )
+    state.refresh_from_db()
+    assert state.agent_health == AgentHealth.HEALTHY
+    assert state.agent_last_activity_at == resumed
+
+
+@pytest.mark.unit
+def test_upsert_ignores_unknown_agent_health_label(db, create_user, workspace, pod):
+    runner = _make_runner(create_user, workspace, pod)
+    rid = uuid.uuid4()
+    upsert_runner_live_state(runner, {"observed_run_id": str(rid), "agent_health": "unhealthy"})
+    upsert_runner_live_state(runner, {"observed_run_id": str(rid), "agent_health": "degraded"})
+    state = RunnerLiveState.objects.get(runner=runner)
+    assert state.agent_health == AgentHealth.UNHEALTHY
+
+
+@pytest.mark.unit
+def test_upsert_run_change_drops_previous_runs_health(db, create_user, workspace, pod):
+    runner = _make_runner(create_user, workspace, pod)
+    upsert_runner_live_state(
+        runner,
+        {
+            "observed_run_id": str(uuid.uuid4()),
+            "agent_health": "unhealthy",
+            "agent_last_activity_at": timezone.now().isoformat(),
+        },
+    )
+    upsert_runner_live_state(runner, {"observed_run_id": None})
+    state = RunnerLiveState.objects.get(runner=runner)
+    assert state.agent_health is None
+    assert state.agent_last_activity_at is None
+
+
 # ---------------------------------------------------------------------------
 # reconcile_stalled_runs watchdog
 # ---------------------------------------------------------------------------
@@ -426,6 +487,36 @@ def test_watchdog_does_not_reap_awaiting_approval(
     assert reaped == 0
     run.refresh_from_db()
     assert run.status == AgentRunStatus.AWAITING_APPROVAL
+
+
+@pytest.mark.unit
+@override_settings(
+    RUNNER_AGENT_STALL_THRESHOLD_SECS=300,
+    RUNNER_AGENT_OBSERVABILITY_STALE_SECS=90,
+)
+def test_watchdog_leaves_runs_on_runners_that_own_their_watchdog(db, create_user, workspace, pod):
+    """A runner reporting agent_health runs the passive-kill watchdog itself.
+
+    Its agent may be quiet inside a long tool call, so the cloud's short
+    backstop must not fail the run even when every legacy condition holds.
+    """
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner)
+    now = timezone.now()
+    for health in (AgentHealth.HEALTHY, AgentHealth.UNHEALTHY):
+        RunnerLiveState.objects.update_or_create(
+            runner=runner,
+            defaults={
+                "observed_run_id": run.id,
+                "last_event_at": now - timedelta(hours=30),
+                "agent_health": health,
+            },
+        )
+        RunnerLiveState.objects.filter(runner=runner).update(updated_at=now - timedelta(seconds=10))
+
+        assert reconcile_stalled_runs() == 0
+        run.refresh_from_db()
+        assert run.status == AgentRunStatus.RUNNING
 
 
 @pytest.mark.unit
