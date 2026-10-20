@@ -701,7 +701,12 @@ function titleField(): HTMLInputElement {
 
 /** The dialog's submit button lives in the footer, outside the form. */
 function save(): void {
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  // The form's own submit: a draft entry names it "Save to Drafts", every
+  // other entry "Save" (the issue entry also carries the inline shortcut).
+  const form = document.getElementById("work-item-create-form");
+  const submit = form?.querySelector('button[type="submit"]');
+  if (submit) fireEvent.click(submit);
+  else fireEvent.click(screen.getAllByRole("button", { name: /^(Save|Save to Drafts)$/ }).at(-1)!);
 }
 
 /** Type into the rich description; the editor's own content node takes
@@ -2402,5 +2407,194 @@ describe("WorkItemCreateDialog tab order (ISS-125)", () => {
     const order = modalTabOrder();
     expect(order.some((entry) => entry.includes("#10:"))).toBe(false);
     expect(order.some((entry) => entry.includes("#11:"))).toBe(false);
+  });
+});
+
+describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
+  it("heads a blank draft, hides Create more, and stores it without a title rule", async () => {
+    const user = userEvent.setup();
+    const h = setup({}, { onCopySaved: vi.fn(async () => undefined) });
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toContain("draft");
+    expect(await screen.findByRole("button", { name: "Save to Drafts" })).toBeInTheDocument();
+    expect(screen.queryByText("Create more")).not.toBeInTheDocument();
+    await user.click(titleField());
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(h.onOpenChange).toHaveBeenCalledTimes(1);
+    expect(h.calls.some((call) => call.method === "POST" && call.url.endsWith("/draft-issues/"))).toBe(false);
+  });
+
+  it("passes an unnamed draft through the caller's write as Untitled", async () => {
+    const saves: unknown[] = [];
+    const onCopySaved = vi.fn(async (input: unknown) => {
+      saves.push(input);
+    });
+    const h = setup({}, { onCopySaved });
+    save();
+    await waitFor(() => expect(onCopySaved).toHaveBeenCalledTimes(1));
+    expect(saves[0]).toMatchObject({ name: "Untitled" });
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("opens a copy on the duplicated payload", async () => {
+    const h = setup(
+      {},
+      {
+        draftSeed: {
+          title: "Plan (copy)",
+          input: { name: "Plan (copy)", project_id: PROJECT_ATLAS, priority: "high", label_ids: [PARENT_ID] },
+        },
+        onCopySaved: vi.fn(async () => undefined),
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
+    expect(h.sent).toBeDefined();
+    const chips = screen.getAllByText("Labels");
+    expect(chips.length).toBeGreaterThan(0);
+  });
+
+  it("saves a copy through the caller's write with the typed name", async () => {
+    const onCopySaved = vi.fn(async () => undefined);
+    const h = setup(
+      {},
+      {
+        draftSeed: { title: "Plan (copy)", input: { name: "Plan (copy)", project_id: PROJECT_ATLAS } },
+        onCopySaved,
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
+    fireEvent.change(titleField(), { target: { value: "Plan (copy) v2" } });
+    save();
+    await waitFor(() => expect(onCopySaved).toHaveBeenCalledTimes(1));
+    expect(onCopySaved).toHaveBeenCalledWith(expect.objectContaining({ name: "Plan (copy) v2" }));
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps the form open and explains a failed copy write", async () => {
+    const h = setup(
+      {},
+      {
+        draftSeed: { title: "Plan (copy)", input: { name: "Plan (copy)", project_id: PROJECT_ATLAS } },
+        onCopySaved: vi.fn(async () => {
+          throw new Error("nope");
+        }),
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
+    save();
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't save the draft", expect.any(String)));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    // The retry opens again.
+    save();
+    await waitFor(() => expect(notifyError).toHaveBeenCalledTimes(2));
+  });
+
+  it("saves a standalone draft entry without a caller write", async () => {
+    const h = setup({}, { draftSeed: { title: "", input: { name: null } } });
+    await waitFor(() => expect(h).toBeDefined());
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(h.calls.some((call) => call.method === "POST" && call.url.endsWith("/draft-issues/"))).toBe(true);
+  });
+
+  it("explains a failed standalone draft write", async () => {
+    const h = setup({ draftStatus: 500 }, { draftSeed: { title: "", input: { name: null } } });
+    save();
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't save the draft", expect.any(String)));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("opens the move entry on the draft and promotes through the caller", async () => {
+    const user = userEvent.setup();
+    const onPublish = vi.fn(async () => undefined);
+    const h = setup(
+      {},
+      {
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Mover" }) },
+        moveToProject: true,
+        onPublish,
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Mover"));
+    expect(screen.getByRole("button", { name: "Add to project" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish issue" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add to project" }));
+    await waitFor(() => expect(onPublish).toHaveBeenCalledTimes(1));
+    expect(onPublish).toHaveBeenCalledWith(expect.objectContaining({ name: "Mover", project_id: PROJECT_ATLAS }));
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("locks the project chip in the move entry", async () => {
+    setup(
+      {},
+      {
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Mover" }) },
+        moveToProject: true,
+        onPublish: vi.fn(async () => undefined),
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Mover"));
+    // The promote endpoint files under the draft's stored project, so the
+    // move form must not offer a different one (ISS-139).
+    expect(screen.getByRole("button", { name: /Atlas/ })).toBeDisabled();
+  });
+
+  it("keeps the move form open and explains a failed promote", async () => {
+    const h = setup(
+      {},
+      {
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Mover" }) },
+        moveToProject: true,
+        onPublish: vi.fn(async () => {
+          throw new Error("nope");
+        }),
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Mover"));
+    fireEvent.click(screen.getByRole("button", { name: "Add to project" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't publish the draft", expect.any(String)));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("runs one copy write while the first is still in flight", async () => {
+    let release = (): void => undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onCopySaved = vi.fn(async () => pending);
+    setup(
+      {},
+      {
+        draftSeed: { title: "Plan (copy)", input: { name: "Plan (copy)", project_id: PROJECT_ATLAS } },
+        onCopySaved,
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
+    save();
+    save();
+    await waitFor(() => expect(onCopySaved).toHaveBeenCalledTimes(1));
+    release();
+  });
+
+  it("refuses to move a draft with no project", async () => {
+    const onPublish = vi.fn(async () => undefined);
+    setup(
+      {},
+      {
+        edit: { kind: "draft", id: "draft-1", projectId: null, snapshot: editRow({ name: "Loose" }) },
+        moveToProject: true,
+        onPublish,
+      },
+      { seedPicker: false }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Loose"));
+    fireEvent.click(screen.getByRole("button", { name: "Add to project" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Couldn't publish the draft",
+        "Select a project before publishing this draft."
+      )
+    );
+    expect(onPublish).not.toHaveBeenCalled();
   });
 });

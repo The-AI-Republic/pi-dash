@@ -19,7 +19,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/schedulers
   component: ProjectSchedulersListComponent,
 });
 
-export function ProjectSchedulersListComponent(): React.ReactElement {
+function ProjectSchedulersListComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   const navigate = useNavigate();
   const permissions = usePermissions(ws);

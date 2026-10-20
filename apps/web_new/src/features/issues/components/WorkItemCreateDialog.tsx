@@ -15,7 +15,12 @@
 import { Button, Dialog, Input, Switch } from "@pidash/kit";
 import * as React from "react";
 
-import { DRAFT_DESCRIPTION_ENTITY_TYPE, ISSUE_DESCRIPTION_ENTITY_TYPE, type IssueSearchHit } from "@pidash/api-client";
+import {
+  DRAFT_DESCRIPTION_ENTITY_TYPE,
+  ISSUE_DESCRIPTION_ENTITY_TYPE,
+  type DraftIssueCreateInput,
+  type IssueSearchHit,
+} from "@pidash/api-client";
 
 import { edition } from "../../../core/edition/index.js";
 import {
@@ -171,6 +176,31 @@ export interface WorkItemCreateDialogProps {
    * row. The parent picker shows it and removing it clears the choice.
    */
   initialParent?: CreateParentPreset | undefined;
+  /**
+   * Draft entry (ISS-139/141): a new draft starts from this payload — the
+   * duplicated row a copy carries — and the footer stores it instead of
+   * creating an issue. An absent seed is a blank draft.
+   */
+  draftSeed?: DraftSeed | null | undefined;
+  /**
+   * Called with the payload to store when a draft entry saves. The
+   * caller owns the write and its toast, so a copy on the drafts page
+   * re-reads that page rather than switching the form to create mode.
+   */
+  onCopySaved?: ((input: DraftIssueCreateInput) => Promise<unknown>) | undefined;
+  /**
+   * Move-to-project entry (ISS-139): the edited draft is promoted through
+   * the caller's publish write, and the footer names that action.
+   */
+  moveToProject?: boolean | undefined;
+  /** Promote write the move entry runs with the named draft payload. */
+  onPublish?: ((input: DraftIssueCreateInput) => Promise<void>) | undefined;
+}
+
+/** The draft payload a copy or a blank draft entry opens with. */
+export interface DraftSeed {
+  title: string;
+  input: DraftIssueCreateInput;
 }
 
 /** A parent preset the dialog seeds as if the picker had chosen it. */
@@ -209,6 +239,9 @@ export const MODAL_TAB_ORDER = {
 export const CREATE_DIALOG_TITLE = "Create new work item";
 export const EDIT_DIALOG_TITLE = "Update work item";
 export const PUBLISH_BUTTON_LABEL = "Publish issue";
+export const CREATE_DRAFT_DIALOG_TITLE = "Create a draft";
+export const SAVE_DRAFT_BUTTON_LABEL = "Save to Drafts";
+export const MOVE_TO_PROJECT_BUTTON_LABEL = "Add to project";
 export const PUBLISH_SUCCESS_TITLE = "Draft published to project.";
 export const PUBLISH_SUCCESS_BODY = "The work item now lives in its project.";
 export const PUBLISH_FAILED_TITLE = "Couldn't publish the draft";
@@ -331,8 +364,16 @@ export function WorkItemCreateDialog({
   lockedProjectId,
   lockedParent = false,
   initialParent,
+  draftSeed = null,
+  onCopySaved,
+  moveToProject = false,
+  onPublish,
 }: WorkItemCreateDialogProps): React.ReactElement | null {
   const editing = edit !== null;
+  // A draft entry (ISS-139/141): the create form writes a draft instead of
+  // an issue. The stored-draft edit keeps its own publish entry.
+  const drafting = edit === null && (draftSeed !== null || onCopySaved !== undefined);
+  const moving = editing && edit?.kind === "draft" && moveToProject;
   const create = useCreateWorkItem(workspaceSlug);
   const attachMembership = useApplyCreateMembership(workspaceSlug);
   const generateTitle = useGenerateTitle(workspaceSlug);
@@ -388,10 +429,33 @@ export function WorkItemCreateDialog({
     [seededParent, workspaceSlug]
   );
   const editProjectId = edit?.projectId ?? null;
+  const seededDraftForm = React.useMemo((): CreateFormState | null => {
+    if (draftSeed === null) return null;
+    return formFromSnapshot(
+      {
+        id: "draft-copy",
+        // A copy opens under its duplicated title (ISS-139), not the
+        // original row name its payload carried before the suffix.
+        name: draftSeed.title,
+        description_html: draftSeed.input.description_html ?? "",
+        state_id: draftSeed.input.state_id ?? null,
+        priority: draftSeed.input.priority ?? "none",
+        assignee_ids: draftSeed.input.assignee_ids ?? [],
+        label_ids: draftSeed.input.label_ids ?? [],
+        start_date: draftSeed.input.start_date ?? null,
+        target_date: draftSeed.input.target_date ?? null,
+        cycle_id: draftSeed.input.cycle_id ?? null,
+        module_ids: draftSeed.input.module_ids ?? [],
+        estimate_point: draftSeed.input.estimate_point ?? null,
+        parent_id: draftSeed.input.parent_id ?? null,
+      },
+      draftSeed.input.project_id ?? initialProjectId ?? null
+    );
+  }, [draftSeed, initialProjectId]);
   const [form, setForm] = React.useState<CreateFormState>(() =>
     edit !== null
       ? (editStart(edit, resolveProjectId(offered, initialProjectId ?? editProjectId ?? null)) ?? seededForm(null))
-      : seededForm(resolveProjectId(offered, initialProjectId ?? null))
+      : (seededDraftForm ?? seededForm(resolveProjectId(offered, initialProjectId ?? null)))
   );
   // What the edit opened with: every submit diffs against it. A create
   // never has one, so its submit always builds a full payload.
@@ -460,6 +524,8 @@ export function WorkItemCreateDialog({
     edit?.kind ?? "",
     edit?.id ?? "",
     edit?.projectId ?? "",
+    draftSeed?.title ?? "",
+    draftSeed?.input.project_id ?? "",
     context?.cycleId ?? "",
     context?.moduleId ?? "",
   ].join(":");
@@ -477,8 +543,12 @@ export function WorkItemCreateDialog({
         ? null
         : resolveProjectId(offered, lockedProjectId ?? initialProjectId ?? editProjectId ?? null);
     const starting = edit === null ? null : editStart(edit, projectId);
+    // A copy opens on the duplicated payload (ISS-139); every other entry
+    // keeps the listing prefill the base introduced.
     let next =
-      starting ?? contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
+      starting ??
+      seededDraftForm ??
+      contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
     routeMembership.current = membershipForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
@@ -556,11 +626,12 @@ export function WorkItemCreateDialog({
   // notice instead of a form that cannot submit. An edit may keep a
   // project it no longer has create permission for, so it only needs
   // an offered row.
-  const allowed = canCreate && offered.length > 0;
+  const allowed = canCreate && (offered.length > 0 || drafting);
   // A create (and an issue edit) always files under a project, so the
   // first creatable row backs a null value. A draft may genuinely hold
   // none: it stays empty until the user picks one to publish into.
-  const projectId = form.projectId ?? (edit?.kind === "draft" ? "" : targetProjectId(form.projectId, offered));
+  const projectId =
+    form.projectId ?? (edit?.kind === "draft" || drafting ? "" : targetProjectId(form.projectId, offered));
   const creatableIds = React.useMemo(() => offered.map((project) => project.id), [offered]);
   // The picker's option list resolves lazily on open, but its trigger
   // must name the picked project right away: the dialog already holds
@@ -711,6 +782,13 @@ export function WorkItemCreateDialog({
 
   async function submitOnce(): Promise<boolean> {
     if (busy) return false;
+    if (drafting) {
+      // A draft has no title rule: an unnamed one is stored as "Untitled"
+      // and picked up later (ISS-141). The project stays optional so a
+      // draft may start before it is aimed anywhere.
+      createDraftEntry({ ...form, name: normalizeTitle(form.name) });
+      return true;
+    }
     const title = await resolveTitle();
     if (title === null) return false;
     const named = { ...form, name: title };
@@ -768,6 +846,40 @@ export function WorkItemCreateDialog({
     return true;
   }
 
+  /** Store a new draft (ISS-139/141): the caller handles the write. */
+  function createDraftEntry(named: CreateFormState): void {
+    if (onCopySaved === undefined) {
+      // Standalone draft entry (a page that seeds no write): store it
+      // through the same save write the inline footer uses.
+      saveDraft.mutate(buildDraftInput(named), {
+        onSettled: () => {
+          submitting.current = false;
+        },
+        onSuccess: () => {
+          notifySuccess(DRAFT_SAVED_INLINE_TITLE, "Find it in your drafts when you're ready to finish it.");
+          clearWorkItemDraft(workspaceSlug);
+          finishClose();
+        },
+        onError: () => {
+          submitting.current = false;
+          notifyError(DRAFT_SAVE_FAILED_INLINE_TITLE, "Nothing was saved — check your connection and try again.");
+        },
+      });
+      return;
+    }
+    void onCopySaved(buildDraftInput(named)).then(
+      () => {
+        submitting.current = false;
+        clearWorkItemDraft(workspaceSlug);
+        finishClose();
+      },
+      () => {
+        submitting.current = false;
+        notifyError(DRAFT_SAVE_FAILED_INLINE_TITLE, "Nothing was saved — check your connection and try again.");
+      }
+    );
+  }
+
   /** Submit an edit: only the fields that changed travel (ISS-126). */
   function submitEdit(named: CreateFormState): void {
     if (baseline === null) return;
@@ -814,6 +926,19 @@ export function WorkItemCreateDialog({
     const title = await resolveTitle();
     if (title === null) return;
     const named = { ...form, name: title };
+    if (moving && onPublish !== undefined) {
+      // The drafts page owns the promote write, its toast and the list
+      // refresh (ISS-139); a failure keeps the form open for a retry.
+      submitting.current = true;
+      try {
+        await onPublish(buildPublishInput(named));
+        finishClose();
+      } catch {
+        submitting.current = false;
+        notifyError(PUBLISH_FAILED_TITLE, PUBLISH_FAILED_BODY);
+      }
+      return;
+    }
     try {
       const promoted = await publish.mutateAsync({
         draftId: id,
@@ -876,7 +1001,9 @@ export function WorkItemCreateDialog({
   }
 
   const branchValue = form.gitWorkBranch;
-  const submitLabel = editing ? (busy ? "Saving…" : "Save") : busy ? "Saving…" : "Save";
+  // A new draft stores as a draft, not as an issue: the submit names that
+  // action (ISS-139/141), matching the standalone Save to Drafts entry.
+  const submitLabel = busy ? "Saving…" : drafting ? SAVE_DRAFT_BUTTON_LABEL : "Save";
   // An edit diffs against the row it opened with; without one (a draft
   // or issue whose snapshot did not parse) there is nothing to save.
   const saveDisabled = busy || (editing && baseline === null);
@@ -894,11 +1021,13 @@ export function WorkItemCreateDialog({
   return (
     <>
       <Dialog
-        title={editing ? EDIT_DIALOG_TITLE : CREATE_DIALOG_TITLE}
+        title={editing ? EDIT_DIALOG_TITLE : drafting ? CREATE_DRAFT_DIALOG_TITLE : CREATE_DIALOG_TITLE}
         description={
           editing
             ? "Changed fields are saved; the rest stay as they are."
-            : "Set the details now; you can refine them later."
+            : drafting
+              ? "Half-finished is fine; drafts keep whatever you have so far."
+              : "Set the details now; you can refine them later."
         }
         open={open}
         onOpenChange={handleOpenChange}
@@ -911,12 +1040,17 @@ export function WorkItemCreateDialog({
                 Discard
               </Button>
             </TabStop>
-            {editing || draftTargetId !== null ? null : (
+            {editing || draftTargetId !== null || drafting ? null : (
               <Button variant="secondary" onClick={() => void saveInlineDraft()} disabled={busy}>
-                Save to Drafts
+                {SAVE_DRAFT_BUTTON_LABEL}
               </Button>
             )}
-            {draftTargetId === null ? null : (
+            {moving ? (
+              <Button type="button" variant="secondary" onClick={() => void publishDraftOnce()} disabled={busy}>
+                {MOVE_TO_PROJECT_BUTTON_LABEL}
+              </Button>
+            ) : null}
+            {draftTargetId === null || moving ? null : (
               <Button variant="secondary" onClick={() => void publishDraftOnce()} disabled={busy}>
                 {PUBLISH_BUTTON_LABEL}
               </Button>
@@ -949,9 +1083,13 @@ export function WorkItemCreateDialog({
               onChange={pickProject}
               includeProjectIds={creatableIds}
               knownProjects={projectLabels}
-              disabled={busy || lockedProject !== undefined || (editing && edit?.kind !== "draft")}
+              // A stored row keeps the project it was filed under — a draft
+              // changing where it publishes does so through its own picker
+              // entry, and the move entry reads the stored project (the
+              // promote endpoint files under it, ISS-139).
+              disabled={busy || lockedProject !== undefined || (editing && (edit?.kind !== "draft" || moving))}
             />
-            {editing ? null : <DuplicatePanel matches={duplicates.matches} />}
+            {editing || drafting ? null : <DuplicatePanel matches={duplicates.matches} />}
           </div>
           {issueType === null ? null : (
             <IssueTypeSlots
@@ -1160,7 +1298,7 @@ export function WorkItemCreateDialog({
               </div>
             ) : null}
           </div>
-          {editing || draftTargetId !== null ? null : (
+          {editing || draftTargetId !== null || drafting ? null : (
             <div
               role="group"
               aria-label="Create more"

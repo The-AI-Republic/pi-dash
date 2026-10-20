@@ -250,6 +250,12 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
   if (form.startDate !== null) draft.start_date = form.startDate;
   if (form.targetDate !== null) draft.target_date = form.targetDate;
   if (form.parentId !== null) draft.parent_id = form.parentId;
+  // The draft contract stores cycle, modules and estimate on the row
+  // itself (create and update serializers), and a copy must keep them:
+  // the old duplicate payload carries the whole row (ISS-139).
+  if (form.cycleId !== null) draft.cycle_id = form.cycleId;
+  if (form.moduleIds.length > 0) draft.module_ids = [...form.moduleIds];
+  if (form.estimatePoint !== null) draft.estimate_point = form.estimatePoint;
   return draft;
 }
 

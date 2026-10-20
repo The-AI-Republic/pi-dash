@@ -22,7 +22,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/s
   component: ProjectSchedulersSettingsComponent,
 });
 
-export function ProjectSchedulersSettingsComponent(): React.ReactElement {
+function ProjectSchedulersSettingsComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   return (
     <ProjectSettingsShell workspaceSlug={ws} projectId={projectId}>

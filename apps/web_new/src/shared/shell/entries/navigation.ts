@@ -103,6 +103,18 @@ export function buildNavigationCommands(context: NavigationEntryContext): Pidash
   ];
   if (context.project === null) {
     if (context.canEdit) {
+      // Both destinations belong to member-or-better viewers: the old
+      // palette offers workspace drafts to members and the archives jump
+      // no lower (SHELL-087, ISS-137).
+      commands.push(
+        jump(context, {
+          id: "shell.go-drafts",
+          title: "Go to workspace drafts",
+          sequence: "gj",
+          href: `${ws}/drafts`,
+          hint: context.workspaceName,
+        })
+      );
       commands.push(
         jump(context, {
           id: "shell.go-archives",

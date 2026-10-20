@@ -60,6 +60,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-workspace-settings.test.ts",
       "e2e/parity/drivers/web-new-workspace-settings-dom.test.ts",
       "e2e/parity/drivers/web-new-members.test.ts",
+      "e2e/parity/drivers/web-new-drafts.test.ts",
       "e2e/parity/drivers/modal-copy.test.tsx",
       "e2e/parity/helpers/calendar-dates.test.ts",
       "e2e/parity/drivers/web-favorites.test.ts",
