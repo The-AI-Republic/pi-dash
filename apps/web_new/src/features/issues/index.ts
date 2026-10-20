@@ -197,6 +197,8 @@ export type { DescriptionHistoryProps, VersionAuthor } from "./detail/Descriptio
 export { IssueDescriptionField } from "./detail/IssueDescriptionField.js";
 export type { IssueDescriptionFieldProps, RestoredDescription } from "./detail/IssueDescriptionField.js";
 export { IssueDetailRoot } from "./detail/IssueDetailRoot.js";
+export { IssuePropertiesSidebar } from "./detail/sidebar/index.js";
+export type { IssuePropertiesSidebarProps } from "./detail/sidebar/index.js";
 export type { IssueDetailRootProps } from "./detail/IssueDetailRoot.js";
 export { TriageDetailRoot } from "./detail/TriageDetailRoot.js";
 export type { TriageDetailRootProps } from "./detail/TriageDetailRoot.js";

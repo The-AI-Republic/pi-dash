@@ -7,7 +7,9 @@
 // never offered; suspended members render with a pill and stay
 // unselectable. The current member reads as "You" inside the options
 // and leads the list, followed by the selected members. Multi-select
-// stays open across picks and toggles. Reads resolve lazily on open.
+// stays open across picks and toggles. Reads resolve lazily on open; a
+// caller that has to name an existing selection before the popup opens
+// preloads them.
 import { Avatar, Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import { User } from "lucide-react";
 import * as React from "react";
@@ -31,6 +33,8 @@ interface MemberPickerBase {
   placeholder?: string;
   /** Explicit keyboard position inside a dialog's tab order. */
   tabIndex?: number | undefined;
+  /** Read members up front so a set selection names itself before the popup opens. */
+  preload?: boolean;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -75,6 +79,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
     trigger,
     placeholder,
     tabIndex,
+    preload = false,
     open: controlledOpen,
     onOpenChange,
   } = props;
@@ -87,8 +92,9 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
     onOpenChange?.(next);
   }
 
-  const members = usePickerProjectMembers(workspaceSlug, projectId ?? "", open && !disabled && projectId !== undefined);
-  const directory = usePickerWorkspaceMembers(workspaceSlug, open && !disabled);
+  const readsAllowed = open || preload;
+  const members = usePickerProjectMembers(workspaceSlug, projectId ?? "", readsAllowed && projectId !== undefined);
+  const directory = usePickerWorkspaceMembers(workspaceSlug, readsAllowed);
   const me = useMe();
 
   const options = React.useMemo(() => {

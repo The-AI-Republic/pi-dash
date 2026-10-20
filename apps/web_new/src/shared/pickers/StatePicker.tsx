@@ -5,7 +5,8 @@
 // the project's workflow states in server order, each with its group
 // glyph in the state's own color. There is no clear row — a state is
 // always set — and no workflow-aware option in this build. Reads resolve
-// lazily on open behind a spinner.
+// lazily on open behind a spinner; a caller that has to name an existing
+// value before the popup opens preloads the list instead.
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
@@ -28,6 +29,8 @@ export interface StatePickerProps {
   placeholder?: string;
   /** Explicit keyboard position inside a dialog's tab order. */
   tabIndex?: number | undefined;
+  /** Read the list up front so a set value names itself before the popup opens. */
+  preload?: boolean;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -58,6 +61,7 @@ export function StatePicker({
   trigger,
   placeholder = "Select state",
   tabIndex,
+  preload = false,
   open: controlledOpen,
   onOpenChange,
 }: StatePickerProps): React.ReactElement {
@@ -69,7 +73,7 @@ export function StatePicker({
     onOpenChange?.(next);
   }
 
-  const states = usePickerStates(workspaceSlug, projectId, open && !disabled);
+  const states = usePickerStates(workspaceSlug, projectId, open || preload);
   const options = React.useMemo(() => selectStateOptions(states.data ?? []), [states.data]);
   const loading = open && !disabled && states.isPending;
   const errorText = states.isError ? "Couldn't load states." : undefined;

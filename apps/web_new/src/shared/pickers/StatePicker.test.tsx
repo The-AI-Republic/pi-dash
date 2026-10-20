@@ -222,6 +222,25 @@ describe("StatePicker", () => {
     expect(await screen.findByRole("option", { name: "Todo" })).toBeInTheDocument();
   });
 
+  it("preloads to name an existing value before the popup opens", async () => {
+    const { queryClient, calls } = harness(STATES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value="cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+          onChange={() => undefined}
+          preload
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Done" })).toBeInTheDocument();
+    expect(calls.some((url) => url.endsWith("/states/"))).toBe(true);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("opens without an open-change handler", async () => {
     const { queryClient } = harness(STATES);
     render(
@@ -242,5 +261,23 @@ describe("StatePicker", () => {
     );
     expect(screen.getByRole("button", { name: "Select state" })).toBeDisabled();
     expect(calls).toEqual([]);
+  });
+
+  it("names a disabled row's value when preloaded", async () => {
+    const { queryClient } = harness(STATES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <StatePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value="cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+          onChange={() => undefined}
+          preload
+          disabled
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "Done" })).toBeDisabled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 });

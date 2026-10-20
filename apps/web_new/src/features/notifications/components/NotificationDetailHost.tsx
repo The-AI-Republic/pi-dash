@@ -16,7 +16,12 @@ import { getAppClient } from "../../../core/api/client.js";
 import { ROLE_MEMBER } from "../../../core/session/index.js";
 import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { projectMembershipQueryOptions } from "../../auth/index.js";
-import { IssueDetailRoot, TriageDetailRoot, issueDetailQueryOptions } from "../../issues/index.js";
+import {
+  IssueDetailRoot,
+  IssuePropertiesSidebar,
+  TriageDetailRoot,
+  issueDetailQueryOptions,
+} from "../../issues/index.js";
 import type { NotificationCardData } from "../lib/card.js";
 import { formatNotificationAge } from "../lib/relativeAge.js";
 
@@ -146,6 +151,14 @@ export function NotificationDetailHost({
               <span className="text-meta text-(--text-muted)">{selection.reference}</span>
               <CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={selection.reference} />
             </div>
+          }
+          sidebar={
+            <IssuePropertiesSidebar
+              workspaceSlug={workspaceSlug}
+              projectId={selection.projectId}
+              issue={issue.data}
+              editable={editable}
+            />
           }
         />
       )}

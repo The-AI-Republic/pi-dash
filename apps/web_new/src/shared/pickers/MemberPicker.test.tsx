@@ -568,4 +568,23 @@ describe("MemberPicker", () => {
     expect(await screen.findByRole("option", { name: "Ana" })).toBeInTheDocument();
     expect(optionNames()).toEqual(["Max", "Ana"]);
   });
+
+  it("preloads to name a selection before the popup opens", async () => {
+    const { queryClient, calls } = harness(memberRoutes());
+    setupPicker(queryClient, { multiple: true, value: [ANA], preload: true });
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Ana" })).toBeInTheDocument();
+    expect(calls.some((url) => url.includes("/projects/") && url.endsWith("/members/"))).toBe(true);
+    expect(calls.some((url) => url === "https://api.test/api/workspaces/acme/members/")).toBe(true);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("names the value on a disabled row without opening it", async () => {
+    const { queryClient, calls } = harness(memberRoutes());
+    setupPicker(queryClient, { value: ANA, preload: true, disabled: true });
+    expect(await screen.findByRole("button", { name: "Ana" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Ana" }));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(calls.some((url) => url === "https://api.test/api/workspaces/acme/members/")).toBe(true);
+  });
 });

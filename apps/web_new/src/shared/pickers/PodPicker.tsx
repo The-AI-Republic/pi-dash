@@ -5,7 +5,9 @@
 // Single-select over the offered cloud/managed agent rows plus the
 // project's pods with search. Unavailable agents disable with their
 // reason inline; the default pod carries a tag. Picks map onto the
-// issue execution-target patch. Reads resolve lazily on open.
+// issue execution-target patch. Reads resolve lazily on open; a caller
+// that has to name an existing target before the popup opens preloads
+// them.
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import { Cloud, Container, Monitor } from "lucide-react";
 import * as React from "react";
@@ -36,6 +38,8 @@ export interface PodPickerProps {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /** Read targets up front so a set selection names itself before the popup opens. */
+  preload?: boolean;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -119,6 +123,7 @@ export function PodPicker({
   iconOnly = false,
   trigger,
   placeholder = "Select target",
+  preload = false,
   open: controlledOpen,
   onOpenChange,
 }: PodPickerProps): React.ReactElement {
@@ -130,8 +135,9 @@ export function PodPicker({
     onOpenChange?.(next);
   }
 
-  const pods = usePickerPods(workspaceSlug, projectId, open && !disabled);
-  const project = usePickerProject(workspaceSlug, projectId, open && !disabled);
+  const readsAllowed = open || preload;
+  const pods = usePickerPods(workspaceSlug, projectId, readsAllowed);
+  const project = usePickerProject(workspaceSlug, projectId, readsAllowed);
   const targets = React.useMemo(
     () => buildExecutionTargets(pods.data ?? [], project.data?.agent_executor_options ?? []),
     [pods.data, project.data]

@@ -326,6 +326,14 @@ describe("PodPicker", () => {
     expect(calls).toEqual([]);
   });
 
+  it("names a disabled row's target when preloaded", async () => {
+    const { queryClient } = harness();
+    renderPicker({ value: { type: "pod", podId: POD_TIER }, preload: true, disabled: true }, queryClient);
+    expect(await screen.findByRole("button", { name: "ACME-Tier" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "ACME-Tier" }));
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("shows the loading row while either read lags", async () => {
     const bothHang = harness({ hang: true }, { hang: true });
     renderPicker({}, bothHang.queryClient);
@@ -352,5 +360,22 @@ describe("PodPicker", () => {
     renderPicker({}, queryClient);
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load pods.");
+  });
+
+  it("preloads to name a pod before the popup opens", async () => {
+    const { queryClient, calls } = harness();
+    renderPicker({ value: { type: "pod", podId: POD_TIER }, preload: true }, queryClient);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "ACME-Tier" })).toBeInTheDocument();
+    expect(calls.some((url) => url.includes("/api/runners/pods/"))).toBe(true);
+    expect(calls.some((url) => url.endsWith(`/projects/${PROJECT}/`))).toBe(true);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("names a preloaded agent without reading pods for its label", async () => {
+    const { queryClient } = harness();
+    renderPicker({ value: { type: "agent", executor: "cloud_agent" }, preload: true }, queryClient);
+    expect(await screen.findByRole("button", { name: "Pi Dash Cloud Agent" })).toBeInTheDocument();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 });
