@@ -35,8 +35,9 @@ export function schedulersQueryOptions(client: ApiClient, workspaceSlug: string)
   });
 }
 
-export function useSchedulers(workspaceSlug: string) {
-  return useQuery(schedulersQueryOptions(getAppClient(), workspaceSlug));
+/** The workspace catalog; `enabled: false` keeps a closed dialog quiet. */
+export function useSchedulers(workspaceSlug: string, enabled = true) {
+  return useQuery({ ...schedulersQueryOptions(getAppClient(), workspaceSlug), enabled });
 }
 
 export function schedulerFailureMessage(error: unknown): string {

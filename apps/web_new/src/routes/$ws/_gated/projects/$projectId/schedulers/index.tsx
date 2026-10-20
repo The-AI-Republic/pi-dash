@@ -1,18 +1,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Schedulers tab home (SHELL-075). Thin mount: the Schedulers area epic owns this
-// screen and replaces the mount with its content when it lands.
+// Project schedulers section entry (parity/specs/agents.md §5, AGT-021):
+// the bare tab address lands on the calendar, which NEWFRONT-593 builds.
+// Until it lands the redirect target renders the section's not-found page,
+// so the address and the redirect are stable for the calendar slice.
 
-import { createFileRoute } from "@tanstack/react-router";
-import * as React from "react";
-
-import { TabAreaMount } from "../../../../../../features/projects/index.js";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/schedulers/")({
-  component: SchedulersComponent,
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      href: `/${params.ws}/projects/${params.projectId}/schedulers/calendar`,
+    });
+  },
 });
-
-function SchedulersComponent(): React.ReactElement {
-  return <TabAreaMount area="Schedulers" />;
-}
