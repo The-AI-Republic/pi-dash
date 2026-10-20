@@ -15,6 +15,8 @@ the PR.
 
 import uuid
 
+from _harness import sessions
+
 from . import seed_loop as seed_l
 from .test_admin_jobs import JOBS, detail, valid_payload
 from .test_admin_targets import targets as targets_url
@@ -142,3 +144,58 @@ def test_stale_instance_admin_denied(org):
     r = org.adm("GET", JOBS, "other")
     assert r.status_code == 403
     assert r.json() == DENIED
+
+
+def _admin_routes(job, tag, prefix):
+    """The six instance-admin loop routes, with a write body for each."""
+    return [
+        ("GET", JOBS, None),
+        ("POST", JOBS, valid_payload(f"zz-{prefix}-{tag}")),
+        ("GET", detail(job["id"]), None),
+        ("PATCH", detail(job["id"]), {"enabled": False}),
+        ("DELETE", detail(job["id"]), None),
+        ("GET", targets_url(job["id"]), None),
+    ]
+
+
+def test_inactive_instance_admin_denied_on_admin_routes(org):
+    # Deactivating the admin revokes the session: Django's ModelBackend
+    # refuses an inactive user and DRF SessionAuthentication yields None, so
+    # every admin route answers 401 and nothing is written.
+    job = seed_l.create_loop_job(org.conn, slug=f"ia-{org.tag}", public_name="IA")
+    org.conn.execute(
+        "UPDATE users SET is_active=false WHERE id=%s", (org.admin["id"],)
+    )
+    for method, path, payload in _admin_routes(job, org.tag, "ia"):
+        r = org.adm(method, path, "admin", json=payload)
+        assert r.status_code == 401, (method, path, r.text)
+        assert r.json() == ANON, (method, path, r.json())
+    row = org.conn.execute(
+        "SELECT enabled, deleted_at FROM loop_jobs WHERE id=%s", (job["id"],)
+    ).fetchone()
+    assert row[0] is True and row[1] is None
+    assert org.conn.execute(
+        "SELECT count(*) FROM loop_jobs WHERE slug=%s", (f"zz-ia-{org.tag}",)
+    ).fetchone()[0] == 0
+
+
+def test_stale_session_hash_denied_on_admin_routes(org):
+    # Rotating the admin's password changes ``_auth_user_hash``: the stored
+    # session no longer matches, Django flushes it and the caller is
+    # anonymous. The old ``admin-session-id`` cookie must not authenticate.
+    job = seed_l.create_loop_job(org.conn, slug=f"sh-{org.tag}", public_name="SH")
+    org.conn.execute(
+        "UPDATE users SET password=%s WHERE id=%s",
+        (sessions.make_password_hash(f"rotated-{org.tag}"), org.admin["id"]),
+    )
+    for method, path, payload in _admin_routes(job, org.tag, "sh"):
+        r = org.adm(method, path, "admin", json=payload)
+        assert r.status_code == 401, (method, path, r.text)
+        assert r.json() == ANON, (method, path, r.json())
+    row = org.conn.execute(
+        "SELECT enabled, deleted_at FROM loop_jobs WHERE id=%s", (job["id"],)
+    ).fetchone()
+    assert row[0] is True and row[1] is None
+    assert org.conn.execute(
+        "SELECT count(*) FROM loop_jobs WHERE slug=%s", (f"zz-sh-{org.tag}",)
+    ).fetchone()[0] == 0
