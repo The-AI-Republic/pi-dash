@@ -53,9 +53,8 @@ export function PreviewCard({
 
   // Opening waits out the delay so a pointer crossing the reference on its
   // way somewhere else never flashes a card.
-  const open = (element: Element | null) => {
+  const open = (element: Element) => {
     cancel();
-    if (element === null) return;
     if (delay <= 0) {
       setAnchor(element.getBoundingClientRect());
       return;
@@ -80,8 +79,7 @@ export function PreviewCard({
   // Choosing the card takes focus off the reference; that blur must not
   // tear the card down under the pointer.
   const blur = () => {
-    if (timer.current !== null) return;
-    setAnchor(null);
+    if (timer.current === null) setAnchor(null);
   };
 
   const reference = React.cloneElement(trigger, {

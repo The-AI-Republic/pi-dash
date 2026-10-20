@@ -111,6 +111,9 @@ describe("PreviewCard", () => {
       ["bottom", "center", 36, 65, "translate(-50%, 0)"],
       ["top", "end", 4, 110, "translate(-100%, -100%)"],
       ["left", "start", 10, 14, "translate(-100%, 0)"],
+      ["left", "center", 20, 14, "translate(-100%, -50%)"],
+      ["right", "start", 10, 116, "translate(0, 0)"],
+      ["right", "center", 20, 116, "translate(0, -50%)"],
       ["right", "end", 30, 116, "translate(0, -100%)"],
     ] as const) {
       const { unmount } = render(
@@ -136,5 +139,49 @@ describe("PreviewCard", () => {
       expect(card.style.transform).toBe(transform);
       unmount();
     }
+  });
+
+  it("forwards every trigger handler the caller set, including focus handlers", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const onFocus = vi.fn();
+      const onBlur = vi.fn();
+      render(
+        <PreviewCard
+          delay={0}
+          trigger={
+            <button type="button" onPointerEnter={vi.fn()} onPointerLeave={vi.fn()} onFocus={onFocus} onBlur={onBlur}>
+              Ref
+            </button>
+          }
+        >
+          <p>Card body</p>
+        </PreviewCard>
+      );
+      const trigger = screen.getByRole("button", { name: "Ref" });
+      trigger.focus();
+      expect(onFocus).toHaveBeenCalledTimes(1);
+      expect(await screen.findByTestId("preview-card")).toBeInTheDocument();
+      trigger.blur();
+      expect(onBlur).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(screen.queryByTestId("preview-card")).not.toBeInTheDocument());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the card while the reference blurs into it", async () => {
+    const user = userEvent.setup();
+    render(
+      <PreviewCard delay={0} trigger={<button type="button">Ref</button>}>
+        <button type="button">Inside</button>
+      </PreviewCard>
+    );
+    const trigger = screen.getByRole("button", { name: "Ref" });
+    await user.hover(trigger);
+    trigger.focus();
+    const inside = await screen.findByRole("button", { name: "Inside" });
+    inside.focus();
+    expect(screen.getByTestId("preview-card")).toBeInTheDocument();
   });
 });
