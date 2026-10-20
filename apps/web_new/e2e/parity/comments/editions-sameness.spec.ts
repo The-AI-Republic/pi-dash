@@ -86,6 +86,9 @@ test(
     );
     try {
       await test.step("enter the app with this edition's own sign-in and open the work item", async () => {
+        // Install the spy before navigating so the detail's own load is in
+        // the first window, not just the reload that follows.
+        await driver.activityBeginTrafficSpy({ reload: false });
         await driver.openAuthenticated(
           `/${seed.workspaceSlug}/projects/${seed.projectId}/issues/${issue.id}`,
           session.cookies
@@ -99,7 +102,6 @@ test(
       });
 
       await test.step("loading the detail reads the shared feed and writes nothing", async () => {
-        await driver.activityBeginTrafficSpy();
         await expect.poll(() => driver.rulesCommentComposerVisible(), { timeout: 120_000 }).toBe(true);
         const traffic = await driver.activityTrafficCounts();
         expect(traffic.historyReads).toBeGreaterThan(0);
@@ -158,6 +160,10 @@ test(
       });
 
       await test.step("the filter menu offers the same categories and narrows the feed client-side", async () => {
+        // Filtering is a local view over the feed. Keep one spy window across
+        // both toggles so a build that round-tripped the choice to the server
+        // (or re-posted the comment to reveal it) fails here.
+        await driver.activityBeginTrafficSpy({ reload: false });
         await driver.activityOpenFilterMenu();
         expect(await driver.activityFilterOptionLabels()).toEqual(["Updates", "Comments", "State", "Assignee"]);
         await driver.activityToggleFilterOption("Comments");
@@ -171,6 +177,13 @@ test(
         await expect
           .poll(() => driver.activityEntryTexts(), { timeout: 60_000 })
           .toEqual(expect.arrayContaining([expect.stringContaining(commentBody)]));
+        const traffic = await driver.activityTrafficCounts();
+        expect(traffic.unexpectedWrites).toBe(0);
+        expect(traffic.commentCreates).toBe(0);
+        expect(traffic.commentReactionCreates).toBe(0);
+        expect(traffic.commentReactionDeletes).toBe(0);
+        expect(traffic.issueReactionCreates).toBe(0);
+        expect(traffic.issueReactionDeletes).toBe(0);
       });
 
       await test.step("mention autocomplete asks the shared suggestion endpoint and lists its members", async () => {
@@ -252,7 +265,8 @@ test(
         expect(await serverCommentReactions(seed.workspaceSlug, seed.projectId, comment.id, session.cookie)).toEqual(
           []
         );
-        // The whole scenario sent nothing outside the shared endpoints.
+        // Every step since the detail opened sent nothing outside the shared
+        // endpoints; each step's own window asserts that for its traffic.
         expect((await driver.activityTrafficCounts()).unexpectedWrites).toBe(0);
       });
     } finally {
