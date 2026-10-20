@@ -29,6 +29,7 @@ vi.mock("../../shared/shell/index.js", () => ({ notifyError: notify.error, notif
 
 import { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from "./EditInstallDialog.js";
 import { bindingKeys, invalidateInstalls } from "./installData.js";
+import { DEFAULT_TZID } from "./schedule.js";
 
 const SLUG = "acme";
 const PROJECT = "p1";
@@ -103,6 +104,16 @@ describe("installDraftFromBinding", () => {
     expect(draft.schedule.enabled).toBe(true);
     expect(draft.outcomeMode).toBe("create_issue");
     expect(draft.pod).toBeNull();
+  });
+
+  it("pre-fills the default zone for a blank stored one", () => {
+    expect(installDraftFromBinding(binding({ tzid: "" })).schedule.timeZone).toBe(DEFAULT_TZID);
+  });
+
+  it("never sends a blank zone to the server", () => {
+    const draft = installDraftFromBinding(binding({ tzid: "" }));
+    draft.schedule.timeZone = "";
+    expect(installUpdatePayload(draft).tzid).toBe(DEFAULT_TZID);
   });
 
   it("keeps a rule it cannot read exactly as stored", () => {
@@ -230,6 +241,41 @@ describe("EditInstallDialog", () => {
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
     expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ pod: null });
+  });
+
+  it("submits null for a saved pod the project no longer has", async () => {
+    const user = userEvent.setup();
+    contracts.listPods.mockResolvedValue([
+      {
+        id: "pod2",
+        name: "Replacement pool",
+        description: "",
+        is_default: true,
+        workspace: "w1",
+        project: PROJECT,
+        project_identifier: "RKT",
+        created_by: null,
+        runner_count: 0,
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+    ]);
+    setup({ binding: binding({ pod: "gone" }) });
+    await screen.findByRole("option", { name: "Replacement pool (default)" });
+    expect(screen.getByLabelText("Pod")).toHaveValue("");
+    await user.click(screen.getByRole("radio", { name: "Apply fix" }));
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
+    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ pod: null });
+  });
+
+  it("falls back to the default zone when the stored one is blank", async () => {
+    const user = userEvent.setup();
+    setup({ binding: binding({ tzid: "" }) });
+    expect(screen.getByLabelText("Time zone")).toHaveValue(DEFAULT_TZID);
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(contracts.updateSchedulerBinding).toHaveBeenCalled());
+    expect(contracts.updateSchedulerBinding.mock.calls[0]?.[4]).toMatchObject({ tzid: DEFAULT_TZID });
   });
 
   it("refuses an empty start locally and sends nothing", async () => {

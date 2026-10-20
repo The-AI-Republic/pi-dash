@@ -4,7 +4,8 @@
 // Execution pod for one install (parity/specs/agents.md §4, AGT-019).
 // The empty value is the project default, which resolves at fire time.
 // The list is the project's pods, default first; a saved pod that no
-// longer exists reads as the default instead of an impossible option.
+// longer exists reads as the default and is reported back as such, so a
+// save never hands the server a pod id the project can no longer resolve.
 
 import { listPods, type ApiClient, type Pod } from "@pidash/api-client";
 import { queryOptions, useQuery } from "@tanstack/react-query";
@@ -56,6 +57,15 @@ export function PodField({
   const rows = pods.data ?? [];
   const selected = selectedPodValue(value, rows);
   const busy = disabled || pods.isPending;
+  const report = React.useRef(onChange);
+  report.current = onChange;
+  const stale = pods.isSuccess && value !== null && selected === DEFAULT_POD_VALUE;
+  React.useEffect(() => {
+    // Once the project's pods are known, a stored id that is not among
+    // them can never fire again; tell the form it is the default so the
+    // next save does not send a dead id the server rejects.
+    if (stale) report.current(null);
+  }, [stale]);
   return (
     <div className="flex flex-col gap-(--space-2)">
       <label htmlFor={`scheduler-pod-${projectId}`} className="text-body font-medium text-(--text)">

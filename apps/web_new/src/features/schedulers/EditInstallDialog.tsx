@@ -12,7 +12,7 @@ import type { SchedulerBinding } from "@pidash/api-client";
 import { Button, Dialog } from "@pidash/kit";
 import * as React from "react";
 
-import { isoToLocalStart, type ScheduleValue } from "./schedule.js";
+import { DEFAULT_TZID, isoToLocalStart, type ScheduleValue } from "./schedule.js";
 import { ScheduleFields, useScheduleDraft } from "./ScheduleFields.js";
 import { OutcomeModeField } from "./OutcomeModeField.js";
 import { PodField } from "./PodField.js";
@@ -27,14 +27,16 @@ export interface InstallDraft {
 
 /**
  * The stored row as a draft. The start arrives as a UTC instant and is
- * shown as browser-local wall time; the rule string is passed through
- * untouched so the builder can decide whether it is expressible.
+ * shown as browser-local wall time; an install that stored no zone reads
+ * as the default the server would apply anyway; the rule string is
+ * passed through untouched so the builder can decide whether it is
+ * expressible.
  */
 export function installDraftFromBinding(binding: SchedulerBinding): InstallDraft {
   return {
     schedule: {
       startsAt: isoToLocalStart(binding.dtstart),
-      timeZone: binding.tzid,
+      timeZone: binding.tzid || DEFAULT_TZID,
       rrule: binding.rrule,
       projectContext: binding.extra_context,
       enabled: binding.enabled,
@@ -45,10 +47,10 @@ export function installDraftFromBinding(binding: SchedulerBinding): InstallDraft
 }
 
 /**
- * The PATCH payload for a draft; an empty pod means the project default.
- * The rule travels exactly as it sits in the draft: a stored rule the
- * person never edited is saved byte for byte, and a typed one is saved
- * as typed.
+ * The PATCH payload for a draft; an empty pod means the project default,
+ * and a blank zone means the default zone. The rule travels exactly as
+ * it sits in the draft: a stored rule the person never edited is saved
+ * byte for byte, and a typed one is saved as typed.
  */
 export function installUpdatePayload(draft: InstallDraft): {
   dtstart: string;
@@ -61,7 +63,7 @@ export function installUpdatePayload(draft: InstallDraft): {
 } {
   return {
     dtstart: new Date(draft.schedule.startsAt).toISOString(),
-    tzid: draft.schedule.timeZone,
+    tzid: draft.schedule.timeZone.trim() || DEFAULT_TZID,
     rrule: draft.schedule.rrule,
     extra_context: draft.schedule.projectContext.trim(),
     enabled: draft.schedule.enabled,
