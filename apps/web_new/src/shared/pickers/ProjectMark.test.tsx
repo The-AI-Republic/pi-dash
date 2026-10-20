@@ -6,7 +6,7 @@ import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it } from "vitest";
 
-import { ProjectMark } from "./ProjectMark.js";
+import { ProjectMark, resolveMarkSource } from "./ProjectMark.js";
 
 describe("ProjectMark", () => {
   it("draws an emoji mark as its glyph", () => {
@@ -56,5 +56,34 @@ describe("ProjectMark", () => {
   it("stays decorative for assistive tech", () => {
     render(<ProjectMark logoProps={{}} identifier="SEED" />);
     expect(screen.getByTestId("project-mark")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("draws an uploaded emblem as a decorative image against the API base", () => {
+    render(
+      <ProjectMark
+        logoProps={{ in_use: "emoji", emoji: { url: "/api/assets/v2/static/emblem/" } }}
+        identifier="SEED"
+        apiBaseUrl="https://api.test"
+      />
+    );
+    const mark = screen.getByTestId("project-mark");
+    expect(mark).toHaveAttribute("data-mark", "image");
+    const image = screen.getByTestId("project-mark-image");
+    expect(image).toHaveAttribute("src", "https://api.test/api/assets/v2/static/emblem/");
+    expect(image).toHaveAttribute("alt", "");
+  });
+});
+
+describe("resolveMarkSource", () => {
+  it("resolves a root-relative path against the trimmed base", () => {
+    expect(resolveMarkSource("/asset.png", "https://api.test/")).toBe("https://api.test/asset.png");
+    expect(resolveMarkSource("asset.png", "https://api.test")).toBe("https://api.test/asset.png");
+  });
+
+  it("keeps an absolute, protocol-relative or baseless URL as stored", () => {
+    expect(resolveMarkSource("https://cdn.test/a.png", "https://api.test")).toBe("https://cdn.test/a.png");
+    expect(resolveMarkSource("//cdn.test/a.png", "https://api.test")).toBe("//cdn.test/a.png");
+    expect(resolveMarkSource("/asset.png", undefined)).toBe("/asset.png");
+    expect(resolveMarkSource("/asset.png", "")).toBe("/asset.png");
   });
 });

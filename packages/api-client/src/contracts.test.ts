@@ -78,6 +78,7 @@ import {
   checkProjectIdentifier,
   createProject,
   deleteProject,
+  getProjectSettingsDetail,
   joinProjects,
   leaveProject,
   listFavoriteProjects,
@@ -85,6 +86,7 @@ import {
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
+  updateProjectSettings,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "./contracts/project-management.js";
@@ -2465,6 +2467,53 @@ describe("project lifecycle contracts", () => {
     expect(cleared.estimate).toBeNull();
     const clearCall = clearTransport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
     expect(clearCall?.init.body).toBe(JSON.stringify({ estimate: null }));
+  });
+
+  it("reads the General tab's row with the agent policy columns", async () => {
+    const row = {
+      ...details,
+      agent_ticking_enabled: true,
+      agent_default_max_ticks: 7,
+      agent_default_interval_seconds: 1800,
+      agent_review_default_interval_seconds: 1800,
+      agent_test_default_interval_seconds: 1800,
+    };
+    const transport = stubbedApi(() => ({ status: 200, body: row }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getProjectSettingsDetail(client, "acme", UUID2);
+    expect(parsed.agent_ticking_enabled).toBe(true);
+    expect(parsed.agent_default_max_ticks).toBe(7);
+    expect(parsed.agent_default_interval_seconds).toBe(1800);
+    const readCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(readCall?.init.method ?? "GET").toBe("GET");
+  });
+
+  it("refuses a General tab row that omits the agent policy columns", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: details }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await getProjectSettingsDetail(client, "acme", UUID2).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("patches the agent policy and parses the policy columns back", async () => {
+    const row = {
+      ...details,
+      agent_ticking_enabled: false,
+      agent_default_max_ticks: -1,
+      agent_default_interval_seconds: 3600,
+      agent_review_default_interval_seconds: 3600,
+      agent_test_default_interval_seconds: 3600,
+    };
+    const transport = stubbedApi(() => ({ status: 200, body: row }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProjectSettings(client, "acme", UUID2, {
+      agent_ticking_enabled: false,
+      agent_default_max_ticks: -1,
+    });
+    expect(updated.agent_default_max_ticks).toBe(-1);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ agent_ticking_enabled: false, agent_default_max_ticks: -1 }));
   });
 
   it("checks identifier availability and parses matches", async () => {

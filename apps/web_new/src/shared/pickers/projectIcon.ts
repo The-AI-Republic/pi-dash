@@ -72,11 +72,40 @@ import {
   Zap,
 } from "lucide-react";
 
-/** A project's mark: an emoji glyph, an icon name plus color, or neither. */
+/**
+ * A project's mark: an emoji glyph, an uploaded image, an icon name plus
+ * color, or the short code's initial. The General tab's emblem control
+ * stores an upload as `{ in_use: "upload", url }`; older rows written by the
+ * emoji control carry the emoji's decimal codepoints (for example
+ * before the upload path carry the emoji's decimal codepoints (for example
+ * "128640" for a rocket) rather than the character itself.
+ */
 export type ProjectMark =
   | { kind: "emoji"; glyph: string }
+  | { kind: "image"; url: string }
   | { kind: "icon"; name: string; color: string | null }
   | { kind: "initial" };
+
+/**
+ * Decode the stored emoji form. A dash-separated decimal list is a set of
+ * Unicode code points; anything that does not decode (out of range, not a
+ * number) is returned untouched so a literal character still renders.
+ */
+export function decodeEmojiValue(value: string): string {
+  if (!/^\d+(-\d+)*$/.test(value)) return value;
+  const points = value.split("-").map((part) => Number(part));
+  if (points.some((point) => !isCodePoint(point))) return value;
+  try {
+    return String.fromCodePoint(...points);
+  } catch {
+    return value;
+  }
+}
+
+/** A scalar value: in range and not a lone UTF-16 surrogate. */
+function isCodePoint(point: number): boolean {
+  return Number.isInteger(point) && point >= 0 && point <= 0x10ffff && (point < 0xd800 || point > 0xdfff);
+}
 
 /**
  * Material icon names the new frontend carries. The projects dialog offers
@@ -202,10 +231,19 @@ function record(value: unknown): Record<string, unknown> | null {
 
 /** The project's mark with its emoji, icon, or initial fallback. */
 export function projectMark(logo: Record<string, unknown>): ProjectMark {
+  if (logo.in_use === "upload") {
+    const url = logo["url"];
+    if (typeof url === "string" && url.trim() !== "") return { kind: "image", url };
+  }
   if (logo.in_use === "emoji") {
     const emoji = record(logo.emoji);
+    const url = emoji?.["url"];
     const value = emoji?.["value"];
-    if (typeof value === "string" && value.trim() !== "") return { kind: "emoji", glyph: value };
+    if (typeof url === "string" && url.trim() !== "") return { kind: "image", url };
+    if (typeof value === "string" && value.trim() !== "") {
+      const glyph = decodeEmojiValue(value);
+      if (glyph.trim() !== "") return { kind: "emoji", glyph };
+    }
   }
   if (logo.in_use === "icon") {
     const icon = record(logo.icon);
