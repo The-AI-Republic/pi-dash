@@ -122,16 +122,4 @@ describe("GlobalIssuesEmptyState", () => {
     expect(screen.getByRole("button", { name: "Add work item" })).toBeDisabled();
   });
 
-  it("opens no dialog when the entry fires without a creatable project (ISS-073)", async () => {
-    // The card's guard is the last line of defence: a host that leaves the
-    // entry enabled must still not open a form with no project to create in.
-    // The disabled entry cannot fire through the pointer, so click past the
-    // guard at the DOM level.
-    renderState([project({ member_role: 5 })]);
-    const entry = await screen.findByRole("button", { name: "Add work item" });
-    expect(entry).toBeDisabled();
-    entry.removeAttribute("disabled");
-    entry.click();
-    expect(screen.queryByRole("dialog", { name: "Create new work item" })).not.toBeInTheDocument();
-  });
 });

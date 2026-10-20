@@ -42,24 +42,27 @@ export function useAttachExisting({ workspaceSlug, projectId, entity, cycleId, m
     async (ids: string[]): Promise<boolean> => {
       const client = getAppClient();
       setAttaching(true);
+      if (cycleId === undefined && moduleId === undefined) {
+        setAttaching(false);
+        notifyError(ATTACH_FAILED_TITLE, ATTACH_FAILED_BODY);
+        return false;
+      }
       try {
         if (cycleId !== undefined) {
           for (const id of ids) await addIssueToCycle(client, workspaceSlug, projectId, cycleId, id);
         } else if (moduleId !== undefined) {
           await addIssuesToModule(client, workspaceSlug, projectId, moduleId, ids);
-        } else {
-          throw new Error("this page has no cycle or module to attach to");
         }
         notifySuccess(ids.length === 1 ? "Work item added" : "Work items added");
         await queryClient.invalidateQueries({
           queryKey: issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity)),
         });
+        setAttaching(false);
         return true;
       } catch {
+        setAttaching(false);
         notifyError(ATTACH_FAILED_TITLE, ATTACH_FAILED_BODY);
         return false;
-      } finally {
-        setAttaching(false);
       }
     },
     [cycleId, entity, moduleId, projectId, queryClient, workspaceSlug]

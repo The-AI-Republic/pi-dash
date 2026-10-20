@@ -4,12 +4,20 @@
 // See the LICENSE file for details.
 // The archived tab route (ISS-071): its loader fills the project list the
 // body reads, and the pending and body it mounts stay thin.
-import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import * as React from "react";
+import { describe, expect, it, vi } from "vitest";
 
 import { createAppClient } from "../../../../../../core/api/client.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { Route } from "./issues.js";
+
+vi.mock("../../../../../../features/issues/contexts/ArchivedIssuesScreen.js", () => ({
+  ArchivedIssuesScreen: (props: { workspaceSlug: string; projectId: string }) => (
+    <div data-testid="archived-issues-screen" data-ws={props.workspaceSlug} data-project={props.projectId} />
+  ),
+}));
 
 const WS = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -65,7 +73,11 @@ describe("archived issues route", () => {
     expect(Route.options.pendingComponent).toBeUndefined();
   });
 
-  it("mounts the archived screen for the route's project", () => {
-    expect(typeof Route.options.component).toBe("function");
+  it("mounts the archived screen for the route's project", async () => {
+    vi.spyOn(Route, "useParams").mockReturnValue({ ws: WS, projectId: PROJECT });
+    const component = Route.options.component as unknown as React.ComponentType;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}>{React.createElement(component)}</QueryClientProvider>);
+    expect(await screen.findByTestId("archived-issues-screen")).toHaveAttribute("data-project", PROJECT);
   });
 });

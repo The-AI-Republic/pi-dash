@@ -67,8 +67,9 @@ function expressionOrEmpty(value: unknown): RichExpression {
 }
 
 function defaultStorage(): Storage | undefined {
+  // A browser that refuses storage: every access reads as no expression.
   try {
-    return typeof window === "undefined" ? undefined : window.localStorage;
+    return window.localStorage;
   } catch {
     return undefined;
   }
