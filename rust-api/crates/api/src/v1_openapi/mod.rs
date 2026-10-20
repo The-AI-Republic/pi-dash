@@ -167,7 +167,7 @@ impl ThrottleStore {
             }
         };
         self.calls += 1;
-        if self.calls % SWEEP_INTERVAL == 0 {
+        if self.calls.is_multiple_of(SWEEP_INTERVAL) {
             self.histories.retain(|_, history| match history.first() {
                 Some(&newest) => newest > horizon,
                 None => false,
