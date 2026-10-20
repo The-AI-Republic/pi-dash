@@ -38,34 +38,49 @@ export function notifyInfo(title: string, description?: string): void {
   showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
 }
 
-/**
- * A notice that stays on screen while a write flies and is then replaced in
- * place by its outcome (PSET-043/053/054's pending/success/error cycle).
- * Resolves `{ id, settle }`; calling `settle` twice rewrites the same toast.
- */
-export function notifyPending(
-  title: string,
-  description?: string
-): {
+/** How long a settled notice stays up; a failure lingers longer. */
+export const NOTICE_SUCCESS_TIMEOUT_MS = 5000;
+export const NOTICE_FAILURE_TIMEOUT_MS = 8000;
+
+export interface PendingNotice {
+  /** The sticky toast currently on screen. */
   id: string;
+  /**
+   * Replace the sticky notice with its outcome. The outcome is a fresh,
+   * timed toast: the kit's `update` carries a new `timeout` but does not
+   * schedule it, so settling the old toast in place would leave it up
+   * forever (PSET-043/053/054's pending/success/error cycle). Settling
+   * twice swaps the latest outcome; the stale id then closes nothing.
+   */
   settle: (outcome: { title: string; description?: string; failed?: boolean }) => void;
-} {
+}
+
+/**
+ * A notice that stays on screen while a write flies and is then replaced by
+ * its outcome. Success auto-dismisses on the kit's ordinary delay; a
+ * failure lingers longer. Never leaves a success notice stuck on screen.
+ */
+export function notifyPending(title: string, description?: string): PendingNotice {
   const manager = getToastManager();
-  const id = manager.add({
+  let current = manager.add({
     title,
     ...(description === undefined ? {} : { description }),
     timeout: 0,
   });
-  return {
-    id,
+  const notice: PendingNotice = {
+    get id() {
+      return current;
+    },
     settle: (outcome) => {
-      manager.update(id, {
+      manager.close(current);
+      current = manager.add({
         title: outcome.title,
         ...(outcome.description === undefined ? {} : { description: outcome.description }),
-        ...(outcome.failed === true ? { timeout: 8000 } : {}),
+        timeout: outcome.failed === true ? NOTICE_FAILURE_TIMEOUT_MS : NOTICE_SUCCESS_TIMEOUT_MS,
       });
     },
   };
+  return notice;
 }
 
 export function notifyError(title: string, description?: string): void {

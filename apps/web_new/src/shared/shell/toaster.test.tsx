@@ -6,9 +6,20 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ToastHost } from "@pidash/kit";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getToastManager, notifyError, notifyInfo, notifySuccess, notifySuccessWithAction } from "./toaster.js";
+import {
+  getToastManager,
+  notifyError,
+  notifyInfo,
+  notifyPending,
+  notifySuccess,
+  notifySuccessWithAction,
+} from "./toaster.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("toaster", () => {
   it("delivers success, info, and error notices to the shared stack", async () => {
@@ -50,5 +61,16 @@ describe("toaster", () => {
     expect(await screen.findByText("Every section now loads.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Undo" }));
     expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("replaces a pending notice in the stack with its settled success", async () => {
+    render(<ToastHost manager={getToastManager()} />);
+    const pending = notifyPending("Updating the feature", "Applying the change…");
+    expect(await screen.findByText("Updating the feature")).toBeInTheDocument();
+
+    pending.settle({ title: "Feature updated", description: "All set." });
+    expect(await screen.findByText("Feature updated")).toBeInTheDocument();
+    expect(await screen.findByText("All set.")).toBeInTheDocument();
+    expect(screen.queryByText("Updating the feature")).not.toBeInTheDocument();
   });
 });
