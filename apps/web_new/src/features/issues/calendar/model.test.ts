@@ -187,4 +187,10 @@ describe("calendar model", () => {
     expect(isTouchLayout(false, 390)).toBe(false);
     expect(isTouchLayout(true, 1024)).toBe(false);
   });
+
+  it("falls back for out-of-range months and empty week ranges", () => {
+    expect(monthTitle(2026, 99)).toBe(" 2026");
+    expect(weekTitle([])).toBe("");
+    expect(weekTitle([{ iso: "bogus", day: 1, inMonth: true, weekend: false, isToday: false }])).toBe("");
+  });
 });

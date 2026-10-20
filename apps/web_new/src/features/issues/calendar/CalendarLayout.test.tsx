@@ -380,6 +380,14 @@ describe("CalendarLayout", () => {
         .map((url) => url.searchParams.get("target_date"));
       expect(ranges).toContainEqual(expect.not.stringMatching(new RegExp(`^${initialRange}$`)));
     });
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await waitFor(() => {
+      const ranges = state.calls
+        .map((call) => new URL(call.url))
+        .filter((url) => url.pathname.endsWith("/issues/"))
+        .map((url) => url.searchParams.get("target_date"));
+      expect(ranges).toContainEqual(initialRange);
+    });
     await user.click(screen.getByRole("button", { name: "Today" }));
     expect(screen.getByRole("button", { name: initialTitle })).toBeInTheDocument();
   });
@@ -600,15 +608,15 @@ describe("CalendarLayout", () => {
   it("pages a crowded day with the server cursor instead of skipping a page", async () => {
     renderLayout();
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: "Load more" }));
-    expect(await screen.findByText("Extra item")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Load more" }, { timeout: FULL_RUN_TEST_TIMEOUT_MS }));
+    expect(await screen.findByText("Extra item", undefined, { timeout: FULL_RUN_TEST_TIMEOUT_MS })).toBeInTheDocument();
     const dayCalls = () =>
       state.calls
         .map((call) => new URL(call.url))
         .filter((url) => url.searchParams.get("target_date") === `${todayIso};after,${todayIso};before`);
     expect(dayCalls()[0]?.searchParams.get("cursor")).toBe("4:1:0");
     await user.click(screen.getByRole("button", { name: "Load more" }));
-    expect(await screen.findByText("Third item")).toBeInTheDocument();
+    expect(await screen.findByText("Third item", undefined, { timeout: FULL_RUN_TEST_TIMEOUT_MS })).toBeInTheDocument();
     expect(dayCalls()[1]?.searchParams.get("cursor")).toBe("4:2:0");
   });
 
@@ -674,5 +682,78 @@ describe("CalendarLayout", () => {
     expect(await screen.findByTestId("issues-calendar-reload-bar")).toBeInTheDocument();
     state.releaseWindow?.();
     await waitFor(() => expect(screen.queryByTestId("issues-calendar-reload-bar")).not.toBeInTheDocument());
+  });
+
+  it("ignores drag-over reports when nothing is being dragged", async () => {
+    renderLayout();
+    await screen.findByRole("link", { name: "WEB-42" });
+    fireEvent.pointerEnter(tile(emptyIso));
+    expect(tile(emptyIso)).not.toHaveClass("ring-2");
+  });
+
+  it("drops nowhere when the release is over no day tile", async () => {
+    renderLayout();
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    fireEvent(block, pointerEvent("pointerdown", 10, 10));
+    fireEvent(block, pointerEvent("pointermove", 30, 10));
+    fireEvent(document, pointerEvent("pointerup", 9999, 9999));
+    expect(state.reDate).not.toHaveBeenCalled();
+  });
+
+  it("closes peek without touching a URL that carries no peek key", async () => {
+    renderLayout();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("link", { name: "WEB-42" }));
+    expect(window.location.search).toContain("peekIssueId=");
+    window.history.replaceState({}, "", "/acme/projects/1/issues");
+    await user.click(screen.getByRole("button", { name: "Close preview" }));
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+    expect(window.location.search).toBe("");
+  });
+
+  it("dismisses the delete dialog without removing anything", async () => {
+    renderLayout();
+    const block = await screen.findByRole("link", { name: "WEB-42" });
+    fireEvent.click(within(block).getByRole("button", { name: "Quick actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: /Delete work item/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Delete work item/ })).not.toBeInTheDocument());
+    expect(state.remove).not.toHaveBeenCalled();
+  });
+
+  it("keeps a blank mobile quick-add open and closes it on Escape", async () => {
+    state.narrow = true;
+    state.touch = true;
+    renderLayout();
+    const user = userEvent.setup();
+    const face = tile(todayIso).querySelector("div.mx-auto.cursor-pointer") as HTMLElement;
+    await user.click(face);
+    const detail = screen.getByRole("region", { name: `Issues on ${todayIso}` });
+    await user.click(within(detail).getByRole("button", { name: CALENDAR_ADD_ITEM }));
+    const field = within(detail).getByPlaceholderText(CALENDAR_TITLE_PLACEHOLDER);
+    await user.type(field, "   ");
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(state.create).not.toHaveBeenCalled();
+    expect(within(detail).getByPlaceholderText(CALENDAR_TITLE_PLACEHOLDER)).toBeInTheDocument();
+    fireEvent.keyDown(field, { key: "Escape" });
+    expect(within(detail).queryByPlaceholderText(CALENDAR_TITLE_PLACEHOLDER)).not.toBeInTheDocument();
+  });
+
+  it("shows a pulsing temp row in the mobile detail while a quick-add settles", async () => {
+    state.narrow = true;
+    state.touch = true;
+    renderLayout();
+    const user = userEvent.setup();
+    const face = tile(todayIso).querySelector("div.mx-auto.cursor-pointer") as HTMLElement;
+    await user.click(face);
+    const detail = screen.getByRole("region", { name: `Issues on ${todayIso}` });
+    await user.click(within(detail).getByRole("button", { name: CALENDAR_ADD_ITEM }));
+    const field = within(detail).getByPlaceholderText(CALENDAR_TITLE_PLACEHOLDER);
+    await user.type(field, "Mobile pending");
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(await within(detail).findByText("Mobile pending")).toBeInTheDocument();
+    expect(within(detail).getByText("…")).toBeInTheDocument();
+    expect(detail.querySelector(".animate-pulse")).not.toBeNull();
   });
 });

@@ -41,4 +41,16 @@ describe("calendarDayAtPoint", () => {
     document.body.innerHTML = "";
     expect(calendarDayAtPoint(document, 10, 10)).toBeNull();
   });
+
+  it("skips tiles without a day attribute and falls through to rects", () => {
+    document.body.innerHTML = "";
+    const nameless = document.createElement("div");
+    nameless.setAttribute("data-calendar-day", "");
+    nameless.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0 }) as DOMRect;
+    document.body.append(nameless);
+    tile("2026-10-16", { left: 100, top: 0, right: 200, bottom: 100 });
+    const doc = { querySelectorAll: document.querySelectorAll.bind(document) };
+    expect(calendarDayAtPoint(doc, 150, 50)).toBe("2026-10-16");
+  });
 });

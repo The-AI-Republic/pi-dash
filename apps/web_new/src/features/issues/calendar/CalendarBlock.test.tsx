@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueListItem } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -278,5 +278,35 @@ describe("CalendarBlock", () => {
     fireEvent.focus(screen.getByRole("link", { name: "WEB-42" }));
     expect(screen.getByRole("tooltip")).toHaveAttribute("data-placement", "top-end");
     expect(screen.getByRole("tooltip")).toHaveClass("bottom-full", "right-0");
+  });
+
+  it("stops tracking when the pointer is cancelled", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    fireEvent(link, pointerEvent("pointercancel", 10, 10));
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("ignores document movement without an active press", () => {
+    const handlers = renderBlock();
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("releases its document listeners on unmount", () => {
+    const handlers = renderBlock();
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent(link, pointerEvent("pointerdown", 10, 10));
+    cleanup();
+    fireEvent(document, pointerEvent("pointermove", 80, 80));
+    expect(handlers.onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("draws no state colour when the state is unknown", () => {
+    renderBlock(row({ state_id: null }), false, { stateColor: null, stateName: null, stateGroup: null });
+    const edge = screen.getByRole("link", { name: "WEB-42" }).querySelector("span[aria-hidden='true']") as HTMLElement;
+    expect(edge.style.backgroundColor).toBe("");
   });
 });

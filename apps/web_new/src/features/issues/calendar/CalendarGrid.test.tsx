@@ -147,4 +147,11 @@ describe("CalendarGrid", () => {
     scroll.dispatchEvent(new MouseEvent("pointermove", { clientY: 499, bubbles: true }));
     expect(scrollContainerTowardPointer).toHaveBeenCalledWith(scroll, 499);
   });
+
+  it("falls back to the supplied weekday labels when there are no weeks", () => {
+    renderGrid({ weeks: [], rowsByDay: new Map(), totalsByDay: new Map() });
+    const labels = [...document.querySelectorAll("div.sticky .flex.h-11 > div")].map((node) => node.textContent);
+    expect(labels).toEqual(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]);
+    expect(document.querySelectorAll("[data-calendar-day]")).toHaveLength(0);
+  });
 });

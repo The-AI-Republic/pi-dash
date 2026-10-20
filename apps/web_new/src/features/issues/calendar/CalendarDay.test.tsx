@@ -193,4 +193,25 @@ describe("CalendarDay", () => {
     fireEvent.pointerEnter(tile);
     expect(handlers.onDragOver).toHaveBeenCalledWith(CELL.iso);
   });
+
+  it("omits add-existing when the caller does not offer it", async () => {
+    renderDay({ canAddExisting: false });
+    fireEvent.click(screen.getByText(CALENDAR_ADD_ITEM));
+    expect(screen.queryByRole("menuitem", { name: CALENDAR_ADD_EXISTING_ITEM })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: CALENDAR_ADD_ITEM })).toBeInTheDocument();
+  });
+
+  it("passes state colour and metadata into the block preview", async () => {
+    const stateId = "923e4567-e89b-12d3-a456-426614174009";
+    renderDay({
+      rows: [row({ state_id: stateId })],
+      totalRows: 1,
+      stateColors: new Map([[stateId, "#123456"]]),
+      stateMeta: new Map([[stateId, { name: "In progress", group: "started" }]]),
+    });
+    const link = screen.getByRole("link", { name: "WEB-42" });
+    fireEvent.focus(link);
+    const card = screen.getByRole("tooltip");
+    expect(card).toHaveTextContent("In progress");
+  });
 });

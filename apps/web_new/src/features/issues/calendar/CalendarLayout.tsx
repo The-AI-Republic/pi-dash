@@ -408,7 +408,7 @@ export function CalendarLayout({
       {narrow && touch && selectedDay !== null ? (
         <MobileDayDetail
           day={selectedDay}
-          rows={[...rowsForDay(grouped, selectedDay), ...(extraByDay[selectedDay] ?? [])]}
+          rows={[...rowsForDay(grouped, selectedDay), ...(extraRowsByDay.get(selectedDay) ?? [])]}
           totalRows={totalsByDay.get(selectedDay) ?? 0}
           projectIdentifier={projectIdentifier}
           canEdit={canEdit}

@@ -163,4 +163,15 @@ describe("calendar queries", () => {
     expect(states.queryKey).toContain("calendar-states");
     await expect(states.queryFn?.({} as never)).resolves.toEqual([]);
   });
+
+  it("keys a day query without a cursor", async () => {
+    const options = calendarDayQueryOptions(
+      {} as never,
+      "acme",
+      "project-1",
+      { scope: "project", projectId: "project-1" },
+      { day: "2026-10-05", perPage: 4 }
+    );
+    expect(options.queryKey?.slice(-1)).toEqual([""]);
+  });
 });

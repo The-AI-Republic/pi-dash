@@ -822,7 +822,7 @@ describe("project issues screen", () => {
       displayFilters: { layout: "calendar", group_by: null, order_by: "sort_order" },
     });
 
-    expect(await screen.findByTestId("issues-calendar")).toBeInTheDocument();
+    expect(await screen.findByTestId("issues-calendar", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.queryByLabelText("WEB-42")).not.toBeInTheDocument();
   });
 
@@ -832,7 +832,7 @@ describe("project issues screen", () => {
       projects: [{ ...projectSeed(), archived_at: "2026-10-01T00:00:00Z" }],
     });
 
-    expect(await screen.findByTestId("issues-calendar")).toBeInTheDocument();
+    expect(await screen.findByTestId("issues-calendar", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.queryByText("Add work item")).not.toBeInTheDocument();
   });
 });
