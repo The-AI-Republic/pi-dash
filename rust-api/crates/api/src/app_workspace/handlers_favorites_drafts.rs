@@ -111,7 +111,6 @@ use uuid::Uuid;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::app_pages::strip::sync_description_stripped;
-use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_jobs::queue::{self, NewJob};
 use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
 use pidash_jobs::TaskMessage;
