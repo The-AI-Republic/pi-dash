@@ -49,3 +49,10 @@ runner/test_offline_runner_sweeps.py
 # Django oracle half is assistant/test_tasks_turn.py in the worker-plane oracle
 # job of rust-api-contract-tests.yml.
 assistant/test_sweep_rust_replay.py
+# PIDASHCONV-1220: the Rust replay of the loop fire oracle
+# (loop/test_worker.py::test_fire_happy_path_creates_hidden_turn). It seeds
+# rust_job_queue rows and waits for `pidash-api worker` to dispatch a hidden
+# loop turn, so the HTTP matrix cannot run it on either backend; its coverage
+# is .github/workflows/rust-api-contract-tests-loop-rust.yml (Rust worker;
+# the Django worker stays stopped).
+loop/test_fire_rust_replay.py

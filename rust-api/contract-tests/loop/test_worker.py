@@ -187,10 +187,17 @@ def test_fire_happy_path_creates_hidden_turn(org):
     assert thread[3] is False
 
     turn = org.conn.execute(
-        "SELECT status, user_message_id FROM assistant_turn WHERE id=%s",
+        "SELECT status, user_message_id, model_used, error_code, error_detail"
+        " FROM assistant_turn WHERE id=%s",
         (str(last_run_id),),
     ).fetchone()
     assert turn[0] == "queued"
+    # model_used / error_code / error_detail are Django-side defaults ("") on
+    # NOT NULL columns with no database default; the row must carry them
+    # (PIDASHCONV-1220: the Rust dispatch insert used to omit all three).
+    assert turn[2] == ""
+    assert turn[3] == ""
+    assert turn[4] == ""
     msg = org.conn.execute(
         "SELECT kind, display_content, status FROM assistant_message WHERE id=%s",
         (str(turn[1]),),

@@ -228,9 +228,13 @@ pub fn turn_active_skip_sql() -> &'static str {
 
 /// Queued turn (`dispatch.py:102`):
 /// `AssistantTurn.objects.create(thread=locked, status=QUEUED)`.
+/// The ORM fills `model_used`, `error_code` and `error_detail` from their
+/// model defaults (`""`, `assistant/models.py:89-91`); the columns are
+/// `NOT NULL` with no database default, so the insert carries them.
 pub fn turn_insert_sql() -> &'static str {
-    "INSERT INTO assistant_turn (id, thread_id, status, created_at) \
-     VALUES ($1, $2, 'queued', $3) \
+    "INSERT INTO assistant_turn \
+     (id, thread_id, status, model_used, error_code, error_detail, created_at) \
+     VALUES ($1, $2, 'queued', '', '', '', $3) \
      RETURNING id"
 }
 
@@ -737,6 +741,9 @@ mod tests {
                     "insert into assistant_turn",
                     "thread_id",
                     "'queued'",
+                    "model_used",
+                    "error_code",
+                    "error_detail",
                     "returning id",
                 ],
             ),
