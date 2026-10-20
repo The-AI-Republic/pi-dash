@@ -139,8 +139,11 @@ selection then lives in the URL.
 
 If the active tab's list is empty, nothing is selected and the content
 pane keeps the INT-001 placeholder. An empty Closed tab does not
-auto-select either. Auto-selection does not fire when the URL already
-names a request, even a stale one — INT-028 owns fallback.
+auto-select either. Auto-selection does not fire directly on a URL that
+already names a request: INT-028 first decides whether that id is in
+the settled tab's list. If it is not (stale, other tab, forbidden), it
+drops the id and the resulting tab list auto-selects as described in
+INT-028 step 3.
 
 ### INT-008 — list and content empty states (bug NEWFRONT-262)
 
@@ -231,11 +234,22 @@ avatar instead of a member avatar. A forms-sourced row that a member
 created through the in-app form keeps the member's avatar: the rule is
 about the creating identity, not the source value.
 
+The old row decides this by comparing the creator's email with a
+hardcoded intake address, and does not consult `source` at all. The new
+build keeps the identity-based rule but takes the intake identity from
+the server-side identity data (the creator's user record and the app's
+intake identity configuration) rather than copying the literal address
+into the client. The gate uses a row created by the actual intake
+identity and a member-created row with a non-in-app source; both must
+show the right avatar.
+
 The priority tooltip is part of the intended behavior. In the old app
-the marker's trigger was a fragment, so its tooltip never opened
-(NEWFRONT-273); the oracle scenario therefore asserts the marker's
-presented priority key rather than a visible tooltip. The new build
-renders a real trigger and the gate must be able to assert the tooltip.
+the marker sits inside a tooltip wrapper, yet the tooltip never opened
+in the observed run (NEWFRONT-273). The wrapper's trigger is not
+keyboard-focusable, and the exact cause was not established; the
+scenario asserts only the marker's presented priority key. The new
+build renders a real, focusable trigger with an accessible name and the
+gate must be able to assert the tooltip opens on hover and on focus.
 
 Rows are selection controls: the selected row is marked (INT-027), and
 activating a row writes `inboxIssueId` into the URL without a full page
@@ -362,19 +376,31 @@ The same encoding serves both date sections: `created_at` for the
 created-date section and `updated_at` for the updated-date section, each
 one comma-separated token of the form above.
 
-Custom opens a range dialog with a from day and a to day. The old dialog
-seeded from today and next month's same day, let the second calendar
-start no earlier than the first and the first end no later than the
-second, and disabled Apply when the start is after the end. The new
-build keeps that shape (two day fields, start not after end, Apply
-disabled while invalid) and sends one token pair `FROM;after,TO;before`.
-While a custom range is open the dialog's title names the section it was
-opened from, so the created-date dialog and the updated-date dialog are
+Custom opens a dialog with a mode choice: before, after or range. The
+old dialog has all three modes. In before and after mode it shows one
+calendar and submits one bound token, `DATE;before` or `DATE;after`; in
+range mode it shows two calendars and submits two tokens. The new build
+keeps all three modes and their token shapes, because they are a
+capability, not a bug: `DATE;before` and `DATE;after` each describe a
+real one-sided filter the server already understands. Only range mode
+changes shape under NEWFRONT-274 (below): instead of two separate
+values it sends one combined `FROM;after,TO;before` pair.
+
+The dialog defaults to range mode, seeded from today to the same day of
+next month. The second calendar cannot start before the first, the
+first cannot end after the second, and Apply is disabled for an invalid
+range. The old guard had a copy-paste defect: it compared the first day
+with itself, so it never detected start-after-end. The new build uses
+the real second day in the comparison and disables Apply while the order
+is invalid; choosing Before or After mode never disables Apply.
+
+While the dialog is open its title names the section it was opened from,
+so the created-date dialog and the updated-date dialog are
 distinguishable.
 
 Old defects and intended behavior:
 
-- NEWFRONT-274 (custom range): the old dialog submits two separate
+- NEWFRONT-274 (range mode): the old dialog submits two separate
   filter values, `${FROM};after` and `${TO};before`. The date filter
   treats any date-shaped value as "custom selected" and replaces the
   whole section on the next pick; the two tokens end up joined as one
@@ -386,7 +412,7 @@ Old defects and intended behavior:
   bounds as one range group, and the list narrows server-side. The gate
   asserts both the sent parameter and the narrowed rows; it does not
   assert the empty-pair observation.
-- NEWFRONT-271: the old custom dialog title was the created-date title
+- NEWFRONT-271: the old custom-date dialog title was the created-date title
   in both sections. The new dialog title follows the section. The gate
   asserts both titles.
 
@@ -440,8 +466,10 @@ Defaults: the intake state is the project's triage state (INT-033); all
 other properties start empty. Title is a single line; description is
 rich text with the shared editor's toolbar (headings, formatting, lists,
 links, code, attachments). Properties use the shared pickers: intake
-state (INT-033), priority (INT-009 picker), members (INT-009 picker),
-labels, and the shared single-date picker for the due date.
+state (INT-033), the single-select priority picker (the one used for
+the priority property, not the multi-select filter of INT-009), the
+multi-select member picker (INT-013/019), the label picker, and the
+shared single-date picker for the due date.
 
 Saving posts to `POST /api/workspaces/{ws}/projects/{pid}/intake-issues/`
 with:
@@ -449,12 +477,14 @@ with:
 - `source`: `"IN_APP"`;
 - `issue`: an object carrying `name`, `description_html`, `priority`,
   `state_id`, `label_ids`, `assignee_ids` and `target_date` (the due
-  date). `state_id` carries whatever the dialog's state picker shows;
-  the server overwrites it with the project's triage state and ignores
-  a client-supplied intake state. The form must keep a valid
-  project state id in the payload (the triage state) rather than sending
-  an empty value, because the field is validated as a project state
-  before the server overwrites it.
+  date). `state_id` carries whatever the dialog's state picker shows,
+  which is the project's triage state by default and may be empty. The
+  client does not validate it and does not manufacture an id: the server
+  overwrites `issue.state_id` with the project's triage state _before_
+  it builds its create serializer, so an empty or client-picked value
+  never reaches validation and never decides the request's state. This
+  is the old form's own behavior (it sends the picker value or an empty
+  string) and the new build keeps it.
 
 The server guarantees the request lives in the project's triage state,
 creating that state if the project has none (INT-033), and records a
@@ -488,20 +518,29 @@ In all three cases nothing is created and the form keeps its input.
 ### INT-015 — create more
 
 The dialog has a "create more" toggle, off by default. With it on,
-saving keeps the dialog open, clears the form back to its defaults
-(including the intake state default), and leaves the created request
-visible behind it; the screen does not navigate to the new request.
+saving keeps the dialog open, clears the title, description editor and
+every property back to the create defaults (INT-013), and leaves the
+created request visible behind it; the screen does not navigate to the
+new request. The intake-state field resets to the same unset value as a
+fresh dialog; the picker's trigger and the server both supply the
+project's triage state, so the next request still lands in triage
+(INT-033) without the form forcing an id (INT-013).
 With it off, saving closes the dialog and navigates to the new request
 as in INT-013. The toggle's state persists only for the open dialog.
 
 ### INT-016 — dismiss guard (bug NEWFRONT-304)
 
 The dialog's close control is blocked while the rich-text editor is
-still processing — specifically while an attachment upload started from
-the description is in flight. Blocking does not close the dialog; it
-shows a short wait notice and the dialog stays with its content. Escape
-is blocked the same way. Once the editor is idle, close and Escape both
-dismiss; dismissing discards the draft without confirmation.
+still processing. The old guard reads the editor's own
+`uploadInProgress` flag, which covers attachment/asset uploads and any
+other in-flight editor operation that sets it; it is broader than
+"attachment uploads only". The new build keeps that same predicate on
+the shared editor handle rather than inventing a narrower one (slice C
+must not add a separate upload-tracking state). Blocking does not close
+the dialog; it shows a short wait notice and the dialog stays with its
+content. Escape is blocked the same way. Once the editor reports that
+it is ready to discard, close and Escape both dismiss; dismissing
+discards the draft without confirmation.
 
 The old app closed on Escape even while busy (NEWFRONT-304); the oracle
 pins that. The new build treats Escape exactly like the close control
@@ -674,14 +713,19 @@ The intake URL carries `?currentTab=open|closed` and
 
 Resolution order on entry:
 
-1. Settle the tab from `currentTab`, reading that tab's list.
-2. If `inboxIssueId` is present and the request is in the settled
-   tab's list (and readable), open it. A link to a closed request
-   therefore settles the Closed tab before loading the detail.
-3. If the id is stale, belongs to another tab's list, or is forbidden
-   to this viewer (INT-032), drop it and fall back to the tab list.
-   With a non-empty list this triggers auto-selection (INT-005); an
-   empty list keeps the placeholder.
+1. Settle the tab from `currentTab` alone, reading that tab's list.
+   A deep link that names only `inboxIssueId` (no `currentTab`) uses
+   the Open tab. The client never infers the other tab from the id:
+   it does not look the id up across tabs and does not switch tabs to
+   make a link resolve. A table link to a resolved request without
+   `currentTab` therefore lands on Open and falls back if the request
+   is not in the Open list; the caller that knows the tab passes it.
+2. If `inboxIssueId` is present and the request is in the settled tab's
+   list (and readable), open it.
+3. If the id is stale, is not in the settled tab's list, or is
+   forbidden to this viewer (INT-032), drop it from the URL and fall
+   back to the tab list. With a non-empty list the first row
+   auto-selects (INT-005); an empty list keeps the placeholder.
 4. With no id, auto-select (INT-005).
 
 Selecting a row, triage actions that advance, and create all keep the
@@ -902,10 +946,13 @@ flag that lets guests view all features is on. Without it:
 
 - the list read returns only the guest's own requests (the server scopes
   it by creator);
-- retrieving another user's request is refused (403), so the detail
-  shows the permission notice rather than content;
+- retrieving another user's request is refused (403); intake never
+  renders a foreign request's detail. There is no separate permission
+  notice surface: the id is simply absent from the guest-scoped list,
+  so the URL falls back to the tab list and auto-selects the first own
+  request when there is one (INT-028);
 - a deep link to a forbidden request falls back to the tab list
-  (INT-028);
+  (INT-028), exactly as a stale id does;
 - creating a request is allowed for a guest and the new request is
   theirs to see.
 
@@ -958,11 +1005,11 @@ scenario keeps pinning the observation as evidence.
 
 | Row                    | Oracle observation (pinned)                                                                                                                      | Intended behavior in web_new                                                                                                                                                                                             |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| INT-006 (NEWFRONT-273) | Row priority marker present, but its tooltip never opens (fragment trigger); the scenario asserts the presented priority key.                    | Marker is a real tooltip trigger; hovering/focusing shows the priority key. Gate asserts the tooltip opens.                                                                                                              |
+| INT-006 (NEWFRONT-273) | Row priority marker present, but its tooltip never opens; the scenario asserts the presented priority key.                                       | Marker is a real, focusable tooltip trigger; hovering/focusing shows the priority key. Gate asserts the tooltip opens.                                                                                                   |
 | INT-007 (NEWFRONT-269) | Placeholder rows appear while a page loads, but the header syncing hint never appears.                                                           | Syncing hint appears while a page is in flight and clears when it settles. Gate asserts it appears and clears.                                                                                                           |
 | INT-008 (NEWFRONT-262) | Every empty tab shows the no-results state (the default status counts as an applied filter); guidance and informational states are unreachable.  | Three distinct states: filtered-to-nothing → no-results; empty Open (no filters) → guidance plus create; empty Closed (no filters) → informational.                                                                      |
 | INT-010 (NEWFRONT-274) | Explicit range shows After/Before chips but sends a single `,` and never narrows; the list keeps every row.                                      | Sends `FROM;after,TO;before` as one parameter; the one range chip group narrows the list to the range.                                                                                                                   |
-| INT-010 (NEWFRONT-271) | Custom-range dialog title is the created-date title for both sections.                                                                           | Title follows the opened section (created vs updated).                                                                                                                                                                   |
+| INT-010 (NEWFRONT-271) | The custom-date dialog's title is the created-date title in both sections.                                                                       | Title follows the opened section (created vs updated) in every mode.                                                                                                                                                     |
 | INT-010 (NEWFRONT-270) | Same-day fixture data masks the defect; the updated-date preset assertion passes coincidentally.                                                 | Client sends `updated_at`; the updated-date predicate must use the updated column. Blocked on PDASHOSS01-312 (server); until Done the gate keeps INT-010's updated-date assertion red. The client still sends the range. |
 | INT-016 (NEWFRONT-304) | Escape closes the create dialog while the editor is busy.                                                                                        | Escape is guarded exactly like close: wait notice while busy, close once settled.                                                                                                                                        |
 | INT-022 (NEWFRONT-272) | A lapsed snooze hides the status chip.                                                                                                           | Lapsed snooze keeps the chip with due/passed styling.                                                                                                                                                                    |
@@ -981,19 +1028,21 @@ forks.
 
 **Shared, consumed by several slices**
 
-| Module                                             | Status      | Intake use                                                                                                                                                                                |
-| -------------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `shared/pickers/IntakeStatePicker`                 | reuse as-is | INT-013/019/033 — create default and read-only detail state; lazy reference read via `shared/pickers/reference.ts` (five-minute reference staleness, no focus refetch).                   |
-| `shared/pickers/PriorityPicker`                    | reuse as-is | INT-009/013/019 — priority filter and property.                                                                                                                                           |
-| `shared/pickers/MemberPicker`                      | reuse as-is | INT-009/013/019 — assignees, created-by, member filters.                                                                                                                                  |
-| `features/issues/labels/LabelPicker`               | reuse as-is | INT-009/013/019 — labels. Exported from `features/issues/index.ts` as `LabelPicker` / `LabelPickerProps`; it is not part of `shared/pickers`, so slices import it from `features/issues`. |
-| `features/issues/dropdowns/DatePicker`             | reuse as-is | INT-013 due date (single date); INT-010 custom range uses its range calendar export. If a range prop is missing, extend that module (NEWFRONT-616) and open an edge.                      |
-| `shared/editor` (`IssueDescriptionEditor`, handle) | reuse as-is | INT-013/019/029 — description composition, autosave editor and version viewer.                                                                                                            |
-| `features/issues/filters/shared/FilterSection`     | reuse as-is | INT-009 — section chrome (options, search, count, cap).                                                                                                                                   |
-| `shared/shell/CopyWorkItemLinkButton`              | reuse as-is | INT-024 — copies and toasts.                                                                                                                                                              |
-| `shared/shell/narrowViewport`                      | reuse as-is | INT-030 — breakpoint detection.                                                                                                                                                           |
-| `features/issues/reactions/IssueReactions`         | reuse as-is | INT-019 — reactions strip with disabled state.                                                                                                                                            |
-| `features/issues/detail/TriageDetailRoot`          | not used    | Notifications-only read-only triage host (NTF-008). Intake renders `IssueDetailRoot` with `editable` and an action slot that slice E fills; it neither wraps nor forks this host.         |
+| Module                                                 | Status        | Intake use                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `shared/pickers/IntakeStatePicker`                     | reuse as-is   | INT-013/019/033 — create default and read-only detail state; lazy reference read via `shared/pickers/reference.ts` (five-minute reference staleness, no focus refetch).                                                                                      |
+| `shared/pickers/PriorityPicker`                        | reuse as-is   | INT-013/019 — the single-select priority property (`value: PriorityLevel`). **Not** the INT-009 filter, which is multi-select (INT-009).                                                                                                                     |
+| `shared/pickers/MemberPicker`                          | reuse as-is   | INT-013/019 assignees and INT-009's created-by filter in its `multiple: true` form (`value: readonly string[]`).                                                                                                                                             |
+| `features/issues/labels/LabelPicker`                   | reuse as-is   | INT-013/019 — the label property. Exported from `features/issues/index.ts` as `LabelPicker` / `LabelPickerProps`; it is not part of `shared/pickers`, so slices import it from `features/issues`. It is a select control, not a filter row list (below).     |
+| `features/issues/dropdowns/DatePicker`                 | reuse as-is   | INT-013 due date (single date).                                                                                                                                                                                                                              |
+| `features/issues/dropdowns/DateRangePicker`            | reuse as-is   | INT-010 custom range uses the exported `DateRangeCalendar` (and `DateRangeCalendarProps`), not `DateRangePicker`'s merged/split trigger and portalled popover: intake embeds the calendar inside its dialog, so it consumes the calendar directly.           |
+| `features/issues/filters/*` priority/member/label rows | new in intake | INT-009's priority and label sections are multi-select checkbox rows composed with `FilterSection` and the shared option data (`selectPriorityOptions`, `labelKeys`), not `PriorityPicker`/`LabelPicker`. Created-by reuses `MemberPicker` `multiple: true`. |
+| `shared/editor` (`IssueDescriptionEditor`, handle)     | reuse as-is   | INT-013/019/029 — description composition, autosave editor and version viewer.                                                                                                                                                                               |
+| `features/issues/filters/shared/FilterSection`         | reuse as-is   | INT-009 — section chrome (options, search, count, cap).                                                                                                                                                                                                      |
+| `shared/shell/CopyWorkItemLinkButton`                  | reuse as-is   | INT-024 — copies and toasts.                                                                                                                                                                                                                                 |
+| `shared/shell/narrowViewport`                          | reuse as-is   | INT-030 — breakpoint detection.                                                                                                                                                                                                                              |
+| `features/issues/reactions/IssueReactions`             | reuse as-is   | INT-019 — reactions strip with disabled state.                                                                                                                                                                                                               |
+| `features/issues/detail/TriageDetailRoot`              | not used      | Notifications-only read-only triage host (NTF-008). Intake renders `IssueDetailRoot` with `editable` and its own header/action area (outside the root) that slice E fills; it neither wraps nor forks this host.                                             |
 
 **Slice A (INT-001–005, 008, 012, 031)** — all new:
 `features/intake/route` (search schema, redirect, gate), `IntakeShell`,
@@ -1004,19 +1053,31 @@ prefix and the retired-inbox redirect.
 
 **Slice B (INT-006, 007, 009–011)** — new: `IntakeRow`,
 `IntakeListPager`, `IntakeFilterPanel` (composing `FilterSection`),
-`IntakeDateRangeFilter`, `IntakeOrderMenu`, `IntakeChips`. Reuses
-`FilterSection` and the `DatePicker` range export. Edges: NEWFRONT-626,
-627, 629 (filter inputs and chrome) and NEWFRONT-616 (date/range). The
-row and chip visuals are new intake components.
+`IntakeDateFilter`, `IntakeOrderMenu`, `IntakeChips`. Reuses
+`FilterSection` (NEWFRONT-629), the shared priority option data,
+`MemberPicker` with `multiple: true` for created-by, `labelKeys` for
+label options and `DateRangeCalendar` for the custom range. The
+date-filter section and the applied chips are intake components. Edges:
+NEWFRONT-626/627 (shared filter inputs and ordering chrome), NEWFRONT-629
+(`FilterSection`) and NEWFRONT-616 (`DateRangeCalendar`). No priority
+filter picker is forked; if the shared option data is insufficient,
+extend NEWFRONT-616 and open an edge.
 
 **Slice C (INT-013–017, 033)** — new: `IntakeCreateDialog`,
-`IntakeCreateForm` and the create mutation. Reuses
-`WorkItemCreateDialog`/`useCreateWorkItem` (`features/issues/api/create.ts`),
-`ModalDescription` (`onAssetUploaded`, `onReadinessChange`,
-`assetScope`), `createApi` upload/attach hooks, the dedupe seam
-(`dedupe.ts` + `ISSUE_DEDUPE_FLAG`) with NEWFRONT-630, and the shared
-pickers. Edges: NEWFRONT-631 (assets/description), NEWFRONT-630
-(dedupe). Intake does not write a second uploader or a create form.
+`IntakeCreateForm` and the create mutation. Intake's create is its own
+dialog because the intake payload is not the work-item create payload
+(it carries `source` and posts to `intake-issues/`); it reuses the
+shared field components rather than a create form. Reuses
+`features/issues/create/ModalDescription.tsx` (asset-parked callback,
+readiness callback and asset-scope props) and
+`features/issues/create/createApi.ts` (`uploadDescriptionAsset`,
+`attachDescriptionAssets`), the shared pickers (`IntakeStatePicker`,
+`PriorityPicker`, `MemberPicker`, `LabelPicker`), the dedupe seam
+(`dedupe.ts` + `ISSUE_DEDUPE_FLAG`) with NEWFRONT-630, and `shared/editor`
+through `ModalDescription`. Edges: NEWFRONT-631 (description assets),
+NEWFRONT-630 (dedupe). NEWFRONT-631 is **not** on `web-new-dev` yet, so
+slice C carries the blocked_by edge and starts after it lands. Intake
+writes no uploader, asset client or second description editor.
 
 **Slice D (INT-019, 024, 026, 027, 028, 029)** — new:
 `IntakeDetail`, `IntakeDetailHeader`, `IntakeProperties`,
@@ -1025,8 +1086,14 @@ pickers. Edges: NEWFRONT-631 (assets/description), NEWFRONT-630
 `IssueDetailRoot` (editable/sidebar/topSlot/activity props),
 `IssueReactions`, `CopyWorkItemLinkButton`, `issue-versions.ts`. Edges:
 NEWFRONT-639 (detail fields), NEWFRONT-640/642 (properties surfaces),
-NEWFRONT-654 (reactions). If `IssueDetailRoot`'s sidebar slot needs a
-new prop, extend it in its owning slice and open an edge; do not fork.
+NEWFRONT-654 (reactions), NEWFRONT-650 (attachments). `IssueDetailRoot`
+has no action-slot prop and slice D must not add one by assumption: the
+triage action bar is composed **outside** `IssueDetailRoot`, in intake's
+`IntakeDetailHeader` above it, and the root's `topSlot` carries only the
+identifier/type row. Slice D owns that header placement; slice E fills
+its action slot. If the Issues detail slice later wants its own action
+bar inside the root, that is NEWFRONT-639's change, reached with an
+edge, never a local fork of the root.
 
 **Intake adds no attachment component of its own.** The detail's
 attachments list is the Issues attachments slice (NEWFRONT-650,
@@ -1051,9 +1118,10 @@ editable title/description, the property sidebar and live triage
 actions — so slice D does not use `TriageDetailRoot` and does not
 extend it. It composes the same shared content root,
 `IssueDetailRoot`, directly with `editable`, `sidebar` and `topSlot`
-filled, and defines an action slot above the content that slice E fills
-with its `IntakeTriageActions` bar. Slice D ships the slot and its
-read-only rendering; slice E owns the actions in it.
+filled, and composes its own `IntakeDetailHeader` above the root; that
+header holds the action area slice E fills with `IntakeTriageActions`.
+The action area is not a new `IssueDetailRoot` prop. Slice D ships the
+header and its read-only rendering; slice E owns the actions in it.
 
 That reuses the shared content instead of forking it and avoids a
 second triage wrapper: `TriageDetailRoot` stays notifications-only, and
@@ -1069,8 +1137,12 @@ read-only render (NTF rows).
 **Slice E (INT-020–023, 025)** — new: `IntakeTriageMenu`,
 `IntakeAcceptDialog`, `IntakeDeclineDialog`, `IntakeSnoozeDialog`,
 `IntakeDuplicatePicker`, `IntakeDeleteDialog`, and the triage
-mutations. Reuses the Issues edit form (`WorkItemCreateDialog` with an
-`edit` target) and `issue-search.ts`. It needs one extension on that
+mutations. Reuses the Issues edit form
+(`features/issues/components/WorkItemCreateDialog.tsx` with an `edit`
+target), `writeIssueEdit` in `features/issues/create/createApi.ts` for
+the follow-up work-item write, and `searchIssues` from
+`@pidash/api-client` (the same contract the create/parent search uses)
+for INT-023. It needs one extension on that
 form, owned by the Issues create/edit slice: a pre-submit callback that
 fires before the work-item update (INT-020's accept ordering) plus the
 changed-field hand-back. Slice E opens a blocked_by edge for that
@@ -1100,8 +1172,11 @@ takes the workspace slug as its first argument:
 - `intakeKeys.versions(workspaceSlug, projectId, issueId)` — description versions,
   shared through `issueKeys.descriptionVersions`.
 - `intakeKeys.search(workspaceSlug, projectId, term)` — duplicate-picker search.
-- reference data (`intakeState`, members, labels, states) uses
-  `pickerKeys` from `shared/pickers/reference.ts`.
+- reference data: intake state, members and project states use
+  `pickerKeys` from `shared/pickers/reference.ts`; labels are separate,
+  under `labelKeys` in `features/issues/labels/api.ts`
+  (`labelKeys.list(workspaceSlug, projectId)`). Intake reads both and
+  invalidates neither (labels are another slice's data).
 
 **Query options.** Intake list and detail reads set
 `refetchOnWindowFocus: false` (overriding the app default), and stale
@@ -1116,11 +1191,11 @@ resets paging.
 | Action                           | Write                                                                            | Optimistic                                                  | On success                                                                                | On error                                     |
 | -------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------- |
 | Create (INT-013)                 | `POST intake-issues/` + bulk attach                                              | No (needs the server id)                                    | Invalidate the list keys; navigate to new id; attach assets with the created work-item id | Keep dialog and input; show the server error |
-| Accept (INT-020)                 | `PATCH status=1`                                                                 | No                                                          | Invalidate list keys and detail; advance to neighbour                                     | Show permission/error notice; keep state     |
-| Decline (INT-021)                | `PATCH status=-1`                                                                | No                                                          | Same as accept                                                                            | Same                                         |
-| Snooze (INT-022)                 | `PATCH status=0, snoozed_till`                                                   | No                                                          | Same; the row gains the countdown chip                                                    | Same                                         |
-| Un-snooze                        | `PATCH status=-2, snoozed_till=null`                                             | No                                                          | Same                                                                                      | Same                                         |
-| Mark duplicate (INT-023)         | `PATCH status=2, duplicate_to`                                                   | No                                                          | Invalidate list keys and detail; stay on the request                                      | Same                                         |
+| Accept (INT-020)                 | `PATCH …/intake-issues/{id}/` `status=1`                                         | No                                                          | Invalidate list keys and detail; advance to neighbour                                     | Show permission/error notice; keep state     |
+| Decline (INT-021)                | `PATCH …/intake-issues/{id}/` `status=-1`                                        | No                                                          | Same as accept                                                                            | Same                                         |
+| Snooze (INT-022)                 | `PATCH …/intake-issues/{id}/` `status=0, snoozed_till`                           | No                                                          | Same; the row gains the countdown chip                                                    | Same                                         |
+| Un-snooze                        | `PATCH …/intake-issues/{id}/` `status=-2, snoozed_till=null`                     | No                                                          | Same                                                                                      | Same                                         |
+| Mark duplicate (INT-023)         | `PATCH …/intake-issues/{id}/` `status=2, duplicate_to`                           | No                                                          | Invalidate list keys and detail; stay on the request                                      | Same                                         |
 | Delete (INT-025)                 | `DELETE intake-issues/{id}/`                                                     | No                                                          | Invalidate list keys and detail; advance or clear selection                               | Same                                         |
 | Title/description edit (INT-019) | Intake update `PATCH …/intake-issues/{id}/` with `issue{name, description_html}` | Yes, local draft with save indicator (shared save pipeline) | Mark saved; invalidate detail                                                             | Keep text, show field failure                |
 | Property edit (INT-019/026)      | Intake update `PATCH …/intake-issues/{id}/` with `issue{...}`                    | Yes, the picker shows the new value                         | Keep value; invalidate detail                                                             | Revert to server value, show notice          |
@@ -1155,18 +1230,18 @@ tab/filter/order/paging actions.
 
 ## Cross-area seams
 
-| Seam                                                                   | Owner                                                                                          | Intake consumes                                                                                                                                                                                                              |
-| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Project feature toggle screen `/{ws}/settings/projects/{pid}/features` | Project settings (feature toggle slice, placeholder owner NEWFRONT-582)                        | INT-002 reads the project's `inbox_view` and links to the toggle; it does not build the toggle.                                                                                                                              |
-| Intake-state reference read (`GET …/intake-state/`)                    | `shared/pickers` (`IntakeStatePicker`, `reference.ts`)                                         | INT-033 and INT-013/019 use the picker; intake never reads or creates states itself.                                                                                                                                         |
-| Work-item add-to-project form (accept)                                 | Issues create/edit (NEWFRONT-631, merged)                                                      | INT-020 opens it in edit mode on the request's existing work item, with a pre-submit hook that writes `status=1` before the work-item update; the hook and the changed-field hand-back are an extension owned by that slice. |
-| Duplicate target picker search                                         | Issues search (`issue-search.ts`, project issue search)                                        | INT-023 calls it with `search` and `workspace_search=false`; intake adds no search surface.                                                                                                                                  |
-| Description create assets (INT-017)                                    | Issues create (NEWFRONT-631): `ModalDescription` + `createApi` + `issue-description-assets.ts` | Intake passes the draft asset scope, collects parked ids via `onAssetUploaded`, reads readiness via `onReadinessChange`, and attaches after create with the work-item id.                                                    |
-| Detail attachments list (INT-019)                                      | Issues attachments (NEWFRONT-650, ISS-187–191)                                                 | Intake mounts NEWFRONT-650's list as a detail content section with the work item's id and scope; it defines no attachment component, wrapper, fetch or upload.                                                               |
-| Reactions (INT-019)                                                    | Issues reactions (NEWFRONT-654)                                                                | Intake renders the strip with a disabled flag for read-only viewers.                                                                                                                                                         |
-| Description versions (INT-029)                                         | Issues detail (NEWFRONT-639) + the versions contract                                           | Intake renders `DescriptionHistory`; it does not build a versions API.                                                                                                                                                       |
-| Copy work-item link / browse address (INT-024)                         | `shared/shell`                                                                                 | Intake uses the button and the browse address.                                                                                                                                                                               |
-| Narrow viewport                                                        | `shared/shell/narrowViewport`                                                                  | Intake adapts layout; it does not add a media query.                                                                                                                                                                         |
+| Seam                                                                   | Owner                                                                                                                                                               | Intake consumes                                                                                                                                                                                                              |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Project feature toggle screen `/{ws}/settings/projects/{pid}/features` | Project settings (feature toggle slice, placeholder owner NEWFRONT-582)                                                                                             | INT-002 reads the project's `inbox_view` and links to the toggle; it does not build the toggle.                                                                                                                              |
+| Intake-state reference read (`GET …/intake-state/`)                    | `shared/pickers` (`IntakeStatePicker`, `reference.ts`)                                                                                                              | INT-033 and INT-013/019 use the picker; intake never reads or creates states itself.                                                                                                                                         |
+| Work-item add-to-project form (accept)                                 | Issues create/edit (NEWFRONT-631, merged)                                                                                                                           | INT-020 opens it in edit mode on the request's existing work item, with a pre-submit hook that writes `status=1` before the work-item update; the hook and the changed-field hand-back are an extension owned by that slice. |
+| Duplicate target picker search                                         | Issues search (`searchIssues` in `@pidash/api-client`, `contracts/issue-search.ts`; the create/search query pattern lives in `features/issues/create/createApi.ts`) | INT-023 calls it with `search` and `workspace_search=false`; intake adds no search surface.                                                                                                                                  |
+| Description create assets (INT-017)                                    | Issues create (NEWFRONT-631): `ModalDescription` + `createApi` + `issue-description-assets.ts`                                                                      | Intake passes the draft asset scope, collects parked ids via `onAssetUploaded`, reads readiness via `onReadinessChange`, and attaches after create with the work-item id.                                                    |
+| Detail attachments list (INT-019)                                      | Issues attachments (NEWFRONT-650, ISS-187–191)                                                                                                                      | Intake mounts NEWFRONT-650's list as a detail content section with the work item's id and scope; it defines no attachment component, wrapper, fetch or upload.                                                               |
+| Reactions (INT-019)                                                    | Issues reactions (NEWFRONT-654)                                                                                                                                     | Intake renders the strip with a disabled flag for read-only viewers.                                                                                                                                                         |
+| Description versions (INT-029)                                         | Issues detail (NEWFRONT-639) + the versions contract                                                                                                                | Intake renders `DescriptionHistory`; it does not build a versions API.                                                                                                                                                       |
+| Copy work-item link / browse address (INT-024)                         | `shared/shell`                                                                                                                                                      | Intake uses the button and the browse address.                                                                                                                                                                               |
+| Narrow viewport                                                        | `shared/shell/narrowViewport`                                                                                                                                       | Intake adapts layout; it does not add a media query.                                                                                                                                                                         |
 
 Attachments have no single owner today; the modules named above are the
 owners intake consumes. Slice C's edge is NEWFRONT-631 (merged); slice
@@ -1296,3 +1371,9 @@ and must be reused, not duplicated.
   merges. The rest of INT-019 does not depend on it.
 - The retired inbox redirect and the `/{ws}/...` paths depend on
   NEWFRONT-528 (workspace-scoped migrated routes).
+- The oracle does not exercise the single-bound custom-date modes
+  (Before / After); slice B keeps them because the old dialog and server
+  support them, and adds an oracle scenario for them before the gate
+  asserts their token shapes.
+- The Closed status filter is not exercised by the oracle; slice B adds
+  that scenario before the gate asserts the Closed option set (INT-009).
