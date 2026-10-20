@@ -32,6 +32,7 @@ function renderRow(props: Partial<React.ComponentProps<typeof StateRow>> = {}) {
       share={0.5}
       editable
       draggable
+      dropEnabled
       deleteBlockedReason={null}
       promoting={false}
       dragging={false}
@@ -80,6 +81,7 @@ describe("StateRow", () => {
         share={-1}
         editable
         draggable
+        dropEnabled
         deleteBlockedReason={null}
         promoting={false}
         dragging={false}
@@ -182,12 +184,29 @@ describe("StateRow", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 
-  it("does not run drag handlers on a row that cannot be dragged", () => {
-    const { onDragOverEdge, onDrop } = renderRow({ draggable: false });
+  it("does not run drag handlers on a row when editing is off", () => {
+    const { onDragOverEdge, onDrop } = renderRow({ draggable: false, dropEnabled: false });
     const target = screen.getByTestId("state-row");
-    fireEvent.dragOver(target, { clientY: 1 });
-    fireEvent.drop(target, { clientY: 1 });
+    const NativeDrag = globalThis.DragEvent;
+    class CoordDragEvent extends MouseEvent {}
+    globalThis.DragEvent = CoordDragEvent as unknown as typeof DragEvent;
+    try {
+      fireEvent.dragOver(target, { clientY: 1 });
+      fireEvent.drop(target, { clientY: 1 });
+    } finally {
+      globalThis.DragEvent = NativeDrag;
+    }
     expect(onDragOverEdge).not.toHaveBeenCalled();
     expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("accepts a drop into a one-row group that offers no grip", () => {
+    const { onDragOverEdge, onDrop } = renderRow({ draggable: false });
+    const target = screen.getByTestId("state-row");
+    fireEvent.dragOver(target);
+    fireEvent.drop(target);
+    expect(onDragOverEdge).toHaveBeenCalledTimes(1);
+    expect(onDrop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("state-row-grip")).not.toBeInTheDocument();
   });
 });

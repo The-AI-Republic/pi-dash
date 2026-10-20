@@ -561,6 +561,99 @@ describe("editing, deleting and promoting", () => {
     });
   });
 
+  it("ignores a drag hover with no source and a hover over the source itself", async () => {
+    setViewer(20, true);
+    const calls = stubApi();
+    renderTab();
+    const backlog = (await screen.findAllByTestId("state-group-card")).find(
+      (card) => card.getAttribute("data-group") === "backlog"
+    )!;
+    const rows = within(backlog).getAllByTestId("state-row");
+    // A hover with nothing being dragged paints no marker.
+    fireEvent.dragOver(rows[1]!);
+    expect(within(backlog).queryByTestId("state-drop-marker")).not.toBeInTheDocument();
+    fireEvent.dragStart(within(backlog).getAllByTestId("state-row-grip")[0]!, {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
+    });
+    // Leaving a row when nothing is marked leaves nothing to clear.
+    fireEvent.dragLeave(rows[1]!);
+    expect(within(backlog).queryByTestId("state-drop-marker")).not.toBeInTheDocument();
+    // Hovering one row and then leaving it clears that marker.
+    fireEvent.dragOver(rows[1]!);
+    expect(within(backlog).getByTestId("state-drop-marker")).toBeInTheDocument();
+    fireEvent.dragLeave(rows[1]!);
+    expect(within(backlog).queryByTestId("state-drop-marker")).not.toBeInTheDocument();
+    // Hovering the source row itself never marks it as its own target.
+    fireEvent.dragOver(rows[0]!);
+    expect(within(backlog).queryByTestId("state-drop-marker")).not.toBeInTheDocument();
+    fireEvent.drop(rows[0]!);
+    expect(calls.some((call) => call.startsWith("PATCH "))).toBe(false);
+  });
+
+  it("keeps the marker when the pointer leaves a row other than the marked one", async () => {
+    setViewer(20, true);
+    stubApi();
+    renderTab();
+    const backlog = (await screen.findAllByTestId("state-group-card")).find(
+      (card) => card.getAttribute("data-group") === "backlog"
+    )!;
+    const rows = within(backlog).getAllByTestId("state-row");
+    fireEvent.dragStart(within(backlog).getAllByTestId("state-row-grip")[0]!, {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
+    });
+    fireEvent.dragOver(rows[1]!);
+    expect(within(backlog).getByTestId("state-drop-marker")).toBeInTheDocument();
+    fireEvent.dragLeave(rows[0]!);
+    expect(within(backlog).getByTestId("state-drop-marker")).toBeInTheDocument();
+  });
+
+  it("moves a state across cards when the source was dragged in another group", async () => {
+    setViewer(20, true);
+    const calls = stubApi();
+    renderTab(defaultRows());
+    const cards = await screen.findAllByTestId("state-group-card");
+    const backlog = cards.find((card) => card.getAttribute("data-group") === "backlog")!;
+    const unstarted = cards.find((card) => card.getAttribute("data-group") === "unstarted")!;
+    const target = within(unstarted).getByTestId("state-row");
+    fireEvent.dragStart(within(backlog).getAllByTestId("state-row-grip")[1]!, {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
+    });
+    fireEvent.dragOver(target);
+    expect(within(unstarted).getByTestId("state-drop-marker")).toBeInTheDocument();
+    fireEvent.drop(target);
+    await waitFor(() => {
+      expect(
+        calls.some(
+          (call) =>
+            call.startsWith("PATCH ") &&
+            call.includes(`/states/${testRowId("Triage queue")}/`) &&
+            call.endsWith(`/projects/${TEST_PROJECT}/states/${testRowId("Triage queue")}/`)
+        )
+      ).toBe(true);
+    });
+    expect(calls.filter((call) => call.startsWith("PATCH "))).toHaveLength(1);
+  });
+
+  it("lands a cross-card drop in a group that holds a single state", async () => {
+    setViewer(20, true);
+    const calls = stubApi();
+    renderTab();
+    const cards = await screen.findAllByTestId("state-group-card");
+    const backlog = cards.find((card) => card.getAttribute("data-group") === "backlog")!;
+    const review = cards.find((card) => card.getAttribute("data-group") === "review")!;
+    fireEvent.click(within(review).getByTestId("state-group-toggle"));
+    const target = within(review).getByTestId("state-row");
+    fireEvent.dragStart(within(backlog).getAllByTestId("state-row-grip")[0]!, {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
+    });
+    fireEvent.drop(target);
+    await waitFor(() => {
+      expect(calls.some((call) => call.startsWith("PATCH ") && call.includes(`/states/${testRowId("Backlog")}/`))).toBe(
+        true
+      );
+    });
+  });
+
   it("does not send a drop that leaves the row where it was", async () => {
     setViewer(20, true);
     const calls = stubApi();

@@ -7,7 +7,9 @@
 // the add control (disabled while that group's form is open or the
 // viewer may not edit). The body holds the rows, the docked create form,
 // the empty note, and the drop marker that names where a dragged row
-// will land.
+// will land. The drag itself is owned by the tab: a source dragged out
+// of one card must be receivable by every other card, so the card only
+// reports hover/drop events and repaints the shared source and target.
 
 import { Button, IconButton } from "@pidash/kit";
 import { ChevronDown, Plus } from "lucide-react";
@@ -15,6 +17,8 @@ import * as React from "react";
 
 import type { State } from "@pidash/api-client";
 import { canDragGroupRows, rowShare, type WorkflowGroup, WORKFLOW_GROUP_SWATCHES } from "../groups.js";
+import type { DropEdge } from "../ordering.js";
+import { GroupGlyph } from "./GroupGlyph.js";
 import { StateForm, type StateFormValue } from "./StateForm.js";
 import { StateRow } from "./StateRow.js";
 
@@ -40,8 +44,21 @@ export interface StateGroupCardProps {
   onDelete: (state: State) => void;
   onPromote: (state: State) => void;
   promotingId: string | null;
-  /** Commits a drop; the card resolves the source/target itself. */
-  onMove: (sourceId: string, targetId: string, edge: "above" | "below") => void;
+  /** The row being dragged, owned by the tab so any card can receive it. */
+  dragSource: string | null;
+  /** The row and edge the pointer currently names, owned by the tab. */
+  dropTarget: StateDropTarget | null;
+  onDragStart: (stateId: string) => void;
+  onDragEnd: () => void;
+  onDragOver: (targetId: string, edge: DropEdge) => void;
+  onDragLeave: (targetId: string) => void;
+  onDrop: (targetId: string, edge: DropEdge) => void;
+}
+
+/** A row named by a drop, and the edge the pointer landed against. */
+export interface StateDropTarget {
+  id: string;
+  edge: DropEdge;
 }
 
 export function StateGroupCard({
@@ -65,22 +82,16 @@ export function StateGroupCard({
   onDelete,
   onPromote,
   promotingId,
-  onMove,
+  dragSource,
+  dropTarget,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
 }: StateGroupCardProps): React.ReactElement {
   const bodyId = React.useId();
-  const [dragSource, setDragSource] = React.useState<string | null>(null);
-  const [dropTarget, setDropTarget] = React.useState<{ id: string; edge: "above" | "below" } | null>(null);
   const draggable = canDragGroupRows(rows.length, editable);
-
-  function endDrag(): void {
-    setDragSource(null);
-    setDropTarget(null);
-  }
-
-  function acceptDrop(targetId: string, edge: "above" | "below"): void {
-    if (dragSource !== null && dragSource !== targetId) onMove(dragSource, targetId, edge);
-    endDrag();
-  }
 
   return (
     <section
@@ -103,6 +114,7 @@ export function StateGroupCard({
             aria-hidden="true"
             className={`shrink-0 text-(--text-muted) transition-transform ${expanded ? "rotate-0" : "-rotate-90"}`}
           />
+          <GroupGlyph group={group} color={WORKFLOW_GROUP_SWATCHES[group]} />
           <span className="text-body font-medium text-(--text)">{label}</span>
           <span className="text-body text-(--text-muted)">{rows.length}</span>
         </button>
@@ -146,17 +158,13 @@ export function StateGroupCard({
                     share={rowShare(index + 1, rows.length)}
                     editable={editable}
                     draggable={draggable}
+                    dropEnabled={editable}
                     deleteBlockedReason={deleteBlockedReason(state, rows)}
-                    onDragStart={() => {
-                      setDragSource(state.id);
-                      setDropTarget(null);
-                    }}
-                    onDragEnd={endDrag}
-                    onDragOverEdge={(edge) => setDropTarget({ id: state.id, edge })}
-                    onDragLeaveRow={() => {
-                      if (dropTarget?.id === state.id) setDropTarget(null);
-                    }}
-                    onDrop={(edge) => acceptDrop(state.id, edge)}
+                    onDragStart={() => onDragStart(state.id)}
+                    onDragEnd={onDragEnd}
+                    onDragOverEdge={(edge) => onDragOver(state.id, edge)}
+                    onDragLeaveRow={() => onDragLeave(state.id)}
+                    onDrop={(edge) => onDrop(state.id, edge)}
                     onEdit={() => onEdit(state.id)}
                     onPromote={() => onPromote(state)}
                     onDelete={() => onDelete(state)}

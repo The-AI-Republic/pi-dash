@@ -34,6 +34,12 @@ export interface StateRowProps {
   editable: boolean;
   /** Grip is offered only on multi-row groups with editing on. */
   draggable: boolean;
+  /**
+   * Rows accept a drop whenever editing is on, even in a one-row group:
+   * a source dragged out of another card may land in a group that did
+   * not have enough rows to offer a grip of its own.
+   */
+  dropEnabled: boolean;
   /** Delete control explanation when it is disabled; null when enabled. */
   deleteBlockedReason: string | null;
   /** Fires while dragging this row, naming the row and the hovered edge. */
@@ -57,6 +63,7 @@ export function StateRow({
   share,
   editable,
   draggable,
+  dropEnabled,
   deleteBlockedReason,
   onDragStart,
   onDragEnd,
@@ -83,16 +90,16 @@ export function StateRow({
         dragging ? "opacity-50" : "opacity-100"
       }`}
       onDragOver={
-        draggable
+        dropEnabled
           ? (event) => {
               event.preventDefault();
               onDragOverEdge(edgeAt(event));
             }
           : undefined
       }
-      onDragLeave={draggable ? onDragLeaveRow : undefined}
+      onDragLeave={dropEnabled ? onDragLeaveRow : undefined}
       onDrop={
-        draggable
+        dropEnabled
           ? (event) => {
               event.preventDefault();
               onDrop(edgeAt(event));

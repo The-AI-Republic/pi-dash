@@ -31,7 +31,7 @@ import { resolveStateMove } from "../ordering.js";
 import { canEditStates, canToggleMemberEditing } from "../rights.js";
 import { MemberEditingToggle } from "./MemberEditingToggle.js";
 import { StateDeleteDialog } from "./StateDeleteDialog.js";
-import { StateGroupCard } from "./StateGroupCard.js";
+import { StateGroupCard, type StateDropTarget } from "./StateGroupCard.js";
 import type { StateFormValue } from "./StateForm.js";
 
 /** Rows the loading skeleton sketches before grouped content arrives. */
@@ -78,6 +78,10 @@ export function StatesTab(): React.ReactElement {
   const [creatingIn, setCreatingIn] = React.useState<WorkflowGroup | null>(null);
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [deleting, setDeleting] = React.useState<State | null>(null);
+  // One drag lives across the whole tab: the source may sit in one card
+  // while the pointer hovers another.
+  const [dragSource, setDragSource] = React.useState<string | null>(null);
+  const [dropTarget, setDropTarget] = React.useState<StateDropTarget | null>(null);
 
   const groups = React.useMemo<GroupedStates[]>(() => groupStates(states.data ?? []), [states.data]);
 
@@ -112,6 +116,33 @@ export function StatesTab(): React.ReactElement {
 
   function promoteState(state: State): void {
     promote.mutate({ workspaceSlug, projectId, stateId: state.id });
+  }
+
+  function startDrag(stateId: string): void {
+    setDragSource(stateId);
+    setDropTarget(null);
+  }
+
+  function endDrag(): void {
+    setDragSource(null);
+    setDropTarget(null);
+  }
+
+  function hoverEdge(targetId: string, edge: "above" | "below"): void {
+    if (dragSource === null) return;
+    // A row never marks itself as its own destination.
+    if (dragSource === targetId) {
+      setDropTarget(null);
+      return;
+    }
+    setDropTarget({ id: targetId, edge });
+  }
+
+  function leaveRow(targetId: string): void {
+    setDropTarget((previous) => {
+      if (previous === null) return null;
+      return previous.id === targetId ? null : previous;
+    });
   }
 
   const header = (
@@ -163,6 +194,11 @@ export function StatesTab(): React.ReactElement {
     move.mutate({ workspaceSlug, projectId, move: resolved });
   }
 
+  function dropRow(targetId: string, edge: "above" | "below"): void {
+    if (dragSource !== null && dragSource !== targetId) submitMove(dragSource, targetId, edge);
+    endDrag();
+  }
+
   return (
     <section aria-label="Workflow states" data-testid="states-tab" className="flex flex-col gap-(--space-4)">
       {header}
@@ -190,7 +226,13 @@ export function StatesTab(): React.ReactElement {
             onDelete={setDeleting}
             onPromote={promoteState}
             promotingId={promote.isPending ? promote.variables.stateId : null}
-            onMove={submitMove}
+            dragSource={dragSource}
+            dropTarget={dropTarget}
+            onDragStart={startDrag}
+            onDragEnd={endDrag}
+            onDragOver={hoverEdge}
+            onDragLeave={leaveRow}
+            onDrop={dropRow}
           />
         ))}
       </div>

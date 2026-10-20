@@ -8,7 +8,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { stateList } from "../testFixtures.js";
-import { StateGroupCard, type StateGroupCardProps } from "./StateGroupCard.js";
+import { StateGroupCard, type StateDropTarget, type StateGroupCardProps } from "./StateGroupCard.js";
 
 afterEach(() => {
   cleanup();
@@ -35,6 +35,11 @@ function box(top: number): DOMRect {
 
 function renderCard(props: Partial<StateGroupCardProps> = {}) {
   const handlers = {
+    onDragStart: vi.fn(),
+    onDragEnd: vi.fn(),
+    onDragOver: vi.fn(),
+    onDragLeave: vi.fn(),
+    onDrop: vi.fn(),
     onToggle: vi.fn(),
     onOpenCreate: vi.fn(),
     onCancelCreate: vi.fn(),
@@ -44,7 +49,6 @@ function renderCard(props: Partial<StateGroupCardProps> = {}) {
     onSaveEdit: vi.fn(),
     onDelete: vi.fn(),
     onPromote: vi.fn(),
-    onMove: vi.fn(),
   };
   render(
     <StateGroupCard
@@ -59,6 +63,8 @@ function renderCard(props: Partial<StateGroupCardProps> = {}) {
       editPending={false}
       deleteBlockedReason={() => null}
       promotingId={null}
+      dragSource={null}
+      dropTarget={null}
       {...handlers}
       {...props}
     />
@@ -170,22 +176,91 @@ describe("empty groups", () => {
   });
 });
 
+describe("group glyph", () => {
+  it("names an empty group with its glyph, drawn without a share ring", () => {
+    renderCard({ rows: [] });
+    const glyph = screen.getByTestId("state-group-glyph");
+    expect(glyph).not.toHaveAttribute("data-share");
+    expect(glyph.querySelectorAll("circle")).toHaveLength(0);
+  });
+});
+
+/**
+ * A card whose drag state is held outside it, the way the tab holds one
+ * source across every card.
+ */
+function DragHarness({ rows = TWO_ROWS }: { rows?: typeof TWO_ROWS }): React.ReactElement {
+  const [source, setSource] = React.useState<string | null>(null);
+  const [target, setTarget] = React.useState<StateDropTarget | null>(null);
+  return (
+    <StateGroupCard
+      group="backlog"
+      label="Backlog"
+      rows={rows}
+      expanded
+      editable
+      creating={false}
+      createPending={false}
+      editingId={null}
+      editPending={false}
+      deleteBlockedReason={() => null}
+      promotingId={null}
+      onToggle={vi.fn()}
+      onOpenCreate={vi.fn()}
+      onCancelCreate={vi.fn()}
+      onCreate={vi.fn()}
+      onEdit={vi.fn()}
+      onCancelEdit={vi.fn()}
+      onSaveEdit={vi.fn()}
+      onDelete={vi.fn()}
+      onPromote={vi.fn()}
+      dragSource={source}
+      dropTarget={target}
+      onDragStart={setSource}
+      onDragEnd={() => {
+        setSource(null);
+        setTarget(null);
+      }}
+      onDragOver={(id, edge) => setTarget({ id, edge })}
+      onDragLeave={(id) => setTarget((previous) => (previous?.id === id ? null : previous))}
+      onDrop={() => {
+        setSource(null);
+        setTarget(null);
+      }}
+    />
+  );
+}
+
 describe("dragging", () => {
-  it("lights the marker for the hovered edge and commits the drop", () => {
-    const { onMove } = renderCard();
+  it("reports the drag start and lights the marker for a hovered edge", () => {
+    const { onDragStart, onDragOver, onDrop } = renderCard();
     const rows = screen.getAllByTestId("state-row");
-    const source = screen.getAllByTestId("state-row-grip")[0]!;
-    fireEvent.dragStart(source, { dataTransfer: { setData: vi.fn(), effectAllowed: "" } });
+    fireEvent.dragStart(screen.getAllByTestId("state-row-grip")[0]!, {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
+    });
+    expect(onDragStart).toHaveBeenCalledWith(TWO_ROWS[0]!.id);
+    fireEvent.dragOver(rows[1]!);
+    expect(onDragOver).toHaveBeenCalledWith(TWO_ROWS[1]!.id, "below");
+    fireEvent.drop(rows[1]!);
+    expect(onDrop).toHaveBeenCalledWith(TWO_ROWS[1]!.id, "below");
+  });
+
+  it("dims the source and paints the marker from the shared state", () => {
+    render(<DragHarness />);
+    const rows = screen.getAllByTestId("state-row");
+    fireEvent.dragStart(screen.getAllByTestId("state-row-grip")[0]!, {
+      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
+    });
     expect(rows[0]).toHaveAttribute("data-dragging", "true");
     fireEvent.dragOver(rows[1]!);
     expect(screen.getAllByTestId("state-drop-marker")).toHaveLength(1);
     fireEvent.drop(rows[1]!);
-    expect(onMove).toHaveBeenCalledWith(TWO_ROWS[0]!.id, TWO_ROWS[1]!.id, "below");
+    expect(rows[0]).toHaveAttribute("data-dragging", "false");
     expect(screen.queryAllByTestId("state-drop-marker")).toHaveLength(0);
   });
 
   it("lights the marker above a hovered row", () => {
-    renderCard();
+    render(<DragHarness />);
     const rows = screen.getAllByTestId("state-row");
     fireEvent.dragStart(screen.getAllByTestId("state-row-grip")[0]!, {
       dataTransfer: { setData: vi.fn(), effectAllowed: "" },
@@ -204,26 +279,8 @@ describe("dragging", () => {
     }
   });
 
-  it("does not commit a drop onto the row being dragged", () => {
-    const { onMove } = renderCard();
-    const rows = screen.getAllByTestId("state-row");
-    fireEvent.dragStart(screen.getAllByTestId("state-row-grip")[0]!, {
-      dataTransfer: { setData: vi.fn(), effectAllowed: "" },
-    });
-    fireEvent.drop(rows[0]!);
-    expect(onMove).not.toHaveBeenCalled();
-  });
-
-  it("clears the drag when it ends without a drop", () => {
-    renderCard();
-    const grip = screen.getAllByTestId("state-row-grip")[0]!;
-    fireEvent.dragStart(grip, { dataTransfer: { setData: vi.fn(), effectAllowed: "" } });
-    fireEvent.dragEnd(grip);
-    expect(screen.getAllByTestId("state-row")[0]).toHaveAttribute("data-dragging", "false");
-  });
-
   it("clears a hover marker when the pointer leaves that row", () => {
-    renderCard();
+    render(<DragHarness />);
     const rows = screen.getAllByTestId("state-row");
     fireEvent.dragStart(screen.getAllByTestId("state-row-grip")[0]!, {
       dataTransfer: { setData: vi.fn(), effectAllowed: "" },
@@ -234,8 +291,8 @@ describe("dragging", () => {
     expect(screen.queryAllByTestId("state-drop-marker")).toHaveLength(0);
   });
 
-  it("leaves an unrelated hover marker alone when another row is left", () => {
-    renderCard();
+  it("keeps a marker on another row when an unrelated row is left", () => {
+    render(<DragHarness />);
     const rows = screen.getAllByTestId("state-row");
     fireEvent.dragStart(screen.getAllByTestId("state-row-grip")[0]!, {
       dataTransfer: { setData: vi.fn(), effectAllowed: "" },
@@ -243,5 +300,28 @@ describe("dragging", () => {
     fireEvent.dragOver(rows[1]!);
     fireEvent.dragLeave(rows[0]!);
     expect(screen.getAllByTestId("state-drop-marker")).toHaveLength(1);
+  });
+
+  it("accepts a drop on the only row of a group, though it offers no grip", () => {
+    const { onDragOver, onDrop } = renderCard({ rows: [TWO_ROWS[0]!] });
+    const only = screen.getByTestId("state-row");
+    expect(screen.queryByTestId("state-row-grip")).not.toBeInTheDocument();
+    fireEvent.dragOver(only);
+    fireEvent.drop(only);
+    expect(onDragOver).toHaveBeenCalledWith(TWO_ROWS[0]!.id, expect.any(String));
+    expect(onDrop).toHaveBeenCalledWith(TWO_ROWS[0]!.id, expect.any(String));
+  });
+
+  it("withholds drop handling from readers", () => {
+    const { onDragOver, onDrop } = renderCard({
+      editable: false,
+      rows: [TWO_ROWS[0]!],
+      dragSource: TWO_ROWS[1]!.id,
+    });
+    const only = screen.getByTestId("state-row");
+    fireEvent.dragOver(only);
+    fireEvent.drop(only);
+    expect(onDragOver).not.toHaveBeenCalled();
+    expect(onDrop).not.toHaveBeenCalled();
   });
 });

@@ -33,20 +33,32 @@ export const MEMBER_EDITING_FAILED_TITLE = "Couldn't change the member editing s
 /** Fallback detail for a refusal with no usable message. */
 export const STATE_FAILURE_FALLBACK = "Check your connection and try again.";
 
-/** True when the server refused a create/rename as a duplicate name. */
+/**
+ * True when the server refused a create/rename as a duplicate name. The
+ * state views answer an integrity clash with `{"name": "<sentence>"}` — a
+ * bare string, not DRF's per-field list — so the client keeps the raw
+ * body too and reads the name key from either shape. A DRF `name` field
+ * error (array) answers the same refusal.
+ */
 export function isDuplicateStateError(error: unknown): boolean {
   if (!isApiError(error) || error.status !== 400) return false;
-  return error.fields !== undefined && Object.keys(error.fields).includes("name");
+  if (error.fields !== undefined && Object.keys(error.fields).includes("name")) return true;
+  if (error.body === null || typeof error.body !== "object") return false;
+  const record = error.body as Record<string, unknown>;
+  return Object.keys(record).length > 0 && Object.keys(record).every((key) => key === "name");
 }
 
 /**
  * True when a delete was refused because issues still live in the
- * state. The server answers `{"error": "..."}` with a status that names
- * the conflict; the message carries the move-items guidance.
+ * state. The server answers `{"error": "The state is not empty, only
+ * empty states can be deleted"}`; an equivalent refusal that talks about
+ * work items in use counts too. The wording is matched because the
+ * status alone cannot tell this from the other 400s (default state,
+ * validation).
  */
 export function isOccupiedStateError(error: unknown): boolean {
   if (!isApiError(error)) return false;
-  return /move|in use|issue/i.test(error.message);
+  return /not empty|move|in use|issue/i.test(error.message);
 }
 
 /** Detail for a failure notice: the server's message, else the fallback. */

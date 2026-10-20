@@ -271,7 +271,7 @@ describe("useCreateState", () => {
   it("notices the specific duplicate message and keeps the caller's form state", async () => {
     stubTransport({
       createStatus: 400,
-      createBody: { name: ["The state name is already taken"] },
+      createBody: { name: "The state name is already taken" },
     });
     const { result } = renderHook(() => useCreateState(), { wrapper: wrapper(queryClient()) });
     await act(async () => {
@@ -344,7 +344,7 @@ describe("useUpdateState", () => {
 
   it("restores the row and shows the specific duplicate notice when the rename clashes", async () => {
     const initial = stateList([{ name: "a", group: "backlog" }]);
-    stubTransport({ patchStatus: 400, patchBody: { name: ["The state name is already taken"] } });
+    stubTransport({ patchStatus: 400, patchBody: { name: "The state name is already taken" } });
     const client = queryClient(initial);
     const { result } = renderHook(() => useUpdateState(), { wrapper: wrapper(client) });
     await act(async () => {
@@ -441,7 +441,10 @@ describe("useDeleteState", () => {
 
   it("guides the operator to move work items when the state is occupied", async () => {
     const client = queryClient(stateList([{ name: "a", group: "backlog" }]));
-    stubTransport({ deleteStatus: 400, deleteBody: { error: "State is in use by issues" } });
+    stubTransport({
+      deleteStatus: 400,
+      deleteBody: { error: "The state is not empty, only empty states can be deleted" },
+    });
     const { result } = renderHook(() => useDeleteState(), { wrapper: wrapper(client) });
     await act(async () => {
       await expect(

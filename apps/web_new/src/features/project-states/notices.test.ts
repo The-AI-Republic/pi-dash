@@ -10,9 +10,23 @@ function apiError(status: number, message = "", fields?: Record<string, string[]
   return new ApiError({ status, code: "http", message, ...(fields === undefined ? {} : { fields }) });
 }
 
+/**
+ * The error the fetch client builds from a raw refusal body: `error`
+ * becomes the message, any other shape stays "Request failed", and the
+ * parsed body is kept.
+ */
+function refusal(status: number, body: Record<string, unknown>): ApiError {
+  const message = typeof body["error"] === "string" ? body["error"] : "Request failed";
+  return new ApiError({ status, code: "http", message, body });
+}
+
 describe("isDuplicateStateError", () => {
   it("recognises a 400 whose field errors name `name`", () => {
     expect(isDuplicateStateError(apiError(400, "", { name: ["The state name is already taken"] }))).toBe(true);
+  });
+
+  it("recognises the string `name` body the state views answer an integrity clash with", () => {
+    expect(isDuplicateStateError(refusal(400, { name: "The state name is already taken" }))).toBe(true);
   });
 
   it("rejects other statuses, other fields and non-API errors", () => {
@@ -20,6 +34,9 @@ describe("isDuplicateStateError", () => {
     expect(isDuplicateStateError(apiError(400, "", { color: ["x"] }))).toBe(false);
     expect(isDuplicateStateError(apiError(400, "boom"))).toBe(false);
     expect(isDuplicateStateError(new Error("boom"))).toBe(false);
+    expect(isDuplicateStateError(refusal(400, { color: "bad" }))).toBe(false);
+    expect(isDuplicateStateError(refusal(400, { name: "taken", group: "bad" }))).toBe(false);
+    expect(isDuplicateStateError(refusal(400, {}))).toBe(false);
   });
 });
 
@@ -29,8 +46,15 @@ describe("isOccupiedStateError", () => {
     expect(isOccupiedStateError(apiError(409, "State is in use"))).toBe(true);
   });
 
-  it("rejects unrelated failures and non-API errors", () => {
+  it("recognises the exact body the state view answers a non-empty delete with", () => {
+    expect(
+      isOccupiedStateError(refusal(400, { error: "The state is not empty, only empty states can be deleted" }))
+    ).toBe(true);
+  });
+
+  it("rejects unrelated failures, other statuses and non-API errors", () => {
     expect(isOccupiedStateError(apiError(400, "Already exists"))).toBe(false);
+    expect(isOccupiedStateError(apiError(400, "Default state cannot be deleted"))).toBe(false);
     expect(isOccupiedStateError(new Error("move"))).toBe(false);
   });
 });
