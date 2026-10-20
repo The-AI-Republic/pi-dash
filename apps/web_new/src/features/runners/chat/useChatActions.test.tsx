@@ -22,6 +22,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 });
 vi.mock("../../../shared/shell/index.js", () => notify);
 vi.mock("./transport.js", () => ({
+  chatTransportForRunner: () => active.transport,
   getChatTransport: () => active.transport,
   openChatSession: (...args: unknown[]) => contracts.createChatSession(...args),
 }));

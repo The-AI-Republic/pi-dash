@@ -99,12 +99,13 @@ function harness(overrides: Partial<LocalChatApi> = {}): Harness {
   };
 }
 
-function transportFor(h: Harness, account = "u-1") {
+function transportFor(h: Harness, account = "u-1", stored: (runnerId: string) => string = () => "full_access") {
   return createLocalChatTransport({
     api: h.api,
     account: () => account,
     workspaceSlug: () => "acme",
     ensureRuntime: h.ensureRuntime,
+    storedMode: stored,
   });
 }
 
@@ -306,43 +307,61 @@ describe("local transport", () => {
     expect(transport.getApprovalMode("s-1")).toBe("ask");
   });
 
-  it("answers the built-in runner and rejects an unknown contact", async () => {
+  it("answers the built-in runner and declines a server contact", async () => {
     const transport = transportFor(harness());
     await expect(transport.chatRunner(BUILTIN_CHAT_ID)).resolves.toMatchObject({ status: "online" });
-    await expect(transport.chatRunner("r-other")).rejects.toThrow(/Unknown local contact/);
+    await expect(transport.chatRunner("r-other")).resolves.toBeNull();
+    expect(transport.ownsRunner(BUILTIN_CHAT_ID)).toBe(true);
+    expect(transport.ownsRunner("r-other")).toBe(false);
   });
 
   it("refuses every store verb when signed out", async () => {
     const transport = complete(transportFor(harness(), ""));
     await expect(transport.listChatMessages("s-1")).rejects.toThrow(/Sign in/);
-    await expect(transport.createChatSession({ workspace: "ws-id", runner: "r-1" })).rejects.toThrow(/Sign in/);
+    await expect(transport.createChatSession({ workspace: "ws-id", runner: BUILTIN_CHAT_ID })).rejects.toThrow(
+      /Sign in/
+    );
     await expect(transport.closeChat("s-1")).rejects.toThrow(/Sign in/);
   });
 
-  it("lists only this workspace's and runner's conversations", async () => {
+  it("lists only this workspace's conversations for the bundled engine", async () => {
     const h = harness({
       listSessions: vi.fn(async () => [
-        record({ id: "keep" }),
+        record({ id: "keep", project: BUILTIN_CHAT_ID }),
         record({ id: "other-runner", project: "r-2" }),
         record({ id: "other-workspace", workspace: "ws-2" }),
       ]),
     });
-    const rows = await complete(transportFor(h)).listChatSessions("ws-id", "r-1");
-    expect(rows.map((row) => row.id)).toEqual(["keep"]);
+    const rows = await complete(transportFor(h)).listChatSessions("ws-id", BUILTIN_CHAT_ID);
+    expect(rows?.map((row) => row.id)).toEqual(["keep"]);
     expect(h.api.listSessions).toHaveBeenCalledWith("u-1");
   });
 
-  it("opens a conversation in the store and maps its transcript", async () => {
+  it("declines a server runner's history and a conversation for one", async () => {
     const h = harness();
     const transport = complete(transportFor(h));
-    await expect(transport.createChatSession({ workspace: "ws-id", runner: "r-1" })).resolves.toMatchObject({
+    await expect(transport.listChatSessions("ws-id", "r-1")).resolves.toBeNull();
+    await expect(transport.createChatSession({ workspace: "ws-id", runner: "r-1" })).resolves.toBeNull();
+    // The store's own row names a server runner, so its transcript is the server's.
+    await expect(transport.listChatMessages("s-1")).resolves.toBeNull();
+    await expect(transport.ownsChatSession("s-1")).resolves.toBe(false);
+    expect(h.api.listSessions).not.toHaveBeenCalled();
+    expect(h.api.createSession).not.toHaveBeenCalled();
+    expect(h.api.listEvents).not.toHaveBeenCalled();
+  });
+
+  it("opens a conversation in the store and maps its transcript", async () => {
+    const h = harness({ getSession: vi.fn(async () => record({ project: BUILTIN_CHAT_ID })) });
+    const transport = complete(transportFor(h));
+    await expect(transport.createChatSession({ workspace: "ws-id", runner: BUILTIN_CHAT_ID })).resolves.toMatchObject({
       id: "new",
-      runner: "r-1",
+      runner: BUILTIN_CHAT_ID,
     });
-    expect(h.api.createSession).toHaveBeenCalledWith("u-1", { workspace: "ws-id", runner: "r-1" });
+    expect(h.api.createSession).toHaveBeenCalledWith("u-1", { workspace: "ws-id", runner: BUILTIN_CHAT_ID });
     const messages = await transport.listChatMessages("s-1");
     expect(messages).toHaveLength(1);
     expect(h.api.listEvents).toHaveBeenCalledWith("u-1", "s-1");
+    await expect(transport.ownsChatSession("s-1")).resolves.toBe(true);
   });
 
   it("warms with the session's working directory, mode and thread", async () => {
@@ -429,6 +448,27 @@ describe("local transport", () => {
     const h = harness();
     const transport = transportFor(h);
     transport.setRunnerApprovalMode("r-1", "ask");
+    await transport.sendChatMessage("s-1", "hi");
+    expect(h.api.send).toHaveBeenCalledWith(expect.objectContaining({ mode: "ask" }));
+  });
+
+  it("falls back to the mode stored for the runner when the page has not handed one over", async () => {
+    // The page created this conversation before it loaded its own choice.
+    const h = harness();
+    const transport = complete(transportFor(h, "u-1", (runnerId) => (runnerId === "r-1" ? "workspace" : "ask")));
+    await transport.warmChatSession("s-1");
+    expect(h.api.warm).toHaveBeenCalledWith(expect.objectContaining({ mode: "workspace" }));
+    await transport.sendChatMessage("s-1", "hi");
+    expect(h.api.send).toHaveBeenCalledWith(expect.objectContaining({ mode: "workspace" }));
+  });
+
+  it("prefers the page's runner and session choices over the stored one", async () => {
+    const h = harness({ getSession: vi.fn(async () => record({ project: "r-2" })) });
+    const transport = complete(transportFor(h, "u-1", (runnerId) => (runnerId === "r-2" ? "ask" : "full_access")));
+    transport.setRunnerApprovalMode("r-2", "workspace");
+    await transport.warmChatSession("s-1");
+    expect(h.api.warm).toHaveBeenCalledWith(expect.objectContaining({ mode: "workspace" }));
+    transport.setApprovalMode("s-1", "ask");
     await transport.sendChatMessage("s-1", "hi");
     expect(h.api.send).toHaveBeenCalledWith(expect.objectContaining({ mode: "ask" }));
   });

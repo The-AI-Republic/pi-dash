@@ -27,6 +27,7 @@ const transportState = vi.hoisted(() => ({
 }));
 
 vi.mock("./transport.js", () => ({
+  chatTransportForRunner: () => transportState.transport,
   getChatTransport: () => transportState.transport,
 }));
 

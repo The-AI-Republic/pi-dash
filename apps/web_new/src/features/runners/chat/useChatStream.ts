@@ -22,7 +22,7 @@ import {
   refreshesHistory,
   type ActivityRow,
 } from "./events.js";
-import { getChatTransport, type ChatSubscriptionHandlers } from "./transport.js";
+import { chatTransportForRunner, type ChatSubscriptionHandlers } from "./transport.js";
 
 /** First wait before reopening a dropped feed; doubles per failure. */
 export const STREAM_RETRY_BASE_MS = 1_000;
@@ -81,7 +81,8 @@ export interface ChatStreamView {
 export function useChatStream(
   sessionId: string | null,
   baseMessages: readonly ChatMessage[],
-  callbacks: ChatStreamCallbacks
+  callbacks: ChatStreamCallbacks,
+  runnerId = ""
 ): ChatStreamView {
   const [liveMessages, setLiveMessages] = React.useState<ChatMessage[]>([]);
   const [events, setEvents] = React.useState<ChatEvent[]>([]);
@@ -132,7 +133,7 @@ export function useChatStream(
 
   React.useEffect(() => {
     if (sessionId === null) return;
-    const transport = getChatTransport();
+    const transport = chatTransportForRunner(runnerId);
     let unsubscribe: (() => void) | null = null;
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -187,7 +188,7 @@ export function useChatStream(
       if (timer !== null) clearTimeout(timer);
       unsubscribe?.();
     };
-  }, [sessionId]);
+  }, [runnerId, sessionId]);
 
   const dismissError = React.useCallback(() => setError(null), []);
 

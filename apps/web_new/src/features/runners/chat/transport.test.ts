@@ -10,10 +10,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { platform, type EventStream, type StreamInit, type StreamMessage } from "../../../core/platform/index.js";
 import {
+  chatTransportForRunner,
   createCloudChatTransport,
+  fetchChatMessages,
+  fetchChatRunner,
+  fetchChatSessions,
   getChatTransport,
   openChatSession,
   setChatTransport,
+  subscribeChatTransport,
   type ChatTransport,
 } from "./transport.js";
 
@@ -201,6 +206,82 @@ describe("read and write seams", () => {
       id: "local",
     });
     expect(createChatSession).toHaveBeenCalledWith({ workspace: "ws-id", runner: "r-1" });
+  });
+
+  it("falls through to the API for everything the local transport declines", async () => {
+    const sendJson = vi.fn(async () => ({ data: { id: "s-new" } }));
+    const getJson = vi.fn(async () => []);
+    const parse = vi.fn((_schema: unknown, body: unknown) => body);
+    const api = { sendJson, getJson, parse } as unknown as ApiClient;
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      chatRunner: vi.fn(async () => null),
+      listChatSessions: vi.fn(async () => null),
+      createChatSession: vi.fn(async () => null),
+      listChatMessages: vi.fn(async () => null),
+      ownsChatSession: vi.fn(async () => false),
+    } as unknown as ChatTransport);
+    await expect(openChatSession(api, { workspace: "ws-id", runner: "r-1" })).resolves.toEqual({ id: "s-new" });
+    expect(sendJson).toHaveBeenCalledWith("POST", "/api/runners/chat/sessions/", {
+      json: { workspace: "ws-id", runner: "r-1" },
+    });
+    await expect(fetchChatSessions(api, "ws-id", "r-1")).resolves.toEqual([]);
+    await expect(fetchChatMessages(api, "s-1")).resolves.toEqual([]);
+    expect(getJson).toHaveBeenCalledWith("/api/runners/chat/sessions/s-1/messages/");
+  });
+
+  it("reads a server runner's detail even while a local transport is installed", async () => {
+    const getJson = vi.fn(async () => ({ id: "r-1" }));
+    const parse = vi.fn(() => ({ id: "r-1" }));
+    const api = { getJson, parse } as unknown as ApiClient;
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      chatRunner: vi.fn(async (runnerId: string) => (runnerId === "pidash-builtin" ? { id: runnerId } : null)),
+    } as unknown as ChatTransport);
+    await expect(fetchChatRunner(api, "pidash-builtin")).resolves.toEqual({ id: "pidash-builtin" });
+    await expect(fetchChatRunner(api, "r-1")).resolves.toEqual({ id: "r-1" });
+    expect(getJson).toHaveBeenCalledWith("/api/runners/r-1/");
+  });
+
+  it("reads a transcript from the local store only when the transport owns it", async () => {
+    const listChatMessages = vi.fn(async () => [{ id: "m-local" }]);
+    const ownsChatSession = vi.fn(async (sessionId: string) => sessionId === "local");
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      listChatMessages,
+      ownsChatSession,
+    } as unknown as ChatTransport);
+    const api = { getJson: vi.fn(async () => []), parse: vi.fn(() => []) } as unknown as ApiClient;
+    await expect(fetchChatMessages(api, "local")).resolves.toEqual([{ id: "m-local" }]);
+    await expect(fetchChatMessages(api, "server")).resolves.toEqual([]);
+    expect(ownsChatSession).toHaveBeenCalledWith("server");
+  });
+
+  it("keeps a server contact on the cloud surface while the local transport is installed", () => {
+    const local = {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+    } as unknown as ChatTransport;
+    setChatTransport(local);
+    expect(chatTransportForRunner("pidash-builtin")).toBe(local);
+    expect(chatTransportForRunner("r-1")).not.toBe(local);
+    // A transport that names no contacts is the whole surface.
+    const whole = { subscribeChatEvents: vi.fn(() => () => undefined) } as unknown as ChatTransport;
+    setChatTransport(whole);
+    expect(chatTransportForRunner("r-1")).toBe(whole);
+  });
+
+  it("notifies subscribers when the transport is replaced or restored", () => {
+    const listener = vi.fn();
+    const stop = subscribeChatTransport(listener);
+    const custom = { subscribeChatEvents: vi.fn(() => () => undefined) } as unknown as ChatTransport;
+    setChatTransport(custom);
+    expect(listener).toHaveBeenCalledTimes(1);
+    setChatTransport(null);
+    expect(listener).toHaveBeenCalledTimes(2);
+    stop();
+    setChatTransport(custom);
+    expect(listener).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -229,4 +229,55 @@ describe("RunnerChatPage local approvals", () => {
       expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toHaveAttribute("aria-pressed", "true")
     );
   });
+
+  it("warms a conversation created after mount under the stored mode", async () => {
+    globalThis.localStorage.setItem(approvalModeKey("pidash-builtin"), "ask");
+    const api = platformState.api as LocalChatApi;
+    vi.mocked(api.listSessions).mockResolvedValue([]);
+    vi.mocked(api.createSession).mockResolvedValue({
+      id: "s-new",
+      title: "",
+      workspace: "ws-id",
+      project: "pidash-builtin",
+      working_dir: "/repo",
+      engine_version: "",
+      engine_thread_id: null,
+      created_at: 1,
+      updated_at: 2,
+    });
+    vi.mocked(api.getSession).mockResolvedValue({
+      id: "s-new",
+      title: "",
+      workspace: "ws-id",
+      project: "pidash-builtin",
+      working_dir: "/repo",
+      engine_version: "",
+      engine_thread_id: null,
+      created_at: 1,
+      updated_at: 2,
+    });
+    render(
+      <Provider client={testClient()}>
+        <RunnersAreaProvider value={area}>
+          <RunnerChatPage
+            workspaceSlug="acme"
+            runnerId="pidash-builtin"
+            requestedSessionId={null}
+            onSelectSession={vi.fn()}
+          />
+        </RunnersAreaProvider>
+      </Provider>
+    );
+    await waitFor(() =>
+      expect(api.warm).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s-new", mode: "ask" }))
+    );
+  });
+
+  it("picks up the approval controls when the transport installs after the page mounted", async () => {
+    resetLocalChatTransportForTests();
+    renderPage();
+    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    await act(async () => registerLocalChatTransport());
+    expect(await screen.findByRole("group", { name: "Approval mode" })).toBeInTheDocument();
+  });
 });

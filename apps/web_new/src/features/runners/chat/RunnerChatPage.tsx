@@ -40,7 +40,7 @@ import {
   type ApprovalMode,
   type PendingApproval,
 } from "./approvalCopy.js";
-import { getChatTransport } from "./transport.js";
+import { chatTransportForRunner, subscribeChatTransport } from "./transport.js";
 import { useChatActions } from "./useChatActions.js";
 import { useChatStream } from "./useChatStream.js";
 import { useNewChat } from "./useNewChat.js";
@@ -169,9 +169,18 @@ export function RunnerChatPage({
     setDraft("");
   }, [runnerId]);
 
-  const transport = React.useMemo(() => getChatTransport(), []);
-  // The approval controls belong to the local engine; the cloud transport
-  // has no decision verb, so cloud and web never render them (RUN-034/035).
+  // The desktop bootstrap installs the local transport after the runtime
+  // resumes, which can be after this page mounted; follow the seam so the
+  // approval controls appear and sends take the local path from then on.
+  const [surface, setSurface] = React.useState(() => chatTransportForRunner(runnerId));
+  React.useEffect(() => {
+    setSurface(chatTransportForRunner(runnerId));
+    return subscribeChatTransport(() => setSurface(chatTransportForRunner(runnerId)));
+  }, [runnerId]);
+  const transport = surface;
+  // The approval controls belong to the local engine and to the contact it
+  // serves; the cloud transport has no decision verb, so cloud and web never
+  // render them, and neither does a server runner on the desktop (RUN-034/035).
   const approvalsSupported = typeof transport.decideChatApproval === "function";
   const [approvalMode, setApprovalModeState] = React.useState<ApprovalMode>(() => storedApprovalMode(runnerId));
   const approvalModeRef = React.useRef(approvalMode);
@@ -186,7 +195,10 @@ export function RunnerChatPage({
       // Persist per runner; the value the engine captures is handed to the
       // session, so a turn already in flight keeps the mode it started with.
       rememberApprovalMode(runnerId, mode);
-      transport.setApprovalMode?.(session?.id ?? "", mode);
+      // The runner-level value covers a conversation the page has not
+      // created yet; the session-level one covers the one on screen.
+      transport.setRunnerApprovalMode?.(runnerId, mode);
+      if (session !== null) transport.setApprovalMode?.(session.id, mode);
     },
     [runnerId, session?.id, transport]
   );
@@ -224,13 +236,18 @@ export function RunnerChatPage({
     setPendingApproval(null);
     setDecisionError(null);
   }, []);
-  const stream = useChatStream(session?.id ?? null, messages.data ?? [], {
-    onHistoryRefresh: () => {
-      refetchSessions();
-      refetchMessages();
+  const stream = useChatStream(
+    session?.id ?? null,
+    messages.data ?? [],
+    {
+      onHistoryRefresh: () => {
+        refetchSessions();
+        refetchMessages();
+      },
+      onApprovalCleared,
     },
-    onApprovalCleared,
-  });
+    runnerId
+  );
 
   // A different conversation starts with no prompt and no carried refusal.
   React.useEffect(() => {
@@ -267,7 +284,10 @@ export function RunnerChatPage({
     if (!approvalsSupported) return;
     approvalModeRef.current = storedApprovalMode(runnerId);
     setApprovalModeState(approvalModeRef.current);
-  }, [approvalsSupported, runnerId]);
+    // Hand it over before warm-up can create a conversation for this
+    // runner, so that first thread spawns under the stored mode.
+    transport.setRunnerApprovalMode?.(runnerId, approvalModeRef.current);
+  }, [approvalsSupported, runnerId, transport]);
 
   React.useEffect(() => {
     if (!approvalsSupported || session === null) return;
@@ -297,7 +317,9 @@ export function RunnerChatPage({
           {...(session === null ? {} : { onClose: () => void actions.close() })}
           {...(approvalsSupported
             ? {
-                actions: <ChatApprovalMode value={approvalMode} onChange={chooseMode} disabled={actions.sending} />,
+                // The mode applies to the next thread, so a send in flight
+                // does not lock it.
+                actions: <ChatApprovalMode value={approvalMode} onChange={chooseMode} />,
               }
             : {})}
         />

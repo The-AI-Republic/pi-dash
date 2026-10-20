@@ -231,6 +231,12 @@ export interface LocalTransportDeps {
   workspaceSlug: () => string;
   /** Bring the daemon up before the first turn; idempotent. */
   ensureRuntime: () => Promise<void>;
+  /**
+   * The mode last stored for a runner. Consulted when the page created a
+   * conversation before it loaded its own choice, so the thread still
+   * warms under what the person picked last time.
+   */
+  storedMode: (runnerId: string) => string;
 }
 
 /** The transport the desktop bootstrap installs in place of the cloud one. */
@@ -239,7 +245,10 @@ export interface LocalChatTransport extends ChatTransport {
   getApprovalMode(sessionId: string): string;
   setRunnerApprovalMode(runnerId: string, mode: string): void;
   decideChatApproval(sessionId: string, localApprovalId: string, decision: string): Promise<void>;
-  chatRunner(runnerId: string): Promise<Runner>;
+  /** The bundled engine's row; every other contact belongs to the server. */
+  chatRunner(runnerId: string): Promise<Runner | null>;
+  ownsChatSession(sessionId: string): Promise<boolean>;
+  ownsRunner(runnerId: string): boolean;
 }
 
 export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTransport {
@@ -276,26 +285,40 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     });
   };
 
-  const modeFor = async (sessionId: string, runnerId: string | undefined): Promise<string> => {
+  /**
+   * The mode a thread warmed or spawned now should capture. What the page
+   * chose for this session wins, then the runner's choice, then the
+   * runner's stored preference, which covers a conversation the page
+   * created after it loaded its own choice. The engine default is last.
+   */
+  const modeFor = async (
+    sessionId: string,
+    runnerId: string | undefined,
+    stored: (runnerId: string) => string
+  ): Promise<string> => {
     return (
       sessionModes.get(sessionId) ??
-      (runnerId === undefined ? undefined : runnerModes.get(runnerId)) ??
+      (runnerId === undefined ? undefined : (runnerModes.get(runnerId) ?? stored(runnerId))) ??
       DEFAULT_APPROVAL_MODE
     );
   };
 
   const readSession = async (sessionId: string) => api.getSession(account(), sessionId);
 
+  /** A conversation this store carries belongs to the bundled engine. */
+  const isLocalSession = async (sessionId: string): Promise<boolean> =>
+    (await readSession(sessionId))?.project === BUILTIN_CHAT_ID;
+
   return {
     setApprovalMode: (sessionId, mode) => sessionModes.set(sessionId, mode),
     getApprovalMode: (sessionId) => sessionModes.get(sessionId) ?? DEFAULT_APPROVAL_MODE,
     setRunnerApprovalMode: (runnerId, mode) => runnerModes.set(runnerId, mode),
-    chatRunner: (runnerId) =>
-      runnerId === BUILTIN_CHAT_ID
-        ? Promise.resolve(builtinRunnerRow())
-        : Promise.reject(new Error(`Unknown local contact ${runnerId}.`)),
+    chatRunner: (runnerId) => Promise.resolve(runnerId === BUILTIN_CHAT_ID ? builtinRunnerRow() : null),
 
     listChatSessions: async (workspaceId, runnerId) => {
+      // Only the bundled engine is served from this machine; the history
+      // of a server runner stays a server read.
+      if (runnerId !== BUILTIN_CHAT_ID) return null;
       const owner = account();
       const rows = await api.listSessions(owner);
       return rows
@@ -304,16 +327,21 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
     },
 
     createChatSession: async (input) => {
+      if (input.runner !== BUILTIN_CHAT_ID) return null;
       const owner = account();
       const record = await api.createSession(owner, { workspace: input.workspace, runner: input.runner });
       return localSessionRow(record, owner, null);
     },
 
     listChatMessages: async (sessionId) => {
+      if (!(await isLocalSession(sessionId))) return null;
       const owner = account();
       const rows = await api.listEvents(owner, sessionId);
       return rows.map(localMessageRow);
     },
+
+    ownsChatSession: isLocalSession,
+    ownsRunner: (runnerId) => runnerId === BUILTIN_CHAT_ID,
 
     warmChatSession: async (sessionId) => {
       const record = await readSession(sessionId);
@@ -323,7 +351,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
         workspaceSlug: deps.workspaceSlug(),
         sessionId,
         cwd: record.working_dir,
-        mode: await modeFor(sessionId, record.project),
+        mode: await modeFor(sessionId, record.project, deps.storedMode),
         localThreadId: record.engine_thread_id ?? undefined,
       });
     },
@@ -346,7 +374,7 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
           messageId,
           content,
           cwd: record?.working_dir,
-          mode: await modeFor(sessionId, record?.project),
+          mode: await modeFor(sessionId, record?.project, deps.storedMode),
           localThreadId: record?.engine_thread_id ?? undefined,
         });
         return localMessageRow(stored);

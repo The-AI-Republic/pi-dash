@@ -9,6 +9,7 @@
 import { getAppClient } from "../../../core/api/client.js";
 import { platform } from "../../../core/platform/index.js";
 import { getRuntimeAccount, ensureChatRuntime } from "../runtime/service.js";
+import { storedApprovalMode } from "./approvalCopy.js";
 import { createLocalChatTransport } from "./localTransport.js";
 import { setChatTransport } from "./transport.js";
 
@@ -32,6 +33,7 @@ export function registerLocalChatTransport(): void {
       api,
       account: getRuntimeAccount,
       workspaceSlug: () => workspaceSlugFromPath(globalThis.location.pathname),
+      storedMode: storedApprovalMode,
       ensureRuntime: () =>
         ensureChatRuntime({
           workspaceSlug: workspaceSlugFromPath(globalThis.location.pathname),

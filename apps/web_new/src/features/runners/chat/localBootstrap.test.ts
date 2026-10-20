@@ -24,6 +24,7 @@ vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ baseUrl: 
 const { registerLocalChatTransport, resetLocalChatTransportForTests, workspaceSlugFromPath } =
   await import("./localBootstrap.js");
 const { getChatTransport } = await import("./transport.js");
+const { approvalModeKey } = await import("./approvalCopy.js");
 type LocalChatApi = import("../../../core/platform/index.js").LocalChatApi;
 
 function localApi(): LocalChatApi {
@@ -103,11 +104,35 @@ describe("registerLocalChatTransport", () => {
     const api = localApi();
     platformState.localChat = api;
     registerLocalChatTransport();
-    await getChatTransport().listChatSessions?.("ws-id", "r-1");
+    await getChatTransport().listChatSessions?.("ws-id", "pidash-builtin");
     expect(api.listSessions).toHaveBeenCalledWith("u-1");
     runtimeState.account = "u-2";
-    await getChatTransport().listChatSessions?.("ws-id", "r-1");
+    await getChatTransport().listChatSessions?.("ws-id", "pidash-builtin");
     expect(api.listSessions).toHaveBeenLastCalledWith("u-2");
     runtimeState.account = "u-1";
+  });
+
+  it("reads the stored approval mode for the runner it is about to warm", async () => {
+    const api = localApi();
+    vi.mocked(api.getSession).mockResolvedValue({
+      id: "s-1",
+      title: "",
+      workspace: "ws-id",
+      project: "pidash-builtin",
+      working_dir: "/repo",
+      engine_version: "",
+      engine_thread_id: null,
+      created_at: 1,
+      updated_at: 2,
+    });
+    platformState.localChat = api;
+    globalThis.localStorage.setItem(approvalModeKey("pidash-builtin"), "workspace");
+    registerLocalChatTransport();
+    try {
+      await getChatTransport().warmChatSession?.("s-1");
+      expect(api.warm).toHaveBeenCalledWith(expect.objectContaining({ mode: "workspace" }));
+    } finally {
+      globalThis.localStorage.clear();
+    }
   });
 });

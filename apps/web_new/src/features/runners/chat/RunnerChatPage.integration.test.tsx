@@ -29,6 +29,7 @@ vi.mock("./transport.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("./transport.js")>();
   return {
     ...original,
+    chatTransportForRunner: () => active.transport,
     getChatTransport: () => active.transport,
     openChatSession: (...args: unknown[]) => contracts.createChatSession(...args),
     prepareChatSession: (...args: unknown[]) => contracts.warmChatSession(...args),

@@ -428,7 +428,7 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
   it("subscribes to the resolved conversation and renders its live rows", () => {
     hooks.useChatStream.mockReturnValue(stream);
     renderPage();
-    expect(hooks.useChatStream).toHaveBeenLastCalledWith("open", expect.any(Array), expect.any(Object));
+    expect(hooks.useChatStream).toHaveBeenLastCalledWith("open", expect.any(Array), expect.any(Object), "r-1");
     expect(hooks.useChatActions).toHaveBeenLastCalledWith(
       expect.objectContaining({ runnerId: "r-1", session: openSession })
     );
@@ -539,13 +539,15 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
 
 describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
   const decide = vi.fn(async () => undefined as void);
-  const localTransport = (): ChatTransport => ({
+  const localTransport = (owns: (runnerId: string) => boolean = () => true): ChatTransport => ({
     subscribeChatEvents: vi.fn(() => () => undefined),
     sendChatMessage: vi.fn(),
     cancelChat: vi.fn(async () => ({ ok: true })),
     closeChat: vi.fn(async () => openSession),
     setApprovalMode: vi.fn(),
+    setRunnerApprovalMode: vi.fn(),
     decideChatApproval: decide,
+    ownsRunner: owns,
   });
   const approval = {
     id: 9,
@@ -637,12 +639,13 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
-  it("persists the chosen mode and hands it to the session", async () => {
+  it("persists the chosen mode and hands it to the session and the runner", async () => {
     const transport = getChatTransport();
     renderPage();
     await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
     expect(globalThis.localStorage.getItem(approvalModeKey("r-1"))).toBe("ask");
     expect(transport.setApprovalMode).toHaveBeenCalledWith("open", "ask");
+    expect(transport.setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
   });
 
   it("loads the stored mode for the contact on screen", () => {
@@ -663,6 +666,15 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     const transport = getChatTransport();
     renderPage();
     expect(transport.setApprovalMode).toHaveBeenCalledWith("open", "ask");
+    // Handed over at mount, before warm-up can create a conversation.
+    expect(transport.setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
+  });
+
+  it("keeps a server runner on the cloud path and hides the approval controls", () => {
+    setChatTransport(localTransport((runnerId) => runnerId === "pidash-builtin"));
+    renderPage();
+    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("falls back to full access for an unrecognized stored value", () => {
@@ -678,8 +690,16 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     hooks.useChatSessions.mockReturnValue({ data: [], isPending: false, refetch: refetchSessions });
     render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
-    expect(getChatTransport().setApprovalMode).toHaveBeenCalledWith("", "ask");
+    // No session to name, so only the runner-level value is handed over.
+    expect(getChatTransport().setApprovalMode).not.toHaveBeenCalledWith("", "ask");
+    expect(getChatTransport().setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
     expect(globalThis.localStorage.getItem(approvalModeKey("r-1"))).toBe("ask");
+  });
+
+  it("keeps the mode control usable while a send is in flight", async () => {
+    actions.sending = true;
+    renderPage();
+    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toBeEnabled();
   });
 
   it("falls back to full access when storage refuses the read", () => {
