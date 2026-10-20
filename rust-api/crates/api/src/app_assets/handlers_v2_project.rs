@@ -87,6 +87,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::app_assets::guards;
+use crate::app_assets::quote_filename;
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
@@ -2086,7 +2087,10 @@ enum Filename {
 fn disposition_value(filename: &Filename) -> String {
     match filename {
         Filename::Name(name) => {
-            format!("attachment; filename*=UTF-8''{}", uri_encode(name))
+            // `_get_content_disposition` quotes with `urllib.parse.quote`
+            // (`safe='/'`), so a stored name containing `/` keeps it;
+            // `uri_encode` (SigV4 strict) would emit `%2F`.
+            format!("attachment; filename*=UTF-8''{}", quote_filename(name))
         }
         Filename::FreshHex => {
             format!("attachment; filename*=UTF-8''{}", Uuid::new_v4().simple())
@@ -2650,6 +2654,13 @@ mod tests {
         assert_eq!(
             disposition_value(&Filename::Name("a b.png".to_owned())),
             "attachment; filename*=UTF-8''a%20b.png"
+        );
+        // `quote` (default `safe='/'`) keeps the slash: a stored name
+        // like a pasted path or a `YYYY/MM/file` convention signs
+        // `a/b.png`, not `a%2Fb.png`.
+        assert_eq!(
+            disposition_value(&Filename::Name("a/b.png".to_owned())),
+            "attachment; filename*=UTF-8''a/b.png"
         );
         assert_eq!(disposition_value(&Filename::Bare), "attachment");
         // Fresh hex per call, 32 lowercase hex chars.

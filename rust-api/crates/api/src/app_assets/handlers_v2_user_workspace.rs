@@ -106,6 +106,7 @@ use pidash_services::app_assets::queries_v2_user_workspace as q;
 use pidash_types::WorkspaceId;
 
 use super::guards;
+use super::quote_filename;
 use crate::state::AppState;
 
 /// Register the six owned v2 paths. Sibling handler issues merge their own
@@ -1587,34 +1588,6 @@ fn uri_encode(input: &str) -> String {
     for b in input.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(
-                    char::from_digit((b >> 4) as u32, 16)
-                        .expect("hex")
-                        .to_ascii_uppercase(),
-                );
-                out.push(
-                    char::from_digit((b & 0x0f) as u32, 16)
-                        .expect("hex")
-                        .to_ascii_uppercase(),
-                );
-            }
-        }
-    }
-    out
-}
-
-/// `urllib.parse.quote(filename)` (default `safe='/'`): like
-/// [`uri_encode`] but `/` survives (filenames with slashes keep them,
-/// exactly like `_get_content_disposition` over `quote`).
-fn quote_filename(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for b in input.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 out.push(b as char);
             }
             _ => {
