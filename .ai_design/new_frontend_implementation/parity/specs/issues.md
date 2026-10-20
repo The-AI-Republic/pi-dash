@@ -727,15 +727,16 @@ empty-result handling); edits and drafts always keep the title
 required. Title generation posts the description to the assistant
 title endpoint. The Create-more toggle (ISS-119) lives in the footer:
 when on, a successful create keeps the modal open, resets it (keeping
-project, type, and the description default), and re-focuses the title;
-when off, the modal closes. It hides when editing. Oracle:
+project, type, the route's cycle/module context, and the description
+default), and re-focuses the title; when off, the modal closes. It hides when editing. Oracle:
 `create-modal.spec.ts`.
 
 Closing or escaping a new item with unsaved changes offers saving a
 draft (ISS-120): a dialog offering discard, cancel, or save-to-drafts.
 Changes are sanitized first (empty values, empty description, and the
-project id stripped), and if nothing meaningful remains the modal
-just closes. Saving posts `POST WS/draft-issues/` with an untitled
+project id stripped; cycle and module ids seeded from the route are
+context, so an untouched form opened from a cycle or module page closes
+silently too), and if nothing meaningful remains the modal just closes. Saving posts `POST WS/draft-issues/` with an untitled
 fallback. Editing never prompts. The seam with the drafts epic is
 drawn in §21. In the cloud edition, typing debounces a duplicate
 search (ISS-121); matches show a count button opening a side-by-side
