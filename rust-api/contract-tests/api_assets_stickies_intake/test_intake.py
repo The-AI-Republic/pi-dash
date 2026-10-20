@@ -270,6 +270,73 @@ def test_intake_delete_accepted_item_keeps_issue(org):
     assert row is not None
 
 
+def test_intake_delete_pending_unmoved_control_204(org):
+    # Control for the moved-issue case below: an intake item still pending in
+    # project A deletes cleanly (204) and soft-deletes both rows.
+    created = org.create_intake_issue(name="stays put")
+    r = org.request("DELETE", f"{_base(org)}{created['issue']}/", "admin")
+    assert r.status_code == 204
+    assert r.text == ""
+    issue_row = org.conn.execute(
+        "SELECT deleted_at FROM issues WHERE id = %s", (created["issue"],)
+    ).fetchone()
+    assert issue_row is not None and issue_row[0] is not None
+    intake_row = org.conn.execute(
+        "SELECT deleted_at FROM intake_issues WHERE issue_id = %s", (created["issue"],)
+    ).fetchone()
+    assert intake_row is not None and intake_row[0] is not None
+
+
+def test_intake_delete_after_issue_moved_to_other_project_500(org):
+    # The intake row stays in project A while its issue moves to project B.
+    # Django scopes its cascade issue fetch to (workspace, project, pk), so it
+    # misses, `issue.created_by_id` raises AttributeError and the request 500s
+    # with nothing written. An id-only fetch instead finds the moved row and
+    # soft-deletes it (and the intake row) — 204. Bug: PIDASHCONV-1164.
+    #
+    # project A needs a non-triage default state so accepting the item moves
+    # its issue out of triage; project B needs a non-triage target state for
+    # the move.
+    seed_d21.create_state(
+        org.conn, workspace_id=org.workspace["id"], project_id=org.project["id"],
+        name="Backlog", group="backlog", default=True,
+    )
+    seed_d21.create_state(
+        org.conn, workspace_id=org.workspace["id"], project_id=org.project2["id"],
+        name="Backlog", group="backlog",
+    )
+    created = org.create_intake_issue(name="moved away")
+    issue_id = created["issue"]
+    # Accept (issue leaves triage → A's default state), then set back to
+    # pending: the intake row is pending again but the issue is non-triage.
+    r = org.request("PATCH", f"{_base(org)}{issue_id}/", "admin", json={"status": 1})
+    assert r.status_code == 200
+    r = org.request("PATCH", f"{_base(org)}{issue_id}/", "admin", json={"status": 0})
+    assert r.status_code == 200
+    # Move the issue into project B.
+    r = org.request(
+        "POST",
+        f"/api/v1/workspaces/{org.workspace['slug']}/projects/{org.project['id']}"
+        f"/work-items/{issue_id}/move/",
+        "admin",
+        json={"project": org.project2["id"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["project"] == org.project2["id"]
+    # Delete through project A: Django 500s, writing nothing.
+    r = org.request("DELETE", f"{_base(org)}{issue_id}/", "admin")
+    assert r.status_code == 500
+    assert r.json() == {"error": "Something went wrong please try again later"}
+    issue_row = org.conn.execute(
+        "SELECT deleted_at FROM issues WHERE id = %s", (issue_id,)
+    ).fetchone()
+    assert issue_row is not None and issue_row[0] is None
+    intake_row = org.conn.execute(
+        "SELECT deleted_at FROM intake_issues WHERE issue_id = %s", (issue_id,)
+    ).fetchone()
+    assert intake_row is not None and intake_row[0] is None
+
+
 EXPANDED_USER_KEYS = {
     "id", "first_name", "last_name", "email", "avatar", "avatar_url",
     "display_name",
