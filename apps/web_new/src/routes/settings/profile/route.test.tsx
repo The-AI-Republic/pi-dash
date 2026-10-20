@@ -62,7 +62,7 @@ const PROFILE_ROW = {
   updated_at: "2024-01-01T00:00:00Z",
 };
 
-function transport(): Parameters<typeof renderProfileSettingsRoute>[0]["transport"] {
+function transport(selfManaged = true): Parameters<typeof renderProfileSettingsRoute>[0]["transport"] {
   return async (url) => {
     const headers = { get: () => null };
     if (url.endsWith("/auth/get-csrf-token/")) {
@@ -85,7 +85,7 @@ function transport(): Parameters<typeof renderProfileSettingsRoute>[0]["transpor
               is_magic_login_enabled: false,
               is_email_password_enabled: true,
               is_smtp_configured: false,
-              is_self_managed: true,
+              is_self_managed: selfManaged,
               instance_changelog_url: "",
             },
           }),
@@ -143,13 +143,14 @@ function setupHarness(routeTransport = transport()) {
   return { apiClient, queryClient: new QueryClient({ defaultOptions: { queries: { retry: false } } }) };
 }
 
-function renderAt(path: string, tab: string) {
+function renderAt(path: string, tab: string, selfManaged = true) {
   return renderProfileSettingsRoute({
     layoutComponent: LayoutComponent,
     leafComponent: () => <p data-testid="leaf">{`leaf ${tab}`}</p>,
     leafPath: "$tab",
     initialPath: path,
-    transport: transport(),
+    transport: transport(selfManaged),
+    routeContext: { selfManaged },
   });
 }
 
@@ -224,6 +225,29 @@ describe("profile settings layout", () => {
     renderAt("/settings/profile/not-a-tab/", "not-a-tab");
     expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("link", { name: "Profile" })).toHaveAttribute("aria-current", "page"));
+  });
+
+  it("answers the route loader with the workspaces and the instance marker (CLOUD-035)", async () => {
+    const { queryClient, apiClient } = setupHarness(transport(false));
+    await expect(
+      Route.options.beforeLoad?.({
+        context: { queryClient, apiClient },
+        location: { pathname: "/settings/profile/general/", searchStr: "" },
+      } as never)
+    ).resolves.toEqual({ workspaces: [], selfManaged: false });
+  });
+
+  it("keeps the password tab off the cloud sidebar (CLOUD-035)", async () => {
+    renderAt("/settings/profile/general/", "general", false);
+    expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Security" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Profile" })).toBeInTheDocument();
+  });
+
+  it("keeps the password tab on a self-managed sidebar (CLOUD-035)", async () => {
+    renderAt("/settings/profile/general/", "general", true);
+    expect(await screen.findByTestId("profile-settings-shell")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Security" })).toBeInTheDocument();
   });
 
   it("marks no tab active on the bare layout address", async () => {

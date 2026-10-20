@@ -23,8 +23,8 @@ import {
   isSidebarToggleEnabled,
   resolveEditionSidebarHref,
 } from "../../../core/edition/index.js";
-import { PlanBadge } from "../../../features/cloud-billing/index.js";
 import { platform } from "../../../core/platform/index.js";
+import { PlanBadge } from "../../../features/cloud-billing/index.js";
 import {
   CREATE_WORKSPACE_PATH,
   decidePageGate,

@@ -62,6 +62,17 @@ describe("profile tab address availability", () => {
     await expect(isTabAddressServed({ queryClient, apiClient, tab: "security" })).resolves.toBe(true);
   });
 
+  it("serves the password address while the marker is unknown", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const apiClient = createClient({
+      baseUrl: "https://api.test",
+      transport: async () => {
+        throw new Error("offline");
+      },
+    });
+    await expect(isTabAddressServed({ queryClient, apiClient, tab: "security" })).resolves.toBe(true);
+  });
+
   it("knows which tabs an instance can withhold", () => {
     expect(tabHasInstanceGate("security")).toBe(true);
     expect(tabHasInstanceGate("general")).toBe(false);

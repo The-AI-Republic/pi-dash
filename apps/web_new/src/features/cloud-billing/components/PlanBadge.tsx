@@ -8,7 +8,6 @@
 // focus, and a refresh failure leaves the last known label in place.
 // Without a destination the badge still labels the plan but is inert.
 
-import { Badge, Tooltip } from "@pidash/kit";
 import * as React from "react";
 
 import { APP_VERSION } from "../../../shared/shell/version.js";
@@ -49,19 +48,22 @@ export function PlanBadge({ onOpenExternal, version }: PlanBadgeProps): React.Re
     else globalThis.window?.open(destination, "_blank", "noopener,noreferrer");
   };
 
+  // The native title carries the version hint: it reaches mouse and
+  // assistive users on every platform and keeps the shell's first paint
+  // free of a tooltip runtime (size gate).
   return (
-    <Tooltip content={planBadgeHint(version)}>
-      <button
-        type="button"
-        data-testid={PLAN_BADGE_TESTID}
-        aria-label={`${PLAN_BADGE_LABEL}: ${label}`}
-        aria-disabled={destination === null || undefined}
-        className="flex w-full items-center justify-between gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-left text-(--text) enabled:hover:bg-(--subtle) aria-disabled:cursor-default aria-disabled:opacity-70"
-        onClick={open}
-      >
-        <Badge tone="accent">{label}</Badge>
-        <span className="text-caption truncate text-(--text-muted)">{PLAN_BADGE_LABEL}</span>
-      </button>
-    </Tooltip>
+    <button
+      type="button"
+      data-testid={PLAN_BADGE_TESTID}
+      aria-label={`${PLAN_BADGE_LABEL}: ${label}`}
+      aria-disabled={destination === null || undefined}
+      title={planBadgeHint(version)}
+      className="flex w-full items-center justify-between gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-left text-(--text) enabled:hover:bg-(--subtle) aria-disabled:cursor-default aria-disabled:opacity-70"
+      onClick={open}
+    >
+      <span className="text-caption truncate rounded-(--radius-full) bg-(--accent-subtle) px-(--space-2) py-(--space-0) font-medium text-(--accent)">
+        {label}
+      </span>
+    </button>
   );
 }

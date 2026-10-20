@@ -126,6 +126,18 @@ describe("unknown tab address", () => {
     expect(getJson).not.toHaveBeenCalled();
   });
 
+  it("falls back to the default tab for a segment the loader let through", async () => {
+    registerProfileSettingsPage("general", () => <p>general body</p>);
+    renderProfileSettingsRoute({
+      layoutComponent: () => <Outletish />,
+      leafComponent: TabRoute.options.component as RouteComponent,
+      leafPath: "$tab",
+      initialPath: "/settings/profile/not-a-tab/",
+      transport: transport(),
+    });
+    expect(await screen.findByText("general body")).toBeInTheDocument();
+  });
+
   it("renders the registered body for a known tab", async () => {
     registerProfileSettingsPage("security", () => <p>security body</p>);
     renderProfileSettingsRoute({

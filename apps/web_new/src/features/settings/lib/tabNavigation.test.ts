@@ -3,7 +3,13 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { PROFILE_SETTINGS_TABS, profileSettingsGroups, profileSettingsTitle, findProfileSettingsTab } from "./tabs.js";
+import {
+  PROFILE_SETTINGS_TABS,
+  findProfileSettingsTab,
+  profileSettingsGroups,
+  profileSettingsTitle,
+  servedProfileSettingsTabs,
+} from "./tabs.js";
 import {
   DEFAULT_PROFILE_SETTINGS_TAB,
   isProfileSettingsTab,
@@ -59,6 +65,22 @@ describe("profile settings sidebar model", () => {
       ["Profile", "Preferences", "AI Assistant", "Auto Project Management", "Notifications", "Security", "Activity"],
       ["Integrations", "Personal Access Tokens"],
     ]);
+  });
+
+  it("drops a withheld tab and any group it leaves empty", () => {
+    expect(profileSettingsGroups((tab) => tab !== "security").map((group) => group.tabs.map((tab) => tab.id))).toEqual([
+      ["general", "preferences", "ai-assistant", "auto-project-management", "notifications", "activity"],
+      ["integrations", "api-tokens"],
+    ]);
+    expect(
+      profileSettingsGroups((tab) => tab === "integrations" || tab === "api-tokens").map((group) => group.id)
+    ).toEqual(["developer"]);
+  });
+
+  it("lists the served tabs from the instance marker", () => {
+    expect(servedProfileSettingsTabs(false).map((tab) => tab.id)).not.toContain("security");
+    expect(servedProfileSettingsTabs(true).map((tab) => tab.id)).toContain("security");
+    expect(servedProfileSettingsTabs(undefined).map((tab) => tab.id)).toContain("security");
   });
 
   it("finds a tab by id and titles the document", () => {

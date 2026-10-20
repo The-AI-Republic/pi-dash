@@ -44,7 +44,7 @@ function renderBadge(replies: Reply[], onOpenExternal = vi.fn()) {
       <Counted />
     </QueryClientProvider>
   );
-  return { ...view, onOpenExternal, queryClient, client, calls: () => index, renders: () => renders };
+  return { ...view, view, onOpenExternal, queryClient, client, calls: () => index, renders: () => renders };
 }
 
 function free(overrides: Record<string, unknown> = {}) {
@@ -75,13 +75,29 @@ describe("PlanBadge", () => {
     expect(await screen.findByRole("button", { name: "Plan: Migrate plan" })).toBeInTheDocument();
   });
 
-  it("carries the running version in its hint", () => {
+  it("carries the running version in its hint", async () => {
     expect(planBadgeHint("1.2.3")).toBe("Version: v1.2.3");
+    renderBadge([{ status: 200, body: free() }]);
+    const badge = await screen.findByRole("button", { name: "Plan: Upgrade" });
+    expect(badge).toHaveAttribute("title", "Version: v9.9.9");
   });
 
   it("renders nothing before the first answer", () => {
     renderBadge(["throw"]);
     expect(screen.queryByTestId("cloud-plan-badge")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the browser's own tab opener", async () => {
+    const user = userEvent.setup();
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const harness = renderBadge([{ status: 200, body: free() }]);
+    harness.view.rerender(
+      <QueryClientProvider client={harness.queryClient}>
+        <PlanBadge version="9.9.9" />
+      </QueryClientProvider>
+    );
+    await user.click(await screen.findByRole("button", { name: "Plan: Upgrade" }));
+    expect(open).toHaveBeenCalledWith("https://home.test/account", "_blank", "noopener,noreferrer");
   });
 
   it("stays inert when the plan carries no destination", async () => {

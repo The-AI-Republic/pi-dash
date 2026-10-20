@@ -28,6 +28,8 @@ export function renderProfileSettingsRoute(args: {
   leafPath: string;
   initialPath: string;
   transport: Transport;
+  /** Loader answers the layout component reads from its route context. */
+  routeContext?: Record<string, unknown>;
 }) {
   const apiClient = createAppClient("https://api.test", args.transport);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -44,7 +46,7 @@ export function renderProfileSettingsRoute(args: {
   });
   const router = createRouter({
     routeTree: rootRoute.addChildren([layoutRoute.addChildren([leafRoute])]),
-    context: { queryClient, apiClient },
+    context: { queryClient, apiClient, ...(args.routeContext ?? {}) },
     history: createMemoryHistory({ initialEntries: [args.initialPath] }),
   });
   const view = render(
