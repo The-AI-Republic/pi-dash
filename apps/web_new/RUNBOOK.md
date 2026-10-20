@@ -107,6 +107,13 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
   works and wins over the global ceiling (`vi.setConfig({ testTimeout })` does
   the same for a whole file), but it outlives this measured budget, so do not
   add one without a measurement that justifies it.
+- Async-query budget: Testing Library's `findBy*`/`waitFor` poll ceiling is
+  the same 30 s (`ASYNC_QUERY_TIMEOUT_MS`, installed in `src/test-setup.ts`).
+  The stock 1 s wait is tighter than the per-test budget, so a suite awaiting
+  a lazy chunk or a stubbed read failed with `Unable to find ...` under load
+  even though the element arrived (NEWFRONT-789). This changes polling time
+  only, never an assertion, and the owning test still ends it at 30 s. A
+  suite that wants a tighter wait may still pass `{ timeout }` explicitly.
 - Full-suite evidence: run on the branch with the machine's load noted, and
   stream rather than truncate the output:
   `pnpm --filter web_new test 2>&1 | tee "$TMPDIR/.web_new-full.log"`.

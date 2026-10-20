@@ -25,3 +25,18 @@ export const FULL_RUN_OBSERVED_P999_MS = 8_400;
 
 /** One-minute load average on the 8-vCPU host during that measurement. */
 export const FULL_RUN_OBSERVED_LOAD = 163;
+
+/**
+ * Wall-clock allowance for Testing Library's async queries (`findBy*`,
+ * `waitFor`).
+ *
+ * Testing Library polls for a second before giving up, which is far tighter
+ * than the per-test budget above. A suite that waits on a lazy chunk (the
+ * token page, a settings section) or on a stubbed read can spend more than
+ * that second queueing on a loaded host and fail with "Unable to find ..."
+ * even though the element does arrive — the failure NEWFRONT-789 saw on the
+ * base head. The wait tracks the per-test budget instead, so the two
+ * ceilings agree; it changes only how long a query polls, never what it
+ * asserts, and it cannot outlive the test that owns it.
+ */
+export const ASYNC_QUERY_TIMEOUT_MS = FULL_RUN_TEST_TIMEOUT_MS;

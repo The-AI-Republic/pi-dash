@@ -5,12 +5,18 @@
 // cleanup between tests (mirrors @pidash/kit).
 import "@testing-library/jest-dom/vitest";
 import * as matchers from "@testing-library/jest-dom/matchers";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach, expect } from "vitest";
 
+import { ASYNC_QUERY_TIMEOUT_MS } from "./testing/testBudget.js";
 import { installTestStorage } from "./testSupport/memoryStorage.js";
 
 expect.extend(matchers);
+
+// Async queries poll on the same load allowance as the per-test budget
+// (`testing/testBudget.ts`); the stock 1 s wait fails suites whose lazy
+// chunk simply arrived late on a busy host. See NEWFRONT-789.
+configure({ asyncUtilTimeout: ASYNC_QUERY_TIMEOUT_MS });
 
 // Guarantee: every jsdom test file starts with a fresh in-memory profile,
 // whatever Node's own global localStorage is (Node 26 leaves an undefined
