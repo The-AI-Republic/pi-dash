@@ -1,3 +1,5 @@
+> **Superseded.** This note was folded into [`space.md`](space.md) by NEWFRONT-751; that file is the authoritative build spec for the area. Kept for history (the oracle research notes it was written from).
+
 # Space board chrome spec — navbar, theme, badge, account, loading, notices, failure screens, locale (NEWFRONT-448)
 
 Parent epic NEWFRONT-97 (tracking). Inventory

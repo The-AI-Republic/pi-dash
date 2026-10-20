@@ -1,0 +1,1539 @@
+# Public boards (space) — area build spec (SPC-001–065)
+
+Area: Public boards (space): published project boards and the public issue
+view. Parent epic NEWFRONT-99. Inventory
+`.ai_design/new_frontend_implementation/parity/inventory/space.md`
+(rows SPC-001–065, every row currently `oracle green`). Oracle scenarios
+`apps/web_new/e2e/parity/space/` (nine spec files). This file consolidates and
+supersedes the six earlier area notes `space-board-access.md`,
+`space-board-chrome.md`, `space-layouts-cards.md`, `space-filters-peek.md`,
+`space-engagement-comments.md` and `space-auth.md`; those may be retired once
+this file is accepted.
+
+Method: the old space frontend (`apps/space/**`), the Django views and
+serializers under `apps/api/pi_dash/space/` and
+`apps/api/pi_dash/authentication/views/space/`, and the running old app against
+the seeded parity stack were read and driven as a **reference only**. Nothing
+is imported, copied or translated from them. This prose is the only thing the
+build slices and the area gate write code from. It contains no UI copy,
+selectors, class names or styles — the only literals are addresses, parameter
+names, API paths and field names. User-visible wording is written by each
+slice from the kit and restated in the oracle scenarios, which must match the
+old app's meaning without reusing its strings.
+
+Status convention: the oracle (NEWFRONT-97, rows already green) pins today's
+behavior on the old app. Build slices write the new app from this spec, cover
+every changed line and branch with unit tests, and append `built` to the
+Status cell of each row they implement. The area gate NEWFRONT-763 runs the
+area's whole parity suite against `apps/web_new`, and turns green rows into
+`new green`. Where this spec conflicts with the issue that created it, this
+spec and the run rules in the issue description win; the slices are told to
+remark it.
+
+## 0. Reading guide
+
+- §1 is the architecture the slices must follow: route shape, public session
+  model, lazy loading, editions, and the address contract.
+- §2 resolves every cross-epic seam: what this area builds itself and what it
+  reuses read-only from the kit and from the Issues epic. Read it before
+  writing each slice; it names the Issues slice that owns each shared piece.
+- §3 is the behavior, row by row, grouped by slice. Each row states screens,
+  states, rules, validation, empty/error states, permissions, shortcuts and
+  the calls that back it. Row IDs are the inventory IDs and the oracle tags.
+- §4 lists the rows that used to live inside a range heading, restated
+  explicitly, and the five inventory confirmations resolved.
+- §5 is the API endpoint and parameter table, with the fields the UI reads.
+- §6 is the F-06 reuse map: what `apps/web_new` already has, and per slice what
+  is added or reworked.
+- §7 is the bug ledger: every `bug:` scenario, its filed issue and the
+  behavior the new app builds instead.
+- §8 is the proof plan: how each row becomes `new green`, how editions are
+  proven, and what the gate must not do.
+
+## 1. Architecture (decisions the slices must not reopen)
+
+### 1.1 Route shape
+
+Public boards are a separate web-only route subtree, not a part of the
+workspace shell. The canonical addresses are:
+
+| Address | What it is | Row |
+| --- | --- | --- |
+| `/spaces/` | Landing: auth gate for anonymous visitors, paste-a-link guidance for signed-in visitors | SPC-005, SPC-064, SPC-058–063 |
+| `/spaces/issues/:anchor/` | The published board for one anchor | SPC-001, SPC-003, SPC-004, SPC-010–065 |
+| `/spaces/:workspaceSlug/:projectId/` | Legacy workspace/project link that resolves to an anchor | SPC-002 |
+| `/spaces/*` (anything else) | Generic not-found page | SPC-009 |
+
+- **It is one subtree, not the workspace shell.** `/spaces/*` must not render
+  the sidebar, the title bar, the workspace switcher, the command palette, the
+  workspace session gate or any workspace-bound component. A visitor here has
+  no workspace and often no account.
+- **It is lazy.** The subtree's route modules, its board, its auth card and
+  its editor are code-split so a visitor loading `/spaces/...` never downloads
+  the workspace shell, the Issues epic's board/kanban code or the rest of the
+  app. The shell chunk stays out of the space entry chunk. The gate proves
+  this by loading a board in a fresh browser context and checking the shell's
+  chunk never arrives, plus the size budget (`pnpm --filter web_new size`).
+- **Web build only.** `/spaces/*` exists in the `web` build and is absent from
+  the desktop build and its navigation. No desktop parity row exists for this
+  area; the slices add no platform-specific code, no Tauri access, and no
+  edition-specific branches inside the subtree.
+
+### 1.2 Public, no-session model
+
+The space app is public. That has concrete consequences the slices implement:
+
+- **No workspace session gate.** The subtree never calls the session gate,
+  never redirects to the workspace sign-in, and never imports workspace
+  membership, permissions or sidebar features. It is reachable while signed
+  out, and it renders identically whether or not the visitor happens to be
+  signed in.
+- **No session-expiry middleware.** `apps/web_new`'s default API client marks
+  the workspace session expired on any 401 and bounces to sign-in. A 401 on
+  the space subtree is a legitimate anonymous state (current-user,
+  comment writes, vote writes, reactions), never a session expiry. The space
+  subtree uses a **second client instance on the same transport and base URL**
+  with no session middleware. The singleton builder lives in
+  `core/api`; the subtree gets its own scoped client/query client factory
+  from its public-shell module (§6, slice A) rather than reusing
+  `getAppClient()`. No network I/O happens outside `core/api`; the space API
+  modules call through an `ApiClient` argument exactly like the Issues feature
+  does.
+- **Workspace cache isolation.** Space data lives in its own query keys and
+  its own query client. It must never read, write or invalidate the
+  workspace cache, and signing out of a workspace must not clear a visitor's
+  public board (and the reverse). Keys are rooted at `["spaces", anchor, ...]`
+  and `["spaces", "auth", ...]`, never `["ws", ...]`.
+- **Who the visitor is.** The subtree reads the current user through the
+  public client (`GET /api/users/me/`): a signed-in visitor gets identity,
+  avatar and name; an anonymous visitor gets 401, which the subtree treats as
+  "anonymous" (not an error, not a redirect). That identity gates the
+  composer, the owner menu and the navbar account slot (§3).
+- **Signed-in visitors are not re-gated.** A signed-in visitor opening a board
+  sees the same board plus their account controls; nothing forces them back to
+  `/spaces/` guidance. The landing's guidance view is only what `/spaces/`
+  itself shows to a signed-in visitor with no valid return path.
+
+### 1.3 Address and parameter contract
+
+All names are lower-case/camelCase exactly as below; the oracle asserts these
+spellings.
+
+| Parameter | Where | Meaning | Notes |
+| --- | --- | --- | --- |
+| `anchor` (path) | `/spaces/issues/:anchor/` | Published board's anchor | Matches `[A-Za-z0-9_-]+`; anything else is treated as unknown and renders SPC-003 |
+| `workspaceSlug`, `projectId` (path) | `/spaces/:workspaceSlug/:projectId/` | Legacy identify of the project | Resolved server-side to the anchor |
+| `board` | board address | Active layout | Values `list`, `kanban` only (the two renderable ones). Unknown or missing settles on the first publisher-enabled layout |
+| `peekId` | board address | The open issue's UUID | Present = overlay open; absent = closed. Invalid values are dropped |
+| `priority` | board address | Comma-joined priority values | `urgent`, `high`, `medium`, `low`, `none` |
+| `state` | board address | Comma-joined state UUIDs | One key, comma-separated values |
+| `labels` | board address | Comma-joined label UUIDs | Address-only facet (§3, SPC-036/037) |
+| `next_path` | landing address and every sign-in/sign-out link/form | Return address | Validated (§3, SPC-006); survives valid round trips |
+| `error_code` | landing address | Server error code after a native form post | Lands on the fixing step (§3, SPC-063) |
+| `email` | landing address | Pre-fills the address field | Optional |
+
+Rules that apply everywhere:
+
+- **View state lives in the address.** Board, open issue and filters are
+  parsed with a zod `validateSearch`; invalid values fall back to defaults and
+  the address is rewritten to the settled form (SPC-022).
+- **Trailing slash.** `/spaces/*` addresses settle with a trailing slash
+  under the router's `trailingSlash: "preserve"` because the links the subtree
+  authors carry it; pasted slash-less addresses are rewritten on the first
+  client navigation. The oracle checks the canonical `/spaces/issues/:anchor/`
+  form only, not whether a server redirect added the slash.
+- **Legacy links keep only what the old app kept.** The legacy link carries
+  `board` and `peekId` across; it does not carry filter parameters (old
+  behavior, SPC-002). The new app preserves that set exactly — inventing
+  extra parameter forwarding would be a divergence the oracle cannot prove.
+- **Opening a card preserves filters.** Clicking a card rewrites the address
+  keeping `board` and every filter key and adding `peekId`; closing drops only
+  `peekId`. (This is the target for SPC-030/042; the old app dropped filters
+  when a card was clicked from a filtered board — see §7, no separate bug ID,
+  folded into the same close/open address rule.)
+- **Masked spelling.** The old app's parameter names are part of its public
+  links; the new app uses the same names. A future rename would need a
+  redirect table and a new decision; the slices do not rename them.
+
+### 1.4 Editions
+
+Rows are tagged `oss, cloud` identically. Reading `apps/space/**` found **no
+edition branching**: no `ce/` alias, no `ee-overlay` swap, no build-time
+edition constant. The only variation is instance configuration:
+
+- whether mail is configured and magic-link login is enabled (code vs password
+  step, SPC-059–061),
+- whether password login/email password auth is enabled (SPC-059, SPC-061),
+- which third-party providers are enabled (SPC-062),
+- whether signup is enabled (instance config; the card's routing consults it),
+- the product site address for the badge (a build-time constant, SPC-012),
+- which locale packs ship (SPC-065; OSS ships English only).
+
+**Edition proof:** the space subtree carries no `edition` flags, slots, route
+extensions or `if (edition)` branches. Every row is proven per edition (OSS and
+cloud) by serving the same subtree under both stacks and running the same
+scenarios. The two behaviors that differ are proven by *configuring the
+instance* rather than by edition: (a) magic-link/mail on and off gives both
+auth method paths (SPC-059/060/061), and (b) provider flags on and off gives
+both provider states (SPC-062). OSS-only constraints are proven on OSS; any
+cloud config that is not available on the OSS stack is recorded by the gate as
+a config-dependent extension of the same scenario, not as a new row. Server
+endpoints used by this area are `AllowAny` public endpoints with no edition
+gate.
+
+### 1.5 Translations
+
+Every visible string in the subtree goes through `core/i18n` (`useLocale`,
+locale packs). Identifiers (issue keys, anchor, UUIDs), server names (project,
+state, label, member display names) and date/number shapes are data, not text,
+and never go through translation. OSS ships English and falls back to English
+for unsupported stored locales (SPC-065).
+
+## 2. Cross-epic seams
+
+Every row must be provable at the area gate without depending on Backlog
+epics: the gate runs after this area's slices and the Issues area gate
+NEWFRONT-658, nothing else. So each slice either builds its piece itself or
+reuses a component whose Issues slice is already merged or guaranteed by
+NEWFRONT-658. Read-only reuse is the rule: the space subtree never mutates
+Issues feature state, never mounts workspace-bound chrome, and never forks a
+component to get "a slightly different" version. When an Issues component does
+not fit, the slice asks for it through the Issues feature's public barrel
+(`features/issues/index.ts`) or writes its own in the spaces feature. Both are
+new code; nothing is copied from `apps/space`.
+
+| Need | Owner | How space uses it |
+| --- | --- | --- |
+| Generic primitives (button, icon button, input, textarea, switch, avatar, badge, menu, popover, tooltip, dialog, skeleton, spinner, toast host, virtual list, markdown view, empty state, theme helpers) | `@pidash/kit` (already merged) | Direct import. This is the default for everything generic. |
+| Layout icons and the five layout names | Issues `layouts/kinds.ts` + `components/LayoutIcon.tsx` (merged) | Import through the Issues barrel. The spaces board offers only `list` and `kanban`, intersected with the publisher's flags. |
+| Layout switcher UI in the workspace shell | Issues `components/LayoutSwitcher.tsx` (merged) | **Not reused.** It is workspace-styled and offers five layouts. Space builds a small segmented switcher in its own feature (§3, SPC-020/021) using kit `IconButton`/`Tooltip` and `LayoutIcon`; read-only. |
+| List layout rendering | Issues NEWFRONT-619 slice (merged) | **Not reused as a whole.** `ListLayout` is bound to workspace entities, drag/drop and inline property editing; the public board is read-only with different paging. Space builds its own grouped list (§3, SPC-023/026) from kit primitives. |
+| Kanban layout rendering | Issues NEWFRONT-622/623 | **Not reused.** Same reason; space builds its own columns (§3, SPC-024/026). |
+| Card (block) rendering | Issues card slices | **Not reused.** Cards are read-only, have a public key `IDENTIFIER-sequence` and a different footer (§3, SPC-027–029); space writes its own. |
+| Dropdown primitives (filters panel, prioritize/state option lists, searchable long lists) | Issues NEWFRONT-615/616 | Reuse the **kit** primitives (`Popover`, `Menu`, `Combobox`, `Tooltip`) those slices are built on. Do not import workspace filter controls. Space's filter panel (§3, SPC-034) is its own component with two facets. |
+| Filters engine (rich filter builder, saved views, condition pills) | Issues NEWFRONT-626–629 | **Not reused.** Public filters are three fixed facets carried in the address; the space feature keeps its own search schema and fetch parameters (§3, SPC-034–038). |
+| Display options panel | Issues NEWFRONT-618 | **Not reused.** The public board has no display options; what is displayed is fixed (SPC-027/028). |
+| Create modal / quick create | Issues NEWFRONT-630 | **Not present at all.** The public board is read-only (SPC-032); no create affordance exists anywhere. |
+| Issue detail / sidebar | Issues NEWFRONT-639/640/642 | **Not reused.** The overlay is a public read-only presentation (§3, SPC-040–046) built from kit + shared read-only pieces below. |
+| Shared peek panel shell | Issues NEWFRONT-646 (`shared/shell/PeekPanel`, merged) | Reuse read-only: it provides the overlay shell, close control, Escape handling, eyebrow/title/actions slots and a `children` body. The public feature wraps it with its own three presentations (side/modal/full), its own property panel and read-only body. If the side/modal/full switcher is not in the shell, the space slice adds it in its own wrapper (not in the shell) so the shell stays workspace-free. |
+| Bulk edit | Issues NEWFRONT-633 | **Not present.** Read-only board (SPC-032). |
+| Comments thread, cards, edit, fold, speaker labels | Issues NEWFRONT-651 | Reuse **read-only presentation** pieces through the Issues barrel: `CommentCard` (identity, bot mark, fold, speaker label, owner menu via props), `CommentEditForm`, comment model helpers (`isCommentFolded`, `commentAuthorName`, …) and the shared `RichTextView`. Do **not** reuse the Issues `CommentThread`/`comments/api` as-is: they are keyed by workspace and hit workspace endpoints. Space keeps its own query functions for the public endpoints and passes rows into the same presentational components. If a component hardwires workspace fetches, it is not reused; the space slice writes its equivalent and notifies the Issues owner rather than forking silently. |
+| Reactions (issue + comment chips, picker, grouping, own-highlight, reactor names) | Issues NEWFRONT-654 | Reuse **presentational** pieces (`ReactionBar`, `ReactionPicker`, `EmojiPicker`, and the model helpers `groupReactions`, `viewerHasReaction`, …) through the Issues barrel. Same caveat: public data goes through space's own query functions because the Issues hooks are workspace-scoped; the write path is the public reaction endpoints. |
+| Composer (rich text, attachments, mentions, edit) | Issues NEWFRONT-651/654 + `shared/editor` | Reuse `shared/editor/RichTextEditor` (lazy), `RichTextEditorHandle`, `RichTextView`, and the mention extension. The space composer adds the public image upload (public asset endpoint) and submits to the public comment endpoint. Member suggestions come from the public members endpoint. |
+| Shell toasts and notice helpers | `shared/shell/toaster.ts` (merged) | Reuse `notifySuccess`/`notifyError`/`notifyInfo` and mount one kit `ToastHost` in the space layout. The space layout owns its own host so it never depends on the workspace shell mounting. |
+| User menu / account menu | `shared/shell/UserMenu` (merged) | **Not reused.** It offers Your-work, Settings, deactivate and workspace role; none exist for a public visitor. Space builds a one-entry account popover (identity + sign out) from kit `Menu` + `Avatar` and posts the sign-out form (SPC-014). |
+| Clipboard copy helpers / copy-link button | `shared/shell/clipboard.ts`, `CopyWorkItemLinkButton` | The clipboard helper's notice text and the copy-link button are workspace-flavored. Space writes a tiny copy action in its own feature using `navigator.clipboard` and the shared toast (§3, SPC-045). |
+| Current user / instance config | `core/session` queries + `@pidash/api-client` `auth`/`instance` contracts (merged) | Space reads current user and instance config **through the public client**; it never imports the workspace session store or gate. |
+| Document head (title, robots, meta) | `shared/shell/document.tsx` `useDocumentHead` (merged) | Reuse for the board title and noindex (SPC-007/008). |
+| Theme | `core/theme` (workspace, persisted to profile) | **Not reused for persistence.** A public visitor has no profile. Space uses `@pidash/kit` `resolveTheme`/`applyTheme`/`watchSystemTheme` with a space-scoped storage key and an OS default (§3, SPC-011). |
+| Not-found page | `shared/shell/NotFoundPage` | Reuse for the **generic** unmatched address (SPC-009). Anchor-unknown (SPC-003) and board failure (SPC-004) are space-specific illustrated states in the space feature. |
+
+What this area builds itself (slice by slice, §6): the `/spaces/*` shell and
+route tree, the board data layer against the public endpoints, navbar and
+layout switcher, list and kanban read-only renderers with per-group paging,
+filters and pills, public cards, the overlay with three presentations, votes
+and reactions wiring, comments and composer against the public endpoints, the
+auth card that talks to `/auth/spaces/*`, and the space-specific failure
+surfaces.
+
+## 3. Behavior, row by row
+
+Each subsection is one slice from the epic's split. The slice names its rows;
+the rows name what the visitor sees, the rules, and the calls. "Reads" means
+fields of the response the UI displays; the full table is §5.
+
+Row-to-slice map (every row appears exactly once; the split's Done-when):
+
+| Slice | Issue | Rows |
+| --- | --- | --- |
+| A — public shell, routing, failures | NEWFRONT-753 | 001, 002, 003, 004, 009, 016, 018, 019 |
+| B — landing auth gate, metadata | NEWFRONT-754 | 005, 006, 007, 008 |
+| C — spaces auth card and flows | NEWFRONT-755 | 058, 059, 060, 061, 062, 063, 064 |
+| D — navbar, theme, account, notices | NEWFRONT-756 | 010, 011, 012, 013, 014, 015, 017, 065 |
+| E — layouts, list/board, paging | NEWFRONT-757 | 020, 021, 022, 023, 024, 025, 026 |
+| F — filters, pills, encoding | NEWFRONT-758 | 034, 035, 036, 037, 038, 039 |
+| G — cards, read-only behavior | NEWFRONT-759 | 027, 028, 029, 031, 032, 033 |
+| H — overlay shell and content | NEWFRONT-760 | 030, 040, 041, 042, 043, 044, 045, 046 |
+| I — votes and reactions | NEWFRONT-761 | 047, 048 |
+| J1 — comments thread and rows | NEWFRONT-762 | 049, 050, 051, 052 |
+| J2 — composer, edit, delete, comment reactions | NEWFRONT-775 | 053, 054, 055, 056, 057 |
+
+The order the epic uses is A → B → D → E → F → G → H → I → J1 → J2, with C
+mounted by B. Row 030 lives in slice H's section (the split assigns the open
+action to H) even though the card it activates is slice G's; G's card rows
+cite it where the link region is defined.
+
+### 3.1 Slice A — public shell, anchor routing and failure surfaces
+
+**SPC-001 — Anonymous board load.**
+A published board opens at `/spaces/issues/:anchor/` for a visitor with no
+account. The page renders: the board chrome (navbar with project identity and
+controls), the published issues for the board's layout, and — when anonymous —
+a sign-in control that carries the exact board position (§3.3, SPC-013).
+Nothing on load redirects toward sign-in, shows a workspace sign-in form, or
+gates content behind the workspace session. The load sequence is: instance
+probe (§3.9, SPC-018) → board settings → layout + issues. The board is
+reachable in a fresh browser context with no cookies at all. Reads:
+`settings` (row 1 of §5). Empty shop window: see SPC-025 for zero issues.
+
+**SPC-002 — Legacy workspace/project link.**
+`/spaces/:workspaceSlug/:projectId/` resolves the project's published board
+server-side (`GET /api/public/workspaces/:slug/projects/:id/anchor/`). On
+success the app forwards to `/spaces/issues/:anchor/`, carrying exactly
+`board` and `peekId` when the legacy address had them (nothing else), and
+the board validates them like a pasted address. While resolving, the product
+spinner fills the viewport (never a blank page). Unknown workspace/project,
+a malformed project id, an unpublished project (server 404), or a resolved
+payload whose entity is not a project all land on the **generic** not-found
+page (SPC-009), not on the anchor illustration. A project whose board exists
+but whose anchor is later unknown resolves through the board and lands on
+SPC-003, naturally.
+
+**SPC-003 — Unknown or withdrawn anchor.**
+Any non-2xx answer from settings other than a transient/network failure that
+the app classifies as 404 renders a dedicated illustrated not-found state in
+the space design: illustration, one heading, one explanatory line. The board
+chrome (navbar, controls, layouts) does not render. An anchor failing the
+`[A-Za-z0-9_-]+` shape never reaches the network and renders this same state.
+This is distinct from SPC-004 (board-error illustration) and SPC-009 (generic
+unmatched path).
+
+**SPC-004 — Other board failures.**
+A settings failure that is not "anchor unknown" (5xx, network failure,
+unparseable payload) renders the **board-error illustration** with the
+navbar *not* rendered. An issues-list failure after settings succeeded
+(5xx, network) renders the board-error illustration under the resolved
+navbar. In both cases: no spinner left spinning, no blank page, no layout
+shell with empty groups. The old branch offers no retry control, so neither
+does the new one; recovery is a page reload or a later navigation. The
+wording is a neutral "we couldn't load this board" message — not the old
+app's misleading "missing board" line, and not an invitation to publish
+anything.
+
+**SPC-009 — Unmatched paths.**
+Anything under `/spaces/` that matches no route — single unknown segment, deep
+unknown path, a bare `/spaces` without the trailing slash after normalization —
+renders the **generic** guidance page: illustration, heading, and a line
+telling the visitor to check the address. This is the same page the
+unpublished legacy link lands on and the catch-all for the subtree. Do not
+render board chrome on it.
+
+**SPC-016 — Loading states.**
+Four stages, each with one visible state and no flash of stale or wrong
+content:
+1. *Instance boot*: while the instance probe is in flight, a full-viewport
+   product spinner. Nothing else.
+2. *Legacy resolution*: the product spinner until the forward happens.
+3. *Board resolution*: the navbar renders immediately in its placeholder form
+   (generic project mark, placeholder name, disabled/empty controls) over an
+   empty content area while settings resolve — the old app showed no spinner
+   here and did not flash wrong content. Keep that: placeholder chrome, empty
+   body.
+4. *First issues fetch*: a centered product spinner under the loaded navbar.
+Content (groups, cards, counts) appears only after its own data is present,
+never as an empty-group flash followed by data. Once each stage settles it
+hands off to the next; none of these states is a terminal error state (those
+are SPC-003/004/018/019).
+
+**SPC-018 — Unreachable backend.**
+If the instance probe fails (network error, 5xx, non-JSON), the app renders the
+**instance-failure screen**: the product logo/wordmark bar, a themed
+illustration, an explanatory heading and a retry control. Retry performs a
+hard page reload. The probe is a single attempt (no client retries), so a
+single aborted request deterministically reaches this screen. While the probe
+is pending, SPC-016 stage 1 applies. The space failure screen is its own
+component: it fills the viewport, carries no workspace chrome, and is themed
+(light/dark) from the space theme choice.
+
+**SPC-019 — Global crash.**
+A render fault anywhere in the subtree — including a malformed payload that
+makes a renderer throw (e.g. an unparseable project mark) — is caught by the
+space error boundary and renders the crash screen: an apologetic heading, a
+refresh control that reloads, and a contact line with a support-mail link and
+a community/forum link. The boundary is per subtree (it does not take down
+`/spaces/` navigation once a later route renders cleanly after refresh) and
+does not render the workspace crash screen. Reload with the payload fixed
+returns the board.
+
+Implementation notes for A: own `errorComponent` and `notFoundComponent` on
+the space subtree; the settings error is classified into 404 → SPC-003,
+anything else → SPC-004; the probe is a query under the space client; the
+spinner is the kit `Spinner` in its large/full-viewport presentation. No
+data-testid is added to the old app.
+
+### 3.2 Slice B — landing auth gate and board metadata
+
+**SPC-005 — Landing page is the auth gate.**
+`/spaces/` is the public root. While the current-user probe resolves, a
+branded full-viewport spinner (SPC-016 stage 1 rules, on the space design).
+Then:
+- *Anonymous*: the email-first sign-in/sign-up card (§3.11, SPC-058–064).
+  The card's mode is not chosen by the visitor; the server's address check
+  chooses sign-in vs sign-up (§3.11).
+- *Signed-in, no valid `next_path`*: the **guidance view** — product mark,
+  the account control (avatar + menu), an illustration and a short heading
+  and line telling the visitor to paste the public link they want to open in
+  the address bar. No form.
+- *Signed-in with a valid `next_path`*: replace-navigate to that path; the
+  guidance view is not shown. If the path is invalid it is dropped
+  (SPC-006) and the guidance view shows.
+- *Anonymous with a valid `next_path`*: the auth card shows and every
+  auth step carries the return path through its forms; after success the
+  server's redirect lands on the path and the board opens.
+The landing carries the trailing slash (`/spaces/`) and the product badge
+(SPC-012). It does not carry board chrome.
+
+**SPC-006 — Return-address validation.**
+One validator, used by every space entry point: landing `next_path`, the
+navbar sign-in link, the sign-out form, the vote/reaction/comment sign-in
+redirects, the auth forms' hidden field and every auth redirect the card
+follows. Rules (all must pass or the value is dropped):
+- a string,
+- starts with exactly one `/` (so `//host` and scheme URLs fail),
+- no backslash anywhere,
+- no control characters, whitespace, or `javascript:`/`data:`/`vbscript:`
+  active-content payloads anywhere (case-insensitive, decoded),
+- it parses as a relative path and stays same-origin (no `scheme://`, no
+  `@`-encoded authority tricks, no `%2f%2f` escape that becomes an authority).
+Valid values keep their own query string (a board address with `board`,
+`peekId` and filters survives the round trip). When dropped, the visitor
+lands on the safe default: `/spaces/` for the gate (showing guidance if
+signed in, the card if not), and the board for the sign-in links.
+This resolves inventory confirmation (5): `next_path` uses the same shared
+validator as every other return address; there is no second, weaker checker
+for the landing, and the new app implements one function in the space
+feature (it does not import the workspace guard's function, which is
+workspace-shaped, but the rules are the same).
+
+**SPC-007 — Per-board metadata.**
+The board's document head carries, from `GET /api/public/anchor/:anchor/meta/`:
+- title = board name, description = board summary, plus `og:title`,
+  `og:description`, `og:type=website`, `twitter:card` (summary — **no**
+  large-image card because there is no image), `twitter:title`,
+  `twitter:description`.
+- **No cover image tags at all**, even when the project has a cover
+  (`cover_image` in the meta payload is ignored). This is the target
+  (main#523), and it is what the new app implements.
+- Fallbacks: unknown anchor, malformed anchor, server error, or a payload
+  without a name/summary → the generic product title and description. The
+  loader resolves the API base the same way the rest of the app does, so the
+  old root cause (NEWFRONT-453: relative base → always generic) cannot recur.
+How the head is emitted depends on the host: `apps/web_new` builds a static
+SPA, so the served document is one shell for every address and per-board tags
+exist only in the live document, updated on navigation and on the first
+board render. The build slice must therefore (a) keep the generic tags in the
+served shell as the safe default and (b) set the board's tags in the live
+document before the board content is announced. If the deployment can serve
+per-address HTML (the way the old app did), the same function feeds it; that
+is a hosting capability, not a second behavior. A malformed anchor never
+produces a request with the malformed value.
+
+**SPC-008 — Crawler directive.**
+Every page in the subtree carries a `robots` directive `noindex, nofollow`:
+board, landing, legacy-resolution, not-found and error pages alike. The
+subtree sets it on its root (`useDocumentHead`) and no child route loosens it.
+**What the oracle proves** is the live document's `<meta name="robots">` on
+the board and on the landing (both read `noindex, nofollow`); it does not
+fetch and parse the served HTML, so the served document is a separate
+constraint below, proven by the gate's host check rather than faked. Two hard
+constraints for the slices and the gate:
+- The app root today claims `index, nofollow` as the workspace fallback. The
+  space subtree must claim `noindex, nofollow` at its own root so the claim
+  wins for every space page in the live document.
+- The standard static SPA shell is shared by workspace pages, so the served
+  document may not vary by address. The row's "served pages" requirement is
+  met by whatever document the space addresses are served with — for the
+  static build, the space subtree's host configuration (for example a
+  response header/Caddy/`_headers` rule for `/spaces/*`) must add the
+  directive, or the deployment must serve a space shell. This is an
+  infrastructure task for slice A, not something to fake with a client-side
+  script. If no host change is possible in the parity stack, the gate records
+  the exact gap against SPC-008 and links the hosting issue; it does not
+  relax the row.
+
+### 3.3 Slice D — board navbar, theme, account and notices
+
+**SPC-010 — Navbar project identity with fallbacks.**
+Left side: the project's mark, then its name. Mark branches, in order:
+1. a glyph icon chosen from the project's `logo_props` (icon name → kit icon),
+2. an emoji from `logo_props`' emoji branch (decimal code points),
+3. no configured mark → an empty slot (the old app renders nothing; do the
+   same — do not invent a fallback mark for a configured-empty project).
+4. no project details at all in the settings payload (placeholder during
+   resolution or a malformed payload) → the bar stays intact with a generic
+   project mark and a short placeholder name.
+The name comes from `project_details.name`; long names truncate in the bar
+with the full name on hover. Reads: `project_details.{name, logo_props,
+identifier, cover_image}`. Covers are **not** rendered as a banner on the
+public board (the old board has no cover banner; the cover appears only in
+metadata, which SPC-007 disables).
+
+**SPC-011 — Theme switch.**
+The navbar carries a light/dark toggle. Rules:
+- A first visit with no stored choice **follows the OS scheme** (dark OS →
+  dark) and stores nothing; the mark follows OS changes live while nothing is
+  stored.
+- The first toggle from the OS default **flips** to the opposite of what is
+  currently showing and stores that explicit choice. (Old bug NEWFRONT-456:
+  the first click stored explicit light regardless of the current scheme;
+  the new app implements the flip.)
+- Later toggles alternate; the explicit choice persists across reloads in the
+  space-scoped storage key; the document theme and the toggle's own state
+  agree at all times.
+- There is no "follow system" entry in the public switch: once an explicit
+  choice is stored the OS no longer affects the board; clearing the stored key
+  returns the next load to the OS default (the gate exercises this through
+  storage, not through a visible control).
+The kit's `resolveTheme`/`applyTheme`/`watchSystemTheme` are used with a key
+namespaced for space; no profile write.
+
+**SPC-012 — Product badge.**
+A small branded badge is fixed to the bottom-right corner of every public
+screen (board, landing, legacy resolution, error/not-found states). It opens
+the configured product site in a new tab with `noopener noreferrer`. Its
+address is a build-time constant; when the constant is absent or the badge is
+disabled, it renders nothing (no empty slot, no broken link). The badge stays pinned while the board scrolls and
+must not intercept clicks meant for content behind it.
+
+**SPC-013 — Anonymous sign-in remembers the position.**
+The navbar account slot for an anonymous visitor is one sign-in control
+linking to `/spaces/?next_path=<current board address including board, every
+filter key and peekId, URL-encoded once>`. Rules:
+- The return address is the full current position, encoded as one value
+  (old bug NEWFRONT-465: the board address was spliced unencoded, so the
+  second and later parameters leaked out; the new app encodes once).
+- The validator of SPC-006 decides whether it survives.
+- The slot renders nothing inside an embedding frame (SPC-015).
+- The old app's sign-in link target is the landing root; keep that (the
+  landing then forwards after auth).
+Reads: current-user (present/absent); the link is computed from the router
+search, not from a store snapshot.
+
+**SPC-014 — Account menu.**
+A signed-in visitor sees the avatar button with their display name
+(fallback: display name → first+last → email → a neutral label). Clicking
+opens a menu whose content is exactly: identity (avatar + name + email) and a
+sign-out action. Rules:
+- Sign-out is a native form post to `POST /auth/spaces/sign-out/` with the
+  CSRF token (`GET /auth/get-csrf-token/`, fetched when the menu opens or at
+  mount) and a hidden `next_path` carrying the current board position
+  (board, filters, peekId — encoded once).
+- After sign-out the server redirects to the return address; the board
+  reloads as anonymous chrome with the same position; the menu is gone.
+- No Your-work, settings, deactivate or workspace entries exist here.
+- The menu is absent inside embeds (SPC-015).
+FIELD: `display_name`, `first_name`, `last_name`, `email`, `avatar_url`.
+
+**SPC-015 — Embedded frame hides account controls.**
+The subtree detects an embedding frame (`window.self !== window.top`, same
+rule as the old hook, with no user-agent heuristics). Inside a frame:
+- navbar account slot: nothing in either state (no sign-in button, no avatar
+  menu);
+- emoji add controls: not rendered (overlay and cards alike — the old app's
+  card footer missed this check; the new app applies the frame gate to both,
+  as SPC-015 owns the frame-wide claim);
+- comment compose, owner menu and the comment sign-in invitation: not
+  rendered;
+- everything else stays readable: navbar identity, fields, switcher, filters,
+  cards, open overlay, thread, reaction **counts**, and the vote controls.
+  The inventory row does not list voting inside a frame, and the old app
+  leaves vote controls live there; keep them live (a signed-in visitor in a
+  same-origin frame has cookies). A signed-in session inside a frame still
+  reads; the hide is about UI, not permissions.
+
+**SPC-017 — Navigation progress and notices.**
+- A route transition that takes long enough to matter (the legacy resolution
+  is the proof) shows a top progress bar while in flight and removes it when
+  settled. Instant transitions show none.
+- Short notices (the kit toast host mounted by the space layout, bottom or
+  top per the design) report: copy-link success, copy-link failure, comment
+  post failure, comment post success where the design confirms it, vote
+  failure, reaction failure, comment edit failure, comment delete success and
+  failure, attachment upload failure. Notices are dismissible/auto-expiring,
+  one line plus optional detail, and never block the board.
+- A failed write never changes the visible data except through the
+  reconcile rules of its own row (SPC-047/048/056/057).
+
+**SPC-065 — Locale fallback with stable identifiers.**
+All visible chrome, filter, auth and notice text goes through translation.
+With the OSS build's single locale: an unsupported stored locale falls back to
+English, the document language stays English, and the stored value heals to
+English on boot. Identifiers (keys, anchors, UUIDs), server-provided names
+and date shapes are unchanged by locale. The gate proves this on OSS by
+storing an unsupported locale and capturing board properties, keys, navbar
+and badge text and the landing title/subtitle/consent text before and after
+(all stable). Cloud locale packs extend the same assertion; they are not a
+separate row.
+
+### 3.4 Slice E — layout switcher, list/board layouts and per-group paging
+
+**SPC-020 — Only publisher-enabled layouts are offered.**
+The navbar carries a small segmented layout switcher with one button per
+offered layout and a tooltip naming it. The offered set is the intersection of
+(a) the two layouts the public board can render — stacked **list** and
+sideways **board (kanban)** — and (b) the layouts the publisher enabled in
+`settings.view_props` (`list`, `kanban`; the payload also carries
+`calendar`, `gantt`, `spreadsheet`, which the public board never renders and
+the switcher never shows). A board with one enabled layout shows a
+one-button switcher (no effective choice) but still renders it; a board with
+none enabled (malformed settings) falls back to list so the board is usable.
+The old app builds the acceptable list from all five flags and then picks the
+first, which can settle on a layout it cannot render; the new app restricts
+the candidate set to the two renderable ones **before** settling (see
+SPC-022). This changes only malformed/never-produced configurations; the
+oracle's enabled subsets are unaffected.
+
+**SPC-021 — Layout switch is shareable.**
+Clicking a switcher button flips the layout immediately, keeps the loaded
+issues (no issue fetch on a switch), keeps `peekId` and every filter
+parameter, and rewrites `board` in the address. A pasted address carrying
+`board` opens directly in that layout. Switching back to a layout already
+loaded reuses its data. The switcher is keyboard operable (buttons, focus
+visible, tooltip on focus too) and announces the pressed state.
+
+**SPC-022 — View validation and fallback.**
+On arrival, `board` is validated against the offered set (SPC-020). Missing
+or unrecognised → the first offered layout in list-then-board order, and the
+address is rewritten to name it (replace, not a history entry). The rewrite
+keeps every other parameter that was present. The settled address is what the
+share and sign-in links carry.
+
+**SPC-023 — List layout.**
+Issues group under one collapsible section per workflow state, in the
+project's state order (`GET .../states/`, ordered by `sequence`). Each header
+shows the state's colour marker, its name and the count for that group as
+returned by the issues response (`total_results` per group). States with no
+issues **still render a header with a zero count**. Clicking a header
+collapses/expands its rows; collapsing keeps the paging state. Rows show the
+public key and title (SPC-027/028). The list is not virtualised in the
+public board (group paging already caps the DOM; if the kit's `VirtualList`
+is used per group it must keep the header sticky and focus order intact).
+
+**SPC-024 — Board layout.**
+One fixed-width column per workflow state in a sideways-scrolling strip;
+columns keep their state order and empty states render an empty column, not
+nothing. Each column header shows the same marker + name + count treatment.
+The strip scrolls horizontally with touch, trackpad and shift+wheel; columns
+scroll vertically on their own. The header row stays visible while a column
+scrolls. Public board columns never offer drag targets (SPC-032).
+
+**SPC-025 — Empty board.**
+The empty test is the fetch's overall `total_count` — the server's count of
+published issues matching the *current filter set* — not "no rows rendered".
+When it is zero, neither layout renders any of its own surface: no group
+headers, no column shells, no skeleton. Instead one centred notice fills the
+content area (the new app writes its own line in the kit's empty-state
+treatment and may add a single action such as a link back to `/spaces/`).
+The test lives in one wrapper around both layouts, so list and board cannot
+diverge. The navbar stays live above the notice: layout switcher, Filters and
+the applied strip (when something is applied) all keep working, so a visitor
+can switch layouts or undo the filter that produced the empty result. The
+notice is reached in both layouts, and switching layout keeps the notice.
+Neighbouring states that are deliberately not this one:
+- *Fetch failed* → the error surface (SPC-004), never the empty notice.
+- *Filters exclude everything* → **the same notice**, because the total is
+  filtered. This matches the old app: the wrapper decides "empty" before
+  either layout renders, so in both cases no group header or column shell
+  appears and there is no separate filtered-empty line to add. Clearing the
+  last filter brings the rows back without a reload.
+- *A group with no rows while others have some* → not this state: the group
+  keeps its header/column with count 0 (SPC-023/024).
+The gate proves a board with zero published issues in both layouts, a board
+with issues showing no notice, and the notice appearing after a live filter
+change and disappearing when the filter is cleared.
+
+**SPC-026 — Per-group paging.**
+First fetch: per group, page size **50**, `group_by=state_id`, ordered by
+`-created_at` unless the request says otherwise. Then each group pages
+independently:
+- *List*: a manual "load more" control under the group's rows, shown only
+  while that group has a next page. Pressing it fetches the next page with
+  the group's own cursor; while in flight the control is replaced by pulsing
+  placeholder rows; the new rows append, the count stays the server's total,
+  and the control retires when the group is exhausted. Loading one group never
+  touches another's rows, cursor or expanded state.
+- *Board*: scrolling a column to its end (an invisible tripwire plus
+  placeholder cards) loads the column's next page; there is no manual control
+  on state columns. The trigger is debounced so a burst of scroll events
+  fires exactly one request per page; it never duplicates cards and never
+  fetches without a next page.
+- Cursors are opaque and come from the response (`next_cursor`,
+  `next_page_results`); they are not part of the board address.
+
+Implementation note: the grouped response's shape and the per-group cursor
+are in §5. The spaces feature keeps one query per (anchor, layout, filters,
+state group) so the address and the cache agree.
+
+### 3.5 Slice F — filters, pills and address encoding
+
+**SPC-034 — Filter panel.**
+A Filters control in the navbar opens a dropdown panel (kit `Popover`) with:
+- a search box at the top that narrows the option rows below (see SPC-039);
+- one collapsible section per facet the active layout supports — for both
+  public layouts that is exactly **priority** and **state**;
+- priority: five options highest to lowest plus the unset/none option, each a
+  checkbox row with the priority marker and its name; state: one row per
+  workflow state (`GET .../states/`), initially showing five with an expand
+  control past that, each a checkbox row with the state marker and name;
+- applied options show checked; each section header counts its applied
+  values; Clear inside a section clears only that facet;
+- **no label section**: labels are never offered here (they arrive only via
+  the address, SPC-037).
+Rules: picking an option updates the filters, rewrites the address, and
+refetches page one of every group (the panel is a dropdown; it stays open for
+multi-pick and closes on outside click/Escape). The section-to-facet mapping
+is driven by a per-layout table (both layouts map to
+`priority` + `state`) rather than hard-wired JSX, so SPC-038 keeps holding if
+a layout is added.
+
+**SPC-035 — Applied pills strip.**
+Above the layouts, one facet shell per applied facet:
+- the facet's name label, one pill per value (priority pill: marker + name;
+  state pill: marker + state name), a per-facet clear control;
+- one global clear-all control at the end;
+- the strip does not render at all when nothing is applied;
+- indeterminate facets (labels, SPC-037) get only the facet label and the
+  clear control.
+Three removal levels — one pill, one facet, all — each of which updates the
+address (surviving values stay under the **singular** keys `state`,
+`priority`, `labels`, each still comma-joined; old bug NEWFRONT-464 rewrote
+survivors under `states=`, which the loader never read) and refetches page one
+of every group. The pill's remove control is a labelled button, keyboard
+reachable.
+
+**SPC-036 — Filters are address-encoded and reload-safe.**
+`state`, `priority` and `labels` are comma-joined UUID/value lists in the
+address; `board` and `peekId` travel beside them. **The initial list fetch
+carries them**: opening a pasted filtered address fetches the filtered board on
+the first request (old bug NEWFRONT-463 seeded pills but fetched unfiltered).
+Reload, share, back/forward and sign-in round trips reproduce the same board.
+Clearing all filters strips `state`, `priority`, `labels` and keeps `board` and
+an open `peekId`. Values that are not valid UUIDs (for state/labels) or known
+priorities are dropped rather than sent; a dropped value never renders a pill.
+The filter values are also validated against what the reference endpoints
+return where cheaply possible (states, labels) without blocking the first
+fetch on those requests.
+
+**SPC-037 — Address-only label filter.**
+A `labels` value in the address narrows the list server-side on the first
+fetch and every page (old bug NEWFRONT-463: it was never sent). The panel has
+no label picker, so the only ways to remove it are the strip's facet clear and
+clear-all. The strip shows the labels facet shell exactly as the facet name
+plus its clear control — **no value pills, no label names** (inventory
+confirmation 2). Label names are still shown on cards whenever the issue
+payload carries them (SPC-028); removing a label filter does not change which
+labels a card shows.
+
+**SPC-038 — Facets follow the active layout.**
+The panel's sections come from the active layout's supported-facet table.
+Both public layouts support priority and state, so switching layouts shows the
+same two sections; the space feature still computes them from the table.
+No facet is ever offered that the layout cannot apply to its fetch.
+
+**SPC-039 — No free-text issue search.**
+There is no search over issue titles or descriptions anywhere in the
+subtree (no navbar search, no palette, no command). The panel's box only
+narrows filter option rows (priority names/keys and state names); it matches
+case-insensitively on substrings, clears back to all options, never changes
+the address, never refetches issues and never leaves the panel. A section with
+no matching options shows an empty line rather than rows. Pressing Enter in
+the box does nothing to the board.
+
+### 3.6 Slice G — issue cards and read-only board behavior
+
+**SPC-027 — Card identity.**
+Every card (list row or board card) shows the public key — the project
+`identifier` plus `-` plus the issue `sequence_id` — and the title truncated
+to one line, with the full title in a tooltip on hover/focus. The key is a
+link to the issue's address (adds `peekId`) and is keyboard focusable; the
+whole card is a link/button that opens the overlay (SPC-030). Titles and keys
+come from the issue payload; no client-side padding or renumbering.
+
+**SPC-028 — Card markers.**
+The card's property strip shows: the state marker with its name, the priority
+marker (icon; the old board card shows no priority text — the overlay's
+property chip does, SPC-044; the new card may add text only if the design
+does, and the oracle checks the marker, not the wording), label chips by name
+(colours from the label payload), and the due-date marker as a short
+month/day/year date. The priority marker renders **always**, including the
+unset level, which has its own marker. Omitted when absent: labels (no
+chips), due date (no marker). The start date is never shown on
+cards. Cycles and modules are **not** shown anywhere on cards or groups, even
+when the issue carries them (inventory confirmation 1 — no visible cycle or
+module surface was found in the old board; the fetches existed for other
+consumers). The new app displays exactly key, title, state, priority, labels
+and due date.
+
+**SPC-029 — Card footers.**
+Board (kanban) cards carry an inline footer with the vote control (up/down
+counts) and the emoji-reaction control, each gated separately by
+`is_votes_enabled` / `is_reactions_enabled`. Each half renders only when its
+flag is on; with both off the footer renders nothing (compact card, no empty
+row). List rows never render a vote/reaction footer in any flag combination
+(inventory confirmation 4). Inside a frame the reaction add control is hidden
+(SPC-015); vote controls stay live.
+
+**SPC-031 — Highlight tracks the open issue.**
+Exactly one card/row is highlighted and it is the one whose id equals
+`peekId`: opening another issue moves the highlight; an address with
+`peekId` opens with that highlight even if no click happened; closing the
+overlay clears the highlight. A `peekId` that is not in the loaded groups
+still opens the overlay (it is fetched by id, SPC-040) and highlights nothing
+until it appears in a group after a fetch. The highlight is a visual ring/bar
+plus an accessible current state (`aria-current="true"` or equivalent), not
+colour alone.
+
+**SPC-032 — Read-only board.**
+No card or row is draggable (`draggable` false/absent), there is no drag
+handle, no drop target, no reorder animation, no inline editable field
+anywhere in the two layouts. No mutation endpoint is ever called from the
+board (only detail reads, filters, vote/reaction from the controls and
+comment endpoints from the overlay). Attempting a drag selects text or
+scrolls but never moves a card. There is no create/new issue affordance, no
+bulk selection UI and no context menu that offers edit. Visitor actions are
+limited to: view, switch layout, filter, open an issue, vote, react, copy a
+link, comment (when enabled).
+
+**SPC-033 — No live refresh.**
+The public board does not refetch on window focus and does not open a
+realtime channel. Refocusing the tab leaves the rendered rows, order and
+scroll exactly as they were. Reconnecting after an offline period behaves
+like refocus — **no refetch** (old bug NEWFRONT-455: reconnect refetched at
+the data layer's default; the new app sets `refetchOnWindowFocus: false` and
+`refetchOnReconnect: false` for every board query, and no realtime
+subscription). Fresh data arrives only through an explicit action: navigating
+(including a back/forward that remounts the board query), switching to a
+layout that has not loaded, changing a filter, or a successful mutation
+reconcile. This applies to the space queries only; it must not change the
+workspace app's defaults.
+
+### 3.7 Slice H — issue open, overlay shell, content and copy link
+
+**SPC-030 — Opening a card.**
+Clicking a card (or pressing Enter on a focused card) opens the issue overlay
+and writes `peekId` into the address **keeping `board` and every filter
+parameter**. The oracle pins the address contents (board + filters + peekId)
+and that the board is behind the open overlay; it does not pin history
+semantics, so the slice picks one entry per open (a push) and the close row
+(SPC-042) governs how back/forward resolves. The old app dropped the filter
+keys from the address on a card click while the store kept filtering (so a
+reload of an open issue lost the filter) — that is a defect and the new app
+does not rebuild it; the position-preserving rule above is what the gate
+asserts.
+In list layout the open issue's row gains the active highlight. In board
+layout the open card gains the same highlight.
+The board card's footer (votes/reactions, SPC-047/SPC-048) is a **sibling**
+of the card's link, not inside it: clicking a footer control toggles the
+vote/reaction and does **not** open the overlay or write `peekId`, and the
+same goes for keyboard activation of those controls. Only the link region
+(title/properties) opens the overlay. (The old app renders the footer
+outside the link for exactly this reason; the list layout has no footer at
+all — SPC-029.)
+
+**SPC-040 — Issue address opens the overlay.**
+An address with `peekId` loads the board and, while the board data loads,
+fetches that issue's detail and its comments (§5) and mounts the overlay
+already open. The board behind it is the board the rest of the address
+describes (layout and filters applied once they land). A `peekId` that does
+not belong to the board's project, a malformed UUID, or a server 404/403
+drops `peekId` from the address (replace) and leaves the board; it does not
+crash, and it does not show the board-error illustration. The overlay fetches
+detail and comments in parallel; either failing independently shows its own
+error (§3.8/3.10) while the other renders.
+
+**SPC-041 — Three presentations.**
+One overlay component with three presentations:
+- **side** (default): a half-width/fixed-width panel sliding in from the right
+  (or left per the design) with a header, the detail column as its body and
+  the activity section below; it keeps the board visible beside it;
+- **modal**: centred over a dim, inert backdrop; closes on backdrop click and
+  Escape;
+- **full**: takes the content area (near-full-screen) with the detail content
+  in the main column and the property panel in a side column.
+A header control (segmented or menu) switches between them and keeps the same
+`peekId` and the same board state; the default is side. The overlay is a
+dialog in the accessibility tree with a name from the issue key/title, traps
+focus while open in modal and full, restores focus to the opening card on
+close, and Escape closes from every presentation. Comments/activity gating is
+**uniform**: the section renders only while `is_comments_enabled` is on, in
+all three presentations (old bug NEWFRONT-461: full-screen mounted it
+unconditionally; inventory confirmation 3). Inside a frame, comment compose
+and menus hide per SPC-015.
+
+**SPC-042 — Closing keeps the board state.**
+Close drops only `peekId` from the address and preserves `board` and every
+filter key. The board underneath is exactly what it was (same rows, same
+scroll, same filter state); the overlay remembers nothing between openings.
+Close paths: the header close control in side view, the backdrop in modal,
+Escape in every view, and the browser back gesture (which lands on the
+pre-open address if the slice opened with a push). The highlight clears (SPC-031).
+
+**SPC-043 — Overlay content.**
+Detail block order: the public key line (project identifier + sequence) and
+any issue-type/eyebrow the design shows, the title (read as text, never an
+editable field), the rendered description read-only (rich text through
+`RichTextView` with the public asset resolver), then the property panel and
+the activity section. An issue with no description (empty HTML, the API's
+empty-content marker, or whitespace only) renders **no description block at
+all** — no empty editor, no placeholder. Long content scrolls inside the
+overlay; the header stays visible. No edit affordance exists anywhere.
+
+**SPC-044 — Property panel.**
+Shows exactly: **state** (marker + name), **priority** (marker + translated
+label inside a marker chip), **due date** (formatted date; an explicit empty
+marker when absent). Non-editable. A due date on or before today on an issue
+whose state is not completed or cancelled is emphasised as overdue; future
+dates and completed/cancelled states are never emphasised. The panel shows no
+assignees, cycles, modules, estimates, links, attachments or parent (none are
+in the row, none are public). In the full presentation the panel sits in a
+side column; in side/modal it sits under the description or in a compact
+strip, as the design decides, but the same three fields.
+
+**SPC-045 — Copy link.**
+A copy action in the overlay header, rendered only when the browser grants
+clipboard write access (`navigator.clipboard.writeText` available and
+permission not denied), copies the **current address** (board + filters +
+peekId) and raises a success notice. Denied/unavailable → the action is not
+rendered (not a disabled control). The full presentation's header shows no
+copy control; the property column's second copy control of the old app was
+never rendered (dead UI) and is not rebuilt. Copy failures raise an error
+notice. The action is keyboard reachable and announced.
+
+**SPC-046 — Overlay loading.**
+While the detail resolves, the overlay mounts immediately with skeletons:
+text-line skeletons in the detail column and property-row skeletons in the
+full presentation's side column; the header shows the key and a title
+skeleton, and copy is not offered until the address/page is known. No
+half-rendered overlay: partial data replaces skeletons section by section,
+never interleaves stale and new values for the same field. The comments
+section shows its own skeleton independently of the detail (SPC-049). If the
+list already had a cached row, it may seed the key/title instantly while the
+detail fetch fills description, properties and engagement.
+
+### 3.8 Slice I — issue votes and emoji reactions
+
+**SPC-047 — Issue voting.**
+Two controls (up and down), each with a live count, in the overlay and on
+board-card footers (board layout only), rendered only while `is_votes_enabled`
+is on.
+- Hover/focus a control shows who voted that way, in order, or a short empty
+  note; the visitor's own side is marked.
+- Click toggles: same side again removes; the other side moves the single
+  vote. One vote per visitor per issue.
+- The screen updates immediately (optimistic), then writes; a failed write
+  re-reads the issue's stored votes and shows them with an error notice.
+- Anonymous clicks go to `/spaces/?next_path=<current full board position,
+  encoded once>` (§3.3, SPC-013; old bug NEWFRONT-465 truncated the position).
+  After sign-in the visitor returns to the same issue open.
+- Reads: the issue payload's embedded `votes` (the public votes **list**
+  endpoint answers empty because it resolves the board by the wrong key; do
+  not rely on it). Writes: `POST .../votes/` with `vote` 1|−1, `DELETE
+  .../votes/`. The write path does not check the flag server-side (a direct
+  post stores); the UI only offers controls when the flag is on, and the new
+  app does not add client-side re-gating beyond that.
+FIELD per vote: `actor`, `actor_details.{id, display_name, avatar,
+first_name, last_name}`, `vote`.
+
+**SPC-048 — Issue emoji reactions.**
+Grouped pills below the issue title (overlay) and in the card footer (board):
+one pill per emoji with its count, the visitor's own pills marked, plus an
+add control opening a picker. Hovering a pill names the reactors in order
+(truncated with an overflow note past a handful).
+- Picker pick adds; clicking a pill the visitor already reacted to removes;
+  clicking another pill adds theirs to that group. Optimistic then reconcile
+  from a fresh issue read on failure, with a notice.
+- Gated by `is_reactions_enabled`; hidden inside a frame (overlay and card).
+- Anonymous attempts (pill or picker) go to sign-in with the encoded full
+  position (SPC-013; NEWFRONT-465).
+- Reads: the issue payload's embedded reactions (`reactions` /
+  `reaction_items` per §5), not the list endpoint (same wrong-key lookup).
+  Writes: `POST .../reactions/` and `DELETE .../reactions/:reactionCode/`
+  where the code is the emoji's decimal code point(s), exactly as returned.
+FIELD per reaction: `reaction` (code), actor id/display name/avatar.
+
+### 3.9 Slice J1 — public comments thread, gating and rows
+
+**SPC-049 — Comments gating and invitation.**
+The activity section (heading, thread, composer or invitation) renders only
+while `is_comments_enabled` is on — in side, modal and full presentations
+alike (confirmation 3; NEWFRONT-461). With it on:
+- everyone sees the thread (anonymous included);
+- signed-in visitors see the composer;
+- anonymous visitors outside a frame see a sign-in invitation in place of
+  the composer; inside a frame the invitation is hidden and the thread stays;
+- a failed comments fetch shows an inline error with a retry that refetches
+  the thread without reopening the overlay; it does not use the board-error
+  illustration;
+- an empty thread shows the heading and a short empty line (never a blank
+  area).
+The invitation's return address is the full current position, encoded once
+(old bug NEWFRONT-465 kept only the bare board). The server also refuses
+comment writes and returns an empty list while the flag is off; the new app
+does not depend on that gate (it hides the section) but must not break when it
+happens (a disabled response renders as an empty thread).
+
+**SPC-050 — Comment rows.**
+Each row: avatar (uploaded image when present, else the author's initial with
+a stable colour), display name, the age line — a **relative age** of the
+comment's creation/edited time ("3 hours ago" shape, from the shared
+`timeAgo` helper, updating without a refetch on a coarse timer) (old bug
+NEWFRONT-459 rendered no age; the target matches the workspace rows),
+bot-marked authors (an explicit bot suffix/badge next to the name, not a
+different row shape), the formatted rich body (`RichTextView`, asset links
+resolved through the public asset URL), and the reaction row (SPC-057).
+Edits show an edited marker. Author and body come from `actor_detail`,
+`comment_html` (fallback `comment_stripped`), `created_at`/`updated_at`.
+
+**SPC-051 — Folded comments.**
+A comment whose `labels` include the fold marker renders collapsed: header
+(name, age, the fold toggle) and nothing else, including no body and no
+reaction row. Activating the toggle expands the body in place; toggling again
+collapses. Expanded state is per row and local (not in the address, not
+persisted). Folded state comes only from the server marker (never inferred
+from the body or speaker). Selecting the toggle is keyboard operable.
+
+**SPC-052 — Machine-authored speaker labels.**
+A comment whose `speaker_type` marks it as machine-authored (agent/system/
+integration) shows its `speaker_label` on the author line, prefixed like the
+old row ("label · author" or a badge, as the design decides); an empty label
+falls back to a generic agent label. Human rows show no speaker line. The
+author identity still renders as in SPC-050.
+
+### 3.10 Slice J2 — composer, attachments, mentions, edit/delete, reactions
+
+**SPC-053 — Posting rich comments with attachments.**
+The composer is a rich editor (`shared/editor/RichTextEditor`, lazy) with a
+toolbar (bold/italic/strike/lists/code/link), paste that keeps inline
+formatting, and an image command. Rules:
+- Enter submits while signed in (Shift+Enter inserts a line break); a send
+  button submits too; an empty/whitespace body disables submit.
+- Image command → file chooser → upload to the public asset endpoint
+  (`POST /api/public/assets/v2/anchor/:anchor/`), then insert the image node
+  (pointing at the public asset URL) into the body. The comment **create
+  payload carries no asset field**; after the create succeeds the app links
+  the draft's asset ids to the new comment with one bulk call
+  (`POST /api/public/assets/v2/anchor/:anchor/:newCommentId/bulk/`,
+  `{asset_ids}`). The node shows an uploading state and flips to uploaded when
+  the upload lands; submitting mid-upload is blocked until the upload settles
+  (the old app allowed a post that stored a node without its file).
+- Success appends the row (optimistic or refetch), clears the draft and
+  keeps scroll; the new row's age and reactions are server-shaped.
+- Failure raises an error notice, keeps the draft and leaves the existing
+  thread untouched; nothing is stored.
+- Upload failure raises a notice, removes the uploading node/draft image, and
+  keeps the rest of the draft.
+- Anonymous visitors never see the composer (SPC-049); inside a frame they see
+  no composer either.
+Create payload and fields: §5 (comments).
+
+**SPC-054 — Member mentions.**
+Typing the mention trigger (`@`) followed by at least one character opens a
+member suggestion list from `GET .../members/` (names + avatars, keyboard
+navigable, Enter inserts). Picking inserts a mention chip bound to the
+member's id; the posted body carries the mention markup the sanitizer accepts;
+the rendered comment shows the chip (name, not id). With no members or no
+match the list shows an empty note (or closes) — it never offers people who
+are not project members. Old bug NEWFRONT-460: no autocomplete existed at
+all; the target is the working dropdown. Mentions render in posted rows and
+in edits.
+
+**SPC-055 — Owner menu.**
+A comment row shows an overflow menu only when: the visitor is signed in, the
+visitor's id equals the comment's author id, and the board is not embedded.
+The menu has exactly Edit and Delete. Other visitors see no menu; embedded
+frames show no menu at all. Delete removes the row immediately (optimistic)
+and deletes server-side; a failure restores the row and raises a notice.
+Delete is confirmed only if the design confirms destructive actions elsewhere;
+the old app deleted immediately — keep immediate delete with a success notice
+and an undo affordance only if the kit/product provides one (no new decision).
+
+**SPC-056 — Comment edits.**
+Edit switches the row's body to the rich editor with Save and Cancel; Save
+swaps the content immediately (optimistic), persists with `PATCH
+.../comments/:commentId/`, and on success shows the edited marker and a
+notice. On failure the row **reconciles to the stored text** and shows an
+error notice (old bug NEWFRONT-467 left the phantom edit on screen) — the
+save failure path refetches the thread (or rolls back the optimistic patch to
+the last server value) so the view never disagrees with the server. Cancel
+restores the previous content with no request. Only the owner can edit
+(SPC-055).
+
+**SPC-057 — Comment reactions.**
+Each row carries a grouped-pill reaction control (counts, add control with
+picker, toggle semantics, optimistic then reconcile, notices) with:
+- reactor names on hover (comment payload rows are flat:
+  `reaction.actor_detail` / lite `actor_detail`; read the flat shape — the
+  old bug NEWFRONT-466 read the nested shape and showed nobody);
+- the visitor's own pills highlighted on server-loaded rows (same fix);
+- anonymous attempts → sign-in with the encoded full position (SPC-013;
+  NEWFRONT-465);
+- embedded frames show counts only, no add control;
+- writes gated by the publisher's reactions flag (server enforces it for
+  comment reactions).
+Reads: `comment_reactions` on the comment row; writes: `POST`/`DELETE
+.../comments/:commentId/reactions/` with the code.
+
+### 3.11 Slice C — spaces auth card and flows (mounted by slice B)
+
+The card lives only at `/spaces/`. It never appears on a board, and a board
+never mounts it. It reads instance configuration (§5, instance row) for which
+methods and providers exist, and it routes every step by the server's
+`email-check` answer plus that configuration. Native submits are real HTML
+forms (Enter works, browser password managers work) with the CSRF token in a
+hidden field; JSON posts go through the space client.
+
+**SPC-058 — Email-first step with inline validation.**
+The first step is one labelled address field (with a clear control) and one
+continue action. Rules:
+- The field format-checks locally (standard address shape; trim; lower-case
+  before sending).
+- The inline invalid notice appears only **after** the field loses focus
+  (blur) or after a submit attempt; while focused a bad value shows no
+  notice. Fixing it clears the notice on the next blur.
+- Continue is disabled while empty, while the local check fails, and while a
+  check is in flight (button shows progress, not a duplicate request).
+- Submit calls `POST /auth/spaces/email-check/` with `{email}` and creates
+  nothing server-side. Server answers `{existing, status}` where `status` is
+  `MAGIC_CODE` or `CREDENTIAL`; the card uses both (SPC-059).
+- A landing address may carry `email` and pre-fill the field (still checked
+  on submit).
+- The email-check endpoint is anonymously rate limited; a 429 is a banner
+  error with a try-again-later line, and the card stays on the email step.
+
+**SPC-059 — Known vs new routing and method selection.**
+Known address → sign-in mode; new → sign-up mode. Method selection:
+- *Code step* requires mail configured and magic-link login enabled
+  (`is_smtp_configured && is_magic_login_enabled`); for a **known** address
+  the account must also be code-created (`status === "MAGIC_CODE"` — password
+  accounts always route to credentials). Taking the code step generates a
+  fresh code immediately (`POST /auth/spaces/magic-generate/`).
+- *Password step* requires email/password auth enabled
+  (`is_email_password_enabled`).
+- *Sign-up with signup disabled*: the check still routes the new address to a
+  method step, and the server refuses the sign-up post with
+  `SIGNUP_DISABLED`, which renders as a banner (this is an instance setting,
+  not an edition; the card does not claim a pre-emptive gate it cannot see).
+- *Neither method enabled*: the card must explain itself rather than mislead.
+  Old bug NEWFRONT-462: sign-in showed a misleading invalid-address banner and
+  sign-up dead-ended silently. The target: a dismissible banner on the email
+  step stating that no sign-in method is available on this instance and to
+  contact the administrator, in **both** modes, with the mode and address
+  preserved.
+- Clearing the locked address on a later step returns to the email step and
+  keeps the current mode.
+The mode is derived from the check; the visitor never picks sign-in vs
+sign-up.
+
+**SPC-060 — Code step.**
+Shows the locked address with a clear control (back to email), a code field,
+delivery guidance, a submit and a resend control. Rules:
+- The step generates a code on entry (or the entry already generated it);
+  resend re-generates and then disables itself behind a short client-side
+  cooldown (a few seconds) before offering resend again. Past the server's
+  per-address attempt cap the generate call reports exhaustion, which renders
+  as a banner on the step (not a toast, not a silent failure).
+- Submit is a native CSRF-protected form post to
+  `/auth/spaces/magic-sign-in/` or `/auth/spaces/magic-sign-up/` (by mode)
+  with `code`, `email`, `next_path` and `csrfmiddlewaretoken`. The token is
+  fetched when the step renders; submit waits for it. A post without a token
+  is refused by the server with the verification-failed page (no redirect,
+  success status) — the card must never submit without the token.
+- Overview of failures: wrong code → `INVALID_MAGIC_CODE_SIGN_*`; missing or
+  consumed code → `EXPIRED_MAGIC_CODE_SIGN_*`; past cap →
+  `EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_*`. The server redirects back to the
+  spaces base with `error_code`, and the card maps it back to the code step in
+  the matching mode with a banner (SPC-063).
+- Codes are single-use and short-lived server-side; a valid code signs in,
+  consumes the code and redirects to the validated `next_path`; replaying it
+  reports expiry.
+- A code-created account is marked password-unset, which is why it routes to
+  the code step on the next visit.
+
+**SPC-061 — Password step.**
+Shows the locked address and one password field in sign-in mode, plus a
+confirmation field in sign-up mode. Rules:
+- Each field has its own visibility toggle that flips only that field.
+- Sign-up: a non-empty password failing the strength rules shows a strength
+  meter (a verdict plus the unmet criteria) and submit stays disabled until
+  the password passes and both fields match. A filled confirmation that
+  differs shows an inline mismatch notice once the confirmation is blurred or
+  has grown at least as long as the password. Sign-in never shows the meter.
+- Primary action labels: sign-in mode "continue" when mail is configured,
+  "go to workspace" when it is not; sign-up mode "create account" (the label
+  is translated and the design owns the exact words).
+- Sign-in with mail configured additionally offers a switch to the code step,
+  which generates a code and moves the card there; without mail there is no
+  switch.
+- Submit is a native CSRF-protected form post to `/auth/spaces/sign-in/` or
+  `/auth/spaces/sign-up/` with `email`, `password` (and `confirm_password` on
+  sign-up), `next_path` and the token; the token is fetched at submit time.
+  Wrong credentials → `AUTHENTICATION_FAILED_SIGN_IN`, no session. A fresh
+  sign-up creates a password account and signs in. A token-less post is
+  refused by the verification page as on the code step.
+- A code-only instance (no password auth) never shows this step.
+
+**SPC-062 — Provider buttons.**
+Third-party buttons render exactly when the instance enables providers —
+any of Google, GitHub, GitLab, Gitea (`is_*_enabled`). With none enabled the
+card shows no buttons and no leftover divider or slot. Off the password step
+each button carries its full invitation text following the mode ("Continue
+with …"); beside the password step the same buttons render compact (icon-only,
+with an accessible name). Activating a button starts the provider flow at
+`/auth/spaces/<provider>/` (not the workspace `/auth/<provider>/`), carrying
+the encoded `next_path`. Completing a provider flow is unprovable on the
+seeded stack (no credentials): the oracle proves presence, compact shape and
+flow start, and the gate extends only if a provider is configured. Provider
+errors that arrive as codes (`*_NOT_CONFIGURED`, `*_OAUTH_PROVIDER_ERROR`,
+GitHub org membership) render through the same banner as SPC-063.
+
+**SPC-063 — Failure banner and error links.**
+Card-level failures render as a dismissible banner above the header;
+dismissing removes it and keeps the current step. Banner types only — inline
+step errors (malformed address, mismatch, weak password) never use the
+banner. Opening `/spaces/?error_code=<code>&…` at the landing root lands on
+the fixing step:
+- credential failures (`AUTHENTICATION_FAILED_SIGN_IN`, `…_SIGN_UP`,
+  `INVALID_PASSWORD`) → the password step in the matching mode;
+- wrong/expired/exhausted code failures (`INVALID_/EXPIRED_/
+  EMAIL_CODE_ATTEMPT_EXHAUSTED_MAGIC_CODE_SIGN_*` and the `MAGIC_SIGN_*_
+  EMAIL_CODE_REQUIRED` variants) → the code step in the matching mode;
+- account-existence failures (`USER_DOES_NOT_EXIST`, `USER_ALREADY_EXIST`) →
+  the email step with the banner; the banner's wording points the visitor at
+  the right mode (the other mode's step is not force-switched, matching the
+  old card and the oracle);
+- unknown numbers, the rate-limit and the OAuth configuration codes that the
+  card does not model → no banner, email step untouched.
+The banner text is written from the code's meaning and translated (one
+catalog entry per known code); the code itself is never shown, and the
+server's raw message/address fields are not echoed into the banner. Codes the
+catalog does not know produce no banner at all (SPC-063's unknown branch).
+`error_code` is consumed once: after rendering the banner, the card keeps the
+step but does not re-apply the code on in-card navigation.
+
+**SPC-064 — Headings and consent.**
+The card header carries a mode-specific heading and subline (sign-in for
+returning contributors, sign-up for new ones). Below the form, a consent line
+names the terms of service and the privacy policy as links (targets from
+configuration or build-time constants), with sign-up wording for account
+creation and sign-in wording for signing in. Both links are present in both
+modes.
+
+## 4. Rows restated, confirmations resolved
+
+### 4.1 Rows whose heading used to sit inside a range
+
+The inventory headings of the six earlier notes sometimes covered several rows
+under one number. These four are restated here as the authoritative text; the
+numbered subsections above are the full behavior, this table is the one-line
+contract the slices cite:
+
+| Row | Restated capability |
+| --- | --- |
+| **SPC-036** | Filter state (priority, state, labels) is fully encoded in the address; a pasted address reproduces the same filtered board **on the first fetch**, and clearing filters strips the keys. |
+| **SPC-041** | The issue overlay offers side, modal and full presentations through a switcher that preserves the open issue; the comments section is gated by the publisher flag in **every** presentation. |
+| **SPC-042** | Closing the overlay removes `peekId` and nothing else; the filtered board underneath is exactly as it was (layout + filters survive). |
+| **SPC-044** | The overlay property panel shows state, priority and due date, with overdue emphasis on incomplete issues whose due date is today or past. |
+
+### 4.2 The five open confirmations
+
+All five were resolved by the oracle runs (rows are `oracle green`); this is
+the behavior to build.
+
+1. **Cycles and modules visible surface.** None. The old board fetches
+   `/cycles/` and `/modules/` into stores but no card, group or overlay
+   renders them, even when an issue belongs to both. The new app displays
+   key, title, state, priority, labels and due date only (SPC-028), and does
+   **not** fetch cycles/modules for the board at all.
+2. **Label pill from a URL-supplied label.** The strip renders the labels
+   facet as its name plus the facet-level clear control, with **zero value
+   pills and no label names** (SPC-037). Labels still appear on cards from
+   the issue payload.
+3. **Activity section gating.** Uniform: the comments section renders only
+   while `is_comments_enabled` is on, in side, modal and full (SPC-041,
+   SPC-049). The old full-screen mounting it unconditionally is NEWFRONT-461
+   and is not rebuilt.
+4. **List-card footers.** List rows never render a vote/reaction footer in any
+   flag combination; only board (kanban) cards do (SPC-029). This is
+   intended and matches these rows.
+5. **`next_path` validator.** The landing gate uses the same validator as the
+   navbar sign-in link, the sign-out form, vote/reaction/comment sign-in
+   redirects and the auth forms' hidden field: single leading slash, no
+   backslashes, no active-content patterns, relative and same-origin, with the
+   query preserved (SPC-006). No second, weaker checker for the landing.
+
+## 5. API — endpoints, parameters, fields
+
+Base: the space subtree's client talks to the app origin; paths below are
+relative to it. `:anchor`, `:id` (issue), `:commentId` are UUIDs except the
+anchor. Public endpoints are `AllowAny`; authenticated ones answer 401 for an
+anonymous visitor. "Reads" lists the fields the UI displays or branches on;
+the payloads carry more.
+
+### 5.1 Board
+
+| Call | Method + path | Parameters | Response fields read | Rows |
+| --- | --- | --- | --- | --- |
+| Board settings | `GET /api/public/anchor/:anchor/settings/` | — | `anchor`, `entity_name` (= `project`), `is_comments_enabled`, `is_reactions_enabled`, `is_votes_enabled`, `is_activity_enabled`, `view_props.{list,kanban}`, `project_details.{id, identifier, name, logo_props, cover_image, description}`, `workspace_detail.{slug}` | 001, 003, 004, 010, 020, 029, 041, 047, 048, 049, 057 |
+| Legacy resolve | `GET /api/public/workspaces/:slug/projects/:id/anchor/` | path `slug`, `project_id` | `anchor`, `entity_name` | 002 |
+| Board metadata | `GET /api/public/anchor/:anchor/meta/` | — | `name`, `description` (only; `cover_image` is read and ignored) | 007 |
+| Issues (grouped) | `GET /api/public/anchor/:anchor/issues/` | `group_by=state_id`, `sub_group_by` (unused), `per_page` (50), `cursor` (opaque, from a prior response), `order_by=-created_at`, filters `state`, `priority`, `labels` (comma-joined), unknown filter keys ignored | envelope: `grouped_by`, `total_count`, `next_cursor`, `next_page_results`, `results` keyed by state UUID → `{results: [...], total_results}`; per issue: `id`, `name`, `sequence_id`, `state`, `priority`, `target_date`, `label_ids`, `project`, embedded `votes`, `reactions` | 023, 024, 026, 027, 028, 033, 036, 037 |
+| Issue detail | `GET /api/public/anchor/:anchor/issues/:id/` | — | `id`, `name`, `sequence_id`, `state_id`, `priority`, `target_date`, `description_html`, `description_stripped`, `label_ids`, `project`; `votes[]` `{actor, vote, actor_details.{id, display_name, avatar, first_name, last_name}}`; `reactions[]`/`reaction_items[]` `{reaction, actor_details.{…}}` | 030, 040, 043, 044, 047, 048 |
+| States | `GET /api/public/anchor/:anchor/states/` | — | `id`, `name`, `color`, `group`, `sequence` | 023, 024, 034, 044 |
+| Labels | `GET /api/public/anchor/:anchor/labels/` | — | `id`, `name`, `color` | 028, 034 (panel offers none), 037 |
+| Members | `GET /api/public/anchor/:anchor/members/` | — | `id`, `member`, `member__display_name`, `member__avatar` | 054 |
+| Cycles | `GET /api/public/anchor/:anchor/cycles/` | — | **not fetched** (no visible surface, confirmation 1) | — |
+| Modules | `GET /api/public/anchor/:anchor/modules/` | — | **not fetched** | — |
+
+Notes:
+- `group_by=state_id` reports one entry per workflow state with
+  `total_results` (the header/column count). The server's total query
+  excludes declined-triage rows that the rows query includes
+  (NEWFRONT-454), so a group's `total_results` can be lower than its rendered
+  rows; the header renders the server number. Intended behavior is count =
+  rendered rows; the new app renders the server number (it cannot compute the
+  true total without a second query) and the bug stays with its issue.
+- The public votes list (`GET .../votes/`) and reactions list
+  (`GET .../reactions/`) resolve the board by the wrong key and answer empty;
+  the app reads the embedded arrays instead (NEWFRONT-465 notes; §7).
+- The detail endpoint's payload is a flat object with the keys above (not the
+  serializer spelling of the list endpoint); the slice's contract module
+  declares each shape separately.
+
+### 5.2 Engagement
+
+| Call | Method + path | Body/params | Response fields read | Rows |
+| --- | --- | --- | --- | --- |
+| Vote set | `POST /api/public/anchor/:anchor/issues/:id/votes/` | `{vote: 1 \| -1}` | stored vote (actor, vote) | 029, 047 |
+| Vote remove | `DELETE /api/public/anchor/:anchor/issues/:id/votes/` | — | 204 | 047 |
+| Issue reaction add | `POST /api/public/anchor/:anchor/issues/:id/reactions/` | `{reaction: "<code>"}` | created reaction | 029, 048 |
+| Issue reaction remove | `DELETE /api/public/anchor/:anchor/issues/:id/reactions/:reactionCode/` | — | 204 | 048 |
+| Comment reaction add | `POST /api/public/anchor/:anchor/comments/:commentId/reactions/` | `{reaction: "<code>"}` | created reaction | 057 |
+| Comment reaction remove | `DELETE /api/public/anchor/:anchor/comments/:commentId/reactions/:reactionCode/` | — | 204 | 057 |
+| Comment reactions list | `GET /api/public/anchor/:anchor/comments/:commentId/reactions/` | — | not needed (read from the comment row) | — |
+
+Gating: issue vote writes do not check `is_votes_enabled`; issue reaction
+writes do not check `is_reactions_enabled`; **comment** reaction writes do
+check `is_reactions_enabled` and refuse while off. Comments writes refuse
+while `is_comments_enabled` is off. The UI gates all of them by the flags.
+
+### 5.3 Comments
+
+| Call | Method + path | Body/params | Response fields read | Rows |
+| --- | --- | --- | --- | --- |
+| Comments list | `GET /api/public/anchor/:anchor/issues/:id/comments/` | — (server filters `access=EXTERNAL`, order `created_at`) | `id`, `actor`, `actor_detail.{id, display_name, avatar, avatar_url, is_bot}`, `comment_html`, `comment_stripped`, `created_at`, `updated_at`, `edited_at`, `labels` (fold marker), `speaker_type`, `speaker_label`, `comment_reactions[]` (`reaction`, `actor_detail`) | 049–052, 057 |
+| Comment create | `POST /api/public/anchor/:anchor/issues/:id/comments/` | `{comment_html, comment_json?, access: "EXTERNAL"}` (no asset field: the body carries the image nodes) | created row (`id` needed for the link step) | 053, 054 |
+| Comment edit | `PATCH /api/public/anchor/:anchor/issues/:id/comments/:commentId/` | `{comment_html, comment_json?}` (owner only) | updated row | 055, 056 |
+| Comment delete | `DELETE /api/public/anchor/:anchor/issues/:id/comments/:commentId/` | — (owner only) | 204 | 055 |
+| Asset upload | `POST /api/public/assets/v2/anchor/:anchor/` | multipart file + `entity_type` for comment attachments | `asset_id`, upload state | 053 |
+| Asset bulk link | `POST /api/public/assets/v2/anchor/:anchor/:entityId/bulk/` | `{asset_ids: string[]}` where `:entityId` is the new comment's id | 204; the assets become comment attachments (`comment_id` set) | 053 |
+| Asset restore | `POST /api/public/assets/v2/anchor/:anchor/restore/:assetId/` | — | editor lifecycle | 053 (editor lifecycle only) |
+
+Attachment flow: upload each file → keep its `asset_id` in the draft and insert
+the image node (pointing at the public asset URL
+`/api/public/assets/v2/anchor/:anchor/...`) in the editor → post the comment
+body → on success, link the uploaded assets to the new comment with one bulk
+call carrying the comment id and all draft asset ids. Submitting waits for
+every upload to settle (the old app did not, and stored a node without its
+file). The bulk call only links assets of the comment-description entity type;
+an asset that is not yet uploadable is reported as a notice and stays in the
+draft. Single-asset confirm (`PATCH .../:assetId/`) and upload cancel are dead
+code for this area and are not rebuilt.
+
+### 5.4 Spaces auth and instance
+
+| Call | Method + path | Body/params | Response fields read | Rows |
+| --- | --- | --- | --- | --- |
+| Instance info | `GET /api/instances/` | — | `config.{is_smtp_configured, is_magic_login_enabled, is_email_password_enabled, is_google_enabled, is_github_enabled, is_gitlab_enabled, is_gitea_enabled, enable_signup}` | 005, 016, 018, 059, 062 |
+| Current user | `GET /api/users/me/` | — | `id`, `display_name`, `first_name`, `last_name`, `email`, `avatar_url` | 005, 013, 014, 049, 055 |
+| CSRF token | `GET /auth/get-csrf-token/` | — | `csrf_token` | 014, 060, 061 |
+| Email check | `POST /auth/spaces/email-check/` | JSON `{email}` (lower-case, trimmed) | `existing` (bool), `status` (`MAGIC_CODE` \| `CREDENTIAL`); errors `{error_code, error_message}` | 058, 059 |
+| Magic generate | `POST /auth/spaces/magic-generate/` | JSON `{email}` | `key`; errors (exhausted, SMTP, instance) | 059, 060 |
+| Code submit | native `POST /auth/spaces/magic-sign-in/` \| `.../magic-sign-up/` | form: `csrfmiddlewaretoken`, `code`, `email`, `next_path` | redirect to validated return path, or to the spaces base with `error_code` | 060 |
+| Password submit | native `POST /auth/spaces/sign-in/` \| `.../sign-up/` | form: `csrfmiddlewaretoken`, `email`, `password` (+ confirmation), `next_path` | redirect as above | 061 |
+| Sign out | native `POST /auth/spaces/sign-out/` | form: `csrfmiddlewaretoken`, `next_path` | redirect to return path; session destroyed | 014 |
+| Providers | `GET /auth/spaces/{google,github,gitlab,gitea}/` (flow start; callbacks at `.../callback/`) | `next_path` | redirect to provider | 062 |
+
+Auth error codes the card models (from the server's catalog; the card maps
+the number to a step and a translated banner, never shows the number):
+`INVALID_EMAIL`, `EMAIL_REQUIRED`, `SIGNUP_DISABLED`,
+`AUTHENTICATION_FAILED_SIGN_IN`, `AUTHENTICATION_FAILED_SIGN_UP`,
+`INVALID_PASSWORD`, `MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED`,
+`MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED`, `INVALID_MAGIC_CODE_SIGN_IN/UP`,
+`EXPIRED_MAGIC_CODE_SIGN_IN/UP`, `EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN/UP`,
+`USER_DOES_NOT_EXIST`, `USER_ALREADY_EXIST`, `INSTANCE_NOT_CONFIGURED`,
+`SMTP_NOT_CONFIGURED`, `*_NOT_CONFIGURED` for the four providers, and the
+provider error codes. Unknown numbers: no banner.
+
+### 5.5 Response shapes the contracts must declare
+
+NEWFRONT-752 (contracts) owns the zod modules; these are the shapes the spec
+requires them to model:
+
+- `BoardSettings`: the settings object above, with `view_props` a loose
+  boolean record and `project_details` nullable (the placeholder case).
+- `BoardMeta`: `{name?, description?, cover_image?}` — all optional.
+- `BoardIssuePage`: the grouped envelope with `results` a record keyed by
+  state id and `{results, total_results}` values, plus the top-level
+  `next_cursor`, `next_page_results`, `total_count`, `grouped_by`.
+- `BoardIssue` (list item) and `BoardIssueDetail` (detail payload) as two
+  distinct shapes: the detail carries `description_html`, `state_id`,
+  `votes`, `reactions`/`reaction_items` and no `name`-adjacent nested
+  serializer objects.
+- `PublicComment`: the comment row incl. `actor_detail`, `labels`,
+  `speaker_type`, `speaker_label`, `edited_at`, `comment_reactions`.
+- `PublicReaction` / `PublicVote`: the flat actor shapes (`actor_details` on
+  votes, `actor_detail` on comment reactions and issue reactions as returned).
+- `SpaceEmailCheck`: `{existing, status}`; `SpaceAuthError`:
+  `{error_code, error_message}`.
+- `Instance` config and `CurrentUser` may reuse the existing modules, but the
+  space-specific fields (`is_magic_login_enabled`, `is_email_password_enabled`,
+  `enable_signup`, provider flags) must be present.
+
+Each contract gets a contract test against a real response from the Django
+test server, per the Data layer page.
+
+### 5.6 Not used by this area
+
+The intake endpoints (`/api/public/anchor/:anchor/intakes/...`) and the
+workspace project-boards endpoint exist under the same `apps/api` space
+module but have no public-board surface. This area does not call them and adds
+no rows for them; if a future row needs them, it is a new row, not a silent
+addition.
+
+## 6. F-06 reuse map
+
+"Already there" means the component is merged on `web-new-dev` at the time
+this spec was written (2026-10-19). Everything under "add" is **new code
+written from this spec**, not adapted from `apps/space`.
+
+### 6.1 What `apps/web_new` already has
+
+- **Kit** (`@pidash/kit`): `Button`, `IconButton`, `Input`, `Textarea`,
+  `Switch`, `Avatar`, `Badge`, `Menu`, `Popover`, `Tooltip`, `Dialog`,
+  `Skeleton`, `Spinner`, `ToastHost` + `createKitToastManager`/`showToast`,
+  `VirtualList`, `Markdown`/`MarkdownSpans`, `EmptyState` (+
+  `emptyStateImagePath`), `Combobox`, `ContextMenu`, `Breadcrumbs`, theme
+  helpers (`resolveTheme`, `applyTheme`, `watchSystemTheme`), tokens.
+- **shared/shell**: `document.tsx` (`useDocumentHead`, overlay portal),
+  `toaster.ts` (`notifySuccess/notifyError/notifyInfo`), `clipboard.ts`
+  (page-URL copy), `NotFoundPage`, `PeekPanel` (overlay shell),
+  `UserMenu` (workspace-shaped), `AppShell` (workspace-shaped),
+  `CopyWorkItemLinkButton` (workspace-shaped), `externalLinks`, `narrowViewport`.
+- **Issues feature** (public barrel `features/issues/index.ts`):
+  `LayoutIcon`, layout kinds, `ListLayout`/`ListRow`/`GroupHeader` (workspace
+  bound), `ReactionBar`/`ReactionPicker`/`EmojiPicker` + reaction model,
+  `CommentCard`/`CommentEditForm` + comment model, comment/reaction **hooks
+  and API** (workspace scoped), `RichTextView` (shared/editor too),
+  `RichTextEditor` (lazy), mention extension, `Skeleton` loaders,
+  `useNarrowViewport` consumers, toast notices constants.
+- **core**: `api/client.ts` (`createClient`, singleton), `session` (workspace
+  gate — not used), `theme`, `i18n`/`LanguageProvider`, `query`, `platform`,
+  `edition`.
+- **`@pidash/api-client`**: client, middleware, `auth.ts` (`InstanceConfig`,
+  `getInstanceConfig`), `instance.ts`, `comments`/`reactions`/`issues`
+  contracts for **workspace** endpoints, `ProjectDeployBoard` contract for the
+  admin publish flow.
+
+### 6.2 Per slice — add or rework
+
+| Slice | Borrows (read-only) | Must add / rework |
+| --- | --- | --- |
+| **A** shell, routing, failures | kit primitives; `useDocumentHead`; `NotFoundPage`; `PeekPanel` (not yet); `notify*` | `features/spaces` feature skeleton; `/spaces/*` route tree with lazy boundaries; space query client + public API client instance; space `errorComponent`/`notFoundComponent`; settings/instance queries; spinners; SPC-003/004/018/019 illustrations (kit `EmptyState` art + kit illustrations, not old assets); board-error and anchor-not-found states; generic-not-found wiring |
+| **B** landing + metadata | kit form primitives; `useDocumentHead`; `notify*` | `/spaces/` route; current-user + instance queries; auth gate; signed-in guidance view; metadata function (title/description/OG/Twitter, no cover); robots claim at the subtree root + host rule; return-path plumbing into the card |
+| **C** auth card | kit `Input`/`Button`/`Avatar`/banner pattern; i18n | The whole card: email step, method routing, code step (native form + CSRF), password step (strength + toggles), provider buttons, error catalog → step mapping, dismissible banner, headings/consent; spaces-auth contract module in `@pidash/api-client` (**NEWFRONT-752** owns the contracts; C consumes them) |
+| **D** navbar/theme/account/notices | `LayoutIcon`; kit `Menu`/`Popover`/`Tooltip`/`Avatar`; `notify*`; `ToastHost`; kit theme helpers | Space navbar (identity + fallbacks), layout switcher (own), filter trigger slot (slice F), theme toggle with space storage key and flip semantics, account popover, iframe hook, progress bar, space toast host |
+| **E** layouts/paging | `LayoutIcon`, layout kinds; kit `Tooltip`/`Skeleton` | List layout (groups, headers with counts, collapse), kanban columns strip, empty board, per-group cursors and paging (manual list control, column tripwire + debounce), paging queries |
+| **F** filters/pills/address | kit `Popover`/`Combobox`/`Tooltip`; Issues `LayoutPicker` helpers **not** reused | Filter panel (two facets, search, expand), applied strip with three removal levels, search-schema validation, fetch parameter builder, address writer |
+| **G** cards/read-only | kit `Tooltip`; `timeAgo` (shared/lib); `LayoutIcon` | Public card/list row (key, title, markers), board card footer wiring (slice I), highlight, read-only guarantees, no-focus/no-reconnect query defaults |
+| **H** overlay/copy | `PeekPanel` (shell), `RichTextView`, kit `Dialog`/`Skeleton`; Issues detail **not** reused | Three presentations wrapper, read-only detail body, property panel (state/priority/due + overdue), copy-link action, skeletons, close/address rules |
+| **I** votes/reactions | Issues `ReactionBar`/`ReactionPicker`/`EmojiPicker` + model helpers; kit | Public vote control (overlay + card footer), public issue-reaction wiring (space queries + public endpoints), sign-in redirect with encoded position, frame gating |
+| **J1** comments thread | Issues `CommentCard`/model helpers; `RichTextView`; `timeAgo` | Public comments query; gating/invitation; thread layout; fold; edited marker; comments error/retry state |
+| **J2** composer | `RichTextEditor` (lazy), mention extension, `RichTextView`; kit | Public composer (Enter submit, upload → asset ids, mid-upload guard), member mention source from the public members endpoint, owner menu, edit reconcile, comment reactions against public endpoints, notices |
+
+Cross-cutting rule for the slices: when an Issues component needs a prop it
+does not have (for example a viewer-id override or a "public" reaction write
+callback), add the prop to the **Issues** component in the Issues owner's
+slice or through a follow-up under the Issues epic — do not fork it into
+`features/spaces` and do not shadow it with a near-copy. If the component
+cannot be made public-safe without changing workspace behavior, write the
+spaces equivalent from this spec and note it on the Issues issue.
+
+## 7. Bug ledger — build the intent, keep the bug filed
+
+Every row below was observed as a `bug:` scenario on the old app (the oracle
+pins the old behavior). The new app implements the intent in this column.
+
+| Bug | Row(s) | Intent to build |
+| --- | --- | --- |
+| NEWFRONT-453 | SPC-007 | Resolve the API base like every other call; serve board name/summary with a generic fallback and **no cover image**. |
+| NEWFRONT-454 | SPC-023, SPC-024 | Render the server's group total (it can be short of the rows). Intended: count = rendered rows. The new app cannot compute the true total without a second query, so it renders the server number and the bug stays open for the backend. |
+| NEWFRONT-455 | SPC-033 | No refetch on focus **or** reconnect; `refetchOnReconnect: false`. |
+| NEWFRONT-456 | SPC-011 | The first toggle from the OS default flips to the opposite of what is showing and stores that. |
+| NEWFRONT-459 | SPC-050 | A real relative age on every comment row, refreshed without a fetch. |
+| NEWFRONT-460 | SPC-054 | A member autocomplete on the mention trigger, inserting chips. |
+| NEWFRONT-461 | SPC-041, SPC-049 | The activity section is gated by `is_comments_enabled` in every presentation. |
+| NEWFRONT-462 | SPC-059 | With no method enabled, both modes explain themselves in a dismissible banner and keep the address/mode; no misleading invalid-address error, no silent dead end. |
+| NEWFRONT-463 | SPC-036, SPC-037 | The initial fetch carries the address filters (state, priority, labels); no seed-without-fetch. |
+| NEWFRONT-464 | SPC-035 | Removing one value keeps survivors under the singular keys (`state`, `priority`, `labels`). |
+| NEWFRONT-465 | SPC-013, SPC-014, SPC-047, SPC-048, SPC-049, SPC-057 | Every sign-in/sign-out round trip carries the **full** position (board, filters, open issue), encoded exactly once. |
+| NEWFRONT-466 | SPC-057 | Comment reaction pills name their reactors and mark the visitor's own from server-loaded rows (read the flat actor shape). |
+| NEWFRONT-467 | SPC-056 | A failed edit reconciles the row to the stored text. |
+| (unfiled, recorded) | SPC-030/042 | Clicking a card from a filtered board keeps the filter keys in the address; the old app dropped them while the store kept filtering. |
+| (unfiled, recorded) | SPC-015 | The frame gate hides the card-footer reaction add control too; the old card missed it while the overlay hid it. |
+| (unfiled, recorded) | SPC-020 | Settle only on layouts the board can render (list/kanban), instead of any enabled flag. |
+| (unfiled, recorded) | SPC-017/053 | A post whose image is still uploading is blocked until the upload settles; the old app stored a node without its file. |
+
+The three unfiled items are folded into their rows (the gate proves the
+intent); they do not need separate issues unless a slice finds user-visible
+divergence in a configuration the gate cannot produce.
+
+## 8. Proof plan and gate
+
+### 8.1 What each slice proves on its own
+
+- Unit tests cover every changed line and branch (the binding run rule), using
+  the space query modules with a stubbed transport: address parsing and
+  rewriting, filter parameter building, paging cursors, gating flags, the
+  frame hook, the path validator, the auth step reducer and error catalog,
+  the upload guard, the edit reconcile and the copy permission.
+- Local checks: `pnpm --filter web_new typecheck|lint|test`, plus
+  `check:boundaries`, `check:headers`, `check:deps`, `check:coexistence`, the
+  similarity check and the paths gate. Slices append `built` to their rows.
+- No slice brings up the parity stack.
+
+### 8.2 What the area gate (NEWFRONT-763) proves
+
+- Brings up the parity stack and runs the whole `apps/web_new/e2e/parity/space/`
+  suite against `apps/web_new` for both editions (the same subtree served under
+  OSS and cloud), with the configuration variants below.
+- Turns rows whose scenarios pass into `new green`; files fix sub-issues for
+  failures and waits on them.
+- Appends `/spaces` to `apps/web_new/migrated-routes.json` only when every
+  row is green, and regenerates the coexistence config.
+- Every SPC row must be green: 001–065, no exemptions. A `bug:` scenario is
+  oracle-only evidence (it pins the old app's defect); the new app passes
+  through the intent described in §7. Four rows currently have **only** a
+  `bug:` scenario (SPC-007, SPC-036, SPC-037, SPC-054) and SPC-059's
+  no-method defect (NEWFRONT-462) is the same shape. Before those rows can be
+  flipped the gate needs their intent scenarios — one per row, asserting the
+  new app's behavior, tagged with the same row id and titled without `bug:`.
+  Writing those scenarios is part of the gate's fix list (a small scenario
+  issue), never a silently skipped row and never a re-tag of the old ones.
+- Configuration variants for the config-driven rows:
+  - mail + magic login **on** and **off** (SPC-059/060/061);
+  - email/password enabled and disabled (SPC-059/061);
+  - each provider flag on/off as available (SPC-062);
+  - locale: English only on OSS; cloud pack if present (SPC-065).
+- Static checks on the gate's own run: the subtree imports nothing from the
+  workspace shell, the space entry chunk does not include the shell, and
+  `pnpm --filter web_new size` stays within the ceiling for the new chunk
+  (lazy subtree).
+
+### 8.3 Explicit non-goals for the gate
+
+- No desktop rows (none exist for this area; `/spaces/*` is web-only).
+- No new inventory rows: the 65 rows are complete. If a slice finds behavior
+  no row covers, it adds a row (`SPC-066…`), an oracle scenario and covers it
+  in its slice; the gate never invents rows.
+- No weakening of the import ban, the similarity check or a scenario's
+  assertions to make a row flippable.
