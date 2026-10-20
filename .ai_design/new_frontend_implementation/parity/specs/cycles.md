@@ -42,7 +42,7 @@ CYC-032, CYC-034, CYC-043):
 | `/{ws}/projects/{pid}/cycles`          | project cycles list, with the active-cycle hero                 |
 | `/{ws}/projects/{pid}/cycles/{cid}`    | cycle detail: work items in switchable layouts plus the sidebar |
 | `/{ws}/projects/{pid}/archives/cycles` | archived cycles list                                            |
-| `/{ws}/active-cycles`                  | workspace-level active cycles (edition-dependent)               |
+| `/{ws}/active-cycles`                  | workspace active-cycles upsell (the paid data view is a seam)   |
 
 The `cycles` tab is a project tab (`SHELL-075`): it sits second in the
 project tab strip, requires the `cycle_view` project feature, and is
@@ -66,7 +66,8 @@ hosts the shared list layout for the `{ scope: "cycle", projectId,
 cycleId }` entity; it renders the list only and owns no cycle chrome.
 There is no `archives/cycles` route yet: the archives shell today is
 `src/routes/$ws/_gated/projects/archives/index.tsx` (archived projects,
-NEWFRONT-698). There is no workspace active-cycles route.
+NEWFRONT-698). There is no workspace active-cycles route; slice H adds it for the
+upsell of §16 (not a data view).
 There is no cycles feature directory yet. The slices replace both cycle
 route mounts with the real area, add the archived-cycles route under the
 archives shell, and add the workspace route; nothing else in the shell
@@ -198,13 +199,16 @@ The list can be narrowed by two dimensions (CYC-006, CYC-007):
   search field, which narrows the options, and stays open while options
   are toggled. In-progress means the cycle covers today; yet-to-start
   and finished mean the cycle's status; draft means an undated cycle.
-- **Start date** and **end date** windows: each window is a preset range
-  plus an exact-date entry, and a cycle is kept when its start date falls
-  _inside_ the selected start window and its end date falls _inside_ the
-  selected end window (containment of each cycle date in its own window,
-  not range overlap). The two windows combine with AND. A missing or
-  undated cycle never matches a window, so drafts drop out of every dated
-  filter.
+- **Start date** and **Due date** windows: the filter menu renders two
+  sections, headed "Start date" and "Due date"; "Due date" means the
+  cycle's end date, and the oracle picks its options by that label, so
+  the section must keep the "Due date" heading and must not be renamed
+  "End date". Each window is a preset range plus an exact-date entry, and
+  a cycle is kept when its start date falls _inside_ the selected start
+  window and its end date falls _inside_ the selected "Due date" window
+  (containment of each cycle date in its own window, not range overlap).
+  The two windows combine with AND. A missing or undated cycle never
+  matches a window, so drafts drop out of every dated filter.
 
 Filters combine (a cycle must match both dimensions) and combine with
 the search term. All filtering runs on the loaded list; no filter
@@ -280,8 +284,13 @@ filters-hide-all and search-hide-all hints differ).
 ## 6. Creating a cycle
 
 The create dialog is opened from the list header, from the zero-state
-shortcut, and from the cycle context of the work-item create modal
-(NEWFRONT-630). It asks for (CYC-014, CYC-015):
+shortcut, and from the command palette's "New cycle" command (CYC-030).
+The palette entry is shown and enabled only while a project is in
+context, that project has the cycles feature on, and the user is a
+member or admin; it is absent — not merely disabled — otherwise. The
+work-item create modal is not a create-cycle entry point: it only
+pre-fills a work item's cycle, and the cycles area adds nothing to it.
+The dialog asks for (CYC-014, CYC-015):
 
 - a title, required, trimmed, at most 255 characters, validated inline
   as the user leaves the field and on submit; an empty or overlong title
@@ -377,17 +386,31 @@ Oracle: `edit-delete.spec.ts`.
 
 ## 8. Deleting a cycle, and finished cycles as read-only
 
-**Delete** (CYC-022). The row menu offers delete only to members and
-admins, and never for a cycle the viewer is not allowed to mutate. It
-opens a confirmation dialog that names the cycle and states that
-deletion is permanent; cancelling does nothing. Confirming issues
-`DELETE BASE/cycles/{cid}/` and, on success, shows a confirmation toast
-and removes the row and its group count. When the viewer was on the
-deleted cycle's detail page or had it open in the peek panel, they are
-returned to the project cycles list. A cycle that disappears because
-someone else deleted it lands on the gone-away view (§5) rather than
-retrying forever. A permission failure shows the dedicated permission
-message, not a generic error, and leaves the row in place.
+**Delete** (CYC-022). Delete has two layers, and the spec keeps both
+visible:
+
+1. **Which menu shows it.** The row menu offers delete to every member
+   and admin, and never on a finished, archived or read-only cycle. A
+   guest or viewer gets no delete entry.
+2. **What the server accepts.** `DELETE BASE/cycles/{cid}/` is allowed
+   for the cycle's creator/owner **or** a project admin. A plain member
+   who is not the owner sees the entry, confirms, and receives a 403
+   even though the entry was shown. That refusal is the dedicated
+   permission message (below), not a hidden capability.
+
+Confirming opens a dialog that names the cycle and states that deletion
+is permanent; cancelling does nothing. On success the flagged cycle is
+gone, and the UI shows a confirmation toast and removes the row and its
+group count. When the viewer was on the deleted cycle's detail page or
+had it open in the peek panel, they are returned to the project cycles
+list. A cycle that disappears because someone else deleted it lands on
+the gone-away view (§5) rather than retrying forever.
+
+A permission failure — including a non-owner member's delete — shows the
+dedicated permission message, not a generic error, and leaves the row in
+place; the list does not optimistically drop it. The CYC-022 forbidden-
+delete scenario relies on this second layer: the entry is present for a
+member, and the refusal is graceful and explains permissions.
 
 **Finished cycles are read-only** (CYC-023). For a finished cycle the
 detail page, sidebar, row menu and peek all suppress edit, delete, and
@@ -414,12 +437,16 @@ answers `{ archived_at }`; the client must not send an `archived_at`
 field. The cycle leaves the live list and groups; its completion ring
 and counts stay frozen. Archiving never deletes work items.
 
-**Restore** (CYC-026). An archived row's menu offers restore, which asks
-for confirmation and calls `DELETE BASE/cycles/{cid}/archive/`. On
-success the cycle is live again; the toast names the outcome and the
-view moves to the archived cycles list so the user sees the row leave
-it. The restored cycle is a finished cycle and reappears in the live
-list's completed group with its snapshot intact.
+**Restore** (CYC-026). An archived row's menu offers restore as a
+**direct menu action**: picking it calls `DELETE BASE/cycles/{cid}/archive/`
+immediately, with no confirmation dialog. Only archive and delete open a
+dialog; restore must not, because the oracle picks "Restore" and
+immediately waits for the success toast and the archives path, and a
+dialog step would stall it. On success the cycle is live again; the
+toast names the outcome and the view moves to the archived cycles list
+so the user sees the row leave it. The restored cycle is a finished
+cycle and reappears in the live list's completed group with its
+snapshot intact.
 
 Restore failure must be honest (see §26, NEWFRONT-244): if the restore
 request fails, the UI shows an error that names the failure and keeps
@@ -494,9 +521,17 @@ only — the same set that may edit — not for guests or the read-only
 role. The star is rendered only where editing is allowed and the cycle
 is not archived (the server's favorite endpoints allow admin and member
 and refuse others), so a guest sees no star rather than a disabled one.
-The favorite is per user. The row star toggles optimistically and issues
-`POST BASE/user-favorite-cycles/` with `{ cycle }` to add and
-`DELETE BASE/user-favorite-cycles/{cid}/` to remove. While the request
+The favorite is per user and is stored as a **workspace favorite**, not
+through the project-scoped cycle endpoints. Adding toggles the star
+optimistically and issues `POST WS/user-favorites/` with
+`{ entity_type: "cycle", entity_identifier: <cid>, project_id,
+entity_data: { name } }`; removing first resolves the row's favorite id
+and issues `DELETE WS/user-favorites/{favoriteId}/`. Both endpoints allow
+admin and member only. The sidebar's Favorites section reads the same
+`GET WS/user-favorites/` collection, which is why the toggle and the
+section stay in step; the project-scoped `BASE/user-favorite-cycles/`
+endpoints exist but are not the toggle's path, and the new UI must not
+mix the two. While the request
 settles the UI shows progress feedback, then an outcome message that
 names whether the cycle was added to or removed from favorites; a
 failure reverts the star and reports the failure. The first favorite a
@@ -744,27 +779,38 @@ views; the pinned fresh-click bug; the no-active-cycle explainer).
 
 ## 16. Workspace active cycles
 
-`/{ws}/active-cycles` is a workspace-level view of every cycle that
-covers today across the workspace's projects (CYC-043). It is backed by
-`GET WS/active-cycles/?per_page&cursor`, paged by cursor.
+`/{ws}/active-cycles` is the workspace-level active-cycles page
+(CYC-043). In this checkout it renders the **paid-feature upsell in
+every edition**: the CE root mounts the upgrade component
+(`apps/web/ce/components/active-cycles/root.tsx` →
+`workspace-active-cycles-upgrade.tsx`), and the page mounts that root
+unchanged. Nothing in this tree renders a list of active cycles; the
+service method for the endpoint exists but no page calls it.
 
-- **Free (OSS) workspace**: the page renders an upsell instead of data —
-  a heading for active cycles, a badge marking the paid feature, a hero
-  explaining on-demand snapshots of all cycles, a short set of benefit
-  cards, and an upgrade action that opens
-  `https://airepublic.com/pricing` in a new tab. The page never requests
-  the active-cycles endpoint in this edition.
-- **Cloud workspace**: the page renders the full view: the workspace's
-  active cycles as rows or cards grouped by project, each opening the
-  project's cycle detail, with the same progress ring and dates as the
-  project list, and cursor paging or a load-more control. Empty renders a
-  workspace-level explainer.
+- **Free (OSS) workspace**: the page shows a heading for active cycles,
+  a badge marking the paid feature, a hero explaining on-demand
+  snapshots of all cycles, a short set of benefit cards, and an upgrade
+  action that opens `https://airepublic.com/pricing` in a new tab. The
+  page never requests the active-cycles endpoint.
+- **Paid cloud workspace**: nothing in this checkout changes the
+  rendered page — it is the same upsell component. A real paid data view
+  may live in the private EE overlay, but the overlay at
+  `private-pi-dash/ee-overlay/apps/web/` contains no active-cycles
+  source at this head, so there is no rendered screen to cite. Treat the paid data
+  view as a **seam**, not a spec'd screen: no slice builds a cloud list
+  and the gate proves only the upsell. If a cloud data view is wanted,
+  a new inventory row and oracle scenario come first, with the source
+  path recorded. The workspace endpoint `GET WS/active-cycles/` is
+  cursor-paged and documented in §23, but is unused by the page.
 - **Desktop**: follows the edition the build is running as; the route is
-  reachable from the workspace navigation in both.
+  reachable from the workspace navigation in both, and renders the same
+  upsell in this checkout.
 
 The edition switch is a single capability check supplied by the build,
 not a fork of the page. The workspace route appears in the workspace
-navigation only where the edition supports the view or the upsell.
+navigation only where the edition supports the view or the upsell. The
+page does not read data, so it needs no empty or error state of its own;
+the seam's data view, when it exists, owns those.
 
 Oracle: `hero-crosscutting.spec.ts` (workspace actives page is a paid
 upsell with a pricing path).
@@ -915,8 +961,9 @@ slice that owns it. Nothing here is an import from the old frontend.
   the row list. Archives shell owner: NEWFRONT-698. Consumer: slice E
   (NEWFRONT-711).
 - Workspace actives: new route `routes/$ws/_gated/active-cycles/`; slice
-  H (NEWFRONT-714). No shared shell piece exists; it uses the workspace
-  app shell.
+  H (NEWFRONT-714) builds the upsell page of §16, including its pricing
+  link and upgrade marker, and no data view. No shared shell piece
+  exists; it uses the workspace app shell.
 
 **Issues layouts and their data**
 
@@ -1011,11 +1058,15 @@ slice that owns it. Nothing here is an import from the old frontend.
 counters for total, completed, backlog, started, unstarted, cancelled
 work items and the same for estimate points, `distribution` (assignees,
 labels and the completion chart), `estimate_distribution`, `progress`
-(series), and `version`. The list payload groups or arrays rows; the
-UI never assumes a fixed page size.
+(series), and `version`. `GET BASE/cycles/` and `GET WS/cycles/` both
+answer a **bare array** of cycle rows in this checkout — read them as
+arrays, not as `{results}` envelopes. Only `GET WS/active-cycles/` is a
+cursor-paged envelope (`per_page`, `next_cursor`); nothing else in this
+area is paged, so the UI never assumes a fixed page size.
 
-**Workspace active rows** add the project reference needed to link to
-the cycle detail (project id and, where supplied, the project name).
+**Workspace active rows** (only for the seam of §16, not built today)
+would add the project reference needed to link to the cycle detail
+(project id and, where supplied, the project name).
 
 **Progress and analytics.** Progress reads answer the snapshot and the
 series used by the ring and chart; analytics answers, per `type`,
@@ -1028,39 +1079,41 @@ field. A permission failure on any mutation is shown as a permission
 message; a missing cycle on any read or write is the gone-away state; a
 date-check collision is a refusal with guidance, not a generic error.
 
-| Method and path                                                               | Purpose                                                            | Rows                              |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------- |
-| `GET BASE/cycles/` (no `cycle_view`; `current` only for the hero read)        | project cycles list (all live cycles) and the hero's current cycle | 001, 002, 011, 012, 032, 033, 045 |
-| `POST BASE/cycles/`                                                           | create `{name, description, start_date, end_date}`                 | 014, 016, 018, 019                |
-| `GET BASE/cycles/{cid}/`                                                      | cycle detail and peek body                                         | 003, 004, 013, 035, 037, 040      |
-| `PATCH BASE/cycles/{cid}/`                                                    | edit title/description/dates                                       | 017, 036                          |
-| `DELETE BASE/cycles/{cid}/`                                                   | delete                                                             | 022                               |
-| `GET BASE/cycles/{cid}/cycle-issues/`                                         | the cycle's work items for the hosted layouts                      | 032, 033, 039                     |
-| `POST BASE/cycles/date-check/`                                                | overlap check `{start_date, end_date, cycle_id?}` → `{status}`     | 016, 017, 036                     |
-| `POST BASE/cycles/{cid}/transfer-issues/`                                     | `{new_cycle_id}` → `{message}`                                     | 031                               |
-| `POST BASE/user-favorite-cycles/` / `DELETE BASE/user-favorite-cycles/{cid}/` | favorite toggle                                                    | 029, 030                          |
-| `POST BASE/cycles/{cid}/archive/`                                             | archive (no body) → `{archived_at}`                                | 024, 025                          |
-| `DELETE BASE/cycles/{cid}/archive/`                                           | restore                                                            | 026                               |
-| `GET BASE/archived-cycles/` and `GET BASE/archived-cycles/{cid}/`             | archived list and row                                              | 004, 027                          |
-| `GET WS/cycles/`                                                              | workspace-wide cycles for switchers and pickers                    | 030, 033                          |
-| `GET WS/active-cycles/?per_page&cursor`                                       | workspace actives (cloud)                                          | 043                               |
-| `GET BASE/cycles/{cid}/progress/`, `GET BASE/cycles/{cid}/cycle-progress/`    | snapshot and series (cloud variant)                                | 038, 041, 045                     |
-| `GET BASE/cycles/{cid}/analytics?type=issues\|points`                         | breakdown distributions                                            | 038, 041                          |
-| `GET`/`PATCH BASE/cycles/{cid}/user-properties/`                              | per-cycle layout, filters, display, rich filters                   | 032, 035, 039                     |
-| `GET BASE/` (project features)                                                | `cycle_view` flag, feature-off view                                | 010                               |
+| Method and path                                                            | Purpose                                                             | Rows                              |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------- |
+| `GET BASE/cycles/` (no `cycle_view`; `current` only for the hero read)     | project cycles list (all live cycles) and the hero's current cycle  | 001, 002, 011, 012, 032, 033, 045 |
+| `POST BASE/cycles/`                                                        | create `{name, description, start_date, end_date}`                  | 014, 016, 018, 019                |
+| `GET BASE/cycles/{cid}/`                                                   | cycle detail and peek body                                          | 003, 004, 013, 035, 037, 040      |
+| `PATCH BASE/cycles/{cid}/`                                                 | edit title/description/dates                                        | 017, 036                          |
+| `DELETE BASE/cycles/{cid}/`                                                | delete                                                              | 022                               |
+| `GET BASE/cycles/{cid}/cycle-issues/`                                      | the cycle's work items for the hosted layouts                       | 032, 033, 039                     |
+| `POST BASE/cycles/date-check/`                                             | overlap check `{start_date, end_date, cycle_id?}` → `{status}`      | 016, 017, 036                     |
+| `POST BASE/cycles/{cid}/transfer-issues/`                                  | `{new_cycle_id}` → `{message}`                                      | 031                               |
+| `POST WS/user-favorites/` / `DELETE WS/user-favorites/{favoriteId}/`       | favorite toggle (star and palette); the sidebar section reads `GET` | 029, 030                          |
+| `POST BASE/cycles/{cid}/archive/`                                          | archive (no body) → `{archived_at}`                                 | 024, 025                          |
+| `DELETE BASE/cycles/{cid}/archive/`                                        | restore                                                             | 026                               |
+| `GET BASE/archived-cycles/` and `GET BASE/archived-cycles/{cid}/`          | archived list and row                                               | 004, 027                          |
+| `GET WS/cycles/`                                                           | workspace-wide cycles for switchers and pickers                     | 030, 033                          |
+| `GET WS/active-cycles/?per_page&cursor`                                    | unused by the page today (upsell only, §16); cursor-paged envelope  | 043                               |
+| `GET BASE/cycles/{cid}/progress/`, `GET BASE/cycles/{cid}/cycle-progress/` | snapshot and series (cloud variant)                                 | 038, 041, 045                     |
+| `GET BASE/cycles/{cid}/analytics?type=issues\|points`                      | breakdown distributions                                             | 038, 041                          |
+| `GET`/`PATCH BASE/cycles/{cid}/user-properties/`                           | per-cycle layout, filters, display, rich filters                    | 032, 035, 039                     |
+| `GET BASE/` (project features)                                             | `cycle_view` flag, feature-off view                                 | 010                               |
 
 ## 24. Edition seams
 
-- **OSS**: everything in this spec except the workspace active-cycles
-  data view, which is the pricing upsell (§16). No cloud-only cycle
+- **OSS**: everything in this spec; the workspace active-cycles page is
+  the pricing upsell (§16). No cloud-only cycle
   dialog or extension entry renders: the old cloud slots for end-of-cycle
   and additional row actions are empty in OSS and have no observable
   capability, so the new area has no equivalent mount. If cloud sources
   later add a real capability there, a row is added to the inventory
   first.
-- **Cloud**: the workspace active-cycles view is live data (§16); the
-  cloud progress read (`cycle-progress/`) backs the same sidebar and
-  hero charts; no additional cycle screen exists.
+- **Cloud**: the workspace active-cycles page renders the same upsell in
+  this checkout; a paid data view is a seam with no source path here
+  (§16), and is built only after a row and scenario exist. The cloud
+  progress read (`cycle-progress/`) backs the same sidebar and hero
+  charts; no additional cycle screen exists.
 - **Desktop**: follows the same edition capability as its build; the
   desktop window uses the same routes and the same wide/narrow behavior
   (§21) driven by window width, not the platform. Opening links in a new
@@ -1075,10 +1128,12 @@ payload.
 ## 25. Cross-area seams and backend gaps
 
 - **Issues**: the detail host is the issues layouts (NEWFRONT-618–624,
-  626–629, 630); the cycle create form is also reachable from the
-  work-item create modal's cycle context, so NEWFRONT-630 owns the modal
-  that mounts it. The cycles area supplies the form's fields, the
-  project target and the date-check; it does not fork the modal.
+  626–629). The work-item create modal (NEWFRONT-630) is not a
+  create-cycle entry point; it pre-fills a work item's cycle at most.
+  The cycle create dialog is reached from the cycles list header, its
+  zero state and the palette's "New cycle" command; the cycles area owns
+  that dialog, its fields, project target and date-check, and does not
+  fork the Issues modal.
 - **Issues pickers**: `CyclePicker` (shared/pickers) lists project
   cycles and filters on status; cycles must not fork it for the
   switcher or transfer. The transfer destination adds its own
@@ -1152,6 +1207,13 @@ or wrongly. Slices must build exactly these:
 | CYC-038 | The sidebar Work items row and state-group total use the raw `completed_issues/total_issues` counters (cancelled included); only the ring excludes cancelled. §2, §14.                                                                                                              |
 | CYC-041 | A hero state-group click navigates to the cycle detail with that state group filtered (and persisted in rich filters). §15.                                                                                                                                                         |
 | CYC-001 | The list read sends **no `cycle_view`** (the backend treats it as `all`); `current` is the separate hero read, and the project feature flag is a separate boolean on the project payload. §2, §23.                                                                                  |
+| CYC-026 | Restore is a **direct menu action** with no confirmation dialog; only archive and delete open dialogs. A failure leaves the row archived and retryable (§9). §9.                                                                                                                    |
+| CYC-022 | Delete has two layers: the menu entry is shown to member+, but the server accepts the cycle owner/creator or a project admin only, so a non-owner member gets the permission message. §8.                                                                                           |
+| CYC-043 | The workspace page is **the upsell in every edition** in this checkout; no cloud list renders and there is no EE source to cite. A paid data view is a seam needing a row and scenario first. The inventory no longer claims a full view. §16, §24.                                 |
+| CYC-014 | The palette's "New cycle" command is an entry point (project in context, `cycle_view` on, member+); the work-item create modal is **not**. §6, §25.                                                                                                                                 |
+| CYC-029 | The star and palette write `POST WS/user-favorites/` `{entity_type:"cycle", entity_identifier, project_id, entity_data:{name}}` and `DELETE WS/user-favorites/{favoriteId}/`; the sidebar reads the same collection. §11.                                                           |
+| CYC-007 | The end-date filter section is labelled **"Due date"** (the oracle picks by that label); it filters the cycle's end date. §4.                                                                                                                                                       |
+| CYC-001 | `GET BASE/cycles/` and `GET WS/cycles/` answer **bare arrays**; only `GET WS/active-cycles/` is cursor-paged. §23.                                                                                                                                                                  |
 
 ## 27. Row coverage index
 
