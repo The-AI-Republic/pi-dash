@@ -95,6 +95,15 @@ export function issueAssigneeIds(issue: IssueListItem): string[] {
   return issue.assignee_ids;
 }
 
+/**
+ * The rows the tab shows given its display switch: with sub-work items off
+ * (the default), rows that hang under another item leave the list, as the
+ * old profile tabs dropped them; with it on, every row stays.
+ */
+export function visibleIssueRows(rows: readonly IssueListItem[], showSubIssues: boolean): readonly IssueListItem[] {
+  return showSubIssues ? rows : rows.filter((row) => row.parent_id === null);
+}
+
 function groupTitle(
   dimension: ProfileGroupDimension,
   key: string,

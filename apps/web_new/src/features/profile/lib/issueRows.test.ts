@@ -18,6 +18,7 @@ import {
   stateGroupFor,
   isProfileStateGroup,
   priorityLabel,
+  visibleIssueRows,
   type ProfileStateLookup,
 } from "./issueRows.js";
 import type { ProfileStateGroup } from "./stats.js";
@@ -178,6 +179,15 @@ describe("groupIssueRows", () => {
   it("puts a row with several assignees into each group once", () => {
     const groups = groupIssueRows([issue({ id: "i-1", assignee_ids: ["u-a", "u-b"] })], "assignees");
     expect(groups.map((group) => group.id)).toEqual(["u-a", "u-b"]);
+  });
+
+  it("drops rows that hang under another work item unless the switch is on", () => {
+    const parent = issue({ id: "i-parent" });
+    const child = issue({ id: "i-child", parent_id: "i-parent" });
+    expect(visibleIssueRows([parent, child], false)).toEqual([parent]);
+    expect(visibleIssueRows([parent, child], true)).toEqual([parent, child]);
+    expect(visibleIssueRows([], false)).toEqual([]);
+    expect(visibleIssueRows([], true)).toEqual([]);
   });
 
   it("appends a second row to the bucket an earlier row opened", () => {

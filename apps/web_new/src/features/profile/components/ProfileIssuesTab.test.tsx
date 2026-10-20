@@ -13,11 +13,17 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { IssueListItem } from "@pidash/api-client";
-import { listStates, listUserProfileIssues, listProjects } from "@pidash/api-client";
+import { listStates, listUserProfileIssues, listProjects, listWorkspaceMembers } from "@pidash/api-client";
 
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
-  return { ...original, listStates: vi.fn(), listUserProfileIssues: vi.fn(), listProjects: vi.fn() };
+  return {
+    ...original,
+    listStates: vi.fn(),
+    listUserProfileIssues: vi.fn(),
+    listProjects: vi.fn(),
+    listWorkspaceMembers: vi.fn(),
+  };
 });
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -119,6 +125,10 @@ beforeEach(() => {
   vi.mocked(listStates).mockResolvedValue([
     { id: "s-backlog", name: "Backlog", group: "backlog", color: "#000000", project_id: "p-1" } as never,
     { id: "s-working", name: "In progress", group: "started", color: "#000000", project_id: "p-1" } as never,
+  ]);
+  vi.mocked(listWorkspaceMembers).mockResolvedValue([
+    { id: "m-1", member: { id: "u-2", display_name: "Ada Lovelace" }, role: 20 } as never,
+    { id: "m-2", member: { id: "u-3", display_name: "Grace Hopper" }, role: 20 } as never,
   ]);
   vi.mocked(listUserProfileIssues).mockResolvedValue(
     response([issue("i-urgent", "Prof persist urgent", { priority: "urgent" }), issue("i-low", "Prof persist low")])
@@ -367,6 +377,80 @@ describe("ProfileIssuesTab", () => {
       })
     );
     expect(screen.getByRole("button", { name: "Show empty groups" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("drops sub-work items from the loaded rows, then restores them from the display switch", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([issue("i-urgent", "Prof parent row"), issue("i-low", "Prof child row", { parent_id: "i-urgent" })])
+    );
+    renderTab();
+    await screen.findByTestId("profile-list");
+    const rowIds = () =>
+      [...document.querySelectorAll("[data-profile-row]")].map((row) => row.getAttribute("data-profile-row"));
+    expect(rowIds()).toEqual(["i-urgent"]);
+    await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
+    await userEvent.click(await screen.findByRole("button", { name: "Show sub-work items" }));
+    await waitFor(() => expect(rowIds()).toEqual(["i-urgent", "i-low"]));
+  });
+
+  it("hides sub-work items on the board layout as well", async () => {
+    localStorage.setItem(profileDisplayKey("acme", "u-1"), JSON.stringify({ layout: "kanban" }));
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([
+        issue("i-urgent", "Prof parent row", { priority: "high" }),
+        issue("i-low", "Prof child row", { priority: "high", parent_id: "i-urgent" }),
+      ])
+    );
+    renderTab();
+    await screen.findByTestId("profile-board");
+    const cardIds = () =>
+      [...document.querySelectorAll("[data-profile-board-card]")].map((card) =>
+        card.getAttribute("data-profile-board-card")
+      );
+    expect(cardIds()).toEqual(["i-urgent"]);
+    await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
+    await userEvent.click(await screen.findByRole("button", { name: "Show sub-work items" }));
+    await waitFor(() => expect(cardIds()).toEqual(["i-urgent", "i-low"]));
+  });
+
+  it("titles assignee groups with the workspace display names", async () => {
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([
+        issue("i-urgent", "Prof Ada row", { assignee_ids: ["u-2"] }),
+        issue("i-low", "Prof Grace row", { assignee_ids: ["u-3"] }),
+        issue("i-none", "Prof unassigned row"),
+      ])
+    );
+    renderTab();
+    await screen.findByTestId("profile-list");
+    await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
+    const panel = await screen.findByTestId("profile-display-panel");
+    await userEvent.click(within(panel).getByRole("radio", { name: "Assignees" }));
+    await waitFor(() =>
+      expect(
+        [...document.querySelectorAll("[data-profile-group]")].map((group) => group.getAttribute("data-profile-group"))
+      ).toEqual(["Unassigned", "Ada Lovelace", "Grace Hopper"])
+    );
+    expect(listWorkspaceMembers).toHaveBeenCalledWith(expect.anything(), "acme");
+  });
+
+  it("keeps the board's empty columns only when show-empty-groups is on", async () => {
+    localStorage.setItem(profileDisplayKey("acme", "u-1"), JSON.stringify({ layout: "kanban", groupBy: "state" }));
+    vi.mocked(listUserProfileIssues).mockResolvedValue(
+      response([issue("i-urgent", "Prof backlog row", { state_id: "s-backlog" })])
+    );
+    renderTab();
+    await screen.findByTestId("profile-board");
+    const columns = () =>
+      [...document.querySelectorAll("[data-profile-board-column]")].map((column) =>
+        column.getAttribute("data-profile-board-column")
+      );
+    expect(columns()).toEqual(["Backlog"]);
+    await userEvent.click(screen.getAllByTestId("profile-display-trigger")[0]!);
+    await userEvent.click(await screen.findByRole("button", { name: "Show empty groups" }));
+    await waitFor(() =>
+      expect(columns()).toEqual(["Backlog", "Unstarted", "Started", "Review", "Test", "Completed", "Canceled"])
+    );
   });
 
   it("names the assignee column, blanks dates that are unset, and keeps a row whose state left the project", async () => {

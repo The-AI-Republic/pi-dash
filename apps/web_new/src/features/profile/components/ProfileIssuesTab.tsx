@@ -30,6 +30,7 @@ import {
 } from "../../issues/index.js";
 import { projectStatesQueryOptions } from "../../home/index.js";
 import { projectsQueryOptions } from "../../projects/index.js";
+import { pickerWorkspaceMembersQueryOptions } from "../../../shared/pickers/index.js";
 import { CrossAppLink } from "../../../shared/coexistence/CrossAppLink.js";
 import { PeekPanel } from "../../../shared/shell/PeekPanel.js";
 import { profileIssuesQueryOptions } from "../api/queries.js";
@@ -44,6 +45,7 @@ import {
   groupIssueRows,
   isProfileStateGroup,
   priorityLabel,
+  visibleIssueRows,
   type ProfileGroupDimension,
   type ProfileStateLookup,
 } from "../lib/issueRows.js";
@@ -300,17 +302,19 @@ function ListBody({
   rows,
   groupBy,
   showEmptyGroups,
+  memberNames,
   context,
   stateLookup,
 }: {
   rows: readonly IssueListItem[];
   groupBy: string | null;
   showEmptyGroups: boolean;
+  memberNames: ReadonlyMap<string, string>;
   context: RowContext;
   stateLookup: ProfileStateLookup;
 }): React.ReactElement {
   const dimension = isGroupDimension(groupBy) ? groupBy : null;
-  const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups });
+  const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups, memberNames });
   if (groups.length === 0) return <IssuesEmpty showEmptyGroups={showEmptyGroups} />;
   return (
     <div data-testid="profile-list" className="flex flex-col">
@@ -331,17 +335,21 @@ function ListBody({
 function BoardBody({
   rows,
   groupBy,
+  showEmptyGroups,
+  memberNames,
   context,
   stateLookup,
 }: {
   rows: readonly IssueListItem[];
   groupBy: string | null;
+  showEmptyGroups: boolean;
+  memberNames: ReadonlyMap<string, string>;
   context: RowContext;
   stateLookup: ProfileStateLookup;
 }): React.ReactElement {
   const dimension = isGroupDimension(groupBy) ? groupBy : "priority";
-  const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups: false });
-  if (groups.length === 0) return <IssuesEmpty showEmptyGroups={false} />;
+  const groups = groupIssueRows(rows, dimension, stateLookup, { showEmptyGroups, memberNames });
+  if (groups.length === 0) return <IssuesEmpty showEmptyGroups={showEmptyGroups} />;
   return (
     <div data-testid="profile-board" className="flex gap-(--space-3) overflow-x-auto p-(--space-3)">
       {groups.map((group) => (
@@ -437,6 +445,7 @@ export function ProfileIssuesTab({
   const [display, updateDisplay] = useProfileDisplay(workspaceSlug, userId);
   const active = resolveActiveLayout(display.layout, OFFERED) as ProfileTabLayout;
   const projects = useQuery(projectsQueryOptions(client, workspaceSlug));
+  const directory = useQuery(pickerWorkspaceMembersQueryOptions(client, workspaceSlug));
   const issues = useInfiniteQuery(profileIssuesQueryOptions(client, workspaceSlug, userId, ownership, display.orderBy));
   const [peekId, setPeekId] = React.useState<string | null>(null);
   const identifiers = React.useMemo(
@@ -447,15 +456,20 @@ export function ProfileIssuesTab({
     (issue: IssueListItem) => identifiers.get(issue.project_id) ?? "",
     [identifiers]
   );
-  const rows = React.useMemo(() => issues.data?.pages.flatMap((page) => page.results) ?? [], [issues.data]);
-  const projectIds = React.useMemo(() => [...new Set(rows.map((row) => row.project_id))].sort(), [rows]);
+  const loaded = React.useMemo(() => issues.data?.pages.flatMap((page) => page.results) ?? [], [issues.data]);
+  const rows = React.useMemo(() => visibleIssueRows(loaded, display.showSubIssues), [loaded, display.showSubIssues]);
+  const projectIds = React.useMemo(() => [...new Set(loaded.map((row) => row.project_id))].sort(), [loaded]);
+  const memberNames = React.useMemo(
+    () => new Map((directory.data ?? []).map((entry) => [entry.member.id, entry.member.display_name])),
+    [directory.data]
+  );
   const stateLookup = useStateLookup(workspaceSlug, projectIds);
   const stateName = React.useCallback(
     (issue: IssueListItem) => (issue.state_id === null ? "" : (stateLookup.name(issue.state_id) ?? "")),
     [stateLookup]
   );
   const total = issues.data?.pages[0]?.total_count ?? 0;
-  const peeked = peekId === null ? null : (rows.find((row) => row.id === peekId) ?? null);
+  const peeked = peekId === null ? null : (loaded.find((row) => row.id === peekId) ?? null);
   const show = React.useCallback((key: string) => display.properties[key] !== false, [display.properties]);
   const context: RowContext = {
     identifier,
@@ -490,12 +504,20 @@ export function ProfileIssuesTab({
         {issues.isPending ? (
           <p className="text-body p-(--space-6) text-(--text-muted)">Loading work items…</p>
         ) : active === "kanban" ? (
-          <BoardBody rows={rows} groupBy={display.groupBy} context={context} stateLookup={stateLookup} />
+          <BoardBody
+            rows={rows}
+            groupBy={display.groupBy}
+            showEmptyGroups={display.showEmptyGroups}
+            memberNames={memberNames}
+            context={context}
+            stateLookup={stateLookup}
+          />
         ) : (
           <ListBody
             rows={rows}
             groupBy={display.groupBy}
             showEmptyGroups={display.showEmptyGroups}
+            memberNames={memberNames}
             context={context}
             stateLookup={stateLookup}
           />
