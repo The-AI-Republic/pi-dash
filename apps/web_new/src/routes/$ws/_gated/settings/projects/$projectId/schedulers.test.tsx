@@ -148,6 +148,7 @@ describe("schedulers settings route", () => {
   });
 
   it("mounts the settings variant and the dialog for a project admin", async () => {
+    harness.workspaceRole = 15;
     harness.bindings = { data: [{ id: "b1", scheduler: "s9" } as SchedulerBinding], refetch: vi.fn() };
     const user = userEvent.setup();
     renderRoute();
@@ -175,5 +176,6 @@ describe("schedulers settings route", () => {
     harness.workspaceRole = 20;
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
-    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-can-author", "true");  });
+    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-can-author", "true");
+  });
 });
