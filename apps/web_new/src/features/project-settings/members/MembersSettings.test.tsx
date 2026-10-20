@@ -258,6 +258,14 @@ describe("MembersSettings role filter", () => {
 });
 
 describe("MembersSettings sort", () => {
+  it("carries the direction marker on the sort trigger itself, not on a child", () => {
+    happyPath();
+    renderSection();
+    const trigger = screen.getByRole("button", { name: "Sort by Display name" });
+    expect(trigger).toHaveAttribute("data-sort-marker", "Not sorted");
+    expect(trigger.querySelector("[data-sort-marker]")).toBeNull();
+  });
+
   it("orders ascending, descending and clears, marking only the active column", async () => {
     happyPath();
     const user = userEvent.setup();
@@ -273,12 +281,27 @@ describe("MembersSettings sort", () => {
       "aria-label",
       "Sort by Display name"
     );
+    // The driver reads the marker off the trigger button, so the active
+    // column must paint it there; the other columns stay "Not sorted".
+    expect(screen.getByRole("button", { name: "Sort by Display name" })).toHaveAttribute(
+      "data-sort-marker",
+      "Ascending"
+    );
+    expect(screen.getByRole("button", { name: "Sort by Email" })).toHaveAttribute("data-sort-marker", "Not sorted");
     await user.click(screen.getByRole("button", { name: "Sort by Display name" }));
     await user.click(await screen.findByRole("menuitem", { name: /Z to A/ }));
     expect(screen.getAllByTestId("member-roster-row")[0]?.textContent).toContain("linus");
+    expect(screen.getByRole("button", { name: "Sort by Display name" })).toHaveAttribute(
+      "data-sort-marker",
+      "Descending"
+    );
     await user.click(screen.getByRole("button", { name: "Sort by Display name" }));
     await user.click(await screen.findByRole("menuitem", { name: "Clear sorting" }));
     expect(rowEmails()).toEqual([ADA, GRACE, LINUS]);
+    expect(screen.getByRole("button", { name: "Sort by Display name" })).toHaveAttribute(
+      "data-sort-marker",
+      "Not sorted"
+    );
   });
 
   it("keeps the sort across a remount", async () => {

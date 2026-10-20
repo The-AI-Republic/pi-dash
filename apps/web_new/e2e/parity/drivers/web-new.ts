@@ -17249,27 +17249,9 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByRole("table", { name: "Members" });
   }
 
-  private settingsMembersRow(displayName: string): Locator {
-    return this.settingsMembersTable().locator("tbody tr").filter({ hasText: displayName }).first();
-  }
-
-  private async settingsMembersAwaitRosterSettled(): Promise<void> {
-    // Settled means rows painted, the no-match note shows, or the skeleton
-    // is up after a failed read — never a bare header.
-    const deadline = Date.now() + WebNewDriver.WAIT_MS;
-    for (;;) {
-      const rows = await this.page.locator('[data-testid="member-roster-row"]').count();
-      const noMatch = await this.page
-        .locator('[data-testid="members-no-match"]')
-        .isVisible()
-        .catch(() => false);
-      if (rows > 0 || noMatch) return;
-      if (Date.now() >= deadline) throw new Error("[parity] members roster never settled.");
-      await this.page.waitForTimeout(250);
-    }
-  }
-
   async settingsMembersOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    // Leaves the roster to the caller: several scenarios arm a held read
+    // first and assert the skeleton, so opening must not wait for rows.
     await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/members/`);
     await this.page.waitForLoadState("domcontentloaded");
     await this.settingsWaitSettled(60_000);

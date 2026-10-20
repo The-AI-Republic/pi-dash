@@ -97,10 +97,11 @@ function SortHeader({
             variant="ghost"
             size="small"
             aria-label={`Sort by ${spec.label}`}
+            data-sort-marker={marker}
             className={cn("-ml-(--space-2) font-medium", direction === null ? "text-(--text-muted)" : "text-(--text)")}
           >
             <span>{spec.label}</span>
-            <span aria-hidden="true" className="inline-flex" data-sort-marker={marker}>
+            <span aria-hidden="true" className="inline-flex">
               {direction === "asc" ? (
                 <ArrowUp size={12} strokeWidth={2} />
               ) : direction === "desc" ? (

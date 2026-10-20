@@ -585,6 +585,44 @@ describe("project settings members read driver", () => {
     expect(await driver.settingsMembersSortItems()).toEqual(["A to Z", "Z to A", "Clear sorting"]);
   });
 
+  it("picks a sort entry by its menu label", async () => {
+    const click = vi.fn(async () => undefined);
+    const menuItem = locator({ first: () => locator({ click }) });
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => {
+        if (role === "menuitem") return menuItem;
+        return locator();
+      }),
+    });
+    await new WebNewDriver(page).settingsMembersSortPick("Clear sorting");
+    expect(page.getByRole).toHaveBeenCalledWith("menuitem", { name: "Clear sorting" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles a role checkbox by its accessible name", async () => {
+    const click = vi.fn(async () => undefined);
+    const checkbox = locator({ click });
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => (role === "checkbox" ? checkbox : locator())),
+    });
+    await new WebNewDriver(page).settingsMembersFilterToggle("Member");
+    expect(page.getByRole).toHaveBeenCalledWith("checkbox", { name: "Member", exact: true });
+    expect(click).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("closes the filter panel with Escape and waits for it to hide", async () => {
+    const press = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const panel = locator({ waitFor });
+    const page = pageOf({
+      keyboard: { press },
+      locator: (selector: string) => (selector === '[data-testid="member-filters-panel"]' ? panel : locator()),
+    });
+    await new WebNewDriver(page).settingsMembersFiltersClose();
+    expect(press).toHaveBeenCalledWith("Escape");
+    expect(waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: 30_000 });
+  });
+
   it("reads the direction marker only from the active column", async () => {
     const markers = new Map([
       ["Sort by Display name", "Descending"],
