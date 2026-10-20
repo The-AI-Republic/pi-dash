@@ -170,7 +170,7 @@ describe("useUpdateDisplayPrefs", () => {
         sub_group_by: null,
         show_empty_groups: false,
         sub_issue: true,
-        calendar: { layout: "month", show_weekends: true },
+        calendar: { layout: "month", show_weekends: false },
         future_key: "kept",
       },
       display_properties: {},

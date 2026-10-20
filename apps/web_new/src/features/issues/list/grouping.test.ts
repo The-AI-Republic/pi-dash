@@ -126,6 +126,7 @@ describe("group titles and ordering", () => {
     expect(quickAddDisabledReason(base)).toBeUndefined();
     expect(quickAddDisabledReason({ ...base, canEdit: false })).toBe("New work items are read-only for you");
     expect(quickAddDisabledReason({ ...base, completedCycle: true })).toBe("This cycle is complete");
+    expect(quickAddDisabledReason({ ...base, completedModule: true })).toBe("This module is complete");
     expect(quickAddDisabledReason({ ...base, enableQuickAdd: false })).toBe("Quick add is off in this view");
     expect(quickAddDisabledReason({ ...base, workflowBlockedReason: "Workflow blocks this state" })).toBe(
       "Workflow blocks this state"

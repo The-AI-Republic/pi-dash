@@ -29,6 +29,7 @@ vi.mock("../../../../../../features/issues/list/EntityListScreen.js", () => ({
       data-testid="entity-screen"
       data-module={String(props.moduleId ?? "")}
       data-completed={String(props.completedCycle ?? false)}
+      data-module-completed={String(props.completedModule ?? false)}
       data-peek={String(props.peekKey ?? "")}
       data-compact={String(props.compact ?? false)}
     >
@@ -92,9 +93,11 @@ describe("module issues route", () => {
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
   });
 
-  it("renders the module without a completed flag", async () => {
+  it("renders a live module without a completed flag", async () => {
     renderRoute();
-    expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
+    const node = await screen.findByTestId("entity-screen");
+    expect(node).toHaveAttribute("data-completed", "false");
+    expect(node).toHaveAttribute("data-module-completed", "false");
   });
 
   it("passes peek and compact from the search state", async () => {

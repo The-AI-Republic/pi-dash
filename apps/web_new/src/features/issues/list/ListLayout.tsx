@@ -82,6 +82,8 @@ export interface ListLayoutProps {
   moduleId?: string | undefined;
   /** Completed cycle pages render read-only. */
   completedCycle?: boolean | undefined;
+  /** Completed module pages render read-only. */
+  completedModule?: boolean | undefined;
   /** Controlled peek key (the route owns the URL param). */
   peekKey?: string | null | undefined;
   onPeekChange?: ((key: string | null) => void) | undefined;
@@ -162,6 +164,7 @@ export function ListLayout({
   cycleId,
   moduleId,
   completedCycle = false,
+  completedModule = false,
   peekKey: controlledPeekKey,
   onPeekChange,
   compact = false,
@@ -201,7 +204,8 @@ export function ListLayout({
   const [createState, setCreateState] = React.useState<CreateModalState | null>(null);
   const [addExistingOpen, setAddExistingOpen] = React.useState(false);
   const editAllowed = permissions.canEdit && (canEdit ?? true);
-  const readOnly = !editAllowed || completedCycle;
+  const completedContext = completedCycle || completedModule;
+  const readOnly = !editAllowed || completedContext;
   const flags: DisplayFeatureFlags = {
     hideCycle: !project?.cycle_view,
     hideModule: !project?.module_view,
@@ -230,12 +234,13 @@ export function ListLayout({
   const quickAddReason = quickAddDisabledReason({
     canEdit: editAllowed,
     completedCycle,
+    completedModule,
     enableQuickAdd,
     workflowBlockedReason: creationBlockedReason,
     groupBy: prefs.groupBy,
   });
   const quickAddDisabled = quickAddReason !== undefined;
-  const canAdd = editAllowed && !completedCycle && !creationDisabledForGroup(prefs.groupBy);
+  const canAdd = editAllowed && !completedContext && !creationDisabledForGroup(prefs.groupBy);
   const menu = cycleId !== undefined || moduleId !== undefined;
 
   function openCreate(prefill: Record<string, string | string[]>): void {

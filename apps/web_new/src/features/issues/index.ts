@@ -208,6 +208,22 @@ export type { SavePipeline, SaveStatus } from "./detail/savePipeline.js";
 export { useDetailUiStore } from "./detail/store.js";
 export { IssueList } from "./components/IssueList.js";
 export type { IssueListProps } from "./components/IssueList.js";
+export { CalendarLayout } from "./calendar/CalendarLayout.js";
+export type { CalendarLayoutProps } from "./calendar/CalendarLayout.js";
+export { CalendarHeader } from "./calendar/CalendarHeader.js";
+export type { CalendarHeaderProps, CalendarOptionsValue } from "./calendar/CalendarHeader.js";
+export { CalendarGrid } from "./calendar/CalendarGrid.js";
+export type { CalendarGridProps } from "./calendar/CalendarGrid.js";
+export { CalendarDay as CalendarTile } from "./calendar/CalendarDay.js";
+export type { CalendarDayProps as CalendarTileProps } from "./calendar/CalendarDay.js";
+export { CalendarBlock } from "./calendar/CalendarBlock.js";
+export type { CalendarBlockProps } from "./calendar/CalendarBlock.js";
+export {
+  calendarDayQueryOptions,
+  calendarQueryOptions,
+  calendarStatesQueryOptions,
+  rowsFromResponse,
+} from "./calendar/query.js";
 export { IssueLayout, IssueSearch, parseIssueSearch } from "./filters/search.js";
 export {
   labelKeys,

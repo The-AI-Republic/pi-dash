@@ -79,6 +79,8 @@ export function creationDisabledForGroup(dimension: string | null): boolean {
 export interface QuickAddGateInput {
   canEdit: boolean;
   completedCycle: boolean;
+  /** Completed module contexts are read-only too. */
+  completedModule?: boolean | undefined;
   /** The entity's view opts into inline creation. */
   enableQuickAdd: boolean;
   /** Edition workflow rule reason; OSS never supplies one. */
@@ -94,6 +96,7 @@ export interface QuickAddGateInput {
 export function quickAddDisabledReason(input: QuickAddGateInput): string | undefined {
   if (!input.canEdit) return "New work items are read-only for you";
   if (input.completedCycle) return "This cycle is complete";
+  if (input.completedModule ?? false) return "This module is complete";
   if (!input.enableQuickAdd) return "Quick add is off in this view";
   if (input.workflowBlockedReason !== undefined) return input.workflowBlockedReason;
   if (creationDisabledForGroup(input.groupBy)) return "Creation is off in this grouping";

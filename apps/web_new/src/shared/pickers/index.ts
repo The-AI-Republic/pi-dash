@@ -61,7 +61,7 @@ export { isCompletedCycle, selectCycleOptions } from "./cycles.js";
 export type { CycleOption, CycleOptionsInput } from "./cycles.js";
 export { ModuleChips, ModulePicker } from "./ModulePicker.js";
 export type { ModuleChipsProps, ModulePickerProps } from "./ModulePicker.js";
-export { selectModuleOptions } from "./modules.js";
+export { isCompletedModule, selectModuleOptions } from "./modules.js";
 export type { ModuleOption, ModuleOptionsInput } from "./modules.js";
 export { EstimatePicker } from "./EstimatePicker.js";
 export type { EstimatePickerProps } from "./EstimatePicker.js";

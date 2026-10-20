@@ -28,11 +28,22 @@ export interface AddExistingModalProps {
   excludeCycleMembers?: boolean | undefined;
   /** Module id excludes rows already attached to that module. */
   excludeModuleId?: string | undefined;
+  /** Only offer issues that have no target date yet (calendar days). */
+  undatedOnly?: boolean | undefined;
+  /** Day a chosen issue must still be able to start by (calendar drops). */
+  attachableDay?: string | undefined;
 }
 
 /** Search key for the modal's project hits. */
-export function addExistingSearchKey(workspaceSlug: string, projectId: string, search: string) {
-  return [...workspaceScope(workspaceSlug), "issues", "add-existing", projectId, search] as const;
+export function addExistingSearchKey(workspaceSlug: string, projectId: string, search: string, undatedOnly = false) {
+  return [
+    ...workspaceScope(workspaceSlug),
+    "issues",
+    "add-existing",
+    projectId,
+    ...(undatedOnly ? ["undated"] : []),
+    search,
+  ] as const;
 }
 
 export function AddExistingModal({
@@ -44,17 +55,20 @@ export function AddExistingModal({
   excludeIds = [],
   excludeCycleMembers = false,
   excludeModuleId,
+  undatedOnly = false,
+  attachableDay,
 }: AddExistingModalProps): React.ReactElement {
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState<string[]>([]);
   const [submitting, setSubmitting] = React.useState(false);
   const hits = useQuery({
-    queryKey: addExistingSearchKey(workspaceSlug, projectId, query),
+    queryKey: addExistingSearchKey(workspaceSlug, projectId, query, undatedOnly),
     queryFn: () =>
       searchIssues(getAppClient(), workspaceSlug, projectId, {
         search: query,
         ...(excludeCycleMembers ? { cycle: true } : {}),
         ...(excludeModuleId === undefined ? {} : { module: excludeModuleId }),
+        ...(undatedOnly ? { targetDate: "none" as const } : {}),
       }),
     enabled: open,
     staleTime: REFERENCE_STALE_TIME_MS,
@@ -83,7 +97,11 @@ export function AddExistingModal({
     }
   }
 
-  const rows = (hits.data ?? []).filter((row: IssueSearchHit) => !excludeIds.includes(row.id));
+  const rows = (hits.data ?? []).filter(
+    (row: IssueSearchHit) =>
+      !excludeIds.includes(row.id) &&
+      (attachableDay === undefined || row.start_date === null || row.start_date <= attachableDay)
+  );
 
   return (
     <Dialog
