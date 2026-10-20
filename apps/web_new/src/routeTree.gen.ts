@@ -51,6 +51,7 @@ import { Route as WsGatedAppsIndexRouteImport } from './routes/$ws/_gated/apps/i
 import { Route as WsGatedAssistantIndexRouteImport } from './routes/$ws/_gated/assistant/index'
 import { Route as WsGatedAssistantThreadIdRouteImport } from './routes/$ws/_gated/assistant/$threadId'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
+import { Route as WsGatedDraftsIndexRouteImport } from './routes/$ws/_gated/drafts/index'
 import { Route as WsGatedNotificationsIndexRouteImport } from './routes/$ws/_gated/notifications/index'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
 import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/route'
@@ -329,6 +330,11 @@ const WsGatedAssistantThreadIdRoute =
 const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
   id: '/browse/$issueKey',
   path: '/browse/$issueKey',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
+const WsGatedDraftsIndexRoute = WsGatedDraftsIndexRouteImport.update({
+  id: '/drafts/',
+  path: '/drafts/',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
 const WsGatedNotificationsIndexRoute =
@@ -774,6 +780,7 @@ export interface FileRoutesByFullPath {
   '/$ws/analytics/': typeof WsGatedAnalyticsIndexRoute
   '/$ws/apps/': typeof WsGatedAppsIndexRoute
   '/$ws/assistant/': typeof WsGatedAssistantIndexRoute
+  '/$ws/drafts/': typeof WsGatedDraftsIndexRoute
   '/$ws/notifications/': typeof WsGatedNotificationsIndexRoute
   '/$ws/projects/': typeof WsGatedProjectsIndexRoute
   '/$ws/prompts/': typeof WsGatedPromptsIndexRoute
@@ -872,6 +879,7 @@ export interface FileRoutesByTo {
   '/$ws/analytics': typeof WsGatedAnalyticsIndexRoute
   '/$ws/apps': typeof WsGatedAppsIndexRoute
   '/$ws/assistant': typeof WsGatedAssistantIndexRoute
+  '/$ws/drafts': typeof WsGatedDraftsIndexRoute
   '/$ws/notifications': typeof WsGatedNotificationsIndexRoute
   '/$ws/projects': typeof WsGatedProjectsIndexRoute
   '/$ws/prompts': typeof WsGatedPromptsIndexRoute
@@ -981,6 +989,7 @@ export interface FileRoutesById {
   '/$ws/_gated/analytics/': typeof WsGatedAnalyticsIndexRoute
   '/$ws/_gated/apps/': typeof WsGatedAppsIndexRoute
   '/$ws/_gated/assistant/': typeof WsGatedAssistantIndexRoute
+  '/$ws/_gated/drafts/': typeof WsGatedDraftsIndexRoute
   '/$ws/_gated/notifications/': typeof WsGatedNotificationsIndexRoute
   '/$ws/_gated/projects/': typeof WsGatedProjectsIndexRoute
   '/$ws/_gated/prompts/': typeof WsGatedPromptsIndexRoute
@@ -1091,6 +1100,7 @@ export interface FileRouteTypes {
     | '/$ws/analytics/'
     | '/$ws/apps/'
     | '/$ws/assistant/'
+    | '/$ws/drafts/'
     | '/$ws/notifications/'
     | '/$ws/projects/'
     | '/$ws/prompts/'
@@ -1189,6 +1199,7 @@ export interface FileRouteTypes {
     | '/$ws/analytics'
     | '/$ws/apps'
     | '/$ws/assistant'
+    | '/$ws/drafts'
     | '/$ws/notifications'
     | '/$ws/projects'
     | '/$ws/prompts'
@@ -1297,6 +1308,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/analytics/'
     | '/$ws/_gated/apps/'
     | '/$ws/_gated/assistant/'
+    | '/$ws/_gated/drafts/'
     | '/$ws/_gated/notifications/'
     | '/$ws/_gated/projects/'
     | '/$ws/_gated/prompts/'
@@ -1671,6 +1683,13 @@ declare module '@tanstack/react-router' {
       path: '/browse/$issueKey'
       fullPath: '/$ws/browse/$issueKey'
       preLoaderRoute: typeof WsGatedBrowseIssueKeyRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/drafts/': {
+      id: '/$ws/_gated/drafts/'
+      path: '/drafts'
+      fullPath: '/$ws/drafts/'
+      preLoaderRoute: typeof WsGatedDraftsIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/$ws/_gated/notifications/': {
@@ -2329,6 +2348,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedSettingsApiTokensRoute: typeof WsGatedSettingsApiTokensRoute
   WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
   WsGatedAppsIndexRoute: typeof WsGatedAppsIndexRoute
+  WsGatedDraftsIndexRoute: typeof WsGatedDraftsIndexRoute
   WsGatedNotificationsIndexRoute: typeof WsGatedNotificationsIndexRoute
   WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
   WsGatedPromptsIndexRoute: typeof WsGatedPromptsIndexRoute
@@ -2364,6 +2384,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedSettingsApiTokensRoute: WsGatedSettingsApiTokensRoute,
   WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,
   WsGatedAppsIndexRoute: WsGatedAppsIndexRoute,
+  WsGatedDraftsIndexRoute: WsGatedDraftsIndexRoute,
   WsGatedNotificationsIndexRoute: WsGatedNotificationsIndexRoute,
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
   WsGatedPromptsIndexRoute: WsGatedPromptsIndexRoute,

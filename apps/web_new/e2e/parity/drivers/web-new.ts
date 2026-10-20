@@ -1528,7 +1528,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async dismissWelcomeDialog(): Promise<void> {
-    return todo("dismissWelcomeDialog");
+    await this.dismissTourIfShown();
   }
 
   async openCreateModal(): Promise<void> {
@@ -1536,19 +1536,29 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async createModalOpen(): Promise<boolean> {
-    return todo("createModalOpen");
+    return (await this.createDialog().count()) > 0;
   }
 
   async createModalHeading(): Promise<string> {
-    return todo("createModalHeading");
+    const heading = this.createDialog().locator("h2").first();
+    if ((await heading.count()) === 0) return "";
+    return ((await heading.textContent()) ?? "").trim();
   }
 
-  async fillCreateTitle(_title: string): Promise<void> {
-    return todo("fillCreateTitle");
+  async fillCreateTitle(title: string): Promise<void> {
+    // Type with the keyboard: the title field tracks real keystrokes.
+    const field = this.createDialog().getByPlaceholder("Title").first();
+    await field.waitFor({ timeout: 60_000 });
+    await field.click();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+    await this.page.keyboard.type(title);
+    const value = await field.inputValue().catch(() => null);
+    if (value !== title) throw new Error(`[parity] title field holds ${JSON.stringify(value)}.`);
   }
 
   async createTitleValue(): Promise<string> {
-    return todo("createTitleValue");
+    return this.createDialog().getByPlaceholder("Title").first().inputValue();
   }
 
   async createTitleError(): Promise<string> {
@@ -1556,11 +1566,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async submitCreateModal(): Promise<void> {
-    return todo("submitCreateModal");
+    await this.createDialog().locator('form button[type="submit"]').first().click();
   }
 
   async clickModalDiscard(): Promise<void> {
-    return todo("clickModalDiscard");
+    await this.createDialog().getByRole("button", { name: "Discard", exact: true }).first().click();
   }
 
   async enableCreateMore(): Promise<void> {
@@ -1568,7 +1578,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalPrimaryButtonLabel(): Promise<string> {
-    return todo("modalPrimaryButtonLabel");
+    const submit = this.createDialog().locator('form button[type="submit"]').first();
+    return ((await submit.textContent()) ?? "").trim();
   }
 
   async gitBranchValue(): Promise<string> {
@@ -1579,12 +1590,12 @@ export class WebNewDriver implements ParityDriver {
     return todo("createTitleFocused");
   }
 
-  async modalTextContains(_text: string): Promise<boolean> {
-    return todo("modalTextContains");
+  async modalTextContains(text: string): Promise<boolean> {
+    return (await this.createDialog().getByText(text, { exact: false }).count()) > 0;
   }
 
   async confirmSaveDraft(): Promise<void> {
-    return todo("confirmSaveDraft");
+    await this.page.getByRole("dialog").getByRole("button", { name: "Save to Drafts", exact: true }).last().click();
   }
 
   async cancelDiscardDialog(): Promise<void> {
@@ -1595,12 +1606,15 @@ export class WebNewDriver implements ParityDriver {
     return todo("discardDialogDiscard");
   }
 
-  async openDraftForEdit(_name: string): Promise<void> {
-    return todo("openDraftForEdit");
+  async openDraftForEdit(name: string): Promise<void> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await block.dblclick();
+    await this.draftDialogTitle().waitFor({ timeout: 60_000 });
   }
 
   async publishDraft(): Promise<void> {
-    return todo("publishDraft");
+    await this.createDialog().getByRole("button", { name: "Publish issue", exact: true }).first().click();
   }
 
   async openRowMenuEntry(_issueName: string, _entry: string): Promise<void> {
@@ -1701,40 +1715,71 @@ export class WebNewDriver implements ParityDriver {
     return todo("countText");
   }
 
-  async openDraftsPage(_workspaceSlug: string): Promise<void> {
-    return todo("openDraftsPage");
+  async openDraftsPage(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/drafts/`, { timeout: 60_000 }).catch(() => undefined);
+    await this.page.waitForLoadState("domcontentloaded").catch(() => undefined);
   }
 
   async visibleDraftNames(): Promise<string[]> {
-    return todo("visibleDraftNames");
+    try {
+      const texts = await this.page.locator("p[data-draft-name]").allTextContents();
+      return texts.map((text) => text.trim()).filter((text) => text.length > 0);
+    } catch {
+      return [];
+    }
   }
 
   async openCreateDraftModal(): Promise<void> {
-    return todo("openCreateDraftModal");
+    // The empty state offers "Create draft work item"; once drafts exist
+    // the header offers "Draft a work item". Either opens the draft modal.
+    const emptyAction = this.page.getByRole("button", { name: "Create draft work item", exact: true }).first();
+    if ((await emptyAction.count()) > 0) await emptyAction.click();
+    else await this.page.getByRole("button", { name: "Draft a work item", exact: true }).first().click();
+    await this.draftDialogTitle().waitFor({ timeout: 30_000 });
   }
 
   async draftBlockCount(): Promise<number> {
-    return todo("draftBlockCount");
+    try {
+      return await this.page.locator("[data-draft-block]").count();
+    } catch {
+      return 0;
+    }
   }
 
-  async draftBlockText(_name: string): Promise<string> {
-    return todo("draftBlockText");
+  async draftBlockText(name: string): Promise<string> {
+    const text = await this.draftBlock(name).first().textContent();
+    return (text ?? "").replace(/\s+/g, " ").trim();
   }
 
-  async settleDraftsPage(_workspaceSlug: string): Promise<"empty" | "list"> {
-    return todo("settleDraftsPage");
+  async settleDraftsPage(workspaceSlug: string): Promise<"empty" | "list"> {
+    // The drafts fetch can be rate-limited on the shared stack; re-entering
+    // the route remounts the view and retries it.
+    let revisits = 0;
+    const started = Date.now();
+    for (;;) {
+      if ((await this.page.getByText("Half-written work items").count()) > 0) return "empty";
+      if ((await this.page.getByText("No project", { exact: true }).count()) > 0) return "empty";
+      if ((await this.draftBlockCount()) > 0) return "list";
+      if (Date.now() - started > 150_000) throw new Error("[parity] drafts page never settled");
+      if (Date.now() - started > 30_000 * (revisits + 1) && revisits < 4) {
+        revisits += 1;
+        await this.openDraftsPage(workspaceSlug);
+      }
+      await this.page.waitForTimeout(2000);
+    }
   }
 
-  async pageTextContains(_text: string): Promise<boolean> {
-    return todo("pageTextContains");
+  async pageTextContains(text: string): Promise<boolean> {
+    return (await this.page.getByText(text, { exact: false }).count()) > 0;
   }
 
-  async deleteDraftByName(_name: string): Promise<void> {
-    return todo("deleteDraftByName");
+  async deleteDraftByName(name: string): Promise<void> {
+    await this.openDraftMenu(name, "Delete");
+    await this.page.getByRole("button", { name: "Delete", exact: true }).last().click();
   }
 
-  async signInWithPasswordRetry(_email: string, _password: string): Promise<void> {
-    return todo("signInWithPasswordRetry");
+  async signInWithPasswordRetry(email: string, password: string): Promise<void> {
+    await this.signInWithPassword(email, password);
   }
 
   async openProjectIssuesSettled(workspaceSlug: string, projectId: string): Promise<void> {
@@ -1744,24 +1789,62 @@ export class WebNewDriver implements ParityDriver {
     await this.openProjectIssues(workspaceSlug, projectId);
   }
 
-  async copyDraftByName(_name: string): Promise<void> {
-    return todo("copyDraftByName");
+  async copyDraftByName(name: string): Promise<void> {
+    await this.openDraftMenu(name, "Make a copy");
   }
 
-  async moveDraftToProject(_name: string): Promise<void> {
-    return todo("moveDraftToProject");
+  async moveDraftToProject(name: string): Promise<void> {
+    await this.openDraftMenu(name, "Move to project");
   }
 
   async confirmMoveToProject(): Promise<void> {
-    return todo("confirmMoveToProject");
+    await this.createDialog().getByRole("button", { name: "Add to project", exact: true }).first().click();
   }
 
   async modalProjectName(): Promise<string> {
-    return todo("modalProjectName");
+    const chip = this.modalProjectChip();
+    await chip.waitFor({ timeout: 30_000 });
+    return ((await chip.textContent()) ?? "").replace(/\s+/g, " ").trim();
   }
 
-  async selectModalProject(_name: string): Promise<void> {
-    return todo("selectModalProject");
+  async selectModalProject(name: string): Promise<void> {
+    await this.modalProjectChip().click();
+    const option = this.page.getByRole("option", { name, exact: true }).first();
+    await option.waitFor({ timeout: 30_000 });
+    await option.click();
+    await expect.poll(() => this.modalProjectName(), { timeout: 30_000 }).toBe(name);
+  }
+
+  /** The create/edit dialog: scoped by its title field, since toasts and
+   * the account menu also render as dialogs. */
+  private createDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByPlaceholder("Title") });
+  }
+
+  /** The draft modal (create, copy, edit or move): headed "…draft…". */
+  private draftDialogTitle(): Locator {
+    return this.createDialog().getByRole("heading").first();
+  }
+
+  /** One draft block, located by the name it shows. */
+  private draftBlock(name: string): Locator {
+    return this.page
+      .locator("[data-draft-block]")
+      .filter({ has: this.page.locator("p[data-draft-name]", { hasText: name }) })
+      .first();
+  }
+
+  /** Open a draft's ellipsis menu and choose one entry. */
+  private async openDraftMenu(name: string, entry: string): Promise<void> {
+    const block = this.draftBlock(name);
+    await block.waitFor({ timeout: 60_000 });
+    await block.getByRole("button", { name: `Actions for ${name}`, exact: true }).click();
+    await this.page.getByRole("menuitem", { name: entry, exact: true }).first().click();
+  }
+
+  /** The project chip inside the open dialog (the first chip in the form). */
+  private modalProjectChip(): Locator {
+    return this.createDialog().locator("form").getByRole("button").first();
   }
 
   async hoverCardRead(_issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
