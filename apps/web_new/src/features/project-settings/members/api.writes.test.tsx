@@ -46,7 +46,7 @@ vi.mock("../../auth/index.js", async (importOriginal) => ({
   },
   projectQueryOptions: () => ({
     queryKey: authMocks.project.queryKey,
-    queryFn: async () => contractMocks.getProject(),
+    queryFn: async () => contractMocks.listProjectDetails(),
   }),
   useWorkspaceMembership: () => authMocks.workspace,
   useProjectRoles: () => authMocks.roles,

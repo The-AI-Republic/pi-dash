@@ -32,7 +32,7 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
-import { authKeys, projectQueryOptions, useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
+import { authKeys, useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { useMe } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectKeys } from "../../projects/index.js";
 import { notifyError } from "../../../shared/shell/index.js";

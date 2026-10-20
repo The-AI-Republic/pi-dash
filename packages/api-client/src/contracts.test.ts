@@ -91,7 +91,6 @@ import {
 } from "./contracts/project-management.js";
 import { getProjectSettingsDetail, updateProjectSettings } from "./contracts/project-settings-general.js";
 import {
-  completeTour,
   createQuickLink,
   deleteQuickLink,
   getQuickLink,
@@ -102,6 +101,7 @@ import {
   updateHomePreference,
   updateQuickLink,
 } from "./contracts/home.js";
+import { completeTour } from "./contracts/tour.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
 import {
   getIssue,

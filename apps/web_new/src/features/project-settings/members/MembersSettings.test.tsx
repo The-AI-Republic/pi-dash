@@ -147,11 +147,11 @@ function happyPath(): void {
 beforeEach(() => {
   clearMemberFilters();
   routerMocks.navigate.mockClear();
-  writeMocks.add.mutate.mockClear();
-  writeMocks.role.mutate.mockClear();
-  writeMocks.remove.mutate.mockClear();
-  writeMocks.leave.mutate.mockClear();
-  writeMocks.defaults.mutate.mockClear();
+  writeMocks.add.mutate.mockReset();
+  writeMocks.role.mutate.mockReset();
+  writeMocks.remove.mutate.mockReset();
+  writeMocks.leave.mutate.mockReset();
+  writeMocks.defaults.mutate.mockReset();
   writeMocks.editor.userId = ADA;
   writeMocks.editor.workspaceRole = 20;
   writeMocks.editor.projectRole = 20;
@@ -597,6 +597,56 @@ describe("MembersSettings writes (PSET-022–026)", () => {
     renderSection();
     const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
     expect(within(graceRow).queryByRole("button", { name: "Actions for Grace Hopper" })).not.toBeInTheDocument();
+  });
+
+  it("closes the invite dialog once the bulk add lands", async () => {
+    happyPath();
+    vi.mocked(useWorkspaceDirectory).mockReturnValue(
+      resolved([
+        ...DIRECTORY,
+        directoryMember(OUTSIDER, "Phoebe", "Outsider", "Phoebe", { email: "p@example.test" }),
+      ]) as never
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await user.click(screen.getByRole("button", { name: "Select co-worker" }));
+    await user.click(await screen.findByRole("option", { name: /Phoebe Outsider/ }));
+    await user.click(screen.getByRole("button", { name: "Add members" }));
+    const options = writeMocks.add.mutate.mock.calls[0]?.[1] as { onSuccess?: () => void };
+    act(() => options.onSuccess?.());
+    expect(screen.queryByRole("heading", { name: "Invite members" })).not.toBeInTheDocument();
+  });
+
+  it("withdraws the remove confirmation once the write settles", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Actions for Grace Hopper" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    const options = writeMocks.remove.mutate.mock.calls[0]?.[1] as { onSettled?: () => void };
+    act(() => options.onSettled?.());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("withdraws the leave confirmation once the write settles without a refusal", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    writeMocks.editor.userId = GRACE;
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Actions for Grace Hopper" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Leave" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Leave" }));
+    const options = writeMocks.leave.mutate.mock.calls[0]?.[1] as { onSettled?: () => void };
+    act(() => options.onSettled?.());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(routerMocks.navigate).not.toHaveBeenCalled();
   });
 
   it("saves defaults for admins and disables them for members", async () => {

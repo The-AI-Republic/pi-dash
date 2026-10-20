@@ -212,18 +212,3 @@ export async function listRecentVisits(client: ApiClient, slug: string, entityNa
   );
   return client.parse(RecentVisitList, body, `GET ${path}`);
 }
-
-export const TourCompletedResponse = z.object({
-  message: z.string(),
-});
-export type TourCompletedResponse = z.infer<typeof TourCompletedResponse>;
-
-/** PATCH /api/users/me/tour-completed/ flips the profile tour flag. */
-export async function completeTour(
-  client: ApiClient,
-  input: { is_tour_completed: boolean }
-): Promise<TourCompletedResponse> {
-  const path = "/api/users/me/tour-completed/";
-  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
-  return client.parse(TourCompletedResponse, envelope.data, `PATCH ${path}`);
-}

@@ -127,6 +127,18 @@ describe("InviteMembersDialog", () => {
     expect(screen.getAllByTestId("invite-row")).toHaveLength(1);
   });
 
+  it("takes the chosen role for the row and submits it with the colleague", async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderDialog();
+    await user.click(screen.getByRole("button", { name: "Select co-worker" }));
+    await user.click(await screen.findByRole("option", { name: /Grace Hopper/ }));
+    await user.click(screen.getByRole("button", { name: "Member role" }));
+    await user.click(await screen.findByRole("option", { name: "Admin" }));
+    expect(screen.getByRole("button", { name: "Member role" })).toHaveTextContent("Admin");
+    await user.click(screen.getByRole("button", { name: "Add members" }));
+    expect(onSubmit).toHaveBeenCalledWith([{ member_id: GRACE, role: 20 }]);
+  });
+
   it("adds a second row, picks a workspace guest there and caps it to Guest", async () => {
     const user = userEvent.setup();
     renderDialog();

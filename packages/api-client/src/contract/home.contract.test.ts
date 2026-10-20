@@ -6,7 +6,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { signIn } from "../contracts/auth-entry.js";
 import {
-  completeTour,
   createQuickLink,
   deleteQuickLink,
   getQuickLink,
@@ -17,6 +16,7 @@ import {
   updateHomePreference,
   updateQuickLink,
 } from "../contracts/home.js";
+import { completeTour } from "../contracts/tour.js";
 import { CONTRACT_EMAIL, CONTRACT_PASSWORD, CONTRACT_WORKSPACE, contractClient, contractEnabled } from "./setup.js";
 import type { ApiClient } from "../client.js";
 
