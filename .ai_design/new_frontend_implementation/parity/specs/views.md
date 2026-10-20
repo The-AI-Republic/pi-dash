@@ -57,7 +57,8 @@ of `list`, `kanban`, `calendar`, `spreadsheet`, `gantt_chart`), grouping
 flag, the sub-issue flag, and a nested `calendar` object with its mode and
 weekend flag. `display_properties` holds one boolean per column
 (`key`, `assignee`, `start_date`, `due_date`, `labels`, `priority`,
-`state`, `sub_issue_count`, `attachment_count`, `link`, `estimate`). The
+`state`, `sub_issue_count`, `attachment_count`, `link`, `estimate`) plus
+the model-default `created_on` and `updated_on` columns. The
 filter expression lives in `rich_filters` as the issues area's expression
 tree (conjunctions of field conditions); the legacy `filters` object is
 carried through untouched. The issues area owns the builder and the
@@ -66,8 +67,10 @@ received.
 
 **Access values.** `access` is a number: `1` is shared (the list badge
 shows a globe glyph labelled Public), `0` is owner-only (a lock glyph
-labelled Private). New views take the shared default in every edition
-unless the cloud dialog sends an explicit value.
+labelled Private). Every create lands shared (`access = 1`, the model
+default) because the field is serializer read-only and cannot ride a create
+or patch body in any edition; a cloud access choice is stored by the cloud
+write path in §14, not by the OSS create body.
 
 **Locked views.** `is_locked` is a server-set flag. The acceptance text is
 the single target: a locked view offers no layout switcher, no Display
@@ -77,7 +80,7 @@ app kept the filter toggle on locked views and let guests reach Add; those
 pins are the recorded gap adjudicated in §15/§16, not part of the target. The
 issue list still renders the saved layout.
 
-**Workspace add affordance.** A workspace custom view's Add-view control is
+**Workspace add affordance.** A workspace custom view's "Add view" control is
 offered only to workspace admins and members (VIEW-034/038's Who column) and
 is absent for guests. The oracle's guest-visible scenario is pinned as a gap
 (§16).
@@ -134,8 +137,12 @@ Project views:
   (`access = 1`, shared) applies in every edition. Responds 201 with the
   record. Validation errors are 400 with field messages.
 - `GET BASE/views/{viewId}/` — retrieve. 200 with the record. A missing id
-  currently answers 200 with a null body (bug NEWFRONT-227); a forbidden
-  view answers 403/404. The contract must treat a null body as “not found”.
+  currently answers 200 with an empty serialized record rather than 404
+  (bug NEWFRONT-227): blank `name`/`description`, `null` JSON fields
+  (`filters`, `display_filters`, `display_properties`, `rich_filters`,
+  `logo_props`), no `id`, and no `access` value — not a JSON `null`. A
+  forbidden view answers 403/404. The contract normalises a response with
+  no `id` (or a blank name) to “not found”.
 - `PATCH BASE/views/{viewId}/` — update, owner only, refuses locked views
   with 400, refuses non-owners with 400. Body: any subset of the create
   fields; `access` and `is_locked` are read-only and cannot be changed
@@ -160,10 +167,15 @@ Workspace views:
   workspace guests see only their own). The server accepts `order_by` and
   defaults to newest first; the screen keeps that order. Array of records.
 - `POST WS/views/` — create. Body as the project create minus project.
-  New views default to the spreadsheet layout and an empty expression, and
-  land shared (`access = 1`) for the same read-only reason.
-- `GET WS/views/{viewId}/` — retrieve; 200 with the record, missing/
-  forbidden handled as above.
+  The workspace create dialog sends `display_filters` with `layout:
+  "spreadsheet"` and `order_by: "-created_at"` and an empty expression; a
+  bare API create with no `display_filters` takes the model defaults
+  (`layout: "list"`, `order_by: "-created_at"`). The view lands shared
+  (`access = 1`) for the same read-only reason.
+- `GET WS/views/{viewId}/` — retrieve; 200 with the record. Missing ids
+  return the same empty serialized record for project and workspace
+  retrieve; forbidden ids are rejected by the queryset and normalise to
+  not-found as above.
 - `PATCH WS/views/{viewId}/` — owner only, refuses locked views with 400.
 - `DELETE WS/views/{viewId}/` — owner or workspace admin; 204.
 
@@ -201,7 +213,7 @@ extend it, do not fork it.
 **Screen (VIEW-001).** The project's Views tab mounts a list screen under
 `/{ws}/projects/{p}/views`. The header carries the project breadcrumb trail
 (workspace › project) with a trailing "Views" crumb, the list controls, and
-a primary Add-view button on the right. The browser tab title is the project
+a primary button labelled "Add view" on the right. The browser tab title is the project
 name, a separator, then "Views". The list reads `GET BASE/views/` once on
 mount and shows one row per visible view. Order is the list store's default:
 `updated_at` descending; sort is session-local (VIEW-005). The project
@@ -217,10 +229,27 @@ themed illustration, the heading `Views are not enabled for the project.`
 from project settings, and one primary button labelled "Manage features".
 The button is enabled only for a project admin and does nothing visually
 when disabled; for members and guests it still renders, disabled.
-Activating it navigates to the project's features settings screen (the
-per-feature route under `/{ws}/settings/projects/{p}/features/`), not the
-bare features index (§15, NEWFRONT-247). The gate replaces the skeleton:
-no list fetch is made while the gate shows, and no Add button renders.
+Activating it navigates to the project's features settings surface that
+renders the views switch (VIEW-041, PSET-043). Which address that is —
+the bare `/{ws}/settings/projects/{p}/features` index or its
+`/features/views` leaf — is the settings area's route decision (§19); the
+target is a rendered settings page, not a 404. The bug is the old
+shortcut's bare `…/features` target, which has no page because only
+per-feature leaves exist; the same address in the new tree is still
+unrendered in this checkout.
+
+The oracle's bug step asserts the old URL shape (`…/features` with an
+optional trailing slash) plus an empty views gate heading. If the settings
+area renders the bare index, that step can pass on `web_new`; if the
+shortcut lands on the views leaf, the URL assertion is a known oracle
+divergence and is not a VIEW-002 failure. Either way the gate proves the
+intended behavior on `apps/web_new` (§15/§18): the shortcut resolves to a
+rendered settings page, the views switch is present for an admin, and no
+views gate heading remains. A bare address that still renders nothing is a
+failure, not a divergence. S1 does not add a settings route; the
+destination is the settings area's (§19).
+The gate replaces the skeleton: no list fetch is made while the gate shows,
+and no Add view control renders.
 
 **Loading (VIEW-008).** While the first list fetch is in flight the screen
 shows a skeleton list of row placeholders sized like the real rows, inside
@@ -264,6 +293,25 @@ strings exactly. Pinned by the driver: the gate heading
 `Save custom views for your project`; the no-match heading
 `No matching results.`; "Manage features"; "All Views"; and the tab-title
 separator. Everything else in these states is free prose.
+
+The complete set of oracle-asserted literals across the area, named where
+each belongs: the three headings above; `View work items will appear here`
+(layout zero-result, §7); `No matches found` (ISS-094 filter primitive, §4);
+"Manage features"; "Add view" (list header and workspace detail header);
+"Add work item" (§8); "Create view" (zero-views action); "Create View" and
+"Update View" (dialog headings and submit/cancel roles); "Title" and
+"Description" (field placeholders), "Title is required" (§5);
+"All work items", "Assigned", "Created", "Subscribed" (workspace defaults);
+"List" (layout label) and "Display Properties" (display options);
+"Public"/"Private" (access labels, cloud legs);
+"Go to All work items" (§11 missing-view back); "View does not exist"; "All
+Views"; "Views" (crumb); "Clear all" (§4 chips); "Display"; "Save as" and
+"Update view" (filter-row triggers); "Open in new tab", "Copy link", "Edit
+View", "Delete View" (menus); "Are you sure you want to delete this view?"
+(delete-confirm heading); `Link Copied` (copy notice fragment); and
+`updated successfully`, `created successfully`, `could not be created` (notice
+fragments). Nothing outside this set is copied from the old app; slices
+write their own prose for every other state.
 
 ## 4. S2 — List search, sort, filters and applied chips (VIEW-004–007; NEWFRONT-720)
 
@@ -312,10 +360,14 @@ box that narrows the *options* (not the rows) by name. Dimensions:
   the OSS build renders no Access section at all (probe: the panel has no
   Access heading and no access values). The list filter, when present,
   matches rows whose `access` is in the selected set.
-- Created date — relative ranges: "1 week ago", "2 weeks ago", "1 month
-  ago", and a custom range. Multi-select; a row matches when its
-  `created_at` falls within **every** selected range (the intersection, as
-  the oracle pins: a "1 month ago" alone excludes fresh rows).
+- Created date — relative presets "1 week ago", "2 weeks ago", "1 month
+  ago", and "Custom". Each preset means *older than* that offset (at least
+  7, 14 or 30 days before now), not the week or month just gone: a
+  "1 month ago" preset alone excludes views created inside the last 30
+  days, which is what the oracle asserts. Multi-select is conjunctive — a
+  row must satisfy every selected preset, so combining two presets yields
+  the older of the two. A custom range offers a date picker and means the
+  selected window.
 - Created by — project members plus a "You" entry; multi-select of user
   ids matched against the record's `created_by`.
 
@@ -349,7 +401,7 @@ user can undo.
 
 ## 5. S3 — Create dialog and access selector (VIEW-003, 013, 014, 019; NEWFRONT-721)
 
-**Entry points (VIEW-003).** The list header's primary Add-view button opens
+**Entry points (VIEW-003).** The list header's primary "Add view" button opens
 the create dialog over the list (modal, page stays mounted). The zero-views
 empty state's create action opens the same dialog, and the palette's "New
 view" command (§14) and the `n v` sequence open it too. One dialog
@@ -513,8 +565,9 @@ the set: an urgent-only expression shows urgent issues and hides low-priority
 ones, and the same set follows into another layout.
 
 **Missing or forbidden (VIEW-022).** Any read failure that means "this view
-is not visible to you" — 404, 403, or a 200 with a null body (the observed
-old behavior for unknown ids) — renders, instead of the layout, an empty
+is not visible to you" — 404, 403, or a 200 carrying an empty serialized
+record with no `id` (the observed old behavior for unknown ids, §2) —
+renders, instead of the layout, an empty
 state with an illustration, the heading "View does not exist", an
 explanation that the view does not exist or the viewer lacks permission, and
 a primary action returning to the project views list (the slice picks its
@@ -589,8 +642,8 @@ working filter toggle (intended for locked views: no toggle at all, per
 VIEW-025/026's acceptance text; the pinned old behavior is adjudicated in
 §15/§16).
 
-**Add work item (VIEW-027).** The header shows a primary Add work item
-button only for users who can create work items in the project — project
+**Add work item (VIEW-027).** The header shows a primary button labelled
+"Add work item" (oracle-asserted exactly) only for users who can create work items in the project — project
 member or admin. Guests and other read-only roles never see it. Activating it
 opens the issues area's create modal (ISS-117–123) scoped to the project;
 submitting creates the issue through the issues endpoint. When the new issue
@@ -658,9 +711,11 @@ overflow menu offers exactly Open in new tab and Copy link (the same
 behaviors as VIEW-018, with the same copy notice). No edit or delete entry
 exists for a default.
 
-**Custom rows (VIEW-032).** A custom row shows the view name (truncated with
-an ellipsis past a fixed display length — the oracle pins a visible
-truncation for very long names), its description underneath when present
+**Custom rows (VIEW-032).** A custom row shows the view name, capped with an
+ellipsis at a display length the slice picks (the old row capped at 75
+characters; the oracle pins only that a very long name renders visibly
+shorter, so the exact cap is a design choice), its description underneath
+when present
 (omitted otherwise, no empty line), and links the whole row to
 `/{ws}/workspace-views/{id}`. A trailing overflow menu offers Edit View and
 Delete View. The menu renders for every member who can see the row, as the
@@ -698,7 +753,7 @@ component was never mounted (dead code, §17). The acceptance text requires
 the strip, so slices build it and the gate proves it on `apps/web_new` as
 "target, no oracle" (§18).
 
-**Create a custom workspace view (VIEW-034).** The Add-view button on the
+**Create a custom workspace view (VIEW-034).** The "Add view" button on the
 workspace detail header and the strip's trailing add button open the
 workspace create dialog. Both are offered to workspace members and admins
 and hidden for guests (VIEW-038's acceptance text); the oracle records the
@@ -729,9 +784,10 @@ copy as VIEW-016 requires explicit confirmation. Cancel keeps the view.
 Confirming DELETEs it and removes it from the list; success shows the
 success notice, and failure shows an error notice ("Failed to delete…")
 and keeps the row. The detail's local filter state for that view id is
-dropped. The oracle records the old app closing silently on success; the
+dropped. The oracle's "delete confirms, then removes silently" scenario
+pins the old silent success — a recorded gap, not the target. The
 acceptance text asks for a success notice, so the slice builds the notice
-and the gate proves it (§18).
+and the gate proves it on `web_new` as target, no oracle (§16).
 
 **Quick menu (VIEW-037).** On a custom view's detail header the overflow
 menu offers Edit, Open in new tab, Copy link and Delete. Edit and Delete are
@@ -753,10 +809,10 @@ defaults and customs (the oracle pins this); the crumbs identify the current
 view — a "Views" crumb and the current view's name, or the localized
 default's label. The header's left side is the crumb/switcher; the right
 side carries, in order: the layout selector (cloud, §below), the filter
-toggle, the Display control, an Add-view button (workspace admins and
+toggle, the Display control, an "Add view" button (workspace admins and
 members only) that opens the create dialog, and the view quick menu (custom)
 or the default quick menu. On a locked custom the layout selector (cloud),
-filter toggle and Display control are all absent; the Add-view button and
+filter toggle and Display control are all absent; the "Add view" button and
 quick menu remain as above. The body mounts the issues area's all-issues layout root for both
 defaults and customs: defaults apply their fixed condition (assigned to me,
 created by me, subscribed, or no extra condition for all items) and customs
@@ -767,14 +823,17 @@ The switcher spans the four defaults and the customs with a search box; a
 pick navigates to that view's detail in the same tab.
 
 Locked customs: the layout selector, filter toggle and Display control are
-absent, and no update is possible (server 400 if attempted). The Add-view
+absent, and no update is possible (server 400 if attempted). The "Add view"
 button is unaffected by another view's lock but still follows the role rule
 (workspace admins and members). The old app's guest-visible Add and
 locked-view toggle are pinned bugs, proved as target on `web_new` (§16).
 Unknown and forbidden ids show
-the missing-view empty state: illustration, "View does not exist", the
-explanation, and a primary button that returns to `workspace-views/all-issues`
-(the default view, not the list — the oracle pins that destination).
+the missing-view empty state: illustration, the heading "View does not
+exist" (oracle-asserted exactly), the explanation, and a primary button
+labelled "Go to All work items" (oracle-asserted exactly) that returns to
+`workspace-views/all-issues` — the default view, not the list. The old app
+kept the detail header above this state; the target renders the state
+without the header chrome, matching VIEW-022.
 
 **Layout choice (VIEW-040).** OSS renders the spreadsheet layout with **no**
 layout selector; the saved display payload decides the body, and API-created
@@ -796,9 +855,10 @@ notice in place of the switch; only a project admin can flip it. Flipping on
 makes the Views tab, the list and every creation entry point appear;
 flipping off replaces the list with the VIEW-002 gate on the next visit (and
 the already-mounted list is not expected to live-update, §1). The switch is
-the destination the VIEW-002 shortcut points at; that route and the gate's
-shortcut must resolve to the same per-feature page (this is the seam that
-fixes NEWFRONT-247). This area binds the switch's effect to `issue_views_view`
+the destination the VIEW-002 shortcut points at: the shortcut opens the
+rendered features settings surface that contains this switch, not a bare
+`features` address that renders nothing (this is the seam that fixes
+NEWFRONT-247; §3 states how the gate treats the oracle's URL assertion). This area binds the switch's effect to `issue_views_view`
 reads in the tab model, the list gate, the palette creation command and the
 detail filter row; the switch component itself belongs to NEWFRONT-582.
 
@@ -986,10 +1046,13 @@ treats the pinned scenario as "target, no oracle" (§18).
 **VIEW-002 — NEWFRONT-247.** Observed: the gate's "Manage features" button
 navigates to the bare `/{ws}/settings/projects/{p}/features` address, which
 has no page (only per-feature sub-pages exist), so the user lands on a 404.
-Intended: it navigates to the features settings screen and the views switch
-is reachable there. Slices build the destination; the gate proves the path
-resolves and the settings page renders, not the 404. The gate proves the
-project admin path and the disabled non-admin button.
+Intended: it navigates to a rendered features settings page where the
+VIEW-041 switch sits. The gate proves on `web_new` that the shortcut's
+target renders with the views switch reachable and no views gate heading,
+and that non-admins still see the disabled button on the views gate. The
+oracle's bug step also asserts the bare `…/features` URL; if the settings
+area renders that index the step passes, otherwise that URL assertion is a
+target, no-oracle divergence and is not required to pass on `web_new`.
 
 **VIEW-007 — NEWFRONT-216.** Observed: removing one applied-filter chip
 replaces the entire filter object, so every sibling dimension is wiped and
@@ -1004,9 +1067,11 @@ user's input for retry, shows the error notice, and creates nothing. The
 gate proves input retention after a failed submit.
 
 **VIEW-022 — NEWFRONT-227.** Observed: the retrieve endpoint answers 200
-with a null body for an unknown id, so the detail renders a nameless phantom
-with no error state and no current-view crumb. Intended: the null body is
-treated as not-found and the missing-view state renders with its way back.
+with an empty serialized record (no `id`, blank name, null JSON fields) for
+an unknown id instead of 404, so the detail renders a nameless phantom with
+no error state and no current-view crumb. Intended: a record without an
+`id` is treated as not-found and the missing-view state renders with its
+way back.
 The gate proves the phantom is gone (error heading, way back, no layout
 controls) for an unknown id.
 
@@ -1181,13 +1246,19 @@ and what each slice adds or reworks:
 - **Data.** `@pidash/api-client` has the thin `SavedView` schema and the six
   request helpers (project/workspace get, create, update, delete) plus the
   generic favorites and issue-list contracts. NEWFRONT-718 extends the
-  schema/helpers (list reads, null-body retrieve normalisation, favorites
+  schema/helpers (list reads, empty-record retrieve normalisation, favorites
   helper, groups/ordering params). Query keys: `savedViewKeys` exists;
   S1/S7 add list keys and a workspace-scope favorites key.
 - **Settings/edition.** The features-views route
   (`settings/projects/$projectId/features/views.tsx`) is a placeholder
   mounting `ProjectSettingsTabMount` with owner NEWFRONT-582; the switch
-  lands there and S10 only binds its effect. Edition: `core/edition`
+  lands there and S10 only binds its effect. The tree has only the five
+  feature **leaves** (`features/{cycles,modules,views,pages,intake}.tsx`) and
+  no rendered `features` index; VIEW-002's shortcut destination is therefore
+  a project-settings area route that renders the views switch (PSET-043
+  owns the switch there), not a route this area adds. S1 renders the gate
+  and its shortcut and links to that settings page; it does not add a
+  settings route itself (§3). Edition: `core/edition`
   (OSS module, flags, slots) as §14; desktop target via `src/target.ts`
   (`PIDASH_TARGET`) and the shell's runtime banner rules.
 - **Per slice.**
