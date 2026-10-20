@@ -105,10 +105,10 @@ struct SessionRuntime {
     workspace: Option<PathBuf>,
     bridge_seq: u64,
     started_sent: bool,
-    /// The approval mode this session's engine thread was spawned under.
-    /// Captured once, when the bridge is first spawned, and then held for the
-    /// life of the thread so a mode change mid-session cannot retune a turn
-    /// already in flight — it takes effect on the next thread instead.
+    /// The approval mode in force for this session: the one its engine thread
+    /// was spawned under, or the one a later warm/send switched it to. Each
+    /// turn copies it when it starts, so a change never retunes a turn already
+    /// in flight — it takes effect on the next message.
     approval_mode: ApprovalMode,
 }
 
@@ -469,11 +469,8 @@ async fn ensure_bridge(
         rt.started_sent = false;
     }
     if rt.bridge.is_none() {
-        // Capture the mode for the whole thread the moment we spawn it. A
-        // later warm/send that carries a different mode reuses this bridge and
-        // does not disturb the captured value — the new mode only lands when a
-        // fresh session spawns its own bridge.
-        rt.approval_mode = mode.unwrap_or_default();
+        // A respawn that names no mode keeps the one the session had.
+        rt.approval_mode = mode.unwrap_or(rt.approval_mode);
         rt.bridge = Some(
             AgentBridge::spawn_from_config_with_resume(
                 &inst.config,
@@ -484,6 +481,17 @@ async fn ensure_bridge(
             )
             .await?,
         );
+    } else if let Some(mode) = mode
+        && mode != rt.approval_mode
+    {
+        // The user switched modes in an open chat. The caller holds the
+        // session's runtime lock, so no turn is in flight: the runner decides
+        // under the new mode from here on, and the engine is retuned by the
+        // next turn it starts. A request that names no mode changes nothing.
+        rt.approval_mode = mode;
+        if let Some(bridge) = rt.bridge.as_mut() {
+            bridge.set_approval_mode(mode);
+        }
     }
     Ok(workspace)
 }
@@ -1611,6 +1619,138 @@ mod tests {
             runtime_dir: base.join("runtime"),
         };
         RunnerInstance::new_offline(config(), &paths, DaemonConfig::default())
+    }
+
+    /// Write an executable fake engine that records every frame it is sent to
+    /// `log`, warms a thread, asks to run a command on the first turn, waits
+    /// for the answer, and completes the turn.
+    #[cfg(unix)]
+    fn approval_engine(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+log='{log}'
+next() {{ read line; printf '%s\n' "$line" >> "$log"; }}
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"capabilities":{{}}}}}}'
+next
+next
+printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"threadId":"th_mode"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","method":"item/commandExecution/requestApproval","params":{{"approval_id":"appr_mode","command":"rm -rf build","cwd":"/tmp","item_id":"i1","reason":"needs approval"}}}}'
+next
+printf '%s\n' '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"conclusion":"success"}}}}'
+sleep 2
+"#,
+            log = log.display()
+        );
+        let path = dir.join("fake-engine");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mode_changed_after_warm_applies_to_the_next_turn() {
+        // PIDESKAPP-70: the chat page warms the session on open in the default
+        // mode, so the thread exists before the user picks one. A send that
+        // carries a different mode must run under that mode, on both sides:
+        // the engine is told the new posture and the runner prompts.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("frames.log");
+        let mut cfg = config();
+        cfg.codex.binary = approval_engine(dir.path(), &log).display().to_string();
+        let inst = {
+            use crate::config::schema::DaemonConfig;
+            use crate::util::paths::Paths;
+            let paths = Paths {
+                config_dir: dir.path().join("config"),
+                data_dir: dir.path().join("data"),
+                runtime_dir: dir.path().join("runtime"),
+            };
+            RunnerInstance::new_offline(cfg, &paths, DaemonConfig::default())
+        };
+        let chat_session_id = Uuid::new_v4();
+        let cwd = Some(dir.path().display().to_string());
+
+        let mut sink = VecSink::default();
+        handle_warm(
+            &inst,
+            WarmArgs {
+                chat_session_id,
+                cwd: cwd.clone(),
+                model: None,
+                mode: Some(ApprovalMode::FullAccess),
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        )
+        .await
+        .expect("warm");
+
+        let send = handle_send(
+            &inst,
+            SendArgs {
+                chat_session_id,
+                message_id: Uuid::new_v4(),
+                content: "delete the build folder".into(),
+                cwd,
+                model: None,
+                mode: Some(ApprovalMode::Ask),
+                local_thread_id: None,
+                local_session_id: None,
+            },
+            &mut sink,
+        );
+        // Answer the prompt the way the desktop would, if one is raised.
+        let decide = async {
+            for _ in 0..120 {
+                if let Some(rec) = inst.approvals.list_pending().await.into_iter().next() {
+                    inst.approvals
+                        .decide(&rec.approval_id, ApprovalDecision::Decline, DecisionSource::Local)
+                        .await;
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            false
+        };
+        let (terminal, prompted) = tokio::join!(send, decide);
+        let terminal = terminal.expect("send");
+
+        let frames = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            prompted,
+            "the command ran without a prompt after switching to Ask; engine saw:\n{frames}"
+        );
+        assert!(
+            sink.frames
+                .iter()
+                .any(|f| matches!(f, Response::ChatApprovalRequest { .. })),
+            "missing ChatApprovalRequest: {:?}",
+            sink.frames
+        );
+        assert!(
+            matches!(&terminal, Response::ChatMessageCompleted { status, .. } if status == "completed"),
+            "unexpected terminal frame: {terminal:?}"
+        );
+
+        let line = |method: &str| {
+            frames
+                .lines()
+                .find(|l| l.contains(&format!(r#""method":"{method}""#)))
+                .unwrap_or_else(|| panic!("no {method} in:\n{frames}"))
+                .to_string()
+        };
+        // The thread was warmed under full access...
+        assert!(line("thread/start").contains(r#""sandbox":"danger-full-access""#));
+        // ...and the turn retunes the engine to Ask before it runs anything.
+        let turn = line("turn/start");
+        assert!(turn.contains(r#""sandboxPolicy":{"type":"readOnly"}"#), "{turn}");
+        assert!(turn.contains(r#""approvalPolicy":"on-request""#), "{turn}");
+        assert!(line("approval/response").contains(r#""decision":"decline""#));
     }
 
     #[tokio::test]

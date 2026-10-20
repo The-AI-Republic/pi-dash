@@ -76,39 +76,57 @@ export function approvalTarget(request: PendingChatApproval): string | null {
   );
 }
 
+/** Shown beside the control while a picked mode waits for the running turn. */
+export const APPROVAL_MODE_PENDING_NOTE = "Applies from your next message";
+
 /**
- * The mode control. A small segmented button group; the active mode is filled.
- * `onChange` writes through to the transport; the runner applies it to the next
- * thread, never a turn already in flight.
+ * The mode control. A small segmented button group; the filled mode is the one
+ * in force. `onChange` writes through to the transport and the runner applies
+ * it from the next message, never to a turn already in flight — so while a
+ * turn runs, the page keeps `value` on the running turn's mode and passes the
+ * newly picked one as `pending`, which is outlined and explained instead.
  */
 export function ChatApprovalModeSelect(props: {
   value: TApprovalMode;
   onChange: (mode: TApprovalMode) => void;
+  pending?: TApprovalMode | null;
   disabled?: boolean;
 }) {
-  const { value, onChange, disabled } = props;
+  const { value, onChange, pending, disabled } = props;
+  const queued = pending && pending !== value ? pending : null;
   return (
-    <div className="flex items-center gap-1" role="group" aria-label="Approval mode">
-      <span className="mr-1 text-11 text-tertiary">Approvals</span>
-      {APPROVAL_MODES.map((mode) => {
-        const copy = APPROVAL_MODE_COPY[mode];
-        const active = mode === value;
-        return (
-          <button
-            key={mode}
-            type="button"
-            disabled={disabled}
-            aria-pressed={active}
-            title={copy.help}
-            onClick={() => onChange(mode)}
-            className={`rounded px-2 py-1 text-11 transition-colors disabled:opacity-50 ${
-              active ? "bg-surface-3 font-medium text-primary" : "text-secondary hover:bg-surface-2"
-            }`}
-          >
-            {copy.label}
-          </button>
-        );
-      })}
+    <div className="flex shrink-0 flex-col items-end" role="group" aria-label="Approval mode">
+      <div className="flex items-center gap-1">
+        <span className="mr-1 text-11 text-tertiary">Approvals</span>
+        {APPROVAL_MODES.map((mode) => {
+          const copy = APPROVAL_MODE_COPY[mode];
+          const active = mode === value;
+          const isQueued = mode === queued;
+          let tone = "text-secondary hover:bg-surface-2";
+          if (active) tone = "bg-surface-3 font-medium text-primary";
+          else if (isQueued) tone = "text-primary outline outline-1 outline-subtle";
+          return (
+            <button
+              key={mode}
+              type="button"
+              disabled={disabled}
+              aria-pressed={active}
+              title={isQueued ? `${copy.help} ${APPROVAL_MODE_PENDING_NOTE}.` : copy.help}
+              onClick={() => onChange(mode)}
+              className={`rounded px-2 py-1 text-11 whitespace-nowrap transition-colors disabled:opacity-50 ${tone}`}
+            >
+              {copy.label}
+            </button>
+          );
+        })}
+      </div>
+      {/* On its own line: beside the buttons it has no room in the chat header
+          and wraps one word per line. */}
+      {queued && (
+        <span className="text-11 leading-4 whitespace-nowrap text-tertiary" role="status">
+          {APPROVAL_MODE_PENDING_NOTE}
+        </span>
+      )}
     </div>
   );
 }

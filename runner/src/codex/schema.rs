@@ -84,6 +84,13 @@ pub struct TurnStartParams {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    // Posture overrides. The engine applies them to this turn and every later
+    // one, so they are only sent when the posture changed since the thread (or
+    // the previous override) set it; omitted, the thread keeps what it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

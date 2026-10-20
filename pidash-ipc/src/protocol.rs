@@ -146,10 +146,11 @@ pub enum Request {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        /// Approval mode for this session's engine thread. Absent = the
-        /// engine's historical full-access posture (no prompts). Captured when
-        /// the session's bridge is first spawned; changing it later takes
-        /// effect on the next thread, not a turn already in flight.
+        /// Approval mode for this session. Absent on the request that spawns
+        /// the session's bridge = the engine's historical full-access posture
+        /// (no prompts); absent later = keep the mode in force. A different
+        /// mode on a later warm/send switches the session to it from the next
+        /// message, never a turn already in flight.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<ApprovalMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,9 +175,7 @@ pub enum Request {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        /// See [`Request::ChatWarm::mode`]. Only consulted when this send is
-        /// what first spawns the session bridge; otherwise the mode the
-        /// session was warmed with is kept for the whole thread.
+        /// See [`Request::ChatWarm::mode`]. This turn runs under it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mode: Option<ApprovalMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

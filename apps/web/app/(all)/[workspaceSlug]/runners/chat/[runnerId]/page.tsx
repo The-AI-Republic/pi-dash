@@ -259,8 +259,9 @@ const RunnerChatPage = observer(function RunnerChatPage() {
     setApprovalModeState(mode);
   }, []);
   // Push the currently-selected mode into the transport's slot for a session
-  // right before it is warmed or sent to, so the runner captures it when it
-  // spawns the thread. A no-op on the cloud transport.
+  // right before it is warmed or sent to. The runner spawns the thread under
+  // it, and switches an open thread to it from the next message. A no-op on
+  // the cloud transport.
   const applyApprovalMode = useCallback(
     (sessionId: string) => {
       (transport as ApprovalCapableTransport).setApprovalMode?.(sessionId, approvalModeRef.current);
@@ -363,8 +364,8 @@ const RunnerChatPage = observer(function RunnerChatPage() {
       } catch {
         /* private mode / storage disabled — the in-memory value still holds */
       }
-      // Update the current session's slot too; the runner only honours it on
-      // the next thread, so a turn already running keeps the mode it started.
+      // Update the current session's slot too; it rides on the next message,
+      // so a turn already running keeps the mode it started with.
       if (session?.id) (transport as ApprovalCapableTransport).setApprovalMode?.(session.id, mode);
     },
     [runnerId, session?.id, setApprovalMode, transport]
@@ -661,6 +662,14 @@ const RunnerChatPage = observer(function RunnerChatPage() {
   const reason = disabledReason(runner, session);
   const rows = liveMessages;
   const busy = !!(session?.active_message_id || session?.active_turn_id);
+  // The mode the running turn started with. A mode picked mid-turn only lands
+  // on the next message, so until the turn ends the control keeps showing this
+  // one as in force and the pick as pending.
+  const turnInFlight = busy || sending;
+  const [turnMode, setTurnMode] = useState<TApprovalMode | null>(null);
+  useEffect(() => {
+    setTurnMode((current) => (turnInFlight ? (current ?? approvalModeRef.current) : null));
+  }, [turnInFlight]);
   const eventStrip = events
     .filter(
       (event) =>
@@ -706,8 +715,14 @@ const RunnerChatPage = observer(function RunnerChatPage() {
                   {session?.cwd || runner?.pod_detail?.name || runner?.status || ""}
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                {approvalsSupported && <ChatApprovalModeSelect value={approvalMode} onChange={changeApprovalMode} />}
+              <div className="flex shrink-0 items-center gap-2">
+                {approvalsSupported && (
+                  <ChatApprovalModeSelect
+                    value={turnMode ?? approvalMode}
+                    pending={turnMode ? approvalMode : null}
+                    onChange={changeApprovalMode}
+                  />
+                )}
                 {runner && (
                   <Badge variant={runner.status === "online" ? "accent-success" : "accent-neutral"}>
                     {runner.status}
