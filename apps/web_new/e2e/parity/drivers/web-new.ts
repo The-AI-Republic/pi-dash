@@ -5036,8 +5036,14 @@ export class WebNewDriver implements ParityDriver {
 
   async goToPath(path: string): Promise<void> {
     // Settle on parsed DOM, not full load: late sub-resources can stall
-    // the load event while the app itself is already interactive.
+    // the load event while the app itself is already interactive. A dev
+    // server under load can also hand the page a module graph that never
+    // runs, leaving an empty mount point and no error; one reload picks up
+    // a fresh graph, and a mounted page is never reloaded.
     await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    if (await this.appMounted()) return;
+    await this.page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
   // Palette locators (SHELL-080-085, NEWFRONT-292/293/294). DOM contract

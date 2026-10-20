@@ -94,3 +94,35 @@ describe("notificationsProjectNavBadge shell settle", () => {
     expect(stub.pageStub.reload).not.toHaveBeenCalled();
   });
 });
+
+describe("goToPath reload recovery", () => {
+  function pathPage(children: number) {
+    const goto = vi.fn(async (_url: string, _options: unknown) => undefined);
+    const reload = vi.fn(async (_options: unknown) => undefined);
+    const waitForLoadState = vi.fn(async (_state: unknown) => undefined);
+    const page = {
+      goto,
+      reload,
+      waitForLoadState,
+      locator: vi.fn((_selector: string) => ({ evaluate: async () => children > 0 })),
+    };
+    return { page: page as unknown as Page, goto, reload };
+  }
+
+  it("leaves a mounted page alone", async () => {
+    const stub = pathPage(1);
+
+    await new WebNewDriver(stub.page).goToPath("/acme/notifications/");
+
+    expect(stub.goto).toHaveBeenCalledWith("/acme/notifications/", { waitUntil: "domcontentloaded", timeout: 120_000 });
+    expect(stub.reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads one empty mount point so a dead module graph is replaced", async () => {
+    const stub = pathPage(0);
+
+    await new WebNewDriver(stub.page).goToPath("/acme/notifications/");
+
+    expect(stub.reload).toHaveBeenCalledWith({ waitUntil: "domcontentloaded", timeout: 120_000 });
+  });
+});
