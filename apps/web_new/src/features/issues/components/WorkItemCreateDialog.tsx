@@ -370,8 +370,7 @@ export function WorkItemCreateDialog({
   const editProjectId = edit?.projectId ?? null;
   const [form, setForm] = React.useState<CreateFormState>(() =>
     edit !== null
-      ? (editStart(edit, resolveProjectId(offered, initialProjectId ?? editProjectId ?? null)) ??
-        seededForm(null))
+      ? (editStart(edit, resolveProjectId(offered, initialProjectId ?? editProjectId ?? null)) ?? seededForm(null))
       : seededForm(resolveProjectId(offered, initialProjectId ?? null))
   );
   // What the edit opened with: every submit diffs against it. A create
@@ -492,26 +491,6 @@ export function WorkItemCreateDialog({
     editProjectId,
     context,
   ]);
-
-  // The detail read answers after the first paint: adopt its description
-  // unless the user already started typing, and make it the baseline the
-  // submit diffs against either way.
-  const storedDescription = edit?.kind === "issue" ? detailEdit.data?.description_html : undefined;
-  React.useEffect(() => {
-    if (storedDescription === undefined || !open || edit?.kind !== "issue") return;
-    if (adoptedDescription.current === storedDescription) return;
-    const untouched = openedDescription.current === null || form.descriptionHtml === openedDescription.current;
-    openedDescription.current = storedDescription;
-    adoptedDescription.current = storedDescription;
-    if (untouched) {
-      setForm((current) => withStoredDescription(current, storedDescription));
-      setEditorGeneration((current) => current + 1);
-    }
-    const normalized = visibleDescriptionHtml(storedDescription);
-    setBaseline((current) =>
-      current === null ? current : { ...current, form: { ...current.form, descriptionHtml: normalized } }
-    );
-  }, [storedDescription, open, edit?.kind, form.descriptionHtml]);
 
   // The detail read answers after the first paint: adopt its description
   // unless the user already started typing, and make it the baseline the

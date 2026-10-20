@@ -140,13 +140,10 @@ export function ModalDescription({
   );
 
   async function describeFromTitle(): Promise<void> {
-    const trimmed = title.trim();
-    if (trimmed === "") {
-      notifyError(DESCRIBE_EMPTY_TITLE, DESCRIBE_EMPTY_TITLE_BODY);
-      return;
-    }
+    // The control only renders for a titled form, so the title is never
+    // blank here; the endpoint still answers an empty body at times.
     try {
-      const html = await withPanelWork(() => describe.mutateAsync({ projectId, title: trimmed }));
+      const html = await withPanelWork(() => describe.mutateAsync({ projectId, title: title.trim() }));
       if (html === "") {
         notifyError(DESCRIBE_EMPTY_TITLE, DESCRIBE_EMPTY_TITLE_BODY);
         return;

@@ -151,6 +151,27 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.test/shot.png");
   });
 
+  it("reports the @-query under the caret and its absence", async () => {
+    const user = userEvent.setup();
+    const queries: Array<string | null> = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml="<p></p>"
+          label="Description"
+          onChange={() => {}}
+          onMentionQuery={(query) => queries.push(query)}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("Description");
+    editable.focus();
+    await user.keyboard("Hello @ad");
+    await vi.waitFor(() => expect(queries[queries.length - 1]).toBe("ad"));
+    await user.keyboard(" ");
+    await vi.waitFor(() => expect(queries[queries.length - 1]).toBeNull());
+  });
+
   it("replaces the typed @query when a person is picked", async () => {
     const user = userEvent.setup();
     const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
@@ -320,6 +341,33 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(last).toContain('alignment="left"');
     expect(last).not.toContain("data-stored-src");
     expect(last).not.toContain("<img");
+  });
+
+  it("serializes a new picture as a plain img without a stored attribute", async () => {
+    const onChange = vi.fn();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml="<p></p>"
+          label="Description"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    await editorSurface("Description");
+    await vi.waitFor(() => expect(handles.length).toBeGreaterThan(0));
+    handles[handles.length - 1]?.insertImage("https://cdn.test/shot.png");
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    // A body written today carries a URL, not an asset id, so it saves as
+    // an ordinary image with no legacy attribute (ISS-127).
+    expect(last).toContain('<img src="https://cdn.test/shot.png"');
+    expect(last).not.toContain("data-stored-src");
+    expect(last).not.toContain("<image-component");
   });
 
   it("mounts without a ready handler", async () => {

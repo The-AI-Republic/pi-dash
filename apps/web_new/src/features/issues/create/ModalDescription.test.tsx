@@ -294,6 +294,17 @@ describe("ModalDescription assistant (ISS-127)", () => {
     expect(h.calls.some((entry) => entry.url.includes("/ai-assistant/"))).toBe(false);
   });
 
+  it("reports an empty GPT answer as a failure", async () => {
+    const user = userEvent.setup();
+    const h = setup({ describeBody: editorAnswer("") });
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Insert" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    expect(handleCalls).toEqual([]);
+    expect(h.onChange).not.toHaveBeenCalled();
+  });
+
   it("reports a failed GPT answer without changing the body", async () => {
     const user = userEvent.setup();
     const h = setup({ answerStatus: 500 });

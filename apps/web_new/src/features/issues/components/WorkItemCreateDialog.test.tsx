@@ -2095,6 +2095,31 @@ describe("WorkItemCreateDialog type seam (ISS-129)", () => {
 });
 
 describe("WorkItemCreateDialog publish (ISS-130)", () => {
+  it("links images uploaded for a draft to the issue it becomes", async () => {
+    const user = userEvent.setup();
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const h = setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Picture draft" }) },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Picture draft"));
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByLabelText("Attach an image to the description")).not.toBeDisabled());
+    await user.click(screen.getByRole("button", { name: "Publish issue" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    // The upload parked an asset against the draft; publishing links it
+    // to the promoted issue so the picture is not orphaned (ISS-127/130).
+    const attach = h.calls.find((call) => call.method === "POST" && call.url.endsWith("/bulk/"));
+    expect(attach?.url).toContain(CREATED_ID);
+    expect(attach?.body).toEqual({ asset_ids: ["asset-1"] });
+    upload.mockRestore();
+  });
+
   it("publishes a stored draft into its project", async () => {
     const user = userEvent.setup();
     const h = setup(
