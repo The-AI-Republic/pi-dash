@@ -556,17 +556,19 @@ fn check_freq_interval(parsed: &ParsedRule) -> Result<(), String> {
 /// side (`dateutil/rrule.py:465-499,838-848`), returning the bare
 /// `dateutil` message so the caller wraps it as `invalid RRULE: …`. Only the
 /// properties the stored subset can carry are checked: `UNTIL` awareness
-/// against the always-aware anchor, the `BYSETPOS` range, and the
+/// against the implicit aware anchor (or an explicit `DTSTART`), the
+/// `BYSETPOS` range, and the
 /// `BYHOUR`/`BYMINUTE`/`BYSECOND` ranges (which `dateutil` enforces by
 /// building a `datetime.time` per `(hour, minute, second)` combination,
 /// lowest FREQ below `HOURLY`). `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY` and
 /// `BYWEEKNO` have no range check in `rrule.__init__` — confirmed against a
 /// live `dateutil` — so they are deliberately not checked here.
-fn check_rrule_init_semantics(parsed: &ParsedRule) -> Result<(), String> {
-    // `if self._dtstart and self._until:` — the anchor is aware
-    // (`_validate_writes` passes no dtstart, so `validate_rrule_string`
-    // uses `datetime.now(tz=utc)`), so only a naive UNTIL mismatches.
-    if parsed.until == Some(false) {
+fn check_rrule_init_semantics(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), String> {
+    // `if self._dtstart and self._until:` — the anchor is the aware
+    // `datetime.now(tz=utc)` unless the rule text carries its own DTSTART,
+    // which `rrulestr` substitutes. Only an aware anchor rejects a naive
+    // UNTIL.
+    if anchor_aware && parsed.until == Some(false) {
         return Err(
             "RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware".to_owned(),
         );
@@ -624,12 +626,22 @@ fn sorted_set(values: &[i64]) -> Vec<i64> {
 /// `rrulestr` runs `rrule.__init__` before Django applies its own FREQ/
 /// INTERVAL constraints, so the constructor's semantic checks come first; a
 /// missing FREQ is the constructor's `TypeError` and wins over both.
-fn check_parsed_rule(parsed: &ParsedRule) -> Result<(), String> {
+fn check_parsed_rule(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), String> {
     if parsed.freq.is_none() {
         return check_freq_interval(parsed);
     }
-    check_rrule_init_semantics(parsed).map_err(|msg| format!("invalid RRULE: {msg}"))?;
+    check_rrule_init_semantics(parsed, anchor_aware)
+        .map_err(|msg| format!("invalid RRULE: {msg}"))?;
     check_freq_interval(parsed)
+}
+
+/// Whether `rrulestr` would build an aware anchor from a `DTSTART` line.
+/// A `Z`/offset value is already aware; a `TZID=` parameter supplies the
+/// zone for an otherwise naive value. `check_date_line` has already
+/// validated the shape.
+fn dtstart_aware(parms: &[&str], value: &str) -> bool {
+    parms.iter().any(|parm| parm.starts_with("TZID="))
+        || parse_loose_datetime_aware(value) == Some(true)
 }
 
 /// Check the date values of an `RDATE`/`EXDATE`/`DTSTART` line
@@ -686,7 +698,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
 
     if lines.len() == 1 && (!lines[0].contains(':') || lines[0].starts_with("RRULE:")) {
         let parsed = parse_single_rule(lines[0]).map_err(invalid)?;
-        return check_parsed_rule(&parsed);
+        return check_parsed_rule(&parsed, true);
     }
 
     // Multi-property mode. `dateutil` assembles a set (which never carries
@@ -697,6 +709,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
     let mut rrule_count = 0usize;
     let mut forces_set = false;
     let mut only_rule: Option<ParsedRule> = None;
+    let mut anchor_aware = true;
     for line in &lines {
         if !line.contains(':') {
             let parsed = parse_single_rule(line).map_err(invalid)?;
@@ -730,6 +743,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
             }
             "DTSTART" => {
                 check_date_line(prop, &parms, value).map_err(invalid)?;
+                anchor_aware = dtstart_aware(&parms, value);
             }
             _ => {
                 return Err(invalid(format!("unsupported property: {prop}")));
@@ -738,7 +752,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
     }
     if rrule_count == 1 && !forces_set {
         if let Some(parsed) = &only_rule {
-            return check_parsed_rule(parsed);
+            return check_parsed_rule(parsed, anchor_aware);
         }
     }
     // `rrule_count == 0` (e.g. a lone `DTSTART:` line) hits `rrulevals[0]`

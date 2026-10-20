@@ -200,6 +200,19 @@ def test_patch_rejects_semantically_invalid_rrule(org, rrule, expected):
     assert row[0] == "FREQ=DAILY;BYHOUR=2"
 
 
+def test_create_embedded_naive_dtstart_allows_naive_until(org):
+    # `rrulestr` substitutes a DTSTART carried in the rule text for the
+    # aware admin anchor, so a naive DTSTART + naive UNTIL is a valid
+    # (naive) dateutil rule. Only the implicit aware anchor rejects it.
+    rrule = "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231"
+    r = org.adm(
+        "POST", JOBS, "admin",
+        json=valid_payload(f"naive-anchor-{org.tag}", rrule=rrule),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["rrule"] == rrule
+
+
 def test_create_rejects_empty_rrule(org):
     r = org.adm(
         "POST", JOBS, "admin", json=valid_payload(f"er-{org.tag}", rrule="")
