@@ -84,9 +84,15 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
       (items.completed_work_items?.count ?? 0);
     expect(withExtras).toBeLessThanOrEqual(metric(items.total_work_items) as number);
 
-    // The tab defaults to overview: the same eleven keys as the tab above.
+    // The tab defaults to overview, so the payload carries the overview keys
+    // and not the work-item ones. Compare key sets against a fresh overview
+    // read rather than pinning a count: other suites create and delete
+    // projects concurrently.
     const defaulted = await getAnalyticsTotals(client, CONTRACT_WORKSPACE);
-    expect(metric(defaulted.total_projects)).toBe(6 - 4);
+    const overview = await getAnalyticsTotals(client, CONTRACT_WORKSPACE, { tab: "overview" });
+    expect(Object.keys(defaulted).sort()).toEqual(Object.keys(overview).sort());
+    expect(defaulted).not.toHaveProperty("un_started_work_items");
+    expect(typeof metric(defaulted.total_projects)).toBe("number");
   });
 
   it("scopes the totals to the picker's project ids", async () => {
@@ -134,6 +140,22 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
     for (const row of chart) expect(typeof row.count).toBe("number");
     const scopedRow = chart.find((row) => row.key === "work_items");
     expect(scopedRow?.count).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the radar's member row out of the project scope", async () => {
+    const client = await sharedSignedIn();
+    const missing = "00000000-0000-4000-8000-000000000000";
+    const chart = await getAnalyticsChart(client, CONTRACT_WORKSPACE, {
+      type: "projects",
+      projectIds: [missing],
+    });
+    // The view counts members workspace-wide, so the row survives a scope
+    // that matches no project while the other six zero out.
+    expect(chart).toHaveLength(7);
+    for (const row of chart) {
+      if (row.key === "members") expect(row.count).toBeGreaterThan(0);
+      else expect(row.count).toBe(0);
+    }
   });
 
   it("answers a monthly created-vs-resolved series from workspace creation", async () => {
@@ -188,13 +210,35 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
     }
   });
 
-  it("refuses an unknown chart axis or type with 400", async () => {
+  it("answers integer keys for the estimate-point axis", async () => {
+    const client = await sharedSignedIn();
+    const projectId = await seededProjectId(client);
+    const chart = await getAnalyticsChart(client, CONTRACT_WORKSPACE, {
+      type: "custom-work-items",
+      xAxis: "ESTIMATE_POINTS",
+      projectIds: [projectId],
+    });
+    // The seeded probe issue sits on estimate point 2; the backend leaves the
+    // key as an integer here (every other axis answers a string).
+    const point = chart.data.find((row) => row.key === 2);
+    expect(point).toBeDefined();
+    expect(point?.name).toBe("2");
+    expect(point?.count).toBeGreaterThanOrEqual(1);
+  });
+
+  it("refuses an unknown chart axis, split or type with 400", async () => {
     const client = await sharedSignedIn();
     const axis = await getAnalyticsChart(client, CONTRACT_WORKSPACE, {
       type: "custom-work-items",
       xAxis: "NOPE" as unknown as "STATES",
     }).catch((error: unknown) => error);
     expect(isApiError(axis) && axis.status).toBe(400);
+    const split = await getAnalyticsChart(client, CONTRACT_WORKSPACE, {
+      type: "custom-work-items",
+      xAxis: "STATE_GROUPS",
+      groupBy: "NOPE" as unknown as "STATES",
+    }).catch((error: unknown) => error);
+    expect(isApiError(split) && split.status).toBe(400);
     const type = await getAnalyticsChart(client, CONTRACT_WORKSPACE, {
       type: "bogus" as unknown as "projects",
     }).catch((error: unknown) => error);
@@ -238,6 +282,43 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
     });
     expect(scoped).toHaveLength(1);
     expect(scoped[0]?.id).toBe(projectId);
+  });
+
+  it("answers integer zeros, not nulls, for a project with no work items", async () => {
+    const client = await sharedSignedIn();
+    // The seed's second project exists without issues of its own; the count
+    // subquery still answers 0 rather than null.
+    const projects = await listProjects(client, CONTRACT_WORKSPACE);
+    const empty = projects.find((project) => project.identifier !== CONTRACT_PROJECT_IDENTIFIER);
+    expect(empty).toBeDefined();
+    const rows = await getProjectStats(client, CONTRACT_WORKSPACE, {
+      fields: ["total_issues", "completed_issues"],
+      projectIds: [empty?.id ?? ""],
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.total_issues).toBe(0);
+    expect(rows[0]?.completed_issues).toBe(0);
+  });
+
+  it("answers zeros for a scope that matches no project", async () => {
+    const client = await sharedSignedIn();
+    const missing = "00000000-0000-4000-8000-000000000000";
+    const totals = await getAnalyticsTotals(client, CONTRACT_WORKSPACE, {
+      tab: "overview",
+      projectIds: [missing],
+    });
+    // An empty scope still carries all eleven keys, each counting zero.
+    const metrics = Object.entries(totals);
+    expect(metrics).toHaveLength(11);
+    for (const [, value] of metrics) expect((value as { count?: number }).count).toBe(0);
+
+    // Custom bars draw nothing at all for an empty scope.
+    const chart = await getAnalyticsChart(client, CONTRACT_WORKSPACE, {
+      type: "custom-work-items",
+      xAxis: "STATE_GROUPS",
+      projectIds: [missing],
+    });
+    expect(chart).toEqual({ data: [], schema: {} });
   });
 
   it("falls back to every field when none of the requested names is valid", async () => {

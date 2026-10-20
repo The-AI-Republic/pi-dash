@@ -27,7 +27,7 @@ import {
 
 interface Call {
   url?: string;
-  query?: Record<string, unknown>;
+  query?: Record<string, unknown> | undefined;
 }
 
 function stubClient(body: unknown, calls: Call[] = []): ApiClient {
@@ -122,6 +122,17 @@ describe("analytics charts", () => {
     });
     expect(Object.keys(parsed.schema)).toEqual(["medium", "low"]);
     expect(parsed.data[0]?.["medium"]).toBe(3);
+  });
+
+  it("accepts the integer key the estimate-point axis answers", async () => {
+    expect(AnalyticsCustomChart.parse({ data: [{ key: 2, name: "2", count: 1 }], schema: {} }).data).toEqual([
+      { key: 2, name: "2", count: 1 },
+    ]);
+    const missing = AnalyticsCustomChart.parse({
+      data: [{ key: "None", name: "None", count: 0 }],
+      schema: {},
+    });
+    expect(missing.data[0]?.key).toBe("None");
   });
 
   it("accepts the empty series an undated scope answers", async () => {

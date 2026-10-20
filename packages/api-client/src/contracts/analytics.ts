@@ -25,11 +25,16 @@ export const ANALYTICS_TABS = ["overview", "work-items"] as const;
 export type AnalyticsTab = (typeof ANALYTICS_TABS)[number];
 
 /**
- * One headline metric. The server returns `{count}` and nothing else — no
- * previous-period figure. The screen renders a missing metric, or one whose
- * `count` is missing/non-numeric, as `0`; `count` stays optional so a read
- * with an absent metric still parses. `count` can be null in the agent-token
- * aggregates when the sum has no rows.
+ * One headline metric. The server always returns `{count}` and nothing else —
+ * no previous-period figure. `count` is optional only so the screen keeps its
+ * "absent reads as zero" rule (ANL-005/ANL-008) if an older payload omits it;
+ * a 200 from the current views always carries every count as an integer.
+ *
+ * There is one caveat for the head maps: the agent-token sums are coerced
+ * with `or 0` in the view, so they are never null. Other counts come from
+ * `queryset.count()` and likewise never null. The nullable/metric shape is
+ * kept for the coarse "missing is zero" path, not because the server sends
+ * null.
  */
 export const AnalyticsMetric = z.object({
   count: z.optional(z.nullable(z.number())),
@@ -39,10 +44,13 @@ export type AnalyticsMetric = z.infer<typeof AnalyticsMetric>;
 /**
  * Overview tab totals. One read drives the eleven overview cards, in this
  * order: users, admins, members, guests, projects, work items, cycles,
- * intake, and the three agent-token sums. Every key is optional: the counts
- * endpoint omits nothing when it answers 200, but the screen must still show
- * `0` for an absent key (an older payload, or a per-project member read the
- * server resolves to zero rows). Keys beyond the eleven pass through.
+ * intake, and the three agent-token sums.
+ *
+ * A successful read always returns all eleven keys, even on an empty
+ * workspace or an empty project scope: the view counts querysets, so an
+ * empty scope answers `{count: 0}`, never an absent key or null. Every key is
+ * nonetheless optional because the screen reads an absent metric as `0`
+ * (ANL-005/ANL-008). Keys beyond the eleven pass through unchanged.
  */
 export const AnalyticsOverviewTotals = z.looseObject({
   total_users: z.optional(AnalyticsMetric),
@@ -62,8 +70,9 @@ export type AnalyticsOverviewTotals = z.infer<typeof AnalyticsOverviewTotals>;
 /**
  * Work-items tab totals: five cards, `total`, `started`, `backlog`,
  * `unstarted` (the server's `un_started_work_items` spelling) and
- * `completed`. Every key is optional for the same reason as the overview
- * map — an absent metric reads as `0`.
+ * `completed`. An empty workspace or scope still answers all five as
+ * `{count: 0}`; the keys are optional only so the screen can read an absent
+ * metric as `0` (ANL-008).
  */
 export const AnalyticsWorkItemsTotals = z.looseObject({
   total_work_items: z.optional(AnalyticsMetric),
@@ -159,9 +168,14 @@ export async function getProjectAnalyticsTotals(
 /**
  * One radar/summary dimension. The projects chart always answers all seven
  * rows (work items, cycles, modules, intake, members, pages, views) in that
- * order, zeroed when the workspace or scope is empty; the screen must keep
- * zero rows rather than filter them. `key` is the request-time identifier,
- * `name` the title-cased display label, `count` the value.
+ * order; the screen must keep zero rows rather than filter them. `key` is the
+ * request-time identifier, `name` the title-cased display label, `count` the
+ * value.
+ *
+ * Six rows honour the `project_ids` scope (an empty scope answers `0`), but
+ * `members` counts active workspace members and ignores `project_ids`
+ * entirely — a scoped read still reports the workspace-wide member total.
+ * The radar therefore never answers `[]`.
  */
 export const AnalyticsProjectsChartRow = z.object({
   key: z.string(),
@@ -206,12 +220,18 @@ export type AnalyticsWorkItemsChart = z.infer<typeof AnalyticsWorkItemsChart>;
  * One custom-chart row: the x bucket plus its total. With a split active the
  * row carries one extra numeric key per schema key; the screen stacks them
  * in schema order and sums nothing client-side. Without a split there are no
- * extra keys. `key` is the raw server value (nullable buckets become the
- * literal `"none"`/`"None"`), `name` its display value — both raw here; the
- * screen formats dates and capitalizes labels itself.
+ * extra keys.
+ *
+ * `key` is the raw server value. Most axes key on an id, enum or date and so
+ * answer a string (a missing bucket is flattened to `"none"`/`"None"`), but
+ * `ESTIMATE_POINTS` keys on `estimate_point__key`, an integer that the view
+ * leaves as a number (`0` becomes `"None"`). The contract therefore accepts
+ * a string or a number and the screen stringifies before grouping. `name` is
+ * the display value, also raw; the screen formats dates and capitalizes
+ * labels itself.
  */
 export const AnalyticsCustomChartRow = z.looseObject({
-  key: z.string(),
+  key: z.union([z.string(), z.number()]),
   name: z.string(),
   count: z.number(),
 });
@@ -221,6 +241,10 @@ export type AnalyticsCustomChartRow = z.infer<typeof AnalyticsCustomChartRow>;
  * `schema` maps each split key present in the data to its display label and
  * preserves server order (rows are ordered by descending total). It is empty
  * when no `group_by` was sent or when the grouped value is absent.
+ *
+ * An empty workspace or project scope answers `{data: [], schema: {}}`; the
+ * screen draws its empty panel rather than a zero-height axis. A successful
+ * read always carries both keys.
  */
 export const AnalyticsCustomChart = z.object({
   data: z.array(AnalyticsCustomChartRow),
@@ -533,9 +557,18 @@ export type ProjectStatField = (typeof PROJECT_STAT_FIELDS)[number];
 /**
  * One row per workspace project (or per `project_ids` match), `id` plus the
  * requested fields. `completed_issues` counts the closed state groups, so it
- * is not limited to the `completed` group the breakdown table uses. A
- * project with no work items reports 0, never an absent key, for the fields
- * it was asked for.
+ * is not limited to the `completed` group the breakdown table uses.
+ *
+ * Each requested count is a correlated `OuterRef` subquery wrapping
+ * `Count(...)`, which always resolves to an integer: a project with no
+ * matching rows answers `0`, never `null` or an absent key (verified against
+ * the seeded issue-less `CU` project). Unrequested fields are absent
+ * entirely. An empty workspace, or a `project_ids` list that matches
+ * nothing, answers `[]`.
+ *
+ * The fields stay optional-and-nullable in the contract as a defensive
+ * tolerance: the screen reads null or absent as `0`, so a payload from
+ * another edition or an older serializer still renders.
  */
 export const ProjectStatsRow = z.looseObject({
   id: uuid(),

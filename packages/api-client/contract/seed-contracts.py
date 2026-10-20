@@ -919,15 +919,26 @@ def seed():
         defaults={"type": "points", "last_used": True},
     )
     note("estimate", estimate.name, estimate_created)
+    estimate_points = {}
     for key, value in ((1, "1"), (2, "2"), (3, "3")):
-        _, point_created = EstimatePoint.objects.get_or_create(
+        point, point_created = EstimatePoint.objects.get_or_create(
             workspace=workspace,
             project=project,
             estimate=estimate,
             key=key,
             defaults={"value": value, "description": ""},
         )
+        estimate_points[key] = point
         note("estimate-point", f"{estimate.name}/{value}", point_created)
+
+    # The analytics custom chart keys the ESTIMATE_POINTS axis on
+    # `estimate_point__key`, which the backend leaves as an integer (unlike
+    # the id axes). Put the probe issue on point 2 so the contract suite
+    # proves the numeric key parses and is counted.
+    probe_point = estimate_points[2]
+    if analytics_issue.estimate_point_id != probe_point.pk:
+        Issue.objects.filter(pk=analytics_issue.pk).update(estimate_point_id=probe_point.pk)
+        note("issue-estimate-point", f"{analytics_issue.name}/{probe_point.value}", False)
 
     # Instance-admin console (NEWFRONT-502): a dedicated admin user plus
     # the InstanceAdmin link the admins/me and admins-list contracts
