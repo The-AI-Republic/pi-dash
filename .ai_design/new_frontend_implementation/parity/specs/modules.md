@@ -77,7 +77,10 @@ Three structural facts shape every screen:
    editable control renders disabled or as text, the breakdown entries do not
    write filters, and no create/edit/delete action appears; it does **not**
    mean a different layout. If a slice cannot express a difference as a prop,
-   it extends the shared component rather than forking it.
+   it extends the shared component rather than forking it. Slice ownership
+   follows the row split: C (NEWFRONT-795) builds the component tree and the
+   identity fields, L (NEWFRONT-804) adds the progress section into it, and M
+   (NEWFRONT-805) adds links; none of them may start another sidebar.
 
 **Roles.** Three project roles matter:
 
@@ -208,16 +211,21 @@ Rules:
 - The default is **Name, ascending**. The trigger shows the active key's
   label (the direction is a separate affordance; it does not change the
   trigger label).
-- **Name** — lexicographic on the module name; ties keep a stable order
-  (creation order).
+- **Name** — a natural, case-insensitive comparison: numeric runs inside a
+  name compare by value (“Module 2” before “Module 10”), not as raw
+  characters. Ties keep a stable order (creation order).
 - **Progress** — completion share, `(completed + cancelled) / total`, where
   `completed` is the server's completed-work-item count and `cancelled` its
   cancelled count. A module with no work items sorts as zero progress. Ties
   keep a stable order.
 - **Number of work items** — the server's `total_issues`, ascending.
-- **Due date** — the module's target date. Modules without a target date sort
-  after dated ones under ascending order; among themselves keep a stable
-  order.
+- **Due date** — the module's target date. **Undated modules always come
+  last in both directions**: ascending orders the dated modules by date and
+  then the undated ones; descending reverses only the dated ones and still
+  leaves the undated modules at the end, in a stable order among themselves.
+  (The old app's descending branch compares a boolean and therefore happens
+  to leave them last; the new app must keep them last by rule, not by
+  accident.)
 - **Created date** — creation order (`created_at`), which the oracle proves
   by creating modules in a deliberately non-alphabetical order.
 - **Manual** — the module's stored `sort_order`, ascending. This is the
@@ -248,21 +256,29 @@ The filters control opens a menu with its own search box. Groups, in order:
    five-then-expand, multi-select.
 5. **Start date** — relative choices _pinned_ **“1 week from now”**,
    **“2 weeks from now”**, **“1 month from now”**, **“2 months from now”**,
-   and **“Custom”**. Relative choices select modules whose start date falls
-   inside the window ending at that offset from today. Custom opens a
+   and **“Custom”**. A relative choice is a lower bound: it selects modules
+   whose start date is **on or after** today plus the offset (7, 14, 30 or
+   60 days). It is not a window and it has no upper bound. Custom opens a
    date-range dialog (§2.6.1).
 6. **Due date** — the same relative choices plus Custom, evaluated against
    the target date.
 
 Semantics:
 
-- Options inside a group are OR-ed; groups are AND-ed; the result is then
-  AND-ed with the name search.
+- **Values are OR-ed and groups are AND-ed, with one exception: tokens inside
+  a date group are AND-ed with each other.** The old app builds one
+  predicate per selected date token and ANDs them all (a module must satisfy
+  every token at once); status, lead and member values are OR-ed as usual.
+  Groups are then AND-ed and the result is AND-ed with the name search.
+  The new app keeps the per-token AND rule so a dimension with several date
+  tokens narrows rather than widens.
 - Favorites narrows to modules this user favorited.
 - Lead matches modules whose lead is a selected user.
 - Members matches modules carrying **any** selected member.
-- Date filters select modules whose corresponding date lies inside the chosen
-  range. A module with a missing date never matches a date filter.
+- A relative date choice matches when the module's corresponding date is
+  **at or after** today plus the offset (a lower bound, open-ended above).
+  A custom range matches when the date lies between the range's two ends,
+  inclusive. A module with a missing date never matches a date filter.
 - The menu's search box narrows the offered options (for example typing
   “cancel” leaves only the Cancelled status option). It does not filter the
   module list itself.
@@ -270,20 +286,39 @@ Semantics:
   marker while any filter is applied.
 - Clearing every filter restores the full (searched) list.
 
-**2.6.1 Custom date range.** The Custom entry opens a range dialog. Its
-default is **today through one month from today**. Applying the range closes
-the dialog and applies the filter; cancelling changes nothing. Choosing
-Custom again while a custom range is applied removes the custom range
-(the entry acts as a toggle), while picking any relative option replaces it.
-Relative and custom choices in the same dimension are mutually exclusive:
-one chip per dimension showing the current choice (§2.7). The applied
-range raises one chip under the relevant dimension (§2.7). The picker is the
-shared date-range control described in §12; do not build a module-only
-calendar.
+**2.6.1 Custom date range.** The Custom entry opens a range dialog whose
+default is **today through the same day-of-month next month** (e.g. Oct 20 →
+Nov 20; a month-end day rolls into the next month as the date constructor
+does). Both ends are inclusive, so unlike a relative option the custom
+choice is a **bounded window** (two tokens: on-or-after the start and
+on-or-before the end). Applying closes the dialog and writes both tokens
+into the dimension; cancelling changes nothing.
 
-Filter state is **per project and per user**, persisted in the module
-user-properties record alongside display state (§13.3). On first visit the
-defaults are: no filters, layout `list`, ordering `name` ascending.
+The dialog and the relative options share one list of tokens; every pick
+toggles its own tokens, and the combination rule above decides the result:
+
+- Applying a custom range **adds** its two tokens to whatever relative
+  choices are already selected; it does not replace them.
+- Picking a relative option while a custom range is applied also **adds**
+  that token; it does not drop the range.
+- Choosing Custom again while a custom range is applied **removes** the
+  range's tokens and leaves any relative tokens in place (the entry is a
+  toggle).
+
+Because tokens inside a date group are AND-ed (§ above), a custom range plus
+a later relative choice narrows to the intersection — in practice usually
+nothing when the relative lower bound lies beyond the range's end. The new
+app reproduces that combination rule; it must not silently turn the
+dimension into an OR. The dimension's chip lists the selected values, and
+the custom range reads as its two dates. The picker is the shared
+date-range control described in §12; do not build a module-only calendar.
+
+Filter state is **per project and per user**, persisted in the same
+personal, per-project browser record as the list's layout and ordering
+(§13.3.1). It is not part of any module's user-properties record: those are
+keyed by module id, and the list exists before any module does. On first
+visit the defaults are: no filters, layout `list`, ordering `name`
+ascending.
 
 ### 2.7 Applied-filter chips (MOD-007)
 
@@ -297,7 +332,7 @@ stable identity the oracle reads):
 - `start date` — the chosen relative label or the custom range.
 - `target date` — the same for the due date dimension.
 - `Modules` — the favorites chip; its key is the word “Modules”, not
-  “favorites”.
+  “favorites”, and its value reads _pinned_ **“Favorite”**.
 
 Behavior:
 
@@ -368,10 +403,13 @@ is 3.
 
 - Changing the layout re-renders the same module set in the new layout,
   immediately, with no refetch.
-- The choice is **persisted per project per user** and survives a reload. In
-  the new app this is the module user-properties record (§13.3), the same
-  place the detail page stores its work-item layout; the old app used a
-  browser key, which is not a contract. Do not persist it on the project.
+- The choice is **persisted per project per user** and survives a reload.
+  It lives in the modules feature's own per-project browser record
+  (§13.3.1), _not_ in the per-module user-properties record the detail page
+  uses: the list's layout is a property of the project's modules list and
+  has no module id to key on. Do not persist it on the project row, and do
+  not write it into the project's Issues display preferences (the two
+  surfaces have different layout vocabularies).
 - **Small screens** hide the desktop switcher and show a compact layout menu
   with exactly two options, _pinned_ **“List layout”** and _pinned_
   **“Gallery layout”** (list and board). Timeline is not offered on small
@@ -389,8 +427,8 @@ Each list row shows, in reading order:
    - when the module's status is **`completed`** but completion is below
      100%, an **alert** (“!”) glyph replaces the number. (`cancelled` shows
      the percentage, not the alert.)
-   The percentage uses the same completed-and-cancelled share as ordering
-   (§2.5). The ring is decorative; the accessible name carries the value.
+     The percentage uses the same completed-and-cancelled share as ordering
+     (§2.5). The ring is decorative; the accessible name carries the value.
 2. **Module name**, linking to the module detail page
    (`/{ws}/projects/{projectId}/modules/{moduleId}`). The link is a real
    anchor so copy/open semantics work.
@@ -474,14 +512,14 @@ is empty.
 Six statuses exist, with these wire values and colors (the color is the
 contract the oracle reads from the rendered pill):
 
-| Wire value | Label | Color |
-| --- | --- | --- |
-| `backlog` | Backlog | `#a3a3a2` |
-| `planned` | Planned | `#3f76ff` |
+| Wire value    | Label       | Color     |
+| ------------- | ----------- | --------- |
+| `backlog`     | Backlog     | `#a3a3a2` |
+| `planned`     | Planned     | `#3f76ff` |
 | `in-progress` | In Progress | `#f39e1f` |
-| `paused` | Paused | `#525252` |
-| `completed` | Completed | `#16a34a` |
-| `cancelled` | Cancelled | `#ef4444` |
+| `paused`      | Paused      | `#525252` |
+| `completed`   | Completed   | `#16a34a` |
+| `cancelled`   | Cancelled   | `#ef4444` |
 
 - The pill shows the current status in its color. The menu lists all six in
   that order.
@@ -516,10 +554,11 @@ A star control on each row and card toggles this user's favorite.
   **“Module added to favorites.”** and
   **“Module removed from favorites.”**.
 - Favorites also feed the `Favorites` filter (§2.6) and the shell's sidebar
-  favorites list (SHELL-057). On the user's **first-ever** module favorite,
-  the sidebar favorites section expands so the user sees the new entry. A
-  subsequent favorite does not force an already-expanded group open; it must
-  not collapse it either.
+  favorites list (SHELL-057). When the user has no module favorite yet, the
+  star collapses-then-expands: the sidebar favorites section is collapsed
+  before the first favorite and expands once the star is set, so the user
+  sees the new entry. A later favorite does not force an already-expanded
+  group open; it must not collapse it either.
 - Archived modules cannot be favorited; archiving a module removes its
   favorites server-side.
 
@@ -688,8 +727,10 @@ title (1), description (2), the date control (3), status (4), lead (5),
 members (6), cancel (7), submit (8). The date control is **third** — the old
 app renders it without a tab index so it is reached after Submit
 (NEWFRONT-330, §15). This is a bug disposition: the new app must make the
-date control tabbable in place. The project picker, when present, comes
-before the title.
+date control tabbable in place. In create mode the project picker sits
+above the title as part of the dialog's ambient header area and carries no
+position in the numbered sequence; the oracle asserts only title through
+submit, so the project picker's own index is not pinned by a scenario.
 
 **Cancel/Escape** close the dialog without writing. After a **successful**
 submit the dialog closes, a success toast shows, the list refreshes (the new
@@ -771,7 +812,7 @@ them):
     guidance.
   - **filters** — archived modules exist but filters hide them: filter
     guidance with a way to clear.
-  The three are distinct; the oracle reads which kind is showing.
+    The three are distinct; the oracle reads which kind is showing.
 - A skeleton shows while the archived list fetches. **Cold entry must not
   hang**: a direct load or reload of `/archives/modules` loads its own data
   and leaves the skeleton (old bug NEWFRONT-228 / NEWFRONT-239, owned by the
@@ -816,10 +857,17 @@ only.
 - **With the peek open (intended).** Deleting the module shown in the peek
   clears `peekModule` and returns to the plain list. The old app leaves the
   address pointing at the deleted module (NEWFRONT-329, §15).
-- **Permission failure:** the server refuses with 403; show the dedicated
-  notice _pinned_ **“You don't have permission to perform this action.”** and
-  keep the module in place.
-- Only project admins and members see Delete; guests do not.
+- **Who may actually delete.** The menu shows Delete to project admins and
+  members (guests never see it), but the server's rule is narrower: a module
+  can be deleted by a **project admin, or by the user who created the
+  module**. A member who did not create it still sees the entry, and the
+  request comes back 403. So a slice must not hide Delete from
+  non-creator members; it must handle the refusal.
+- **Permission failure:** the server refuses with 403; show an error toast
+  whose title is _pinned_ **“You don't have permission to perform this
+  action.”**, close the confirmation and keep the module in place. The
+  oracle reads the toast _title_, so the sentence must be the title, not the
+  body.
 
 ### 7.6 Restore (MOD-028)
 
@@ -897,6 +945,28 @@ The detail header (desktop) offers:
 control but **not** the filter toggle. The active layout persists per module
 and survives reload (the module user-properties record, §13.3).
 
+**URL keys on the detail route.** The detail address accepts two search
+keys, both validated by the shared issues search schema
+(`features/issues/filters/search.ts`):
+
+- **`peekIssueId`** — the open work-item peek; the detail body already
+  mounts it through `EntityListScreen`, and the modules area must keep that
+  behavior rather than adding a second peek.
+- **`layout`** — `list` or `compact` only. It selects the compact
+  presentation of the hosted issue list (the mobile/narrow variant the
+  shared entity host renders); an absent or invalid value falls back to the
+  normal presentation. It is **not** the module layout: the module layout
+  (list/board/calendar/spreadsheet/gantt) is persisted display state in
+  §13.3, never a URL key. Loading a detail URL with `layout=compact` must
+  render the same module frame and the compact list, and a link without it
+  must stay clean (the schema has no default, so the key stays out of
+  generated links).
+
+The module **list** route accepts `peekModule` (§5) and nothing else; a
+`layout` key on the list address is not read and not written. Module
+selection itself is always a path segment (`/modules/{moduleId}`), never a
+query key on the list.
+
 **Grouping rules on a module page:**
 
 - **Module** grouping is **never** offered (grouping a module by module is
@@ -910,7 +980,7 @@ Issues layout. The data scope is the module (`GET modules/{moduleId}/issues/`
 and the shared issue list contracts; the hosted `EntityListScreen` already
 does this). Menu actions, bulk actions, quick create and row rendering are
 the Issues area's and must not be forked inside the modules feature. The
-module-specific piece is the *frame* and the *empty states* (§8.3).
+module-specific piece is the _frame_ and the _empty states_ (§8.3).
 
 Viewing is open to every project role; layout and display choices are
 personal.
@@ -937,8 +1007,13 @@ the list and badge refresh. Failure shows
 attached.
 
 **Filtered-but-empty module.** When the module has work items but the active
-filters hide them all, the empty state offers to **clear the filters**
-(_pinned_ **“Clear filters”**) instead of the create/add actions.
+filters hide them all, the hosted issues list shows its own no-results state
+— still the shared Issues empty-state component, not a module copy — whose
+heading is _pinned_ **“No matching results.”** and whose only action is
+**Clear filters** (_pinned_). Create/add are **not** offered in this state
+(the module is not empty, only filtered). Clearing restores the rows and the
+“No work items to show in this Module” wording returns only when the module
+really has no work items.
 
 Guest behavior: guests see the work-item list but no Add button and no create
 or add actions in the empty state (once guest reads land, §16). Work-item
@@ -992,7 +1067,7 @@ bottom: identity and dates, work-item and points counts, progress, links.
 
 - **Status** — the status control (§4.2); inline save.
 - **Name** — editable text field. Renames persist with `PATCH
-  modules/{moduleId}/`; the page title, breadcrumb, row and switcher update.
+modules/{moduleId}/`; the page title, breadcrumb, row and switcher update.
   Empty names are refused (required).
 - **Description** — inline text editor; saving persists `description`. An
   empty description clears it.
@@ -1006,9 +1081,11 @@ bottom: identity and dates, work-item and points counts, progress, links.
   no estimate system there is **no points row at all** (not a zero row).
 
 Every field saves inline: a success toast on save, rollback with an error
-toast on failure. The sidebar shows a **loader** while the detail fetch is in
-flight (it is the same read as the page, so the first paint is a skeleton or
-spinner for the panel).
+toast on failure. Each edit sends only the field(s) the user changed (the
+shared partial `PATCH`, not a full-row replace), so an untouched description
+or member list is never rewritten. The sidebar shows a **loader** while the
+detail fetch is in flight (it is the same read as the page, so the first
+paint is a skeleton or spinner for the panel).
 
 **Permissions and archive.** Guests and read-only roles see the values but
 cannot edit: controls are disabled. **Archived modules** (only reachable
@@ -1024,16 +1101,26 @@ the field and show the error.
 A collapsible section below the fields, with a completion percentage badge
 in its header.
 
-**Open/closed default.** The section opens by default **only when the module
-is active**: it has a start date on or before today and a target date on or
-after the start date. Otherwise it renders collapsed with an explanatory
-notice instead of a chart:
+**Open/closed default.** Compute the section's default open state from the
+**loaded** module record, not from the pre-fetch placeholder: it opens by
+default **only when the dates are usable**, meaning a start date **on or
+before today** and a target date **not before the start**. Otherwise it
+renders collapsed with an explanatory notice instead of a chart:
 
-- start date in the future — _pinned_ **“This module isn't active yet.”**
-- missing or invalid dates (either side absent, or start after target) —
-  _pinned_ **“Invalid date. Please enter valid date.”**
+- **both dates present** — _pinned_ **“This module isn't active yet.”**
+  This covers a start in the future **and** a start after the target.
+- **either date absent** — _pinned_ **“Invalid date. Please enter valid
+  date.”**
 
-In the notice states there is no chart and no measure selector.
+The notice text is chosen by **whether the record carries both dates**, not
+by date arithmetic. A start-after-target module therefore shows the
+“isn't active yet” sentence while staying collapsed; do not invent a third
+message. A module whose dates were just cleared shows the invalid-dates
+sentence. In the notice states the header shows only the section title and
+the notice (no disclosure chevron and no header percentage), the body is
+absent, and there is no chart and no measure selector, so the breakdown
+tabs do not mount — the oracle reads “closed” by the absence of visible
+tabs, not by an aria-expanded value.
 
 **Burndown chart.** When active, the section shows a burndown of completion
 over the module's date window.
@@ -1050,7 +1137,9 @@ over the module's date window.
 - The header percentage follows the selected measure's completed share.
 
 **Breakdown tabs.** Three tabs, _pinned_ labels **“States”**,
-**“Assignees”**, **“Labels”**. Each tab shows **its own** breakdown:
+**“Assignees”**, **“Labels”**. The **default tab on first view of a module is
+Assignees** (the tab order in the strip is States, Assignees, Labels; the
+default is a separate choice). Each tab shows **its own** breakdown:
 
 - **States** → the module's work items grouped by **state group** (Backlog,
   Unstarted, Started, Completed, Cancelled as present in the module's data),
@@ -1232,7 +1321,9 @@ does; the modules area does not register any other module shortcut.
   the query, second Escape collapses the field (§2.4).
 - The create and edit dialogs have a **logical tab order** across fields and
   actions (title → description → date → status → lead → members → cancel →
-  submit; project first in create), with the date control tabbable in place.
+  submit), with the date control tabbable in place. In create mode the
+  project picker sits above the title and is outside that numbered
+  sequence, so its own index is not part of the assertion.
 - The only module shortcut is the palette sequence **`nm`** (§10.2). No other
   single-key or two-key module shortcut exists: ordinary letters, `Shift+M`
   on the modules list, and similar keypresses open nothing and change no
@@ -1277,34 +1368,34 @@ it and do not build a stub.** If a piece cannot express a module need with a
 prop, the modules slice adds the prop/callback to the owner (with the owner's
 issues notified) rather than writing a module-only copy.
 
-| Module surface | Existing `apps/web_new` piece | Owner / sibling issue | How the modules area uses it |
-| --- | --- | --- | --- |
-| Module detail work-item body | `features/issues/list/EntityListScreen.tsx` (already mounted by `routes/$ws/_gated/projects/$projectId/modules/$moduleId.tsx`) with `features/issues/layouts/IssuesLayoutRoot.tsx` | Issues: list 619 (Done), spreadsheet 620 (Done), calendar 621 (In Review), kanban 622/623, gantt/timeline 624 (Done) | Mount the shared entity host with `scope: "module"` and `moduleId`. Do not re-render layouts or rows. Slice J (NEWFRONT-802) owns the module **frame** around it (breadcrumbs, switcher, badge, analytics trigger, sidebar) and the empty states (slice K). |
-| Layout switcher, layout kinds, icons | `features/issues/layouts/kinds.ts`, `features/issues/components/LayoutSwitcher.tsx`, `LayoutIcon.tsx`, `layoutMenuItems.tsx`, `dropdowns/LayoutPicker.tsx` | Issues 615/616 + layout slices | Use the same kinds (`list`, `board`/kanban, `calendar`, `spreadsheet`, `gantt`) and the same switcher. The **modules list** (slice A) passes only list/board/timeline and the compact menu with “List layout”/“Gallery layout”; the **detail** (slice J) passes the five (mobile three). No module-specific switcher. |
-| Display options | `features/issues/display/DisplayControl.tsx`, `DisplayPanel.tsx`, `matrix.ts` | Issues 618 (Done) | Detail header mounts the display control with the module context; the matrix supplies per-layout entries. Modules passes “Module grouping never offered, Cycle grouping follows the flag”; do not edit the matrix for modules — supply the excluded grouping. |
-| Work-item filters and filter chips | `features/issues/filters/rich/*` (`IssueFilters`, `useRichFilters`, `expression`, `legacyDimensions`), `filters/shared` | Issues 626–629 (Done) | Detail filter row and the list it filters. Breakdown clicks (slice L) write into this filter instance. The **modules list's own** filters (§2.6) are a separate, lighter client-side filter over modules — build it in the modules feature from kit primitives; do not reuse issue filter state. |
-| Dropdown primitives (menu, combobox, popover, searchable lists, expanders) | `@pidash/kit` (`Menu`, `Popover`, `Combobox`, `Tooltip`, `Switch`) and the patterns of `shared/pickers/`, `features/issues/dropdowns/` | Issues 615/616 | The module ordering menu, filters menu, custom-date dialog trigger and row quick menu are built from kit primitives in the modules feature. Do **not** import issue dropdowns for module-specific menus. |
-| Member picker (lead, members, filters) | `shared/pickers/MemberPicker.tsx`, `members.ts` | Issues 615 | Reuse for the dialog's lead/members and the sidebar. The list filter's “You” first, five-then-expand group is the filter menu's own combinator built on the same member source. |
-| State/status picker | `shared/pickers/StatePicker.tsx` (workflow states) vs module statuses | Issues 615 | **Not the issue state picker**: module status is its own six-value enum (§4.2). Build the module status control in the modules feature from kit `Menu` + the color tokens. Do not reuse issue state picker or state groups for module status. |
-| Module picker (palette, work-item membership) | `shared/pickers/ModulePicker.tsx`, `modules.ts`, `reference.ts` | Issues 615 + shell palette 292/293/294 | Palette jump/“Add to modules” and the work-item picker use this. The modules area does not rebuild it. Pre-selection comes from the work item's module ids. |
-| Project picker (create dialog) | `shared/pickers/ProjectPicker.tsx`, `projects.ts` | Issues 615 | Create dialog's project field, restricted to projects where the user may create modules. |
-| Date range picker | `features/issues/dropdowns/DateRangePicker.tsx`, `calendar.ts`, `shared/pickers/*` date pieces | Issues 616 | Row/card inline dates, dialog dates, sidebar dates and the custom filter range. Same clearing semantics described in §4.1/§2.6.1. |
-| Work-item create modal | `features/issues/components/WorkItemCreateDialog.tsx` / `WorkItemCreateEntry.tsx`, `create/*` | Issues create slice (630) and list slice 619 | Detail header Add and empty-state “Create work item” open this with module scope. Do not build a module work-item form. |
-| Add-existing picker | `features/issues/list/AddExistingModal.tsx` | Issues list 619 | Empty-state “Add existing work item”; on confirm the modules slice calls `POST modules/{moduleId}/issues/`. |
-| Detail sidebar properties (fields, descriptions, dates, lead/members patterns) | `features/issues/detail/*` (title/description fields, save pipeline), `shared/pickers` | Issues 639 (Done), 640, 642 | The module sidebar is **its own** component in the modules feature (module fields differ from issue fields), but it uses the same field, picker and save-pipeline patterns, the shared date range and member pickers, and the kit inputs. Do not import issue-detail components that are keyed to issues. |
-| Module sidebar and progress | New: `features/modules/*` (one component tree) | This area (slice L) | One sidebar used by the detail page and the peek with a read-only flag (§1.3). Progress (burndown + breakdowns) is a section of it, not a separate page. Nothing in the Issues feature computes module burndowns; reuse kit chart primitives and the server's chart data. |
-| Peek panel shell | `shared/shell/PeekPanel.tsx` | Issues 646 (`shared/shell`, merged) | Modules mount the shell (close control, Escape, eyebrow/actions, body slot) and put the shared sidebar in its body. Use the read-only variant of the sidebar. The peek's URL key (`peekModule`) and param handling are the module route's. |
-| Analytics scoped dialog | `features/issues/analytics/AnalyticsEntry.tsx` and the scoped dialog from NEWFRONT-738 | Analytics 738; area gate 739 | The module detail mounts the trigger with module scope; the analytics area owns the dialog. No reverse edge is needed (analytics already records the module trigger as external). |
-| Archives shell, tabs, titles, badges | Archives shell from NEWFRONT-698 | Archives: 698 (shell) | The modules **tab** (`/archives/modules`) mounts inside the archives shell. Modules do not render a second tab strip or archives chrome. |
-| Archived-modules screen, restored row behavior, archived peek | NEWFRONT-702 (ARCH-020–025) | Archives: 702 is the authority | **Do not fork.** MOD-026–028 and MOD-027 consume it. If the modules oracle needs a module-specific tweak, extend NEWFRONT-702's component via props; never mount a modules-owned copy. |
-| Project features switch (modules) | `features/project-features/*` | Project settings 582 (PSET-046) | The modules area defines effects (§10.1), not the switch. The gate's Manage-features link targets the project features page. |
-| Command palette registry, sequences, contextual entries | `shared/commands/{registry,shortcuts,store}.ts`, `shared/shell/contextual/{modules.ts,workItems.ts,hooks}.ts` | Shell 292/293/294 (Done) + the palette entity-context hook | Slice N registers “New module” + `nm` and “Open a module”; it wires the module context (status/member/copy) through the existing contextual hook. Fix the `nm` state bug there, not in a module-local key handler. |
-| Sidebar favorites | `features/sidebar/favoriteLinks.ts`, `SidebarFavoritesGroup` | Shell favorites (SHELL-057) | Favorite writes go through `user-favorite-modules/`; the sidebar reads favorites from its own source. The first-ever favorite expands the group (§4.4) via the shell's favorites state, not a module-specific sidebar. |
-| Toasts, clipboard, document head, access wall | `shared/shell/toaster.ts`, `shared/shell/clipboard.ts`, `shared/shell/document.tsx` (`useDocumentHead`), project access wall in the project shell | Shell (merged) | Use the shared helpers for toasts, copy, the tab title (§2.1, §8.1) and the access wall (§10.3). |
-| Route validation and prefetch | `routes/$ws/_gated/projects/$projectId/modules/{index,$moduleId}.tsx`, `features/issues/filters/search.ts` (`parseIssueSearch`), `features/issues/list/prefetch.ts` | Issues list 619 + modules slices A/J | The detail host already validates the issue search and prefetches; slice J adds module data (detail, sidebar) and keeps the existing peek key handling. The list route (slice A) replaces the `TabAreaMount` and adds `peekModule` to its search schema. |
-| Module user-properties record | `features/issues/prefs/entities.ts` (`scope: "module"` → `updateModuleUserProperties`), `displayPrefs.ts`, `prefsQuery.ts` | Issues prefs (merged) | Module list layout/order/filters and detail layout/display live here per §13.3. Do not add a module-only preferences store. |
-| Coexistence and route ownership | `.github/newfront-path-extras.json`, `apps/web_new/migrated-routes.json`, NEWFRONT-528 | Coexistence (F-09) | The area gate adds the module path prefixes to the migrated routes when the area is green. Slices touch only their own feature/route files. |
-| Contracts | `packages/api-client/src/contracts/modules.ts` (thin today: list/update) | Contracts 792 | NEWFRONT-792 extends the zod schemas and helpers for every endpoint in §13 (create/detail/issues/links/favorites/archive/archived/user-properties). Modules slices consume those helpers; they do not hand-write request shapes. |
+| Module surface                                                                 | Existing `apps/web_new` piece                                                                                                                                                                                                    | Owner / sibling issue                                                                                                                                                      | How the modules area uses it                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Module detail work-item body                                                   | `features/issues/list/EntityListScreen.tsx` (already mounted by `routes/$ws/_gated/projects/$projectId/modules/$moduleId.tsx`) with `features/issues/layouts/IssuesLayoutRoot.tsx`                                               | Issues: list 619 (Done), spreadsheet 620 (Done), calendar 621 (In Review), kanban 622/623, gantt/timeline 624 (Done)                                                       | Mount the shared entity host with `scope: "module"` and `moduleId`. Do not re-render layouts or rows. Slice J (NEWFRONT-802) owns the module **frame** around it (breadcrumbs, switcher, badge, analytics trigger and the mount point for the sidebar) and the empty states (slice K, NEWFRONT-803).                                                                                                                                              |
+| Layout switcher, layout kinds, icons                                           | `features/issues/layouts/kinds.ts`, `features/issues/components/LayoutSwitcher.tsx`, `features/issues/components/LayoutIcon.tsx`, `features/issues/components/layoutMenuItems.tsx`, `features/issues/dropdowns/LayoutPicker.tsx` | Issues 615/616 + layout slices                                                                                                                                             | Use the same kinds (`list`, `board`/kanban, `calendar`, `spreadsheet`, `gantt`) and the same switcher. The **modules list** (slice A) passes only list/board/timeline and the compact menu with “List layout”/“Gallery layout”; the **detail** (slice J) passes the five (mobile three). No module-specific switcher.                                                                                                                             |
+| Display options                                                                | `features/issues/display/DisplayControl.tsx`, `features/issues/display/DisplayPanel.tsx`, `features/issues/display/matrix.ts`                                                                                                    | Issues 618 (Done)                                                                                                                                                          | Detail header mounts the display control with the module context; the matrix supplies per-layout entries. Modules passes “Module grouping never offered, Cycle grouping follows the flag”; do not edit the matrix for modules — supply the excluded grouping.                                                                                                                                                                                     |
+| Work-item filters and filter chips                                             | `features/issues/filters/rich/*` (`IssueFilters`, `useRichFilters`, `expression`, `legacyDimensions`), `filters/shared`                                                                                                          | Issues 626–629 (Done)                                                                                                                                                      | Detail filter row and the list it filters. Breakdown clicks (slice L) write into this filter instance. The **modules list's own** filters (§2.6) are a separate, lighter client-side filter over modules — build it in the modules feature from kit primitives; do not reuse issue filter state.                                                                                                                                                  |
+| Dropdown primitives (menu, combobox, popover, searchable lists, expanders)     | `@pidash/kit` (`Menu`, `Popover`, `Combobox`, `Tooltip`, `Switch`) and the patterns of `shared/pickers/`, `features/issues/dropdowns/`                                                                                           | Issues 615/616                                                                                                                                                             | The module ordering menu, filters menu, custom-date dialog trigger and row quick menu are built from kit primitives in the modules feature. Do **not** import issue dropdowns for module-specific menus.                                                                                                                                                                                                                                          |
+| Member picker (lead, members, filters)                                         | `shared/pickers/MemberPicker.tsx`, `members.ts`                                                                                                                                                                                  | Issues 615                                                                                                                                                                 | Reuse for the dialog's lead/members and the sidebar. The list filter's “You” first, five-then-expand group is the filter menu's own combinator built on the same member source.                                                                                                                                                                                                                                                                   |
+| State/status picker                                                            | `shared/pickers/StatePicker.tsx` (workflow states) vs module statuses                                                                                                                                                            | Issues 615                                                                                                                                                                 | **Not the issue state picker**: module status is its own six-value enum (§4.2). Build the module status control in the modules feature from kit `Menu` + the color tokens. Do not reuse issue state picker or state groups for module status.                                                                                                                                                                                                     |
+| Module picker (palette, work-item membership)                                  | `shared/pickers/ModulePicker.tsx`, `modules.ts`, `reference.ts`                                                                                                                                                                  | Issues 615 + shell palette 292/293/294                                                                                                                                     | Palette jump/“Add to modules” and the work-item picker use this. The modules area does not rebuild it. Pre-selection comes from the work item's module ids.                                                                                                                                                                                                                                                                                       |
+| Project picker (create dialog)                                                 | `shared/pickers/ProjectPicker.tsx`, `projects.ts`                                                                                                                                                                                | Issues 615                                                                                                                                                                 | Create dialog's project field, restricted to projects where the user may create modules.                                                                                                                                                                                                                                                                                                                                                          |
+| Date range picker                                                              | `features/issues/dropdowns/DateRangePicker.tsx`, `features/issues/dropdowns/calendar.ts`, `shared/pickers/*` date pieces                                                                                                         | Issues 616                                                                                                                                                                 | Row/card inline dates, dialog dates, sidebar dates and the custom filter range. Same clearing semantics described in §4.1/§2.6.1.                                                                                                                                                                                                                                                                                                                 |
+| Work-item create modal                                                         | `features/issues/components/WorkItemCreateDialog.tsx` / `WorkItemCreateEntry.tsx`, `create/*`                                                                                                                                    | Issues create slice (630) and list slice 619                                                                                                                               | Detail header Add and empty-state “Create work item” open this with module scope. Do not build a module work-item form.                                                                                                                                                                                                                                                                                                                           |
+| Add-existing picker                                                            | `features/issues/list/AddExistingModal.tsx`                                                                                                                                                                                      | Issues list 619                                                                                                                                                            | Empty-state “Add existing work item”; on confirm the modules slice calls `POST modules/{moduleId}/issues/`.                                                                                                                                                                                                                                                                                                                                       |
+| Detail sidebar properties (fields, descriptions, dates, lead/members patterns) | `features/issues/detail/*` (title/description fields, save pipeline), `shared/pickers`                                                                                                                                           | Issues 639 (Done), 640, 642                                                                                                                                                | The module sidebar is **its own** component in the modules feature (module fields differ from issue fields), but it uses the same field, picker and save-pipeline patterns, the shared date range and member pickers, and the kit inputs. Do not import issue-detail components that are keyed to issues.                                                                                                                                         |
+| Module sidebar and progress                                                    | New: `features/modules/*` (one component tree)                                                                                                                                                                                   | This area: slice C (NEWFRONT-795) builds the sidebar shell and identity fields (MOD-033); slice L (NEWFRONT-804) adds the progress section inside that same tree (MOD-034) | **One** sidebar used by the detail page and the peek with a read-only flag (§1.3). C owns the component, its fields and the read-only prop; L adds the progress section as a child of it and must not create a second sidebar, a peek-only stub or a separate progress page. Nothing in the Issues feature computes module burndowns; reuse kit chart primitives and the server's chart data. Slice M (NEWFRONT-805) adds links to the same tree. |
+| Peek panel shell                                                               | `shared/shell/PeekPanel.tsx`                                                                                                                                                                                                     | Issues 646 (`shared/shell`, merged)                                                                                                                                        | Modules mount the shell (close control, Escape, eyebrow/actions, body slot) and put the shared sidebar in its body. Use the read-only variant of the sidebar. The peek's URL key (`peekModule`) and param handling are the module route's.                                                                                                                                                                                                        |
+| Analytics scoped dialog                                                        | `features/issues/analytics/AnalyticsEntry.tsx` and the scoped dialog from NEWFRONT-738                                                                                                                                           | Analytics 738; area gate 739                                                                                                                                               | The module detail mounts the trigger with module scope; the analytics area owns the dialog. No reverse edge is needed (analytics already records the module trigger as external).                                                                                                                                                                                                                                                                 |
+| Archives shell, tabs, titles, badges                                           | Archives shell from NEWFRONT-698                                                                                                                                                                                                 | Archives: 698 (shell)                                                                                                                                                      | The modules **tab** (`/archives/modules`) mounts inside the archives shell. Modules do not render a second tab strip or archives chrome.                                                                                                                                                                                                                                                                                                          |
+| Archived-modules screen, restored row behavior, archived peek                  | NEWFRONT-702 (ARCH-020–025)                                                                                                                                                                                                      | Archives: 702 is the authority                                                                                                                                             | **Do not fork.** MOD-026–028 and MOD-027 consume it. If the modules oracle needs a module-specific tweak, extend NEWFRONT-702's component via props; never mount a modules-owned copy.                                                                                                                                                                                                                                                            |
+| Project features switch (modules)                                              | `features/project-features/*`                                                                                                                                                                                                    | Project settings 582 (PSET-046)                                                                                                                                            | The modules area defines effects (§10.1), not the switch. The gate's Manage-features link targets the project features page.                                                                                                                                                                                                                                                                                                                      |
+| Command palette registry, sequences, contextual entries                        | `shared/commands/{registry,shortcuts,store}.ts`, `shared/shell/contextual/{modules.ts,workItems.ts,hooks}.ts`                                                                                                                    | Shell 292/293/294 (Done) + the palette entity-context hook                                                                                                                 | Slice N registers “New module” + `nm` and “Open a module”; it wires the module context (status/member/copy) through the existing contextual hook. Fix the `nm` state bug there, not in a module-local key handler.                                                                                                                                                                                                                                |
+| Sidebar favorites                                                              | `features/sidebar/favoriteLinks.ts`, `SidebarFavoritesGroup`                                                                                                                                                                     | Shell favorites (SHELL-057)                                                                                                                                                | Favorite writes go through `user-favorite-modules/`; the sidebar reads favorites from its own source. The first-ever favorite expands the group (§4.4) via the shell's favorites state, not a module-specific sidebar.                                                                                                                                                                                                                            |
+| Toasts, clipboard, document head, access wall                                  | `shared/shell/toaster.ts`, `shared/shell/clipboard.ts`, `shared/shell/document.tsx` (`useDocumentHead`), project access wall in the project shell                                                                                | Shell (merged)                                                                                                                                                             | Use the shared helpers for toasts, copy, the tab title (§2.1, §8.1) and the access wall (§10.3).                                                                                                                                                                                                                                                                                                                                                  |
+| Route validation and prefetch                                                  | `routes/$ws/_gated/projects/$projectId/modules/{index,$moduleId}.tsx`, `features/issues/filters/search.ts` (`parseIssueSearch`), `features/issues/list/prefetch.ts`                                                              | Issues list 619 + modules slices A/J                                                                                                                                       | The detail host already validates the issue search and prefetches; slice J adds module data (detail, sidebar) and keeps the existing peek key handling. The list route (slice A) replaces the `TabAreaMount` and adds `peekModule` to its search schema.                                                                                                                                                                                          |
+| Module user-properties record (detail only)                                    | `features/issues/prefs/entities.ts` (`scope: "module"` → `updateModuleUserProperties`), `displayPrefs.ts`, `prefsQuery.ts`                                                                                                       | Issues prefs (merged)                                                                                                                                                      | The **detail** work-item layout/display and breakdown filters live here per §13.3. The **modules list**'s layout/order/filters do not: it has no module id, so it uses the modules feature's own per-project browser record (§13.3.1). Do not call the per-module endpoint from the list.                                                                                                                                                         |
+| Coexistence and route ownership                                                | `.github/newfront-path-extras.json`, `apps/web_new/migrated-routes.json`, NEWFRONT-528                                                                                                                                           | Coexistence (F-09)                                                                                                                                                         | The area gate adds the module path prefixes to the migrated routes when the area is green. Slices touch only their own feature/route files.                                                                                                                                                                                                                                                                                                       |
+| Contracts                                                                      | `packages/api-client/src/contracts/modules.ts` (thin today: list/update)                                                                                                                                                         | Contracts 792                                                                                                                                                              | NEWFRONT-792 extends the zod schemas and helpers for every endpoint in §13 (create/detail/issues/links/favorites/archive/archived/user-properties). Modules slices consume those helpers; they do not hand-write request shapes.                                                                                                                                                                                                                  |
 
 **Module-sidebar rule (repeated because it is load-bearing).** The detail
 page and the peek mount the **same** module sidebar component and the same
@@ -1315,20 +1406,23 @@ link actions) is a prop of the shared component.
 
 ## 13. API reference (MOD-001–043)
 
-Base: `/api/workspaces/{ws}/projects/{projectId}`. JSON bodies; reads need
-an authenticated project member. DRF error shapes: a field map for serializer
-errors, or `{"error": "<sentence>"}` for explicit checks.
+Base: `/api/workspaces/{ws}/projects/{projectId}`. JSON bodies; every call
+needs an authenticated session with a role on the project. The module
+**list** is open to guests, the **detail** and the module work-item read are
+admin/member only today (NEWFRONT-334), and every write needs admin or
+member. DRF error shapes: a field map for serializer errors, or
+`{"error": "<sentence>"}` for explicit checks.
 
 ### 13.1 Module CRUD
 
-| Method | Path | Body / params | Success | Errors | Rows |
-| --- | --- | --- | --- | --- | --- |
-| `GET` | `/modules/` | — | 200, array of module rows (non-archived only) | 403 non-member/anon | 001, 005–008, 011, 012, 019, 020 |
-| `POST` | `/modules/` | `{"name", "description"?, "start_date"?, "target_date"?, "status"?, "lead_id"?, "member_ids"?}` | 201, created row | 400 duplicate name (`Module with this name already exists`), 400 start > target, 400 field errors | 003, 009, 022, 023, 037 |
-| `GET` | `/modules/{moduleId}/` | — | 200, detail: base fields + `total_issues`, `completed_issues`, `cancelled_issues`, `started_issues`, `unstarted_issues`, `backlog_issues`, `total_estimate_points`, `completed_estimate_points`, `is_favorite`, `sort_order`, `lead_id`, `member_ids`, `archived_at`, `link_module`, `sub_issues`, `distribution` `{assignees, labels, completion_chart}`, `estimate_distribution` `{}` (points project: `{assignees, labels, completion_chart}`) | 404 unknown or archived (`Module not found`); 403 today for guests (NEWFRONT-334) | 019, 029, 032–035, 038, 039 |
-| `PATCH` | `/modules/{moduleId}/` | any of `name`, `description`, `start_date`, `target_date`, `status`, `lead_id`, `member_ids` (partial) | 200, updated row | 400 archived module, 400 start > target, 400 duplicate name, 404 | 013–016, 024, 026, 033 |
-| `PUT` | `/modules/{moduleId}/` | full row | 200 | same as PATCH | 024 (only if the edit form uses a full replace; partial PATCH is fine) |
-| `DELETE` | `/modules/{moduleId}/` | — | 204 | 403 non-editor / not creator, 404 | 017, 025 |
+| Method   | Path                   | Body / params                                                                                          | Success                                                                                                                                                                                                                                                                                                                                                                                                                                           | Errors                                                                                            | Rows                                                                   |
+| -------- | ---------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `GET`    | `/modules/`            | —                                                                                                      | 200, array of module rows (non-archived only)                                                                                                                                                                                                                                                                                                                                                                                                     | 403 anon (guests may read)                                                                        | 001, 005–008, 011, 012, 019, 020                                       |
+| `POST`   | `/modules/`            | `{"name", "description"?, "start_date"?, "target_date"?, "status"?, "lead_id"?, "member_ids"?}`        | 201, created row                                                                                                                                                                                                                                                                                                                                                                                                                                  | 400 duplicate name (`Module with this name already exists`), 400 start > target, 400 field errors | 003, 009, 022, 023, 037                                                |
+| `GET`    | `/modules/{moduleId}/` | —                                                                                                      | 200, detail: base fields + `total_issues`, `completed_issues`, `cancelled_issues`, `started_issues`, `unstarted_issues`, `backlog_issues`, `total_estimate_points`, `completed_estimate_points`, `is_favorite`, `sort_order`, `lead_id`, `member_ids`, `archived_at`, `link_module`, `sub_issues`, `distribution` `{assignees, labels, completion_chart}`, `estimate_distribution` `{}` (points project: `{assignees, labels, completion_chart}`) | 404 unknown or archived (`Module not found`); 403 today for guests (NEWFRONT-334)                 | 019, 029, 032–035, 038, 039                                            |
+| `PATCH`  | `/modules/{moduleId}/` | any of `name`, `description`, `start_date`, `target_date`, `status`, `lead_id`, `member_ids` (partial) | 200, updated row                                                                                                                                                                                                                                                                                                                                                                                                                                  | 400 archived module, 400 start > target, 400 duplicate name, 404                                  | 013–016, 024, 026, 033                                                 |
+| `PUT`    | `/modules/{moduleId}/` | full row                                                                                               | 200                                                                                                                                                                                                                                                                                                                                                                                                                                               | same as PATCH                                                                                     | 024 (only if the edit form uses a full replace; partial PATCH is fine) |
+| `DELETE` | `/modules/{moduleId}/` | —                                                                                                      | 204                                                                                                                                                                                                                                                                                                                                                                                                                                               | 403 non-editor / not creator, 404                                                                 | 017, 025                                                               |
 
 Module row fields the client relies on: `id`, `project_id`, `name`,
 `description`, `description_html`, `start_date`, `target_date`, `status`,
@@ -1339,55 +1433,79 @@ Module row fields the client relies on: `id`, `project_id`, `name`,
 
 ### 13.2 Work items in a module
 
-| Method | Path | Body / params | Success | Rows |
-| --- | --- | --- | --- | --- |
-| `GET` | `/modules/{moduleId}/issues/` | the shared issue list params (filters, cursor, layout grouping) | 200, paged issue list | 030, 031, 034 |
-| `POST` | `/modules/{moduleId}/issues/` | `{"issues": ["<issueId>", ...]}` | 200/201, attached | 031 |
-| `DELETE` | `/modules/{moduleId}/issues/{issueId}/` | — | 204 | 031 (removal from a module, used by the issues area) |
-| `POST` | `/issues/{issueId}/modules/` | `{"modules": ["<moduleId>"], "removed_modules": ["<moduleId>"]}` | 200 `{"message": "success"}` | 037 (work-item picker) |
+| Method   | Path                                    | Body / params                                                    | Success                      | Rows                                                 |
+| -------- | --------------------------------------- | ---------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------- |
+| `GET`    | `/modules/{moduleId}/issues/`           | the shared issue list params (filters, cursor, layout grouping)  | 200, paged issue list        | 030, 031, 034                                        |
+| `POST`   | `/modules/{moduleId}/issues/`           | `{"issues": ["<issueId>", ...]}`                                 | 200/201, attached            | 031                                                  |
+| `DELETE` | `/modules/{moduleId}/issues/{issueId}/` | —                                                                | 204                          | 031 (removal from a module, used by the issues area) |
+| `POST`   | `/issues/{issueId}/modules/`            | `{"modules": ["<moduleId>"], "removed_modules": ["<moduleId>"]}` | 200 `{"message": "success"}` | 037 (work-item picker)                               |
 
 The issue list and work-item endpoints' full contracts are the Issues
 area's; this spec only fixes the module-scoped paths and the attach body.
 
-### 13.3 Display state (module user properties)
+### 13.3 Detail display state (module user properties)
 
-| Method | Path | Body | Rows |
-| --- | --- | --- | --- |
-| `GET` | `/modules/{moduleId}/user-properties/` | — → the record | 011, 030, 034, 039 |
-| `PATCH` | `/modules/{moduleId}/user-properties/` | partial `{filters, display_filters, display_properties, rich_filters}` | 011, 030, 034 |
+These records are keyed by `(module, user)` and can only carry state that
+belongs to **one module** — the detail page's work-item list, its filters
+and the breakdown measure. They cannot carry the project's modules-list
+state (see §13.3.1).
 
-Display rules used here:
+| Method  | Path                                   | Body                                                                   | Rows          |
+| ------- | -------------------------------------- | ---------------------------------------------------------------------- | ------------- |
+| `GET`   | `/modules/{moduleId}/user-properties/` | — → the record                                                         | 030, 034, 039 |
+| `PATCH` | `/modules/{moduleId}/user-properties/` | partial `{filters, display_filters, display_properties, rich_filters}` | 030, 034      |
 
-- The modules **list** persists layout (`display_filters.layout` =
-  `list|board|timeline`), ordering key and direction, and its client filters
-  in this record for the project's module context. (The old app used local
-  storage keys; the new app keeps user-properties as the source of truth —
-  a deliberate architecture change, not a behavior difference.)
-- The **detail** persists its work-item layout/display in the same record,
-  via the shared Issues prefs code (`scope: "module"`).
+- The **detail** persists its work-item layout/display in this record via
+  the shared Issues prefs code (`scope: "module"`). `display_filters.order_by`
+  defaults to `-created_at` on the server's record; the detail list uses it
+  as the server contract does, not the modules-list ordering (§2.5).
+- Breakdown-interaction filters (assignee, label, state group) write the
+  detail's `rich_filters` here (§9.2).
 - Active breakdown tab: a per-module browser key (e.g.
   `module-analytics-tab-{moduleId}`), since it is view-only UI state.
 - Sidebar collapsed: a per-user browser key (or the shared sidebar
   preference), persisted across reloads.
-- All of these are **personal**: never write them to the project or the
-  module row.
+- Every field is **personal**: never write it to the project or the module
+  row.
+
+### 13.3.1 List display state (project-scoped)
+
+The modules **list** is project-scoped, so its layout
+(`list|board|timeline`), ordering key and direction, and client-side filter
+selection cannot live in a per-module record. They are personal display
+state, persisted **per user per project in the modules feature's own
+browser storage**, initialised to the §3.4/§2.5/§2.6 defaults and restored
+on reload. The exact key name and encoding are the slice's to choose; the
+constraints are: one selection per project (changing projects must not
+leak it), no server request for these values, nothing written to the
+project row, and nothing written through a module's user-properties
+endpoint. Keep the modules list independent of the project's Issues display
+preferences — the two use different layout vocabularies and must not
+overwrite each other.
+
+The archived-modules screen keeps its own search/order/filter selection,
+separate from the active list's, so narrowing one never changes the other.
+
+If a later issue decides to move this state server-side, it must add a
+project-scoped contract (not reuse the per-module record) and record the
+change here; slices must not invent one.
 
 ### 13.4 Favorites
 
-| Method | Path | Body | Success | Rows |
-| --- | --- | --- | --- | --- |
-| `POST` | `/user-favorite-modules/` | `{"module": "<moduleId>"}` | 204 | 016 |
-| `DELETE` | `/user-favorite-modules/{moduleId}/` | — | 204 | 016 |
-| `GET` | `/user-favorite-modules/` | — | 200, current user's module favorites (the shell reads favorites through its own contract) | 016 |
+| Method   | Path                                 | Body                       | Success                                                                                   | Rows |
+| -------- | ------------------------------------ | -------------------------- | ----------------------------------------------------------------------------------------- | ---- |
+| `POST`   | `/user-favorite-modules/`            | `{"module": "<moduleId>"}` | 204                                                                                       | 016  |
+| `DELETE` | `/user-favorite-modules/{moduleId}/` | —                          | 204                                                                                       | 016  |
+| `GET`    | `/user-favorite-modules/`            | —                          | 200, current user's module favorites (the shell reads favorites through its own contract) | 016  |
 
 ### 13.5 Links
 
-| Method | Path | Body | Success | Rows |
-| --- | --- | --- | --- | --- |
-| `GET` | `/modules/{moduleId}/module-links/` | — | 200, array `{id, url, title, created_at, created_by, …}` newest first | 035 |
-| `POST` | `/modules/{moduleId}/module-links/` | `{"url", "title"?}` | 201, created link | 035 |
-| `PATCH` | `/modules/{moduleId}/module-links/{linkId}/` | partial `{url, title}` | 200 | 035 |
-| `DELETE` | `/modules/{moduleId}/module-links/{linkId}/` | — | 204 | 035 |
+| Method   | Path                                         | Body                   | Success                                                               | Rows |
+| -------- | -------------------------------------------- | ---------------------- | --------------------------------------------------------------------- | ---- |
+| `GET`    | `/modules/{moduleId}/module-links/`          | —                      | 200, array `{id, url, title, created_at, created_by, …}` newest first | 035  |
+| `POST`   | `/modules/{moduleId}/module-links/`          | `{"url", "title"?}`    | 201, created link                                                     | 035  |
+| `PATCH`  | `/modules/{moduleId}/module-links/{linkId}/` | partial `{url, title}` | 200                                                                   | 035  |
+| `DELETE` | `/modules/{moduleId}/module-links/{linkId}/` | —                      | 204                                                                   | 035  |
 
 Scheme defaulting happens on the client before submit (`https?://` preserved,
 otherwise prefix `http://`); the server also validates the URL. A duplicate
@@ -1395,86 +1513,87 @@ URL in the same module is refused by the server.
 
 ### 13.6 Archive and archived reads
 
-| Method | Path | Body | Success | Errors | Rows |
-| --- | --- | --- | --- | --- | --- |
-| `POST` | `/modules/{moduleId}/archive/` | — | 200 `{"archived_at": "<iso>"}` | 400 unless completed/cancelled | 026 |
-| `DELETE` | `/modules/{moduleId}/archive/` | — | 204 | 404 | 028 |
-| `GET` | `/archived-modules/` | — | 200, archived module rows (favorites-first order, then created desc) | 403 | 027 |
-| `GET` | `/archived-modules/{moduleId}/` | — | 200, archived detail (same detail shape) | 404 | 027, 019 (archived peek) |
+| Method   | Path                            | Body | Success                                                              | Errors                         | Rows                     |
+| -------- | ------------------------------- | ---- | -------------------------------------------------------------------- | ------------------------------ | ------------------------ |
+| `POST`   | `/modules/{moduleId}/archive/`  | —    | 200 `{"archived_at": "<iso>"}`                                       | 400 unless completed/cancelled | 026                      |
+| `DELETE` | `/modules/{moduleId}/archive/`  | —    | 204                                                                  | 404                            | 028                      |
+| `GET`    | `/archived-modules/`            | —    | 200, archived module rows (favorites-first order, then created desc) | 403                            | 027                      |
+| `GET`    | `/archived-modules/{moduleId}/` | —    | 200, archived detail (same detail shape)                             | 404                            | 027, 019 (archived peek) |
 
 ### 13.7 Project flags and permissions read
 
-| Method | Path | Use | Rows |
-| --- | --- | --- | --- |
-| `GET` | `/api/workspaces/{ws}/projects/{projectId}/` | project record incl. `module_view`, `cycle_view`, estimate type | 002, 030, 036 |
-| `PATCH` | same | the project-settings switch flips `module_view` (owned by PSET-046) | 036 |
+| Method  | Path                                         | Use                                                                 | Rows          |
+| ------- | -------------------------------------------- | ------------------------------------------------------------------- | ------------- |
+| `GET`   | `/api/workspaces/{ws}/projects/{projectId}/` | project record incl. `module_view`, `cycle_view`, estimate type     | 002, 030, 036 |
+| `PATCH` | same                                         | the project-settings switch flips `module_view` (owned by PSET-046) | 036           |
 
 ### 13.8 Role matrix (as the server enforces it today)
 
-| Endpoint | Admin | Member | Guest |
-| --- | --- | --- | --- |
-| List modules | yes | yes | yes |
-| Detail module | yes | yes | **403 today** (NEWFRONT-334) |
-| Create/update/delete module | yes | yes | no |
-| Module issues list | yes | yes | **403 today** (NEWFRONT-334) |
-| Attach/detach issues | yes | yes | no |
-| Links read | yes | yes | via project membership (read) |
-| Links write | yes | yes | no |
-| Favorites write | yes | yes | no (UI hides the star) |
-| Archive / restore | yes | yes | no |
-| Archived list/detail | yes | yes | yes (archives ARCH-028) |
-| User properties | yes | yes | yes (own record) |
+| Endpoint             | Admin | Member                    | Guest                         |
+| -------------------- | ----- | ------------------------- | ----------------------------- |
+| List modules         | yes   | yes                       | yes                           |
+| Detail module        | yes   | yes                       | **403 today** (NEWFRONT-334)  |
+| Create/update module | yes   | yes                       | no                            |
+| Delete module        | yes   | only the module's creator | no                            |
+| Module issues list   | yes   | yes                       | **403 today** (NEWFRONT-334)  |
+| Attach/detach issues | yes   | yes                       | no                            |
+| Links read           | yes   | yes                       | via project membership (read) |
+| Links write          | yes   | yes                       | no                            |
+| Favorites write      | yes   | yes                       | no (UI hides the star)        |
+| Archive / restore    | yes   | yes                       | no                            |
+| Archived list/detail | yes   | yes                       | yes (archives ARCH-028)       |
+| User properties      | yes   | yes                       | yes (own record)              |
 
 The client must match the intended column once NEWFRONT-334 lands (guest
 read-only); until then it must not invent a workaround (§16).
 
 ## 14. Row coverage map
 
-| Row | Sections | Oracle scenario |
-| --- | --- | --- |
-| MOD-001 | 2.1 | `modules/list-header.spec.ts` — list, breadcrumb, tab title |
-| MOD-002 | 2.2 | `list-header.spec.ts` — gate art/explanation/Manage features, admin vs non-admin |
-| MOD-003 | 2.3 | `list-header.spec.ts` — Add Module / Add, opens dialog, hidden for guests |
-| MOD-004 | 2.4 | `list-header.spec.ts` — expandable search, Escape matrix |
-| MOD-005 | 2.5, 6.3 | `list-header.spec.ts` — ordering keys, direction, manual; manual gates timeline reorder |
-| MOD-006 | 2.6 | `list-header.spec.ts` — favorites/status/lead/members/dates, You first, expander, custom range, combined with search |
-| MOD-007 | 2.7 | `list-header.spec.ts` — chips per dimension, per-value/per-dimension removal, clear-all |
-| MOD-008 | 3.1 | `list-views.spec.ts` — layout-matched exclusive skeleton |
-| MOD-009 | 3.2 | `list-views.spec.ts` — zero state, create opens dialog, guest disabled |
-| MOD-010 | 3.3 | `list-views.spec.ts` — no-match heading/hint, clearing restores |
-| MOD-011 | 3.4 | `list-views.spec.ts` — 3 layouts, persistence, compact menu list+board |
-| MOD-012 | 3.5 | `list-views.spec.ts` — progress ring/check/alert, link, peek trigger; archived row opens peek |
-| MOD-013 | 4.1 | `row-actions.spec.ts` — placeholders, range save, clear, card dates |
-| MOD-014 | 4.2 | `row-actions.spec.ts` — six statuses/colors, inline save |
-| MOD-015 | 4.3 | `row-actions.spec.ts` — avatar vs no-lead marker |
-| MOD-016 | 4.4 | `row-actions.spec.ts` — star toggle, toasts, first-favorite expands sidebar, guests no star |
-| MOD-017 | 4.5 | `row-actions.spec.ts` — menu per role/state, archive gate explanation, each entry |
-| MOD-018 | 4.6 | `row-actions.spec.ts` — copy full URL, new tab, detail header menu |
-| MOD-019 | 5 | `row-actions.spec.ts` — peek open/close, `peekModule`, shareable, board density, archived peek |
-| MOD-020 | 3.6 | `list-views.spec.ts` — card identity, counts, segments, dates/star/menu, body navigates |
-| MOD-021 | 6 | `row-actions.spec.ts` — timeline rows/bars/tooltips, drag/resize, manual reorder, guest no-op |
-| MOD-022 | 7.1 | `dialogs-archived.spec.ts` — picker/defaults/tab order, bug 330, title validation, cancel/escape/reset |
-| MOD-023 | 7.1 | `dialogs-archived.spec.ts` — success stores all fields; bug 328 failed create clears form |
-| MOD-024 | 7.2 | `dialogs-archived.spec.ts` — prefill + save; bug 328 failed save clears form |
-| MOD-025 | 7.5 | `dialogs-archived.spec.ts` — confirm/cancel/list delete, detail delete navigates, bug 329 peek-open, permission notice |
-| MOD-026 | 7.4 | `dialogs-archived.spec.ts` — archive confirm/cancel; bug 233 failed archive reports success |
-| MOD-027 | 7.3 | `dialogs-archived.spec.ts` — archive strip placement, filters, chips, row reuse, peek; zero/search/filters empties |
-| MOD-028 | 7.6 | `dialogs-archived.spec.ts` — restore; bug 233 failed restore reports success |
-| MOD-029 | 8.1 | `detail.spec.ts` — breadcrumb/switcher/badge/tab title, unknown id; bug 334 guest missing state |
-| MOD-030 | 8.2 | `detail.spec.ts` — five layouts, display matrix, filter toggle; flag-off grouping; mobile three |
-| MOD-031 | 8.3 | `detail.spec.ts` — header add scoped, empty create/add-existing, failure notice, filtered-empty |
-| MOD-032 | 8.4 | `detail.spec.ts` — analytics dialog scoped, sidebar collapse persists, mobile analytics |
-| MOD-033 | 9.1 | `detail.spec.ts` — fields/counts, inline edits, points gating, archived disabled, loader |
-| MOD-034 | 9.2 | `detail.spec.ts` — chart/measure refetch, dates notices, tab memory + bug 337, entries filter, peek read-only |
-| MOD-035 | 9.3 | `detail.spec.ts` — section states, dialog validation + scheme, bug 342 reload, rows CRUD |
-| MOD-036 | 10.1 | `cross-cutting.spec.ts` — toggle both ways, member not-authorized |
-| MOD-037 | 10.2 | `cross-cutting.spec.ts` — palette create gating/dialog, jump menu, work-item picker |
-| MOD-038 | 10.3 | `cross-cutting.spec.ts` — copied links, unknown id missing state, outsider access wall |
-| MOD-039 | 8.5 | `cross-cutting.spec.ts` — list/peek stale, own writes; bug 332 detail revalidates |
-| MOD-040 | 11.1 | `cross-cutting.spec.ts` — Escape matrix, tab order, `nm`; bug 333 `nm` after palette click |
-| MOD-041 | 11.2 | `cross-cutting.spec.ts` — row/card drag no-ops, no export/import/print |
-| MOD-042 | 11.3 | `cross-cutting.spec.ts` — desktop same routes, allowlist, no markers, no desktop code |
-| MOD-043 | 11.4 | `cross-cutting.spec.ts` — surfaces ungated, allowlist, no edition markers |
+| Row     | Sections | Oracle scenario                                                                                                        |
+| ------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| MOD-001 | 2.1      | `modules/list-header.spec.ts` — list, breadcrumb, tab title                                                            |
+| MOD-002 | 2.2      | `list-header.spec.ts` — gate art/explanation/Manage features, admin vs non-admin                                       |
+| MOD-003 | 2.3      | `list-header.spec.ts` — Add Module / Add, opens dialog, hidden for guests                                              |
+| MOD-004 | 2.4      | `list-header.spec.ts` — expandable search, Escape matrix                                                               |
+| MOD-005 | 2.5, 6.3 | `list-header.spec.ts` — ordering keys, direction, manual; manual gates timeline reorder                                |
+| MOD-006 | 2.6      | `list-header.spec.ts` — favorites/status/lead/members/dates, You first, expander, custom range, combined with search   |
+| MOD-007 | 2.7      | `list-header.spec.ts` — chips per dimension, per-value/per-dimension removal, clear-all                                |
+| MOD-008 | 3.1      | `list-views.spec.ts` — layout-matched exclusive skeleton                                                               |
+| MOD-009 | 3.2      | `list-views.spec.ts` — zero state, create opens dialog, guest disabled                                                 |
+| MOD-010 | 3.3      | `list-views.spec.ts` — no-match heading/hint, clearing restores                                                        |
+| MOD-011 | 3.4      | `list-views.spec.ts` — 3 layouts, persistence, compact menu list+board                                                 |
+| MOD-012 | 3.5      | `list-views.spec.ts` — progress ring/check/alert, link, peek trigger; archived row opens peek                          |
+| MOD-013 | 4.1      | `row-actions.spec.ts` — placeholders, range save, clear, card dates                                                    |
+| MOD-014 | 4.2      | `row-actions.spec.ts` — six statuses/colors, inline save                                                               |
+| MOD-015 | 4.3      | `row-actions.spec.ts` — avatar vs no-lead marker                                                                       |
+| MOD-016 | 4.4      | `row-actions.spec.ts` — star toggle, toasts, first-favorite expands sidebar, guests no star                            |
+| MOD-017 | 4.5      | `row-actions.spec.ts` — menu per role/state, archive gate explanation, each entry                                      |
+| MOD-018 | 4.6      | `row-actions.spec.ts` — copy full URL, new tab, detail header menu                                                     |
+| MOD-019 | 5        | `row-actions.spec.ts` — peek open/close, `peekModule`, shareable, board density, archived peek                         |
+| MOD-020 | 3.6      | `list-views.spec.ts` — card identity, counts, segments, dates/star/menu, body navigates                                |
+| MOD-021 | 6        | `row-actions.spec.ts` — timeline rows/bars/tooltips, drag/resize, manual reorder, guest no-op                          |
+| MOD-022 | 7.1      | `dialogs-archived.spec.ts` — picker/defaults/tab order, bug 330, title validation, cancel/escape/reset                 |
+| MOD-023 | 7.1      | `dialogs-archived.spec.ts` — success stores all fields; bug 328 failed create clears form                              |
+| MOD-024 | 7.2      | `dialogs-archived.spec.ts` — prefill + save; bug 328 failed save clears form                                           |
+| MOD-025 | 7.5      | `dialogs-archived.spec.ts` — confirm/cancel/list delete, detail delete navigates, bug 329 peek-open, permission notice |
+| MOD-026 | 7.4      | `dialogs-archived.spec.ts` — archive confirm/cancel; bug 233 failed archive reports success                            |
+| MOD-027 | 7.3      | `dialogs-archived.spec.ts` — archive strip placement, filters, chips, row reuse, peek; zero/search/filters empties     |
+| MOD-028 | 7.6      | `dialogs-archived.spec.ts` — restore; bug 233 failed restore reports success                                           |
+| MOD-029 | 8.1      | `detail.spec.ts` — breadcrumb/switcher/badge/tab title, unknown id; bug 334 guest missing state                        |
+| MOD-030 | 8.2      | `detail.spec.ts` — five layouts, display matrix, filter toggle; flag-off grouping; mobile three                        |
+| MOD-031 | 8.3      | `detail.spec.ts` — header add scoped, empty create/add-existing, failure notice, filtered-empty                        |
+| MOD-032 | 8.4      | `detail.spec.ts` — analytics dialog scoped, sidebar collapse persists, mobile analytics                                |
+| MOD-033 | 9.1      | `detail.spec.ts` — fields/counts, inline edits, points gating, archived disabled, loader                               |
+| MOD-034 | 9.2      | `detail.spec.ts` — chart/measure refetch, dates notices, tab memory + bug 337, entries filter, peek read-only          |
+| MOD-035 | 9.3      | `detail.spec.ts` — section states, dialog validation + scheme, bug 342 reload, rows CRUD                               |
+| MOD-036 | 10.1     | `cross-cutting.spec.ts` — toggle both ways, member not-authorized                                                      |
+| MOD-037 | 10.2     | `cross-cutting.spec.ts` — palette create gating/dialog, jump menu, work-item picker                                    |
+| MOD-038 | 10.3     | `cross-cutting.spec.ts` — copied links, unknown id missing state, outsider access wall                                 |
+| MOD-039 | 8.5      | `cross-cutting.spec.ts` — list/peek stale, own writes; bug 332 detail revalidates                                      |
+| MOD-040 | 11.1     | `cross-cutting.spec.ts` — Escape matrix, tab order, `nm`; bug 333 `nm` after palette click                             |
+| MOD-041 | 11.2     | `cross-cutting.spec.ts` — row/card drag no-ops, no export/import/print                                                 |
+| MOD-042 | 11.3     | `cross-cutting.spec.ts` — desktop same routes, allowlist, no markers, no desktop code                                  |
+| MOD-043 | 11.4     | `cross-cutting.spec.ts` — surfaces ungated, allowlist, no edition markers                                              |
 
 ## 15. Bug-row dispositions (intended behavior, never the old bug)
 
@@ -1484,18 +1603,18 @@ new app implements the **intended** column; the oracle's bug-titled scenario
 stays as evidence of the old behavior and must not be used to justify
 reproducing it.
 
-| Bug issue | Rows | Old behavior (pinned by the oracle) | Intended (new app) |
-| --- | --- | --- | --- |
-| **NEWFRONT-330** | MOD-022 | The create dialog's date-range control renders with no tab index, so keyboard focus reaches it **after** Submit (order `1,2,null,4,5,6,7,8`). | The date control is reachable **third** in tab order, between description and status: title → description → date → status → lead → members → cancel → submit. §7.1 |
-| **NEWFRONT-328** | MOD-023, MOD-024 | A failed create resets the form to empty defaults; a failed save clears the title (and other fields) even though the dialog stays open with an error. | A failed create or save keeps **every entered field** exactly as the user left them; the dialog stays open with an error toast; nothing is stored. §7.1, §7.2 |
-| **NEWFRONT-329** | MOD-025 | Deleting the module whose peek is open keeps the address on `?peekModule=` for the deleted id. | Deleting with the peek open clears `peekModule`, closes the panel and leaves the user on the plain modules list. §5, §7.5 |
-| **NEWFRONT-233** (archive) | MOD-026 | A failed archive fires the success notice and navigates away as if it worked. | A failed archive shows an **error** toast, does not navigate, and the module keeps its active state. §7.4 |
-| **NEWFRONT-233** (restore) | MOD-028 | A failed restore fires the success notice and keeps the row as if it worked. | A failed restore shows an **error** toast, keeps the module archived, stays on the archives screen and keeps the row. §7.6 |
-| **NEWFRONT-334** | MOD-029, MOD-031, MOD-033 | Project guests get a 403 on the module detail and module-issues reads, so they land on the missing-module state (and cannot see the read-only sidebar / empty-state actions as intended). | **Backend dependency, not a client workaround.** Once the backend guest read lands, guests read the detail page, the module work-item list and the sidebar (edits disabled, no create actions, no empty-state create/add). Unknown ids still show the missing-module state, and users without project access still get the project access wall (MOD-038). §8.1, §8.3, §9.1, §16 |
-| **NEWFRONT-337** | MOD-034 | The breakdown tabs show each other's data (States shows assignees, Assignees shows labels, Labels shows state groups — a one-step rotation). | Each tab shows **its own** breakdown: States → state groups, Assignees → assignees, Labels → labels. §9.2 |
-| **NEWFRONT-342** | MOD-035 | The links section stays collapsed after a reload even though links exist. | The links section opens by default whenever links exist, **including after a reload**. Empty stays collapsed with the notice. §9.3 |
-| **NEWFRONT-332** | MOD-039 | The module detail revalidates behind the scenes and shows other users' renames without navigation. | Detail (and list, peek, analytics) is fetch-on-mount: no background revalidation from other users' changes; only the acting user's own mutations update the view. §8.5 |
-| **NEWFRONT-333** | MOD-040 | Click-activating a palette command breaks the `nm` sequence until a navigation. | The `nm` creation sequence keeps working after any palette command was clicked; click and key activation are equally safe. §10.2, §11.1 |
+| Bug issue                  | Rows                      | Old behavior (pinned by the oracle)                                                                                                                                                       | Intended (new app)                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **NEWFRONT-330**           | MOD-022                   | The create dialog's date-range control renders with no tab index, so keyboard focus reaches it **after** Submit (order `1,2,null,4,5,6,7,8`).                                             | The date control is reachable **third** in tab order, between description and status: title → description → date → status → lead → members → cancel → submit. §7.1                                                                                                                                                                                                              |
+| **NEWFRONT-328**           | MOD-023, MOD-024          | A failed create resets the form to empty defaults; a failed save clears the title (and other fields) even though the dialog stays open with an error.                                     | A failed create or save keeps **every entered field** exactly as the user left them; the dialog stays open with an error toast; nothing is stored. §7.1, §7.2                                                                                                                                                                                                                   |
+| **NEWFRONT-329**           | MOD-025                   | Deleting the module whose peek is open keeps the address on `?peekModule=` for the deleted id.                                                                                            | Deleting with the peek open clears `peekModule`, closes the panel and leaves the user on the plain modules list. §5, §7.5                                                                                                                                                                                                                                                       |
+| **NEWFRONT-233** (archive) | MOD-026                   | A failed archive fires the success notice and navigates away as if it worked.                                                                                                             | A failed archive shows an **error** toast, does not navigate, and the module keeps its active state. §7.4                                                                                                                                                                                                                                                                       |
+| **NEWFRONT-233** (restore) | MOD-028                   | A failed restore fires the success notice and keeps the row as if it worked.                                                                                                              | A failed restore shows an **error** toast, keeps the module archived, stays on the archives screen and keeps the row. §7.6                                                                                                                                                                                                                                                      |
+| **NEWFRONT-334**           | MOD-029, MOD-031, MOD-033 | Project guests get a 403 on the module detail and module-issues reads, so they land on the missing-module state (and cannot see the read-only sidebar / empty-state actions as intended). | **Backend dependency, not a client workaround.** Once the backend guest read lands, guests read the detail page, the module work-item list and the sidebar (edits disabled, no create actions, no empty-state create/add). Unknown ids still show the missing-module state, and users without project access still get the project access wall (MOD-038). §8.1, §8.3, §9.1, §16 |
+| **NEWFRONT-337**           | MOD-034                   | The breakdown tabs show each other's data (States shows assignees, Assignees shows labels, Labels shows state groups — a one-step rotation).                                              | Each tab shows **its own** breakdown: States → state groups, Assignees → assignees, Labels → labels. §9.2                                                                                                                                                                                                                                                                       |
+| **NEWFRONT-342**           | MOD-035                   | The links section stays collapsed after a reload even though links exist.                                                                                                                 | The links section opens by default whenever links exist, **including after a reload**. Empty stays collapsed with the notice. §9.3                                                                                                                                                                                                                                              |
+| **NEWFRONT-332**           | MOD-039                   | The module detail revalidates behind the scenes and shows other users' renames without navigation.                                                                                        | Detail (and list, peek, analytics) is fetch-on-mount: no background revalidation from other users' changes; only the acting user's own mutations update the view. §8.5                                                                                                                                                                                                          |
+| **NEWFRONT-333**           | MOD-040                   | Click-activating a palette command breaks the `nm` sequence until a navigation.                                                                                                           | The `nm` creation sequence keeps working after any palette command was clicked; click and key activation are equally safe. §10.2, §11.1                                                                                                                                                                                                                                         |
 
 Count: **ten dispositions across nine bug issues** (NEWFRONT-233 is split
 into its archive and restore halves), covering MOD-022, 023, 024, 025, 026,
