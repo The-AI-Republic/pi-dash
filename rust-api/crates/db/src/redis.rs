@@ -204,9 +204,17 @@ mod tests {
 
     #[tokio::test]
     async fn connection_refused_surfaces_as_error_for_callers_to_swallow() {
-        // No server listens here; the refused connection must come back as
-        // `Err` (callers swallow it per-site) rather than panic or hang.
-        let handle = RedisHandle::from_url("redis://127.0.0.1:6399/").expect("url parses");
+        // Bind an ephemeral port and read it back, then drop the listener so
+        // the port is free: a fixed port cannot be assumed unused on a shared
+        // runner (PIDASHCONV-1283). No server listens on the chosen port; the
+        // refused connection must come back as `Err` (callers swallow it
+        // per-site) rather than panic or hang.
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local_addr").port()
+        };
+        let handle =
+            RedisHandle::from_url(&format!("redis://127.0.0.1:{port}/")).expect("url parses");
         assert!(handle.set_ex("assistant:cancel:x", "1", 600).await.is_err());
         assert!(handle
             .get_string("throttle_assistant_message_x")
