@@ -2434,6 +2434,23 @@ describe("project lifecycle contracts", () => {
     expect(patchCall?.init.body).toBe(JSON.stringify({ archive_in: 1, close_in: 2, default_state: UUID }));
   });
 
+  it("patches one project feature boolean per call", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { ...details, issue_views_view: true } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProject(client, "acme", UUID2, { issue_views_view: true });
+    expect(updated.issue_views_view).toBe(true);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.body).toBe(JSON.stringify({ issue_views_view: true }));
+
+    for (const patch of [{ cycle_view: false }, { inbox_view: true }, { module_view: false }, { page_view: true }]) {
+      const body = JSON.stringify(patch);
+      const one = stubbedApi(() => ({ status: 200, body: details }));
+      const oneClient = createClient({ baseUrl: "https://api.test", transport: one });
+      await updateProject(oneClient, "acme", UUID2, patch);
+      expect(one.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`))?.init.body).toBe(body);
+    }
+  });
+
   it("patches the active-estimate reference the enable switch owns", async () => {
     const transport = stubbedApi(() => ({ status: 200, body: { ...details, estimate: UUID } }));
     const client = createClient({ baseUrl: "https://api.test", transport });

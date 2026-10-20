@@ -38,6 +38,36 @@ export function notifyInfo(title: string, description?: string): void {
   showToast(getToastManager(), { title, ...(description === undefined ? {} : { description }) });
 }
 
+/**
+ * A notice that stays on screen while a write flies and is then replaced in
+ * place by its outcome (PSET-043/053/054's pending/success/error cycle).
+ * Resolves `{ id, settle }`; calling `settle` twice rewrites the same toast.
+ */
+export function notifyPending(
+  title: string,
+  description?: string
+): {
+  id: string;
+  settle: (outcome: { title: string; description?: string; failed?: boolean }) => void;
+} {
+  const manager = getToastManager();
+  const id = manager.add({
+    title,
+    ...(description === undefined ? {} : { description }),
+    timeout: 0,
+  });
+  return {
+    id,
+    settle: (outcome) => {
+      manager.update(id, {
+        title: outcome.title,
+        ...(outcome.description === undefined ? {} : { description: outcome.description }),
+        ...(outcome.failed === true ? { timeout: 8000 } : {}),
+      });
+    },
+  };
+}
+
 export function notifyError(title: string, description?: string): void {
   showToast(getToastManager(), {
     title,

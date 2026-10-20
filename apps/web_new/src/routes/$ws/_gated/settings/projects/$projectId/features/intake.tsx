@@ -1,16 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Intake feature leaf (PSET-004/PSET-045): admin gate. The switch belongs
-// to the features slice.
+// Intake feature tab (PSET-001/PSET-004/PSET-045) — one switch on the
+// project's own boolean, read from the already-loaded row
+// (parity/specs/project-settings-part-f.md).
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import {
-  ProjectSettingsScreen,
-  ProjectSettingsTabMount,
-} from "../../../../../../../features/project-settings/index.js";
+import { ProjectFeatureSettings, findProjectFeature } from "../../../../../../../features/project-features/index.js";
+import { ProjectSettingsScreen } from "../../../../../../../features/project-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/features/intake")({
   component: SettingsRouteComponent,
@@ -18,9 +17,11 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/f
 
 function SettingsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
+  const feature = findProjectFeature("intake");
+  if (feature === undefined) throw new Error("Unknown project feature: intake");
   return (
     <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="intake">
-      <ProjectSettingsTabMount title="Intake" owner="NEWFRONT-582" />
+      <ProjectFeatureSettings feature={feature} />
     </ProjectSettingsScreen>
   );
 }
