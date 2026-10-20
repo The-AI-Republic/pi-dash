@@ -1200,6 +1200,25 @@ describe("reference contracts", () => {
     expect(parsed[0]?.member).toBe(UUID);
   });
 
+  it("keeps the directory email optional: the admin lens carries it, the thin lens does not", async () => {
+    const base = {
+      first_name: "Ada",
+      last_name: "Lovelace",
+      avatar: "",
+      avatar_url: null,
+      display_name: "Ada Lovelace",
+      is_bot: false,
+    };
+    const thin = [{ id: UUID2, member: { ...base, id: UUID }, role: 15 }];
+    const admin = [{ id: UUID, member: { ...base, id: UUID2, email: "ada@example.com" }, role: 20 }];
+    const thinClient = createClient({ baseUrl: "https://api.test", transport: json(thin) });
+    const adminClient = createClient({ baseUrl: "https://api.test", transport: json(admin) });
+    const thinParsed = await listWorkspaceMembers(thinClient, "acme");
+    const adminParsed = await listWorkspaceMembers(adminClient, "acme");
+    expect(thinParsed[0]?.member.email).toBeUndefined();
+    expect(adminParsed[0]?.member.email).toBe("ada@example.com");
+  });
+
   it("reads the caller's own project membership as a role", async () => {
     const transport = recordingTransport(() =>
       fakeResponse({ body: JSON.stringify({ id: UUID, role: 15 }), url: `https://api.test/api/project-members/me/` })

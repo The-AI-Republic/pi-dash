@@ -77,6 +77,7 @@ export {
 } from "./contracts/workspaces.js";
 export {
   CreatedWorkspace,
+  DirectoryMember,
   WorkspaceDetails,
   WorkspaceMember,
   WorkspaceMemberList,

@@ -2,12 +2,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Members leaf (PSET-001/PSET-004): the route mounts the settings shell
-// around the tab body, gates it for the role and keeps its own address.
+// Members leaf (PSET-001/PSET-004/PSET-018): the route mounts the settings
+// shell around the members body, gates it for the role and keeps its own
+// address.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { resetAppClient } from "../../../../../../core/api/client.js";
 
 const harness = vi.hoisted(() => ({
   params: { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" },
@@ -38,6 +41,21 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
   useJoinProject: () => ({ isPending: false, mutate: vi.fn() }),
 }));
 
+vi.mock("../../../../../../features/project-settings/members/api.js", () => ({
+  MEMBERS_LOAD_FAILED_TITLE: "Couldn't load the members",
+  useProjectMemberships: () => ({
+    status: "success",
+    data: [],
+    isPending: false,
+  }),
+  useWorkspaceDirectory: () => ({
+    status: "success",
+    data: [],
+    isPending: false,
+  }),
+  notifyMembersLoadFailure: vi.fn(),
+}));
+
 import { renderInRouter } from "../../../../../../features/project-settings/testing.js";
 import { Route } from "./members.js";
 
@@ -58,16 +76,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+beforeEach(() => {
+  resetAppClient();
+});
+
 describe("members settings route", () => {
   it("carries no loader prefetch", () => {
     expect(Route.options.beforeLoad).toBeUndefined();
   });
 
-  it("mounts the tab inside the shell for an admin", async () => {
+  it("mounts the members body inside the shell for an admin", async () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByRole("heading", { level: 1, name: "Members" })).toBeInTheDocument();
-    expect(screen.getByTestId("project-settings-tab-mount")).toHaveAttribute("data-slice", "NEWFRONT-574");
+    expect(screen.getByTestId("project-settings-members")).toHaveAttribute("data-slice", "NEWFRONT-574");
     expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("data-active", "true");
   });
 
