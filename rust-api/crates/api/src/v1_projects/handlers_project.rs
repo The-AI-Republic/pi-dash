@@ -1636,59 +1636,13 @@ fn coerce_json(value: &Value) -> Result<Value, CoerceFail> {
     }
 }
 
-/// CPython ``repr`` for a JSON value, as it appears inside DRF's own
-/// error text. A ``list``/``dict`` renders with single-quoted string
-/// members (``['UTC']``, ``{'a': 1}``); scalars render like ``str``.
-fn python_repr(value: &Value) -> String {
-    match value {
-        Value::Null => "None".to_owned(),
-        Value::Bool(b) => if *b { "True" } else { "False" }.to_owned(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => format!("'{}'", escape_python_str(s)),
-        Value::Array(items) => {
-            let parts: Vec<String> = items.iter().map(python_repr).collect();
-            format!("[{}]", parts.join(", "))
-        }
-        Value::Object(map) => {
-            let parts: Vec<String> = map
-                .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}: {}",
-                        python_repr(&Value::String(k.clone())),
-                        python_repr(v)
-                    )
-                })
-                .collect();
-            format!("{{{}}}", parts.join(", "))
-        }
-    }
-}
-
-/// CPython ``str`` for a JSON value: identical to ``python_repr`` except a
-/// bare string is itself, not its quoted repr.
+/// CPython ``str`` for a JSON value: a bare string is itself; containers
+/// and scalars render through the shared CPython ``repr`` implementation.
 fn python_str(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        _ => python_repr(value),
+        _ => pidash_jobs::py_repr(value),
     }
-}
-
-/// Escape a string for CPython ``repr`` (single-quoted): backslash, the
-/// quote itself, and the common control escapes.
-fn escape_python_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 /// `ChoiceField.to_internal_value`: `str(data)` (CPython semantics) looked
@@ -3673,6 +3627,20 @@ mod tests {
                 "link": true, "priority": true, "start_date": true, "state": true,
                 "sub_issue_count": true, "updated_on": true
             })
+        );
+    }
+
+    #[test]
+    fn python_str_matches_cpython() {
+        // A bare string is `str`, not `repr`; containers use the shared
+        // CPython `repr` (quote choice, control escapes, float formatting).
+        assert_eq!(python_str(&serde_json::json!("UTC")), "UTC");
+        assert_eq!(python_str(&serde_json::json!(["UTC"])), "['UTC']");
+        assert_eq!(python_str(&serde_json::json!(["it's"])), r#"["it's"]"#);
+        assert_eq!(python_str(&serde_json::json!(["a\nb"])), r#"['a\nb']"#);
+        assert_eq!(
+            python_str(&serde_json::json!({ "a": true, "b": null })),
+            "{'a': True, 'b': None}"
         );
     }
 
