@@ -1155,8 +1155,9 @@ owns the estimate axis semantics:
   every axis (the same "exclude null dimension" step it applies to all
   non-date axes), so the estimate chart shows only values that exist and
   an item with no estimate is absent from it. Do not invent a "None"
-  bucket for this axis; the coalescing that names a null group applies
-  only to other dimensions' count paths. The oracle's two items both
+  bucket for this axis — or for any other axis of this chart builder:
+  the null-dimension exclusion runs before the count/estimate split, so
+  no axis produces a synthetic null group. The oracle's two items both
   carry a value, so it cannot tell the two behaviours apart; parity is
   the absence.
 - **Y axis.** There is **no** estimate metric offered, in any project
