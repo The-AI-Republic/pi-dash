@@ -131,11 +131,14 @@ accessibility improvement, not a behavior change.
 ### INT-005 — auto-selection
 
 Entering the intake route with no `inboxIssueId`, and with a non-empty
-list in the active tab, replaces the navigation with a redirect that
-adds `inboxIssueId=<first row id>` while keeping `currentTab`. The first
-row is the list's first item in the active order (newest-created by
-default). The redirect must not loop: it fires once per entry and the
-selection then lives in the URL.
+list in the active tab, adds `inboxIssueId=<first row id>` to the URL
+while keeping `currentTab` (writing `currentTab` explicitly, INT-028).
+The first row is the list's first item in the active order
+(newest-created by default). The redirect must not loop: it fires once
+per entry and the selection then lives in the URL. Whether that first
+selection replaces or pushes a history entry is not pinned by the
+oracle and the old screen used a push; the new build only has to
+converge on the single selected URL, not on a particular history depth.
 
 If the active tab's list is empty, nothing is selected and the content
 pane keeps the INT-001 placeholder. An empty Closed tab does not
@@ -151,7 +154,13 @@ Three distinct situations must render differently:
 
 - Filtered to nothing: the active tab has data conceptually but the
   applied filters match no request. The list pane shows a no-results
-  state that names filters as the reason, with a way to clear them.
+  state that names filters as the reason. The applied chips above the
+  list are the way back (each section's clear control, subject to
+  INT-009's last-status guard); the old empty state itself carried no
+  clear action. Adding one inside the empty state is a reasonable
+  new-build improvement but is not observed behavior, so the gate
+  asserts the no-results state and the chips, not a clear button in
+  the empty state.
 - Empty Open tab with no filters applied: the list pane shows guidance
   explaining that requests arriving here are waiting for triage, plus a
   create action that opens the create dialog (INT-013).
@@ -180,7 +189,8 @@ three states, not the pinned old one.
 
 Without any explicit status filter, Open reads exactly Pending
 (`status=-2`) and Closed reads Accepted, Declined and Duplicate
-(`status=1, -1, 2`, in that order). Snoozed rows are Open in vocabulary
+(`status=1,-1,2` on the wire, in that order; the server's `__in` does
+not depend on the order). Snoozed rows are Open in vocabulary
 but are not part of the default Open read; they appear when the user
 adds Snoozed in the status filter (INT-009). The default set is a real
 filter value, not an empty state: it is shown as a chip and it counts in
@@ -221,11 +231,20 @@ Each row, in order, shows:
   no chip;
 - the request title, truncated to the row's width with the full title
   available on hover/focus;
-- the created date, with a tooltip carrying the full timestamp;
+- the created date, with a tooltip heading that names it and content
+  repeating the same formatted day as the visible text. The old row
+  formats both with the same day-month-year format and carries no time
+  of day; the oracle asserts the heading is non-empty and the content
+  contains the visible text, not a fuller timestamp. The new build may
+  show a more precise time in the tooltip, but parity only requires the
+  day text, so the gate must not assert a time.
 - a priority marker that renders for every priority including none, and
   whose tooltip carries the row's priority key;
-- labels: up to three label chips; four or more collapse to a single
-  count chip for the remainder;
+- labels: one chip per label while the row has up to three; with four
+  or more the individual chips are replaced by **one** count chip
+  carrying the total (it does not show the first three plus a
+  remainder). A count chip names the number and the kind of thing it
+  counts, and a row with no labels shows no chip;
 - the author avatar.
 
 The author is the work item's creator. A request created by the system
@@ -236,12 +255,22 @@ about the creating identity, not the source value.
 
 The old row decides this by comparing the creator's email with a
 hardcoded intake address, and does not consult `source` at all. The new
-build keeps the identity-based rule but takes the intake identity from
-the server-side identity data (the creator's user record and the app's
-intake identity configuration) rather than copying the literal address
-into the client. The gate uses a row created by the actual intake
-identity and a member-created row with a non-in-app source; both must
-show the right avatar.
+build keeps the identity-based rule: the row asks one named predicate
+"is this creator the intake identity?" and does not branch on `source`.
+This checkout has no server-side intake-identity record to read (the
+intake user is an ordinary member the parity seed creates, and the
+intake entry's `source` does not mark its author), so where that
+predicate's value comes from is **not settled**: it may be a single
+named constant, or a server field added later. Slice B must not scatter
+an address comparison through the row, must not treat `source === FORM`
+as the avatar rule, and must show the intake avatar for the identity the
+gate seeds. If no server source exists by the time the slice is built,
+the constant lives in one named export with its own test; the open
+question goes to the Decisions page rather than being resolved inside
+this spec. The gate uses a row created by the actual intake identity,
+a member-created row carrying a non-in-app source, and a row with no
+labels plus one with four; it asserts the right avatar and the single
+count chip.
 
 The priority tooltip is part of the intended behavior. In the old app
 the marker sits inside a tooltip wrapper, yet the tooltip never opened
@@ -264,13 +293,19 @@ its end the next page is requested with the previous page's
 exists. Appending keeps the already-rendered rows and never duplicates
 ones already shown; the combined order is the server order.
 
-Placeholder rows render below the loaded rows while a page is in
-flight, and are removed when it settles. The header shows a syncing
-indication while a page is loading. In the old app the syncing
-indication never appeared because nothing set the paged-loading state
-(NEWFRONT-269); the oracle pins its absence. The new build implements
-the indication and the gate asserts it appears during a delayed page
-then clears.
+While a page beyond the first is in flight, placeholder rows render
+**below** the rows already on screen (the sentinel that triggers the
+next-page read sits under them) and are removed when the page settles.
+They are not added above or between loaded rows, and they are not what
+signals a first-page load: while the very first page is in flight the
+list pane shows its own loading skeleton in place of the list, not
+placeholder rows under an empty list.
+
+The header shows a syncing indication while a page is loading. In the
+old app the syncing indication never appeared because nothing set the
+paged-loading state (NEWFRONT-269); the oracle pins its absence. The new
+build implements the indication off the list's in-flight paging state
+and the gate asserts it appears during a delayed page then clears.
 
 Reloading the list (tab, filter or sort change) resets to the first page
 and the first page's cursor chain; the old rows are not reused.
@@ -299,8 +334,10 @@ Section behavior and widget types:
   Choosing two priorities sends both (comma-separated) and the list is
   the union; choosing a checked priority removes it.
 - **Assignees** and **Created by**: multi-select over project members.
-  Both use the same member list and the same checkbox behavior; the
-  "you" member sorts first.
+  Both use the same member list and the same checkbox behavior. Options
+  order as: already-selected members first, then the signed-in member,
+  then everyone else by display name — so "you" is not literally first
+  once something else is checked.
 - **Labels**: multi-select over project labels.
 - **Created date** and **updated date**: single-select over quick
   presets plus an explicit range (INT-010); the two date sections are
@@ -332,8 +369,11 @@ render before the tab default applies) is not part of the intended
 behavior; the client always sends a status set.
 
 Applied values are visible as chips outside the panel, grouped by
-section; each chip and each section group can be cleared, subject to the
-last-status guard above. The panel's per-section count and the header's
+section; each chip can be removed and the priority, assignee, created-by,
+label and date groups each carry a clear-all control. The status group
+has no clear-all: it is governed by the last-value guard above, so a
+single remaining status keeps its chip and its remove control is
+hidden. The panel's per-section count and the header's
 applied-filter count both sum the selected values of every section,
 including the tab-default status. That count is display state only; it
 is not the test for which empty state to show. INT-008 decides the
@@ -356,6 +396,12 @@ Filter values live per project and tab session; switching tabs restores
 that tab's own default set (INT-012), not the other tab's selections.
 Snoozed rows therefore appear on Open only after the user adds Snoozed
 to the default, and the same filter set is not carried into Closed.
+The status parameter sent is exactly the selected set: with only the
+Open default it is Pending; when the user adds Snoozed it is both
+values, and the response is the union. The server's own default when
+`status` is omitted happens to be Pending too; the client never relies
+on it (the read always names the set), so a selected Snoozed set never
+silently falls back to the server default.
 
 ### INT-010 — date ranges (bugs NEWFRONT-270, 271, 274)
 
@@ -460,14 +506,24 @@ request is theirs). Whether a given person sees the control is decided
 by project membership plus the feature flag, not by an admin-only rule.
 The control opens a dialog with a title, a rich-text description, and
 inline properties: intake state, priority, assignees, labels and due
-date.
+date. The new build may word the header control and the dialog's
+primary action its own way; the capability (a create dialog reachable
+from the header) is what parity fixes, not the old label.
 
-Defaults: the intake state is the project's triage state (INT-033); all
-other properties start empty. Title is a single line; description is
-rich text with the shared editor's toolbar (headings, formatting, lists,
-links, code, attachments). Properties use the shared pickers: intake
-state (INT-033), the single-select priority picker (the one used for
-the priority property, not the multi-select filter of INT-009), the
+Defaults: the intake-state picker starts with **no committed value**
+and shows the project's triage state through the picker's own fallback
+(INT-033); priority starts at None; assignees and labels start empty;
+the due date starts empty. The form also holds an internal start date
+seeded to today, but the old properties strip hides the start-date,
+cycle, module, estimate and parent controls in this dialog (they exist
+in the form and are only rendered for the full work-item form), so
+none of them is submitted: the create payload below carries no
+`start_date`, `cycle_id`, `module_id`, `estimate_point` or `parent_id`.
+Title is a single line; description is rich text with the shared
+editor's toolbar (headings, formatting, lists, links, code,
+attachments). Properties use the shared pickers: intake state
+(INT-033), the single-select priority picker (the one used for the
+priority property, not the multi-select filter of INT-009), the
 multi-select member picker (INT-013/019), the label picker, and the
 shared single-date picker for the due date.
 
@@ -518,29 +574,34 @@ In all three cases nothing is created and the form keeps its input.
 ### INT-015 — create more
 
 The dialog has a "create more" toggle, off by default. With it on,
-saving keeps the dialog open, clears the title, description editor and
-every property back to the create defaults (INT-013), and leaves the
-created request visible behind it; the screen does not navigate to the
-new request. The intake-state field resets to the same unset value as a
-fresh dialog; the picker's trigger and the server both supply the
-project's triage state, so the next request still lands in triage
-(INT-033) without the form forcing an id (INT-013).
+saving keeps the dialog open, clears the title and the description
+editor, and resets every property to the create defaults (INT-013):
+priority back to None, assignees and labels empty, due date empty, and
+the intake-state value back to unset so the picker shows the project's
+fallback triage state. The created request stays visible behind the
+dialog; the screen does not navigate to it. Because the intake state
+is unset rather than a forced id, the server still files the next
+request in triage (INT-033).
 With it off, saving closes the dialog and navigates to the new request
 as in INT-013. The toggle's state persists only for the open dialog.
 
 ### INT-016 — dismiss guard (bug NEWFRONT-304)
 
 The dialog's close control is blocked while the rich-text editor is
-still processing. The old guard reads the editor's own
-`uploadInProgress` flag, which covers attachment/asset uploads and any
-other in-flight editor operation that sets it; it is broader than
-"attachment uploads only". The new build keeps that same predicate on
-the shared editor handle rather than inventing a narrower one (slice C
-must not add a separate upload-tracking state). Blocking does not close
-the dialog; it shows a short wait notice and the dialog stays with its
-content. Escape is blocked the same way. Once the editor reports that
-it is ready to discard, close and Escape both dismiss; dismissing
-discards the draft without confirmation.
+still processing. The old guard reads the editor's own readiness
+predicate, which is derived from its `uploadInProgress` flag; that flag
+covers attachment/asset uploads and any other in-flight editor
+operation that sets it, so the guard is broader than "attachment
+uploads only". The new build keeps the same predicate (the shared
+editor's ready-to-discard readiness, the same value the shared create
+form already reads) rather than inventing a narrower one (slice C must
+not add a separate upload-tracking state). The same readiness check
+also guards **submit**: with an upload in flight, pressing the primary
+action shows the wait notice and creates nothing. Blocking does not
+close the dialog or clear the draft; it shows a short wait notice and
+the dialog stays with its content. Escape is blocked the same way.
+Once the editor reports that it is ready to discard, close, submit and
+Escape all proceed; dismissing discards the draft without confirmation.
 
 The old app closed on Escape even while busy (NEWFRONT-304); the oracle
 pins that. The new build treats Escape exactly like the close control
@@ -642,7 +703,12 @@ intake-only attachment surface is ever needed, it must be a new
 component with its own inventory row — nothing in INT-019 requires one.
 
 Reactions reuse `features/issues/reactions/IssueReactions` with the
-work-item id and a disabled state for read-only viewers.
+work-item id. The old detail passes no disabled flag, so reactions stay
+available even when the title, description and properties are
+read-only (a resolved request or another member's request); reacting is
+not part of the edit permission matrix in INT-026 and must not be
+gated by it. The strip renders the issue's existing chips plus the add
+picker, and the oracle adds a reaction as an admin.
 
 ### INT-026 — edit permissions
 
@@ -669,13 +735,33 @@ add control for labels hides when the viewer may not edit labels.
 ### INT-024 — work-item link
 
 An admin or member can copy the selected request's work-item link from
-the detail's overflow menu while the request is open, and from a direct
-control once it is resolved. Guests do not get copy on open requests.
-The link targets `/{ws}/browse/{identifier}-{sequenceId}/`, and copying
-shows a confirmation toast. On a resolved request, an "open work item"
-action navigates to that address. Both reuse
-`shared/shell/CopyWorkItemLinkButton` with the workspace slug and work
-item key; intake adds no clipboard or link-building code.
+the detail's overflow menu while the request is open. A guest who is
+neither admin nor member gets no overflow menu, so no copy on open
+requests. The link targets `/{ws}/browse/{identifier}-{sequenceId}/`,
+and copying shows a confirmation toast.
+
+Once the request is resolved (accepted, declined or duplicate) the copy
+control and an "open work item" action move out of the overflow menu
+into the header's direct action area, and the overflow menu is gone.
+These two resolved-state controls are deliberately **not** behind the
+admin/member gate: the old header renders them for every viewer,
+including a guest and a creator who is not an admin or member. That
+matches the row's "any viewer for copy" and is the behavior to keep:
+resolving a request widens copy rather than removing it. The new build
+keeps that split — open: admin/member overflow menu only; resolved:
+direct controls for every viewer. Copy is not a triage permission. The
+oracle scenarios cover the admin path on open and resolved requests and
+a member on an open request; nobody yet signs in as a guest or as a
+non-admin creator on a resolved request, so the resolved-state
+"every viewer" half rests on the old source. Slice D adds that oracle
+case, and until it exists the gate asserts only the admin path for
+resolved requests (recorded in Known gaps) rather than claiming the
+guest path green.
+
+Both actions reuse `shared/shell/CopyWorkItemLinkButton` with the
+workspace slug and work item key; intake adds no clipboard or
+link-building code. The browse address is permission-independent and is
+not itself restricted by the gate.
 
 ### INT-029 — description versions
 
@@ -708,7 +794,12 @@ restore write.
 
 The intake URL carries `?currentTab=open|closed` and
 `?inboxIssueId=<work item id>`, validated by the route's search schema.
-`currentTab` defaults to open; an unknown value falls back to open.
+`currentTab` defaults to open. The old page mapped any present value
+other than `open` to Closed (so an unknown value read as Closed); no
+oracle scenario pins an unknown value. The new build validates the
+param against `open|closed` and treats anything else as absent, which
+means Open: a malformed tab never silently opens the Closed list, and
+the URL the screen writes is always one of the two valid values.
 `inboxIssueId` defaults to none.
 
 Resolution order on entry:
@@ -730,16 +821,29 @@ Resolution order on entry:
 
 Selecting a row, triage actions that advance, and create all keep the
 URL in sync: `inboxIssueId` updates on every selection change, and
-`currentTab` updates on tab change. Browser back/forward moves between
-those recorded states. A full navigation to a deep link renders the
-same state without an intermediate flicker of the wrong tab.
+`currentTab` updates on tab change. **Every URL the intake writes
+carries both keys**: row selection, auto-selection, previous/next,
+create and the advance after a triage action all write
+`?currentTab=<active tab>&inboxIssueId=<id>`, and returning to the list
+after the last request is removed writes `?currentTab=<active tab>`
+with no id. Relying on `currentTab`'s default instead of writing it is
+not enough: the old previous/next shortcut wrote the id alone, so
+walking a Closed list from a URL that had dropped `currentTab` could
+silently land on Open. The new build always writes the tab it is
+navigating within.
+
+Browser back/forward moves between those recorded states. A full
+navigation to a deep link renders the same state without an
+intermediate flicker of the wrong tab.
 
 ### INT-027 — previous/next navigation
 
 The detail header carries previous and next chevrons; the ArrowUp and
 ArrowDown keys do the same. Both walk the active list in its displayed
 server order, wrapping from the last to the first and the first to the
-last. Navigation preserves `currentTab` and updates `inboxIssueId`.
+last. Navigation preserves the active tab: every hop writes
+`currentTab` together with the new `inboxIssueId` (INT-028), rather
+than relying on the tab default.
 
 The arrows are suppressed while the user is typing in the title or
 description, or while any dialog is open, so they never steal caret
@@ -837,10 +941,16 @@ as in INT-020.
 
 Snooze lives in the overflow menu for pending and snoozed requests, and
 only an admin's click opens it (INT-020's visible-but-refused rule). It
-opens a single-date picker whose matcher disables days before today, the
-same day granularity the old picker used; the oracle pins only that a
-past day is disabled, so the new build does not re-decide "today" as
-UTC or local beyond matching that observation. The picker starts on the
+opens a single-date picker whose matcher disables every instant before
+the current moment. The old picker's matcher is "before now", not
+"before today", so earlier times on today's date are disabled too, and
+the choice is a day: the stored value is that day's midnight (ISO
+timestamp). The oracle only probes day cells numbered below today's day
+of the month, so it pins "past days are disabled" and says nothing about
+the rest of the month grid or about today; the new build matches the
+observed day rule and does not re-decide "today" as UTC or local beyond
+it. Because day cells are what the user and the gate can address, the
+gate must not assert that today is selectable. The picker starts on the
 request's current snooze day when there is one, otherwise on today.
 Confirming writes `PATCH …/intake-issues/{issueId}/` with `status=0` and
 `snoozed_till` (the chosen day, sent as an ISO timestamp). The screen
@@ -927,11 +1037,19 @@ header carries a back/list toggle, previous/next chevrons, the status
 chip and its own overflow menu. For an open request that menu carries
 Snooze (or un-snooze), Mark as duplicate, Accept and Decline — gated and
 refused exactly as in INT-020 — plus Delete for an admin or the request's
-creator. For a resolved request it carries only copy work-item link and
-open work item. A guest who is neither admin nor creator gets no
-action menu. The mobile menu exposes the same items with the same
-permissions as the desktop overflow menu, so every action remains
-reachable without the desktop header. The header's
+creator, plus copy work-item link. For a resolved request it carries
+only copy work-item link and open work item, for every viewer, as in
+INT-024. The menu button itself is always present in the mobile header
+(it is not gated the way the desktop overflow is) but its entries follow
+the desktop gates: a guest who is neither admin nor creator opens an
+empty menu on an open request and the copy/open pair on a resolved one.
+Every triage entry keeps the desktop gate — visible for an admin or
+member and refused with the same permission notice on click, absent for
+a guest — and open-request copy stays admin/member-only, exactly as in
+the desktop overflow. The mobile menu therefore exposes the same items
+with the same permissions as the desktop overflow menu, so every action
+remains reachable without the desktop header, and it adds nothing the
+desktop path does not allow. The header's
 controls keep their labels available to assistive technology (INT-030
 accessibility notes below).
 
@@ -1041,7 +1159,7 @@ forks.
 | `features/issues/filters/shared/FilterSection`         | reuse as-is   | INT-009 — section chrome (options, search, count, cap).                                                                                                                                                                                                      |
 | `shared/shell/CopyWorkItemLinkButton`                  | reuse as-is   | INT-024 — copies and toasts.                                                                                                                                                                                                                                 |
 | `shared/shell/narrowViewport`                          | reuse as-is   | INT-030 — breakpoint detection.                                                                                                                                                                                                                              |
-| `features/issues/reactions/IssueReactions`             | reuse as-is   | INT-019 — reactions strip with disabled state.                                                                                                                                                                                                               |
+| `features/issues/reactions/IssueReactions`             | reuse as-is   | INT-019 — reactions strip, left enabled (`disabled` unset) so it stays usable on read-only requests; it does not follow INT-026's edit matrix.                                                                                                               |
 | `features/issues/detail/TriageDetailRoot`              | not used      | Notifications-only read-only triage host (NTF-008). Intake renders `IssueDetailRoot` with `editable` and its own header/action area (outside the root) that slice E fills; it neither wraps nor forks this host.                                             |
 
 **Slice A (INT-001–005, 008, 012, 031)** — all new:
@@ -1075,9 +1193,12 @@ readiness callback and asset-scope props) and
 `PriorityPicker`, `MemberPicker`, `LabelPicker`), the dedupe seam
 (`dedupe.ts` + `ISSUE_DEDUPE_FLAG`) with NEWFRONT-630, and `shared/editor`
 through `ModalDescription`. Edges: NEWFRONT-631 (description assets),
-NEWFRONT-630 (dedupe). NEWFRONT-631 is **not** on `web-new-dev` yet, so
-slice C carries the blocked_by edge and starts after it lands. Intake
-writes no uploader, asset client or second description editor.
+NEWFRONT-630 (dedupe). NEWFRONT-631 merged on `web-new-dev`
+(`a409af73a`), so the edge it needs is satisfied and slice C can start;
+the edge is recorded so a later withdraw or rename of that module is
+caught rather than assumed. Intake writes no uploader, asset client or
+second description editor. The attachment list intake mounts in the
+detail (INT-019) is not part of this slice and is not built here.
 
 **Slice D (INT-019, 024, 026, 027, 028, 029)** — new:
 `IntakeDetail`, `IntakeDetailHeader`, `IntakeProperties`,
@@ -1159,10 +1280,11 @@ NEWFRONT-630 (dedupe), NEWFRONT-689/692/693 (the surfaces it adapts).
 
 ## Data layer
 
-**Query keys.** All intake keys are nested under `workspaceScope`
-(`["ws", slug]`, the shared factory in `core/query/client.ts`) so
-workspace switching clears them. Every intake key factory therefore
-takes the workspace slug as its first argument:
+**Query keys.** All intake keys are nested under `workspaceScope`,
+the shared factory in `core/query/client.ts`, whose root is
+`["ws", slug]` (not `["workspace", …]`) so workspace switching clears
+them. Every intake key factory therefore takes the workspace slug as
+its first argument, and every key shares that exact root:
 
 - `intakeKeys.list(workspaceSlug, projectId, { tab, filters, order })` — the infinite
   list (page param = cursor), including the tab's default status in the
@@ -1238,7 +1360,7 @@ tab/filter/order/paging actions.
 | Duplicate target picker search                                         | Issues search (`searchIssues` in `@pidash/api-client`, `contracts/issue-search.ts`; the create/search query pattern lives in `features/issues/create/createApi.ts`) | INT-023 calls it with `search` and `workspace_search=false`; intake adds no search surface.                                                                                                                                  |
 | Description create assets (INT-017)                                    | Issues create (NEWFRONT-631): `ModalDescription` + `createApi` + `issue-description-assets.ts`                                                                      | Intake passes the draft asset scope, collects parked ids via `onAssetUploaded`, reads readiness via `onReadinessChange`, and attaches after create with the work-item id.                                                    |
 | Detail attachments list (INT-019)                                      | Issues attachments (NEWFRONT-650, ISS-187–191)                                                                                                                      | Intake mounts NEWFRONT-650's list as a detail content section with the work item's id and scope; it defines no attachment component, wrapper, fetch or upload.                                                               |
-| Reactions (INT-019)                                                    | Issues reactions (NEWFRONT-654)                                                                                                                                     | Intake renders the strip with a disabled flag for read-only viewers.                                                                                                                                                         |
+| Reactions (INT-019)                                                    | Issues reactions (NEWFRONT-654)                                                                                                                                     | Intake renders the strip with the work-item id and leaves it enabled, including on read-only requests.                                                                                                                       |
 | Description versions (INT-029)                                         | Issues detail (NEWFRONT-639) + the versions contract                                                                                                                | Intake renders `DescriptionHistory`; it does not build a versions API.                                                                                                                                                       |
 | Copy work-item link / browse address (INT-024)                         | `shared/shell`                                                                                                                                                      | Intake uses the button and the browse address.                                                                                                                                                                               |
 | Narrow viewport                                                        | `shared/shell/narrowViewport`                                                                                                                                       | Intake adapts layout; it does not add a media query.                                                                                                                                                                         |
@@ -1307,7 +1429,27 @@ Paths and fields only; no response bodies are copied.
 | Duplicate search | `GET …/search-issues/` — `search`, `workspace_search`                                                                                                                                                                   |
 | Versions         | `GET …/work-items/{issueId}/description-versions/` (+ `/{versionId}/`)                                                                                                                                                  |
 | Version restore  | work-item description update (`description_html`)                                                                                                                                                                       |
-| Create assets    | `POST /api/assets/v2/workspaces/{ws}/projects/{pid}/{issueId}/bulk/` with `asset_ids`                                                                                                                                   |
+| Create assets    | `POST /api/assets/v2/workspaces/{ws}/projects/{pid}/{issueId}/bulk/` with `asset_ids` (`{issueId}` is the created work-item id)                                                                                         |
+
+Server-side field notes that differ from a naive reading:
+
+- The list and detail routes are registered at both `intake-issues/`
+  and the legacy `inbox-issues/`; the new build calls
+  `intake-issues/` only. Both are the same `IntakeIssueViewSet`, and the
+  list detail key is the work-item id (`<uuid:pk>` is matched against
+  `issue_id`), not the intake row's own id.
+- The create route writes `source` from the server constant (`IN_APP`)
+  and ignores any client `source`; the body's `source` is sent for
+  clarity but is not what decides the stored value.
+- `created_at`/`updated_at` are parsed by the shared work-item filter at
+  `issue__created_at__date`/`issue__updated_at__date`; the updated
+  predicate is the NEWFRONT-270 defect (it uses the created column).
+- The multi-value filters split on commas; `priority` filters on
+  whatever it is given (an unknown key narrows to an empty list rather
+  than erroring), while `labels` and `assignees` drop values that are
+  not valid UUIDs before filtering. The client only sends values it got
+  from the project's own lists, so these coercions are server safety,
+  not client rules.
 
 Contract coverage: NEWFRONT-688 adds zod contracts for the intake-issues
 list/detail/create/update/delete, the triage-state read and the bulk
@@ -1367,8 +1509,14 @@ and must be reused, not duplicated.
   updated-date assertion stays red until that issue is Done and
   NEWFRONT-695 is unblocked for it.
 - The detail attachments list depends on NEWFRONT-650, which has no
-  branch yet; INT-019's attachments assertion cannot be driven until it
-  merges. The rest of INT-019 does not depend on it.
+  merged change yet (PR #1889 is open on `pi-dash/newfront-650`, head
+  `6d3930cab`; the widget is
+  `apps/web_new/src/features/issues/detail/widgets/attachments/AttachmentsWidget.tsx`
+  with props `workspaceSlug`, `projectId`, `issueId`, `editable` and a
+  `openPicker` handle). INT-019's attachments assertion cannot be
+  driven until that slice merges. Slice D mounts that export directly —
+  no intake wrapper, no second list, no upload path — and carries the
+  blocked_by edge. The rest of INT-019 does not depend on it.
 - The retired inbox redirect and the `/{ws}/...` paths depend on
   NEWFRONT-528 (workspace-scoped migrated routes).
 - The oracle does not exercise the single-bound custom-date modes
@@ -1377,3 +1525,12 @@ and must be reused, not duplicated.
   asserts their token shapes.
 - The Closed status filter is not exercised by the oracle; slice B adds
   that scenario before the gate asserts the Closed option set (INT-009).
+- No oracle scenario signs in as a guest or a non-admin creator on a
+  resolved request, so INT-024's resolved-state copy/open for every
+  viewer rests on the old source. Slice D adds that oracle case before
+  the gate asserts it.
+- The detail's activity feed (the underlying work item's history under
+  the properties, shown for intake requests in the old detail) is
+  owned by the Issues activity slice, not by INT-019's listed surfaces;
+  intake mounts it the way the Issues detail does. It needs no new
+  intake module and adds no row beyond the Issues feed.
