@@ -11,12 +11,13 @@ import { Copy, Ellipsis, Pencil, Trash2, Unlink } from "lucide-react";
 import * as React from "react";
 
 import { IconButton, Menu } from "@pidash/kit";
-import { updateIssue, type RelatedIssue } from "@pidash/api-client";
+import { updateEpic, updateIssue, type RelatedIssue } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { MemberPicker, PriorityPicker, StatePicker } from "../../../shared/pickers/index.js";
 import { issueKeys } from "../api/keys.js";
+import { issueDetailQueryOptions } from "../api/queries.js";
 
 export interface RelationRowProps {
   workspaceSlug: string;
@@ -59,9 +60,18 @@ export function RelationRow({
   const queryClient = useQueryClient();
   const identifier = `${projectIdentifier}-${row.sequence_id}`;
 
+  // The slim row carries no kind, so the detail read decides which
+  // collection the property write belongs to (ISS-179). The old app
+  // swaps the epics service for an epic row.
   const update = useMutation({
-    mutationFn: (patch: Record<string, unknown>) =>
-      updateIssue(getAppClient(), workspaceSlug, row.project_id, row.id, patch),
+    mutationFn: async (patch: Record<string, unknown>) => {
+      const client = getAppClient();
+      const detail = await queryClient.fetchQuery(
+        issueDetailQueryOptions(client, workspaceSlug, row.project_id, row.id)
+      );
+      if (detail.is_epic === true) await updateEpic(client, workspaceSlug, row.project_id, row.id, patch);
+      else await updateIssue(client, workspaceSlug, row.project_id, row.id, patch);
+    },
     onError: (error: Error) => notifyError("Couldn't update the related work item", error.message),
     onSettled: () =>
       Promise.all([

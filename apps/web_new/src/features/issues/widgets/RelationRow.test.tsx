@@ -63,6 +63,17 @@ describe("relation row", () => {
     );
   });
 
+  it("patches an epic through the epic collection", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderRow(true, { peerIsEpic: true });
+    await user.click(screen.getByRole("button", { name: "High" }));
+    await user.click(await screen.findByRole("option", { name: "Urgent" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.method === "PATCH" && call.url.includes(`/epics/${PEER}/`))).toBe(true)
+    );
+    expect(calls.some((call) => call.method === "PATCH" && call.url.includes(`/issues/${PEER}/`))).toBe(false);
+  });
+
   it("reports a failed property write and keeps the row", async () => {
     const user = userEvent.setup();
     renderRow(true, { writeStatus: 500 });
