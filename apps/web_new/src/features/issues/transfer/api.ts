@@ -3,8 +3,10 @@
 // See the LICENSE file for details.
 // Cycle detail and transfer writes for the completed-cycle prompt
 // (parity/specs/issues.md §18, ISS-224). The detail read carries the
-// progress snapshot and the transferable counts; the transfer POSTs the
-// target cycle and then re-reads both cycles so their counts settle.
+// transferable counts; the transfer POSTs the target cycle and then
+// re-reads the target so its counts settle. The source keeps the counts
+// the page first read — the server freezes them into the cycle's
+// progress snapshot — so its prompt stays up, as the oracle observes.
 
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getCycle, transferCycleIssues, type ApiClient } from "@pidash/api-client";
@@ -36,18 +38,20 @@ export function useCycleDetail(workspaceSlug: string, projectId: string, cycleId
   return useQuery({ ...cycleDetailQueryOptions(getAppClient(), workspaceSlug, projectId, cycleId), enabled });
 }
 
-/** Success notice after the server accepted a transfer. */
-export const TRANSFER_SUCCESS_TITLE = "Success!";
-export const TRANSFER_SUCCESS_BODY = "Work items have been transferred successfully";
-/** Failure notice when the transfer is refused. */
-export const TRANSFER_FAILED_TITLE = "Error!";
-export const TRANSFER_FAILED_BODY = "Unable to transfer work items. Please try again.";
+/** Success notice after the server accepted a move. */
+export const TRANSFER_SUCCESS_TITLE = "Work moved";
+export const TRANSFER_SUCCESS_BODY = "The remaining work items now belong to the cycle you picked.";
+/** Failure notice when the move is refused. */
+export const TRANSFER_FAILED_TITLE = "Move failed";
+export const TRANSFER_FAILED_BODY = "The chosen cycle did not take the work. Pick another one and retry.";
 
 /**
  * Move the source cycle's remaining issues to another cycle. On success
- * both cycles re-read (the source's snapshot freezes, the target's count
- * rises) and the picker list refreshes its names/statuses. A refusal
- * notices and leaves the surfaces as they were.
+ * the target re-reads its rising count and the picker list refreshes its
+ * names/statuses; the source is deliberately not re-read, because the
+ * server froze its pre-move counts and the prompt keeps offering the
+ * action (ISS-224). A refusal notices and leaves the surfaces as they
+ * were.
  */
 export function useTransferCycleIssues(workspaceSlug: string, projectId: string, cycleId: string) {
   const queryClient = useQueryClient();
@@ -56,7 +60,8 @@ export function useTransferCycleIssues(workspaceSlug: string, projectId: string,
       transferCycleIssues(getAppClient(), workspaceSlug, projectId, cycleId, newCycleId),
     onSuccess: (_result, newCycleId) => {
       notifySuccess(TRANSFER_SUCCESS_TITLE, TRANSFER_SUCCESS_BODY);
-      void queryClient.invalidateQueries({ queryKey: transferKeys.cycle(workspaceSlug, projectId, cycleId) });
+      // The source row keeps its counts (the server froze them), so the
+      // prompt and its action stay up; only the target's count changes.
       void queryClient.invalidateQueries({ queryKey: transferKeys.cycle(workspaceSlug, projectId, newCycleId) });
       void queryClient.invalidateQueries({ queryKey: pickerKeys.cycles(workspaceSlug, projectId) });
     },

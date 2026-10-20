@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Completed-cycle prompt above the issues list (parity/specs/issues.md
-// §18, ISS-224). Completed cycles are not editable; while one still
-// holds transferable work and has no frozen progress snapshot, the row
-// also offers moving that work to another cycle.
+// §18, ISS-224). A finished cycle is closed to edits; while it still
+// holds work that could move, the row also offers handing that work to
+// a cycle that is still running.
 
 import { Button } from "@pidash/kit";
 import { CircleAlert } from "lucide-react";
 import * as React from "react";
 
-/** The note completed cycles show whether or not transfer is offered. */
-export const COMPLETED_CYCLE_NOTE = "Completed cycles are not editable.";
+/** The note a finished cycle shows whether or not a move is offered. */
+export const COMPLETED_CYCLE_NOTE = "This cycle has ended, so its work items can no longer be edited here.";
 
 export interface TransferIssuesPromptProps {
   /** Whether the transfer button renders. */
@@ -33,7 +33,7 @@ export function TransferIssuesPrompt({
       </p>
       {canTransfer ? (
         <Button variant="primary" size="small" onClick={onOpen} disabled={disabled}>
-          Transfer work items
+          Move unfinished work
         </Button>
       ) : null}
     </div>

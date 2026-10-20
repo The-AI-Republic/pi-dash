@@ -114,7 +114,7 @@ describe("TransferIssuesDialog", () => {
   it("explains when no incomplete cycle can take the work", () => {
     mocks.cycles.mockReturnValue({ data: cycles().slice(0, 1), isPending: false });
     setup();
-    expect(screen.getByText("No incomplete cycle to move the work into.")).toBeInTheDocument();
+    expect(screen.getByText("No other cycle is open right now.")).toBeInTheDocument();
   });
 
   it("closes when the reader dismisses the dialog", async () => {

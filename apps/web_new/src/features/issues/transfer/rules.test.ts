@@ -5,12 +5,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   canTransferCycleIssues,
-  hasEmptyProgressSnapshot,
   isCompletedCycleStatus,
   showsCompletedCycleNote,
   transferableIssueCount,
   transferFieldsOf,
   transferTargetOptions,
+  type TransferableCycleFields,
 } from "./rules.js";
 
 const COMPLETED = { status: "COMPLETED", backlog_issues: 1 };
@@ -24,15 +24,6 @@ describe("isCompletedCycleStatus", () => {
   });
 });
 
-describe("hasEmptyProgressSnapshot", () => {
-  it("treats absent, null and {} as empty", () => {
-    expect(hasEmptyProgressSnapshot(undefined)).toBe(true);
-    expect(hasEmptyProgressSnapshot(null)).toBe(true);
-    expect(hasEmptyProgressSnapshot({})).toBe(true);
-    expect(hasEmptyProgressSnapshot({ total_issues: 1 })).toBe(false);
-  });
-});
-
 describe("transferableIssueCount", () => {
   it("sums backlog, unstarted and started, defaulting to zero", () => {
     expect(transferableIssueCount(undefined)).toBe(0);
@@ -42,10 +33,9 @@ describe("transferableIssueCount", () => {
 });
 
 describe("canTransferCycleIssues", () => {
-  it("offers transfer on a completed cycle with empty snapshot and work left", () => {
+  it("offers a move on a completed cycle that still holds work", () => {
     expect(canTransferCycleIssues(COMPLETED)).toBe(true);
-    expect(canTransferCycleIssues({ ...COMPLETED, progress_snapshot: null })).toBe(true);
-    expect(canTransferCycleIssues({ ...COMPLETED, progress_snapshot: {} })).toBe(true);
+    expect(canTransferCycleIssues({ ...COMPLETED, unstarted_issues: 4 })).toBe(true);
   });
 
   it("refuses active cycles and cycles with no transferable work", () => {
@@ -54,8 +44,14 @@ describe("canTransferCycleIssues", () => {
     expect(canTransferCycleIssues(null)).toBe(false);
   });
 
-  it("refuses after a transfer froze the snapshot", () => {
-    expect(canTransferCycleIssues({ ...COMPLETED, progress_snapshot: { total_issues: 1 } })).toBe(false);
+  it("keeps offering the move after a transfer froze the source counts", () => {
+    // The oracle shows the source keeping its pre-move counts and the
+    // action staying up; the snapshot is not part of the gate.
+    const frozen: TransferableCycleFields & { progress_snapshot: Record<string, unknown> } = {
+      ...COMPLETED,
+      progress_snapshot: { total_issues: 1, backlog_issues: 1 },
+    };
+    expect(canTransferCycleIssues(frozen)).toBe(true);
   });
 });
 
@@ -101,7 +97,6 @@ describe("transferFieldsOf", () => {
       } as never)
     ).toEqual({
       status: "COMPLETED",
-      progress_snapshot: undefined,
       backlog_issues: 2,
       unstarted_issues: undefined,
       started_issues: undefined,
