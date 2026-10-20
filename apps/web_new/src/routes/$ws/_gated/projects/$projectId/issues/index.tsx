@@ -7,7 +7,9 @@
 // the user's stored order, and the per-entity layout root with the
 // Display control in both headers. Layout slices extend the offered list
 // with their renderer; the timeline is a lazy leaf so its chart code stays
-// out of the route chunk; context empty-state copy arrives with ISS-068.
+// out of the route chunk. The empty cards follow ISS-068: the first-work-
+// item prompt until the filter row adds a condition during this visit, and
+// the no-results card with clear-all from then on.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -30,6 +32,7 @@ import {
   type WorkItemCreateProject,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
+import { ProjectIssuesEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import {
   ResolvedAnalyticsEntry,
   loadIssueListLeaves,
@@ -43,6 +46,9 @@ const LazyCalendarEntry = React.lazy(() =>
     default: module.CalendarEntry,
   }))
 );
+// The empty cards ride their own chunk; the route awaits it with the list
+// leaves in `beforeLoad` so the layout mounts once (Quality gates).
+import { loadProjectEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
@@ -82,29 +88,14 @@ const LazyWorkItemCreateDialog = React.lazy(() =>
 // The timeline is only rendered when the stored layout selects it. Its
 // boundary module would otherwise join the route's initial closure even
 // though the list first paint never mounts it (Quality gates).
+/** The clear entry stays inert while the filter row is still loading. */
+const NOOP = (): void => {};
+
 const LazyGanttTimeline = React.lazy(() =>
   import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
     default: module.GanttTimeline,
   }))
 );
-
-function ProjectIssuesEmptyState(): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No issues yet</h2>
-      <p className="text-body text-(--text-muted)">New issues in this project will appear here.</p>
-    </section>
-  );
-}
-
-function ProjectIssuesNoMatchState(): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No matching issues</h2>
-      <p className="text-body text-(--text-muted)">No issues match the current filters.</p>
-    </section>
-  );
-}
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")({
   validateSearch: (search: Record<string, unknown>) => parseIssueSearch(search),
@@ -129,7 +120,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       // their own chunks (Quality gates); await them with the data so the
       // first commit is the screen itself. The list layout reads its own
       // first page, including the stored sub-issue and empty-group flags.
-      await Promise.all([loadIssueListLeaves(), loadListLayout()]);
+      await Promise.all([loadIssueListLeaves(), loadListLayout(), loadProjectEmptyState()]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -272,92 +263,111 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         totalCount={issues.total_count}
       />
     );
-    const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => (
-      <IssuesLayoutRoot
-        workspaceSlug={params.ws}
-        entity={{ scope: "project", projectId: params.projectId }}
-        title={project.name}
-        totalCount={issues.total_count}
-        resultCount={issues.results.length}
-        offered={offered}
-        renderLayout={(layout, prefs) => {
-          const active = resolveActiveLayout(layout, offered);
-          if (active === "gantt_chart") {
+    // A stored expression on its own keeps the first-run card (ISS-068): the
+    // project list changes card only once a condition was added through the
+    // row during this visit. The layout root sends a zero total to
+    // `emptyState` and a filtered page to `noMatchState`; both show the card
+    // this rule picks, and the entries follow the project standing.
+    const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => {
+      const emptyState = (
+        <ProjectIssuesEmptyState
+          hasCompleteCondition={richFilter?.hasCompleteCondition ?? false}
+          addedThisVisit={richFilter?.addedThisVisit ?? false}
+          visibleCount={issues.total_count}
+          canAct={canEdit}
+          onClear={richFilter === null ? NOOP : richFilter.clearFilters}
+          onCreate={() => {
+            setCreateOpen(true);
+          }}
+        />
+      );
+      return (
+        <IssuesLayoutRoot
+          workspaceSlug={params.ws}
+          entity={{ scope: "project", projectId: params.projectId }}
+          title={project.name}
+          totalCount={issues.total_count}
+          resultCount={issues.results.length}
+          offered={offered}
+          renderLayout={(layout, prefs) => {
+            const active = resolveActiveLayout(layout, offered);
+            if (active === "gantt_chart") {
+              return (
+                <React.Suspense fallback={<ListSkeleton />}>
+                  <LazyGanttTimeline
+                    workspaceSlug={params.ws}
+                    projectId={params.projectId}
+                    projectIdentifier={project.identifier}
+                    issues={issues.results}
+                    totalCount={issues.total_count}
+                    prefs={prefs}
+                  />
+                </React.Suspense>
+              );
+            }
+            if (active === "spreadsheet") {
+              return (
+                <React.Suspense fallback={<ListSkeleton />}>
+                  <LazySpreadsheetLayout
+                    workspaceSlug={params.ws}
+                    projectId={params.projectId}
+                    projectIdentifier={project.identifier}
+                    entity={{ scope: "project", projectId: params.projectId }}
+                    prefs={prefs}
+                    canEdit={canEdit}
+                    hideCycle={!project.cycle_view}
+                    hideModule={!project.module_view}
+                    hideEstimate={project.estimate === null}
+                    richExpression={preferences.rich_filters}
+                    weekStart={weekStart}
+                  />
+                </React.Suspense>
+              );
+            }
+            if (active === "calendar") {
+              return (
+                <React.Suspense fallback={<ListSkeleton />}>
+                  <LazyCalendarEntry
+                    workspaceSlug={params.ws}
+                    projectId={params.projectId}
+                    projectIdentifier={project.identifier}
+                    entity={{ scope: "project", projectId: params.projectId }}
+                    canEdit={canEdit}
+                  />
+                </React.Suspense>
+              );
+            }
+            const ResolvedListLayout = resolvedListLayout();
             return (
-              <React.Suspense fallback={<ListSkeleton />}>
-                <LazyGanttTimeline
-                  workspaceSlug={params.ws}
-                  projectId={params.projectId}
-                  projectIdentifier={project.identifier}
-                  issues={issues.results}
-                  totalCount={issues.total_count}
-                  prefs={prefs}
-                />
-              </React.Suspense>
+              <ResolvedListLayout
+                workspaceSlug={params.ws}
+                entity={{ scope: "project", projectId: params.projectId }}
+                projectId={params.projectId}
+                projectIdentifier={project.identifier}
+                prefs={prefs}
+                canEdit={canEdit}
+                richFilters={preferences.rich_filters}
+                peekKey={peekKey}
+                onPeekChange={setPeekKey}
+                compact={search.layout === "compact"}
+              />
             );
+          }}
+          emptyState={emptyState}
+          noMatchState={emptyState}
+          headerActions={
+            <>
+              {addWorkItem}
+              {display}
+            </>
           }
-          if (active === "spreadsheet") {
-            return (
-              <React.Suspense fallback={<ListSkeleton />}>
-                <LazySpreadsheetLayout
-                  workspaceSlug={params.ws}
-                  projectId={params.projectId}
-                  projectIdentifier={project.identifier}
-                  entity={{ scope: "project", projectId: params.projectId }}
-                  prefs={prefs}
-                  canEdit={canEdit}
-                  hideCycle={!project.cycle_view}
-                  hideModule={!project.module_view}
-                  hideEstimate={project.estimate === null}
-                  richExpression={preferences.rich_filters}
-                  weekStart={weekStart}
-                />
-              </React.Suspense>
-            );
-          }
-          if (active === "calendar") {
-            return (
-              <React.Suspense fallback={<ListSkeleton />}>
-                <LazyCalendarEntry
-                  workspaceSlug={params.ws}
-                  projectId={params.projectId}
-                  projectIdentifier={project.identifier}
-                  entity={{ scope: "project", projectId: params.projectId }}
-                  canEdit={canEdit}
-                />
-              </React.Suspense>
-            );
-          }
-          const ResolvedListLayout = resolvedListLayout();
-          return (
-            <ResolvedListLayout
-              workspaceSlug={params.ws}
-              entity={{ scope: "project", projectId: params.projectId }}
-              projectId={params.projectId}
-              projectIdentifier={project.identifier}
-              prefs={prefs}
-              canEdit={canEdit}
-              richFilters={preferences.rich_filters}
-              peekKey={peekKey}
-              onPeekChange={setPeekKey}
-              compact={search.layout === "compact"}
-            />
-          );
-        }}
-        emptyState={<ProjectIssuesEmptyState />}
-        noMatchState={<ProjectIssuesNoMatchState />}
-        headerActions={
-          <>
-            {addWorkItem}
-            {display}
-          </>
-        }
-        displayControl={display}
-        filterControl={richFilter?.control}
-        filterRow={richFilter?.row}
-        analyticsControl={analytics}
-      />
-    );
+          displayControl={display}
+          filterControl={richFilter?.control}
+          filterRow={richFilter?.row}
+          analyticsControl={analytics}
+        />
+      );
+    };
     const createDialog = createOpen ? (
       <React.Suspense fallback={null}>
         <LazyWorkItemCreateDialog
@@ -375,6 +385,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           <LazyIssueFilters
             workspaceSlug={params.ws}
             projectId={params.projectId}
+            entity={{ scope: "project", projectId: params.projectId }}
             hideCycle={!project.cycle_view}
             hideModule={!project.module_view}
             viewsEnabled={project.issue_views_view}

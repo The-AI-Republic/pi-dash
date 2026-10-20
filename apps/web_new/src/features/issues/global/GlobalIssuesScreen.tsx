@@ -3,20 +3,20 @@
 // See the LICENSE file for details.
 // Workspace all-issues view (parity/specs/issues.md §18, ISS-223). One
 // flat list across every project the caller can see, paged with the
-// server cursor so the whole set is reachable. The route parses the
-// URL's query parameters into route filters and hands them over; this
-// build deliberately does not apply them (the oracle pins the
-// unfiltered result), so the screen shows the same rows either way.
+// server cursor so the whole set is reachable. The URL keeps its query
+// parameters but this build deliberately does not apply them (the
+// oracle pins the unfiltered result), so the screen shows the same rows
+// either way, and the empty surface is the workspace card (ISS-073).
 
 import { useSuspenseInfiniteQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { GlobalIssueRow } from "@pidash/api-client";
-import { Link, useParams, useSearch } from "@tanstack/react-router";
+import { Link, useParams } from "@tanstack/react-router";
 import { Button, VirtualList } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
-import { hasRouteFilters, parseRouteFilters } from "./routeFilters.js";
+import { GlobalIssuesEmptyState } from "../contexts/GlobalIssuesEmptyState.js";
 import { flattenGlobalPages, globalIssuesQueryOptions, globalTotalCount } from "./queries.js";
 
 /** Stable row height for the virtual list. */
@@ -73,7 +73,6 @@ function GlobalRow({
  */
 export function GlobalIssuesScreen(): React.ReactElement {
   const params = useParams({ strict: false }) as { ws?: string };
-  const routeFilters = useSearch({ strict: false }) as Record<string, unknown>;
   const workspaceSlug = params.ws ?? "";
   const client = getAppClient();
   const issues = useSuspenseInfiniteQuery(globalIssuesQueryOptions(client, workspaceSlug));
@@ -96,16 +95,11 @@ export function GlobalIssuesScreen(): React.ReactElement {
     });
   }, [issues.hasNextPage, issues.isFetchingNextPage, issues.fetchNextPage]);
   const sentinel = useLoadMoreSentinel(loadMore, issues.hasNextPage);
-  const filtersOn = hasRouteFilters(parseRouteFilters(routeFilters));
   if (rows.length === 0) {
-    return (
-      <section aria-label="All issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-        <h2 className="text-h3 text-(--text)">No issues yet</h2>
-        <p className="text-body text-(--text-muted)">
-          {filtersOn ? "No issues match these filters." : "Issues from every project will appear here."}
-        </p>
-      </section>
-    );
+    // The empty surface is the workspace card (ISS-073): the old list
+    // shows the same two-tier card with or without query params, because
+    // the read ignores them (ISS-223).
+    return <GlobalIssuesEmptyState workspaceSlug={workspaceSlug} projects={projects} />;
   }
   return (
     <section aria-label="All issues" className="flex h-full min-h-0 flex-col">

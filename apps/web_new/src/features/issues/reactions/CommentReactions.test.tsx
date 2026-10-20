@@ -87,7 +87,7 @@ function stubTransport(handler: (call: Recorded) => { status: number; body: unkn
   return calls;
 }
 
-function wrap(node: JSX.Element) {
+function wrap(node: React.ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });

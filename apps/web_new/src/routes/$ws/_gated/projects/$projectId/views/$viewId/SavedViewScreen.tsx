@@ -23,8 +23,11 @@ import {
   issuesQueryOptions,
   mergeDisplayPrefs,
   parseDisplayPrefs,
+  selectCreatableProjects,
   type LayoutKind,
+  type WorkItemCreateProject,
 } from "../../../../../../../features/issues/index.js";
+import { SavedViewIssuesEmpty } from "../../../../../../../features/issues/emptyStates/cards.js";
 import type { RichFilterBuilderParts } from "../../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import { projectViewQueryOptions } from "../../../../../../../features/issues/filters/rich/savedViewQuery.js";
 import { savedViewKeys, viewExpression } from "../../../../../../../features/issues/filters/rich/views.js";
@@ -43,29 +46,19 @@ const LazyIssueFilters = React.lazy(() => import("../../../../../../../features/
 
 // The timeline boundary only matters when the view stores the timeline
 // layout, so it rides its own chunk (Quality gates, NEWFRONT-677).
+// The create dialog carries the property strip and every picker; a view
+// opens it from its empty card, so it stays off this screen's first paint.
+const LazyWorkItemCreateDialog = React.lazy(() =>
+  import("../../../../../../../features/issues/components/WorkItemCreateDialog.js").then((module) => ({
+    default: module.WorkItemCreateDialog,
+  }))
+);
+
 const LazyGanttTimeline = React.lazy(() =>
   import("../../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
     default: module.GanttTimeline,
   }))
 );
-
-function ViewIssuesEmptyState(): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No issues yet</h2>
-      <p className="text-body text-(--text-muted)">New issues in this project will appear here.</p>
-    </section>
-  );
-}
-
-function ViewIssuesNoMatchState(): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No matching issues</h2>
-      <p className="text-body text-(--text-muted)">No issues match the current filters.</p>
-    </section>
-  );
-}
 
 export interface SavedViewScreenProps {
   params: SavedViewReadInput;
@@ -80,6 +73,20 @@ export function SavedViewScreen({ params, search, context }: SavedViewScreenProp
   );
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
   const project = projects.find((entry) => entry.id === params.projectId) ?? null;
+  const [createOpen, setCreateOpen] = React.useState(false);
+  const creatable: WorkItemCreateProject[] = React.useMemo(
+    () =>
+      selectCreatableProjects(
+        projects.map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          identifier: entry.identifier,
+          memberRole: entry.member_role,
+          archived: entry.archived_at !== null,
+        }))
+      ),
+    [projects]
+  );
   // The layout root renders from these settings rather than the personal
   // record, so the view opens in the layout it was saved with. Display
   // switches edit this copy; Update view persists it.
@@ -132,61 +139,89 @@ export function SavedViewScreen({ params, search, context }: SavedViewScreenProp
       totalCount={issues.total_count}
     />
   );
-  const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => (
-    <IssuesLayoutRoot
-      workspaceSlug={params.ws}
-      entity={{ scope: "project", projectId: params.projectId }}
-      title={view.name}
-      totalCount={issues.total_count}
-      resultCount={issues.results.length}
-      offered={offered}
-      display={viewDisplay}
-      onDisplayChange={(layout) => setViewDisplay((current) => mergeDisplayPrefs(current, { layout }))}
-      renderLayout={(layout, prefs) =>
-        layout === "gantt_chart" ? (
-          <React.Suspense fallback={<ListSkeleton />}>
-            <LazyGanttTimeline
-              workspaceSlug={params.ws}
-              projectId={params.projectId}
-              projectIdentifier={project.identifier}
-              issues={issues.results}
-              totalCount={issues.total_count}
-              prefs={prefs}
-            />
-          </React.Suspense>
-        ) : (
-          <ResolvedIssueList
-            issues={issues.results}
-            projectIdentifier={project.identifier}
-            layout={search.layout ?? "list"}
-          />
-        )
-      }
-      emptyState={<ViewIssuesEmptyState />}
-      noMatchState={<ViewIssuesNoMatchState />}
-      headerActions={displayControl}
-      displayControl={displayControl}
-      filterControl={richFilter?.control}
-      filterRow={richFilter?.row}
-      analyticsControl={analytics}
-    />
-  );
-  return (
-    <React.Suspense fallback={renderWithFilters(null)}>
-      <LazyIssueFilters
-        workspaceSlug={params.ws}
-        projectId={params.projectId}
-        hideCycle={!project.cycle_view}
-        hideModule={!project.module_view}
-        viewsEnabled={project.issue_views_view}
-        view={view}
-        viewDisplay={viewDisplay}
-        onViewUpdated={(stored) => {
-          context.queryClient.setQueryData(savedViewKeys.project(params.ws, params.projectId, params.viewId), stored);
+  const renderWithFilters = (richFilter: RichFilterBuilderParts | null): React.ReactElement => {
+    // ISS-072 pins one card here regardless of the expression: a view
+    // that matches nothing states what the view is for and offers the
+    // create dialog, rather than reading as a search that failed.
+    const emptyState = (
+      <SavedViewIssuesEmpty
+        canAct={creatable.length > 0}
+        onCreate={() => {
+          setCreateOpen(true);
         }}
-      >
-        {renderWithFilters}
-      </LazyIssueFilters>
+      />
+    );
+    return (
+      <IssuesLayoutRoot
+        workspaceSlug={params.ws}
+        entity={{ scope: "project", projectId: params.projectId }}
+        title={view.name}
+        totalCount={issues.total_count}
+        resultCount={issues.results.length}
+        offered={offered}
+        display={viewDisplay}
+        onDisplayChange={(layout) => setViewDisplay((current) => mergeDisplayPrefs(current, { layout }))}
+        renderLayout={(layout, prefs) =>
+          layout === "gantt_chart" ? (
+            <React.Suspense fallback={<ListSkeleton />}>
+              <LazyGanttTimeline
+                workspaceSlug={params.ws}
+                projectId={params.projectId}
+                projectIdentifier={project.identifier}
+                issues={issues.results}
+                totalCount={issues.total_count}
+                prefs={prefs}
+              />
+            </React.Suspense>
+          ) : (
+            <ResolvedIssueList
+              issues={issues.results}
+              projectIdentifier={project.identifier}
+              layout={search.layout ?? "list"}
+            />
+          )
+        }
+        emptyState={emptyState}
+        noMatchState={emptyState}
+        headerActions={displayControl}
+        displayControl={displayControl}
+        filterControl={richFilter?.control}
+        filterRow={richFilter?.row}
+        analyticsControl={analytics}
+      />
+    );
+  };
+  const createDialog = createOpen ? (
+    <React.Suspense fallback={null}>
+      <LazyWorkItemCreateDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        workspaceSlug={params.ws}
+        projects={creatable}
+        initialProjectId={params.projectId}
+      />
     </React.Suspense>
+  ) : null;
+  return (
+    <>
+      <React.Suspense fallback={renderWithFilters(null)}>
+        <LazyIssueFilters
+          workspaceSlug={params.ws}
+          projectId={params.projectId}
+          entity={{ scope: "project", projectId: params.projectId }}
+          hideCycle={!project.cycle_view}
+          hideModule={!project.module_view}
+          viewsEnabled={project.issue_views_view}
+          view={view}
+          viewDisplay={viewDisplay}
+          onViewUpdated={(stored) => {
+            context.queryClient.setQueryData(savedViewKeys.project(params.ws, params.projectId, params.viewId), stored);
+          }}
+        >
+          {renderWithFilters}
+        </LazyIssueFilters>
+      </React.Suspense>
+      {createDialog}
+    </>
   );
 }

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,9 @@ const mocks = vi.hoisted(() => ({
   prefs: vi.fn(),
   pickerCycles: vi.fn(),
   pickerModules: vi.fn(),
+  clearFilters: vi.fn(),
+  hasCompleteCondition: vi.fn(() => false),
+  addedThisVisit: vi.fn(() => false),
 }));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
@@ -38,6 +41,24 @@ vi.mock("../../../shared/pickers/reference.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../shared/pickers/reference.js")>()),
   pickerCyclesQueryOptions: mocks.pickerCycles,
   pickerModulesQueryOptions: mocks.pickerModules,
+}));
+
+// The filter row is a lazy chunk; the harness hands its parts straight
+// down so the host renders without starting another import.
+vi.mock("../filters/rich/lazy.js", () => ({
+  LazyIssueFilters: (props: { children: (parts: unknown) => React.ReactNode; entity: unknown }) => (
+    <div data-testid="issue-filters" data-entity={JSON.stringify(props.entity)}>
+      {props.children({
+        control: <span data-testid="filter-control" />,
+        row: <span data-testid="filter-row" />,
+        instanceId: "project:test",
+        conditions: [],
+        addedThisVisit: mocks.addedThisVisit(),
+        clearFilters: mocks.clearFilters,
+        hasCompleteCondition: mocks.hasCompleteCondition(),
+      })}
+    </div>
+  ),
 }));
 
 vi.mock("../calendar/CalendarEntry.js", () => ({
@@ -102,6 +123,11 @@ vi.mock("./lazy.js", async (importOriginal) => {
         return (
           <div
             data-testid="list-layout"
+            ref={() => {
+              const register = props.onRegisterOverlays as ((overlays: unknown) => void) | undefined;
+              const overlays = (globalThis as { __entityOverlays?: unknown }).__entityOverlays;
+              if (register !== undefined && overlays !== undefined) register(overlays);
+            }}
             data-cycle={String(props.cycleId ?? "")}
             data-module={String(props.moduleId ?? "")}
             data-completed={String(props.completedCycle ?? false)}
@@ -206,6 +232,9 @@ function setCycleTransferState(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.hasCompleteCondition.mockReturnValue(false);
+  mocks.addedThisVisit.mockReturnValue(false);
+  delete (globalThis as { __entityOverlays?: unknown }).__entityOverlays;
   mocks.projects.mockReturnValue({ queryKey: PROJECTS_KEY, queryFn: vi.fn() });
   mocks.listPage.mockReturnValue({ queryKey: PAGE_KEY, queryFn: vi.fn() });
   mocks.prefs.mockReturnValue({ queryKey: PREFS_KEY, queryFn: vi.fn() });
@@ -270,28 +299,6 @@ describe("EntityListScreen", () => {
     expect(screen.getByTestId("layout-root")).toHaveAttribute("data-title", "Cycle");
   });
 
-  it("mounts the calendar with the entity and its cycle membership", () => {
-    setup();
-    const calendar = screen.getByTestId("calendar-entry");
-    expect(calendar).toHaveAttribute(
-      "data-entity",
-      JSON.stringify({ scope: "cycle", projectId: PROJECT, cycleId: CYCLE })
-    );
-    expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ cycleId: CYCLE }));
-    expect(calendar).toHaveAttribute("data-can-edit", "true");
-  });
-
-  it("mounts the module calendar read-only for a completed context", () => {
-    setup({
-      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
-      moduleId: MODULE,
-      completedModule: true,
-    });
-    const calendar = screen.getByTestId("calendar-entry");
-    expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ moduleId: MODULE }));
-    expect(calendar).toHaveAttribute("data-can-edit", "false");
-  });
-
   it("reads the flat first page for the entity", () => {
     setup();
     expect(mocks.listPage).toHaveBeenCalledWith(expect.anything(), "acme", {
@@ -317,43 +324,10 @@ describe("EntityListScreen", () => {
     setup({
       entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
       moduleId: MODULE,
-      completedModule: true,
+      completedCycle: true,
     });
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module", MODULE);
-    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
-  });
-
-  it("forwards a completed module context to the list", () => {
-    setup({
-      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
-      moduleId: MODULE,
-      completedModule: true,
-    });
-    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
-  });
-
-  it("derives a completed module from its picker row", () => {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
-    queryClient.setQueryData(PROJECTS_KEY, [project()]);
-    queryClient.setQueryData(PREFS_KEY, { filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} });
-    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
-    queryClient.setQueryData(MODULES_KEY, [{ id: MODULE, name: "Auth", status: "completed" }]);
-    render(
-      <QueryClientProvider client={queryClient}>
-        <EntityListScreen
-          workspaceSlug="acme"
-          projectId={PROJECT}
-          entity={{ scope: "module", projectId: PROJECT, moduleId: MODULE }}
-          moduleId={MODULE}
-          peekKey={null}
-          onPeekChange={vi.fn()}
-          compact={false}
-        />
-      </QueryClientProvider>
-    );
-    expect(screen.getByTestId("calendar-entry")).toHaveAttribute("data-can-edit", "false");
-    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-completed", "true");
   });
 
   it("passes project standing rather than the workspace role alone", () => {
@@ -448,9 +422,216 @@ describe("EntityListScreen", () => {
     expect(screen.queryByTestId("layout-root")).not.toBeInTheDocument();
   });
 
-  it("wires the empty states to the entity title", () => {
+  it("offers creating and attaching a work item on an empty cycle (ISS-069)", () => {
     setup();
-    expect(screen.getByTestId("empty-state")).toHaveTextContent("No work items in Sprint 1");
-    expect(screen.getByTestId("no-match-state")).toHaveTextContent("No work items in Sprint 1");
+    expect(screen.getByTestId("empty-state")).toHaveTextContent("No work items to show in this cycle");
+    expect(screen.getByTestId("no-match-state")).toHaveTextContent("No work items to show in this cycle");
+    expect(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Create work item" })).toBeEnabled();
+    expect(
+      within(screen.getByTestId("empty-state")).getByRole("button", { name: "Add existing work item" })
+    ).toBeEnabled();
+  });
+
+  it("renders the completed cycle card without actions (ISS-069)", () => {
+    setup({
+      entity: { scope: "cycle", projectId: PROJECT, cycleId: CYCLE },
+      cycleId: CYCLE,
+      completedCycle: true,
+    });
+    const card = screen.getByTestId("empty-state");
+    expect(card).toHaveTextContent("No work items in the cycle");
+    expect(within(card).queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("offers create and attach on an empty module (ISS-070)", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    const card = screen.getByTestId("empty-state");
+    expect(card).toHaveTextContent("No work items to show in this Module");
+    expect(within(card).getByRole("button", { name: "Add existing work item" })).toBeEnabled();
+  });
+
+  it("keeps the module first-run card for a stored expression alone (ISS-070)", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    expect(screen.getByTestId("empty-state")).toHaveTextContent("No work items to show in this Module");
+  });
+
+  it("shows the filtered card for a cycle whose stored expression matches nothing (ISS-069)", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
+    queryClient.setQueryData(PROJECTS_KEY, [project()]);
+    queryClient.setQueryData(PREFS_KEY, {
+      filters: {},
+      display_filters: {},
+      display_properties: {},
+      rich_filters: { and: [{ priority__in: "urgent" }] },
+    });
+    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
+    queryClient.setQueryData(CYCLES_KEY, [{ id: CYCLE, name: "Sprint 1", status: "ACTIVE" }]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EntityListScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          entity={{ scope: "cycle", projectId: PROJECT, cycleId: CYCLE }}
+          cycleId={CYCLE}
+          peekKey={null}
+          onPeekChange={vi.fn()}
+          compact={false}
+        />
+      </QueryClientProvider>
+    );
+    const card = screen.getByTestId("empty-state");
+    expect(card).toHaveTextContent("No matching results.");
+    expect(within(card).getByRole("button", { name: "Clear filters" })).toBeEnabled();
+  });
+
+  it("clears the cycle expression from the filtered card's entry (ISS-069)", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
+    queryClient.setQueryData(PROJECTS_KEY, [project()]);
+    queryClient.setQueryData(PREFS_KEY, {
+      filters: {},
+      display_filters: {},
+      display_properties: {},
+      rich_filters: { priority__in: "urgent" },
+    });
+    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
+    queryClient.setQueryData(CYCLES_KEY, [{ id: CYCLE, name: "Sprint 1", status: "ACTIVE" }]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EntityListScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          entity={{ scope: "cycle", projectId: PROJECT, cycleId: CYCLE }}
+          cycleId={CYCLE}
+          peekKey={null}
+          onPeekChange={vi.fn()}
+          compact={false}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Clear filters" }));
+    expect(mocks.clearFilters).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the filtered card on a cycle once a condition was added this visit (ISS-069)", () => {
+    mocks.hasCompleteCondition.mockReturnValue(true);
+    mocks.addedThisVisit.mockReturnValue(true);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
+    queryClient.setQueryData(PROJECTS_KEY, [project()]);
+    queryClient.setQueryData(PREFS_KEY, { filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} });
+    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
+    queryClient.setQueryData(CYCLES_KEY, [{ id: CYCLE, name: "Sprint 1", status: "ACTIVE" }]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EntityListScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          entity={{ scope: "cycle", projectId: PROJECT, cycleId: CYCLE }}
+          cycleId={CYCLE}
+          peekKey={null}
+          onPeekChange={vi.fn()}
+          compact={false}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("empty-state")).toHaveTextContent("No matching results.");
+  });
+
+  it("opens the cycle's create entry from the empty card through the list layout (ISS-069)", async () => {
+    const openCreate = vi.fn();
+    (globalThis as { __entityOverlays?: unknown }).__entityOverlays = { openCreate, openAddExisting: vi.fn() };
+    setup();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Create work item" }));
+    expect(openCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the module's add-existing entry from the empty card through the list layout (ISS-070)", async () => {
+    const openAddExisting = vi.fn();
+    (globalThis as { __entityOverlays?: unknown }).__entityOverlays = { openCreate: vi.fn(), openAddExisting };
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Add existing work item" }));
+    expect(openAddExisting).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the module's create and the cycle's add-existing entries (ISS-069/070)", async () => {
+    const openCreate = vi.fn();
+    const openAddExisting = vi.fn();
+    (globalThis as { __entityOverlays?: unknown }).__entityOverlays = { openCreate, openAddExisting };
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Create work item" }));
+    expect(openCreate).toHaveBeenCalledTimes(1);
+    cleanup();
+    (globalThis as { __entityOverlays?: unknown }).__entityOverlays = { openCreate, openAddExisting };
+    setup();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.click(within(screen.getByTestId("empty-state")).getByRole("button", { name: "Add existing work item" }));
+    expect(openAddExisting).toHaveBeenCalledTimes(1);
+  });
+
+  it("mounts the calendar with the entity and its cycle membership", () => {
+    setup();
+    const calendar = screen.getByTestId("calendar-entry");
+    expect(calendar).toHaveAttribute(
+      "data-entity",
+      JSON.stringify({ scope: "cycle", projectId: PROJECT, cycleId: CYCLE })
+    );
+    expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ cycleId: CYCLE }));
+    expect(calendar).toHaveAttribute("data-can-edit", "true");
+  });
+
+  it("mounts the module calendar read-only for a completed context", () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      completedModule: true,
+    });
+    const calendar = screen.getByTestId("calendar-entry");
+    expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ moduleId: MODULE }));
+    expect(calendar).toHaveAttribute("data-can-edit", "false");
+  });
+
+  it("derives a completed module from its picker row", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient = queryClient;
+    queryClient.setQueryData(PROJECTS_KEY, [project()]);
+    queryClient.setQueryData(PREFS_KEY, { filters: {}, display_filters: {}, display_properties: {}, rich_filters: {} });
+    queryClient.setQueryData(PAGE_KEY, { total_count: 0, results: [], count: 0 });
+    queryClient.setQueryData(MODULES_KEY, [{ id: MODULE, name: "Auth", status: "completed" }]);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <EntityListScreen
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          entity={{ scope: "module", projectId: PROJECT, moduleId: MODULE }}
+          moduleId={MODULE}
+          peekKey={null}
+          onPeekChange={vi.fn()}
+          compact={false}
+        />
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("calendar-entry")).toHaveAttribute("data-can-edit", "false");
+    expect(screen.getByTestId("list-layout")).toHaveAttribute("data-module-completed", "true");
+  });
+
+  it("passes the entity to the filter row so cycle and module expressions are their own", () => {
+    setup({ entity: { scope: "module", projectId: PROJECT, moduleId: MODULE }, moduleId: MODULE, title: "Auth" });
+    expect(screen.getByTestId("issue-filters")).toHaveAttribute(
+      "data-entity",
+      JSON.stringify({ scope: "module", projectId: PROJECT, moduleId: MODULE })
+    );
   });
 });

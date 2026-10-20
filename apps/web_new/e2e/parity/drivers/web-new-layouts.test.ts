@@ -1,0 +1,335 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Unit tests for the WebNewDriver empty-state and overlay methods
+// (NEWFRONT-637, ISS-068–074). A stub Page records each selector the
+// method reads, so a markup change that drops a parity hook fails here
+// before the parity stack is brought up.
+import type { Locator, Page } from "@playwright/test";
+import { describe, expect, it } from "vitest";
+
+import { WebNewDriver } from "./web-new";
+
+interface StubLocator {
+  count?: () => Promise<number>;
+  isVisible?: () => Promise<boolean>;
+  isDisabled?: () => Promise<boolean>;
+  isChecked?: () => Promise<boolean>;
+  click?: (options?: unknown) => Promise<void>;
+  fill?: (value: string) => Promise<void>;
+  waitFor?: (options?: unknown) => Promise<unknown>;
+  innerText?: () => Promise<string>;
+  nth?: (index: number) => StubLocator;
+  first?: () => StubLocator;
+  last?: () => StubLocator;
+  locator?: (selector: string, options?: unknown) => StubLocator;
+  getByRole?: (role: string, options?: unknown) => StubLocator;
+  getByText?: (text: string | RegExp, options?: unknown) => StubLocator;
+  getByPlaceholder?: (text: string, options?: unknown) => StubLocator;
+  filter?: (options: unknown) => StubLocator;
+  evaluate?: (fn: (node: never, arg?: never) => unknown, arg?: unknown) => Promise<unknown>;
+  [key: string]: unknown;
+}
+
+function locator(overrides: Partial<StubLocator> = {}): Locator {
+  const node: StubLocator = {
+    count: async () => 1,
+    isVisible: async () => true,
+    isDisabled: async () => false,
+    isChecked: async () => true,
+    click: async () => undefined,
+    fill: async () => undefined,
+    waitFor: async () => undefined,
+    innerText: async () => "",
+    evaluate: async () => null,
+    ...overrides,
+  };
+  const defaults: StubLocator = {
+    first: () => node,
+    last: () => node,
+    nth: () => node,
+    locator: () => node,
+    getByRole: () => node,
+    getByText: () => node,
+    getByPlaceholder: () => node,
+    filter: () => node,
+  };
+  for (const [name, value] of Object.entries(defaults)) {
+    if (node[name] === undefined) node[name] = value;
+  }
+  return node as unknown as Locator;
+}
+
+interface PageStub {
+  page: Page;
+  selectors: string[];
+  roles: Array<{ role: string; name: unknown }>;
+  clicks: string[];
+  keys: string[];
+  filled: string[];
+  waits: number;
+}
+
+function pageOf(
+  parts: {
+    locator?: (selector: string) => Locator;
+    role?: (role: string, options: Record<string, unknown> | undefined) => Locator;
+    placeholder?: (text: string) => Locator;
+    url?: string;
+  } = {}
+): PageStub {
+  const state: PageStub = {
+    selectors: [],
+    roles: [],
+    clicks: [],
+    keys: [],
+    filled: [],
+    waits: 0,
+    page: undefined as unknown as Page,
+  };
+  state.page = {
+    keyboard: {
+      press: async (key: string) => {
+        state.keys.push(key);
+      },
+    },
+    getByRole: (role: string, options?: Record<string, unknown>) => {
+      state.roles.push({ role, name: options?.["name"] });
+      return parts.role?.(role, options) ?? locator();
+    },
+    getByPlaceholder: (text: string) => parts.placeholder?.(text) ?? locator(),
+    locator: (selector: string) => {
+      state.selectors.push(selector);
+      return parts.locator?.(selector) ?? locator();
+    },
+    waitForTimeout: async () => {
+      state.waits += 1;
+    },
+    url: () => parts.url ?? "https://p.test/acme/projects/p/issues",
+    evaluate: async (fn: (arg?: unknown) => unknown, arg?: unknown) => fn(arg),
+    reload: async () => null,
+  } as unknown as Page;
+  return state;
+}
+
+describe("web_new empty-state driver", () => {
+  it("reads the visible card's heading", async () => {
+    const { page, selectors } = pageOf({
+      locator: (selector) => {
+        if (selector === '[data-testid="issues-empty-state"]:visible') {
+          return locator({ getByRole: () => locator({ innerText: async () => "  No project  " }) });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBe("No project");
+    expect(selectors).toContain('[data-testid="issues-empty-state"]:visible');
+  });
+
+  it("reads nothing when no card is mounted", async () => {
+    const { page } = pageOf({
+      locator: (selector) =>
+        selector === '[data-testid="issues-empty-state"]:visible' ? locator({ count: async () => 0 }) : locator(),
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyTitle()).resolves.toBeNull();
+    await expect(new WebNewDriver(page).layoutsEmptyActions()).resolves.toEqual([]);
+  });
+
+  it("lists every action with its enabled state", async () => {
+    const actions = locator({
+      count: async () => 2,
+      nth: (index) =>
+        locator({
+          innerText: async () => (index === 0 ? " Create work item " : "Add existing work item"),
+          isDisabled: async () => index === 1,
+        }),
+    });
+    const { page } = pageOf({
+      locator: (selector) =>
+        selector === '[data-testid="issues-empty-state"]:visible' ? locator({ locator: () => actions }) : locator(),
+    });
+    await expect(new WebNewDriver(page).layoutsEmptyActions()).resolves.toEqual([
+      { label: "Create work item", disabled: false },
+      { label: "Add existing work item", disabled: true },
+    ]);
+  });
+
+  it("clicks an action by its label inside the visible card", async () => {
+    const clicks: string[] = [];
+    const { page } = pageOf({
+      locator: (selector) =>
+        selector === '[data-testid="issues-empty-state"]:visible'
+          ? locator({
+              locator: (inner) => {
+                expect(inner).toBe("button");
+                return locator({
+                  first: () => locator({ click: async () => void clicks.push("button") }),
+                });
+              },
+            })
+          : locator(),
+    });
+    await new WebNewDriver(page).layoutsEmptyChoose("Add existing work item");
+    expect(clicks).toEqual(["button"]);
+  });
+
+  it("reads the profile activity heading", async () => {
+    const { page, roles } = pageOf({
+      role: (role, options) =>
+        role === "heading" && options?.["name"] === "Recent activity"
+          ? locator({ count: async () => 1 })
+          : locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).layoutsProfileActivityVisible()).resolves.toBe(true);
+    expect(roles).toContainEqual({ role: "heading", name: "Recent activity" });
+  });
+
+  it("reports the current url", async () => {
+    const { page } = pageOf({ url: "https://p.test/acme/projects/p/automations" });
+    await expect(new WebNewDriver(page).layoutsCurrentUrl()).resolves.toBe(
+      "https://p.test/acme/projects/p/automations"
+    );
+  });
+});
+
+describe("web_new work-item modal driver", () => {
+  it("finds the dialog through its Title field and reads the heading", async () => {
+    const { page, roles } = pageOf({
+      role: (role) =>
+        role === "dialog"
+          ? locator({ getByRole: () => locator({ innerText: async () => "Create new work item" }) })
+          : locator(),
+      placeholder: (text) => (text === "Title" ? locator() : locator({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(page).layoutsWorkItemModalVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(page).layoutsWorkItemModalTitle()).resolves.toBe("Create new work item");
+    expect(roles.filter((row) => row.role === "dialog").length).toBeGreaterThan(0);
+  });
+
+  it("reports no modal when no dialog exists", async () => {
+    const { page } = pageOf({
+      role: () => locator({ count: async () => 0 }),
+      placeholder: () => locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).layoutsWorkItemModalVisible()).resolves.toBe(false);
+    await expect(new WebNewDriver(page).layoutsWorkItemModalTitle()).resolves.toBeNull();
+  });
+
+  it("fills the title field", async () => {
+    const filled: string[] = [];
+    const field = locator({
+      fill: async (value: string) => {
+        filled.push(value);
+      },
+    });
+    const { page } = pageOf({
+      role: (role) =>
+        role === "dialog"
+          ? locator({ filter: () => locator({ getByPlaceholder: () => locator({ first: () => field }) }) })
+          : locator(),
+    });
+    await new WebNewDriver(page).layoutsWorkItemModalSetTitle("Parity item");
+    expect(filled).toEqual(["Parity item"]);
+  });
+
+  it("closes through Escape once the dialog is gone", async () => {
+    let open = true;
+    const { page, keys } = pageOf({
+      role: (role) => (role === "dialog" ? locator({ count: async () => (open ? 1 : 0) }) : locator()),
+      placeholder: () => locator(),
+    });
+    (page as unknown as { keyboard: { press: (key: string) => Promise<void> } }).keyboard.press = async (
+      key: string
+    ) => {
+      keys.push(key);
+      open = false;
+    };
+    await new WebNewDriver(page).layoutsWorkItemModalClose();
+    expect(keys).toEqual(["Escape"]);
+  });
+
+  it("submits a create once and waits for the dialog to close", async () => {
+    let open = true;
+    const clicks: string[] = [];
+    const save = locator({
+      count: async () => 1,
+      first: () =>
+        locator({
+          click: async () => {
+            clicks.push("Save");
+            open = false;
+          },
+        }),
+    });
+    const dialog = locator({
+      count: async () => (open ? 1 : 0),
+      getByRole: (role: string) => (role === "button" ? save : locator({ count: async () => 0 })),
+    });
+    const { page } = pageOf({
+      role: (role) => (role === "dialog" ? dialog : locator()),
+      placeholder: () => locator(),
+    });
+    await new WebNewDriver(page).layoutsWorkItemModalSubmit();
+    expect(clicks).toEqual(["Save"]);
+  });
+
+  it("reports whether the dialog carries a text", async () => {
+    const { page } = pageOf({
+      role: (role, options) =>
+        role === "dialog"
+          ? locator({
+              filter: () => locator(),
+              getByText: () => locator({ count: async () => (options === undefined ? 1 : 0) }),
+              first: () => locator({ evaluate: async () => true }),
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).layoutsWorkItemModalHasText("Parity item")).resolves.toBe(true);
+  });
+});
+
+describe("web_new add-existing modal driver", () => {
+  it("reads the dialog marker from its submit control", async () => {
+    const { page, roles } = pageOf({
+      role: (role, options) =>
+        role === "button" && options?.["name"] === "Add selected work items"
+          ? locator({ count: async () => 1 })
+          : locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).layoutsAddExistingModalVisible()).resolves.toBe(true);
+    expect(roles.some((row) => row.role === "button")).toBe(true);
+  });
+
+  it("lists the option names once the search returns rows", async () => {
+    const { page, selectors } = pageOf({
+      locator: (selector) => {
+        if (selector === 'label[for^="issue-"]') {
+          return locator({
+            count: async () => 2,
+            nth: (index) =>
+              locator({
+                locator: () =>
+                  locator({ last: () => locator({ innerText: async () => (index === 0 ? "First" : " Second ") }) }),
+              }),
+          });
+        }
+        if (selector === "span") return locator({ innerText: async () => "row" });
+        return locator();
+      },
+    });
+    const names = await new WebNewDriver(page).layoutsAddExistingModalIssueNames();
+    expect(names.length).toBe(2);
+    expect(selectors).toContain('label[for^="issue-"]');
+  });
+
+  it("returns no names when the search finds nothing", async () => {
+    const { page } = pageOf({
+      locator: (selector) => (selector === 'label[for^="issue-"]' ? locator({ count: async () => 0 }) : locator()),
+      role: (role) => (role === "button" ? locator({ count: async () => 0 }) : locator()),
+    });
+    const getByText = (page as unknown as { getByText: (text: string) => Locator }).getByText;
+    (page as unknown as { getByText: (text: string) => Locator }).getByText = (text: string) =>
+      text === "No matching work items." ? locator({ count: async () => 1 }) : getByText(text);
+    await expect(new WebNewDriver(page).layoutsAddExistingModalIssueNames()).resolves.toEqual([]);
+  });
+});

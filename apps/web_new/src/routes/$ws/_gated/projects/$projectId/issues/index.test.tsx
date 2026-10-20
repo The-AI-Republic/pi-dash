@@ -26,6 +26,7 @@ import {
 } from "../../../../../../features/issues/index.js";
 import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
 import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
+import { loadProjectEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
@@ -498,7 +499,7 @@ describe("project issues screen", () => {
   // The route awaits the list layout chunk in beforeLoad; these tests render
   // the component directly, so resolve the same chunk first.
   beforeAll(async () => {
-    await loadListLayout();
+    await Promise.all([loadListLayout(), loadProjectEmptyState()]);
   });
 
   it("composes the layout root with the project title and its rows", async () => {
@@ -815,19 +816,37 @@ describe("project issues screen", () => {
     expect(screen.queryByRole("button", { name: "Add to All work items" })).not.toBeInTheDocument();
   });
 
-  it("renders the interim empty state when the project has no issues", () => {
+  it("offers the first work item when the project has none (ISS-068)", async () => {
     renderScreen({}, 0, []);
 
-    expect(screen.getByRole("heading", { name: "No issues yet" })).toBeInTheDocument();
-    expect(screen.getByText("New issues in this project will appear here.")).toBeInTheDocument();
+    const card = await screen.findByTestId("issues-empty-state", undefined, LAZY_WAIT);
+    expect(card).toHaveAttribute("data-context", "project");
+    expect(screen.getByRole("heading", { name: /^Start with your first work item\./ })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Create your first work item" }, LAZY_WAIT)).toBeEnabled();
     expect(screen.queryByTestId("issues-fresh-strip")).not.toBeInTheDocument();
   });
 
-  it("renders the interim no-match state when filters exclude every row", () => {
-    renderScreen({}, 2, []);
+  it("opens the create dialog from the first-work-item card (ISS-068)", async () => {
+    renderScreen({}, 0, []);
 
-    expect(screen.getByRole("heading", { name: "No matching issues" })).toBeInTheDocument();
-    expect(screen.getByText("No issues match the current filters.")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Create your first work item" }, LAZY_WAIT));
+    expect(await screen.findByRole("dialog", undefined, LAZY_WAIT)).toBeInTheDocument();
+  });
+
+  it("disables the first-work-item entry for a project guest", async () => {
+    renderScreen({}, 0, [], { project: { member_role: 5 } });
+
+    expect(await screen.findByRole("button", { name: "Create your first work item" }, LAZY_WAIT)).toBeDisabled();
+  });
+
+  it("keeps the first-work-item card for a stored expression that matches nothing", async () => {
+    // The seed empties the rows but no condition was added through the
+    // row in this visit, so the project list shows its first-run card.
+    renderScreen({}, 0, [], { richFilters: { and: [{ priority__in: "urgent" }] } });
+
+    const card = await screen.findByTestId("issues-empty-state", undefined, LAZY_WAIT);
+    expect(card).toHaveAttribute("data-context", "project");
+    expect(screen.getByRole("heading", { name: /^Start with your first work item\./ })).toBeInTheDocument();
   });
 
   it("mounts the calendar renderer for a stored calendar layout", async () => {
