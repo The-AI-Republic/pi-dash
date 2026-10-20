@@ -1295,6 +1295,24 @@ class Seeder:
         self._put("labels", label_id)
         return {"id": label_id}
 
+    def create_page_label(
+        self, workspace_id: str, page_id: str, label_id: str
+    ) -> dict[str, Any]:
+        """A live ``page_labels`` join row.
+
+        Matches the write path's ``bulk_create`` shape (audit ids come from
+        the page server-side; the read annotations only look at ``label_id``).
+        """
+        row_id = _uid()
+        self.db.execute(
+            """INSERT INTO page_labels
+               (id, workspace_id, page_id, label_id, deleted_at, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,NULL,now(),now())""",
+            (row_id, workspace_id, page_id, label_id),
+        )
+        self._put("page_labels", row_id)
+        return {"id": row_id}
+
     def create_asset(
         self,
         workspace_id: str,
