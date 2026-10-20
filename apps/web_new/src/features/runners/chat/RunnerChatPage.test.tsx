@@ -599,6 +599,17 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     expect(screen.getByRole("alertdialog")).toBeInTheDocument();
   });
 
+  it("clears the refusal reason once a retried decision lands", async () => {
+    decide.mockRejectedValueOnce(new Error("socket closed"));
+    stream.approval = approval;
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await screen.findByTestId("chat-approval-error");
+    stream.approval = { ...approval, seq: 10, id: 10 };
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await vi.waitFor(() => expect(screen.queryByTestId("chat-approval-error")).toBeNull());
+  });
+
   it("names a decision failure that carries nothing readable", async () => {
     decide.mockRejectedValueOnce({});
     stream.approval = approval;

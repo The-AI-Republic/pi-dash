@@ -209,8 +209,11 @@ export function RunnerChatPage({
       if (request === null || session === null || transport.decideChatApproval === undefined) return;
       setDeciding(true);
       // Clear optimistically so a slow round-trip does not leave a stale
-      // prompt; a refusal puts it back so the choice can be retried.
+      // prompt; a refusal puts it back so the choice can be retried. The
+      // previous refusal's reason goes with it, so a retry that lands does
+      // not leave an error nobody can dismiss beside the cleared prompt.
       setPendingApproval(null);
+      setDecisionError(null);
       try {
         await transport.decideChatApproval(session.id, request.localApprovalId, decision);
       } catch (error) {

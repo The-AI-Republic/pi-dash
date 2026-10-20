@@ -17,6 +17,7 @@ import {
   fetchChatSessions,
   getChatTransport,
   openChatSession,
+  prepareChatSession,
   setChatTransport,
   subscribeChatTransport,
   type ChatTransport,
@@ -438,5 +439,47 @@ describe("createCloudChatTransport resilience", () => {
     const transport = createCloudChatTransport({ getClient: () => rows });
     await transport.cancelChat("s-21");
     expect(calls).toEqual([{ reason: "user_cancelled" }]);
+  });
+});
+
+describe("prepareChatSession ownership", () => {
+  function warmClient(): { api: ApiClient; calls: string[] } {
+    const calls: string[] = [];
+    const api = {
+      sendJson: async () => {
+        calls.push("warm");
+        return { data: { ok: true } };
+      },
+      parse: () => ({ ok: true }),
+    } as unknown as ApiClient;
+    return { api, calls };
+  }
+
+  it("warms a server session through the API while the local transport is installed", async () => {
+    const local = {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      ownsChatSession: async (sessionId: string) => sessionId === "local-session",
+      warmChatSession: vi.fn(async () => undefined),
+    } as unknown as ChatTransport;
+    setChatTransport(local);
+    const { api, calls } = warmClient();
+    await prepareChatSession(api, "server-session");
+    expect(calls).toEqual(["warm"]);
+    expect(local.warmChatSession).not.toHaveBeenCalled();
+  });
+
+  it("warms its own conversation through the engine without touching the API", async () => {
+    const local = {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      ownsChatSession: async (sessionId: string) => sessionId === "local-session",
+      warmChatSession: vi.fn(async () => undefined),
+    } as unknown as ChatTransport;
+    setChatTransport(local);
+    const { api, calls } = warmClient();
+    await prepareChatSession(api, "local-session");
+    expect(local.warmChatSession).toHaveBeenCalledWith("local-session");
+    expect(calls).toEqual([]);
   });
 });

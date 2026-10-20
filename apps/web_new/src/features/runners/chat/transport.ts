@@ -248,11 +248,14 @@ export async function fetchChatMessages(client: ApiClient, sessionId: string): P
 }
 
 /**
- * Prepare a session so its first turn streams promptly (RUN-028). Local
- * transports warm the engine; the cloud path posts to the warm endpoint.
+ * Prepare a session so its first turn streams promptly (RUN-028). A local
+ * transport warms only the conversations its own store carries; a session
+ * the server owns keeps the warm endpoint even while the desktop seam is
+ * installed, exactly like the other read verbs.
  */
 export async function prepareChatSession(client: ApiClient, sessionId: string): Promise<void> {
-  if (activeTransport.warmChatSession) {
+  const owned = activeTransport.ownsChatSession === undefined || (await activeTransport.ownsChatSession(sessionId));
+  if (owned && activeTransport.warmChatSession) {
     await activeTransport.warmChatSession(sessionId);
     return;
   }

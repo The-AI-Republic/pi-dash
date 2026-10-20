@@ -24,11 +24,16 @@ const transportState = vi.hoisted(() => ({
   handlers: [] as ChatSubscriptionHandlers[],
   subscriptions: [] as { sessionId: string; after: number }[],
   unsubscribes: [] as Array<ReturnType<typeof vi.fn>>,
+  installs: new Set<() => void>(),
 }));
 
 vi.mock("./transport.js", () => ({
   chatTransportForRunner: () => transportState.transport,
   getChatTransport: () => transportState.transport,
+  subscribeChatTransport: (listener: () => void) => {
+    transportState.installs.add(listener);
+    return () => transportState.installs.delete(listener);
+  },
 }));
 
 const STAMP = "2026-10-19T10:00:00Z";
@@ -102,6 +107,34 @@ describe("streamErrorMessage", () => {
     expect(streamErrorMessage("")).toBeNull();
     expect(streamErrorMessage(undefined)).toBeNull();
     expect(streamErrorMessage({ code: 3 })).toBeNull();
+  });
+});
+
+describe("transport installs", () => {
+  it("reopens the feed on the transport installed after mount", async () => {
+    transportState.installs.clear();
+    const firstUnsubscribe = vi.fn();
+    const secondUnsubscribe = vi.fn();
+    const cloud = {
+      subscribeChatEvents: vi.fn(() => firstUnsubscribe),
+    };
+    const local = {
+      subscribeChatEvents: vi.fn(() => secondUnsubscribe),
+    };
+    transportState.transport = cloud;
+    const { result } = renderHook(() => useChatStream("s-1", [], callbacks(), "r-1"));
+    expect(cloud.subscribeChatEvents).toHaveBeenCalledTimes(1);
+
+    transportState.transport = local;
+    act(() => {
+      for (const listener of transportState.installs) listener();
+    });
+
+    expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(local.subscribeChatEvents).toHaveBeenCalledTimes(1);
+    // The feed it reopens keeps the conversation the page was on.
+    expect(local.subscribeChatEvents.mock.calls[0]?.[0]).toBe("s-1");
+    expect(result.current.messages).toEqual([]);
   });
 });
 

@@ -22,7 +22,7 @@ import {
   refreshesHistory,
   type ActivityRow,
 } from "./events.js";
-import { chatTransportForRunner, type ChatSubscriptionHandlers } from "./transport.js";
+import { chatTransportForRunner, subscribeChatTransport, type ChatSubscriptionHandlers } from "./transport.js";
 
 /** First wait before reopening a dropped feed; doubles per failure. */
 export const STREAM_RETRY_BASE_MS = 1_000;
@@ -131,9 +131,22 @@ export function useChatStream(
     setTranscriptSession(sessionId);
   }, [sessionId]);
 
+  // The desktop bootstrap can install the local transport after this page
+  // mounted, which changes the feed a conversation must follow: reopen on
+  // the new seam so its frames reach the page instead of a stale stream.
+  const [surface] = React.useState(() => ({ transport: chatTransportForRunner(runnerId) }));
+  React.useEffect(() => {
+    surface.transport = chatTransportForRunner(runnerId);
+    return subscribeChatTransport(() => {
+      surface.transport = chatTransportForRunner(runnerId);
+      setSurfaceVersion((version) => version + 1);
+    });
+  }, [runnerId, surface]);
+  const [surfaceVersion, setSurfaceVersion] = React.useState(0);
+
   React.useEffect(() => {
     if (sessionId === null) return;
-    const transport = chatTransportForRunner(runnerId);
+    const transport = surface.transport;
     let unsubscribe: (() => void) | null = null;
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -188,7 +201,7 @@ export function useChatStream(
       if (timer !== null) clearTimeout(timer);
       unsubscribe?.();
     };
-  }, [runnerId, sessionId]);
+  }, [runnerId, sessionId, surface, surfaceVersion]);
 
   const dismissError = React.useCallback(() => setError(null), []);
 

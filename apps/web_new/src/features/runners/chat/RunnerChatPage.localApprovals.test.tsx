@@ -281,3 +281,20 @@ describe("RunnerChatPage local approvals", () => {
     expect(await screen.findByRole("group", { name: "Approval mode" })).toBeInTheDocument();
   });
 });
+
+describe("RunnerChatPage late transport install", () => {
+  it("delivers the engine's frames to a page mounted before the transport installed", async () => {
+    resetLocalChatTransportForTests();
+    const api = platformState.api as LocalChatApi;
+    renderPage();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(subscribed).toBe(false);
+    await act(async () => registerLocalChatTransport());
+    // The contact is re-read through the store that now serves it, so the
+    // page subscribes to its stream rather than the cloud feed.
+    await waitFor(() => expect(subscribed).toBe(true), { timeout: 10_000 });
+    await act(async () => emit(approvalFrame()));
+    expect(await screen.findByRole("alertdialog", { name: "Approval requested" })).toBeInTheDocument();
+    expect(api.decide).toBeDefined();
+  });
+});
