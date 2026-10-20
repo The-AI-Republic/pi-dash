@@ -55,7 +55,7 @@ describe("runRemoteCreate", () => {
     expect(await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, d)).toEqual({
       phase: "error",
       machineLabel: "L",
-      error: expect.stringContaining("went offline") as unknown as string,
+      error: expect.stringContaining("is offline") as unknown as string,
     });
   });
 
@@ -161,7 +161,7 @@ describe("runRemoteCreate", () => {
       }),
     });
     const offlineState = (await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, offline)) as RemoteState;
-    expect(offlineState.error).toContain("went offline");
+    expect(offlineState.error).toContain("is offline");
 
     // The live transport shape: a 409 body `{"error":"machine_offline"}`
     // arrives as ApiError code "http" with the reason in the message.
@@ -171,7 +171,7 @@ describe("runRemoteCreate", () => {
       }),
     });
     const httpState = (await runRemoteCreate({ machineId: "m1", machineLabel: "L" }, viaHttp)) as RemoteState;
-    expect(httpState.error).toContain("went offline");
+    expect(httpState.error).toContain("is offline");
 
     const unreachable = deps({
       createRunner: vi.fn(async () => {
@@ -182,7 +182,7 @@ describe("runRemoteCreate", () => {
       { machineId: "m1", machineLabel: "L" },
       unreachable
     )) as RemoteState;
-    expect(unreachableState.error).toContain("Could not reach the cloud");
+    expect(unreachableState.error).toContain("did not get a response");
   });
 
   it("falls back to the built-in poll cadence and deadline when none is given", async () => {

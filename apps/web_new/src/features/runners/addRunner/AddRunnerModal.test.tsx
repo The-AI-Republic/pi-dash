@@ -466,6 +466,79 @@ describe("machine path (RUN-007, RUN-009)", () => {
     await waitFor(() => expect(cancellationObserved).toBe(true));
   });
 
+  it("reports a create rejection while the dialog stays open", async () => {
+    machineRows.push(machine());
+    createRunner.mockRejectedValueOnce(Object.assign(new Error("machine_offline"), { code: "http" }));
+    harness();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
+    await pickPicker("Project", "Acme");
+    await submit();
+    await waitFor(() => expect(screen.getByText(/Could not create the runner/)).toBeInTheDocument());
+    expect(screen.getByText(/is offline/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Runner created" })).toBeNull();
+  });
+
+  it("keeps a stale create from writing into a reopened dialog", async () => {
+    machineRows.push(machine());
+    const { view } = harness();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
+    await pickPicker("Project", "Acme");
+    let release: (state: unknown) => void = () => undefined;
+    runRemoteCreateMock.mockImplementation(async (_input: unknown, deps: { update: (state: unknown) => void }) => {
+      await new Promise<void>((resolve) => {
+        release = (state) => {
+          deps.update(state);
+          resolve();
+        };
+      });
+      return null;
+    });
+    await submit();
+    expect(await screen.findByText(/Setting up a runner/)).toBeInTheDocument();
+    // Close and reopen before the first create settles: its result belongs
+    // to the dismissed dialog, not the fresh form.
+    view.rerender(<AddRunnerModal open={false} onOpenChange={() => undefined} />);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    view.rerender(<AddRunnerModal open onOpenChange={() => undefined} />);
+    release({ phase: "ok", machineLabel: "Laptop", runnerName: "stale" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole("heading", { name: "Add runner" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Runner created" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Generate Runner" })).toBeInTheDocument();
+  });
+
+  it("reports an in-flight create as cancelled when the dialog is replaced", async () => {
+    machineRows.push(machine());
+    const { view } = harness();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Dev machine" })).toHaveTextContent("Laptop"));
+    await pickPicker("Project", "Acme");
+    let finishCreate: () => void = () => undefined;
+    createRunner.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          finishCreate = () => reject(new Error("gone"));
+        })
+    );
+    const seen: unknown[] = [];
+    runRemoteCreateMock.mockImplementation(async (_input: unknown, deps: { createRunner: () => Promise<unknown> }) => {
+      try {
+        await deps.createRunner();
+      } catch (error) {
+        seen.push(error);
+      }
+      return null;
+    });
+    await submit();
+    await waitFor(() => expect(createRunner).toHaveBeenCalled());
+    view.rerender(<AddRunnerModal open={false} onOpenChange={() => undefined} />);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    view.rerender(<AddRunnerModal open onOpenChange={() => undefined} />);
+    finishCreate();
+    await waitFor(() => expect(seen).toHaveLength(1));
+    expect(seen[0]).toMatchObject({ code: "aborted" });
+    expect(screen.getByRole("heading", { name: "Add runner" })).toBeInTheDocument();
+  });
+
   it("resets the screen when the dialog closes", async () => {
     const { view } = harness();
     await pickPicker("Project", "Acme");

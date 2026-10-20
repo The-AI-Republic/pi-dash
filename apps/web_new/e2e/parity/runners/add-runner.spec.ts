@@ -540,7 +540,7 @@ test(
       await serverAddRunnerDropSession(machine.id);
       await driver.addRunnerSubmit();
       await expect.poll(() => driver.addRunnerRemotePhase(), { timeout: 30_000 }).toBe("error");
-      expect(await driver.addRunnerRemoteText()).toContain("went offline");
+      expect(await driver.addRunnerRemoteText()).toMatch(/offline/i);
       // The POST was attempted (the 409 came from the server, not the client).
       expect((await driver.addRunnerCreateSpyBodies()).length).toBe(1);
       await closeModal(driver);

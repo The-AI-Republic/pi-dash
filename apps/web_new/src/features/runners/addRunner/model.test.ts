@@ -196,19 +196,19 @@ describe("agent gating", () => {
 
 describe("remote failures", () => {
   it("distinguishes offline, unsupported agents and generic failures", () => {
-    expect(remoteFailureText("machine_offline")).toContain("went offline");
+    expect(remoteFailureText("machine_offline")).toContain("is offline");
     expect(remoteFailureText("unsupported_agent")).toBe(DAEMON_TOO_OLD_TEXT);
     expect(remoteFailureText('unknown agent kind "muse-code"')).toBe(DAEMON_TOO_OLD_TEXT);
     expect(remoteFailureText("boom")).toBe("boom");
-    expect(remoteFailureText(undefined)).toContain("Could not reach the cloud");
+    expect(remoteFailureText(undefined)).toContain("did not get a response");
   });
 
   it("reads the server reason out of the shared client's http code", () => {
-    expect(remoteFailureText("http", "machine_offline")).toContain("went offline");
+    expect(remoteFailureText("http", "machine_offline")).toContain("is offline");
     expect(remoteFailureText("http", "unsupported_agent")).toBe(DAEMON_TOO_OLD_TEXT);
     expect(remoteFailureText("http", "boom")).toBe("boom");
-    expect(remoteFailureText("http", "")).toContain("Could not reach the cloud");
-    expect(remoteFailureText("network", "network down")).toContain("Could not reach the cloud");
+    expect(remoteFailureText("http", "")).toContain("did not get a response");
+    expect(remoteFailureText("network", "network down")).toContain("did not get a response");
     expect(remoteFailureText("unsupported_agent", "ignored")).toBe(DAEMON_TOO_OLD_TEXT);
   });
 
@@ -218,7 +218,7 @@ describe("remote failures", () => {
     expect(isUnknownAgentError(undefined)).toBe(false);
     expect(remoteStatusError('unknown agent kind "grok"')).toBe(DAEMON_TOO_OLD_TEXT);
     expect(remoteStatusError("parity boom")).toBe("parity boom");
-    expect(remoteStatusError("machine_offline")).toContain("went offline");
+    expect(remoteStatusError("machine_offline")).toContain("is offline");
     expect(remoteStatusError(undefined)).toBe("");
   });
 });

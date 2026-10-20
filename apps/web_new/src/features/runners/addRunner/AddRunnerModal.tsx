@@ -86,6 +86,10 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   const [screen, setScreen] = React.useState<Screen>({ kind: "form" });
   const [lastFields, setLastFields] = React.useState<CommandFields | null>(null);
   const [machineTouched, setMachineTouched] = React.useState(false);
+  // Each open (and each close) bumps the generation. A create started under
+  // an older generation must not write into the screen the user is now
+  // looking at, even if it was reopened before the request settled.
+  const generation = React.useRef(0);
   const cancelled = React.useRef(false);
   const prefilled = React.useRef(false);
 
@@ -108,10 +112,12 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
 
   // Fresh form per open: reset every field, the screen, and both one-shot refs.
   React.useEffect(() => {
+    generation.current += 1;
     if (!open) {
       cancelled.current = true;
       return;
     }
+    const openedAt = generation.current;
     cancelled.current = false;
     prefilled.current = false;
     setValues(emptyValues());
@@ -119,6 +125,9 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
     setScreen({ kind: "form" });
     setLastFields(null);
     setMachineTouched(false);
+    return () => {
+      if (generation.current === openedAt) generation.current += 1;
+    };
   }, [open]);
 
   // One-shot machine auto-selection once the list arrives, with the agent
@@ -229,17 +238,30 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   }
 
   async function runRemote(machine: ConnectedMachine): Promise<void> {
+    const runFor = generation.current;
+    const stillCurrent = (): boolean => generation.current === runFor && !cancelled.current;
     setScreen({ kind: "remote", state: { phase: "creating", machineLabel: machine.label } });
     const transport = createRunnerRequest();
     await runRemoteCreate(
       { machineId: machine.id, machineLabel: machine.label },
       {
-        createRunner: () => transport.create(machine.id),
+        createRunner: async (machineId) => {
+          try {
+            return await transport.create(machineId);
+          } catch (error) {
+            // A close/reopen while the request was in flight reports as an
+            // abort so the loop exits without rendering a failure.
+            if (!stillCurrent()) throw Object.assign(new Error("aborted"), { code: "aborted" });
+            throw error;
+          }
+        },
         readStatus: () => transport.status(machine.id),
         sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
         now: () => Date.now(),
-        isCancelled: () => cancelled.current,
-        update: (state) => setScreen({ kind: "remote", state }),
+        isCancelled: () => !stillCurrent(),
+        update: (state) => {
+          if (stillCurrent()) setScreen({ kind: "remote", state });
+        },
       }
     );
   }
@@ -273,6 +295,7 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
   }
 
   function close(): void {
+    generation.current += 1;
     cancelled.current = true;
     onOpenChange(false);
   }
@@ -294,7 +317,10 @@ export function AddRunnerModal({ open, onOpenChange, projectId }: AddRunnerModal
       title={screen.kind === "remote" && screen.state.phase === "ok" ? "Runner created" : "Add runner"}
       open={open}
       onOpenChange={(next) => {
-        if (!next) cancelled.current = true;
+        if (!next) {
+          generation.current += 1;
+          cancelled.current = true;
+        }
         onOpenChange(next);
       }}
       bodyClassName={DIALOG_BODY}
@@ -459,14 +485,14 @@ function FormPanel({
         placeholder="my-laptop-runner"
         onChange={(event) => onField("name", event.target.value)}
         {...(errors.name === undefined ? {} : { error: errors.name })}
-        hint="Auto-assigned if blank. No spaces. If provided, use letters, digits, underscore, dot, or dash; start with a letter, digit, or underscore."
+        hint="Leave it empty to have one assigned. Letters, digits, underscore, dot and dash are allowed; it must begin with a letter, digit or underscore."
       />
 
       <Input
         id="add-runner-working-dir"
         label="Working directory (optional)"
         value={values.workingDir}
-        placeholder="local dev machine project working dir"
+        placeholder="e.g. /home/me/src/my-project"
         onChange={(event) => onField("workingDir", event.target.value)}
         hint="Where the agent CLI should run on that machine. Point it at the project checkout; an empty value uses a sandbox that is seldom what you want."
       />

@@ -214,7 +214,8 @@ export interface RemoteState {
 export function remoteFailureText(code: string | undefined, detail?: string | undefined): string {
   for (const reason of [code, detail]) {
     if (reason === undefined) continue;
-    if (reason === "machine_offline") return "The dev machine went offline before the command could be delivered.";
+    if (reason === "machine_offline")
+      return "That dev machine is offline, so the request never reached it. Run the command on it, or start its daemon and try again.";
     if (reason === "unsupported_agent") return DAEMON_TOO_OLD_TEXT;
     if (UNKNOWN_AGENT_PATTERN.test(reason)) return DAEMON_TOO_OLD_TEXT;
   }
@@ -222,7 +223,7 @@ export function remoteFailureText(code: string | undefined, detail?: string | un
   // A 409 body carries `{"error": reason}`; the shared client keeps the
   // reason in `message` and reports code `http`.
   if (code === "http" && detail !== undefined && detail !== "") return detail;
-  return "Could not reach the cloud to start the runner creation.";
+  return "The request did not get a response from the server. Check your connection and try again.";
 }
 
 /** Transport-level codes the shared client uses when the server only sent a reason. */
