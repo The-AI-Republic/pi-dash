@@ -17,7 +17,7 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { hasRouteFilters, parseRouteFilters } from "./routeFilters.js";
-import { flattenGlobalPages, globalIssuesQueryOptions } from "./queries.js";
+import { flattenGlobalPages, globalIssuesQueryOptions, globalTotalCount } from "./queries.js";
 
 /** Stable row height for the virtual list. */
 export const GLOBAL_ROW_HEIGHT = 40;
@@ -83,9 +83,17 @@ export function GlobalIssuesScreen(): React.ReactElement {
     [projects]
   );
   const rows = React.useMemo(() => flattenGlobalPages(issues.data), [issues.data]);
-  const total = issues.data.pages[0]?.total_count ?? rows.length;
+  const total = globalTotalCount(issues.data);
+  // A sentinel callback and a click can both land before the render that
+  // reports the fetch state, so the latch is synchronous and the render
+  // flag only keeps the control's busy state in step.
+  const inFlight = React.useRef(false);
   const loadMore = React.useCallback(() => {
-    if (issues.hasNextPage && !issues.isFetchingNextPage) void issues.fetchNextPage();
+    if (!issues.hasNextPage || inFlight.current || issues.isFetchingNextPage) return;
+    inFlight.current = true;
+    void issues.fetchNextPage().finally(() => {
+      inFlight.current = false;
+    });
   }, [issues.hasNextPage, issues.isFetchingNextPage, issues.fetchNextPage]);
   const sentinel = useLoadMoreSentinel(loadMore, issues.hasNextPage);
   const filtersOn = hasRouteFilters(parseRouteFilters(routeFilters));

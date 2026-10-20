@@ -42,6 +42,11 @@ export function globalIssuesQueryOptions(client: ApiClient, workspaceSlug: strin
   });
 }
 
+/** The server's total from the first page; zero before any page lands. */
+export function globalTotalCount(data: { pages: GlobalIssueListResponse[] } | undefined): number {
+  return data?.pages[0]?.total_count ?? 0;
+}
+
 /** Flatten cursor pages into one row list, dropping any repeated id. */
 export function flattenGlobalPages(
   data: { pages: GlobalIssueListResponse[] } | undefined

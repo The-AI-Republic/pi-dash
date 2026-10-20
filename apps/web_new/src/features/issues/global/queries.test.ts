@@ -8,7 +8,7 @@ import type { ApiClient, GlobalIssueListResponse } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import type { GlobalIssueRow } from "@pidash/api-client";
-import { flattenGlobalPages, GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions } from "./queries.js";
+import { flattenGlobalPages, GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions, globalTotalCount } from "./queries.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 
@@ -133,6 +133,14 @@ describe("globalIssuesQueryOptions", () => {
 
   it("keys the cache on the workspace alone so a deep link shares the plain entry", () => {
     expect(options.queryKey).toEqual(["ws", "acme", "issues", "global"]);
+  });
+});
+
+describe("globalTotalCount", () => {
+  it("reads the first page's server total and falls back to zero", () => {
+    expect(globalTotalCount(undefined)).toBe(0);
+    expect(globalTotalCount({ pages: [] })).toBe(0);
+    expect(globalTotalCount({ pages: [response([row("a", 1)], { total: 42 })] })).toBe(42);
   });
 });
 

@@ -12,7 +12,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -167,6 +167,9 @@ afterEach(() => {
 // window. Give the scroll region and rows a height so rows mount.
 const realHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
 
+/** Every sentinel observer mounted this test, so a test can scroll it. */
+const capturedObservers: Array<{ trigger(): void; disconnect(): void }> = [];
+
 beforeEach(() => {
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
     configurable: true,
@@ -176,9 +179,19 @@ beforeEach(() => {
       return realHeight?.get?.call(this) ?? 0;
     },
   });
+  capturedObservers.length = 0;
   class TestIntersectionObserver {
+    private readonly callback: IntersectionObserverCallback;
+    constructor(callback: IntersectionObserverCallback) {
+      this.callback = callback;
+      capturedObservers.push(this);
+    }
     observe(): void {}
     disconnect(): void {}
+    /** Drive the sentinel as the browser would when it scrolls into view. */
+    trigger(): void {
+      this.callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+    }
   }
   vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
 });
@@ -274,5 +287,47 @@ describe("GlobalIssuesScreen", () => {
     const more = await screen.findByRole("button", { name: GLOBAL_LOAD_MORE_LABEL });
     await userEvent.setup().click(more);
     expect(seen.some((url) => url.includes("cursor=page-2"))).toBe(true);
+  });
+
+  it("asks for the next page when the sentinel scrolls into view", async () => {
+    const first = [row("p1-0", { sequence_id: 1 })];
+    const seen: string[] = [];
+    renderScreen(
+      { results: first, total_count: 2 },
+      {},
+      { nextPage: page([row("p2-0", { sequence_id: 2 })], { total: 2 }), onFetch: (url) => seen.push(url) }
+    );
+    await screen.findByRole("button", { name: GLOBAL_LOAD_MORE_LABEL });
+    await waitFor(() => expect(capturedObservers.length).toBeGreaterThan(0));
+    act(() => capturedObservers.at(-1)?.trigger());
+    await waitFor(() => expect(seen.some((url) => url.includes("cursor=page-2"))).toBe(true));
+  });
+
+  it("asks for one continuation at a time while a page is in flight", async () => {
+    const first = [row("p1-0", { sequence_id: 1 })];
+    const seen: string[] = [];
+    renderScreen(
+      { results: first, total_count: 3 },
+      {},
+      {
+        nextPage: page([row("p2-0", { sequence_id: 2 })], { total: 3, nextCursor: "page-3" }),
+        onFetch: (url) => seen.push(url),
+      }
+    );
+    await screen.findByRole("button", { name: GLOBAL_LOAD_MORE_LABEL });
+    await waitFor(() => expect(capturedObservers.length).toBeGreaterThan(0));
+    const observer = capturedObservers.at(-1);
+    act(() => observer?.trigger());
+    act(() => observer?.trigger());
+    await waitFor(() => expect(seen.filter((url) => url.includes("cursor=page-2")).length).toBe(1));
+  });
+
+  it("does not read again once the chain ended", async () => {
+    renderScreen({ results: [row("only", { sequence_id: 1 })] });
+    await screen.findByText("Issue only");
+    act(() => capturedObservers.forEach((observer) => observer.trigger()));
+    // With no continuation there is no footer sentinel at all, so the
+    // observer list stays empty and nothing fires.
+    expect(capturedObservers).toHaveLength(0);
   });
 });
