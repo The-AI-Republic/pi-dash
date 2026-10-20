@@ -31,12 +31,20 @@ import {
   useSaveProjectGeneral,
   useUploadEmblem,
 } from "./api/mutations.js";
-import { useGeneralDetail, useIdentifierCheck, useRepositoryStatus, seedProjectRow } from "./api/queries.js";
+import {
+  identifierQueryOptions,
+  seedProjectRow,
+  useGeneralDetail,
+  useIdentifierCheck,
+  useRepositoryStatus,
+} from "./api/queries.js";
 import {
   buildGeneralPayload,
   generalConflictError,
   generalFormFrom,
+  IDENTIFIER_CHECK_FAILED_MESSAGE,
   identifierUnavailable,
+  reseatGeneralForm,
   saveFailureMessage,
   shapeIdentifier,
   uploadedEmblem,
@@ -62,8 +70,11 @@ function GeneralTabBody({
   canEdit,
 }: GeneralTabProps & { stored: ProjectSettingsDetail; canEdit: boolean }): React.ReactElement {
   const [values, setValues] = React.useState<GeneralFormValues>(() => generalFormFrom(stored));
+  const queryClient = useQueryClient();
   const [errors, setErrors] = React.useState<GeneralFieldErrors>({});
   const [cadenceDirty, setCadenceDirty] = React.useState(false);
+  // True while submit waits on a fresh availability answer.
+  const [checkingIdentifier, setCheckingIdentifier] = React.useState(false);
   const [emblemOpen, setEmblemOpen] = React.useState(false);
   const [uploadOpen, setUploadOpen] = React.useState(false);
   // A refused emblem upload blocks every later save until a new upload
@@ -83,7 +94,7 @@ function GeneralTabBody({
   React.useEffect(() => {
     if (lastStored.current === stored || save.isPending) return;
     lastStored.current = stored;
-    setValues(generalFormFrom(stored));
+    setValues((current) => reseatGeneralForm(stored, current));
   }, [stored, save.isPending]);
 
   const identifierChanged = values.identifier.toUpperCase() !== stored.identifier.toUpperCase();
@@ -107,23 +118,46 @@ function GeneralTabBody({
 
   const submit = (event: React.FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    if (!canEdit || save.isPending) return;
+    if (!canEdit || save.isPending || checkingIdentifier) return;
     if (emblemUploadFailed) {
       notifyError(EMBLEM_UPLOAD_FAILED_TITLE, EMBLEM_UPLOAD_FAILED_MESSAGE);
       return;
     }
     const fieldErrors = validateGeneralFields(values);
-    if (identifierChanged && precheck.data !== undefined && precheck.data.exists > 0) {
-      const unavailable = identifierUnavailable(precheck.data);
-      if (unavailable !== null) fieldErrors.identifier = unavailable;
-    }
     setErrors(fieldErrors);
     if (Object.keys(fieldErrors).length > 0) return;
 
-    void save.mutateAsync(buildGeneralPayload({ values, cadenceDirty })).then(
+    void confirmThenSave(fieldErrors);
+  };
+
+  /**
+   * A changed short code is checked again at submit time, whatever the
+   * live hint says: a fetch still in flight or a failed one must not let
+   * the write through. Only a completed "free" answer saves (PSET-006).
+   */
+  const confirmThenSave = async (fieldErrors: GeneralFieldErrors): Promise<void> => {
+    const identifier = values.identifier.trim();
+    if (identifierChanged && identifier !== "") {
+      setCheckingIdentifier(true);
+      let check: { exists: number };
+      try {
+        check = await queryClient.fetchQuery(identifierQueryOptions(getAppClient(), workspaceSlug, identifier));
+      } catch {
+        setCheckingIdentifier(false);
+        setErrors({ ...fieldErrors, identifier: IDENTIFIER_CHECK_FAILED_MESSAGE });
+        return;
+      }
+      setCheckingIdentifier(false);
+      const unavailable = identifierUnavailable(check);
+      if (unavailable !== null) {
+        setErrors({ ...fieldErrors, identifier: unavailable });
+        return;
+      }
+    }
+    await save.mutateAsync(buildGeneralPayload({ values, cadenceDirty })).then(
       (saved) => {
         lastStored.current = saved;
-        setValues(generalFormFrom(saved));
+        setValues((current) => reseatGeneralForm(saved, current));
         if (cadenceDirty) setCadenceDirty(true);
       },
       (error: unknown) => {
@@ -172,7 +206,7 @@ function GeneralTabBody({
         values={values}
         errors={errors}
         disabled={!canEdit}
-        checkingIdentifier={precheck.isFetching}
+        checkingIdentifier={precheck.isFetching || checkingIdentifier}
         timezones={timezoneChoices}
         timezonesLoading={timezones.isPending}
         timezonesFailed={timezones.isError}

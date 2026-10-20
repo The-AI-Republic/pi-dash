@@ -220,14 +220,21 @@ test(
       await test.step("an unreserved live identifier collides at write with its own notice", async () => {
         // The seeded project carries no reservation row, so the precheck
         // waves its identifier through and the write refuses it instead.
+        // The target (PSET-006, inventory) reports the refusal on the
+        // field with no toast; the old app toasts and leaves the field
+        // clean, so the oracle branch keeps its observation.
         const seeded = await serverProjectRecord(seed.workspaceSlug, seed.projectId, session);
         expect(await serverIdentifierTaken(seed.workspaceSlug, String(seeded["identifier"]), session)).toBe(false);
         await driver.settingsGeneralFill("name", `${tag} project`);
         await driver.settingsGeneralFill("identifier", String(seeded["identifier"]));
         await driver.settingsGeneralSave();
-        expect(await driver.settingsGeneralFieldError("identifier")).toBe("");
-        const toast = await driver.rulesLastToast();
-        expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`).toContain("already taken");
+        if (driver.target === "web_new") {
+          expect(await driver.settingsGeneralFieldError("identifier")).toContain("already taken");
+        } else {
+          expect(await driver.settingsGeneralFieldError("identifier")).toBe("");
+          const toast = await driver.rulesLastToast();
+          expect(`${toast?.title ?? ""} ${toast?.message ?? ""}`).toContain("already taken");
+        }
         expect(String((await serverProjectRecord(seed.workspaceSlug, projectId, session))["identifier"])).toBe(
           String(before["identifier"])
         );

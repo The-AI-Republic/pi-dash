@@ -33,6 +33,7 @@ export const NAME_TOO_LONG_MESSAGE = `Keep the name to ${GENERAL_NAME_MAX_LENGTH
 export const IDENTIFIER_REQUIRED_MESSAGE = "A short code is required";
 export const IDENTIFIER_TOO_LONG_MESSAGE = `Keep the short code to ${GENERAL_IDENTIFIER_MAX_LENGTH} characters`;
 export const IDENTIFIER_UNAVAILABLE_MESSAGE = "That short code is already reserved by another project.";
+export const IDENTIFIER_CHECK_FAILED_MESSAGE = "That short code could not be checked. Try again.";
 export const BASE_BRANCH_TOO_LONG_MESSAGE = `Keep the base branch to ${GENERAL_BASE_BRANCH_MAX_LENGTH} characters`;
 export const BASE_BRANCH_CHARS_MESSAGE = "A branch name may contain only letters, numbers, and . _ / -";
 export const BUDGET_REQUIRED_MESSAGE = "Enter a run budget, or tick no cap";
@@ -132,6 +133,22 @@ export function generalFormFrom(project: ProjectSettingsDetail): GeneralFormValu
     lastCappedBudget: String(capped ?? DEFAULT_MAX_TICKS),
     cadence: selectCadence(project.agent_default_interval_seconds),
   };
+}
+
+/**
+ * Re-seat the form on a freshly saved row while keeping the cap the
+ * operator typed. A no-cap save stores the `-1` sentinel, so the row alone
+ * cannot say what the budget was before the tick; the typed value is the
+ * only memory of it and unticking must restore it (PSET-009).
+ */
+export function reseatGeneralForm(
+  saved: ProjectSettingsDetail,
+  previous: Pick<GeneralFormValues, "lastCappedBudget">
+): GeneralFormValues {
+  const next = generalFormFrom(saved);
+  if (!next.noCap) return next;
+  const typed = previous.lastCappedBudget.trim();
+  return typed === "" || Number(typed) < 1 ? next : { ...next, lastCappedBudget: typed };
 }
 
 /** Which cadence option a stored rhythm is; an out-of-band value is custom. */

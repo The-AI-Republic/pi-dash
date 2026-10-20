@@ -29,6 +29,7 @@ import {
   executorChoices,
   generalConflictError,
   generalFormFrom,
+  reseatGeneralForm,
   IDENTIFIER_REQUIRED_MESSAGE,
   IDENTIFIER_TAKEN_CODE,
   IDENTIFIER_TAKEN_MESSAGE,
@@ -161,6 +162,27 @@ describe("cappedBudgetOf", () => {
     expect(cappedBudgetOf({ agent_default_max_ticks: 3 })).toBe(3);
     expect(cappedBudgetOf({ agent_default_max_ticks: 0 })).toBeNull();
     expect(cappedBudgetOf({ agent_default_max_ticks: INFINITE_MAX_TICKS })).toBeNull();
+  });
+});
+
+describe("reseatGeneralForm", () => {
+  it("keeps the typed cap when the saved row is uncapped", () => {
+    const saved = { ...STORED, agent_default_max_ticks: INFINITE_MAX_TICKS };
+    const form = reseatGeneralForm(saved, { lastCappedBudget: "7" });
+    expect(form.noCap).toBe(true);
+    expect(form.budget).toBe("");
+    expect(form.lastCappedBudget).toBe("7");
+  });
+
+  it("takes the saved cap and falls back for a blank or unusable memory", () => {
+    expect(reseatGeneralForm({ ...STORED, agent_default_max_ticks: 4 }, { lastCappedBudget: "9" })).toMatchObject({
+      budget: "4",
+      noCap: false,
+      lastCappedBudget: "4",
+    });
+    const saved = { ...STORED, agent_default_max_ticks: INFINITE_MAX_TICKS };
+    expect(reseatGeneralForm(saved, { lastCappedBudget: " " }).lastCappedBudget).toBe(String(DEFAULT_MAX_TICKS));
+    expect(reseatGeneralForm(saved, { lastCappedBudget: "0" }).lastCappedBudget).toBe(String(DEFAULT_MAX_TICKS));
   });
 });
 

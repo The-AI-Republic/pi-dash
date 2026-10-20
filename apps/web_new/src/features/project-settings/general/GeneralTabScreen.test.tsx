@@ -48,6 +48,7 @@ import {
   BASE_BRANCH_CHARS_MESSAGE,
   BUDGET_REQUIRED_MESSAGE,
   DESCRIPTION_PLACEHOLDER,
+  IDENTIFIER_CHECK_FAILED_MESSAGE,
   IDENTIFIER_TAKEN_MESSAGE,
   IDENTIFIER_UNAVAILABLE_MESSAGE,
   NAME_REQUIRED_MESSAGE,
@@ -146,6 +147,10 @@ interface StubOptions {
   hangDetail?: boolean;
   detailStatus?: number;
   identifierExists?: number;
+  /** Hold the availability answer open so submit must wait for it. */
+  identifierHang?: boolean;
+  /** Fail the availability answer. */
+  identifierStatus?: number;
   patchStatus?: number;
   patchBody?: unknown;
   patchRows?: Array<Record<string, unknown>>;
@@ -236,8 +241,12 @@ function stubApi(options: StubOptions = {}) {
       bound = statusRow;
       return jsonResponse(url, 201, { ...answer, repo_url: "https://github.com/acme/site.git" });
     }
-    if (url.startsWith(`https://api.test${IDENTIFIER_PATH}`) && method === "GET")
+    if (url.startsWith(`https://api.test${IDENTIFIER_PATH}`) && method === "GET") {
+      if (options.identifierHang === true) return new Promise<never>(() => undefined);
+      if (options.identifierStatus !== undefined && options.identifierStatus !== 200)
+        return jsonResponse(url, options.identifierStatus, { detail: "gone" });
       return reserved(options.identifierExists ?? 0);
+    }
     if (url === "https://api.test/api/timezones/") {
       return jsonResponse(url, 200, {
         timezones: [{ value: "Europe/Lisbon", label: "Lisbon", gmt_offset: "GMT+0", utc_offset: "+00:00" }],
@@ -433,6 +442,24 @@ describe("PSET-006 save and validation", () => {
     save();
     await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
     expect(calls.some((call) => call.url.includes("project-identifiers/"))).toBe(false);
+  });
+
+  it("waits for a stalled availability answer instead of saving", async () => {
+    const { calls } = await renderLoaded({ identifierHang: true });
+    fireEvent.change(field("Short code"), { target: { value: "new" } });
+    await waitFor(() => expect(screen.getByText("Checking availability…")).toBeInTheDocument());
+    save();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(patchCalls(calls)).toHaveLength(0);
+    expect(screen.getByTestId("project-settings-general")).toBeInTheDocument();
+  });
+
+  it("refuses a changed code whose availability check failed", async () => {
+    const { calls } = await renderLoaded({ identifierStatus: 500 });
+    fireEvent.change(field("Short code"), { target: { value: "new" } });
+    save();
+    expect(await screen.findByText(IDENTIFIER_CHECK_FAILED_MESSAGE)).toBeInTheDocument();
+    expect(patchCalls(calls)).toHaveLength(0);
   });
 
   it("clears a field error as soon as that field is edited", async () => {
@@ -751,6 +778,20 @@ describe("PSET-009 execution policy", () => {
     save();
     await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
     expect(patchBodyAt(calls).agent_default_max_ticks).toBe(-1);
+  });
+
+  it("keeps the typed budget across a no-cap save so unticking restores it", async () => {
+    const budget = () => screen.getByRole("spinbutton", { name: "Run budget per work item" }) as HTMLInputElement;
+    const { calls } = await renderLoaded();
+    fireEvent.change(budget(), { target: { value: "7" } });
+    fireEvent.click(screen.getByTestId("general-nocap"));
+    expect(budget()).toHaveValue(null);
+    save();
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    expect(patchBodyAt(calls).agent_default_max_ticks).toBe(-1);
+    await waitFor(() => expect(screen.getByTestId("general-nocap")).toBeChecked());
+    fireEvent.click(screen.getByTestId("general-nocap"));
+    expect(budget()).toHaveValue(7);
   });
 
   it("writes a picked cadence to every stage", async () => {
