@@ -1034,9 +1034,11 @@ Shared pieces every consumer uses (already in `apps/web_new`):
 Issues owns the generic property row and the dropdown family
 (`parity/specs/issues.md` §17, ISS-216). Estimates owns:
 
-- **Option source.** The active system of the item's project; values in
-  key order; time humanized; the clear row is first and maps to a
-  `null` write. With no active system, the picker is a single
+- **Option source.** The active system of the item's project; time
+  humanized; the clear row is first and maps to a `null` write. Values
+  are rendered in **key order**, sorted client-side: the server returns
+  nested values in the model's `value` text ordering, and the old
+  picker sorts by `key` before rendering.  With no active system, the picker is a single
   non-interactive row ("No estimate") — the picker still opens, shows
   its search box, and offers nothing actionable. The old behaviour is
   the same: the options list is the clear row only and the picker does
@@ -1140,9 +1142,16 @@ owns the estimate axis semantics:
   list, with or without an estimate system enabled (the catalogue
   includes it unconditionally; the oracle asserts it in both states).
   Choosing it groups rows by the work item's estimate value and labels
-  each group with the value (time humanized when the system is time);
-  the table's first row is the axis name and the metric ("Count").
-  Unestimated items group under the empty/None bucket.
+  each group with the **raw stored value**: the server groups on the
+  point's stored value text without formatting it, and the old chart
+  only capitalises priority/state-group names and reformats date axes,
+  so a time system charts "90", not "1h 30m". The table prints the
+  group name verbatim. The oracle's EST-020 scenario uses a points
+  system ("1"/"3") and cannot tell the rules apart. If the new app
+  humanises time here, that is a §9.3 divergence owned by Analytics,
+  not a rendering of the old app. The table's first row is the axis
+  name and the metric ("Count"). Unestimated items group under the
+  empty/None bucket.
 - **Y axis.** There is **no** estimate metric offered, in any project
   state. The old catalogue defines an estimate-count metric but the
   selector hides it in every state, and the oracle asserts the y-axis
@@ -1163,7 +1172,8 @@ Issues'. Estimates owns:
   oracle asserts the command and its page, not the rendering of the
   shortcut).
 - **Page options.** "No estimate" first, then the active system's values
-  in key order (time humanized), with the current value marked
+  in **key order** (sorted client-side, since the nested values arrive
+  in value-text order; time humanized), with the current value marked
   selected. Choosing a value runs the same write as the inline picker
   (§6.1), produces the same history, and closes the palette. Choosing
   the current value still closes without a write.
@@ -1315,10 +1325,15 @@ are the ones whose `field` starts with `estimate`.
 
 `GET /api/workspaces/{ws}/estimates/` returns the linked systems of
 every project in the workspace (with values), under workspace
-membership, cached for two hours server-side. No old UI consumer calls
-it (the old service method has no caller). The new app does not need it
-for any row; contracts may include it for completeness but slices must
-not use it as a substitute for the project list.
+membership, cached for two hours server-side. The old app has consumers: the
+shared workspace issue-properties hook calls it under its own workspace
+cache key (stale and focus revalidation off) and is mounted by the
+all-issues root, the workspace spreadsheet root, the drafts root and the
+notifications root, to preload estimate systems for workspace-wide item
+piles. The project settings screen never uses it. The new app needs it
+only where those surfaces need every project's systems; contracts may
+include it, but slices must not use it as a substitute for the project
+list on the settings screen.
 
 ### 7.4 Cache keys and invalidation (EST-027)
 
@@ -1358,12 +1373,12 @@ the difference. The spec above is binding where it differs.
 | EST-013 | Create with family name/type/last_used and keys 1..n; success closes + refetch; failure keeps dialog open; no project write                                                                                                       | Slice 742: prove the flag is set and the project link is untouched (§3.8); time never submitted in OSS                                                                                                                                                  |
 | EST-014 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): update dialog, PATCH existing ids + point add/delete routing, empty-set failure, persistence across refetch                                                                                                                          |
 | EST-015 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): single-value delete confirmation, reassignment/clear, renumber, history caveat                                                                                                                                                       |
-| EST-016 | Row delete + confirmation copy; delete then clear link when active; success/failure notices; dialog stays open                                                                                                                    | Slice 743: confirm dialog title/body contain the name and "permanently"; failure body says "unable to delete" (602's copy does not); do not reproduce the old wrong title                                                                               |
-| EST-017 | Picker options, clear row, humanized time, optimistic write + rollback                                                                                                                                                            | Issues slices mount it everywhere; slice 744 proves the full searchable picker, persistence, clear and history                                                                                                                                          |
+| EST-016 | Row delete + confirmation copy; success/failure notices; unlinks only when the deleted system is the active one | Slice 743: confirm dialog title/body contain the name and "permanently"; failure body says "unable to delete" (602's copy does not); do not reproduce the old wrong title; **match §4.3** — the old client clears the project reference whenever the project is linked, whichever system is deleted (bug NEWFRONT-809), while 602 unlinks only the active system's delete. Reproduce the old observable outcome or record the narrower rule as a divergence |
+| EST-017 | Picker options, clear row, humanized time, optimistic write + rollback                                                                                                                                                            | Issues slices mount it everywhere; slice 744 sorts options by key before rendering (602 maps `points` as received and the server orders by value text), proves the full searchable picker, persistence, clear and history                                                                                                                                          |
 | EST-018 | `hideEstimate` flag into issues layout/spreadsheet; create/edit field                                                                                                                                                             | Slice 744/Issues: sidebar, list, drafts, inbox; prove on/off via project flip                                                                                                                                                                           |
 | EST-019 | —                                                                                                                                                                                                                                 | Slice 747 (Cycles surface)                                                                                                                                                                                                                              |
-| EST-020 | —                                                                                                                                                                                                                                 | Slice 747 (Analytics surface)                                                                                                                                                                                                                           |
-| EST-021 | Palette command + page behind `estimatesEnabled`                                                                                                                                                                                  | Slice 744: prove options, selection, write and absence when off                                                                                                                                                                                         |
+| EST-020 | — | Slice 747 (Analytics surface): old behaviour labels estimate groups with the raw stored value (a time system charts "90", not "1h 30m"); humanising is a §9.3 divergence 747 may take deliberately |
+| EST-021 | Palette command + page behind `estimatesEnabled`                                                                                                                                                                                  | Slice 744: sort options by key (602's palette maps `active.points` as received); prove options, selection, write and absence when off                                                                                                                                                                                         |
 | EST-022 | Picker disabled path exists (`disabled` trigger)                                                                                                                                                                                  | Slice 774: peek read-only label with estimates loaded (intended behaviour, bug 349), public-board absence stays                                                                                                                                         |
 | EST-023 | Activity model handles `estimate_point` + `estimate_points` + `estimate_categories`, sentence "set the estimate to X"                                                                                                             | Slice 774: whole `estimate_*` family, pinned "set the estimate point to X", removal shape, link                                                                                                                                                         |
 | EST-024 | Screen gate + server rules                                                                                                                                                                                                        | Slice 741/743: role-matrix reads and UI absences per role                                                                                                                                                                                               |
@@ -1493,6 +1508,7 @@ oracle scenario, so none can fail the gate on its own.
 | Value trimming | Raw drafts are validated and sent untrimmed; whitespace-only reads as zero (numeric) or as text (categories), not as empty | A value is trimmed once on commit and that trimmed value is what validation and submit see, so whitespace-only reads as empty (§3.6, §3.7) | 742 |
 | Time starter (cloud) | No starter block for cloud families: choosing time is a dead end | Hours template plus a two-value scratch set, stored as minutes (§3.3) | 743 |
 | Key allocation on add | `length + 1`, which can reuse a key | `max + 1`, keys contiguous 1..n (D21, §9.1) | 742, 743 |
+| Analytics estimate labels | Groups carry the raw stored value; a time system charts "90" and the table prints it verbatim | May render the humanised value through the shared formatter if slice 747 chooses so (§6.4) | 747 |
 
 ## 10. Desktop and editions (EST-029)
 
@@ -1559,7 +1575,7 @@ is part of the contract; elsewhere write copy in the product's voice.
 | EST-017 | 6.1, 7.2      | `consumers.spec.ts` (picker options, assign/clear, history)                                            |
 | EST-018 | 6.2           | `consumers.spec.ts` (sidebar + spreadsheet follow the flag)                                            |
 | EST-019 | 6.3           | `consumers.spec.ts` (measure options; estimates totals; categories hidden)                             |
-| EST-020 | 6.4           | `consumers.spec.ts` (x-axis estimate point; y-axis only Work item)                                     |
+| EST-020 | — | Slice 747 (Analytics surface): old behaviour labels estimate groups with the raw stored value (a time system charts "90", not "1h 30m"); humanising is a §9.3 divergence 747 may take deliberately |
 | EST-021 | 6.5           | `consumers.spec.ts` (palette command, page, assignment, absence when off)                              |
 | EST-022 | 6.6, 9.2      | `consumers.spec.ts` (bug 349 archived peek; no edit)                                                   |
 | EST-023 | 6.7           | `consumers.spec.ts` (set/replace entries and links)                                                    |
