@@ -423,7 +423,12 @@ fn split_zone_suffix(time_part: &str) -> Option<(&str, i64)> {
 /// Python `datetime.isoformat()` for a UTC instant: `+00:00` suffix (never
 /// `Z`), microseconds only when nonzero (`admin_views.py:54,57-58`).
 fn iso(dt: &DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    let format = if dt.timestamp_subsec_micros() == 0 {
+        SecondsFormat::Secs
+    } else {
+        SecondsFormat::Micros
+    };
+    dt.to_rfc3339_opts(format, false)
 }
 
 fn iso_or_null(dt: Option<&DateTime<Utc>>) -> Value {
@@ -1268,6 +1273,10 @@ mod tests {
             .expect("parses")
             .with_timezone(&Utc);
         assert_eq!(iso(&with_micros), "2026-09-28T04:28:10.235211+00:00");
+        let millis = DateTime::parse_from_rfc3339("2026-11-01T03:00:00.500+00:00")
+            .expect("parses")
+            .with_timezone(&Utc);
+        assert_eq!(iso(&millis), "2026-11-01T03:00:00.500000+00:00");
         let whole = DateTime::parse_from_rfc3339("2026-09-29T03:21:09+00:00")
             .expect("parses")
             .with_timezone(&Utc);
