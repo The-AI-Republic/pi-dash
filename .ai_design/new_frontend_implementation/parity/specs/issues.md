@@ -1046,6 +1046,46 @@ count and cursors alongside (target per main#496; restated in §22).
 Oracle: `issue-detail-widgets-subissues.spec.ts`,
 `issue-detail-widgets-subissue-rows.spec.ts`.
 
+Implementation note (NEWFRONT-647): the slice built the widget root and
+the sub-work-items section. The action row renders all five entries and
+only the sub-work-item one is live; relation, link, attachment and Run
+AI stay disabled until their owning slices (NEWFRONT-649, NEWFRONT-650,
+the run-AI slice) mount their entries through the same row. Sections
+after the first arrive through a slot so the fixed order holds. The
+filters dropdown offers priority, state group, state, project, assignees
+and both dates; the project section appears only when a loaded child
+sits in another project, and the issue-type section is the ISS-234 stub
+the old OSS build renders — nothing — because types are cloud-only and
+owned by NEWFRONT-657; the cloud slice wires the same section in. The
+gauge and count read the first page's full-set distribution and total
+and draw for both parent kinds, with only the label switching for epics;
+while grouping, ordering and filtering run over the loaded pages, and
+load-more carries its own cursor per parent (nested parents fetch their
+own pages). Clicking a row opens the child at its browse key; the
+in-place edit mode belongs to NEWFRONT-631 and peek to NEWFRONT-646.
+The dev-only StrictMode double-toggle (NEWFRONT-139) is not reproduced:
+the widget renders the intended rows.
+
+Implementation note (NEWFRONT-647, review pass): Epic parents read and attach their children through
+`epics/<id>/issues/` (the issues collection stays
+`issues/<id>/sub-issues/`), which is what the old issue service swaps and
+what the epics contracts mirror; the cache key stays one entry per
+parent. The custom date half stores a bare day for "On" and the matcher
+reads a bare day as exactly that day, while `;after` stays the lower
+bound and `;before` the upper one on either dimension. The header and
+the add menu draw for a childless parent too, and the create,
+add-existing and delete dialogs stay mounted whether the section is
+open, closed, empty or still loading, so the first child of a new issue
+can be added. The read runs whether or not the section is open: the
+collapsed title needs its counts and a remounted parent must render its
+toggle. Rows resolve each child's own project code for the identifier
+and link (a cross-project child is not the parent's key) and draw
+assignees from the project-member directory, falling back to a neutral
+"Member" for an unknown id. The row menu offers Copy link to everyone
+and remove/delete to members; the full edit modal belongs to
+NEWFRONT-631 and is not offered here, and open-in-new-tab is not in the
+old menu.
+
 Relations group by type (ISS-179), each a default-open inner
 collapsible with a colored header; only present types with at least
 one item show, and the widget count sums all types. Each row shows an

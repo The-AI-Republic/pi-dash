@@ -136,7 +136,13 @@ export default defineConfig(({ mode }) => {
           // The shared editor read surface and lazy editor are pure too
           // (the lazy call carries a PURE annotation): without the listing
           // the barrel pins the sanitizer plus DOMPurify into the initial
-          // bundle (NEWFRONT-639, size gate).
+          // bundle (NEWFRONT-639, size gate). The sub-issue widget renders
+          // only under the detail route, but its section reaches the store
+          // that registers a sign-out reset at load; without the listing
+          // the barrel drags the whole widget into the initial bundle
+          // (NEWFRONT-647, size gate). The store keeps its registration:
+          // it only loads with the widget, and a store nobody loaded has
+          // no state to reset.
           // Every other module keeps the default: a blanket false reshapes
           // the TanStack route splits the size gate keys on.
           moduleSideEffects: (id) =>
@@ -145,7 +151,14 @@ export default defineConfig(({ mode }) => {
             id.includes("features/issues/freshness/highlight.") ||
             id.includes("features/issues/loaders/loaderContext.") ||
             id.includes("shared/editor/sanitize.") ||
-            id.includes("shared/editor/RichTextEditor.")
+            id.includes("shared/editor/RichTextEditor.") ||
+            id.includes("features/issues/subIssues/SubIssuesWidget.") ||
+            id.includes("features/issues/subIssues/SubIssueSection.") ||
+            id.includes("features/issues/subIssues/SubIssueRow.") ||
+            id.includes("features/issues/subIssues/SubIssueProperties.") ||
+            id.includes("features/issues/subIssues/SubIssueFilterMenu.") ||
+            id.includes("features/issues/subIssues/SubIssueDisplayMenu.") ||
+            id.includes("features/issues/subIssues/AddExistingDialog.")
               ? false
               : true,
         },

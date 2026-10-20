@@ -101,6 +101,30 @@ export interface WorkItemCreateDialogProps {
   canCreate?: boolean;
   /** Fired after a create lands, with the server's row id. */
   onCreated?: (issueId: string) => void;
+  /**
+   * Fixed project (ISS-175): the selector shows it but cannot move the
+   * form elsewhere. The caller also passes the row in `projects`.
+   */
+  lockedProjectId?: string | undefined;
+  /**
+   * Keep the preset parent fixed (ISS-175): the create modal opened from
+   * the sub-issues widget shows the parent as context but does not let a
+   * child be re-parented through its picker.
+   */
+  lockedParent?: boolean | undefined;
+  /**
+   * Parent preset (ISS-175): a new sub-work item starts attached to this
+   * row. The parent picker shows it and removing it clears the choice.
+   */
+  initialParent?: CreateParentPreset | undefined;
+}
+
+/** A parent preset the dialog seeds as if the picker had chosen it. */
+export interface CreateParentPreset {
+  id: string;
+  name: string;
+  identifier: string;
+  sequenceId: number;
 }
 
 /** Accessible name of the description editor and its heading. */
@@ -131,6 +155,9 @@ export function WorkItemCreateDialog({
   initialProjectId,
   canCreate = true,
   onCreated,
+  lockedProjectId,
+  lockedParent = false,
+  initialParent,
 }: WorkItemCreateDialogProps): React.ReactElement | null {
   const create = useCreateWorkItem(workspaceSlug);
   const attachMembership = useApplyCreateMembership(workspaceSlug);
@@ -140,12 +167,46 @@ export function WorkItemCreateDialog({
   const weekStart = useWeekStart();
 
   const creatable = React.useMemo(() => selectCreatableProjects(projects.map(toCreateProjectOption)), [projects]);
+  // A fixed project is seeded as the only offered row, so neither the
+  // visit reset nor a later open can move the form elsewhere (ISS-175).
+  const lockedProject = React.useMemo(
+    () => (lockedProjectId === undefined ? undefined : creatable.find((project) => project.id === lockedProjectId)),
+    [creatable, lockedProjectId]
+  );
+  const offered = React.useMemo(
+    () => (lockedProject === undefined ? creatable : [lockedProject]),
+    [creatable, lockedProject]
+  );
+  const seededParent = React.useMemo((): IssueSearchHit | null => {
+    if (initialParent === undefined) return null;
+    return {
+      id: initialParent.id,
+      name: initialParent.name,
+      sequence_id: initialParent.sequenceId,
+      project__name: "",
+      project__identifier: initialParent.identifier,
+      project_id: lockedProjectId ?? initialProjectId ?? "",
+      workspace__slug: workspaceSlug,
+      state__name: null,
+      state__group: null,
+      state__color: null,
+      start_date: null,
+    };
+  }, [initialParent, initialProjectId, lockedProjectId, workspaceSlug]);
+  const seededForm = React.useCallback(
+    (projectId: string | null, name = ""): CreateFormState => {
+      const next = freshForm(workspaceSlug, projectId, name);
+      if (seededParent !== null) next.parentId = seededParent.id;
+      return next;
+    },
+    [seededParent, workspaceSlug]
+  );
   const [form, setForm] = React.useState<CreateFormState>(() =>
-    freshForm(workspaceSlug, resolveProjectId(creatable, initialProjectId ?? null))
+    seededForm(resolveProjectId(offered, initialProjectId ?? null))
   );
   const [fieldError, setFieldError] = React.useState<string | null>(null);
   const [createMore, setCreateMore] = React.useState(false);
-  const [parentHit, setParentHit] = React.useState<IssueSearchHit | null>(null);
+  const [parentHit, setParentHit] = React.useState<IssueSearchHit | null>(seededParent);
   const [discardOpen, setDiscardOpen] = React.useState(false);
   const [draftError, setDraftError] = React.useState<string | null>(null);
   const [generating, setGenerating] = React.useState(false);
@@ -185,14 +246,16 @@ export function WorkItemCreateDialog({
     const freshVisit = !visit.current.open || visit.current.key !== visitKey;
     visit.current = { open: true, key: visitKey };
     if (!freshVisit) return;
-    setForm(freshForm(workspaceSlug, resolveProjectId(creatable, initialProjectId ?? null)));
+    // A fixed project wins over the visit's initial one, so the seeded
+    // parent and the form can never land in different projects.
+    setForm(seededForm(resolveProjectId(offered, lockedProjectId ?? initialProjectId ?? null)));
     setFieldError(null);
-    setParentHit(null);
+    setParentHit(seededParent);
     setDiscardOpen(false);
     setDraftError(null);
     setEditorGeneration((current) => current + 1);
     setFocusRequest((current) => current + 1);
-  }, [open, visitKey, workspaceSlug, initialProjectId, creatable]);
+  }, [open, visitKey, workspaceSlug, initialProjectId, lockedProjectId, offered, seededForm, seededParent]);
 
   // The title owns initial focus. Base UI moves focus into the dialog on
   // a later task (its close button claims it first), so claim the field
@@ -218,27 +281,27 @@ export function WorkItemCreateDialog({
   // with no eligible project, or a guest, sees the notice instead of a
   // form whose submit could only fail. `canCreate` carries the shell's
   // own standing check; the roles are identical on both sides.
-  const allowed = canCreate && creatable.length > 0;
-  const projectId = targetProjectId(form.projectId, creatable);
+  const allowed = canCreate && offered.length > 0;
+  const projectId = targetProjectId(form.projectId, offered);
   // The picker reads the joined-project list itself; an allow list keeps
   // it to the rows the dialog would accept (ISS-123). A deny list would
   // leave the window before that read resolves open to guest projects,
   // so the form names what it may offer instead of what it may not.
-  const creatableIds = React.useMemo(() => creatable.map((project) => project.id), [creatable]);
+  const creatableIds = React.useMemo(() => offered.map((project) => project.id), [offered]);
   // The picker's option list resolves lazily on open, but its trigger
   // must name the picked project right away: the dialog already holds
   // the create-permission rows, so hand them over as display labels
   // instead of waiting for the picker's own read (ISS-117/ISS-123).
   const projectLabels = React.useMemo(
     () =>
-      creatable.map((project) =>
+      offered.map((project) =>
         toProjectOption({
           id: project.id,
           name: project.name,
           identifier: project.identifier,
         })
       ),
-    [creatable]
+    [offered]
   );
   const busy = create.isPending || generating || saveDraft.isPending;
 
@@ -257,12 +320,12 @@ export function WorkItemCreateDialog({
     // The form may only file where it holds create permission; a value
     // from outside the offered rows is ignored even if a caller renders
     // the picker with its own list.
-    if (!isCreatableProjectId(projectId, creatable)) return;
+    if (!isCreatableProjectId(projectId, offered)) return;
     // Dependent fields belong to the old project: reset the strip and the
     // editor, and keep the kept title/project draft in step.
-    setForm(freshForm(workspaceSlug, projectId, form.name));
+    setForm(seededForm(projectId, form.name));
     setFieldError(null);
-    setParentHit(null);
+    setParentHit(seededParent);
     setEditorGeneration((current) => current + 1);
     storeWorkItemDraft(workspaceSlug, { title: form.name, projectId });
   }
@@ -364,9 +427,13 @@ export function WorkItemCreateDialog({
           }
           // Keep the project and re-focus the title; everything else is
           // a new item (ISS-119).
-          setForm(resetForCreateMore(form));
+          setForm(
+            seededParent === null
+              ? resetForCreateMore(form)
+              : { ...resetForCreateMore(form), parentId: seededParent.id }
+          );
           setFieldError(null);
-          setParentHit(null);
+          setParentHit(seededParent);
           setEditorGeneration((current) => current + 1);
           setFocusRequest((current) => current + 1);
         },
@@ -456,7 +523,7 @@ export function WorkItemCreateDialog({
               onChange={pickProject}
               includeProjectIds={creatableIds}
               knownProjects={projectLabels}
-              disabled={busy}
+              disabled={busy || lockedProject !== undefined}
             />
             <DuplicatePanel matches={duplicates.matches} />
           </div>
@@ -592,7 +659,7 @@ export function WorkItemCreateDialog({
                   setParentHit(hit);
                   patch({ parentId: hit?.id ?? null });
                 }}
-                disabled={busy}
+                disabled={busy || lockedParent}
               />
             </FieldSlot>
           </div>
