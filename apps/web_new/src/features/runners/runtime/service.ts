@@ -24,7 +24,8 @@ import {
   type ApiClient,
 } from "@pidash/api-client";
 
-import { edition, usesCloudCsrfPath } from "../../../core/edition/index.js";
+import { edition } from "../../../core/edition/index.js";
+import { CLOUD_CSRF_FLAG } from "../../../core/edition/types.js";
 import type { AgentHostCheck, AgentRuntimeApi } from "../../../core/platform/index.js";
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
@@ -249,7 +250,7 @@ export interface AgentCredentialOptions {
 
 /** Mint with the edition's CSRF choice (cloud builds read the `/api/` sibling). */
 function mintAgentCredential(client: ApiClient): Promise<AgentToken> {
-  return agentCredentialRequest(client, { cloudCsrf: usesCloudCsrfPath(edition) });
+  return agentCredentialRequest(client, { cloudCsrf: edition.flags[CLOUD_CSRF_FLAG] === true });
 }
 
 /**

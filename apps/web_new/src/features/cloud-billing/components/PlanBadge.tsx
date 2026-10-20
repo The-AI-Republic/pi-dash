@@ -10,7 +10,6 @@
 
 import * as React from "react";
 
-import { APP_VERSION } from "../../../shared/shell/version.js";
 import { useCloudPlan } from "../api/queries.js";
 import { accountCenterUrl, isCloudPlan, planLabel } from "../lib/plan.js";
 
@@ -21,7 +20,7 @@ export const PLAN_BADGE_LABEL = "Plan";
  * The hint the badge carries: the running version, so a support
  * conversation can start from what the visitor actually runs.
  */
-export function planBadgeHint(version: string = APP_VERSION): string {
+export function planBadgeHint(version: string): string {
   return `Version: v${version}`;
 }
 
@@ -31,8 +30,12 @@ export interface PlanBadgeProps {
    * the desktop build uses its own window; the default is the browser's.
    */
   onOpenExternal?: ((url: string) => void) | undefined;
-  /** A fixed version for tests and stories; the app version otherwise. */
-  version?: string | undefined;
+  /**
+   * The running app version for the hover hint. The shell reads it once
+   * and passes it down: the badge itself stays out of the initial chain,
+   * and importing the version there would pull the shell chunk back in.
+   */
+  version: string;
 }
 
 export function PlanBadge({ onOpenExternal, version }: PlanBadgeProps): React.ReactElement | null {

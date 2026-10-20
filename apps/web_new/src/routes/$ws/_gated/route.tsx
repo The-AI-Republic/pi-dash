@@ -24,7 +24,6 @@ import {
   resolveEditionSidebarHref,
 } from "../../../core/edition/index.js";
 import { platform } from "../../../core/platform/index.js";
-import { PlanBadge } from "../../../features/cloud-billing/index.js";
 import {
   CREATE_WORKSPACE_PATH,
   decidePageGate,
@@ -130,6 +129,13 @@ const LazyRuntimeSupervisor = React.lazy(() =>
 // does nothing on web builds, so the web initial chain never carries it.
 const LazyUpdateControl = React.lazy(() =>
   import("../../../features/updater/index.js").then((module) => ({ default: module.DesktopUpdateControl }))
+);
+// The plan badge only renders on plan-badge editions (CLOUD-038) and
+// waits on the billing answer anyway, so it rides a lazy chunk and the
+// OSS chain never carries it. The shell passes the version in: the badge
+// must not import the shell module it is split from.
+const LazyPlanBadge = React.lazy(() =>
+  import("../../../features/cloud-billing/index.js").then((module) => ({ default: module.PlanBadge }))
 );
 
 export const Route = createFileRoute("/$ws/_gated")({
@@ -514,7 +520,12 @@ function WorkspaceShell({
             }
             planBadge={
               isPlanBadgeEnabled(edition) ? (
-                <PlanBadge onOpenExternal={(url: string) => void platform.openExternal(url)} />
+                <React.Suspense fallback={null}>
+                  <LazyPlanBadge
+                    onOpenExternal={(url: string) => void platform.openExternal(url)}
+                    version={APP_VERSION}
+                  />
+                </React.Suspense>
               ) : undefined
             }
             onNavigateHref={handleNavigateHref}
