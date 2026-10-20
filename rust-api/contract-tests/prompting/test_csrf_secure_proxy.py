@@ -110,7 +110,7 @@ def test_secure_cross_site_referer_is_rejected(api, tenant_a, write_a):
 def test_secure_malformed_referer_is_rejected(api, tenant_a, write_a):
     r = api.put(
         _detail_url(tenant_a),
-        headers=_secure(write_a, Referer="not a url"),
+        headers=_secure(write_a, Referer="https://[::1"),
         json={"scope": "workspace", "body": "malformed referer"},
     )
     assert r.status_code == 403, r.text

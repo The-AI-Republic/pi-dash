@@ -592,13 +592,17 @@ impl ParsedUrl {
 }
 
 fn urlparse(value: &str) -> Option<ParsedUrl> {
-    let (scheme, after) = value.split_once("://")?;
-    if scheme.is_empty() {
+    let value = value
+        .trim_start_matches(|c: char| c <= ' ')
+        .replace(['\t', '\r', '\n'], "");
+    let (scheme, after) = value.split_once(':')?;
+    if !valid_url_scheme(scheme) {
         return None;
     }
+    let after = after.strip_prefix("//")?;
     let end = after.find(['/', '?', '#']).unwrap_or(after.len());
     let netloc = &after[..end];
-    if netloc.is_empty() {
+    if netloc.is_empty() || !valid_bracketed_netloc(netloc) {
         return None;
     }
     Some(ParsedUrl {
@@ -606,6 +610,41 @@ fn urlparse(value: &str) -> Option<ParsedUrl> {
         netloc: netloc.to_owned(),
         rest: after[end..].to_owned(),
     })
+}
+
+fn valid_url_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+/// The bracketed-host validation in `urllib.parse.urlsplit` /
+/// `_check_bracketed_netloc`.
+fn valid_bracketed_netloc(netloc: &str) -> bool {
+    let host_port = netloc.rsplit_once('@').map_or(netloc, |(_, rest)| rest);
+    if !host_port.contains(['[', ']']) {
+        return !netloc.contains(['[', ']']);
+    }
+    let Some(after_open) = host_port.strip_prefix('[') else {
+        return false;
+    };
+    let Some((host, after_close)) = after_open.split_once(']') else {
+        return false;
+    };
+    if !(after_close.is_empty() || after_close.starts_with(':')) {
+        return false;
+    }
+    if let Some(rest) = host.strip_prefix('v') {
+        let Some((hex, suffix)) = rest.split_once('.') else {
+            return false;
+        };
+        !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) && !suffix.is_empty()
+    } else {
+        host.parse::<std::net::Ipv6Addr>().is_ok()
+    }
 }
 
 /// Split `scheme://netloc` origins into exact entries and per-scheme
@@ -3184,6 +3223,22 @@ mod tests {
             b"",
         )
         .is_ok());
+    }
+
+    #[test]
+    fn csrf_malformed_referer_matches_urlparse() {
+        let referer_headers = |referer: &'static str| {
+            let mut map = axum::http::HeaderMap::new();
+            map.insert("host", "app.test".parse().unwrap());
+            map.insert("referer", referer.parse().unwrap());
+            map
+        };
+        for referer in ["not a url", "https://[::1", "1https://app.test/x"] {
+            assert_eq!(
+                check_referer(&referer_headers(referer), None, &[]).unwrap_err(),
+                "Referer checking failed - Referer is malformed."
+            );
+        }
     }
 
     #[test]
