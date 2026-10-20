@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 from email import message_from_bytes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -130,6 +131,71 @@ class FixedResponseStub:
         return f"http://{host}:{port}"
 
     def __enter__(self) -> "FixedResponseStub":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._thread.join(timeout=5)
+        self._server.server_close()
+
+
+class WildcardHttpProbe:
+    """A title/favicon page bound to a wildcard address.
+
+    The SSRF guard test needs the worker itself to reach the listener by
+    connecting to ``0.0.0.0`` or ``::``. A loopback-bound sink can never
+    distinguish "guard refused" from "connection refused", so this stub
+    binds the wildcard address and answers a distinctive title and icon.
+    ``family`` is ``socket.AF_INET`` (``0.0.0.0``) or ``socket.AF_INET6``
+    (``::``); :attr:`url` carries the brackets IPv6 URLs require.
+    """
+
+    TITLE = "SSRF wildcard probe"
+    FAVICON = b"wildcard-probe-favicon"
+
+    def __init__(self, family: int = socket.AF_INET) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self, body: bytes, content_type: str) -> None:
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                if urlsplit(self.path).path == "/favicon.ico":
+                    self._answer(outer.FAVICON, "image/x-icon")
+                    return
+                body = (
+                    "<html><head><title>"
+                    f"{outer.TITLE}"
+                    '</title><link rel="icon" href="/favicon.ico"></head></html>'
+                ).encode()
+                self._answer(body, "text/html")
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        class Server(ThreadingHTTPServer):
+            address_family = family
+
+        host = "::" if family == socket.AF_INET6 else "0.0.0.0"
+        self._server = Server((host, 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self.host, self.port = self._server.server_address[:2]
+
+    @property
+    def url(self) -> str:
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}/"
+
+    def __enter__(self) -> "WildcardHttpProbe":
         self._thread.start()
         return self
 

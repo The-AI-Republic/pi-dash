@@ -99,13 +99,17 @@ import ast
 import hashlib
 import hmac
 import json
+import socket
 import uuid
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from _harness import config, rust_queue
 from _harness import seed as seed_helpers
 from _harness.db import insert_row
 from _harness.db import snapshot, wait_for_condition as wait_for
+from _harness.sinks import WildcardHttpProbe
 from psycopg.types.json import Json
 
 M = "pi_dash.bgtasks"
@@ -1129,4 +1133,56 @@ def test_rust_crawl_link_executes_locally(db_conn, broker_url):
         "url": url,
         "favicon_url": None,
     }
+
+
+@pytest.mark.parametrize(
+    "family",
+    [socket.AF_INET, socket.AF_INET6],
+    ids=["wildcard-ipv4", "wildcard-ipv6"],
+)
+def test_rust_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
+    """Rust-side guard refusal for 0.0.0.0 and :: (Django parity).
+
+    The listener is bound to the wildcard address and serves a distinctive
+    title/icon, so a bypass is visible as populated metadata rather than
+    being indistinguishable from a connection failure.
+    """
+    with WildcardHttpProbe(family) as probe:
+        chain = seed_helpers.issue_chain(
+            db_conn,
+            "rustwildcard" + ("v6" if family == socket.AF_INET6 else "v4"),
+        )
+        issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+        url = probe.url
+        link = insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": "Wildcard probe",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        celery_id = rust_queue.publish(
+            CRAWL_LINK_TITLE,
+            args=[str(link["id"]), url],
+        )
+        rust_queue.wait_for_settled(celery_id, what=f"{CRAWL_LINK_TITLE} executed")
+
+        def _crawled():
+            row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link["id"]))
+            return row if row and row["metadata"] != {} else None
+
+        crawled = wait_for(_crawled, what="issue_links metadata")
+        assert crawled["metadata"] == {
+            "title": None,
+            "favicon": DEFAULT_FAVICON_DATA_URI,
+            "url": url,
+            "favicon_url": None,
+        }
 

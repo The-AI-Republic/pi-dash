@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import socket
 import uuid
 
 import pytest
@@ -22,6 +23,7 @@ import pytest
 from _harness import broker_probe, celery_wire, config, taskspec
 from _harness import seed as seed_helpers
 from _harness.db import diff, snapshot, wait_for_condition as wait_for
+from _harness.sinks import WildcardHttpProbe
 
 M = "pi_dash.bgtasks"
 
@@ -775,6 +777,59 @@ def test_crawl_link_updates_metadata(db_conn, broker_url):
         "url": url,
         "favicon_url": None,
     }
+
+
+@pytest.mark.parametrize(
+    "family",
+    [socket.AF_INET, socket.AF_INET6],
+    ids=["wildcard-ipv4", "wildcard-ipv6"],
+)
+def test_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
+    """Django denies 0.0.0.0 and :: even though they are not literal loopback.
+
+    CPython's ``is_private`` covers both addresses (and the surrounding
+    ranges), so the crawler must keep the fallback metadata even when a
+    listener is reachable through the wildcard address.
+    """
+    from _harness.db import insert_row
+
+    with WildcardHttpProbe(family) as probe:
+        chain = seed_helpers.issue_chain(
+            db_conn,
+            "contractwildcard" + ("v6" if family == socket.AF_INET6 else "v4"),
+        )
+        issue, project, workspace = chain["issue"], chain["project"], chain["workspace"]
+        url = probe.url
+        link = insert_row(
+            db_conn,
+            "issue_links",
+            {
+                "title": "Wildcard probe",
+                "url": url,
+                "issue_id": str(issue["id"]),
+                "project_id": str(project["id"]),
+                "workspace_id": str(workspace["id"]),
+                "created_by_id": str(chain["owner"]["id"]),
+                "updated_by_id": str(chain["owner"]["id"]),
+                "metadata": {},
+            },
+        )
+        celery_wire.publish(
+            f"{M}.work_item_link_task.crawl_work_item_link_title",
+            args=[str(link["id"]), url],
+        )
+
+        def _crawled():
+            row = snapshot(db_conn, ["issue_links"])["issue_links"].get(str(link["id"]))
+            return row if row and row["metadata"] != {} else None
+
+        crawled = wait_for(_crawled, what="issue_links metadata")
+        assert crawled["metadata"] == {
+            "title": None,
+            "favicon": DEFAULT_FAVICON_DATA_URI,
+            "url": url,
+            "favicon_url": None,
+        }
 
 
 def _expected_payload(hook, probe_id):
