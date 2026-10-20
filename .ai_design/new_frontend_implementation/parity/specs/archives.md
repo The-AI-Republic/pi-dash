@@ -345,11 +345,11 @@ First load shows the list skeleton until the archived read settles. Then:
   create-work-item action.
   Role: the control is **present but disabled for roles that cannot open
   the automations page** (guests and plain members; the page itself is
-  admin-gated, AGT-037, and refuses them). The old empty state renders the
-  same affordance with a disabled action for non-editors, so keeping it
-  present-but-disabled preserves the observable affordance without
-  producing a navigation that lands on the not-authorized view. Admins get
-  an enabled control. The explanation text renders for every role.
+  admin-gated, AGT-037, and refuses them). This is a deliberate divergence
+  from the old affordance, which left the control enabled for members and
+  then landed them on the not-authorized view; the new app preserves the
+  visible affordance without producing a refused navigation. Admins get an
+  enabled control. The explanation text renders for every role.
 
 This empty state is inventory gap G-1; see §14 for the row decision and
 owner.
