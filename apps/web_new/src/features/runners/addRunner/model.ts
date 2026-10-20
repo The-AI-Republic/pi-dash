@@ -14,7 +14,7 @@ import { firstSupportedAgent, PRESELECTED_MODEL, RUNNER_AGENTS, type RunnerAgent
 /** Picker value meaning "do not target a machine; show the command". */
 export const MANUAL_MACHINE = "";
 /** Label of that picker entry. */
-export const MANUAL_MACHINE_LABEL = "Run `pidash runner add` manually";
+export const MANUAL_MACHINE_LABEL = "Create it with the CLI instead";
 /** Sea-level pod value; omitted from the command and the payload. */
 export const DEFAULT_POD = "";
 /** Label of the default-pod entry. */

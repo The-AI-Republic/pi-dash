@@ -10251,7 +10251,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async addRunnerPickManual(): Promise<void> {
-    await this.addRunnerPickOption("Dev machine", "Run `pidash runner add` manually");
+    await this.addRunnerPickOption("Dev machine", "Create it with the CLI instead");
   }
 
   async addRunnerPickProject(name: string): Promise<void> {

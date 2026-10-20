@@ -115,7 +115,7 @@ describe("addRunnerVisible and layout", () => {
 describe("addRunnerForm", () => {
   it("reads every picker and both inputs", async () => {
     const text: Record<string, string> = {
-      "Dev machine": "Run `pidash runner add` manually",
+      "Dev machine": "Create it with the CLI instead",
       Project: "Acme",
       "Pod (optional)": "(default pod)",
       Agent: "Claude Code",
@@ -135,7 +135,7 @@ describe("addRunnerForm", () => {
     const driver = new WebNewDriver(pageStub({ getByRole: () => dialog }));
 
     await expect(driver.addRunnerForm()).resolves.toEqual({
-      machine: "Run `pidash runner add` manually",
+      machine: "Create it with the CLI instead",
       project: "Acme",
       projectLocked: true,
       pod: "(default pod)",

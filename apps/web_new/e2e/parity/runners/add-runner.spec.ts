@@ -54,7 +54,7 @@ function slug(prefix: string): string {
 }
 
 /** Machine picker label when no connected machine is selected. */
-const MANUAL_MACHINE = "Run `pidash runner add` manually";
+const MANUAL_MACHINE = "Create it with the CLI instead";
 
 async function openSignedIn(driver: ParityDriver, seed: ParitySeedFacts): Promise<void> {
   await driver.openEntry();
