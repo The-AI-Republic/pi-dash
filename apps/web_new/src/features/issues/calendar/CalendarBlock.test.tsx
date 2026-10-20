@@ -137,7 +137,8 @@ describe("CalendarBlock", () => {
     fireEvent.pointerEnter(screen.getByRole("link", { name: "WEB-42" }));
     act(() => vi.advanceTimersByTime(CALENDAR_BLOCK_PREVIEW_DELAY_MS));
     const priority = screen.getByTestId("calendar-block-priority");
-    expect(priority.querySelector("svg.lucide-chevron-up")).not.toBeNull();
+    expect(priority.querySelector("svg.lucide-signal-high")).not.toBeNull();
+    expect(priority.querySelector("svg.lucide-chevron-up")).toBeNull();
   });
 
   it("describes partial and absent date lines", () => {
