@@ -11,7 +11,6 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
 import { Link } from "@tanstack/react-router";
-import { Menu } from "@pidash/kit";
 import { deleteEpic, deleteIssue, type RelatedIssue } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -20,17 +19,13 @@ import { DeleteWorkItemDialog } from "../../../shared/shell/contextual/index.js"
 import { projectsQueryOptions } from "../../projects/index.js";
 import { issueKeys } from "../api/keys.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
+import type { WorkItemCreateProject, WorkItemEditTarget } from "../components/WorkItemCreateDialog.js";
 import { AddRelationDialog } from "./AddRelationDialog.js";
 import { RelationRow } from "./RelationRow.js";
 import { useAddRelations, useIssueRelations, useRemoveRelation } from "./api.js";
-import {
-  RELATION_KIND_SPECS,
-  RELATION_KINDS,
-  relationCount,
-  visibleRelationGroups,
-  type RelationKind,
-} from "./relationsModel.js";
-import { WidgetAddButton, WidgetSection } from "./WidgetSection.js";
+import { relationCount, visibleRelationGroups, type RelationKind } from "./relationsModel.js";
+import { useWidgetActions } from "./widgetActions.js";
+import { WidgetSection } from "./WidgetSection.js";
 
 /** Group header tint per kind tone. */
 const HEADER_TONE: Record<"neutral" | "warning" | "danger", string> = {
@@ -60,10 +55,13 @@ export function RelationsWidget({
   const projects = useQuery(projectsQueryOptions(getAppClient(), workspaceSlug));
   const add = useAddRelations({ workspaceSlug, projectId, issueId });
   const detach = useRemoveRelation({ workspaceSlug, projectId, issueId });
-  const [addKind, setAddKind] = React.useState<RelationKind | null>(null);
+  const shared = useWidgetActions();
+  const addKind = shared.relationKind;
+  const setAddKind = shared.setRelationKind;
   const [pendingDelete, setPendingDelete] = React.useState<RelatedIssue | null>(null);
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<RelationKind>>(() => new Set());
   const [peek, setPeek] = React.useState<{ row: RelatedIssue; identifier: string } | null>(null);
+  const [editing, setEditing] = React.useState<RelatedIssue | null>(null);
 
   // The slim relation row carries no epic flag; the detail read decides
   // which collection the destroy belongs to (ISS-182).
@@ -83,7 +81,10 @@ export function RelationsWidget({
   });
 
   const groups = visibleRelationGroups(relations.data);
-  if (groups.length === 0 && !canEdit) return null;
+  // §15: the section renders only with content; the add entry lives in
+  // the widget action row (ISS-173), so an empty section disappears. The
+  // dialogs stay mounted below so the row can still add the first edge.
+  const hasContent = groups.length > 0;
 
   /** Identifier for a related row: its own project when the list resolved it. */
   function identifierOf(row: RelatedIssue): string {
@@ -113,6 +114,16 @@ export function RelationsWidget({
       });
   }
 
+  /**
+   * Row Edit (ISS-182): the slim relation row is enough to seed the shared
+   * work-item modal, which then reads the stored description itself. The
+   * epic modal is edition-only (ISS-232), so OSS edits an epic row through
+   * the same work-item form.
+   */
+  function edit(row: RelatedIssue): void {
+    setEditing(row);
+  }
+
   function toggleGroup(kind: RelationKind): void {
     setCollapsed((current) => {
       const next = new Set(current);
@@ -134,68 +145,52 @@ export function RelationsWidget({
 
   return (
     <>
-      <WidgetSection
-        title="Relations"
-        count={relationCount(relations.data)}
-        add={
-          canEdit ? (
-            <Menu
-              trigger={<WidgetAddButton label="Add relation" onClick={() => undefined} />}
-              items={RELATION_KINDS.map((kind) => {
-                const spec = RELATION_KIND_SPECS[kind];
-                const Icon = spec.icon;
-                return {
-                  label: spec.label,
-                  icon: <Icon size={14} strokeWidth={1.5} aria-hidden="true" />,
-                  onSelect: () => setAddKind(kind),
-                };
-              })}
-            />
-          ) : undefined
-        }
-      >
-        <div className="flex flex-col gap-(--space-2) p-(--space-1)">
-          {groups.map(({ spec, rows }) => {
-            const groupOpen = !collapsed.has(spec.kind);
-            const GroupIcon = spec.icon;
-            return (
-              <div key={spec.kind} data-testid={`relation-group-${spec.kind}`}>
-                <button
-                  type="button"
-                  aria-expanded={groupOpen}
-                  onClick={() => toggleGroup(spec.kind)}
-                  className={`flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left ${HEADER_TONE[spec.tone]}`}
-                >
+      {hasContent ? (
+        <WidgetSection title="Relations" count={relationCount(relations.data)}>
+          <div className="flex flex-col gap-(--space-2) p-(--space-1)">
+            {groups.map(({ spec, rows }) => {
+              const groupOpen = !collapsed.has(spec.kind);
+              const GroupIcon = spec.icon;
+              return (
+                <div key={spec.kind} data-testid={`relation-group-${spec.kind}`}>
+                  <button
+                    type="button"
+                    aria-expanded={groupOpen}
+                    onClick={() => toggleGroup(spec.kind)}
+                    className={`flex w-full items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left ${HEADER_TONE[spec.tone]}`}
+                  >
+                    {groupOpen ? (
+                      <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
+                    ) : (
+                      <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
+                    )}
+                    <GroupIcon size={14} strokeWidth={1.5} aria-hidden="true" />
+                    <span className="text-caption font-medium">{spec.label}</span>
+                    <span className="text-meta">{rows.length}</span>
+                  </button>
                   {groupOpen ? (
-                    <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />
-                  ) : (
-                    <ChevronRight size={12} strokeWidth={2} aria-hidden="true" />
-                  )}
-                  <GroupIcon size={14} strokeWidth={1.5} aria-hidden="true" />
-                  <span className="text-caption font-medium">{spec.label}</span>
-                  <span className="text-meta">{rows.length}</span>
-                </button>
-                {groupOpen ? (
-                  <div className="flex flex-col">
-                    {rows.map((row) => (
-                      <RelationRow
-                        key={`${spec.kind}-${row.id}`}
-                        workspaceSlug={workspaceSlug}
-                        projectIdentifier={identifierOf(row)}
-                        row={row}
-                        canEdit={canEdit}
-                        onOpen={open}
-                        onRemove={(target) => removeRelation(target, spec.kind)}
-                        onDelete={setPendingDelete}
-                      />
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      </WidgetSection>
+                    <div className="flex flex-col">
+                      {rows.map((row) => (
+                        <RelationRow
+                          key={`${spec.kind}-${row.id}`}
+                          workspaceSlug={workspaceSlug}
+                          projectIdentifier={identifierOf(row)}
+                          row={row}
+                          canEdit={canEdit}
+                          onOpen={open}
+                          onEdit={edit}
+                          onRemove={(target) => removeRelation(target, spec.kind)}
+                          onDelete={setPendingDelete}
+                        />
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </WidgetSection>
+      ) : null}
       {canEdit && addKind !== null ? (
         <AddRelationDialog
           open
@@ -229,6 +224,9 @@ export function RelationsWidget({
           title={peek.row.name}
           onClose={() => setPeek(null)}
         />
+      )}
+      {editing === null ? null : (
+        <RelationEditor workspaceSlug={workspaceSlug} row={editing} onClose={() => setEditing(null)} />
       )}
       <DeleteWorkItemDialog
         open={pendingDelete !== null}
@@ -280,5 +278,71 @@ function RelationPeek({
         </Link>
       )}
     </PeekPanel>
+  );
+}
+
+/**
+ * The shared create/update modal seeded with a related row (ISS-182). The
+ * row's project list supplies the form's project row; the modal reads the
+ * stored description and PATCHes only the changed fields.
+ */
+function RelationEditor({
+  workspaceSlug,
+  row,
+  onClose,
+}: {
+  workspaceSlug: string;
+  row: RelatedIssue;
+  onClose: () => void;
+}): React.ReactElement {
+  const LazyDialog = React.useMemo(
+    () =>
+      React.lazy(() =>
+        import("../components/WorkItemCreateDialog.js").then((module) => ({ default: module.WorkItemCreateDialog }))
+      ),
+    []
+  );
+  const projects = useQuery(projectsQueryOptions(getAppClient(), workspaceSlug));
+  const project = projects.data?.find((entry) => entry.id === row.project_id);
+  const target: WorkItemEditTarget = {
+    kind: "issue",
+    id: row.id,
+    projectId: row.project_id,
+    snapshot: {
+      id: row.id,
+      name: row.name,
+      state_id: row.state_id,
+      priority: row.priority,
+      assignee_ids: row.assignee_ids,
+      label_ids: row.label_ids,
+      parent_id: null,
+    },
+    onChanged: onClose,
+  };
+  const offered: WorkItemCreateProject[] =
+    project === undefined
+      ? [{ id: row.project_id, name: "", memberRole: 20 }]
+      : [
+          {
+            id: project.id,
+            name: project.name,
+            identifier: project.identifier,
+            memberRole: project.member_role,
+            archived: project.archived_at !== null,
+          },
+        ];
+  return (
+    <React.Suspense fallback={null}>
+      <LazyDialog
+        open
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+        workspaceSlug={workspaceSlug}
+        projects={offered}
+        initialProjectId={row.project_id}
+        edit={target}
+      />
+    </React.Suspense>
   );
 }

@@ -504,24 +504,25 @@ describe("browse route", () => {
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
   });
 
-  it("mounts the widget stack for a live issue", async () => {
+  it("mounts the widget stack with live relation and link entries for a member", async () => {
     renderBrowse(true, undefined, { details: "member", me: true });
-    expect(await screen.findByRole("button", { name: "Add relation" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Add link" })).toBeInTheDocument();
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    await waitFor(() => expect(within(widget).getByRole("button", { name: "Add relation" })).toBeEnabled());
+    expect(within(widget).getByRole("button", { name: "Add link" })).toBeEnabled();
   });
 
   it("keeps the widget stack read-only on an archived issue", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
-    expect(await screen.findByRole("region", { name: "Work item details" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add relation" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add link" })).not.toBeInTheDocument();
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widget).getByRole("button", { name: "Add relation" })).toBeDisabled();
+    expect(within(widget).getByRole("button", { name: "Add link" })).toBeDisabled();
   });
 
   it("keeps the widget stack read-only on a synced issue", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, syncedIssue: true });
-    expect(await screen.findByRole("region", { name: "Work item details" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add relation" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add link" })).not.toBeInTheDocument();
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widget).getByRole("button", { name: "Add relation" })).toBeDisabled();
+    expect(within(widget).getByRole("button", { name: "Add link" })).toBeDisabled();
   });
 
   it("renders unknown keys without the strip, linking home", async () => {

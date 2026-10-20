@@ -24,6 +24,7 @@ function renderRow(canEdit = true, options: Parameters<typeof stubTransport>[0] 
   createAppClient("https://api.test", transport as never);
   const handlers = {
     onOpen: vi.fn(),
+    onEdit: vi.fn(),
     onRemove: vi.fn(),
     onDelete: vi.fn(),
   };
@@ -81,10 +82,12 @@ describe("relation row", () => {
 
   it("fires the row menu callbacks for editors", async () => {
     const user = userEvent.setup();
-    const { onRemove, onDelete } = renderRow();
+    const { onEdit, onRemove, onDelete } = renderRow();
     await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
     expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(onEdit).toHaveBeenCalledWith(expect.objectContaining({ id: PEER }));
+    await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
     await user.click(await screen.findByRole("menuitem", { name: "Remove relation" }));
     expect(onRemove).toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));

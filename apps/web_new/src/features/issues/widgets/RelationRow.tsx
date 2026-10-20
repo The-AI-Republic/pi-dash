@@ -7,7 +7,7 @@
 // the detail header counts.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Copy, Ellipsis, Trash2, Unlink } from "lucide-react";
+import { Copy, Ellipsis, Pencil, Trash2, Unlink } from "lucide-react";
 import * as React from "react";
 
 import { IconButton, Menu } from "@pidash/kit";
@@ -25,6 +25,8 @@ export interface RelationRowProps {
   row: RelatedIssue;
   canEdit: boolean;
   onOpen: (row: RelatedIssue) => void;
+  /** Opens the shared create/update modal for the related work item. */
+  onEdit: (row: RelatedIssue) => void;
   onRemove: (row: RelatedIssue) => void;
   onDelete: (row: RelatedIssue) => void;
 }
@@ -50,6 +52,7 @@ export function RelationRow({
   row,
   canEdit,
   onOpen,
+  onEdit,
   onRemove,
   onDelete,
 }: RelationRowProps): React.ReactElement {
@@ -117,6 +120,9 @@ export function RelationRow({
           </IconButton>
         }
         items={[
+          ...(canEdit
+            ? [{ label: "Edit", icon: <Pencil size={14} aria-hidden="true" />, onSelect: () => onEdit(row) }]
+            : []),
           {
             label: "Copy link",
             icon: <Copy size={14} aria-hidden="true" />,

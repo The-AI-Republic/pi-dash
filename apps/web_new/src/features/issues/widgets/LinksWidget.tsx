@@ -16,7 +16,8 @@ import type { IssueLink } from "@pidash/api-client";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { LinkDialog, type LinkDraft } from "./LinkDialog.js";
 import { useCreateLink, useDeleteLink, useIssueLinks, useUpdateLink, newestLinks } from "./api.js";
-import { WidgetAddButton, WidgetSection } from "./WidgetSection.js";
+import { useWidgetActions } from "./widgetActions.js";
+import { WidgetSection } from "./WidgetSection.js";
 
 /** Host portion of an absolute URL; empty for anything unparseable. */
 export function faviconUrl(url: string): string | null {
@@ -73,7 +74,9 @@ export function LinksWidget({
   issueId,
   canEdit,
 }: LinksWidgetProps): React.ReactElement | null {
-  const [dialogOpen, setDialogOpen] = React.useState(false);
+  const shared = useWidgetActions();
+  const dialogOpen = shared.linkOpen;
+  const setDialogOpen = shared.setLinkOpen;
   const [editing, setEditing] = React.useState<IssueLink | null>(null);
   const links = useIssueLinks(workspaceSlug, projectId, issueId);
   const create = useCreateLink({ workspaceSlug, projectId, issueId });
@@ -81,12 +84,10 @@ export function LinksWidget({
   const remove = useDeleteLink({ workspaceSlug, projectId, issueId });
   const rows = newestLinks(links.data);
 
-  if (rows.length === 0 && !canEdit) return null;
-
-  function openAdd(): void {
-    setEditing(null);
-    setDialogOpen(true);
-  }
+  // §15: the section renders only with content; the add entry lives in
+  // the widget action row (ISS-173), so an empty section disappears. The
+  // dialog stays mounted below so the row can still add the first link.
+  const hasContent = rows.length > 0;
 
   function openEdit(link: IssueLink): void {
     setEditing(link);
@@ -96,6 +97,7 @@ export function LinksWidget({
   function submit(draft: LinkDraft): void {
     const done = (): void => {
       setDialogOpen(false);
+      setEditing(null);
     };
     if (editing === null) {
       create.mutate({ url: draft.url, title: draft.title === "" ? null : draft.title }, { onSuccess: done });
@@ -120,76 +122,83 @@ export function LinksWidget({
 
   return (
     <>
-      <WidgetSection
-        title="Links"
-        count={rows.length}
-        add={canEdit ? <WidgetAddButton label="Add link" onClick={openAdd} /> : undefined}
-      >
-        <div className="flex flex-col gap-(--space-1) p-(--space-1)">
-          {rows.map((link) => {
-            const icon = faviconUrl(link.url);
-            return (
-              <div
-                key={link.id}
-                data-testid={`link-row-${link.id}`}
-                className="flex min-h-10 items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-3) py-(--space-1)"
-              >
-                <a
-                  href={link.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex min-w-0 flex-1 items-center gap-(--space-2)"
+      {hasContent ? (
+        <WidgetSection title="Links" count={rows.length}>
+          <div className="flex flex-col gap-(--space-1) p-(--space-1)">
+            {rows.map((link) => {
+              const icon = faviconUrl(link.url);
+              return (
+                <div
+                  key={link.id}
+                  data-testid={`link-row-${link.id}`}
+                  className="flex min-h-10 items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--subtle) px-(--space-3) py-(--space-1)"
                 >
-                  {icon === null ? (
-                    <Globe size={14} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
-                  ) : (
-                    <img src={icon} alt="" aria-hidden="true" className="size-4 shrink-0" />
-                  )}
-                  <span className="text-body min-w-0 flex-1 truncate text-(--text)">{linkTitle(link)}</span>
-                  <ExternalLink
-                    size={12}
-                    strokeWidth={1.5}
-                    aria-hidden="true"
-                    className="shrink-0 text-(--text-muted)"
-                  />
-                </a>
-                <span className="text-meta shrink-0 text-(--text-muted)">{attribution(link)}</span>
-                <IconButton
-                  label={`Copy link ${linkTitle(link)}`}
-                  size="small"
-                  variant="ghost"
-                  onClick={() => void copy(link.url)}
-                >
-                  <Copy size={14} strokeWidth={1.5} aria-hidden="true" />
-                </IconButton>
-                {canEdit ? (
-                  <Menu
-                    trigger={
-                      <IconButton label={`Link actions for ${linkTitle(link)}`} size="small" variant="ghost">
-                        <Ellipsis size={14} strokeWidth={1.5} aria-hidden="true" />
-                      </IconButton>
-                    }
-                    items={[
-                      {
-                        label: "Edit",
-                        icon: <Pencil size={14} aria-hidden="true" />,
-                        onSelect: () => openEdit(link),
-                      },
-                      {
-                        label: "Delete",
-                        icon: <Trash2 size={14} aria-hidden="true" />,
-                        onSelect: () => remove.mutate(link.id),
-                      },
-                    ]}
-                  />
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      </WidgetSection>
+                  <a
+                    href={link.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex min-w-0 flex-1 items-center gap-(--space-2)"
+                  >
+                    {icon === null ? (
+                      <Globe size={14} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
+                    ) : (
+                      <img src={icon} alt="" aria-hidden="true" className="size-4 shrink-0" />
+                    )}
+                    <span className="text-body min-w-0 flex-1 truncate text-(--text)">{linkTitle(link)}</span>
+                    <ExternalLink
+                      size={12}
+                      strokeWidth={1.5}
+                      aria-hidden="true"
+                      className="shrink-0 text-(--text-muted)"
+                    />
+                  </a>
+                  <span className="text-meta shrink-0 text-(--text-muted)">{attribution(link)}</span>
+                  <IconButton
+                    label={`Copy link ${linkTitle(link)}`}
+                    size="small"
+                    variant="ghost"
+                    onClick={() => void copy(link.url)}
+                  >
+                    <Copy size={14} strokeWidth={1.5} aria-hidden="true" />
+                  </IconButton>
+                  {canEdit ? (
+                    <Menu
+                      trigger={
+                        <IconButton label={`Link actions for ${linkTitle(link)}`} size="small" variant="ghost">
+                          <Ellipsis size={14} strokeWidth={1.5} aria-hidden="true" />
+                        </IconButton>
+                      }
+                      items={[
+                        {
+                          label: "Edit",
+                          icon: <Pencil size={14} aria-hidden="true" />,
+                          onSelect: () => openEdit(link),
+                        },
+                        {
+                          label: "Delete",
+                          icon: <Trash2 size={14} aria-hidden="true" />,
+                          onSelect: () => remove.mutate(link.id),
+                        },
+                      ]}
+                    />
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </WidgetSection>
+      ) : null}
       {canEdit ? (
-        <LinkDialog open={dialogOpen} onOpenChange={setDialogOpen} link={editing} pending={pending} onSubmit={submit} />
+        <LinkDialog
+          open={dialogOpen}
+          onOpenChange={(open) => {
+            if (!open) setEditing(null);
+            setDialogOpen(open);
+          }}
+          link={editing}
+          pending={pending}
+          onSubmit={submit}
+        />
       ) : null}
     </>
   );

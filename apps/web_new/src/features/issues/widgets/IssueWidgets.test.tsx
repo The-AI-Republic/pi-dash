@@ -9,7 +9,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { IssueWidgets } from "./IssueWidgets.js";
-import { ISSUE, PROJECT, WS, emptyRelations, newQueryClient, relatedRow, stubTransport } from "./widgetTestUtils.js";
+import {
+  ISSUE,
+  PROJECT,
+  WS,
+  emptyRelations,
+  linkRow,
+  newQueryClient,
+  relatedRow,
+  stubTransport,
+} from "./widgetTestUtils.js";
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
@@ -32,7 +41,7 @@ afterEach(() => {
 function renderStack(canEdit = true) {
   const { transport } = stubTransport({
     relations: { ...emptyRelations(), blocked_by: [relatedRow()] },
-    links: [],
+    links: [linkRow()],
   });
   createAppClient("https://api.test", transport as never);
   render(
@@ -53,10 +62,10 @@ describe("issue widget stack", () => {
     expect(screen.getByRole("button", { name: "Add link" })).toBeInTheDocument();
   });
 
-  it("keeps the add controls away from guests", async () => {
+  it("keeps the add controls disabled for guests", async () => {
     renderStack(false);
     expect(await screen.findByText("Peer work item")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add relation" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add link" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add relation" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add link" })).toBeDisabled();
   });
 });

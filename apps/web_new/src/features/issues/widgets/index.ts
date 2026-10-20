@@ -27,4 +27,6 @@ export type { AddRelationDialogProps } from "./AddRelationDialog.js";
 export { LinkDialog, LINK_URL_REQUIRED } from "./LinkDialog.js";
 export type { LinkDialogProps, LinkDraft } from "./LinkDialog.js";
 export { RelationRow, copyWorkItemUrl } from "./RelationRow.js";
+export { LinkActionButton, RelationActionMenu, WidgetActionsProvider, useWidgetActions } from "./widgetActions.js";
+export type { WidgetActionsValue } from "./widgetActions.js";
 export type { RelationRowProps } from "./RelationRow.js";

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { RelationsWidget } from "./RelationsWidget.js";
+import { RelationActionMenu, WidgetActionsProvider } from "./widgetActions.js";
 import {
   ISSUE,
   PEER,
@@ -49,13 +50,16 @@ function renderWidget(options: Parameters<typeof stubTransport>[0] = {}, canEdit
   const queryClient = newQueryClient();
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <RelationsWidget
-        workspaceSlug={WS}
-        projectId={PROJECT}
-        issueId={ISSUE}
-        projectIdentifier="WEB"
-        canEdit={canEdit}
-      />
+      <WidgetActionsProvider>
+        <RelationActionMenu canEdit={canEdit} />
+        <RelationsWidget
+          workspaceSlug={WS}
+          projectId={PROJECT}
+          issueId={ISSUE}
+          projectIdentifier="WEB"
+          canEdit={canEdit}
+        />
+      </WidgetActionsProvider>
     </QueryClientProvider>
   );
   return { calls, view, queryClient };
@@ -189,14 +193,14 @@ describe("relations widget", () => {
     expect(calls.filter((call) => call.url.includes("/remove-relation/"))).toHaveLength(1);
   });
 
-  it("offers copy, remove and delete with a confirm dialog for editors", async () => {
+  it("offers edit, copy, remove and delete with a confirm dialog for editors", async () => {
     const user = userEvent.setup();
     renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
     await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
     expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Remove relation" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
     expect(within(dialog).getByText(/Peer work item/)).toBeInTheDocument();
@@ -278,11 +282,48 @@ describe("relations widget", () => {
     expect(screen.queryByRole("dialog", { name: /Delete work item/i })).not.toBeInTheDocument();
   });
 
-  it("offers the add entry without an empty-state line to an editor with no relations", async () => {
-    renderWidget({ relations: emptyRelations() });
+  it("renders no section for an editor with no relations", async () => {
+    const { view } = renderWidget({ relations: emptyRelations() });
     expect(await screen.findByRole("button", { name: "Add relation" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Relations" })).not.toBeInTheDocument();
     expect(screen.queryByText("No relations yet.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Peer work item")).not.toBeInTheDocument();
+    expect(view.container.querySelector("[data-testid='relation-group-blocked_by']")).toBeNull();
+  });
+
+  it("adds the first relation from the action row while the section is empty", async () => {
+    const user = userEvent.setup();
+    const candidate = {
+      id: "a23e4567-e89b-12d3-a456-426614174009",
+      name: "Candidate one",
+      sequence_id: 9,
+      project__name: "Web",
+      project__identifier: "WEB",
+      project_id: PROJECT,
+      workspace__slug: WS,
+      state__name: "Todo",
+      state__group: "unstarted",
+      state__color: "#000",
+      start_date: null,
+    };
+    const { calls } = renderWidget({ relations: emptyRelations(), candidates: [candidate] });
+    expect(screen.queryByRole("region", { name: "Relations" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Add relation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Blocked by" }));
+    await user.click(await screen.findByRole("option", { name: /Candidate one/ }));
+    await user.click(screen.getByRole("button", { name: "Add selected work items" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Relations added"));
+    expect(calls.find((call) => call.method === "POST" && call.url.includes("/issue-relation/"))?.body).toContain(
+      '"relation_type":"blocked_by"'
+    );
+  });
+
+  it("opens the shared work-item form from a row's Edit entry", async () => {
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 });
+    expect(within(dialog).getByDisplayValue("Peer work item")).toBeInTheDocument();
   });
 
   it("destroys an epic through the epic collection", async () => {
@@ -334,17 +375,17 @@ describe("relations widget", () => {
     const user = userEvent.setup();
     renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } }, false);
     expect(await screen.findByText("Peer work item")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add relation" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add relation" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Actions for Peer work item" }));
     expect(await screen.findByRole("menuitem", { name: "Copy link" })).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Remove relation" })).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
   });
 
-  it("renders nothing for guests with no relations", async () => {
-    const { view } = renderWidget({}, false);
-    await waitFor(() => expect(view.container).toBeEmptyDOMElement());
+  it("renders no section for a guest with no relations", async () => {
+    renderWidget({}, false);
+    expect(await screen.findByRole("button", { name: "Add relation" })).toBeDisabled();
+    expect(screen.queryByRole("region", { name: "Relations" })).not.toBeInTheDocument();
   });
 
   it("hides the group's rows when the inner header is collapsed", async () => {

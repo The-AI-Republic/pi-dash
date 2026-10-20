@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { LinksWidget, addedAgo, attribution, faviconUrl, linkTitle } from "./LinksWidget.js";
+import { LinkActionButton, WidgetActionsProvider } from "./widgetActions.js";
 import { LINK, PROJECT, WS, linkRow, newQueryClient, stubTransport } from "./widgetTestUtils.js";
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
@@ -27,7 +28,10 @@ function renderWidget(options: Parameters<typeof stubTransport>[0] = {}, canEdit
   const queryClient = newQueryClient();
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <LinksWidget workspaceSlug={WS} projectId={PROJECT} issueId={ISSUE} canEdit={canEdit} />
+      <WidgetActionsProvider>
+        <LinkActionButton canEdit={canEdit} />
+        <LinksWidget workspaceSlug={WS} projectId={PROJECT} issueId={ISSUE} canEdit={canEdit} />
+      </WidgetActionsProvider>
     </QueryClientProvider>
   );
   return { calls, view };
@@ -231,19 +235,34 @@ describe("links widget", () => {
   it("hides add and row controls from guests but keeps the anchor and copy", async () => {
     renderWidget({ links: [linkRow()] }, false);
     expect(await screen.findByText("Design doc")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add link" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add link" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Link actions for Design doc" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Copy link Design doc/ })).toBeInTheDocument();
   });
 
-  it("renders nothing for guests with no links", async () => {
-    const { view } = renderWidget({ links: [] }, false);
-    await waitFor(() => expect(view.container).toBeEmptyDOMElement());
+  it("renders no section for a guest with no links", async () => {
+    renderWidget({ links: [] }, false);
+    expect(await screen.findByRole("button", { name: "Add link" })).toBeDisabled();
+    expect(screen.queryByRole("region", { name: "Links" })).not.toBeInTheDocument();
   });
 
-  it("keeps the add entry without an empty-state line for an editor with no links", async () => {
+  it("adds the first link from the action row while the section is empty", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ links: [] });
+    expect(screen.queryByRole("region", { name: "Links" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Add link" }));
+    await user.type(await screen.findByLabelText("URL"), "example.com/first");
+    await user.click(screen.getByRole("button", { name: "Add link" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Link added"));
+    expect(calls.find((call) => call.method === "POST" && call.url.includes("/issue-links/"))?.body).toContain(
+      "http://example.com/first"
+    );
+  });
+
+  it("renders no section for an editor with no links", async () => {
     renderWidget({ links: [] });
     expect(await screen.findByRole("button", { name: "Add link" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Links" })).not.toBeInTheDocument();
     expect(screen.queryByText("No links yet.")).not.toBeInTheDocument();
   });
 
