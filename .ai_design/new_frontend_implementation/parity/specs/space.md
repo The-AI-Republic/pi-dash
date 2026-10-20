@@ -165,7 +165,9 @@ edition constant. The only variation is instance configuration:
   step, SPC-059–061),
 - whether password login/email password auth is enabled (SPC-059, SPC-061),
 - which third-party providers are enabled (SPC-062),
-- whether signup is enabled (instance config; the card's routing consults it),
+- whether signup is enabled (an instance/server setting: the card does not
+  read it when choosing a step; the server refuses a sign-up post with
+  `SIGNUP_DISABLED`, which the card renders as a banner -- SPC-059),
 - the product site address for the badge (a build-time constant, SPC-012),
 - which locale packs ship (SPC-065; OSS ships English only).
 
@@ -691,9 +693,13 @@ with issues showing no notice, and the notice appearing after a live filter
 change and disappearing when the filter is cleared.
 
 **SPC-026 — Per-group paging.**
-First fetch: per group, page size **50**, `group_by=state_id`, ordered by
-`-created_at` unless the request says otherwise. Then each group pages
-independently:
+First fetch: per group, page size **50**, `group_by=state_id`,
+`cursor=50:0:0` (the literal first-page cursor the old store builds:
+`<per_page>:<group offset 0>:<page 0>`), `per_page=50`, ordered by
+`-created_at` unless the request says otherwise. The oracle pins that exact
+first cursor. If a group ever needs a fetch before its first row lands, the
+old store's group fallback is `50:1:0`; the new app may keep it but never
+sends it as the board's first request. Then each group pages independently:
 - *List*: a manual "load more" control under the group's rows, shown only
   while that group has a next page. Pressing it fetches the next page with
   the group's own cursor; while in flight the control is replaced by pulsing
@@ -1085,11 +1091,15 @@ persisted). Folded state comes only from the server marker (never inferred
 from the body or speaker). Selecting the toggle is keyboard operable.
 
 **SPC-052 — Machine-authored speaker labels.**
-The comment serializer accepts any string for `speaker_type` (the store does
-not constrain it). Only the exact value `agent` produces a speaker label;
-every other value (human, a missing value, and any system/integration value
-the payload might carry) renders no speaker line at all. A human row whose
-`speaker_label` is present is still a human row: no line. For an agent comment whose `speaker_label` is non-empty
+The stored `speaker_type` is a four-value contract -- `human`, `agent`,
+`system`, `integration` (the model's choices; `human` is the default). The
+serializer emits whichever of those four the row holds. Only the exact value
+`agent` produces a speaker label; `human`, `system`, `integration` and a
+missing value render no speaker line at all. A human row whose
+`speaker_label` is present is still a human row: no line. If the new app
+tolerates an unknown value on read (forward compatibility), it treats it as
+"not agent" (no line); that tolerance is an explicit new-app choice, not old
+serializer behavior. For an agent comment whose `speaker_label` is non-empty
 after trimming, the row shows that label as **its own line between the
 header and the body**, ending with a colon, above the rendered comment body
 (not folded into the author name and not on the header line). An agent
@@ -1329,6 +1339,16 @@ the fixing step:
   the email step with the banner; the banner's wording points the visitor at
   the right mode (the other mode's step is not force-switched, matching the
   old card and the oracle);
+- the six form-level validation codes the old banner set also knows --
+  `REQUIRED_EMAIL_PASSWORD_SIGN_UP` (5040), `INVALID_EMAIL_SIGN_UP` (5045),
+  `INVALID_EMAIL_MAGIC_SIGN_UP` (5050), `REQUIRED_EMAIL_PASSWORD_SIGN_IN`
+  (5070), `INVALID_EMAIL_SIGN_IN` (5075) and `INVALID_EMAIL_MAGIC_SIGN_IN`
+  (5080) -- render a banner on the step that made the call and do not switch
+  step or mode (the old card only force-switches steps for the
+  `AUTHENTICATION_FAILED_*`, wrong/expired/exhausted-code and
+  account-existence families above). These arise from a submit (a field
+  missing or malformed after the browser check), not from the code link;
+  when they do arrive as `error_code`, the card keeps the current step;
 - unknown numbers → no banner, email step untouched. The OAuth configuration
   codes the card knows render through the banner as described in SPC-062;
   `GITEA_NOT_CONFIGURED` (5112) is **not** among them, so a Gitea
@@ -1419,7 +1439,7 @@ the payloads carry more.
 | Board settings | `GET /api/public/anchor/:anchor/settings/` | — | `anchor`, `entity_name` (= `project`), `is_comments_enabled`, `is_reactions_enabled`, `is_votes_enabled`, `is_activity_enabled`, `view_props.{list,kanban}`, `project_details.{id, identifier, name, logo_props, cover_image, description}`, `workspace_detail.{slug}` | 001, 003, 004, 010, 020, 029, 041, 047, 048, 049, 057 |
 | Legacy resolve | `GET /api/public/workspaces/:slug/projects/:id/anchor/` | path `slug`, `project_id` | `anchor`, `entity_name` | 002 |
 | Board metadata | `GET /api/public/anchor/:anchor/meta/` | — | `name`, `description` (only; the payload also carries `id`, `identifier`, `cover_image`, `icon_prop`, `emoji`, which the UI reads but deliberately does not display — `cover_image` never becomes an image tag) | 007 |
-| Issues (grouped) | `GET /api/public/anchor/:anchor/issues/` | `group_by=state_id`, `sub_group_by` (unused), `per_page` (50), `cursor` (opaque, from a prior response), `order_by=-created_at`, filters `state`, `priority`, `labels` (comma-joined), unknown filter keys ignored | envelope: `grouped_by`, `total_count`, `next_cursor`, `next_page_results`, `results` keyed by state UUID → `{results: [...], total_results}`; each issue is a flat dict with exactly `id`, `name`, `state_id`, `sort_order`, `estimate_point`, `priority`, `start_date`, `target_date`, `sequence_id`, `project_id`, `parent_id`, `cycle_id`, `created_by`, `state__group`, `label_ids`, `assignee_ids`, `module_ids`, `vote_items`, `reaction_items` — the card reads `id`, `name`, `state_id`, `priority`, `target_date`, `label_ids`, `sequence_id` and the embedded `vote_items`/`reaction_items`; there is **no** nested `state`, `project`, `votes` or `reactions` key | 023, 024, 026, 027, 028, 033, 036, 037 |
+| Issues (grouped) | `GET /api/public/anchor/:anchor/issues/` | `group_by=state_id`, `sub_group_by` (unused), `per_page` (50), `cursor` (first request is the literal `50:0:0`; later pages send the group's opaque `next_cursor` from the response; the group fallback `50:1:0` is not a first request), `order_by=-created_at`, filters `state`, `priority`, `labels` (comma-joined), unknown filter keys ignored | envelope: `grouped_by`, `total_count`, `next_cursor`, `next_page_results`, `results` keyed by state UUID → `{results: [...], total_results}`; each issue is a flat dict with exactly `id`, `name`, `state_id`, `sort_order`, `estimate_point`, `priority`, `start_date`, `target_date`, `sequence_id`, `project_id`, `parent_id`, `cycle_id`, `created_by`, `state__group`, `label_ids`, `assignee_ids`, `module_ids`, `vote_items`, `reaction_items` — the card reads `id`, `name`, `state_id`, `priority`, `target_date`, `label_ids`, `sequence_id` and the embedded `vote_items`/`reaction_items`; there is **no** nested `state`, `project`, `votes` or `reactions` key | 023, 024, 026, 027, 028, 033, 036, 037 |
 | Issue detail | `GET /api/public/anchor/:anchor/issues/:id/` | — | the same flat `.values()` dict as the list rows, plus `description_json`, `description_html`, `description_stripped`, `description_binary`: `id`, `name`, `state_id`, `sort_order`, `estimate_point`, `priority`, `start_date`, `target_date`, `sequence_id`, `project_id`, `parent_id`, `cycle_id`, `created_by`, `state__group`, `label_ids`, `assignee_ids`, `module_ids`, `vote_items`, `reaction_items`; each vote item is `{vote, actor_details.{id, display_name, first_name, last_name, avatar, avatar_url}}`, each reaction item is `{reaction, actor_details.{…same…}}`. There is no nested `state`, `project`, `votes` or `reactions` and no `votes` key at all — the old app reads `vote_items`/`reaction_items` and so does the new app | 030, 040, 043, 044, 047, 048 |
 | States | `GET /api/public/anchor/:anchor/states/` | — | `id`, `name`, `color`, `group`, `sequence` | 023, 024, 034, 044 |
 | Labels | `GET /api/public/anchor/:anchor/labels/` | — | `id`, `name`, `color` | 028, 034 (panel offers none), 037 |
@@ -1530,7 +1550,7 @@ create/confirm/link calls above stay exactly as described.
 
 | Call | Method + path | Body/params | Response fields read | Rows |
 | --- | --- | --- | --- | --- |
-| Instance info | `GET /api/instances/` | — | `config.{is_smtp_configured, is_magic_login_enabled, is_email_password_enabled, is_google_enabled, is_github_enabled, is_gitlab_enabled, is_gitea_enabled, enable_signup}` | 005, 016, 018, 059, 062 |
+| Instance info | `GET /api/instances/` | — | `config.{is_smtp_configured, is_magic_login_enabled, is_email_password_enabled, is_google_enabled, is_github_enabled, is_gitlab_enabled, is_gitea_enabled}`; `enable_signup` is carried in the payload but is **not read** by the card (the server enforces it, SPC-059) | 005, 016, 018, 059, 062 |
 | Current user | `GET /api/users/me/` | — | `id`, `display_name`, `first_name`, `last_name`, `email`, `avatar_url` | 005, 013, 014, 049, 055 |
 | CSRF token | `GET /auth/get-csrf-token/` | — | `csrf_token` | 014, 060, 061 |
 | Email check | `POST /auth/spaces/email-check/` | JSON `{email}` (lower-case, trimmed) | `existing` (bool), `status` (`MAGIC_CODE` \| `CREDENTIAL`); errors `{error_code, error_message}` | 058, 059 |
@@ -1547,7 +1567,11 @@ the number to a step and a translated banner, never shows the number):
 `INVALID_PASSWORD`, `MAGIC_SIGN_IN_EMAIL_CODE_REQUIRED`,
 `MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED`, `INVALID_MAGIC_CODE_SIGN_IN/UP`,
 `EXPIRED_MAGIC_CODE_SIGN_IN/UP`, `EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN/UP`,
-`USER_DOES_NOT_EXIST`, `USER_ALREADY_EXIST`, `INSTANCE_NOT_CONFIGURED`,
+`REQUIRED_EMAIL_PASSWORD_SIGN_UP` (5040), `INVALID_EMAIL_SIGN_UP` (5045),
+`INVALID_EMAIL_MAGIC_SIGN_UP` (5050),
+`REQUIRED_EMAIL_PASSWORD_SIGN_IN` (5070), `INVALID_EMAIL_SIGN_IN` (5075),
+`INVALID_EMAIL_MAGIC_SIGN_IN` (5080), `USER_DOES_NOT_EXIST`,
+`USER_ALREADY_EXIST`, `INSTANCE_NOT_CONFIGURED`,
 `SMTP_NOT_CONFIGURED`, `USER_ACCOUNT_DEACTIVATED` (5019),
 `OAUTH_NOT_CONFIGURED`, and the `GOOGLE_`/`GITHUB_`/`GITLAB_` configuration
 and provider-error codes. Deliberate exclusions, both proven by the old card
@@ -1590,7 +1614,8 @@ requires them to model:
   `{error_code, error_message}`.
 - `Instance` config and `CurrentUser` may reuse the existing modules, but the
   space-specific fields (`is_magic_login_enabled`, `is_email_password_enabled`,
-  `enable_signup`, provider flags) must be present.
+  provider flags) must be present. `enable_signup` is declared as an optional
+  passthrough field of the payload; no space component reads it (§1.4).
 
 Each contract gets a contract test against a real response from the Django
 test server, per the Data layer page.
