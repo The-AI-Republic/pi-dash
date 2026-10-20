@@ -860,16 +860,19 @@ Sections, top to bottom:
   or **"No assignee"**. The row labels are exactly **"Lead"**,
   **"Members"**, **"Work items"** and (when it renders) **"Points"**;
   the oracle reads the assignee row as "Members", not "Assignees".
-- **Work items** (CYC-038): completed over raw total
-  (`completed_issues/total_issues`), using the server's counters as they
+- **Work items** (CYC-038): a `completed/total` pair
+  (`completed_issues/total_issues`) using the server's counters as they
   are; `total_issues` includes cancelled items, and only the ring (§2)
-  excludes them. When the total is zero the row reads `0 work items`.
-  Finished cycles read the frozen snapshot's counters. The **"Points"**
-  row renders only when the project's estimate system is points **and
-  the cycle is not completed** (the reference hides it for finished
-  cycles and for item-based estimate systems); it reads
-  `completed/total` estimate points, or `0 Work item` when the total is
-  zero.
+  excludes them. The oracle reads `0/2` and `1/3` here, so always render
+  the pair, including a zero numerator; the reference's `0 Work item`
+  string appears only when the underlying total is itself zero, and the
+  pair is the contract the gate proves. Finished cycles read the frozen
+  snapshot's counters. The **"Points"** row renders only when the
+  project's estimate system is points, the cycle is not completed, and
+  (for a finished cycle's snapshot) the snapshot carries an
+  `estimate_distribution` (the reference hides it for item-based
+  estimates); it reads the `completed_estimate_points /
+total_estimate_points` pair, e.g. `0/2`.
 - **Progress by state** (CYC-038): the cycle's work items grouped by
   workflow state, with the count per state group and the closed count,
   into a total that includes cancelled items. Each group card has its
@@ -923,8 +926,10 @@ inside it), the active row itself with its ring and dates, and three
 cards:
 
 1. **"Progress"** — work items by state group with counts, plus a
-   `{closed}/{open} Work items closed` summary and a cancelled count
-   line; clicking a state group navigates to the
+   summary ending in the word **"closed"** (`{completed +
+cancelled}/{total - cancelled} Work items closed`, matching the
+   reference) and a cancelled-count line, both only when the cycle has
+   items; clicking a state group navigates to the
    cycle detail with that state group as an applied filter (the same
    persisted rich filter as the sidebar entries), and the detail shows
    the filtered work items.
