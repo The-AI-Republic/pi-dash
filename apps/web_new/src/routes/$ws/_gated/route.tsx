@@ -57,7 +57,6 @@ import {
   APP_VERSION,
   AppShell,
   getToastManager,
-  HelpMenu,
   isNotificationsPath,
   isRailUndocked,
   resolveFileUrl,
@@ -129,6 +128,11 @@ const LazyRuntimeSupervisor = React.lazy(() =>
 const LazyUpdateControl = React.lazy(() =>
   import("../../../features/updater/index.js").then((module) => ({ default: module.DesktopUpdateControl }))
 );
+// The help menu opens on click only, so it rides its own chunk like the
+// update control; the shell warms that chunk once it is interactive, so
+// the button is ready by the time anyone opens it (SHELL-060, size gate).
+const loadHelpMenu = () => import("../../../shared/shell/HelpMenu.js");
+const LazyHelpMenu = React.lazy(() => loadHelpMenu().then((module) => ({ default: module.HelpMenu })));
 // The plan badge only renders on plan-badge editions (CLOUD-038), so it
 // rides a lazy chunk; the shell passes the version in.
 const LazyPlanBadge = React.lazy(() =>
@@ -307,6 +311,12 @@ function WorkspaceShell({
   const narrow = useNarrowViewport();
   const stampLastWorkspace = useUpdateProfile();
 
+  // Warm the help-menu chunk once the shell is interactive: it is split
+  // for the size gate, not to make the Help button wait (SHELL-060).
+  React.useEffect(() => {
+    void loadHelpMenu();
+  }, []);
+
   const workspace = selectWorkspace(workspaces, workspaceSlug);
   const activeProject = projects.find((project) => project.id === childProjectId) ?? null;
   const userLabel = me.display_name || me.email;
@@ -441,12 +451,14 @@ function WorkspaceShell({
             />
           }
           helpMenu={
-            <HelpMenu
-              version={APP_VERSION}
-              onOpenShortcuts={() => useShortcutsDialog.getState().openShortcuts()}
-              onOpenUpdates={() => setUpdatesOpen(true)}
-              onOpenExternal={(url: string) => void platform.openExternal(url)}
-            />
+            <React.Suspense fallback={null}>
+              <LazyHelpMenu
+                version={APP_VERSION}
+                onOpenShortcuts={() => useShortcutsDialog.getState().openShortcuts()}
+                onOpenUpdates={() => setUpdatesOpen(true)}
+                onOpenExternal={(url: string) => void platform.openExternal(url)}
+              />
+            </React.Suspense>
           }
           accountMenu={
             <UserMenu

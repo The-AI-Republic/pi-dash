@@ -1635,11 +1635,11 @@ describe("gated layout shell wiring", () => {
       }
     });
 
-    it("opens the shortcut list from the help menu", () => {
+    it("opens the shortcut list from the help menu", async () => {
       renderShell();
       const menu = renderNode(harness.topBar?.helpMenu);
       try {
-        fireEvent.click(screen.getByTestId("topbar-help-menu"));
+        fireEvent.click(await screen.findByTestId("topbar-help-menu"));
         fireEvent.click(screen.getByRole("menuitem", { name: "Keyboard shortcuts" }));
         expect(useShortcutsDialog.getState().open).toBe(true);
       } finally {
