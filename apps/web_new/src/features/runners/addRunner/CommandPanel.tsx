@@ -67,14 +67,16 @@ export function AddRunnerCommandPanel({ fields, originFallback }: CommandPanelPr
           aria-label="Shell"
           className="inline-flex overflow-hidden rounded-(--radius-control) border border-(--border) bg-(--bg)"
         >
-          {SHELL_CHOICES.map((choice) => (
+          {SHELL_CHOICES.map((choice, index) => (
             <button
               key={choice.kind}
               type="button"
               aria-pressed={shell === choice.kind}
               onClick={() => setShell(choice.kind)}
               className={cn(
-                "text-meta cursor-pointer border-r border-(--border) px-(--space-3) py-(--space-1) last:border-r-0",
+                index < SHELL_CHOICES.length - 1
+                  ? "text-meta cursor-pointer border-r border-(--border) px-(--space-3) py-(--space-1)"
+                  : "text-meta cursor-pointer px-(--space-3) py-(--space-1)",
                 shell === choice.kind ? "bg-(--accent) text-(--on-accent)" : "text-(--text-muted) hover:text-(--text)"
               )}
             >
