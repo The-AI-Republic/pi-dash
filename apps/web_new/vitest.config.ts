@@ -67,6 +67,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-estimates-repository.test.ts",
       "e2e/parity/drivers/web-new-auth-card.test.ts",
       "e2e/parity/drivers/web-new-contract-surface.test.ts",
+      "e2e/parity/drivers/web-new-nav-badge.test.ts",
       "e2e/parity/drivers/modal-copy.test.tsx",
       "e2e/parity/helpers/calendar-dates.test.ts",
       "e2e/parity/drivers/web-favorites.test.ts",

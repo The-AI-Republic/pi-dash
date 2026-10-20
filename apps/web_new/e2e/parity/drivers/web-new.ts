@@ -10775,7 +10775,31 @@ export class WebNewDriver implements ParityDriver {
       );
     await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/issues`, cookies);
     await unreadLanded;
+    // The dot read answers "empty inbox" when the entry is absent, so the
+    // shell has to have painted before that answer means anything. A dev
+    // server under load can serve a document whose module graph never runs:
+    // no unread read arrives and no entry paints. One reload gets a fresh
+    // graph; a mounted page that is merely slow is left to finish painting.
+    if (!(await this.inboxEntryPainted(2_000))) {
+      if (!(await this.appMounted())) {
+        await this.page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        await this.page.waitForLoadState("domcontentloaded");
+      }
+      if (!(await this.inboxEntryPainted(WebNewDriver.WAIT_MS))) {
+        throw new Error(`[parity] the shell never painted the inbox entry at ${this.page.url()}.`);
+      }
+    }
     return this.notificationsNavBadge();
+  }
+
+  /** The top bar's inbox link is the shell's own presence marker. */
+  private async inboxEntryPainted(timeoutMs: number): Promise<boolean> {
+    try {
+      await this.page.locator('a[aria-label="Inbox"]').first().waitFor({ state: "attached", timeout: timeoutMs });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
