@@ -1447,18 +1447,15 @@ pub(crate) async fn complete_project_move_handoff(
     drain_publish_effects(pool, state, pairs).await;
     let now = now_micros();
     for id in dispatches {
-        match dispatch_agent_run(pool, &cloud, id, now)
+        // `dispatch_agent_run` leaves the runner-plane drain to the caller
+        // (`dispatch.py:61-70` drains the pod inline). Act on the decision
+        // with the same recipe the revoke path uses so the replacement run
+        // is matched to the target pod's idle runner.
+        if let DispatchDecision::PodDrain { pod_id } = dispatch_agent_run(pool, &cloud, id, now)
             .await
             .map_err(|_| ())?
         {
-            // `dispatch_agent_run` leaves the runner-plane drain to the
-            // caller (`dispatch.py:61-70` drains the pod inline). Act on the
-            // decision with the same recipe the revoke path uses so the
-            // replacement run is matched to the target pod's idle runner.
-            DispatchDecision::PodDrain { pod_id } => {
-                crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id).await?;
-            }
-            _ => {}
+            crate::runner_enroll::teardown::drain_pod_by_id(pool, state, pod_id).await?;
         }
     }
     for consume in &deferred {
