@@ -9,40 +9,41 @@ import { createAppClient } from "../../core/api/client.js";
 import { createMemoryStore } from "../../core/platform/storage.js";
 import { createCachePersistor } from "../../core/query/persistence.js";
 import {
-  INSTANCE_STARTUP_RECHECK_MS,
-  INSTANCE_STARTUP_RETRIES,
   INSTANCE_STARTUP_RETRY_MAX_MS,
   INSTANCE_STARTUP_RETRY_MS,
   appInstanceQueryOptions,
   instanceAppKeys,
-  instanceStartupRetryDelay,
+  instanceStartupRecheckDelay,
   persistAppCache,
 } from "./queries.js";
 
 describe("appInstanceQueryOptions", () => {
-  it("keeps the startup read in its own key and retries a failed read", () => {
+  it("keeps the startup read in its own key and recovers without blocking the screen", () => {
     expect(instanceAppKeys.bootstrap).toEqual(["instance", "app", "bootstrap"]);
     const options = appInstanceQueryOptions({} as ApiClient);
     expect(options.queryKey).toEqual(instanceAppKeys.bootstrap);
-    expect(options.retry).toBe(INSTANCE_STARTUP_RETRIES);
-    expect(options.retryDelay).toBe(instanceStartupRetryDelay);
+    expect(options.retry).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it("backs off between retries and caps the delay", () => {
-    expect(instanceStartupRetryDelay(0)).toBe(INSTANCE_STARTUP_RETRY_MS);
-    expect(instanceStartupRetryDelay(1)).toBe(INSTANCE_STARTUP_RETRY_MS * 2);
-    expect(instanceStartupRetryDelay(10)).toBe(INSTANCE_STARTUP_RETRY_MAX_MS);
+  it("backs off between background rechecks and caps the delay", () => {
+    expect(instanceStartupRecheckDelay(1)).toBe(INSTANCE_STARTUP_RETRY_MS);
+    expect(instanceStartupRecheckDelay(2)).toBe(INSTANCE_STARTUP_RETRY_MS * 2);
+    expect(instanceStartupRecheckDelay(0)).toBe(INSTANCE_STARTUP_RETRY_MS);
+    expect(instanceStartupRecheckDelay(20)).toBe(INSTANCE_STARTUP_RETRY_MAX_MS);
   });
 
   it("rechecks on an interval only while the read is failing", () => {
     const options = appInstanceQueryOptions({} as ApiClient);
-    const interval = options.refetchInterval as (query: { state: { status: string } }) => number | false;
-    expect(interval({ state: { status: "error" } })).toBe(INSTANCE_STARTUP_RECHECK_MS);
-    expect(interval({ state: { status: "success" } })).toBe(false);
-    expect(interval({ state: { status: "pending" } })).toBe(false);
+    const interval = options.refetchInterval as (query: {
+      state: { status: string; errorUpdateCount: number };
+    }) => number | false;
+    expect(interval({ state: { status: "error", errorUpdateCount: 1 } })).toBe(INSTANCE_STARTUP_RETRY_MS);
+    expect(interval({ state: { status: "error", errorUpdateCount: 3 } })).toBe(INSTANCE_STARTUP_RETRY_MS * 4);
+    expect(interval({ state: { status: "success", errorUpdateCount: 0 } })).toBe(false);
+    expect(interval({ state: { status: "pending", errorUpdateCount: 0 } })).toBe(false);
   });
 
   it("accepts the unprovisioned envelope as an unfinished setup", async () => {

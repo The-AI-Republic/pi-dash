@@ -112,9 +112,9 @@ describe("InstanceAppGate", () => {
         text: () => Promise.resolve(JSON.stringify({ detail: "down" })),
       })
     );
-    await waitFor(() => expect(screen.getByTestId("instance-maintenance")).toBeInTheDocument(), { timeout: 10_000 });
+    await waitFor(() => expect(screen.getByTestId("instance-maintenance")).toBeInTheDocument());
     expect(screen.queryByText("workspace content")).not.toBeInTheDocument();
-  }, 15_000);
+  });
 
   it("recovers on its own when a retry after a failed read succeeds", async () => {
     let calls = 0;
