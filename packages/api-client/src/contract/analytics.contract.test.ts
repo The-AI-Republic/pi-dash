@@ -24,11 +24,21 @@ import { getProject, listProjects } from "../contracts/projects.js";
 import { CONTRACT_PROJECT_IDENTIFIER, CONTRACT_WORKSPACE, contractEnabled, sharedSignedIn } from "./setup.js";
 import type { ApiClient } from "../client.js";
 
+// The seed's dedicated issue-less project; other suites never touch it.
+const CONTRACT_EMPTY_PROJECT_IDENTIFIER = "CE";
+
 async function seededProjectId(client: ApiClient): Promise<string> {
   const projects = await listProjects(client, CONTRACT_WORKSPACE);
   const seeded = projects.find((project) => project.identifier === CONTRACT_PROJECT_IDENTIFIER);
   expect(seeded).toBeDefined();
   return seeded?.id ?? "";
+}
+
+async function issueLessProjectId(client: ApiClient): Promise<string> {
+  const projects = await listProjects(client, CONTRACT_WORKSPACE);
+  const empty = projects.find((project) => project.identifier === CONTRACT_EMPTY_PROJECT_IDENTIFIER);
+  expect(empty).toBeDefined();
+  return empty?.id ?? "";
 }
 
 async function scopeId(client: ApiClient, projectId: string, kind: "cycle" | "module", name: string): Promise<string> {
@@ -286,14 +296,12 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
 
   it("answers integer zeros, not nulls, for a project with no work items", async () => {
     const client = await sharedSignedIn();
-    // The seed's second project exists without issues of its own; the count
-    // subquery still answers 0 rather than null.
-    const projects = await listProjects(client, CONTRACT_WORKSPACE);
-    const empty = projects.find((project) => project.identifier !== CONTRACT_PROJECT_IDENTIFIER);
-    expect(empty).toBeDefined();
+    // A dedicated issue-less project (the seed's `CE`), so the zero counts
+    // cannot race the suites that move or create issues elsewhere.
+    const emptyId = await issueLessProjectId(client);
     const rows = await getProjectStats(client, CONTRACT_WORKSPACE, {
       fields: ["total_issues", "completed_issues"],
-      projectIds: [empty?.id ?? ""],
+      projectIds: [emptyId],
     });
     expect(rows).toHaveLength(1);
     expect(rows[0]?.total_issues).toBe(0);
@@ -340,9 +348,7 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
     });
     expect(whole.total_work_items?.count).toBeGreaterThanOrEqual(2);
 
-    const otherProject = (await listProjects(client, CONTRACT_WORKSPACE)).find((project) => project.id !== projectId);
-    expect(otherProject).toBeDefined();
-    const empty = await getProjectAnalyticsTotals(client, CONTRACT_WORKSPACE, otherProject?.id ?? "");
+    const empty = await getProjectAnalyticsTotals(client, CONTRACT_WORKSPACE, await issueLessProjectId(client));
     expect(empty.total_work_items?.count).toBe(0);
     expect(empty.started_work_items?.count).toBe(0);
 
@@ -388,7 +394,9 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
     );
     expect(byModule.data).toHaveLength(31);
 
-    const undatedCycle = await scopeId(client, projectId, "cycle", "Contract cycle");
+    // A dedicated undated scope: the shared seeded cycle is renamed by the
+    // updates suite, so resolving it by name would race that suite.
+    const undatedCycle = await scopeId(client, projectId, "cycle", "Contract analytics undated cycle");
     const empty = await getProjectAnalyticsChart(
       client,
       CONTRACT_WORKSPACE,
@@ -397,6 +405,16 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
       { cycleId: undatedCycle }
     );
     expect(empty).toEqual({ data: [], schema: {} });
+
+    const undatedModule = await scopeId(client, projectId, "module", "Contract analytics undated module");
+    const emptyModule = await getProjectAnalyticsChart(
+      client,
+      CONTRACT_WORKSPACE,
+      projectId,
+      { type: "work-items" },
+      { moduleId: undatedModule }
+    );
+    expect(emptyModule).toEqual({ data: [], schema: {} });
   });
 
   it("answers the project-scoped custom chart", async () => {

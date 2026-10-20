@@ -262,6 +262,31 @@ def seed():
     )
     note("project-member", f"{project_two.identifier}/{user.email}", project_two_membership_created)
 
+    # Third project (NEWFRONT-728): the analytics contract suite reads a
+    # project that never has work items, to prove the totals answer zero
+    # counts (and `project-stats` integer zeros). No other suite touches
+    # this one, so it stays empty even while the move suite parks an issue
+    # in `CU`; pinning `CU` made the zero assertions race.
+    project_empty, project_empty_created = Project.objects.get_or_create(
+        workspace=workspace,
+        identifier="CE",
+        defaults={
+            "name": "Contract Empty",
+            "description": "Issue-less project for api-client contract tests.",
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("project", project_empty.identifier, project_empty_created)
+
+    _, project_empty_membership_created = ProjectMember.objects.get_or_create(
+        workspace=workspace,
+        project=project_empty,
+        member=user,
+        defaults={"role": 20, "is_active": True},
+    )
+    note("project-member", f"{project_empty.identifier}/{user.email}", project_empty_membership_created)
+
     for index, spec in enumerate(DEFAULT_STATES):
         state_two, state_two_created = State.all_state_objects.get_or_create(
             workspace=workspace,
@@ -835,10 +860,12 @@ def seed():
     # Analytics area (NEWFRONT-728): the created-vs-resolved read answers
     # an empty series for a cycle or module with no usable start date, so
     # the analytics contract suite needs both shapes. Dedicated January
-    # 2026 scopes give the daily buckets a known range; the shared undated
-    # cycle and module keep their shape for every other suite. The probe
-    # issue is filed in January so the workspace monthly series has a
-    # bucket of its own. All additive: get_or_create under contract names.
+    # 2026 scopes give the daily buckets a known range and dedicated
+    # undated ones answer the empty series; the shared `Contract cycle` and
+    # `Contract module` stay untouched (another suite renames them), so the
+    # probe issue joins only the analytics scopes. The probe is filed in
+    # January so the workspace monthly series has a bucket of its own. All
+    # additive: get_or_create under contract names.
     from datetime import date, datetime, timezone as dt_timezone  # noqa: E402
 
     from pi_dash.db.models import CycleIssue, ModuleIssue  # noqa: E402
@@ -867,6 +894,22 @@ def seed():
     )
     note("module", analytics_module.name, analytics_module_created)
 
+    analytics_undated_cycle, analytics_undated_cycle_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract analytics undated cycle",
+        defaults={"owned_by": user},
+    )
+    note("cycle", analytics_undated_cycle.name, analytics_undated_cycle_created)
+
+    analytics_undated_module, analytics_undated_module_created = Module.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract analytics undated module",
+        defaults={"lead": user},
+    )
+    note("module", analytics_undated_module.name, analytics_undated_module_created)
+
     analytics_issue, analytics_issue_created = Issue.objects.get_or_create(
         workspace=workspace,
         project=project,
@@ -886,9 +929,7 @@ def seed():
 
     for scope_model, field, scope in (
         (CycleIssue, "cycle", analytics_cycle),
-        (CycleIssue, "cycle", cycle),
         (ModuleIssue, "module", analytics_module),
-        (ModuleIssue, "module", module),
     ):
         _, scope_created = scope_model.objects.get_or_create(
             issue=analytics_issue,
