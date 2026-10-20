@@ -17,20 +17,22 @@ import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { useMe } from "../../../../core/session/index.js";
-import type { AttachmentsWidgetHandle } from "../../../../features/issues/index.js";
 import {
   CommentThread,
   DetailMissingState,
   DetailSkeleton,
   IssueDetailRoot,
   IssuePropertiesSidebar,
-  AttachmentsWidget,
-  CodeReviewsWidget,
   SubIssuesWidget,
   issueDetailQueryOptions,
   issueKeys,
   liteIssueQueryOptions,
 } from "../../../../features/issues/index.js";
+import {
+  AttachmentsWidget,
+  type AttachmentsWidgetHandle,
+} from "../../../../features/issues/detail/widgets/attachments/AttachmentsWidget.js";
+import { CodeReviewsWidget } from "../../../../features/issues/detail/widgets/codeReviews/CodeReviewsWidget.js";
 import { mayDeleteWorkItem } from "../../../../features/issues/lifecycle/rules.js";
 import {
   LinkActionButton,
