@@ -373,9 +373,12 @@ async fn check_user_throttle(state: &AppState, user_id: &uuid::Uuid) -> Result<(
 //   origin from `CSRF_TRUSTED_ORIGINS`, which the project sets to
 //   `CORS_ALLOWED_ORIGINS` — `settings/common.py:612` — so the Rust
 //   `Settings.cors_allowed_origins` is the same list);
-// * `is_secure()` is false: the project sets no
-//   `SECURE_PROXY_SSL_HEADER` and the contract backend runs plain HTTP,
-//   so the HTTPS-Referer branch is dead here exactly as there;
+// * `is_secure()` follows the URI scheme, or `X-Forwarded-Proto: https`
+//   when `Settings.secure_proxy_ssl_header` is set (the production
+//   profile, mirroring `middleware/security.rs::is_secure`). When the
+//   request is secure the same-origin good origin is `https://{host}`
+//   and an unsafe request without an `Origin` must pass the Referer
+//   check (`_check_referer`), exactly as Django 4.2 does;
 // * the `csrftoken` cookie carries the secret (masked or not); the
 //   request token comes from the `csrfmiddlewaretoken` POST form field
 //   for urlencoded POSTs, else the `X-CSRFToken` header (the only way
@@ -398,17 +401,41 @@ const CSRF_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVW
 /// rejection reason to the DRF 403 body.
 fn check_csrf(
     state: &AppState,
+    uri_scheme: Option<&str>,
     headers: &axum::http::HeaderMap,
     method: &str,
     body: &[u8],
 ) -> Result<(), Denial> {
+    let settings = state.settings();
+    let secure = request_is_secure(uri_scheme, headers, settings.secure_proxy_ssl_header);
     enforce_csrf(
-        &state.settings().cors_allowed_origins,
+        &settings.cors_allowed_origins,
+        settings.session.cookie_domain.as_deref(),
+        secure,
         headers,
         method,
         body,
     )
     .map_err(Denial::CsrfFailed)
+}
+
+/// `request.is_secure()` (`django/http/request.py:256-271`): the URI
+/// scheme is https, or — when `SECURE_PROXY_SSL_HEADER` is configured
+/// (production) — `X-Forwarded-Proto: https`. Mirrors
+/// `middleware/security.rs::is_secure`.
+fn request_is_secure(
+    uri_scheme: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    trust_forwarded_proto: bool,
+) -> bool {
+    if uri_scheme == Some("https") {
+        return true;
+    }
+    trust_forwarded_proto
+        && headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("https"))
 }
 
 /// `_unmask_cipher_token` (`csrf.py:70-80`): decrypt the second half with
@@ -533,16 +560,52 @@ fn form_csrf_token(body: &[u8]) -> Option<String> {
     None
 }
 
-/// `is_same_domain` (`django/utils/http.py`): a `.`-prefixed pattern
-/// matches the bare domain and every subdomain.
+/// `is_same_domain` (`django/utils/http.py:239-256`): a `.`-prefixed
+/// pattern matches the bare domain and every subdomain. Only the pattern
+/// is lowercased; the host is compared as given, exactly like Django.
 fn same_domain(host: &str, pattern: &str) -> bool {
-    let host = host.to_lowercase();
-    let pattern = pattern.to_lowercase();
-    if let Some(suffix) = pattern.strip_prefix('.') {
-        host == suffix || host.ends_with(&pattern)
-    } else {
-        host == pattern
+    if pattern.is_empty() {
+        return false;
     }
+    let pattern = pattern.to_lowercase();
+    let suffix_match =
+        pattern.starts_with('.') && (host.ends_with(&pattern) || host == &pattern[1..]);
+    suffix_match || pattern == host
+}
+
+/// The subset of `urllib.parse.urlparse` this gate needs: scheme,
+/// netloc, and the remainder (path/query/fragment). `None` stands for
+/// Python's empty scheme or netloc and for the `ValueError` branches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedUrl {
+    scheme: String,
+    netloc: String,
+    rest: String,
+}
+
+impl ParsedUrl {
+    /// `ParseResult.geturl()`: the scheme is lowercased; the remaining
+    /// components are returned as parsed.
+    fn geturl(&self) -> String {
+        format!("{}://{}{}", self.scheme, self.netloc, self.rest)
+    }
+}
+
+fn urlparse(value: &str) -> Option<ParsedUrl> {
+    let (scheme, after) = value.split_once("://")?;
+    if scheme.is_empty() {
+        return None;
+    }
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let netloc = &after[..end];
+    if netloc.is_empty() {
+        return None;
+    }
+    Some(ParsedUrl {
+        scheme: scheme.to_ascii_lowercase(),
+        netloc: netloc.to_owned(),
+        rest: after[end..].to_owned(),
+    })
 }
 
 /// Split `scheme://netloc` origins into exact entries and per-scheme
@@ -556,39 +619,123 @@ fn split_trusted_origins(trusted: &[String]) -> (HashSet<String>, HashMap<String
             exact.insert(origin.clone());
             continue;
         }
-        if let Some((scheme, rest)) = origin.split_once("://") {
-            let netloc = rest.trim_start_matches('*');
+        if let Some(parsed) = urlparse(origin) {
             subdomains
-                .entry(scheme.to_owned())
+                .entry(parsed.scheme)
                 .or_default()
-                .push(netloc.to_owned());
+                .push(parsed.netloc.trim_start_matches('*').to_owned());
         }
     }
     (exact, subdomains)
 }
 
-/// `_origin_verified` (`csrf.py`): same-origin, exact trusted, or
-/// trusted-subdomain. `is_secure()` is false (see module docs), so the
-/// good origin is always `http://{host}`.
-fn origin_verified(origin: &str, host: &str, trusted: &[String]) -> bool {
-    if origin == format!("http://{host}") {
+/// `csrf_trusted_origins_hosts` (`csrf.py:180-184`): every trusted
+/// origin's netloc with leading wildcards removed.
+fn trusted_origin_hosts(trusted: &[String]) -> Vec<String> {
+    trusted
+        .iter()
+        .filter_map(|origin| urlparse(origin))
+        .map(|parsed| parsed.netloc.trim_start_matches('*').to_owned())
+        .collect()
+}
+
+/// `_origin_verified` (`csrf.py:276-300`): same-origin, exact trusted,
+/// or trusted-subdomain. The good origin's scheme follows `is_secure()`.
+fn origin_verified(origin: &str, host: &str, secure: bool, trusted: &[String]) -> bool {
+    if !host.is_empty() && origin == format!("{}://{host}", if secure { "https" } else { "http" }) {
         return true;
     }
     let (exact, subdomains) = split_trusted_origins(trusted);
     if exact.contains(origin) {
         return true;
     }
-    let Some((scheme, netloc)) = origin.split_once("://") else {
+    let Some(parsed) = urlparse(origin) else {
         return false;
     };
-    // A malformed netloc never verifies.
-    if netloc.is_empty() || netloc.contains(char::is_whitespace) {
-        return false;
-    }
     subdomains
-        .get(scheme)
-        .map(|suffixes| suffixes.iter().any(|suffix| same_domain(netloc, suffix)))
+        .get(&parsed.scheme)
+        .map(|suffixes| {
+            suffixes
+                .iter()
+                .any(|suffix| same_domain(&parsed.netloc, suffix))
+        })
         .unwrap_or(false)
+}
+
+/// The port Django's `request.get_port()` would report: the Host header's
+/// port, else the scheme default. `CSRF_COOKIE_DOMAIN` only consults it
+/// for the non-default ports Django would append.
+fn request_port(headers: &axum::http::HeaderMap, secure: bool) -> String {
+    if let Some(host) = headers.get("host").and_then(|value| value.to_str().ok()) {
+        if let Some(port) = host_port(host) {
+            return port;
+        }
+    }
+    if secure { "443" } else { "80" }.to_owned()
+}
+
+fn host_port(host: &str) -> Option<String> {
+    if let Some(inner) = host.strip_prefix('[') {
+        let (_, after) = inner.split_once(']')?;
+        return after
+            .strip_prefix(':')
+            .filter(|p| !p.is_empty())
+            .map(str::to_owned);
+    }
+    let (_, port) = host.rsplit_once(':')?;
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(port.to_owned())
+}
+
+/// `_check_referer` (`csrf.py:302-345`): no Referer, malformed URL,
+/// non-https scheme, a trusted-origin host, or the cookie domain / current
+/// host via `is_same_domain` in that order, with Django's reason strings.
+fn check_referer(
+    headers: &axum::http::HeaderMap,
+    cookie_domain: Option<&str>,
+    trusted: &[String],
+) -> Result<(), String> {
+    let Some(referer) = headers.get("referer").and_then(|value| value.to_str().ok()) else {
+        return Err("Referer checking failed - no Referer.".to_owned());
+    };
+    let Some(parsed) = urlparse(referer) else {
+        return Err("Referer checking failed - Referer is malformed.".to_owned());
+    };
+    if parsed.scheme != "https" {
+        return Err(
+            "Referer checking failed - Referer is insecure while host is secure.".to_owned(),
+        );
+    }
+    if trusted_origin_hosts(trusted)
+        .iter()
+        .any(|host| same_domain(&parsed.netloc, host))
+    {
+        return Ok(());
+    }
+    let good_referer = match cookie_domain {
+        Some(domain) => {
+            let port = request_port(headers, true);
+            if port == "443" || port == "80" {
+                domain.to_owned()
+            } else {
+                format!("{domain}:{port}")
+            }
+        }
+        None => headers
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned(),
+    };
+    if !same_domain(&parsed.netloc, &good_referer) {
+        return Err(format!(
+            "Referer checking failed - {} does not match any trusted origins.",
+            parsed.geturl()
+        ));
+    }
+    Ok(())
 }
 
 /// Enforce CSRF for an authenticated unsafe request
@@ -596,6 +743,8 @@ fn origin_verified(origin: &str, host: &str, trusted: &[String]) -> bool {
 /// 403 reason on rejection.
 fn enforce_csrf(
     settings_trusted_origins: &[String],
+    cookie_domain: Option<&str>,
+    secure: bool,
     headers: &axum::http::HeaderMap,
     method: &str,
     body: &[u8],
@@ -609,14 +758,16 @@ fn enforce_csrf(
             .get("host")
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
-        if !origin_verified(origin, host, settings_trusted_origins) {
+        if !origin_verified(origin, host, secure, settings_trusted_origins) {
             return Err(format!(
                 "Origin checking failed - {origin} does not match any trusted origins."
             ));
         }
+    } else if secure {
+        // `process_view:446-465`: an Origin-less HTTPS request must pass
+        // the Referer branch.
+        check_referer(headers, cookie_domain, settings_trusted_origins)?;
     }
-    // `is_secure()` is false here (no `SECURE_PROXY_SSL_HEADER`), so the
-    // Referer branch is dead — exactly as on the contract backend.
     let secret = csrf_secret_from_headers(headers)?;
     let (request_token, source) = csrf_request_token(headers, method, body)?;
     if !csrf_token_matches(&request_token, &secret) {
@@ -1168,6 +1319,7 @@ async fn upsert_section(
     Path((slug, section_key)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -1177,6 +1329,7 @@ async fn upsert_section(
         &section_key,
         &query,
         extension,
+        uri.scheme_str(),
         &headers,
         &body,
     )
@@ -1187,19 +1340,21 @@ async fn upsert_section(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upsert_section_inner(
     state: &AppState,
     slug: &str,
     section_key: &str,
     query: &HashMap<String, String>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    uri_scheme: Option<&str>,
     headers: &axum::http::HeaderMap,
     raw: &[u8],
 ) -> Result<Value, Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
     // DRF authenticates (including CSRF) before the view body runs.
-    check_csrf(state, headers, "PUT", raw)?;
+    check_csrf(state, uri_scheme, headers, "PUT", raw)?;
     check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let data = parse_body(raw)?;
@@ -1471,10 +1626,19 @@ async fn delete_override(
     Path((slug, section_key)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let result =
-        delete_override_inner(&state, &slug, &section_key, &query, extension, &headers).await;
+    let result = delete_override_inner(
+        &state,
+        &slug,
+        &section_key,
+        &query,
+        extension,
+        uri.scheme_str(),
+        &headers,
+    )
+    .await;
     match result {
         Ok(()) => Response::builder()
             .status(StatusCode::NO_CONTENT)
@@ -1490,11 +1654,12 @@ async fn delete_override_inner(
     section_key: &str,
     query: &HashMap<String, String>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    uri_scheme: Option<&str>,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
-    check_csrf(state, headers, "DELETE", &[])?;
+    check_csrf(state, uri_scheme, headers, "DELETE", &[])?;
     check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let scope = resolve_scope(query);
@@ -1636,10 +1801,20 @@ async fn preview_prompt(
     State(state): State<AppState>,
     Path((slug, kind)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    uri: axum::http::Uri,
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Response {
-    let result = preview_prompt_inner(&state, &slug, &kind, extension, &headers, &body).await;
+    let result = preview_prompt_inner(
+        &state,
+        &slug,
+        &kind,
+        extension,
+        uri.scheme_str(),
+        &headers,
+        &body,
+    )
+    .await;
     match result {
         Ok(rendered) => json_response(StatusCode::OK, &rendered),
         Err(denial) => denial.into_response(),
@@ -1651,12 +1826,13 @@ async fn preview_prompt_inner(
     slug: &str,
     kind: &str,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    uri_scheme: Option<&str>,
     headers: &axum::http::HeaderMap,
     raw: &[u8],
 ) -> Result<Value, Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
-    check_csrf(state, headers, "POST", raw)?;
+    check_csrf(state, uri_scheme, headers, "POST", raw)?;
     check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let admin = is_workspace_admin(&pool, &actor.id, &workspace.id).await?;
@@ -2873,26 +3049,163 @@ mod tests {
     #[test]
     fn csrf_origin_verification_matches_django() {
         let trusted: Vec<String> = vec![];
-        assert!(origin_verified("http://app.test", "app.test", &trusted));
-        assert!(!origin_verified("http://evil.test", "app.test", &trusted));
+        assert!(origin_verified(
+            "http://app.test",
+            "app.test",
+            false,
+            &trusted
+        ));
+        assert!(!origin_verified(
+            "https://app.test",
+            "app.test",
+            false,
+            &trusted
+        ));
+        assert!(origin_verified(
+            "https://app.test",
+            "app.test",
+            true,
+            &trusted
+        ));
+        assert!(!origin_verified(
+            "http://evil.test",
+            "app.test",
+            false,
+            &trusted
+        ));
         let trusted = vec!["https://app.example.com".to_owned()];
         assert!(origin_verified(
             "https://app.example.com",
             "other.test",
+            false,
             &trusted
         ));
         let trusted = vec!["https://*.example.com".to_owned()];
         assert!(origin_verified(
             "https://a.example.com",
             "other.test",
+            false,
             &trusted
         ));
         assert!(origin_verified(
             "https://example.com",
             "other.test",
+            false,
             &trusted
         ));
-        assert!(!origin_verified("https://evil.com", "other.test", &trusted));
+        assert!(!origin_verified(
+            "https://evil.com",
+            "other.test",
+            false,
+            &trusted
+        ));
+    }
+
+    #[test]
+    fn csrf_secure_request_enforces_referer_branch() {
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let headers = |extra: &[(&'static str, &'static str)]| {
+            let mut map = axum::http::HeaderMap::new();
+            map.insert("host", "app.test:8443".parse().unwrap());
+            map.insert("cookie", format!("csrftoken={secret}").parse().unwrap());
+            map.insert("x-csrftoken", secret.parse().unwrap());
+            map.insert("x-forwarded-proto", "https".parse().unwrap());
+            for (name, value) in extra {
+                map.insert(*name, value.parse().unwrap());
+            }
+            map
+        };
+        let trusted: Vec<String> = vec![];
+        assert_eq!(
+            enforce_csrf(&trusted, None, true, &headers(&[]), "PUT", b"").unwrap_err(),
+            "Referer checking failed - no Referer."
+        );
+        assert_eq!(
+            enforce_csrf(
+                &trusted,
+                None,
+                true,
+                &headers(&[("referer", "http://app.test:8443/x")]),
+                "PUT",
+                b"",
+            )
+            .unwrap_err(),
+            "Referer checking failed - Referer is insecure while host is secure."
+        );
+        assert_eq!(
+            enforce_csrf(
+                &trusted,
+                None,
+                true,
+                &headers(&[("referer", "https://evil.example/x")]),
+                "PUT",
+                b"",
+            )
+            .unwrap_err(),
+            "Referer checking failed - https://evil.example/x does not match any trusted origins."
+        );
+        assert!(enforce_csrf(
+            &trusted,
+            None,
+            true,
+            &headers(&[("referer", "https://app.test:8443/x")]),
+            "PUT",
+            b"",
+        )
+        .is_ok());
+        assert_eq!(
+            enforce_csrf(
+                &trusted,
+                None,
+                true,
+                &headers(&[("origin", "http://app.test:8443")]),
+                "PUT",
+                b"",
+            )
+            .unwrap_err(),
+            "Origin checking failed - http://app.test:8443 does not match any trusted origins."
+        );
+        assert!(enforce_csrf(
+            &trusted,
+            None,
+            true,
+            &headers(&[("origin", "https://app.test:8443")]),
+            "PUT",
+            b"",
+        )
+        .is_ok());
+        let trusted = vec!["https://trusted.example".to_owned()];
+        assert!(enforce_csrf(
+            &trusted,
+            None,
+            true,
+            &headers(&[("referer", "https://trusted.example/x")]),
+            "PUT",
+            b"",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn csrf_insecure_request_skips_referer_branch() {
+        let secret = "abcdefghijklmnopqrstuvwxyz012345";
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "app.test".parse().unwrap());
+        headers.insert("cookie", format!("csrftoken={secret}").parse().unwrap());
+        headers.insert("x-csrftoken", secret.parse().unwrap());
+        headers.insert("origin", "http://app.test".parse().unwrap());
+        assert!(enforce_csrf(&[], None, false, &headers, "PUT", b"").is_ok());
+    }
+
+    #[test]
+    fn request_is_secure_honors_forwarded_proto_only_when_trusted() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        assert!(!request_is_secure(None, &headers, false));
+        assert!(request_is_secure(None, &headers, true));
+        assert!(request_is_secure(Some("https"), &headers, false));
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        assert!(!request_is_secure(None, &headers, true));
     }
 
     #[test]
