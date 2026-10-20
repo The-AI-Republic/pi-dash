@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
 import { resetRegisteredStores } from "../../../../core/session/index.js";
 import { setSessionClient } from "../../../../core/session/queries.js";
+import { agentReasonMessage } from "../../../../shared/lib/agentReasons.js";
 import { pickerKeys } from "../../../../shared/pickers/index.js";
 import { notifyError } from "../../../../shared/shell/index.js";
 import { pickerStatesQueryOptions } from "../../../../shared/pickers/reference.js";
@@ -958,7 +959,7 @@ describe("SidebarProperties", () => {
     // Unavailable agent rows carry their reason and never activate.
     const cloud = screen.getByRole("option", { name: /Pi Dash Cloud Agent/ });
     expect(cloud).toBeDisabled();
-    expect(cloud).toHaveTextContent("The Cloud Agent is disabled on this instance.");
+    expect(cloud).toHaveTextContent(agentReasonMessage("cloud_agent_unavailable"));
     fireEvent.click(screen.getByRole("option", { name: /WEB_pod_b/ }));
     await waitFor(() => expect(writes).toHaveLength(1));
     expect(writes[0]!.body).toEqual({ assigned_pod_id: POD_B, agent_executor: "local_runner" });
