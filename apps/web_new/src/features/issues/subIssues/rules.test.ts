@@ -457,7 +457,7 @@ describe("branch edges", () => {
   });
 
   it("sorts rows with no timestamps together and ties in place", () => {
-    const blank = [row({ id: ADA, created_at: undefined }), row({ id: GRACE, created_at: undefined })];
+    const blank = [row({ id: ADA, created_at: "" }), row({ id: GRACE, created_at: "" })];
     const ordered = orderSubIssues(blank, "-updated_at");
     expect(ordered.map((entry) => entry.id)).toEqual([ADA, GRACE]);
     expect(orderSubIssues(blank, "-created_at").map((entry) => entry.id)).toEqual([ADA, GRACE]);
