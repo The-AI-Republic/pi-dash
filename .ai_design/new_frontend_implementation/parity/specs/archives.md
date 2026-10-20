@@ -964,8 +964,10 @@ What the archives slice must prove and close:
   re-reads favorites.
 - Restore direction: dialog explains the project returns to the projects
   list and becomes visible to its project members again. Restore is
-  **project-admin only**; non-admins never get an enabled restore action
-  (the card/row entry for archived projects is admin-gated). Confirm
+  **project-admin only** — the project's own `member_role`, not effective
+  standing (§11's project-archive row is the matrix exception); non-admins
+  never get an enabled restore action (the card/row entry for archived
+  projects is gated on `isProjectAdmin(project.member_role)`). Confirm
   `DELETE BASE/archive/` (204), success toast, project back in the list. The
   restore success toast body the oracle asserts is "in your projects"
   (`archives/project-crosscutting.spec.ts`, "confirming restores"), already
@@ -995,7 +997,13 @@ Project-settings/Agents owned and already exists:
   owned by NEWFRONT-600 / NEWFRONT-582 (AGT-034..037);
 - the archive row is `ArchiveRow` in `AutomationRows.tsx` with the delay
   picker (`DelayPicker`) and `CustomMonthDialog`; `archiveTogglePatch`
-  toggles between the stored window and 0;
+  toggles between **one month and 0** — it writes `{archive_in: open ? 1
+  : 0}` unconditionally and does **not** remember the previous window. The
+  old row behaved the same way (`archive_in === 0` → write 1, else write
+  0), so this is parity, not a bug to fix here. Consequence a slice must
+  not "improve": a project set to 7 months, switched off and switched back
+  on, comes back at **1 month**, and the oracle asserts the old sequence
+  (off → on → `1`, off again);
 - the write is `PATCH BASE/` with `{archive_in: <months>}` (0 disables).
 
 Behavior proved from the archives side:
@@ -1122,7 +1130,7 @@ desktop — the matrix is identical in each, with no edition-specific entry.
 | Restore/delete archived work item (row + detail) | no | yes | yes |
 | Restore archived cycle / module | no | yes | yes |
 | Archive a live work item/cycle/module | no | yes | yes |
-| Archive/restore the whole project | no | no | yes (admin only: archive on active projects, restore on archived ones) |
+| Archive/restore the whole project | no | no | yes — **project `member_role` admin only**, the one row that is an *exception* to the effective-standing rule: the projects-list card gates both directions on `isProjectAdmin(project.member_role)` (`ProjectCard.tsx` line 133, `cardMenu.tsx` lines 67/74/81), so a workspace admin who holds MEMBER on the project sees no card action. The old app gated identically on `member_role === ADMIN` (`core/components/project/card.tsx` line 67), so parity keeps the project role as the gate here; NEWFRONT-284 must not widen it to effective standing |
 | Auto-archive setting (view/edit) | no | no | yes (non-admins are refused the automations page, AGT-037; workspace admins hold admin standing) |
 | Empty-state "set automation" control | disabled | disabled | enabled |
 
@@ -1133,9 +1141,10 @@ effective admins (project admin or workspace admin) and present but
 disabled** for guests and plain members (§2.4, ARCH-033): it is an
 affordance, not a mutation entry, and the page it opens is admin-gated, so
 the control must not navigate a refused user. The project archive/restore
-action in new code is admin-only on every surface (the projects-list card
-menu gates both directions on project admin), so it is absent for members
-and guests.
+action is absent for members and guests, and — unlike the rest of the
+matrix — is gated on the **project** role, not effective standing (see the
+row above): an effective admin who is only a project member does not get
+it on the card.
 
 Guest-403 backend gap (NEWFRONT-240, in the PDASHOSS01 project): the old
 server refuses guest reads of
@@ -1171,8 +1180,10 @@ scenario's UI flips above) can.
 
 Until then the guest row stays oracle green / not new green, and the gate
 reports it honestly rather than passing a weakened scenario. This is a
-product/backend decision outside the archives code; the new frontend is
-already written to render the read surfaces for guests.
+product/backend decision outside the archives code; the new archives
+screens are **specified** to render the read surfaces for guests (no
+archives route exists yet — `apps/web_new/src/routes` has only the
+unrelated archived-projects list).
 
 Guest visibility of the tabs: the **archives** strip itself is rendered for
 guests on every tab it enables (the work-items tab always, cycles/modules
@@ -1457,6 +1468,24 @@ non-archives slice owns the entry point.
 - Auto-archive row and automations page: NEWFRONT-600 (AGT-034..037) and
   NEWFRONT-582 (PSET feature flags + automations); route constant owned by
   NEWFRONT-700 for the ARCH-033 control. Reused read-only; not rebuilt.
+- **Driver ownership: NEWFRONT-600 owns the whole `automations*` driver
+  family** (19 methods in `parity-driver.ts`, all `todo()` in
+  `drivers/web-new.ts`) because AGT-034..037 are its rows: this is the
+  automations page's own driving surface, not an archives family, and it
+  gets the same single-owner discipline as the six `archives*` families
+  below. NEWFRONT-582 is a read-only caller (it composes the page in
+  project settings but adds no driver method). **NEWFRONT-703 is a
+  read-only consumer**: ARCH-027's scenario
+  (`archives/project-crosscutting.spec.ts`, the auto-archive test and the
+  gate test) calls nine of them —
+  `automationsOpen`, `automationsNotAuthorizedVisible`,
+  `automationsArchiveRow`, `automationsArchiveToggle`,
+  `automationsArchiveSetPreset`, `automationsArchiveOpenCustom`,
+  `automationsMonthModal`, `automationsMonthFill` and
+  `automationsMonthSubmit` — and 703 must implement **none** of them. If
+  they are still `todo()` when 703's gate run starts, the failure belongs
+  to NEWFRONT-600 (file/comment on it), not to a second implementation in
+  the archives tree. No other area spec claims this family.
 
 ### `e2e/parity/drivers/web-new.ts` shared driving surface
 
@@ -1473,7 +1502,13 @@ ownership is by **family** with one owner and one implementation each:
 | Cycles (incl. the cycle-peek family) | 701 | 45 / 43 | 702, 703 |
 | Modules | 702 | 32 / 32 | 703 |
 | Cross-cutting | 703 | 8 / 8 | — |
-| **Total** | | **157 / 152** | |
+| **Total (`archives*`)** | | **157 / 152** | |
+
+The `automations*` family (19 declared, 9 exercised by the archives
+specs) is **not** part of this partition: NEWFRONT-600 owns it (§16,
+"Project settings / Agents"); 582 calls it read-only and 703 consumes it
+read-only. It is listed here so no archives slice mistakes it for an
+unowned family and reimplements it.
 
 **Who may extend a family.** Only the owner writes a family's methods.
 Every other slice is a read-only caller:
@@ -1489,6 +1524,8 @@ Every other slice is a read-only caller:
 - Modules (702): nobody extends it; 703 reads it. 799 adds no archives
   method, so the Modules area's archived tab is driven only through 702.
 - Cross-cutting (703): nobody extends it.
+- `automations*` (600): nobody under Archives extends it. 582 is a
+  read-only caller; 703 consumes it for ARCH-027.
 
 Every method below appears in exactly one family, and the six lists sum to
 **157** — the declared total. CYC-027 (NEWFRONT-711) and the Modules slices
@@ -1605,11 +1642,11 @@ shaping, and the absence probes:
 ## 17. Driver surface inventory
 
 Measured by parsing `apps/web_new/e2e/parity/drivers/parity-driver.ts`
-and the five archives specs; re-verified on base `bcfd6ea1e`
-(`origin/web-new-dev`, the base after the third review) — the numbers were
-the same on the previous bases `d749794d1` and `351d37ea1`, and a slice
-should re-measure rather than trust this SHA if the driver interface has
-grown:
+and the five archives specs; re-verified on base `46cb30c4d`
+(`origin/web-new-dev`, the base after the fourth review) — the numbers were
+the same on the previous bases `bcfd6ea1e`, `d749794d1` and `351d37ea1`,
+and a slice should re-measure rather than trust this SHA if the driver
+interface has grown:
 
 - **157** `archives*` methods are declared in the interface;
 - **152** are exercised by at least one archives spec;
@@ -1631,37 +1668,133 @@ methods are shared across files. The families in §16 partition the union
 plus the interface-only methods; a slice implements its family once and the
 other specs reuse it.
 
-The specs also call generic, non-archives drivers read-only — the list
-layout, display, rich-filter, row-menu and toast drivers
-(`layoutsRowMenuItems`, `layoutsRowMenuChoose`, `layoutsRowMenuOpenNewTabUrl`,
+The specs also call **generic, non-archives** driver methods read-only.
+Parsing every `driver.<name>` call in the five archives specs on this
+base yields **60 distinct** non-`archives*` names: 59 methods plus the
+`page` property (`driver.page.reload()`, `driver.page.url()`,
+`driver.page.setViewportSize(...)`). Of the 59 methods, 22 are already
+implemented in `drivers/web-new.ts` and 37 are still `todo()`. The
+generic surface is **outside this spec's partition**: no archives slice
+implements a generic method for the archives rows alone. Below is the
+complete list, grouped by the slice that owns each method, so a slice
+knows exactly which gaps it inherits versus which it must not touch.
+
+**(a) Already implemented — no archives slice changes them.** Session,
+navigation and identity: `openAuthenticated`, `rulesEnsureSignedIn`,
+`resetSession`, `hasVisibleText` (auth/shell, NEWFRONT-491);
+`openProjectIssues`, `visibleIssueNames`, `goToPath`, `currentPath`,
+`currentUrlPath`. Toast and
+clipboard: `isToastVisible`, `sawToast`, `rulesLastToast`
+(shell/issues, NEWFRONT-285/651/113), `readClipboard` (issues,
+NEWFRONT-121). (`toastText` in `cycles.spec.ts` is a local helper over
+`rulesLastToast`, not `driver.toastText`.) Projects list and project archive (NEWFRONT-284/295):
+`openArchivedProjects`, `awaitProjectCard`, `visibleProjectCardNames`,
+`clickCardRestore`, `openArchiveProjectDialog`, `confirmArchive`,
+`confirmRestore`, `archiveDialogBodyText`; `breadcrumbLabels`
+(NEWFRONT-124). `page` is a driver property, owned by the driver base
+(NEWFRONT-19), not a method.
+
+**(b) `automations*` — NEWFRONT-600** (§16): `automationsOpen`,
+`automationsNotAuthorizedVisible`, `automationsArchiveRow`,
+`automationsArchiveToggle`, `automationsArchiveSetPreset`,
+`automationsArchiveOpenCustom`, `automationsMonthModal`,
+`automationsMonthFill`, `automationsMonthSubmit`, plus the ten the
+archives specs do not call: `automationsCloseRow`,
+`automationsCloseToggle`, `automationsCloseSetPreset`,
+`automationsCloseSetState`, `automationsCloseStateOptions`,
+`automationsCloseOpenCustom`, `automationsMonthCancel`,
+`automationsFailUpdateOnce`, `automationsBuiltInRows`,
+`automationsHasExtensionRows`. 703 consumes the nine; 582 is read-only.
+
+**(c) Issues display, filters and row text — NEWFRONT-618 / 626–629.**
+`openDisplayOptions`, `displayPanelText`, `setDisplayGroupBy`,
+`setDisplayOrderBy`, `isDisplayOptionChecked`, `toggleDisplayProperty`,
+`isRichFilterRowVisible`, `richFilterRowText`, `richConditionCount`,
+`removeRichCondition`, `clearRichFilters`. All 11 are `todo()`; 699's
+ARCH-005/006 scenarios drive them. If the owning Issues slices ship them
+first, 699 inherits them read-only; a gate run that still finds one
+`todo()` files the gap against the Issues slice named here rather than
+reimplementing a display panel or filter row in the archives tree.
+
+**(d) Issues row and detail menus, dialogs — NEWFRONT-636 / 632 / 644.**
+`layoutsRowMenuItems`, `layoutsRowMenuChoose`,
+`layoutsRowMenuOpenNewTabUrl`, `layoutsRowMenuItemDisabled`,
+`layoutsRowMenuItemNote`, `layoutsDetailMenuItems`,
 `layoutsDeleteModalVisible`, `layoutsDeleteModalConfirm`,
-`layoutsDetailMenuItems`, `subscribeToggle`, `openDisplayOptions`,
-`setDisplayGroupBy`, `setDisplayOrderBy`, `toggleDisplayProperty`,
-`isDisplayOptionChecked`, `isRichFilterRowVisible`, `richFilterRowText`,
-`richConditionCount`, `propertyPickerDisabled`, `pickerOpen`,
-`openArchiveProjectDialog`, `archiveDialogBodyText`, `confirmArchive`,
-`confirmRestore`, `openArchivedProjects`, `awaitProjectCard`,
-`clickCardRestore`, `rulesLastToast`, `isToastVisible`, `sawToast`,
-`readClipboard`, `currentUrlPath`, `reloadPage`, `goToPath`,
-`openAuthenticated`, `rulesEnsureSignedIn`) and the API/seed helpers. The
-API/seed helpers are **exports of `e2e/parity/helpers/api.ts`, not driver
-methods and not part of any driver family** — some of them start with
-`archives`, which is a name collision with the driver families above, not a
-family membership. The ones the archives specs import:
-`serverArchivedIssues` and `serverArchiveIssue` (work-item specs),
-`serverArchivedIssuesStatus` and `archivesArchivedIssueStatus` /
-`archivesArchivedListStatus` (the guest/permission status checks),
-`archivesArchivedCycles`, `archivesArchiveCycle`, `archivesCycleArchivedAt`,
-`archivesArchivedModules`, `archivesArchivedModuleDetail`,
-`archivesArchiveModule`, `archivesRestoreModule`, `archivesPatchModule`,
-`archivesModuleIsArchived` (modules) and `archivesProjectArchivedAt`
-(project archive). The archives specs import them directly; no archives
-slice re-implements or wraps them, and no slice adds a same-named
-`archives*` method to the driver interface for them. The generic driver
-methods above belong to the Issues/shell/cycles/modules driver families;
-the archives slices consume them read-only and do not fork them. `layoutsSeedArchivedLocalFilter`
-is the Issues-owned variant for the ISS-071 scenario; the archives spec
-uses `archivesSeedStoredExpression`, which 699 owns.
+`layoutsArchiveModalVisible`. All nine are `todo()`; 700's ARCH-008–013
+scenarios drive them. NEWFRONT-636 owns the row/layout menu component and
+ISS-064 (archived restricted menu), NEWFRONT-632 the archive/delete
+dialogs, NEWFRONT-644 the detail header menu. Archives reuses them
+read-only; `archivesDetailMenuChoose` and `archivesRowMenuEntryTitles`
+are the archives-side wrappers 700 owns.
+
+**(e) Issues list row, peek and read-only property views — NEWFRONT-619 /
+639 / 644 / 646.** `clickListRow`, `peekOpen`, `closePeek`,
+`subscribeToggle`, `propertyPickerDisabled`, `pickerOpen`,
+`openArchivedIssueDetail`. All seven are `todo()`. `clickListRow`,
+`peekOpen` and `closePeek` belong to the list/detail/peek slices
+(NEWFRONT-619/639/646) and are also called by other areas' specs;
+`openArchivedIssueDetail` is called outside archives too
+(`comments/reactions-comment.spec.ts`, `issues/readonly-archived.spec.ts`)
+and is owned with the detail core (NEWFRONT-639), **not** by 700 — 700
+consumes it for ARCH-011/012 and implements only its own
+`archives*` detail methods. `subscribeToggle`,
+`propertyPickerDisabled` and `pickerOpen` belong to the sidebar/property
+slices (NEWFRONT-640/642/615/616) and detail-header (NEWFRONT-644); 699
+consumes them for ARCH-004/007.
+
+**(f) Page reload — shared shell method, still `todo()`.** `reloadPage`
+is called by eleven non-archives specs (issues, estimates, views,
+notifications) as well as by 703's address/reload scenario, so it is a
+shared shell-level method with no archives owner; the first shell slice
+that needs it implements it, and 703 consumes it. It is not an archives
+family member and must not be added to one.
+
+**(g) Nothing else.** Every one of the 60 names
+is in (a)–(f). The API/seed helpers are **exports of
+`e2e/parity/helpers/api.ts`, not driver methods and not part of any
+driver family** — some of them start with `archives`, which is a name
+collision with the driver families above, not a family membership. The
+archives specs import 63 of them (one import list also re-exports the
+`AuthedSession` type); no archives slice reimplements or wraps one, and
+no slice adds a same-named `archives*` method to the driver interface for
+them. By role, the imported helpers are:
+
+- **work-item reads/writes:** `serverArchivedIssues`,
+  `serverArchivedIssuesStatus`, `archivesArchivedIssueStatus`,
+  `archivesArchivedListStatus`, `serverArchiveIssue`,
+  `serverUnarchiveIssue`, `serverIssue`, `serverIssues`, `issueSeqForName`,
+  `issueStatus`;
+- **cycles:** `serverArchivedCycles`, `serverArchivedCycleDetail`,
+  `serverArchiveCycle`, `serverPatchCycle`, `serverProjectCycles`,
+  `serverCreateCycle`, `serverDeleteCycle`, `archivesArchivedCycles`,
+  `archivesArchiveCycle`, `archivesCycleArchivedAt`;
+- **modules:** `serverCreateModule`, `serverProjectModules`,
+  `archivesArchivedModules`, `archivesArchiveModule`, `archivesPatchModule`,
+  `archivesModuleIsArchived` (`modules.spec.ts`), and
+  `archivesModuleArchivedAt` (`project-crosscutting.spec.ts`, line 48,
+  used at line 767);
+- **project and cross-cutting:** `serverCreateProjectWithFlags`,
+  `serverArchivesProjectFlags`, `serverPatchProject`, `serverProject`,
+  `archivesProjectArchivedAt`, `serverProjectAutomations`,
+  `serverProjectStates`, `serverCreateState`, `serverDeleteState`,
+  `serverRequestStatus`, `serverSessionUserId`;
+- **session, members and cleanup:** `signInSession`, `signUpAuthedSession`,
+  `sessionBrowserCookies`, `browserSessionCookies`, `serverMe`,
+  `serverCleanupProject`, `serverCleanupIssueWithSession`,
+  `serverAddProjectMembers`, `addProjectMembers`,
+  `addProjectMembersViaApi`, `serverEnsureProjectGuest`,
+  `ensureWorkspaceMember`, `seatFreshMember`, `createWorkspaceForProjects`,
+  `markOnboardedForProjects`, `parityApiBase`, `parityProjectIdentifier`,
+  `uniqueEmail`, `uniqueSuffixForProjects`, `setLastWorkspaceForProjects`,
+  `listFavorites`, `createFavorite`, and the `ROLE` constant.
+
+`archivesRestoreModule` and `archivesArchivedModuleDetail` are declared in
+`helpers/api.ts` but imported by **none** of the five archives specs;
+they are not part of the list above and no slice needs them for these
+rows. `layoutsSeedArchivedLocalFilter` is the Issues-owned variant for the
+ISS-071 scenario; the archives spec uses `archivesSeedStoredExpression`,
+which 699 owns.
 
 ## 18. Contracts gap (feeds NEWFRONT-697)
 
@@ -1685,8 +1818,8 @@ Gaps to contract in NEWFRONT-697:
 | `GET BASE/archived-cycles/{cycleId}/` | archived cycle detail for the peek body: the same fields plus the progress/estimate summaries the peek renders |
 | `GET BASE/archived-modules/` | flat array with `id`, `workspace_id`, `project_id`, `name`, `description`, `description_text`, `description_html`, `start_date`, `target_date`, `status`, `lead_id`, `member_ids`, `total_issues`, `completed_issues`, `started_issues`, `unstarted_issues`, `cancelled_issues`, `backlog_issues`, `created_at`, `updated_at`, `archived_at` |
 | `GET BASE/archived-modules/{moduleId}/` | archived module detail for the peek body: the same fields plus the sub-issue/label/estimate summaries the peek renders |
-| `POST/DELETE BASE/cycles/{cycleId}/archive/` | archive `200 {archived_at}`, restore `204` — extend `contracts/cycles.ts` (`CycleArchiveStamp`), reusing the existing `CycleListItem`-style row for lists where compatible |
-| `POST/DELETE BASE/modules/{moduleId}/archive/` | archive `200 {archived_at}`, restore `204` — extend `contracts/modules.ts` (`ModuleArchiveStamp`) |
+| `POST/DELETE BASE/cycles/{cycleId}/archive/` | archive `200 {archived_at}`, restore `204` — **add** a `CycleArchiveStamp` (do not assume an existing one) to `contracts/cycles.ts`, reusing the existing `CycleListItem`-style row for lists where compatible |
+| `POST/DELETE BASE/modules/{moduleId}/archive/` | archive `200 {archived_at}`, restore `204` — **add** a `ModuleArchiveStamp` (do not assume an existing one) to `contracts/modules.ts` |
 | filter metadata | **none added**: the archived list reuses the project-context datasets (§2.2); NEWFRONT-697 does not contract an archives-only metadata read unless a slice proves one is needed, in which case it names the endpoint here first |
 
 Do not contract the `archived-cycles|modules/{id}/unarchive/` alias: it
