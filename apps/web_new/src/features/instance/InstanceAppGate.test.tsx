@@ -112,9 +112,28 @@ describe("InstanceAppGate", () => {
         text: () => Promise.resolve(JSON.stringify({ detail: "down" })),
       })
     );
-    await waitFor(() => expect(screen.getByTestId("instance-maintenance")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("instance-maintenance")).toBeInTheDocument(), { timeout: 10_000 });
     expect(screen.queryByText("workspace content")).not.toBeInTheDocument();
-  });
+  }, 15_000);
+
+  it("recovers on its own when a retry after a failed read succeeds", async () => {
+    let calls = 0;
+    renderGate(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          status: 500,
+          url: "https://api.test/api/instances/",
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ detail: "starting" })),
+        });
+      }
+      return Promise.resolve(response("https://api.test/api/instances/", envelope(true)));
+    });
+    await waitFor(() => expect(screen.getByText("workspace content")).toBeInTheDocument(), { timeout: 10_000 });
+    expect(calls).toBe(2);
+    expect(screen.queryByTestId("instance-maintenance")).not.toBeInTheDocument();
+  }, 15_000);
 
   it("shows the not-ready screen while setup is unfinished", async () => {
     renderGate(() => Promise.resolve(response("https://api.test/api/instances/", envelope(false))));

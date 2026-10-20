@@ -43,8 +43,8 @@ export function MaintenanceScreen(): React.ReactElement {
       <div className="flex max-w-lg flex-col items-center gap-(--space-3)">
         <h1 className="text-h2">{MAINTENANCE_HEADING}</h1>
         <p className="text-body text-(--text-muted)">
-          The services may not have finished starting. Check the container logs for errors, then reload once they are
-          running.
+          The services may not have finished starting. Check the container logs for errors; this page rechecks on its
+          own while the instance is unavailable.
         </p>
       </div>
       <a

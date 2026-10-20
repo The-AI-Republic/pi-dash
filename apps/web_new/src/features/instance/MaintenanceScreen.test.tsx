@@ -31,6 +31,7 @@ describe("MaintenanceScreen", () => {
     expect(screen.getByTestId("instance-maintenance")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: MAINTENANCE_HEADING })).toBeInTheDocument();
     expect(screen.getByText(/Check the container logs/)).toBeInTheDocument();
+    expect(screen.getByText(/rechecks on its own/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Contact Support" })).toHaveAttribute("href", MAINTENANCE_SUPPORT_HREF);
     expect(screen.queryAllByRole("navigation")).toHaveLength(0);
   });

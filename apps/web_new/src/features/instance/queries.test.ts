@@ -8,18 +8,41 @@ import { describe, expect, it } from "vitest";
 import { createAppClient } from "../../core/api/client.js";
 import { createMemoryStore } from "../../core/platform/storage.js";
 import { createCachePersistor } from "../../core/query/persistence.js";
-import { appInstanceQueryOptions, instanceAppKeys, persistAppCache } from "./queries.js";
+import {
+  INSTANCE_STARTUP_RECHECK_MS,
+  INSTANCE_STARTUP_RETRIES,
+  INSTANCE_STARTUP_RETRY_MAX_MS,
+  INSTANCE_STARTUP_RETRY_MS,
+  appInstanceQueryOptions,
+  instanceAppKeys,
+  instanceStartupRetryDelay,
+  persistAppCache,
+} from "./queries.js";
 
 describe("appInstanceQueryOptions", () => {
-  it("keeps the startup read in its own key and reads once", () => {
+  it("keeps the startup read in its own key and retries a failed read", () => {
     expect(instanceAppKeys.bootstrap).toEqual(["instance", "app", "bootstrap"]);
     const options = appInstanceQueryOptions({} as ApiClient);
     expect(options.queryKey).toEqual(instanceAppKeys.bootstrap);
-    expect(options.retry).toBe(false);
+    expect(options.retry).toBe(INSTANCE_STARTUP_RETRIES);
+    expect(options.retryDelay).toBe(instanceStartupRetryDelay);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
-    expect(options.refetchInterval).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("backs off between retries and caps the delay", () => {
+    expect(instanceStartupRetryDelay(0)).toBe(INSTANCE_STARTUP_RETRY_MS);
+    expect(instanceStartupRetryDelay(1)).toBe(INSTANCE_STARTUP_RETRY_MS * 2);
+    expect(instanceStartupRetryDelay(10)).toBe(INSTANCE_STARTUP_RETRY_MAX_MS);
+  });
+
+  it("rechecks on an interval only while the read is failing", () => {
+    const options = appInstanceQueryOptions({} as ApiClient);
+    const interval = options.refetchInterval as (query: { state: { status: string } }) => number | false;
+    expect(interval({ state: { status: "error" } })).toBe(INSTANCE_STARTUP_RECHECK_MS);
+    expect(interval({ state: { status: "success" } })).toBe(false);
+    expect(interval({ state: { status: "pending" } })).toBe(false);
   });
 
   it("accepts the unprovisioned envelope as an unfinished setup", async () => {

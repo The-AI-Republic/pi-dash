@@ -801,6 +801,12 @@ request-level error status that still returns data does not trigger
 the view, and the initial load shows a full-screen spinner until the
 read first settles. Oracle: `cross-cutting.spec.ts`.
 
+A failed read is retried a bounded number of times with exponential
+backoff, and while the failure persists the screen keeps rechecking on
+a short interval, so an instance that comes back during a restart is
+picked up without the user reloading. The screen picks the illustration
+from the resolved color scheme (custom schemes follow their dark half).
+
 The administrator entry subtree (`/god-mode` and its descendants,
 including setup and sign-in) is exempt from the replacement: it must
 stay reachable even when the instance read fails, so this view never

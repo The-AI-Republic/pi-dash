@@ -3368,6 +3368,16 @@ describe("instance bootstrap contracts", () => {
     expect((error as ApiError).code).toBe("contract");
   });
 
+  it("rejects a startup answer that is not a JSON object", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json(42),
+    });
+    const error = await getInstanceBootstrapForStartup(client).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
   it("reads a positive setup flag from the bare envelope", async () => {
     const client = createClient({
       baseUrl: "https://api.test",

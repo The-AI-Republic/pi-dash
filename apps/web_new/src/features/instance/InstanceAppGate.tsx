@@ -46,14 +46,14 @@ export function InstanceAppGate({ children }: InstanceAppGateProps): React.React
     markInstanceBootScheme();
   }, []);
   const bootstrap = useAppInstanceBootstrap();
+  if (isAdminEntryPath(globalThis.window.location.pathname)) return <>{children}</>;
   const branch = decideAppInstanceGate({
     isPending: bootstrap.isPending,
     isError: bootstrap.isError,
     data: bootstrap.data,
   });
   if (branch === "loading") return <BootLoader />;
-  if (branch !== "ready" && !isAdminEntryPath(globalThis.window.location.pathname)) {
-    return branch === "maintenance" ? <MaintenanceScreen /> : <NotReadyScreen />;
-  }
+  if (branch === "maintenance") return <MaintenanceScreen />;
+  if (branch === "not-ready") return <NotReadyScreen />;
   return <>{children}</>;
 }
