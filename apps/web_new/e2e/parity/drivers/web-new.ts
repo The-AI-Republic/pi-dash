@@ -10522,6 +10522,31 @@ export class WebNewDriver implements ParityDriver {
     return todo("pageEditorRephraseRequests");
   }
 
+  // --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
+  // --- DESK-026). The desktop area gate reads these on both targets; they sit
+  // --- at the end of the surface so a later area cannot displace them.
+
+  /** Everything the page paints, trimmed, for absence scans. */
+  async deskRuntimePageText(): Promise<string> {
+    return (await this.page.locator("body").innerText()).trim();
+  }
+
+  /** Deliver the focus signal the desktop shell emits when the user returns. */
+  async deskRuntimeDispatchWindowFocus(): Promise<void> {
+    await this.page.evaluate(() => window.dispatchEvent(new FocusEvent("focus")));
+  }
+
+  /** Every client-side database name the page currently holds. */
+  async deskRuntimeIndexedDatabaseNames(): Promise<string[]> {
+    return this.page.evaluate(async () => {
+      const factory = (globalThis as { indexedDB?: { databases?: () => Promise<{ name?: string | null }[]> } })
+        .indexedDB;
+      if (typeof factory?.databases !== "function") return [];
+      const infos = await factory.databases();
+      return infos.map((info) => info.name ?? "").filter((name) => name !== "");
+    });
+  }
+
   // --- Notifications (NEWFRONT-564, NTF-001..032).
   // --- Written for web_new from parity/specs/notifications.md and the web_new
   // --- notifications components: every read below goes through a hook or a
