@@ -98,6 +98,14 @@ rows and keeps the count visible. An empty group still renders its
 header with a zero count. Group membership is decided by the cycle's
 status, so a draft row is an upcoming row everywhere (CYC-001).
 
+The group headings are, in order, **"Active cycle"**, **"Upcoming
+cycle"** and **"Completed cycle"** (singular, as the oracle matches each
+heading by its prefix). Each heading is a disclosure button that carries
+`aria-expanded` matching the group's state. Upcoming and Completed end
+with their count number inside the button (the CYC-001 driver reads the
+trailing integer from the heading text); Active carries no count. Do not
+pluralise the headings, and do not move the counts outside the buttons.
+
 **Row anatomy** (CYC-002). Every row shows, left to right: name; a
 circular completion ring; the lifecycle marker; the date span; and the
 contextual extras for its state:
@@ -118,9 +126,12 @@ contextual extras for its state:
   date set) still renders the single date. Do not render a dash or a
   "No dates" string in the row; the empty state for dates belongs to the
   detail sidebar and hero cards (§15), not the row.
-- Draft and upcoming rows show a work-item count. The current row, shown
-  in the hero, additionally shows the creator's avatar. Every other row
-  shows its assignees' avatars, with a stable fallback for members
+- Draft and upcoming rows show a work-item count; current and completed
+  rows do not. The current row, shown in the hero, shows the creator's
+  avatar and no separate assignee cluster. Every other row (upcoming,
+  draft, completed) shows the creator's avatar **and** the assignees'
+  avatars; with no assignees it shows the members icon instead of an
+  empty cluster. Avatars have a stable fallback (initial) for members
   without images.
 - A favorite star renders on non-archived rows for members and admins
   only (§11). Guests and the read-only role get no star at all, not a
@@ -166,8 +177,13 @@ clears the key, reload and shared link reopen it).
 
 The list header carries a search box (CYC-005). It starts collapsed as
 an icon-only control and expands to a text field on activation; the
-field is focused on expansion and the query filters rows as the user
-types, without a submit step. Matching is on the cycle name only,
+field does **not** take focus on the live list (the reference mounts the
+input only when the box opens, so its focus call lands before the input
+exists; the oracle asserts expansion, and typing focuses through the
+fill itself). Build the collapsed/expanded swap as is; do not add a
+deferred focus call to "fix" it, because the archived box relies on the
+opposite behavior in §9. The query filters rows as the user types,
+without a submit step. Matching is on the cycle name only,
 case-insensitive substring, evaluated client-side over the already
 loaded list; the search never issues a request. Matching rows keep
 their group; groups whose rows all stop matching render empty and the
@@ -178,13 +194,22 @@ an outside click) collapses the box. An outside click collapses the box
 only when the query is empty; with text in it the box stays open so the
 filtered state is not lost by accident. The query survives navigation
 away and back within the project cycles area and is restored into an
-open, unfocused box. The archived list (§9) starts the same way — the
+open, unfocused box. The control that collapses the box is a clear
+control that empties the query as well; the oracle treats the clear
+control as collapsing the box. The archived list (§9) starts the same way — the
 magnifier renders and the box is collapsed on a fresh visit — but it
 opens **focused**: its text input stays mounted inside the collapsed
 box, so the activation can move focus into it, whereas the live list
 swaps the input in only when it opens and the focus call lands before
 the element exists. That focus behavior, not an always-open box, is the
 CYC-005/CYC-027 difference; see §9.
+
+The expanded field's placeholder reads exactly `Search`. The
+`apps/web_new` parity driver (whose cycle methods the slices implement,
+§28) needs a stable handle for the magnifier and for the expanded box;
+the old driver's class/test-id selectors are its own, not a product
+requirement, so choose handles deliberately and keep them unchanged
+once the oracle passes.
 
 Oracle: `list-search-filters.spec.ts` (search expands, filters live,
 Escape clears then collapses, query survives navigation and returns
@@ -194,17 +219,31 @@ unfocused).
 
 The list can be narrowed by two dimensions (CYC-006, CYC-007):
 
-- **Lifecycle**: any combination of in-progress, yet-to-start, finished
-  and draft, selected from a multi-select menu. The menu carries its own
-  search field, which narrows the options, and stays open while options
-  are toggled. In-progress means the cycle covers today; yet-to-start
-  and finished mean the cycle's status; draft means an undated cycle.
+- **Status of the cycle**: any combination of the four statuses,
+  selected from a multi-select section headed **"Status of the cycle"**
+  (with an applied-count suffix once values are selected). Its options
+  are, in order, **"In progress"**, **"Yet to start"**, **"Completed"**
+  and **"Draft"** — the `current`, `upcoming`, `completed` and `draft`
+  values. The oracle picks by these exact labels, so do not rename them.
+  Values selected together combine as OR within the dimension. The menu
+  is three sections in this order — status, start date, then due date
+  (the archived list omits the status section) — under a single search
+  field whose placeholder is `Search` and which narrows options by
+  label and shows `No matches found` when nothing matches. Each section
+  header carries an applied-count suffix and a preview toggle. The menu
+  stays open while options are toggled. "In progress" is the current status, which the backend
+  sets for a cycle covering today.
 - **Start date** and **Due date** windows: the filter menu renders two
   sections, headed "Start date" and "Due date"; "Due date" means the
   cycle's end date, and the oracle picks its options by that label, so
   the section must keep the "Due date" heading and must not be renamed
-  "End date". Each window is a preset range plus an exact-date entry, and
-  a cycle is kept when its start date falls _inside_ the selected start
+  "End date". Both windows offer the same options — `1 week from now`,
+  `2 weeks from now`, `1 month from now`, `2 months from now` — plus
+  **"Custom"**, which opens an exact-date picker. The "Due date" section
+  does not offer past-tense options such as "1 week ago"; that is the
+  shared issues filter list, not this one. Each window is multi-select,
+  and every selected value in a window is ANDed with the others and
+  with the other window. A cycle is kept when its start date falls _inside_ the selected start
   window and its end date falls _inside_ the selected "Due date" window
   (containment of each cycle date in its own window, not range overlap).
   The two windows combine with AND. A missing or undated cycle never
@@ -219,14 +258,17 @@ remain (CYC-027).
 Active filters render as a row of removable chips above the list, one
 chip per applied lifecycle value and one per date window (CYC-008).
 Clicking a chip removes exactly that value; removing the last value in a
-dimension removes the dimension. A clear-all action clears every filter
-and chip. Clear-all leaves the search text alone — search has its own
+dimension removes the dimension. The row also carries a clear-all action
+whose accessible name contains `clear all` (case-insensitive, as the
+oracle matches it). Clear-all clears every filter
+and chip, and leaves the search text alone — search has its own
 clear control in the box — so a list filtered to nothing by both
 dimensions needs both actions to return to the full list. Chips and
 clear-all are available to guests (CYC-047).
 
 Oracle: `list-search-filters.spec.ts` (status multi-select keeps only
-matching lifecycles; start/end windows keep only overlapping cycles;
+matching lifecycles; start/end windows keep only cycles whose own date
+falls inside the window;
 chips remove per dimension, clear-all resets filters while search
 persists).
 
@@ -244,7 +286,11 @@ renders an explained empty view: what a cycle is (a dated window that
 groups work items), and a creation shortcut. The view is visible to
 every role; the shortcut is enabled only for members and admins and is
 hidden or disabled for guests and viewers, without error. Activating
-the shortcut opens the create dialog of §6 over the empty view.
+the shortcut opens the create dialog of §6 over the empty view. The
+shortcut's label is **"Set your first cycle"** (the oracle selects the
+button by that name and reads its disabled state on a guest), so the
+new empty view keeps that string as the action label even if its
+illustration and explanatory copy are redesigned.
 
 **Feature off** (CYC-010). When the project has `cycle_view` disabled,
 the page explains that cycles are turned off for this project instead of
@@ -252,7 +298,9 @@ showing rows, plus a management shortcut to the project's feature
 settings at `/{ws}/settings/projects/{pid}/features`. The explanation
 is visible to guests; the shortcut is enabled only for admins and
 renders disabled for everyone else. The feature-off view takes
-precedence over the zero state.
+precedence over the zero state. The shortcut's label is **"Manage
+features"**; it stays rendered (disabled, not removed) for non-admins
+because the oracle asserts both its presence and its disabled state.
 
 **No match** (CYC-009). When the project has cycles but the current
 search and filters hide all of them, the no-match view differs by
@@ -266,7 +314,14 @@ cause:
 The action must actually restore the list: clearing search must not
 silently clear filters, and clear-all must not clear the search text
 (§4). No-match is never conflated with the zero state, and a no-match in
-the archived list uses the same two-way split (CYC-027).
+the archived list uses the same two-way split (CYC-027). The no-match
+title is **"No matching cycles"** in both lists (an `h5`, as the driver
+reads it). The hint under it is **"Remove the filters to see all
+cycles"** for the filters-only case and **"Remove the search criteria to
+see all cycles"** for search (alone or combined); the oracle tells the
+two apart by the phrase "Remove the search criteria". Because the driver
+keys on those strings, keep them as the rendered hint text; the
+illustration and layout are free.
 
 **Gone away** (CYC-013). A detail address for a missing, deleted, or
 foreign cycle renders a dedicated not-found view: a short explanation
@@ -274,6 +329,15 @@ that the cycle does not exist, and a working route back to the project's
 cycles list. It must not be a generic 404, must not render the sidebar
 or layout chrome, and must not auto-redirect. The same view covers an
 archived cycle accessed through a live detail address.
+The back action's label is **"View other cycles"** (the oracle finds and
+clicks it by name and requires the URL to end at `/cycles`); the
+explanation reads like "Cycle does not exist". After the click the
+address is the bare list path, with no cycle segment and no query.
+
+**Archived zero state.** The archived list with no archived cycles
+shows a heading **"No archived cycles yet"** and a short line inviting
+the user to archive completed cycles; it never offers creation. The
+heading is matched by name, so keep that string.
 
 Oracle: `empty-states-create.spec.ts` (skeleton mid-fetch; zero state
 with member shortcut and guest-disabled shortcut; feature-off view with
@@ -283,7 +347,8 @@ filters-hide-all and search-hide-all hints differ).
 
 ## 6. Creating a cycle
 
-The create dialog is opened from the list header, from the zero-state
+The create dialog is opened from the list header's **"Add cycle"**
+button (the oracle clicks the header action by that name), from the zero-state
 shortcut, and from the command palette's "New cycle" command (CYC-030).
 The palette entry is shown and enabled only while a project is in
 context, that project has the cycles feature on, and the user is a
@@ -298,10 +363,17 @@ The dialog asks for (CYC-014, CYC-015):
   as a toast;
 - a description, optional, plain text and long enough for the project's
   normal description needs;
-- a start date and an end date, both optional, and always both-or-none:
-  a half-filled range is invalid. The past is not selectable for the
-  start date (today is allowed); the end date cannot precede the start
-  date;
+- a start date and an end date, both optional. **One date alone is
+  accepted**: the reference form and the backend both allow a cycle with
+  only a start or only an end (the form's overlap check simply does not
+  run unless both are present, and the payload sends the other as
+  null). Do not add a both-or-none rule. The past is not selectable for
+  the start date (today is allowed); the end date cannot precede the
+  start date. The dialog heading is **"Create cycle"** (edit uses
+  **"Update cycle"**), and the footer's confirm control is the button
+  **"Create cycle"** on create / **"Update cycle"** on edit, next to a
+  **"Cancel"** button; the oracle waits for those headings and button
+  names.
 - a project picker on **every create** (CYC-014), whether the dialog
   was opened from a project page (list header, zero-state shortcut) or
   from a workspace-level creation surface. It defaults to the current
@@ -312,27 +384,42 @@ The dialog asks for (CYC-014, CYC-015):
   date controls, and is not hidden on a project page: the CYC-014
   oracle opens creation from project A's cycles list, picks project B
   and requires the cycle to land in B only. The picker is absent on
-  **edit** (§7) — a cycle cannot move project.
+  **edit** (§7) — a cycle cannot move project. In the create dialog the
+  picker is the form's first focusable control in the DOM, ahead of the
+  title (see the keyboard rule below); that is a markup order, not a
+  visible-order claim.
 
 Submission is `POST BASE/cycles/` for the target project with
 `{ name, description, start_date, end_date }` (dates as ISO instants or
 null). While the request is in flight the submit control is busy and
 cannot be double-submitted. Success closes the dialog, shows a
-confirmation toast naming the cycle, and refreshes the list without a
-reload: a cycle covering today appears in the hero immediately, others
+confirmation toast (`Cycle created successfully.` under a success
+heading), and refreshes the list without a reload: a cycle covering
+today appears in the hero immediately, others
 in their group (CYC-019). The remembered list tab is reset to the
 all-cycles tab so the new row is visible (CYC-018): the stored value at
 `localStorage["cycle_tab"]` becomes the JSON-encoded string `"all"`. A server validation
 error is shown in the dialog, not as a silent close.
+
+**Copy and fields.** The name field's placeholder is **"Title"**, the
+description's is **"Description"**, and the range control's two
+placeholders are **"Start date"** and **"End date"** (the oracle locates
+the range by a button whose text contains "Start date", fills the name
+via `input[name="name"]` and the description via
+`textarea[name="description"]`, and opens the range by clicking its
+first span). Keep those field names and placeholders.
 
 **Overlap** (CYC-016). Creation always asks the backend whether the
 range collides with another cycle in the same project, via
 `POST BASE/cycles/date-check/` with `{ start_date, end_date }` (no
 `cycle_id`). The answer carries a `status`. A collision refuses the
 save with an explanation that names the draft workaround: a conflicting
-draft can be left undated, or its dates removed, to free the window. A
-free range saves. An undated (draft) cycle is always allowed and skips
-the check. The check is asked once per submission, not per keystroke.
+draft can be left undated, or its dates removed, to free the window. The
+refusal is a toast titled **"Error!"** whose message contains "you
+already have a cycle" (the oracle asserts both the title and that
+phrase) and the same draft guidance, and the dialog stays open. A free
+range saves. An undated (draft) cycle is always allowed and skips the
+check. The check is asked once per submission, not per keystroke.
 
 **Keyboard** (CYC-020). The dialog traps focus while open. Focus starts
 in the title field. Forward Tab from there visits the other controls in
@@ -362,8 +449,9 @@ order, creation permissions).
 Editing reuses the create form with the cycle's current values, opened
 from the row menu (§10) and from the sidebar dates (§14) where the
 sidebar only edits dates (CYC-017). The project picker is never shown
-for an edit; a cycle cannot move project. The title keeps the same
-required/maximum rules as creation.
+for an edit; a cycle cannot move project. The dialog heading and the
+footer confirm control both read **"Update cycle"**. The title keeps the
+same required/maximum rules as creation.
 
 The date range is checked for overlap only when **both** new dates are
 present and the range actually changed. An edit that leaves the dates
@@ -376,7 +464,11 @@ itself; the check is never sent with a null date. A collision refuses the save w
 creation. A successful save shows a confirmation toast and refreshes the
 cycle row, the group counts and, when the range now covers today, the
 hero; an edit that moves the range away from today removes the cycle
-from the hero without a reload.
+from the hero without a reload. The success toast reads `Cycle updated
+successfully.`; the overlap refusal uses the same `Error!` toast and
+draft guidance as creation. An edit that changes nothing still closes
+the dialog and issues the patch, but sends no date check (the oracle
+counts date-check requests and expects zero for untouched dates).
 
 The edit form obeys the keyboard rules of §6 and is closed by Escape
 without saving. A finished cycle cannot be edited at all (§8); an
@@ -399,15 +491,20 @@ visible:
    permission message (below), not a hidden capability.
 
 Confirming opens a dialog that names the cycle and states that deletion
-is permanent; cancelling does nothing. On success the flagged cycle is
-gone, and the UI shows a confirmation toast and removes the row and its
+is permanent; cancelling does nothing. The dialog heading is **"Delete
+cycle"** and its body names the cycle (the oracle reads both). On
+success the flagged cycle is
+gone, and the UI shows a confirmation toast (`Cycle deleted
+successfully.`) and removes the row and its
 group count. When the viewer was on the deleted cycle's detail page or
 had it open in the peek panel, they are returned to the project cycles
 list. A cycle that disappears because someone else deleted it lands on
 the gone-away view (§5) rather than retrying forever.
 
 A permission failure — including a non-owner member's delete — shows the
-dedicated permission message, not a generic error, and leaves the row in
+dedicated permission message (a toast whose text contains "permission",
+titled `You don't have permission to perform this action.`) and never
+the generic `Failed to delete cycle` message, and leaves the row in
 place; the list does not optimistically drop it. The CYC-022 forbidden-
 delete scenario relies on this second layer: the entry is present for a
 member, and the refusal is graceful and explains permissions.
@@ -427,11 +524,16 @@ Oracle: `edit-delete.spec.ts`.
 
 **Archive** (CYC-024, CYC-025). Archiving is offered for finished
 cycles only. The row menu's archive entry is present for draft, current
-and upcoming cycles but disabled, with an explanation that only finished
-cycles can be archived; a finished row's entry is enabled. Archiving
-asks for confirmation in a dialog that names the cycle. Confirming calls
+and upcoming cycles but disabled, with the hint `Only completed cycles
+can be archived`; a finished row's entry is enabled. Archiving
+asks for confirmation in a dialog headed **"Archive cycle {name}"**.
+Confirming calls
 `POST BASE/cycles/{cid}/archive/` with **no request body** and shows a
-confirmation toast that also points to the project archives. The server
+confirmation toast titled **"Archive success"** with the line `Your
+archives can be found in project archives.`, and returns the view to the
+project cycles list (the reference navigates there even when archiving
+from the detail). A failure shows an error toast and leaves the row.
+The server
 stamps `archived_at` itself (the serializer lists it as read-only) and
 answers `{ archived_at }`; the client must not send an `archived_at`
 field. The cycle leaves the live list and groups; its completion ring
@@ -443,8 +545,9 @@ immediately, with no confirmation dialog. Only archive and delete open a
 dialog; restore must not, because the oracle picks "Restore" and
 immediately waits for the success toast and the archives path, and a
 dialog step would stall it. On success the cycle is live again; the
-toast names the outcome and the view moves to the archived cycles list
-so the user sees the row leave it. The restored cycle is a finished
+toast is titled **"Cycle restored"** with the line `The cycle has been
+restored.`, and the view moves to the archived cycles list so the user
+sees the row leave it. The restored cycle is a finished
 cycle and reappears in the live list's completed group with its
 snapshot intact.
 
@@ -453,7 +556,9 @@ request fails, the UI shows an error that names the failure and keeps
 the cycle in the archived list and archived state; it must not show the
 success toast, must not navigate away as if it worked, and must not
 optimistically drop the row. The row stays selectable so the user can
-retry.
+retry. The failure toast is titled **"Cycle restore failed"** with a
+retry invitation; the success strings above must never appear on the
+failure path.
 
 **Archived list** (CYC-027). `/{ws}/projects/{pid}/archives/cycles`
 lists archived cycles with the same row anatomy as the live list (name,
@@ -463,7 +568,7 @@ clicks it before typing), and activating it opens the field **focused**
 because the input stays mounted under the collapsed box (§3). Search
 filters by name only; its date filters and chips behave as in §4
 without the lifecycle dimension; its zero state
-says there are no archived cycles yet and does not offer creation; its
+says **"No archived cycles yet"** and does not offer creation; its
 no-match state splits search from filters as in §5. Rows open a peek
 panel on the same `peekCycle` key and offer only the archived actions
 (open, copy, restore). Activating an archived row (name or body, not a
@@ -496,12 +601,19 @@ hover on desktop and is rendered inline on touch and narrow layouts
 (§21). The menu is visible to every role, but its entries are gated by
 role and cycle state (CYC-028):
 
-| Cycle state                | Entries, in order                                                                                               |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| Draft or current           | Edit (member+), open in new tab (all), copy link (all), archive (member+, disabled with hint), delete (member+) |
-| Finished (completed)       | Open in new tab (all), copy link (all), archive (member+)                                                       |
-| Archived                   | Open in new tab (all), copy link (all), restore (member+)                                                       |
-| Any state, guest or viewer | Open in new tab (all), copy link (all)                                                                          |
+| Cycle state                | Entries, in order                                                                                                                   |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Draft or current           | **Edit** (member+), **Open in new tab** (all), **Copy link** (all), **Archive** (member+, disabled with hint), **Delete** (member+) |
+| Finished (completed)       | **Open in new tab** (all), **Copy link** (all), **Archive** (member+)                                                               |
+| Archived                   | **Open in new tab** (all), **Copy link** (all), **Restore** (member+)                                                               |
+| Any state, guest or viewer | **Open in new tab** (all), **Copy link** (all)                                                                                      |
+
+The titles are exactly these strings (the oracle filters menu items by
+`h5` text), and the order is fixed by the DOM order above: disabled
+entries are filtered out of the menu but keep their place, so removing
+Edit from a completed row yields Open in new tab → Copy link → Archive.
+Archive is not rendered at all on a completed row for a guest, and
+Delete/Restore are absent whenever the viewer cannot mutate.
 
 Disabled archive stays in place for draft and current rows so the
 restriction is discoverable; it is not hidden. A guest's menu contains
@@ -521,6 +633,12 @@ only — the same set that may edit — not for guests or the read-only
 role. The star is rendered only where editing is allowed and the cycle
 is not archived (the server's favorite endpoints allow admin and member
 and refuse others), so a guest sees no star rather than a disabled one.
+Activating the star flips its filled/unfilled mark at once and shows a
+progress indication while the write is in flight; the oracle toggles
+until the row and the server agree, so a silent no-op or a revert after
+a successful write fails it. Copy the row's own `is_favorite` into the
+star after every read, and re-read the cycle row after a toggle settles
+(the reference sets the mark optimistically and reverts it on error).
 The favorite is per user and is stored as a **workspace favorite**, not
 through the project-scoped cycle endpoints. Adding toggles the star
 optimistically and issues `POST WS/user-favorites/` with
@@ -541,11 +659,25 @@ toggle. The favorite state also comes back on the cycle row
 (`is_favorite`) so lists and the sidebar agree.
 
 **Palette** (CYC-030). On a live cycle page the command palette offers
-cycle-scoped actions: toggle favorite (member+) and copy the cycle's
-address. Both act on the cycle in the current address. Archived cycles
-expose no cycle commands in the palette. The palette results are
+two cycle-scoped commands whose titles are exactly **"Add to
+favorites"** / **"Remove from favorites"** (one or the other, depending
+on the row's `is_favorite`) and **"Copy URL"**. The favorite command is
+member+ only (the same gate as the star); **Copy URL** is visible to
+every role. Both act on the cycle in the current
+address. Archived cycles
+expose no cycle commands in the palette (neither title appears on the
+archived tab). The palette results are
 filtered to this cycle, not to the whole workspace. The favorite action
 updates the same row state as the star and toasts the same outcome.
+The create command lives on project-level palettes (§6), not on a
+cycle page.
+
+The palette's copy uses the browser's current address
+(`window.location.href`, which may carry `?peekCycle=…`) rather than the
+canonical path; that is the reference's behavior and is **not** the
+canonical-copy rule of §19 for the row menu. Keep that distinction:
+palette copy = current address with its query, row copy = canonical
+detail path.
 
 Oracle: `archive-menu-transfer.spec.ts` (row toggle marks, toasts
 progress and outcome, persists both ways; first-ever favorite reveals
@@ -554,43 +686,66 @@ while the archived tab offers no cycle commands).
 
 ## 12. Transferring remaining work
 
-A finished cycle offers transfer from **two entry points**, and both are
-gated by the same rule (CYC-031):
+A finished cycle offers transfer from **two entry points** (CYC-031).
+They share one eligibility helper and one dialog; only the snapshot
+clause differs between them (below).
 
 1. **Detail banner.** The finished cycle's detail banner carries the
    read-only notice of §8 and a transfer action.
 2. **List row.** A completed row on the project cycles list carries an
-   inline "Transfer {n} work items" action alongside its other extras
+   inline **"Transfer {n} work items"** action alongside its other extras
    (revealed with the row's hover area on desktop, inline on
    touch/narrow).
 
-The gate for both is: the cycle's status is completed, the transferable
-count (`backlog + unstarted + started` work items) is greater than zero,
-**and** `progress_snapshot` is empty. A cycle with a snapshot was already
-closed out and its numbers are frozen; a cycle with nothing left to move
-offers no transfer. The detail banner carries the read-only notice of
-§8 whenever the cycle is completed, independently of whether transfer is
-offered. Both entry points open the **same** transfer dialog — one
-dialog and one eligibility computation, not two implementations.
-Transfer opens a dialog with a searchable picker of destination cycles.
+The two gates are **not identical**, and both are the reference's:
+
+- **List row:** status is completed **and** `total_issues -
+(cancelled_issues + completed_issues) > 0`. It does not look at
+  `progress_snapshot`.
+- **Detail banner:** status is completed, the same transferable count is
+  greater than zero, **and** `progress_snapshot` is empty.
+
+So a completed cycle that still has an empty snapshot shows the row
+action and the banner action; one whose snapshot was already written
+loses the banner action even with work left, while the row action
+follows the count alone. The two counts
+should share one helper so the definitions cannot drift; only the
+snapshot clause differs. The detail banner carries the read-only notice
+of §8 whenever the cycle is completed, independently of whether
+transfer is offered. Both entry points open the **same** transfer
+dialog — one dialog component, not two implementations.
+Transfer opens a dialog headed **"Transfer work items"** with a
+searchable picker of destination cycles, whose search input's
+placeholder is exactly **"Search for a cycle..."** (the oracle waits on
+that placeholder). An option row renders the cycle name plus a
+capitalised status pill (`Current`, `Upcoming`, `Draft`) and is a
+button whose accessible name starts with the cycle name.
 The picker offers only cycles in the same project that are still open —
 draft, current, upcoming — never the source cycle, never a finished or
 archived cycle; the search narrows by name. With no eligible
 destination the dialog explains that another open cycle must be created
-first and offers no submit.
+first — the text reads `You don't have any current cycle. Please create
+one to transfer the work items.` — and offers no submit. Selecting a
+destination immediately performs the transfer (no second confirm).
 
 Confirming calls `POST BASE/cycles/{cid}/transfer-issues/` with
 `{ new_cycle_id }`; the response carries a message. On success the UI
-shows a confirmation toast, closes the dialog, and refreshes **both**
+shows a toast whose message contains `transferred successfully` (the
+reference title is `Success!`), closes the dialog, and refreshes **both**
 cycles: the destination gains the items and its counts and ring update,
 and the source's banner, counts and ring update as well, without a
 reload (the source-side refresh is the intended behavior of NEWFRONT-267,
 §26, and applies whether transfer started from the detail banner or the
-list row — the source row and its ring refresh too). The source stays
-finished with an empty snapshot afterwards, so
-the transfer entry disappears on its own, on the detail banner and on
-the list row alike. A failure keeps the dialog open, reports the error,
-and moves nothing. Transfer is member+ only, like every other mutation.
+list row — the source row and its ring refresh too). The server **writes
+the source's `progress_snapshot`** from its pre-transfer counters
+(`utils/cycle_transfer_issues.py`), so after a successful transfer the
+source's frozen numbers describe the work it had before the items left,
+the detail-banner transfer entry disappears (snapshot now present) and
+the row entry disappears because nothing transferable remains. Do not
+spec a source with an empty snapshot afterwards. A failure shows an
+error toast (`Unable to transfer work items. Please try again.`),
+leaves the dialog's state intact, and moves nothing. Transfer is
+member+ only, like every other mutation.
 
 Oracle: `archive-menu-transfer.spec.ts` (only open cycles offered,
 search narrows, confirming moves items with both-sides refresh; no-open-
@@ -619,9 +774,15 @@ and display options live in the same cycle user-properties record
 **Header** (CYC-033). The header shows the cycle name, the lifecycle
 marker, a cycle switcher, a work-item count badge, and actions:
 
-- The switcher opens a menu of the project's cycles (grouped and
-  filtered as in the old picker: open cycles first) and navigates to the
-  chosen cycle's detail. It is available to every role.
+- The switcher **is the last breadcrumb crumb**: the cycle name in the
+  trail is itself the switcher control, not a separate header widget and
+  not a plain label. Opening it lists the project's non-archived cycles
+  in their stored order in a searchable menu (the reference shows the
+  name with a cycle icon per option and does not regroup them), and
+  picking one navigates to that cycle's detail. It is available to
+  every role. The crumb therefore must not be an inert `aria-current`
+  text node — it is the interactive last item, while the project and
+  "Cycles" crumbs remain links.
 - The badge counts the cycle's work items and is hidden when the count
   is zero. It is shown to every role that can read items; the intended
   guest behavior is in §26.
@@ -641,13 +802,14 @@ marker, a cycle switcher, a work-item count badge, and actions:
   runs, slice F blocks on it and records the gap; it never forks a
   dialog.
 - Add work item is a member+ action and is hidden for a finished cycle
-  (read-only, §8). It opens the shared create modal pre-filled with this
-  cycle (NEWFRONT-630).
+  (read-only, §8). Its label is **"Add work item"** and it opens the
+  shared create modal pre-filled with this cycle (NEWFRONT-630).
+  **Analytics** is the label of the desktop analytics button.
 
 **Breadcrumbs** (CYC-034). The trail is project → cycles → cycle name.
 The project crumb goes to the project's work-items page; the middle
-crumb goes to the project cycles list; the last crumb is current and not
-interactive. On narrow screens the trail collapses to a back control
+crumb goes to the project cycles list; the last crumb is the current
+cycle and doubles as the switcher above. On narrow screens the trail collapses to a back control
 that returns to the cycles list. Archived rows opened from the archives
 list carry an archives crumb as well, described in §9.
 
@@ -695,13 +857,19 @@ Sections, top to bottom:
   image with a fallback initial. The row always renders; with no lead it
   shows an empty avatar and no name text (no "No lead" string), which is
   what the old sidebar does. A member list follows when assignees exist,
-  or "No assignee".
+  or **"No assignee"**. The row labels are exactly **"Lead"**,
+  **"Members"**, **"Work items"** and (when it renders) **"Points"**;
+  the oracle reads the assignee row as "Members", not "Assignees".
 - **Work items** (CYC-038): completed over raw total
   (`completed_issues/total_issues`), using the server's counters as they
   are; `total_issues` includes cancelled items, and only the ring (§2)
   excludes them. When the total is zero the row reads `0 work items`.
-  Finished cycles read the frozen snapshot's counters. A points row
-  renders only when the project has point estimates enabled.
+  Finished cycles read the frozen snapshot's counters. The **"Points"**
+  row renders only when the project's estimate system is points **and
+  the cycle is not completed** (the reference hides it for finished
+  cycles and for item-based estimate systems); it reads
+  `completed/total` estimate points, or `0 Work item` when the total is
+  zero.
 - **Progress by state** (CYC-038): the cycle's work items grouped by
   workflow state, with the count per state group and the closed count,
   into a total that includes cancelled items. Each group card has its
@@ -709,10 +877,18 @@ Sections, top to bottom:
   renders when it has items.
 - **Burn-up/burn-down chart** (CYC-038): a chart measured in work items
   by default, with a measure picker offering estimates only when
-  estimates are enabled. The chart is hidden when the cycle has no valid
+  estimates are enabled. The sidebar section heading is **"Progress"**
+  and the measure control's two options are exactly **"Work items"**
+  and **"Estimates"** (the oracle locates the trigger by those two
+  names). The chart is hidden when the cycle has no valid
   past-start range; an undated cycle shows a "no data" placeholder
   rather than a broken axis. A future-start cycle hides the chart.
 - **Breakdown entries** (CYC-039): states, assignees and labels entries.
+  Their tabs are labelled exactly **"States"**, **"Assignees"** and
+  **"Labels"** in that order; **Assignees** is the default selected tab
+  (the reference stores the choice per cycle in
+  `localStorage["cycle-analytics-tab-{cid}"]` and falls back to
+  Assignees), and the chosen tab is `role="tab"` with `aria-selected`.
   Clicking an entry applies the matching rich filter to the cycle's work
   items and shows it as an active filter; clicking the same entry again
   lifts it; entries combine. The chart itself has no click action. The
@@ -741,19 +917,25 @@ lift).
 ## 15. Active-cycle hero
 
 The list leads with the cycle that covers today (CYC-041). The hero has
-a heading that names it as the active cycle, the active row itself with
-its ring and dates, and three cards:
+a group heading **"Active cycle"** (singular; the oracle matches the
+heading by that prefix and the driver reads the hero's name from the row
+inside it), the active row itself with its ring and dates, and three
+cards:
 
-1. **Progress** — work items by state group with counts, plus the
-   closed and cancelled summary; clicking a state group navigates to the
+1. **"Progress"** — work items by state group with counts, plus a
+   `{closed}/{open} Work items closed` summary and a cancelled count
+   line; clicking a state group navigates to the
    cycle detail with that state group as an applied filter (the same
    persisted rich filter as the sidebar entries), and the detail shows
    the filtered work items.
-2. **Burn-up/burn-down** — the pending series plus the chart and the
+2. **"Work item burndown"** — the `Pending work items - {n}` line, the
+   chart, and the
    same measure picker as the sidebar (items, estimates when enabled);
    an undated or future-start cycle shows the chart's empty
    placeholder.
-3. **Breakdown** — tabs for priority, assignees and labels. The priority
+3. **Breakdown** — tabs labelled exactly **"Priority work items"**,
+   **"Assignees"** and **"Labels"** in that order (the oracle compares
+   the full list). The priority
    tab lists urgent and high work items; clicking an item opens its look
    panel and applies a priority filter. Assignees and labels tabs list
    their entries with counts, and clicking an entry applies the matching
@@ -765,13 +947,19 @@ Each card has its own empty placeholder for "no work yet", "no dates"
 and "nothing to show" rather than an empty box. The hero is built from
 the same cycle row, `progress_snapshot`, `distribution` and progress
 reads as the sidebar; it does not duplicate their requests when the
-sidebar is open on the same cycle.
+sidebar is open on the same cycle. The progress card's empty copy is
+`Add work items to the cycle to view it's progress`; the burndown card
+shows its own empty state and no chart when there is nothing to plot.
+Do not replace either with a bare box or a spinner once data has
+arrived.
 
 With no cycle covering today the hero is replaced by an explainer
-(CYC-042) that says there is no active cycle and that a cycle becomes
-active when its dates include today; it offers a creation shortcut to
+(CYC-042) titled **"No active cycle"** whose description says a cycle
+is active when its range includes today's date; it offers a creation shortcut to
 members and admins and no shortcut to guests. The upcoming and completed
-groups follow the explainer as usual.
+groups follow the explainer as usual. The oracle checks the title and
+description for the words "active cycle" and "today", so both must be
+present.
 
 Oracle: `hero-crosscutting.spec.ts` (hero shows progress, burn-down and
 breakdown cards; breakdown interactions filter the view; per-card empty
@@ -791,7 +979,14 @@ service method for the endpoint exists but no page calls it.
   a badge marking the paid feature, a hero explaining on-demand
   snapshots of all cycles, a short set of benefit cards, and an upgrade
   action that opens `https://airepublic.com/pricing` in a new tab. The
-  page never requests the active-cycles endpoint.
+  page never requests the active-cycles endpoint. The pinned shape the
+  oracle reads is: a level-2 heading whose text contains "snapshots"
+  (the reference reads "On-demand snapshots of all your cycles"),
+  exactly **six** benefit cards, each headed by a level-3 heading, an
+  anchor labelled **"Upgrade"** whose `href` contains `pricing` and whose
+  `target` is `_blank`, and a header badge whose text is exactly
+  **"Pro"**. Keep those counts and strings; the illustrations, colours
+  and card copy are free.
 - **Paid cloud workspace**: nothing in this checkout changes the
   rendered page — it is the same upsell component. A real paid data view
   may live in the private EE overlay, but the overlay at
@@ -813,14 +1008,25 @@ page does not read data, so it needs no empty or error state of its own;
 the seam's data view, when it exists, owns those.
 
 Oracle: `hero-crosscutting.spec.ts` (workspace actives page is a paid
-upsell with a pricing path).
+upsell: "snapshots" heading, six benefits, a pricing link opened in a
+new tab, and the Pro badge).
 
 ## 17. Dates and timezones
 
 Cycle dates are stored as instants and displayed in the project's
-timezone (CYC-044). A date span renders as one range, e.g. a start day
-and an end day joined by a separator, with year shown when the range is
-not in the current year. Whenever the project timezone's offset from UTC
+timezone (CYC-044). A two-sided span renders as one compact range with
+the year **always** present (both ends in the same year):
+
+- same month: `Sep 01 - 18, 2026` (month and year once, days on both
+  ends);
+- different months: `Sep 01 - Oct 18, 2026`;
+- different years: `Dec 28, 2025 - Jan 04, 2026` (year on both ends).
+
+The year is not conditional on "current year"; do not drop it for a
+current-year range. A one-sided span is `MMM dd, yyyy` (`Oct 15, 2026`);
+a cycle with neither date renders no date text. The oracle reads a
+month-and-digit string from the row, so any of the shapes above must
+contain the month name and a digit. Whenever the project timezone's offset from UTC
 is non-zero, the span carries a small offset chip (`UTC -04:00`, `UTC
 -05:00`) and a tooltip explaining that the dates are shown in the
 project's timezone; the chip also exposes the viewer's equivalent day
@@ -831,7 +1037,14 @@ suppression rule is the **project offset** alone: when the offset from
 UTC is zero (whether the project is configured as `UTC` or as any other
 name with a zero offset) no chip renders. The chip reads the project's
 UTC offset; it must not key on the browser timezone or the string
-`"UTC"`. A missing start or end
+`"UTC"`. The chip's text starts with `UTC` followed by a signed offset
+(`UTC +05:30`, `UTC -04:00`), exactly as the oracle matches
+`/^UTC [+-]/`; render the offset as its own element inside the span.
+The "In your timezone" tooltip is shown only when the project zone
+differs from the viewer's; that condition affects only the tooltip,
+never the chip.
+
+A missing start or end
 renders a one-sided range (the single date); a cycle with neither date
 renders no date text (§2, CYC-002), while the sidebar and hero show
 their own "no dates" placeholder.
@@ -876,20 +1089,25 @@ pinned transfer-source staleness).
 
 ## 19. Copy link and open in a new tab
 
-The row menu and the command palette can copy a cycle's address to the
-clipboard (CYC-046). Copy uses the canonical detail address
+The **row menu** can copy a cycle's address to the clipboard (CYC-046).
+Row copy uses the canonical detail address
 (`/{ws}/projects/{pid}/cycles/{cid}`) — the same string on the list, the
-detail, the archived list and the palette — and confirms visibly after
-the clipboard write succeeds; a clipboard refusal reports an error and
-does not claim success. Open in a new tab opens that same address with
-``noopener`/`noreferrer` and leaves the current view untouched. Archived
+detail and the archived list — and confirms visibly after
+the clipboard write succeeds (the reference toasts `Link copied!` /
+`Link copied to clipboard`); a clipboard refusal reports an error and
+does not claim success. The **palette's `Copy URL`** is the one
+exception: it copies `window.location.href` (current address, query
+included), as noted in §11. Open in a new tab opens the canonical
+address in a new browsing context and leaves the current view
+untouched. Archived
 rows offer the same copy and open entries as live rows; the copied
 string is the same canonical detail address. The command palette never
 offers cycle commands for archived cycles (§11).
 
 Oracle: `archive-menu-transfer.spec.ts` (row menu copies the address
 with confirmation and opens it in a new tab; the palette copies the same
-address).
+address on a detail page, where current address and canonical path
+coincide after any `peekCycle` key is dropped).
 
 ## 20. Guests and viewers
 
@@ -926,8 +1144,17 @@ reachable without hover (CYC-048):
 - Row menu triggers render inline in every row instead of appearing on
   hover; the menu opens as a sheet or popover anchored to the row and
   dismisses on outside tap.
-- The detail's narrow header offers the layout menu (list, board,
-  calendar), Display and analytics; the sidebar opens as a full-height
+- The **list**'s narrow header carries a layout control whose menu
+  offers exactly two entries, **"List layout"** and **"Gallery
+  layout"** (the oracle asserts that exact array). "Gallery layout"
+  switches the list's row presentation only; every cycle row stays
+  listed and the hero and groups remain, so a name visible before the
+  switch is still visible after it. The reference's third entry
+  (timeline) is filtered out on narrow screens; do not add it.
+- The detail's narrow bar offers a **Layout** menu with **"List"**,
+  **"Board"** and **"Calendar"** (option names are those three; picking
+  Board writes `kanban` to the cycle's user-properties
+  `display_filters.layout`), plus Display and analytics; the sidebar opens as a full-height
   panel over the content and closes back to the content.
 - The breadcrumb trail collapses to a back control to the cycles list.
 - The hero's cards stack; the sidebar toggle remains visible and the
@@ -1078,6 +1305,15 @@ where the service supplies field keys; the dialog shows them next to the
 field. A permission failure on any mutation is shown as a permission
 message; a missing cycle on any read or write is the gone-away state; a
 date-check collision is a refusal with guidance, not a generic error.
+Missing/deleted detail reads are a real 404 from the API; the UI maps
+that to the gone-away view rather than treating it as retryable.
+
+**Peek and detail reads.** The peek panel reads one cycle
+(`GET BASE/cycles/{cid}/`) and its progress, exactly like the detail
+page, so opening the peek does not depend on the list row still being
+loaded after a filter change. The archived peek reads
+`GET BASE/archived-cycles/{cid}/` and must tolerate the incomplete row
+payload described in §25 (NEWFRONT-240).
 
 | Method and path                                                            | Purpose                                                             | Rows                              |
 | -------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------- |
@@ -1099,6 +1335,13 @@ date-check collision is a refusal with guidance, not a generic error.
 | `GET BASE/cycles/{cid}/analytics?type=issues\|points`                      | breakdown distributions                                             | 038, 041                          |
 | `GET`/`PATCH BASE/cycles/{cid}/user-properties/`                           | per-cycle layout, filters, display, rich filters                    | 032, 035, 039                     |
 | `GET BASE/` (project features)                                             | `cycle_view` flag, feature-off view                                 | 010                               |
+
+The date-check answer is `{ status: boolean }`: `true` means the range is
+free. Its request takes `start_date` and `end_date` in `yyyy-MM-dd` form
+and, on edit, `cycle_id` so the cycle is excluded from its own check.
+The two dates must be sent as date-only values computed in the project's
+timezone (§17), not as UTC instants, or a late-evening local day shifts
+by one and a legitimate range is refused.
 
 ## 24. Edition seams
 
@@ -1179,12 +1422,12 @@ its workpad rather than weakening the assertion.
 
 | Row              | Follow-up    | Old behavior pinned                                                                                                                                             | Intended behavior                                                                                                                                                                                                                                                         |
 | ---------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CYC-026          | NEWFRONT-244 | A failed restore reports success and the cycle stays archived.                                                                                                  | A failed restore shows a failure message and leaves the cycle in the archived list and archived state; no success toast, no navigation to the live list, no optimistic removal. The row stays retryable.                                                                  |
+| CYC-026          | NEWFRONT-244 | A failed restore reports success and the cycle stays archived.                                                                                                  | A failed restore shows the `Cycle restore failed` toast and leaves the cycle in the archived list and archived state; no success toast, no navigation to the archived list (the success destination), no optimistic removal. The row stays retryable.                     |
 | CYC-032, CYC-033 | NEWFRONT-261 | Guests cannot read cycle work items: the layouts are empty, the badge hides and breakdown filtering yields nothing, though creation/mutation gating is correct. | Once PDASHOSS01-310 lands, guests browse cycle items read-only: every layout shows the items, the badge counts them, and sidebar/hero breakdown entries filter them. Creation and all mutations stay gated (§20). No client-side fake data while the backend gap is open. |
 | CYC-020          | NEWFRONT-263 | Tab order skips the project picker (and can escape the dialog).                                                                                                 | The picker sits before the title in the DOM, so the trap wraps submit → picker → title; after the autofocused title the stops are description → dates → cancel → submit → picker. Focus never leaves the dialog; Shift+Tab reverses; Escape closes.                       |
 | CYC-036          | NEWFRONT-264 | A second inline date save while a toast is showing can swallow the overlap rejection, so the user sees no error.                                                | Toasts queue or visibly replace one another; an overlap rejection is always rendered in the panel next to the dates and never swallowed, even when a success toast is on screen.                                                                                          |
 | CYC-041          | NEWFRONT-266 | The first hero breakdown click does nothing because the user-properties row does not exist yet.                                                                 | The first breakdown click on a fresh cycle works: the write path creates the record, applies the filter, and shows it, with no second click needed. Same for the sidebar entries.                                                                                         |
-| CYC-045          | NEWFRONT-267 | Transfer refreshes the destination but the source banner and ring stay stale.                                                                                   | Transfer refreshes both sides: the source's banner, counts and ring update without a reload (§12).                                                                                                                                                                        |
+| CYC-045          | NEWFRONT-267 | Transfer refreshes the destination but the source banner and ring stay stale.                                                                                   | Transfer refreshes both sides: the source's banner, counts and ring update without a reload, from either entry point, even though the server has just written the source's snapshot (§12).                                                                                |
 | CYC-047          | NEWFRONT-268 | Guests lose the list search and filter controls behind the create gate.                                                                                         | Guests keep search, filters, chips, clear-all, peek and copy; only creation and mutation affordances are gated (§20).                                                                                                                                                     |
 
 ### Rules settled by the spec review
@@ -1192,28 +1435,45 @@ its workpad rather than weakening the assertion.
 These are not old bugs; they are points the first draft stated loosely
 or wrongly. Slices must build exactly these:
 
-| Row     | Rule to build                                                                                                                                                                                                                                                                       |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CYC-014 | The project picker is shown on **every create**, including from a project page, and retargets the create to the picked project; it is hidden only on edit. §6.                                                                                                                      |
-| CYC-020 | The dialog's forward tab cycle after the autofocused title is description → dates → cancel → submit → project picker → title, wrapping inside the dialog; the picker is reachable and trapped, and is not second. §6.                                                               |
-| CYC-017 | The edit date check runs only when **both** dates are set and the range changed; clearing either date saves without a date check. §7, §14.                                                                                                                                          |
-| CYC-002 | An undated row renders **no date element** (not a dash); a one-sided range renders the single date; the ring for a zero denominator reads `0%`. §2, §17.                                                                                                                            |
-| CYC-027 | Archived reads are **member+**; activating an archived row opens its peek, while "Open in new tab" goes to the canonical detail address (gone-away for an archived cycle). The archived search box is collapsed on arrival and opens focused; the live box opens unfocused. §3, §9. |
-| CYC-029 | Favorites are **member+ only**; guests get no star, not a disabled one. §11.                                                                                                                                                                                                        |
-| CYC-031 | Transfer has **two entry points** — the finished detail banner and an inline action on a completed list row — gated by `backlog + unstarted + started > 0` **and** an empty `progress_snapshot`, both opening one shared dialog. §12.                                               |
-| CYC-033 | The analytics trigger opens NEWFRONT-738's **cycle-scoped** dialog (`Analytics for {project} in {cycle}`), not the issues-header `AnalyticsEntry`. §13, §22.                                                                                                                        |
-| CYC-044 | The offset chip renders for any **non-zero project offset** (no browser-zone comparison) and is suppressed by a zero offset, not by the `"UTC"` label. §17.                                                                                                                         |
-| CYC-037 | An empty description renders nothing and a missing lead renders an empty avatar with no name; no "No description"/"No lead" strings. §14.                                                                                                                                           |
-| CYC-038 | The sidebar Work items row and state-group total use the raw `completed_issues/total_issues` counters (cancelled included); only the ring excludes cancelled. §2, §14.                                                                                                              |
-| CYC-041 | A hero state-group click navigates to the cycle detail with that state group filtered (and persisted in rich filters). §15.                                                                                                                                                         |
-| CYC-001 | The list read sends **no `cycle_view`** (the backend treats it as `all`); `current` is the separate hero read, and the project feature flag is a separate boolean on the project payload. §2, §23.                                                                                  |
-| CYC-026 | Restore is a **direct menu action** with no confirmation dialog; only archive and delete open dialogs. A failure leaves the row archived and retryable (§9). §9.                                                                                                                    |
-| CYC-022 | Delete has two layers: the menu entry is shown to member+, but the server accepts the cycle owner/creator or a project admin only, so a non-owner member gets the permission message. §8.                                                                                           |
-| CYC-043 | The workspace page is **the upsell in every edition** in this checkout; no cloud list renders and there is no EE source to cite. A paid data view is a seam needing a row and scenario first. The inventory no longer claims a full view. §16, §24.                                 |
-| CYC-014 | The palette's "New cycle" command is an entry point (project in context, `cycle_view` on, member+); the work-item create modal is **not**. §6, §25.                                                                                                                                 |
-| CYC-029 | The star and palette write `POST WS/user-favorites/` `{entity_type:"cycle", entity_identifier, project_id, entity_data:{name}}` and `DELETE WS/user-favorites/{favoriteId}/`; the sidebar reads the same collection. §11.                                                           |
-| CYC-007 | The end-date filter section is labelled **"Due date"** (the oracle picks by that label); it filters the cycle's end date. §4.                                                                                                                                                       |
-| CYC-001 | `GET BASE/cycles/` and `GET WS/cycles/` answer **bare arrays**; only `GET WS/active-cycles/` is cursor-paged. §23.                                                                                                                                                                  |
+| Row                                | Rule to build                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CYC-014                            | The project picker is shown on **every create**, including from a project page, and retargets the create to the picked project; it is hidden only on edit. §6.                                                                                                                                                                                                                                                                                       |
+| CYC-020                            | The dialog's forward tab cycle after the autofocused title is description → dates → cancel → submit → project picker → title, wrapping inside the dialog; the picker is reachable and trapped, and is not second. §6.                                                                                                                                                                                                                                |
+| CYC-017                            | The edit date check runs only when **both** dates are set and the range changed; clearing either date saves without a date check. §7, §14.                                                                                                                                                                                                                                                                                                           |
+| CYC-002                            | An undated row renders **no date element** (not a dash); a one-sided range renders the single date; the ring for a zero denominator reads `0%`. §2, §17.                                                                                                                                                                                                                                                                                             |
+| CYC-027                            | Archived reads are **member+**; activating an archived row opens its peek, while "Open in new tab" goes to the canonical detail address (gone-away for an archived cycle). The archived search box is collapsed on arrival and opens focused; the live box opens unfocused. §3, §9.                                                                                                                                                                  |
+| CYC-029                            | Favorites are **member+ only**; guests get no star, not a disabled one. §11.                                                                                                                                                                                                                                                                                                                                                                         |
+| CYC-031                            | Transfer has **two entry points** — the finished detail banner and an inline action on a completed list row — opening one shared dialog. Row gate: completed **and** `total - (cancelled + completed) > 0`. Banner gate: the same count **and** an empty `progress_snapshot`. The server writes the source snapshot on success. §12.                                                                                                                 |
+| CYC-033                            | The analytics trigger opens NEWFRONT-738's **cycle-scoped** dialog (`Analytics for {project} in {cycle}`), not the issues-header `AnalyticsEntry`. §13, §22.                                                                                                                                                                                                                                                                                         |
+| CYC-044                            | The offset chip renders for any **non-zero project offset** (no browser-zone comparison) and is suppressed by a zero offset, not by the `"UTC"` label. §17.                                                                                                                                                                                                                                                                                          |
+| CYC-037                            | An empty description renders nothing and a missing lead renders an empty avatar with no name; no "No description"/"No lead" strings. §14.                                                                                                                                                                                                                                                                                                            |
+| CYC-038                            | The sidebar Work items row and state-group total use the raw `completed_issues/total_issues` counters (cancelled included); only the ring excludes cancelled. §2, §14.                                                                                                                                                                                                                                                                               |
+| CYC-041                            | A hero state-group click navigates to the cycle detail with that state group filtered (and persisted in rich filters). §15.                                                                                                                                                                                                                                                                                                                          |
+| CYC-001                            | The list read sends **no `cycle_view`** (the backend treats it as `all`); `current` is the separate hero read, and the project feature flag is a separate boolean on the project payload. §2, §23.                                                                                                                                                                                                                                                   |
+| CYC-026                            | Restore is a **direct menu action** with no confirmation dialog; only archive and delete open dialogs. A failure leaves the row archived and retryable (§9). §9.                                                                                                                                                                                                                                                                                     |
+| CYC-022                            | Delete has two layers: the menu entry is shown to member+, but the server accepts the cycle owner/creator or a project admin only, so a non-owner member gets the permission message. §8.                                                                                                                                                                                                                                                            |
+| CYC-043                            | The workspace page is **the upsell in every edition** in this checkout; no cloud list renders and there is no EE source to cite. A paid data view is a seam needing a row and scenario first. The inventory no longer claims a full view. §16, §24.                                                                                                                                                                                                  |
+| CYC-014                            | The palette's "New cycle" command is an entry point (project in context, `cycle_view` on, member+); the work-item create modal is **not**. §6, §25.                                                                                                                                                                                                                                                                                                  |
+| CYC-029                            | The star and palette write `POST WS/user-favorites/` `{entity_type:"cycle", entity_identifier, project_id, entity_data:{name}}` and `DELETE WS/user-favorites/{favoriteId}/`; the sidebar reads the same collection. §11.                                                                                                                                                                                                                            |
+| CYC-007                            | The end-date filter section is labelled **"Due date"** (the oracle picks by that label); it filters the cycle's end date. §4.                                                                                                                                                                                                                                                                                                                        |
+| CYC-001                            | `GET BASE/cycles/` and `GET WS/cycles/` answer **bare arrays**; only `GET WS/active-cycles/` is cursor-paged. §23.                                                                                                                                                                                                                                                                                                                                   |
+| CYC-002                            | Rows: current row shows exactly one avatar (the creator) and no count; every other row shows creator **and** assignee avatars (members icon when none). Draft/upcoming show the count. Group headings are `Active cycle` / `Upcoming cycle` / `Completed cycle`; the last two carry their count inside the disclosure button, Active does not. §2.                                                                                                   |
+| CYC-004, CYC-005                   | The live search box opens **unfocused** (no deferred focus "fix"); the archived box opens focused. The expanded input's placeholder is exactly `Search`. §3, §9.                                                                                                                                                                                                                                                                                     |
+| CYC-006, CYC-007, CYC-008          | Filter labels are fixed: `Status of the cycle` with `In progress` / `Yet to start` / `Completed` / `Draft`; both date sections use `1 week from now` … `2 months from now` plus `Custom`; chips row has a `clear all` action. §4.                                                                                                                                                                                                                    |
+| CYC-009, CYC-010, CYC-011, CYC-013 | Empty-state labels are fixed: `No matching cycles` + `Remove the filters to see all cycles` / `Remove the search criteria to see all cycles`; `Manage features`; `Set your first cycle`; `View other cycles`; archived zero is `No archived cycles yet`. §5, §9.                                                                                                                                                                                     |
+| CYC-014, CYC-015, CYC-016          | Create dialog: header button `Add cycle`; heading and submit `Create cycle`; placeholders `Title`/`Description`/`Start date`/`End date`; a **one-sided** date range is valid (no both-or-none rule); overlap toast is `Error!` + "you already have a cycle" + draft guidance. §6.                                                                                                                                                                    |
+| CYC-017                            | Edit dialog heading and submit are `Update cycle`; success toast `Cycle updated successfully.`; untouched dates send no date check. §7.                                                                                                                                                                                                                                                                                                              |
+| CYC-022                            | Delete dialog heading is `Delete cycle`; success `Cycle deleted successfully.`; a 403 shows the permission toast (`You don't have permission to perform this action.`), never `Failed to delete cycle`. §8.                                                                                                                                                                                                                                          |
+| CYC-024, CYC-025, CYC-026          | Archive: hint `Only completed cycles can be archived`, dialog `Archive cycle {name}`, toast title `Archive success` + `Your archives can be found in project archives.`, and a return to the live list. Restore: direct action, `Cycle restored` + `The cycle has been restored.`, failure `Cycle restore failed`. §9.                                                                                                                               |
+| CYC-028                            | Row-menu titles are fixed: `Edit`, `Open in new tab`, `Copy link`, `Archive`, `Delete` (draft/current) and `…`, `Archive` (completed) and `…`, `Restore` (archived); filtered entries keep that relative order. §10.                                                                                                                                                                                                                                 |
+| CYC-029, CYC-030                   | Palette titles are `Add to favorites` / `Remove from favorites` and `Copy URL`; palette copy uses the current address, row copy the canonical path. §11, §19.                                                                                                                                                                                                                                                                                        |
+| CYC-031                            | Transfer: dialog `Transfer work items`, placeholder `Search for a cycle...`, name + capitalised status pill per option, empty text `You don't have any current cycle. Please create one to transfer the work items.`, success `transferred successfully`, failure `Unable to transfer work items. Please try again.` **The server writes the source snapshot** after transfer; the row gate omits the snapshot clause, the banner gate adds it. §12. |
+| CYC-033, CYC-034                   | The last breadcrumb crumb is the cycle switcher; the labels `Analytics` and `Add work item` are fixed. §13.                                                                                                                                                                                                                                                                                                                                          |
+| CYC-037, CYC-038, CYC-039          | Sidebar labels are `Lead`, `Members`, `Work items`, `Points` (points estimate + not completed), measures `Work items` / `Estimates`, breakdown tabs `States` / `Assignees` / `Labels` with Assignees default. §14.                                                                                                                                                                                                                                   |
+| CYC-041, CYC-042                   | Hero: group heading `Active cycle`, cards `Progress` and `Work item burndown` (with `Pending work items - {n}`), tabs `Priority work items` / `Assignees` / `Labels`; empty copy `Add work items to the cycle to view it's progress`; no-active explainer `No active cycle` with "today" in its description. §15.                                                                                                                                    |
+| CYC-043                            | Workspace upsell: heading containing "snapshots", exactly **six** benefit cards, `Upgrade` anchor to the pricing URL with `target="_blank"`, header badge exactly `Pro`. §16.                                                                                                                                                                                                                                                                        |
+| CYC-044                            | Two-sided spans always carry the year (`Sep 01 - Oct 18, 2026`); one-sided is `MMM dd, yyyy`; the chip text starts `UTC ` + signed offset; only a zero project offset suppresses it, and the viewer-zone comparison affects only the tooltip. §17.                                                                                                                                                                                                   |
+| CYC-048                            | Narrow **list** layout menu offers exactly `List layout` and `Gallery layout` and keeps rows; narrow **detail** menu offers `List` / `Board` / `Calendar` and Board writes `kanban` to the cycle prefs. §21.                                                                                                                                                                                                                                         |
 
 ## 27. Row coverage index
 
@@ -1270,3 +1530,57 @@ its screens, states, rules and API calls.
 | CYC-046 | §19              |
 | CYC-047 | §20, §2, §4      |
 | CYC-048 | §10, §21         |
+
+## 28. Parity driver contract
+
+The oracle specs call a fixed surface on the parity driver. The cycle
+methods in `apps/web_new/e2e/parity/drivers/web-new.ts` are `todo()`
+stubs; each slice implements the ones its rows need, in that file, by
+re-reading the old driver's _intent_ (which is reference-only) and
+finding the equivalent in the new UI. Do not change a method's
+signature or its return shape to suit the new markup: the specs are the
+contract. Where a stub's current selector cannot work in `web_new`,
+implement it from the semantics in this spec (accessible names, roles,
+text) rather than loosening the spec's assertion.
+
+What the specs depend on, and therefore what the slices must render:
+
+- Group headings are disclosure **buttons** whose text starts with
+  `Active cycle` / `Upcoming cycle` / `Completed cycle`; Upcoming and
+  Completed end with their count, and `aria-expanded` reflects the
+  group.
+- Rows are anchors to the detail address with the cycle name in a
+  truncation span; the hover/inline eye control opens the peek, whose
+  panel carries the name in a heading.
+- The search control is a toggle that expands a text box whose
+  placeholder is `Search`; the archived one focuses on open and the live
+  one does not.
+- The filter menu exposes section headings and options by the labels
+  pinned in §4 and §26; chips are removable and a `clear all` control
+  resets them.
+- Dialog headings, submit labels, placeholders, toast titles and toast
+  messages are the strings pinned in §26; drivers wait on those exact
+  strings or case-insensitive phrase matches.
+- The create form's focus trail is `Title`, `Description`, `Start date
+End date` (one range control), `Cancel`, `Create cycle`, with the
+  project picker before the title in DOM order and focus trapped inside
+  the dialog.
+- The sidebar is a panel with a stable width class-independent hook,
+  a heading, and `role="tab"` controls for `States` / `Assignees` /
+  `Labels`; its measure trigger is a button named `Work items` or
+  `Estimates`.
+- The hero renders a group button starting `Active cycle`, a card with
+  the `Progress` heading, a card with a `burndown` heading and a
+  `Pending…` line, and a tablist with `Priority work items` /
+  `Assignees` / `Labels`.
+- The workspace actives page renders an `h2` containing "snapshots", six
+  `h3` benefit headings, an `Upgrade` anchor, and a `Pro` badge.
+- The narrow list menu yields exactly `List layout`, `Gallery layout`;
+  the narrow detail menu yields `List`, `Board`, `Calendar`.
+- The transfer dialog uses a `Search for a cycle...` placeholder and
+  destination buttons named after the cycle; the empty-state sentence is
+  the one pinned in §12.
+
+Anything this section pins that is missing from an earlier section is a
+requirement, not a description of the reference: build to §26 and this
+section together.
