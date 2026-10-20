@@ -131,6 +131,7 @@ describe("schedulers settings route", () => {
 
   it("refuses a project member with the oracle heading, keeping the rail", async () => {
     harness.role = 15;
+    harness.workspaceRole = 15;
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByTestId("project-settings-sidebar")).toBeInTheDocument();
