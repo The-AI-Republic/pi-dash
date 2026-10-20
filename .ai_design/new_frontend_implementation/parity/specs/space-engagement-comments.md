@@ -1,3 +1,5 @@
+> **Superseded.** This note was folded into [`space.md`](space.md) by NEWFRONT-751; that file is the authoritative build spec for the area. Kept for history (the oracle research notes it was written from).
+
 # Space engagement and comments — area spec (NEWFRONT-451)
 
 Oracle area spec for inventory rows SPC-047–057 (issue votes, issue emoji

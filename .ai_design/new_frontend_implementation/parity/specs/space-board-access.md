@@ -1,3 +1,5 @@
+> **Superseded.** This note was folded into [`space.md`](space.md) by NEWFRONT-751; that file is the authoritative build spec for the area. Kept for history (the oracle research notes it was written from).
+
 # Area spec — space board access and routing (SPC-001–009)
 
 Source: NEWFRONT-447 oracle research. Behavior paraphrased from the old

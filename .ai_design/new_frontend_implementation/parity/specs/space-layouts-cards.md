@@ -1,3 +1,5 @@
+> **Superseded.** This note was folded into [`space.md`](space.md) by NEWFRONT-751; that file is the authoritative build spec for the area. Kept for history (the oracle research notes it was written from).
+
 # Area spec: space board layouts & cards (SPC-020–033)
 
 Learned by reading the old space frontend (board routes, navbar, layout
