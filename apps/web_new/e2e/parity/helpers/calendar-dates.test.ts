@@ -3,7 +3,13 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { isoDayOffset, isWeekendISO, pickFutureWeekdayISO, pickPastWeekdayISO } from "./calendar-dates.js";
+import {
+  elapsedHalfHour,
+  isoDayOffset,
+  isWeekendISO,
+  pickFutureWeekdayISO,
+  pickPastWeekdayISO,
+} from "./calendar-dates.js";
 
 describe("isoDayOffset", () => {
   it("shifts days within the month", () => {
@@ -68,5 +74,24 @@ describe("pickPastWeekdayISO", () => {
     ["2026-10-12", "2026-10-09"],
   ])("pushes yesterday back to Friday running on %s", (today, expected) => {
     expect(pickPastWeekdayISO(today, 1)).toBe(expected);
+  });
+});
+
+describe("elapsedHalfHour", () => {
+  it.each([
+    [new Date(2026, 9, 20, 13, 14), "PM", "01:00"],
+    [new Date(2026, 9, 20, 13, 15), "PM", "01:00"],
+    [new Date(2026, 9, 20, 13, 30), "PM", "01:30"],
+    [new Date(2026, 9, 20, 11, 30), "PM", "11:30"],
+    [new Date(2026, 9, 20, 11, 29), "AM", "11:00"],
+    [new Date(2026, 9, 20, 2, 0), "AM", "02:00"],
+    [new Date(2026, 9, 20, 0, 5), "AM", "12:00"],
+  ])("derives the elapsed half-hour and its live period", (now, meridiem, slot) => {
+    expect(elapsedHalfHour(now)).toEqual({ meridiem, slot });
+  });
+
+  it("returns null once both grids are exhausted", () => {
+    expect(elapsedHalfHour(new Date(2026, 9, 20, 23, 30))).toBeNull();
+    expect(elapsedHalfHour(new Date(2026, 9, 20, 23, 59))).toBeNull();
   });
 });
