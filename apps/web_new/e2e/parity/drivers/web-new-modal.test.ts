@@ -89,9 +89,9 @@ describe("create modal", () => {
   });
 
   it("reports the modal by the title field and reads its heading", async () => {
+    const heading = locator({ textContent: async () => "  Create new work item  " });
     const page = pageOf({
-      getByPlaceholder: () => locator({ count: async () => 1 }),
-      locator: () => locator({ allTextContents: async () => ["", "Create new work item", "Another heading"] }),
+      getByRole: () => locator({ filter: () => locator({ count: async () => 1, locator: () => heading }) }),
     });
     const driver = new WebNewDriver(page);
     await expect(driver.createModalOpen()).resolves.toBe(true);
@@ -100,8 +100,8 @@ describe("create modal", () => {
 
   it("reports a closed modal and an empty heading", async () => {
     const page = pageOf({
-      getByPlaceholder: () => locator({ count: async () => 0 }),
-      locator: () => locator({ allTextContents: async () => [] }),
+      getByRole: () => locator({ filter: () => locator({ count: async () => 0 }) }),
+      locator: () => locator({ count: async () => 0 }),
     });
     const driver = new WebNewDriver(page);
     await expect(driver.createModalOpen()).resolves.toBe(false);
@@ -110,8 +110,11 @@ describe("create modal", () => {
 
   it("types the title and proves the field holds it", async () => {
     const typed: string[] = [];
-    const page = pageOf({
+    const dialog = locator({
       getByPlaceholder: () => locator({ inputValue: async () => "Fresh report" }),
+    });
+    const page = pageOf({
+      getByRole: () => locator({ filter: () => dialog }),
       keyboard: {
         press: async () => undefined,
         type: async (text: string) => void typed.push(text),
@@ -122,7 +125,10 @@ describe("create modal", () => {
   });
 
   it("fails loudly when the title field did not take the text", async () => {
-    const page = pageOf({ getByPlaceholder: () => locator({ inputValue: async () => "stale" }) });
+    const dialog = locator({
+      getByPlaceholder: () => locator({ inputValue: async () => "stale" }),
+    });
+    const page = pageOf({ getByRole: () => locator({ filter: () => dialog }) });
     await expect(new WebNewDriver(page).fillCreateTitle("Fresh report")).rejects.toThrow(/holds "stale"/);
   });
 

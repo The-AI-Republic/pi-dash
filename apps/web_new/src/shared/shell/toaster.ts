@@ -30,8 +30,7 @@ export function notifySuccessWithAction(title: string, description: string | und
   showToast(getToastManager(), {
     title,
     ...(description === undefined ? {} : { description }),
-    actionLabel: followUp.actionLabel,
-    onAction: followUp.onAction,
+    actions: [{ label: followUp.actionLabel, run: followUp.onAction }],
   });
 }
 

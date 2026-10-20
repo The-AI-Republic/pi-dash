@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { createKitToastManager, showToast, TOAST_COPIED_RESET_MS, ToastHost } from "./Toast";
@@ -38,7 +38,7 @@ describe("Toast", () => {
     const user = userEvent.setup();
     const manager = setup();
     const onAction = vi.fn();
-    showToast(manager, { title: "Saved", actionLabel: "Undo", onAction, timeout: 0 });
+    showToast(manager, { title: "Saved", actions: [{ label: "Undo", run: onAction }], timeout: 0 });
     await screen.findByText("Saved");
     await user.click(screen.getByRole("button", { name: "Undo" }));
     expect(onAction).toHaveBeenCalledTimes(1);
@@ -79,7 +79,11 @@ describe("Toast inline actions", () => {
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       const manager = setup();
       const run = vi.fn();
-      showToast(manager, { title: "Saved", timeout: 0, actions: [{ label: "Copy link", run }] });
+      showToast(manager, {
+        title: "Saved",
+        timeout: 0,
+        actions: [{ label: "Copy link", run, confirmLabel: "Copied!" }],
+      });
       await screen.findByText("Saved");
       await user.click(screen.getByRole("button", { name: "Copy link" }));
       expect(run).toHaveBeenCalledTimes(1);
@@ -96,7 +100,11 @@ describe("Toast inline actions", () => {
   it("keeps the label when a copy action reports a failed write", async () => {
     const user = userEvent.setup();
     const manager = setup();
-    showToast(manager, { title: "Saved", timeout: 0, actions: [{ label: "Copy link", run: () => false }] });
+    showToast(manager, {
+      title: "Saved",
+      timeout: 0,
+      actions: [{ label: "Copy link", run: () => false, confirmLabel: "Copied!" }],
+    });
     await screen.findByText("Saved");
     await user.click(screen.getByRole("button", { name: "Copy link" }));
     expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
@@ -109,7 +117,7 @@ describe("Toast inline actions", () => {
     showToast(manager, {
       title: "Saved",
       timeout: 0,
-      actions: [{ label: "Copy link", run: async () => true }],
+      actions: [{ label: "Copy link", run: async () => true, confirmLabel: "Copied!" }],
     });
     await screen.findByText("Saved");
     await user.click(screen.getByRole("button", { name: "Copy link" }));
@@ -125,14 +133,26 @@ describe("Toast inline actions", () => {
     expect(screen.queryByText("Moved")).not.toBeInTheDocument();
   });
 
-  it("keeps the legacy single action working alongside the list", async () => {
+  it("runs a plain action and dismisses even when it resolves later", async () => {
     const user = userEvent.setup();
     const manager = setup();
-    const onAction = vi.fn();
-    showToast(manager, { title: "Saved", actionLabel: "Undo", onAction, timeout: 0 });
+    const run = vi.fn(async () => undefined);
+    showToast(manager, { title: "Moved", actions: [{ label: "Open", run }], timeout: 0 });
+    await screen.findByText("Moved");
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(run).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText("Moved")).not.toBeInTheDocument());
+  });
+
+  it("keeps the action row until the copy reports success", async () => {
+    const user = userEvent.setup();
+    const manager = setup();
+    const run = vi.fn(async () => false);
+    showToast(manager, { title: "Saved", actions: [{ label: "Copy link", run, confirmLabel: "Copied!" }], timeout: 0 });
     await screen.findByText("Saved");
-    await user.click(screen.getByRole("button", { name: "Undo" }));
-    expect(onAction).toHaveBeenCalledTimes(1);
-    expect(screen.queryByTestId("toast-actions")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.queryByText("Copied!")).not.toBeInTheDocument();
   });
 });

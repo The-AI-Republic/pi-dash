@@ -26,6 +26,8 @@ export const WORK_ITEM_CREATED_TITLE = "Work item created successfully";
 export const CREATE_TOAST_VIEW_LABEL = "View work item";
 /** Toast action that copies the new work item's address (ISS-131). */
 export const CREATE_TOAST_COPY_LABEL = "Copy link";
+/** What the copy action shows once the clipboard write lands (ISS-131). */
+export const CREATE_TOAST_COPIED_LABEL = "Copied!";
 /** Failure title when the work item does not land. */
 export const WORK_ITEM_CREATE_FAILED_TITLE = "Couldn't create the work item";
 const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connection and try again.";
@@ -68,6 +70,7 @@ export function announceCreatedWorkItem(
       // claim success, so the copy resolves false and the label stays.
       {
         label: CREATE_TOAST_COPY_LABEL,
+        confirmLabel: CREATE_TOAST_COPIED_LABEL,
         run: async () => {
           try {
             await copyShareAddress(path);
