@@ -35,4 +35,41 @@ describe("RichTextView", () => {
     rerender(<RichTextView html="<p>second</p>" label="Body" />);
     expect(screen.getByRole("region", { name: "Body" })).toHaveTextContent("second");
   });
+
+  it("shows a stored mention as the person's name (ISS-127)", () => {
+    render(
+      <RichTextView
+        html={
+          '<p>hi <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component> there</p>'
+        }
+        label="Description"
+      />
+    );
+    const region = screen.getByRole("region", { name: "Description" });
+    expect(region).toHaveTextContent("hi @Ada there");
+    expect(region.querySelector('[data-mention-id="u-1"]')).not.toBeNull();
+  });
+
+  it("shows a stored image component as an image (ISS-127)", () => {
+    render(
+      <RichTextView html='<image-component src="https://cdn.test/a.png" alt="shot"></image-component>' label="Body" />
+    );
+    const image = screen.getByRole("region", { name: "Body" }).querySelector("img");
+    expect(image?.getAttribute("src")).toBe("https://cdn.test/a.png");
+    expect(image?.getAttribute("alt")).toBe("shot");
+  });
+
+  it("resolves a stored asset id through the caller's scope (ISS-127)", () => {
+    render(
+      <RichTextView
+        html='<image-component src="35e8b958-6ee5-43ce-ae56-fb0e776f421e" status="uploaded"></image-component>'
+        label="Body"
+        resolveAsset={(src) => `/api/assets/v2/workspaces/acme/projects/p-1/${src}/`}
+      />
+    );
+    const image = screen.getByRole("region", { name: "Body" }).querySelector("img");
+    expect(image?.getAttribute("src")).toBe(
+      "/api/assets/v2/workspaces/acme/projects/p-1/35e8b958-6ee5-43ce-ae56-fb0e776f421e/"
+    );
+  });
 });

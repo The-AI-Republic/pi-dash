@@ -14,7 +14,8 @@ import type { IssueComment } from "@pidash/api-client";
 import { Copy, Globe, Lock, MoreHorizontal, Pencil, Trash2, UnfoldVertical, FoldVertical } from "lucide-react";
 import * as React from "react";
 
-import { RichTextView } from "../../../shared/editor/index.js";
+import { getAppClient } from "../../../core/api/client.js";
+import { descriptionAssetSrc, RichTextView } from "../../../shared/editor/index.js";
 import { CommentReactionPicker, CommentReactions } from "../reactions/CommentReactions.js";
 import { timeAgo } from "../../../shared/lib/timeAgo.js";
 import {
@@ -110,6 +111,13 @@ export function CommentCard({
   onToggleFold,
   onCopyLink,
 }: CommentCardProps): React.ReactElement {
+  // Comment images stored by the older client keep an asset id; they
+  // resolve through the issue's project like the description does
+  // (ISS-127).
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
+    [workspaceSlug, projectId]
+  );
   const [editing, setEditing] = React.useState(false);
   const [expanded, setExpanded] = React.useState(false);
   const folded = isCommentFolded(comment);
@@ -210,7 +218,12 @@ export function CommentCard({
           {empty ? (
             <p className="text-body text-(--text-muted)">This comment has no text.</p>
           ) : (
-            <RichTextView html={comment.comment_html} label={`Comment by ${name}`} className="pl-(--space-8)" />
+            <RichTextView
+              html={comment.comment_html}
+              label={`Comment by ${name}`}
+              className="pl-(--space-8)"
+              resolveAsset={resolveAsset}
+            />
           )}
           {/* Folded cards and archived issues hide the whole cluster (ISS-203). */}
           {readOnly ? null : (

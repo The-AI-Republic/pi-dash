@@ -10,17 +10,13 @@
 
 import type { DraftIssueCreateInput, IssueCreateInput } from "@pidash/api-client";
 
-import { isStoredHtmlEmpty, storedTextContent } from "../../../shared/editor/index.js";
+import { hasStoredDescriptionContent, storedTextContent } from "../../../shared/editor/index.js";
 import { executionTargetPatch, type ExecutionSelection } from "../../../shared/pickers/index.js";
 import { TITLE_MAX_LENGTH, type CreateProjectOption } from "./createProjects.js";
 
 export { TITLE_MAX_LENGTH } from "./createProjects.js";
 export type { CreateProjectLike, CreateProjectOption } from "./createProjects.js";
-export {
-  selectCreatableProjects,
-  selectCreatableWorkItemProjects,
-  toCreateProjectOption,
-} from "./createProjects.js";
+export { selectCreatableProjects, selectCreatableWorkItemProjects, toCreateProjectOption } from "./createProjects.js";
 
 /** How long the assistant title helper may run before the dialog gives up. */
 export const TITLE_GENERATION_TIMEOUT_MS = 30_000;
@@ -43,6 +39,8 @@ export interface CreateFormState {
   estimatePoint: string | null;
   execution: ExecutionSelection | null;
   parentId: string | null;
+  /** Optional remote branch the item pins to (ISS-128). */
+  gitWorkBranch: string;
 }
 
 /** A blank form. `descriptionHtml` seeds the editor's default content. */
@@ -62,12 +60,21 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
     estimatePoint: null,
     execution: null,
     parentId: null,
+    gitWorkBranch: "",
   };
 }
 
-/** The form after a successful create while Create more is on (ISS-119). */
+/**
+ * The form after a successful create while Create more is on (ISS-119).
+ * The project and the route's cycle/module context stay, so the next
+ * item lands where the modal opened; everything else is a new item. The
+ * old modal merges its route data into the same reset.
+ */
 export function resetForCreateMore(form: CreateFormState, descriptionDefault = ""): CreateFormState {
-  return emptyCreateForm(form.projectId, descriptionDefault);
+  const state = emptyCreateForm(form.projectId, descriptionDefault);
+  state.cycleId = form.cycleId;
+  state.moduleIds = [...form.moduleIds];
+  return state;
 }
 
 /** Whether the dialog may file under a project id (ISS-123). */
@@ -89,6 +96,22 @@ export function resolveProjectId(projects: readonly CreateProjectOption[], prefe
  */
 export function targetProjectId(projectId: string | null, available: readonly CreateProjectOption[]): string {
   return projectId ?? available[0]?.id ?? "";
+}
+
+/** Longest git branch name the API accepts (ISS-128). */
+export const GIT_BRANCH_MAX_LENGTH = 128;
+/** Characters a branch name may carry; empty means "create a new branch". */
+const GIT_BRANCH_PATTERN = /^[A-Za-z0-9._/-]*$/;
+
+/**
+ * Inline message for the advanced branch field, or null when it may be
+ * sent (ISS-128). Empty is valid: the run creates a branch of its own.
+ */
+export function gitBranchError(branch: string): string | null {
+  if (branch.length > GIT_BRANCH_MAX_LENGTH)
+    return `Keep the branch name to ${GIT_BRANCH_MAX_LENGTH} characters or fewer.`;
+  if (!GIT_BRANCH_PATTERN.test(branch)) return "Use only letters, numbers, '.', '_', '/' and '-'.";
+  return null;
 }
 
 /** Trimmed title, or empty when the field holds only whitespace. */
@@ -115,13 +138,13 @@ export function descriptionText(descriptionHtml: string): string {
 }
 
 /**
- * The stored description, or an empty string when it holds no visible
- * content. The editor emits an empty paragraph on mount, which is not
- * something the user typed and must not count as work or travel in the
- * create payload.
+ * The stored description, or an empty string when it holds no content.
+ * Text, images and mentions all count (the shared rule, ISS-127). The
+ * editor emits an empty paragraph on mount, which is not something the
+ * user typed and must not count as work or travel in the create payload.
  */
 export function visibleDescriptionHtml(descriptionHtml: string): string {
-  return isStoredHtmlEmpty(descriptionHtml) ? "" : descriptionHtml;
+  return hasStoredDescriptionContent(descriptionHtml) ? descriptionHtml : "";
 }
 
 /** Whether the assistant may name this work item from its description (ISS-118). */
@@ -153,6 +176,8 @@ export function buildCreatePayload(form: CreateFormState): IssueCreateInput {
     payload.assigned_pod_id = target.assigned_pod_id;
     payload.agent_executor = target.agent_executor;
   }
+  const branch = form.gitWorkBranch.trim();
+  if (branch !== "") payload.git_work_branch = branch;
   return payload;
 }
 
@@ -197,21 +222,32 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
 
 /**
  * Whether the discard guard has anything worth keeping (ISS-120). The
- * project is context, not content, so it never counts; empty values and
- * a description without visible text do not either.
+ * project is context, not content, and so are the memberships a route
+ * seeded: an untouched form opened from a cycle or module page differs
+ * from its context in nothing (ISS-124/ISS-125). Empty values and a
+ * description without content do not count either.
  */
-export function hasDraftWorthKeeping(form: CreateFormState): boolean {
+/** Whether two id lists match element for element, in order. */
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+/** Nothing seeded from the route: a caller with no context. */
+const NO_MEMBERSHIP: CreateMembership = { cycleId: null, moduleIds: [] };
+
+export function hasDraftWorthKeeping(form: CreateFormState, context: CreateMembership = NO_MEMBERSHIP): boolean {
   if (normalizeTitle(form.name) !== "") return true;
-  if (!isStoredHtmlEmpty(form.descriptionHtml)) return true;
+  if (hasStoredDescriptionContent(form.descriptionHtml)) return true;
   if (form.stateId !== null) return true;
   if (form.priority !== "none") return true;
   if (form.assigneeIds.length > 0) return true;
   if (form.labelIds.length > 0) return true;
   if (form.startDate !== null || form.targetDate !== null) return true;
-  if (form.cycleId !== null) return true;
-  if (form.moduleIds.length > 0) return true;
+  if (form.cycleId !== context.cycleId) return true;
+  if (!sameIds(form.moduleIds, context.moduleIds)) return true;
   if (form.estimatePoint !== null) return true;
   if (form.execution !== null) return true;
   if (form.parentId !== null) return true;
+  if (form.gitWorkBranch.trim() !== "") return true;
   return false;
 }

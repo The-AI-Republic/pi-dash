@@ -116,6 +116,16 @@
     max-width: 100%;
     border-radius: var(--radius-control);
   }
+  /* A stored person mention: one inline chip naming the person, so the
+     read and editing surfaces both show who was mentioned (ISS-127). */
+  .rich-text-content .mention-chip,
+  .mention-chip {
+    display: inline;
+    border-radius: var(--radius-control);
+    background-color: var(--accent-subtle);
+    color: var(--accent);
+    padding: 0 var(--space-2);
+  }
   .rich-text-content table {
     border-collapse: collapse;
     margin-top: var(--space-4);

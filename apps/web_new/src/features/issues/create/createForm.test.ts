@@ -124,6 +124,23 @@ describe("buildCreatePayload", () => {
     });
   });
 
+  it("drops the editor's mount-time empty paragraph", () => {
+    expect(buildCreatePayload(form({ name: "Fresh", descriptionHtml: "<p></p>" }))).toEqual({ name: "Fresh" });
+  });
+
+  it("keeps a description made only of an image or a mention (ISS-127)", () => {
+    const image = '<p><img src="https://s3.test/a.png"></p>';
+    const mention = '<p><mention-component id="u-1"></mention-component></p>';
+    expect(buildCreatePayload(form({ name: "Shot", descriptionHtml: image }))).toEqual({
+      name: "Shot",
+      description_html: image,
+    });
+    expect(buildCreatePayload(form({ name: "Ping", descriptionHtml: mention }))).toEqual({
+      name: "Ping",
+      description_html: mention,
+    });
+  });
+
   it("carries every field the user set", () => {
     const payload = buildCreatePayload(
       form({
@@ -196,6 +213,11 @@ describe("buildDraftInput", () => {
     expect(draft.description_html).toBe("<p>Half-written</p>");
   });
 
+  it("keeps an image-only body in the draft", () => {
+    const image = '<p><img src="https://s3.test/a.png"></p>';
+    expect(buildDraftInput(form({ name: "", descriptionHtml: image })).description_html).toBe(image);
+  });
+
   it("trims a real title and carries the set fields", () => {
     const draft = buildDraftInput(
       form({
@@ -231,6 +253,26 @@ describe("buildDraftInput", () => {
 describe("hasDraftWorthKeeping", () => {
   it("ignores the project and an empty description", () => {
     expect(hasDraftWorthKeeping(form({ projectId: PROJECT, descriptionHtml: "<p> </p>" }))).toBe(false);
+    expect(hasDraftWorthKeeping(form({ projectId: PROJECT, descriptionHtml: "<p></p>" }))).toBe(false);
+  });
+
+  it("does not count membership a route seeded, but counts one the user picked", () => {
+    const engaged = { cycleId: "cycle", moduleIds: ["module"] };
+    expect(hasDraftWorthKeeping(form(engaged), engaged)).toBe(false);
+    expect(hasDraftWorthKeeping(form({ cycleId: "other" }), engaged)).toBe(true);
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["other"] }), engaged)).toBe(true);
+    expect(hasDraftWorthKeeping(form({ cycleId: "cycle" }))).toBe(true);
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["module"] }))).toBe(true);
+    // Same size, different member: the user swapped one module for another.
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["other"] }), engaged)).toBe(true);
+    expect(hasDraftWorthKeeping(form({ moduleIds: [] }), { cycleId: null, moduleIds: ["a"] })).toBe(true);
+  });
+
+  it("counts an image-only or mention-only description", () => {
+    expect(hasDraftWorthKeeping(form({ descriptionHtml: '<p><img src="x"></p>' }))).toBe(true);
+    expect(
+      hasDraftWorthKeeping(form({ descriptionHtml: '<p><mention-component id="u-1"></mention-component></p>' }))
+    ).toBe(true);
   });
 
   const dirty: Array<[string, Partial<CreateFormState>]> = [
@@ -242,8 +284,6 @@ describe("hasDraftWorthKeeping", () => {
     ["labels", { labelIds: ["label"] }],
     ["start date", { startDate: "2026-01-02" }],
     ["due date", { targetDate: "2026-01-02" }],
-    ["cycle", { cycleId: "cycle" }],
-    ["modules", { moduleIds: ["module"] }],
     ["estimate", { estimatePoint: "point" }],
     ["execution target", { execution: { type: "pod", podId: "pod" } }],
     ["parent", { parentId: "parent" }],
@@ -307,5 +347,12 @@ describe("resetForCreateMore", () => {
 
   it("keeps a null project", () => {
     expect(resetForCreateMore(form({ projectId: null, name: "x" })).projectId).toBeNull();
+  });
+
+  it("keeps the route's cycle and modules so a second item lands there too", () => {
+    const next = resetForCreateMore(form({ name: "First", cycleId: "cycle", moduleIds: ["module"] }));
+    expect(next.cycleId).toBe("cycle");
+    expect(next.moduleIds).toEqual(["module"]);
+    expect(next.name).toBe("");
   });
 });

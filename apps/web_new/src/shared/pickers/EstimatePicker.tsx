@@ -28,6 +28,8 @@ export interface EstimatePickerProps {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -55,6 +57,7 @@ export function EstimatePicker({
   iconOnly = false,
   trigger,
   placeholder = "None",
+  tabIndex,
   open: controlledOpen,
   onOpenChange,
 }: EstimatePickerProps): React.ReactElement {
@@ -89,7 +92,7 @@ export function EstimatePicker({
       );
     }
     return (
-      <Button variant={variant}>
+      <Button variant={variant} {...(tabIndex === undefined ? {} : { tabIndex })}>
         <EstimateGlyph />
         <span className="truncate">{text}</span>
       </Button>

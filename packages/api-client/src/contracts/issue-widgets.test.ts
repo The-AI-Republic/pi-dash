@@ -474,6 +474,21 @@ describe("draft contracts", () => {
     });
     expect(updater.calls.at(-1)?.init.method).toBe("PATCH");
 
+    // The update serializer replaces the cycle, module and estimate
+    // columns, so the draft edit sends the complete values it stored
+    // (ISS-124/ISS-126).
+    const membership = json(null, 204);
+    await updateDraftIssue(createClient({ baseUrl: "https://api.test", transport: membership }), "acme", UUID, {
+      estimate_point: null,
+      cycle_id: UUID2,
+      module_ids: [UUID2, UUID3],
+    });
+    expect(JSON.parse(membership.calls.at(-1)?.init.body ?? "{}")).toEqual({
+      estimate_point: null,
+      cycle_id: UUID2,
+      module_ids: [UUID2, UUID3],
+    });
+
     const deleter = json(null, 204);
     await deleteDraftIssue(createClient({ baseUrl: "https://api.test", transport: deleter }), "acme", UUID);
     expect(deleter.calls.at(-1)?.init.method).toBe("DELETE");

@@ -29,6 +29,8 @@ interface MemberPickerBase {
   trigger?: React.ReactElement<Record<string, unknown>>;
   /** Default trigger text when nothing is selected. */
   placeholder?: string;
+  /** Explicit keyboard position inside a dialog's tab order. */
+  tabIndex?: number | undefined;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -72,6 +74,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
     iconOnly = false,
     trigger,
     placeholder,
+    tabIndex,
     open: controlledOpen,
     onOpenChange,
   } = props;
@@ -135,7 +138,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
         );
       }
       return (
-        <Button variant={variant}>
+        <Button variant={variant} {...(tabIndex === undefined ? {} : { tabIndex })}>
           {current === undefined ? null : (
             <span aria-hidden="true" className="inline-flex shrink-0 items-center">
               <Avatar
@@ -189,7 +192,7 @@ export function MemberPicker(props: MemberPickerProps): React.ReactElement {
       );
     }
     return (
-      <Button variant={variant}>
+      <Button variant={variant} {...(tabIndex === undefined ? {} : { tabIndex })}>
         {stack}
         <span className="truncate">{text}</span>
       </Button>

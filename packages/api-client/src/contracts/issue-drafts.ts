@@ -84,6 +84,15 @@ export interface DraftIssueCreateInput {
   label_ids?: string[];
   start_date?: string | null;
   target_date?: string | null;
+  /** Estimate point id; null clears the estimate. */
+  estimate_point?: string | null;
+  /** Cycle the draft is filed under; null clears it. */
+  cycle_id?: string | null;
+  /**
+   * The draft's complete module set. The update serializer replaces the
+   * stored set rather than merging, so callers send every kept id.
+   */
+  module_ids?: string[];
 }
 
 /**

@@ -41,6 +41,8 @@ export interface IssueDescriptionFieldProps {
   onSave: (html: string) => Promise<unknown>;
   /** Restore in flight, shown until the server confirms it. */
   restored?: RestoredDescription | null | undefined;
+  /** Resolve a stored image asset id to its served source (ISS-127). */
+  resolveAsset?: ((src: string) => string) | undefined;
 }
 
 export function IssueDescriptionField({
@@ -49,6 +51,7 @@ export function IssueDescriptionField({
   pipeline,
   onSave,
   restored = null,
+  resolveAsset,
 }: IssueDescriptionFieldProps): React.ReactElement | null {
   const [editing, setEditing] = React.useState(false);
   const shown = restored?.html ?? value;
@@ -192,7 +195,7 @@ export function IssueDescriptionField({
             : undefined
         }
       >
-        <RichTextView html={shown} label={DESCRIPTION_LABEL} />
+        <RichTextView html={shown} label={DESCRIPTION_LABEL} resolveAsset={resolveAsset} />
       </div>
     );
   }
@@ -213,6 +216,7 @@ export function IssueDescriptionField({
           label={DESCRIPTION_LABEL}
           placeholder={DESCRIPTION_PLACEHOLDER}
           autoFocus
+          {...(resolveAsset === undefined ? {} : { resolveAsset })}
           onChange={(html: string) => {
             if (echoRef.current) {
               echoRef.current = false;

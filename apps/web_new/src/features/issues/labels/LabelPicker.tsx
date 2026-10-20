@@ -32,6 +32,8 @@ export interface LabelPickerProps {
   label?: string | undefined;
   /** Lock the trigger (archived issues disable pickers). */
   disabled?: boolean | undefined;
+  /** Trigger text before any label is chosen. */
+  emptyText?: string | undefined;
 }
 
 interface PickerOption {
@@ -56,6 +58,7 @@ export function LabelPicker({
   onChange,
   label = "Labels",
   disabled = false,
+  emptyText = "Select labels",
 }: LabelPickerProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -141,12 +144,15 @@ export function LabelPicker({
           type="button"
           aria-label={label}
           disabled={disabled}
+          tabIndex={-1}
           data-testid="label-picker-trigger"
           className="text-body inline-flex cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-4) py-(--space-2) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:opacity-50"
         >
-          <span className="min-w-0 flex-1 truncate text-left">
-            {value.length === 0 ? "Select labels" : `${value.length} selected`}
-          </span>
+          {value.length === 0 && emptyText === "" ? null : (
+            <span className="min-w-0 flex-1 truncate text-left">
+              {value.length === 0 ? emptyText : `${value.length} selected`}
+            </span>
+          )}
           <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
         </button>
       }
