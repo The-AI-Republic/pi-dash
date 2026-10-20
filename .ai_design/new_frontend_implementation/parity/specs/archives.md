@@ -161,13 +161,17 @@ behavior (archived selectors gated on a live fetch having set a "fetched"
 flag) is not reproduced. The oracle's primed helpers
 (`archivesPrimeAndEnter`, `archivesTabClick`, `archivesCyclesOpenTabViaLive`)
 exist because the old app needs them; new-web must also pass direct-address
-loads. The only archives scenario that asserts direct-load rendering today
-is `archivesDirectLoadRenders` (a modules assertion in
-`archives/modules.spec.ts`); for issues and cycles the direct load is
-proven inside the primed-entry scenarios (the address, reload and
-shared-link steps of ARCH-011/014/029). The area gate keeps the bug
-scenarios and `archivesDirectLoadRenders` green and adds no substitute
-scenario of its own.
+loads. The direct-load bug scenarios that exist today are:
+`archives/modules.spec.ts` → `archivesDirectLoadRenders` (asserts the old
+app does **not** render on a raw modules load, bug NEWFRONT-228) and the
+cycles raw-entry scenarios that call `archivesCyclesOpenTabRaw` (the
+NEWFRONT-231 scenario tagged ARCH-014/017, which covers a filled project,
+a zero-archived project and a shared peek link; and ARCH-019's guest raw
+entry). For issues, direct load is exercised by the address, reload and
+shared-link steps of ARCH-011/029 (there is no separate raw-entry
+scenario). The area gate keeps these bug scenarios and
+`archivesDirectLoadRenders` green (aligned to the intended behavior) and
+adds no substitute scenario of its own.
 
 Traffic: entering a tab issues at least one first-page read for that tab
 (a dev-mode double mount may send two; the oracle asserts `>= 1`). Returning
@@ -187,7 +191,10 @@ for the full table): `archivesOpenIssuesList`, `archivesOpenList`,
 `archivesSkeletonVisible`, `archivesSkeletonWasSeen`,
 `archivesDelayNextListReads`, `archivesBeginTrafficSpy`,
 `archivesTrafficCounts`, `archivesPrimeAndEnter`, and the tab-address
-helpers (the three unused ones in §17 included). `archivesCyclesReload`
+helpers (`archivesGoToProjectArchives`, `archivesPageTextPresent`,
+`archivesSelectArchivesTab`; §17's unused set, five in total, also
+includes `archivesCyclePeekName` and `archivesOpenLiveCycles`).
+`archivesCyclesReload`
 does a full page reload and is owned here, exactly once, because the
 cycles scenario calls it and 701/703 must share a single implementation;
 the Cycles slice does not declare it again. All other slices call these
@@ -386,13 +393,16 @@ peek shell (NEWFRONT-646) with the archived restriction set:
 - quick actions inside the peek are restricted to the archived set
   (copy link; restore for editors), never live writes.
 
-Address: the peeked item is carried in the `issue` query param on the
-archives list address (plus `project`/`nesting` cleared to null for this
-context). The oracle reads the URL params and asserts `issue` equals the
-archived issue id while `project` and `nesting` are null; reload reopens
-the same peek; closing the peek removes all three params. Clicking a
-different row replaces the param. Escape closes the peek and clears the
-param.
+Address: the peeked item is carried in the `peekIssueId` query param on
+the archives list address; `peekProjectId` and `peekNestingLevel` are
+absent (null) in this same-project context (the shared peek clears them
+because they are not needed). The oracle driver exposes the values under
+the short names `issue`, `project`, `nesting` — those are object fields,
+not URL keys — and asserts `issue` equals the archived issue id while
+`project` and `nesting` are null. Reload reopens the same peek; closing the
+peek removes `peekIssueId`, `peekProjectId` and `peekNestingLevel`.
+Clicking a different row replaces `peekIssueId`. Escape closes the peek and
+clears the same param.
 
 The peek body is read from the archived list row plus the single-item
 read (§18).
@@ -558,14 +568,42 @@ Guests and viewers never see the entry (server also enforces).
 ## 4. Archived cycles (ARCH-014–019)
 
 Owned by **NEWFRONT-701**, which also owns the read-only archived-cycle
-peek body reused by NEWFRONT-702 and the `archivesCycles*` driver family.
+peek body reused by NEWFRONT-702.
+
+**This section supersedes the archived-cycles ownership wording in both
+NEWFRONT-701 and NEWFRONT-711.** Before either slice starts, the
+coordinator must amend both descriptions to match:
+
+- NEWFRONT-701: drop "Cycles slice E (NEWFRONT-711: archive/restore
+  surfaces and CYC-027 archived list)" as a code dependency for the
+  archived list; 701 *is* the archived cycles screen. It keeps its
+  `archivesCycles*` family (including `archivesCyclesOpenLive`,
+  `archivesCyclesOpenTabViaLive`, `archivesCyclesOpenTabRaw`,
+  `archivesCyclesOpenPeek`, `archivesCyclesOpenPeekLink`,
+  `archivesCyclesPeekName`, `archivesCyclesPeekParam`,
+  `archivesCyclesClosePeek`, the search/filter/empty/skeleton/menu/dialog
+  methods), plus the single ownership of `archivesOpenCyclesTab` and the
+  cycle-peek family `archivesOpenCyclePeek`, `archivesCycleRowNames`,
+  `archivesCyclePeekReadOnly`, `archivesCloseCyclePeek`.
+- NEWFRONT-711: CYC-027 is no longer "this slice mounts the archived
+  cycles content". 711 owns CYC-022, CYC-023, CYC-024, CYC-025, CYC-026
+  and CYC-028 on the live cycles surfaces, and *proves* CYC-027 by
+  navigating from the Cycles area to 701's screen (the live Cycles row/peek
+  entry reaches `/{ws}/projects/{id}/archives/cycles`). It builds no
+  archived route, screen, tab strip, list, search, filter chrome or empty
+  state, and declares no `archives*` driver method — not
+  `archivesOpenCyclesTab` and not the cycle-peek family. Those are 701's,
+  one implementation.
+- Both descriptions cite this file as the authority. Until they are
+  amended, do not start 701 or 711: as written, both would build the
+  archived cycles screen.
 
 Seam with the Cycles epic: there is **one** archived-cycles screen, at
 `/{ws}/projects/{id}/archives/cycles`, and **NEWFRONT-701 owns it** — the
 archived list, its search/filter chrome, its empty states and its tab
 composition inside the NEWFRONT-698 shell. NEWFRONT-711 owns CYC-024
 (archive a cycle), CYC-025/026 (restore) and CYC-028 (live row menus) on
-the live cycles surfaces, and **CYC-027 (the archived cycles entry from the
+the live cycles surfaces. **CYC-027 (the archived cycles entry from the
 Cycles area) is proven by 711 consuming 701's screen**: 711 adds no route,
 no screen and no second archived list; it only ensures the Cycles area's
 entry reaches `.../archives/cycles` and covers CYC-027 against that screen.
@@ -760,8 +798,10 @@ A sort control is always visible in the header and shows the current key
 (default Name) and direction (default Ascending). Options, in this order:
 Name (`name`), Progress (`progress`), Number of work items
 (`issues_length`), Due date (`target_date`), Created date (`created_at`),
-Manual (`sort_order`); plus Ascending/Descending. Changing the key or direction reorders rows
-immediately. The oracle: default name-ascending; created-date follows
+Manual (`sort_order`); plus Ascending/Descending. **Ascending and
+Descending are hidden when the key is Manual** (manual order has no
+direction; the old order-by control removed them for `sort_order`).
+Changing the key or direction reorders rows immediately. The oracle: default name-ascending; created-date follows
 creation order for a deliberately non-alphabetical creation sequence;
 descending reverses. Sorting is display-only (local preference, per
 project), never a server write, and rows do not reorder by dragging.
@@ -991,17 +1031,28 @@ Each tab address (`ARCHIVED_TABS`), the detail address (`DETAIL`) and the
 peek params are shareable and reload-safe:
 
 - `.../archives/issues` reloads onto work items with rows; the
-  `issue=<id>` param reopens the same peek after reload; closing clears
-  `issue`, `project`, `nesting`.
+  `peekIssueId=<id>` param reopens the same peek after reload; closing
+  clears `peekIssueId`, `peekProjectId`, `peekNestingLevel`.
 - `.../archives/cycles` reloads onto the active cycles tab and its shell,
   and settles to rows/empty (bugs 231/239 not reproduced);
   `peekCycle=<id>` reopens the peek after reload; close clears it.
 - `.../archives/modules` the same with `peekModule=<id>`.
 - `DETAIL` reloads to banner plus detail (§3.4) and survives a shared link.
 - The tab strip and the "Archives" crumb preserve the current tab semantics
-  described in §1.3; there is no state in component memory that a reload
-  loses (filters/search/display come from local storage, peeks from the
-  address).
+  described in §1.3. Reload retention differs per family:
+  - **Work items:** filters and display options come from browser storage
+    (`issue_local_filters` with the `"ARCHIVED"` view key, §2.2), so they
+    survive reload; there is no name search on this tab; peeks come from the
+    address (`peekIssueId`).
+  - **Cycles:** filters and search are in-memory for the session only
+    (§4.3); a full reload may start with empty filters and an empty search.
+    Only the peek (`peekCycle`) and the tab address survive.
+  - **Modules:** filter/display preferences persist under `module_filters`
+    and `module_display_filters` (§5.2); module search is in-memory and may
+    start empty after reload. The peek (`peekModule`) survives via the
+    address.
+  - **Detail:** the record itself is re-read; there is no client-only state
+    whose loss changes the screen.
 
 The oracle drives all of this except the cycles/modules content assertions
 that the old app cannot pass; those are the `bug:` scenarios 231/239 and
@@ -1164,8 +1215,11 @@ where shared components could add chrome:
   screen, and no export endpoint is called.
 - **No live updates.** Entering a tab loads once; idle time produces no
   reads and no writes (no polling, no websocket-driven re-reads); a
-  re-entry refreshes. Search/filter/sort changes are client-side and issue
-  no reads.
+  re-entry refreshes. Search, filter and sort changes on **cycles and
+  modules** are client-side and issue no reads. On **work items**, filter
+  changes re-read `GET BASE/archived-issues/` with the serialized `filters`
+  parameter (§2.2); display/sort changes on that tab are client-side.
+  None of these mutate server state.
 - **No edition splits.** The OSS, cloud and desktop builds render the same
   screens, the same entries and the same endpoints; there are no
   cloud-only or desktop-only archive capabilities, and no upgrade prompts
@@ -1344,6 +1398,11 @@ non-archives slice owns the entry point.
 - No second list/detail/peek/menu/modal is built anywhere in Archives.
 
 ### Cycles epic (NEWFRONT-81)
+- Ownership authority: this section supersedes the CYC-027 wording in both
+  NEWFRONT-701 and NEWFRONT-711 at the start of §4. The coordinator amends
+  both issues before either slice starts; the Archives tree still carries
+  only `NEWFRONT-701 --blocked-by ...` for what 701 reuses, never an edge
+  that makes 711 the archived-cycles screen's owner.
 - NEWFRONT-711 (Cycles slice E, rows CYC-022..028) owns CYC-024 (archive
   a finished cycle), CYC-025/CYC-026 (restore) and CYC-028 (row menus) on
   the live surfaces, plus the intended NEWFRONT-244 failure behavior; it is
@@ -1355,14 +1414,15 @@ non-archives slice owns the entry point.
   ARCH-014..019 gaps (§4); it adds no second live entry and no second
   dialog.
 - Reused read-only by NEWFRONT-701: the cycle rows and list groups
-  (NEWFRONT-708, CYC-001..005), lifecycle/date filters and row menus
-  (NEWFRONT-709, CYC-006..008/028), and the narrow/touch and guest
+  (NEWFRONT-708, CYC-001..005), lifecycle/date filters and row-menu
+  mechanics (NEWFRONT-709, CYC-006..008), and the narrow/touch and guest
   read-only surfaces (NEWFRONT-715, CYC-048). The `archivesCycles*` driver
   family belongs to NEWFRONT-701 (§16); the Cycles area's own drivers stay
   in its slices.
 - Specific entry owners (each exactly one slice):
   live cycle archive entry → CYC-024, NEWFRONT-711;
   live cycle restore → CYC-025/026, NEWFRONT-711;
+  live cycle row menus incl. Restore → CYC-028, NEWFRONT-711;
   the archived-cycles screen (route, list, search, filters, empty states,
   tab composition) → NEWFRONT-701, including the screen CYC-027 is proven
   against; CYC-027 itself (the Cycles-area entry to that screen) →
@@ -1506,6 +1566,11 @@ shell-owned `archivesCyclesReload`) plus the cycle-peek family reused by
   `archivesCyclesSkeletonVisible`, `archivesCyclesVisibleNames`, `archivesOpenCyclePeek`,
   `archivesOpenCyclesTab`, `archivesOpenLiveCycles`
 
+`archivesOpenCyclesTab` is 701's single implementation (the live-Cycles
+entry into 701's tab, §4), declared once in the interface and counted once
+in this family. NEWFRONT-711 calls it read-only to prove CYC-027; it does
+not declare a second copy.
+
 Two methods in this family are declared and unused by the archives specs —
 matching §17's list — and are kept: `archivesCyclePeekName` (peek-name
 helper for 702's shared peek checks) and `archivesOpenLiveCycles` (live-cycle
@@ -1540,10 +1605,11 @@ shaping, and the absence probes:
 ## 17. Driver surface inventory
 
 Measured by parsing `apps/web_new/e2e/parity/drivers/parity-driver.ts`
-and the five archives specs; re-verified on base `d749794d1`
-(`origin/web-new-dev`) — the numbers were the same on the previous base
-`351d37ea1`, and a slice should re-measure rather than trust this SHA if
-the driver interface has grown:
+and the five archives specs; re-verified on base `bcfd6ea1e`
+(`origin/web-new-dev`, the base after the third review) — the numbers were
+the same on the previous bases `d749794d1` and `351d37ea1`, and a slice
+should re-measure rather than trust this SHA if the driver interface has
+grown:
 
 - **157** `archives*` methods are declared in the interface;
 - **152** are exercised by at least one archives spec;
