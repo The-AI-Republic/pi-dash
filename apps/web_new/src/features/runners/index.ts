@@ -40,7 +40,6 @@ export {
   resumeRuntime,
 } from "./runtime/service.js";
 export type { AgentRunTarget, HeartbeatPoll, RuntimeDeps } from "./runtime/service.js";
-export { agentRefusalCode, isKnownAgentReason } from "./runtime/reasons.js";
 export { confirmRuntimeSignOut, registerSignOutPrompt } from "./runtime/signOutPrompt.js";
 export { RuntimeSignOutDialog } from "./runtime/SignOutDialog.js";
 export { registerRuntimeSignOutLifecycle, RuntimeSignOutLifecycle } from "./runtime/SignOutLifecycle.js";

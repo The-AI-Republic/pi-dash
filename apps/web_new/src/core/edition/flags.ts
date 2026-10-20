@@ -16,8 +16,3 @@ export function isAppRailEnabled(edition: Edition): boolean {
 export function isSidebarToggleEnabled(edition: Edition): boolean {
   return edition.flags[SIDEBAR_TOGGLE_FLAG] !== false;
 }
-
-/** True only when the edition reaches the server through the cloud API path. */
-export function usesCloudCsrfPath(edition: Edition): boolean {
-  return edition.flags["cloud-csrf"] === true;
-}
