@@ -1048,8 +1048,10 @@ fn form_body_map(
 }
 
 /// Scan JSON source text (string-aware) for bare `NaN`/`Infinity`
-/// tokens outside strings.
-fn json_has_bare_nonfinite(text: &str) -> bool {
+/// tokens outside strings. Shared with the `v1_assets` sticky JSONField
+/// HTML-form path (`crate::v1_assets::sticky`), which hits the same
+/// `JSONField` save blow-up.
+pub(crate) fn json_has_bare_nonfinite(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut index = 0;
     let mut in_string = false;

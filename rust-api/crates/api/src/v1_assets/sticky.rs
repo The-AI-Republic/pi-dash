@@ -97,13 +97,25 @@
 //!   `Surrogate characters are not allowed.`); same documented
 //!   limitation as the merged precedents.
 //!
+//! # Request bodies (PIDASHCONV-1158 / PIDASHCONV-1213)
+//!
+//! The body decoder selects the parser the way DRF `_parse` does
+//! (`JSONParser`, `FormParser`, `MultiPartParser`): a JSON body (exact
+//! `application/json` plus the `*/json`/`*/*`/`application/*` wildcards)
+//! carries `is_form = false`; a urlencoded/multipart body becomes a
+//! last-wins `QueryDict` field map with `is_form = true`, so the serializer
+//! applies DRF's HTML-form `Field.get_value` rules (`fields.py:402-424`):
+//! `''` on a nullable field without `allow_blank` clears (`deleted_at`,
+//! `created_by`, `updated_by`), `''` on a not-required field without
+//! `allow_blank` skips (`sort_order`), and a `JSONField` string is
+//! `json.loads`-ed (`description`, `logo_props`). An unmatched non-empty
+//! media type is 415.
+//!
 //! # Out of scope
 //!
-//! JSON bodies only (the contract suite sends `json=` throughout):
-//! a non-empty non-JSON body answers 415; form/multipart field decoding is
-//! left to the Django proxy. Throttle headers (`ApiKeyRateThrottle` /
-//! `ServiceTokenRateThrottle` from `fx-perm`) are edge-owned: no merged
-//! handler enforces them in-process, so this module matches that precedent.
+//! Throttle headers (`ApiKeyRateThrottle` / `ServiceTokenRateThrottle`
+//! from `fx-perm`) are edge-owned: no merged handler enforces them
+//! in-process, so this module matches that precedent.
 //!
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
@@ -1114,43 +1126,67 @@ struct FieldValidation {
     write: StickyWrite,
     html: Option<String>,
     pending: Vec<PendingPk>,
+    /// A form `JSONField` value CPython's `json.loads` accepts but the
+    /// model save then dies on (bare `NaN`/`Infinity`): the 500 that
+    /// fires only when no other field error already produced a 400.
+    fatal: bool,
 }
 
-/// Run the `StickySerializer` field path over an already-parsed JSON body:
+/// Run the `StickySerializer` field path over the decoded request body:
 /// silently drop read-only + unknown keys (live `to_internal_value`),
 /// then per-field validate the survivors in DRF serializer field order
 /// (`deleted_at`, `name`, `description`, `description_html`,
 /// `description_stripped`, `logo_props`, `color`, `background_color`,
 /// `sort_order`, `created_by`, `updated_by`).
-fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
+///
+/// The HTML-form `Field.get_value` rules apply when the body came from a
+/// form/multipart parser (`is_form`): `''` on an `allow_null` field
+/// without `allow_blank` arrives as `None`, and `''` on a not-required
+/// field without `allow_blank` skips the field (`rest_framework/fields.py`
+/// `get_value`; the `PIDASHCONV-1117` license slices carry the same rules).
+fn validate_sticky_input(body: &form_body::ParsedBody, timezone: &Tz) -> FieldValidation {
+    let is_form = body.is_form();
+    let value = body.value();
     // Live projection: read-only keys (`id`, `created_at`, `updated_at`,
     // `description_binary`, `workspace`, `owner`) and unknown keys are
     // silently dropped — never errors. The audit columns (`created_by`,
     // `updated_by`, `deleted_at`) and `description_stripped` are
     // `editable`, so they survive here and validate below.
     let empty = Map::new();
-    let input = body.as_object().unwrap_or(&empty);
-    if !body.is_object() {
+    let input = value.as_object().unwrap_or(&empty);
+    if !value.is_object() {
         // A JSON null never reaches `to_internal_value`: the serializer's
         // `errors` property rewrites the lone `null`-code failure to the
         // friendlier message (`serializers.py`, DRF 3.15.2).
-        let message = if body.is_null() {
+        let message = if value.is_null() {
             "No data provided".to_owned()
         } else {
-            INVALID_DATA_MESSAGE.replace("{what}", drf_type_name(body))
+            INVALID_DATA_MESSAGE.replace("{what}", drf_type_name(value))
         };
         return FieldValidation {
             errors: vec![("non_field_errors".to_owned(), vec![message])],
             write: StickyWrite::default(),
             html: None,
             pending: Vec::new(),
+            fatal: false,
         };
     }
     let writable = sticky_types::strip_ignored_sticky_keys(input);
     let mut errors: Vec<(String, Vec<String>)> = Vec::new();
     let mut write = StickyWrite::default();
     let mut pending = Vec::new();
+    let mut fatal = false;
+    // `DateTimeField(null=True)`: JSON null clears (`allow_null`); on an
+    // HTML form `''` is `None` because `blank=True` never grants a
+    // DateTimeField `allow_blank` (`get_value`), so `deleted_at=` clears
+    // instead of failing the date parse.
+    let form_null = Value::Null;
     if let Some(value) = writable.get("deleted_at") {
+        let value = if is_blank_form_value(value, is_form) {
+            &form_null
+        } else {
+            value
+        };
         match check_deleted_at(value, timezone) {
             Ok(stamp) => write.deleted_at = Some(stamp),
             Err(message) => errors.push(("deleted_at".to_owned(), vec![message])),
@@ -1164,12 +1200,22 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
     }
     // `JSONField(null=False)`: any JSON value passes through
     // (`to_internal_value` only re-serializes); an explicit null is the
-    // `null` message (`allow_null` follows model `null`).
+    // `null` message (`allow_null` follows model `null`). On an HTML form
+    // body the value is wrapped as a JSON string and `json.loads`-ed
+    // (`get_value`/`to_internal_value`), so `description=foo` and
+    // `description=` are both `invalid` while `description={"a":1}` stores
+    // the parsed object.
     if let Some(value) = writable.get("description") {
-        if matches!(value, Value::Null) {
-            errors.push(("description".to_owned(), vec![MAY_NOT_BE_NULL.to_owned()]));
-        } else {
-            write.description = Some(value.clone());
+        match json_field_outcome(value, is_form) {
+            JsonFieldOutcome::Value(parsed) => write.description = Some(parsed),
+            JsonFieldOutcome::Null => {
+                errors.push(("description".to_owned(), vec![MAY_NOT_BE_NULL.to_owned()]));
+            }
+            JsonFieldOutcome::Invalid => errors.push((
+                "description".to_owned(),
+                vec![JSON_INVALID_MESSAGE.to_owned()],
+            )),
+            JsonFieldOutcome::Fatal => fatal = true,
         }
     }
     let mut html: Option<String> = None;
@@ -1191,11 +1237,18 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
             errors.push(("description_stripped".to_owned(), messages));
         }
     }
+    // `JSONField(default=dict, null=False)` — same rules as `description`.
     if let Some(value) = writable.get("logo_props") {
-        if matches!(value, Value::Null) {
-            errors.push(("logo_props".to_owned(), vec![MAY_NOT_BE_NULL.to_owned()]));
-        } else {
-            write.logo_props = Some(value.clone());
+        match json_field_outcome(value, is_form) {
+            JsonFieldOutcome::Value(parsed) => write.logo_props = Some(parsed),
+            JsonFieldOutcome::Null => {
+                errors.push(("logo_props".to_owned(), vec![MAY_NOT_BE_NULL.to_owned()]));
+            }
+            JsonFieldOutcome::Invalid => errors.push((
+                "logo_props".to_owned(),
+                vec![JSON_INVALID_MESSAGE.to_owned()],
+            )),
+            JsonFieldOutcome::Fatal => fatal = true,
         }
     }
     if let Some(value) = writable.get("color") {
@@ -1210,16 +1263,30 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
             Err(messages) => errors.push(("background_color".to_owned(), messages)),
         }
     }
+    // `FloatField(default=65535)`: `required=False` without
+    // `allow_null`/`allow_blank`, so an HTML-form `''` is the `empty`
+    // sentinel (`get_value`) and the field is skipped — the default keeps.
     if let Some(value) = writable.get("sort_order") {
-        match check_float(value) {
-            Ok(order) => write.sort_order = Some(order),
-            Err(message) => errors.push(("sort_order".to_owned(), vec![message])),
+        if !is_blank_form_value(value, is_form) {
+            match check_float(value) {
+                Ok(order) => write.sort_order = Some(order),
+                Err(message) => errors.push(("sort_order".to_owned(), vec![message])),
+            }
         }
     }
     // The audit FKs validate last: in DRF's serializer field order the
     // forward relations trail every plain field.
     for field in ["created_by", "updated_by"] {
         if let Some(value) = writable.get(field) {
+            // `RelatedField(null=True)`: an HTML-form `''` is `None`
+            // (`get_value`, no `allow_blank`) and `run_validation` forces
+            // the exact `''` to `None` on every path (`relations.py`) —
+            // either clears the nullable FK.
+            let value = if is_blank_form_value(value, is_form) {
+                &form_null
+            } else {
+                value
+            };
             match check_audit_pk(value) {
                 Ok(None) => {
                     if field == "created_by" {
@@ -1240,6 +1307,63 @@ fn validate_sticky_input(body: &Value, timezone: &Tz) -> FieldValidation {
         write,
         html,
         pending,
+        fatal,
+    }
+}
+
+/// DRF HTML-form `get_value` empty-string test (`fields.py:402-424`): the
+/// exact `''` on a form body. Every other value (JSON bodies included)
+/// passes through unchanged.
+fn is_blank_form_value(value: &Value, is_form: bool) -> bool {
+    is_form && matches!(value, Value::String(text) if text.is_empty())
+}
+
+/// `JSONField` `Value must be valid JSON.` message (`fields.py:1751`).
+const JSON_INVALID_MESSAGE: &str = "Value must be valid JSON.";
+
+/// One `JSONField` input, decoded the way DRF does.
+enum JsonFieldOutcome {
+    /// The value to store.
+    Value(Value),
+    /// JSON body with an explicit `null`, `allow_null` false: the `null`
+    /// message (`validate_empty_values`).
+    Null,
+    /// HTML-form text that is not valid JSON: the `invalid` message.
+    Invalid,
+    /// HTML-form text bare `NaN`/`Infinity` accepted by CPython's
+    /// `json.loads` but fatal at the model save (the 500).
+    Fatal,
+}
+
+/// `JSONField.to_internal_value` (`fields.py:1758-1788`). JSON bodies pass
+/// the already-parsed value through (`json.dumps` always succeeds); HTML
+/// form bodies mark the string as a JSON string and `json.loads` it, so
+/// `'foo'`/`''` are the `invalid` message while `'{"a":1}'` stores the
+/// parsed object. A bare `NaN`/`Infinity` token parses in CPython but dies
+/// in the `JSONField` save (`json.dumps` round-trip), which is the 500.
+fn json_field_outcome(value: &Value, is_form: bool) -> JsonFieldOutcome {
+    if is_form {
+        let text = match value {
+            Value::String(text) => text,
+            // Form parsers only ever emit strings; a non-string would be a
+            // multipart file name, which no sticky field reads.
+            _ => return JsonFieldOutcome::Invalid,
+        };
+        return match serde_json::from_str::<Value>(text) {
+            Ok(parsed) => JsonFieldOutcome::Value(parsed),
+            Err(_) => {
+                if crate::app_issues::handlers_engage::json_has_bare_nonfinite(text) {
+                    JsonFieldOutcome::Fatal
+                } else {
+                    JsonFieldOutcome::Invalid
+                }
+            }
+        };
+    }
+    if value.is_null() {
+        JsonFieldOutcome::Null
+    } else {
+        JsonFieldOutcome::Value(value.clone())
     }
 }
 
@@ -1423,15 +1547,22 @@ fn sticky_count_sql(list_sql: &str) -> String {
 /// `MultiPartParser` — `select_body_kind`) picks the parser by media type.
 /// The JSON branch serves the exact `application/json` in any case plus the
 /// `*/*`, `application/*` and `*/json` wildcards (`_MediaType.match`);
-/// form/multipart bodies become a last-wins field map (`QueryDict`);
-/// anything else is 415. Malformed JSON keeps the existing `ParseError` 400.
-fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Result<Value, Denial> {
+/// form/multipart bodies become a last-wins field map (`QueryDict`) carrying
+/// `is_form`, so the serializer applies DRF's HTML-form `get_value` field
+/// rules (`PIDASHCONV-1213`); anything else is 415. Malformed JSON keeps the
+/// existing `ParseError` 400.
+fn parse_json_body(
+    body: &[u8],
+    headers: &HeaderMap,
+    memory_limit: i64,
+) -> Result<form_body::ParsedBody, Denial> {
     // DRF's `_load_stream` leaves the stream `None` at content-length
-    // zero and `_parse` returns the empty mapping without touching a
-    // parser (`request.py`, DRF 3.15.2; same shape as the merged
-    // precedents) — so emptiness is checked before the media type.
+    // zero and `_parse` returns the empty mapping (a plain dict, not a
+    // `QueryDict`) without touching a parser (`request.py`, DRF 3.15.2;
+    // same shape as the merged precedents) — so emptiness is checked
+    // before the media type and the HTML-form rules stay off.
     if body.is_empty() {
-        return Ok(Value::Object(Map::new()));
+        return Ok(form_body::ParsedBody::json(Value::Object(Map::new())));
     }
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -1439,15 +1570,17 @@ fn parse_json_body(body: &[u8], headers: &HeaderMap, memory_limit: i64) -> Resul
         .unwrap_or("");
     match form_body::select_body_kind(content_type) {
         Some(BodyKind::Json) => serde_json::from_slice(body)
+            .map(form_body::ParsedBody::json)
             .map_err(|error| Denial::BadDetail(format!("JSON parse error - {error}"))),
-        // QueryDict semantics: last value wins (`parse_form_body`).
+        // QueryDict semantics: last value wins (`parse_form_body`); the
+        // `is_form` flag routes the serializer's HTML-form field rules.
         Some(BodyKind::Form) => match form_body::parse_form_body(body) {
-            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+            Ok(pairs) => Ok(form_body::ParsedBody::form(pairs)),
             Err(_) => Err(Denial::ServerError),
         },
         Some(BodyKind::Multipart) => {
             match form_body::parse_multipart_body(content_type, body, memory_limit) {
-                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs).value().clone()),
+                Ok(pairs) => Ok(form_body::ParsedBody::form(pairs)),
                 Err(BodyFail::Parse(message)) => Err(Denial::BadDetail(message)),
                 Err(BodyFail::Fatal) | Err(BodyFail::TooMany) => Err(Denial::ServerError),
             }
@@ -1524,7 +1657,7 @@ async fn get_sticky_by_pk(pool: &sqlx::PgPool, pk: &Uuid) -> Result<StickyRow, D
 async fn validated_write(
     pool: &sqlx::PgPool,
     timezone: &Tz,
-    parsed: &Value,
+    parsed: &form_body::ParsedBody,
 ) -> Result<(StickyWrite, Option<String>), Denial> {
     let mut validation = validate_sticky_input(parsed, timezone);
     if !validation.pending.is_empty() {
@@ -1534,6 +1667,13 @@ async fn validated_write(
     }
     if !validation.errors.is_empty() {
         return Err(Denial::FieldErrors(errors_value(validation.errors)));
+    }
+    if validation.fatal {
+        // A form `JSONField` value CPython `json.loads` accepts but the
+        // `JSONField` save dies on: the 500, reached only when the field
+        // pass produced no error of its own (`run_validation` precedes
+        // the save).
+        return Err(Denial::ServerError);
     }
     apply_validate_step(validation.write, validation.html)
 }
@@ -2007,12 +2147,14 @@ mod tests {
         assert_eq!(activate_timezone(Some("UTC")).expect("utc"), chrono_tz::UTC);
     }
 
-    fn json_map(pairs: &[(&str, Value)]) -> Value {
+    /// A JSON-body `ParsedBody` from `(key, value)` pairs (JSON semantics,
+    /// `is_form` off).
+    fn json_body(pairs: &[(&str, Value)]) -> form_body::ParsedBody {
         let mut map = Map::with_capacity(pairs.len());
         for (key, value) in pairs {
             map.insert((*key).to_owned(), value.clone());
         }
-        Value::Object(map)
+        form_body::ParsedBody::json(Value::Object(map))
     }
 
     fn utc() -> Tz {
@@ -2020,7 +2162,7 @@ mod tests {
     }
 
     /// Field errors of `body` as `(field, messages)` pairs in order.
-    fn field_errors(body: &Value) -> Vec<(String, Vec<String>)> {
+    fn field_errors(body: &form_body::ParsedBody) -> Vec<(String, Vec<String>)> {
         validate_sticky_input(body, &utc()).errors
     }
 
@@ -2322,7 +2464,7 @@ mod tests {
 
     #[test]
     fn empty_object_validates_to_no_writes() {
-        let validation = validate_sticky_input(&json_map(&[]), &utc());
+        let validation = validate_sticky_input(&json_body(&[]), &utc());
         assert!(validation.errors.is_empty());
         assert!(validation.pending.is_empty());
         assert!(validation.write.name.is_none());
@@ -2331,7 +2473,7 @@ mod tests {
 
     #[test]
     fn read_only_and_unknown_keys_are_silently_dropped() {
-        let body = json_map(&[
+        let body = json_body(&[
             ("name", serde_json::json!("note")),
             (
                 "workspace",
@@ -2359,7 +2501,7 @@ mod tests {
         // Field validation keeps the stripped input; `validate()` (the
         // types kernel) does the sanitize — and only runs error-free.
         let validation = validate_sticky_input(
-            &json_map(&[(
+            &json_body(&[(
                 "description_html",
                 serde_json::json!("<p>hello</p><script>evil()</script>"),
             )]),
@@ -2374,7 +2516,7 @@ mod tests {
             .expect("unsafe html sanitizes, not rejects");
         assert_eq!(html, Some("<p>hello</p>".to_owned()));
         let safe = validate_sticky_input(
-            &json_map(&[("description_html", serde_json::json!("<p>hello</p>"))]),
+            &json_body(&[("description_html", serde_json::json!("<p>hello</p>"))]),
             &utc(),
         );
         let (_, html) = apply_validate_step(safe.write, safe.html).expect("safe");
@@ -2384,7 +2526,7 @@ mod tests {
     #[test]
     fn falsy_html_skips_the_branches() {
         let validation = validate_sticky_input(
-            &json_map(&[("description_html", serde_json::json!(""))]),
+            &json_body(&[("description_html", serde_json::json!(""))]),
             &utc(),
         );
         assert!(validation.errors.is_empty());
@@ -2399,7 +2541,7 @@ mod tests {
             (serde_json::json!(12.5), "12.5"),
             (serde_json::json!("  padded  "), "padded"),
         ] {
-            let validation = validate_sticky_input(&json_map(&[("name", raw)]), &utc());
+            let validation = validate_sticky_input(&json_body(&[("name", raw)]), &utc());
             assert!(validation.errors.is_empty(), "{:?}", validation.errors);
             assert_eq!(validation.write.name, Some(Some(want.to_owned())));
         }
@@ -2408,7 +2550,7 @@ mod tests {
             serde_json::json!([1]),
             serde_json::json!({"a": 1}),
         ] {
-            let errors = field_errors(&json_map(&[("name", raw)]));
+            let errors = field_errors(&json_body(&[("name", raw)]));
             assert_eq!(
                 errors,
                 vec![("name".to_owned(), vec!["Not a valid string.".to_owned()])]
@@ -2416,14 +2558,14 @@ mod tests {
         }
         // Whitespace-only blanks to `""` (all text fields allow blank).
         let validation =
-            validate_sticky_input(&json_map(&[("color", serde_json::json!("   "))]), &utc());
+            validate_sticky_input(&json_body(&[("color", serde_json::json!("   "))]), &utc());
         assert!(validation.errors.is_empty());
         assert_eq!(validation.write.color, Some(Some(String::new())));
     }
 
     #[test]
     fn color_over_255_collects_both_validator_messages_in_serializer_order() {
-        let body = json_map(&[
+        let body = json_body(&[
             ("sort_order", serde_json::json!("oops")),
             ("color", serde_json::json!("x".repeat(256))),
         ]);
@@ -2439,7 +2581,7 @@ mod tests {
         // Over-long *and* NUL-bearing: both validator messages collected.
         let mut long = "y".repeat(256);
         long.push('\0');
-        let errors = field_errors(&json_map(&[("color", serde_json::json!(long))]));
+        let errors = field_errors(&json_body(&[("color", serde_json::json!(long))]));
         assert_eq!(
             errors,
             vec![(
@@ -2462,7 +2604,7 @@ mod tests {
     fn audit_fields_sort_last_in_serializer_order() {
         // DRF serializer field order: the plain `deleted_at` leads, the
         // audit FKs trail every content field.
-        let body = json_map(&[
+        let body = json_body(&[
             ("name", serde_json::json!([1])),
             ("created_by", serde_json::json!(true)),
             ("deleted_at", serde_json::json!("tomorrow")),
@@ -2478,10 +2620,10 @@ mod tests {
 
     #[test]
     fn null_name_clears_and_null_html_rejects() {
-        let validation = validate_sticky_input(&json_map(&[("name", Value::Null)]), &utc());
+        let validation = validate_sticky_input(&json_body(&[("name", Value::Null)]), &utc());
         assert!(validation.errors.is_empty());
         assert_eq!(validation.write.name, Some(None));
-        let errors = field_errors(&json_map(&[("description_html", Value::Null)]));
+        let errors = field_errors(&json_body(&[("description_html", Value::Null)]));
         assert_eq!(
             errors,
             vec![(
@@ -2497,7 +2639,7 @@ mod tests {
         // explicit nulls are the `null` message (validate_empty_values
         // precedes `to_internal_value`).
         for field in ["description", "logo_props", "sort_order"] {
-            let errors = field_errors(&json_map(&[(field, Value::Null)]));
+            let errors = field_errors(&json_body(&[(field, Value::Null)]));
             assert_eq!(
                 errors,
                 vec![(
@@ -2509,7 +2651,7 @@ mod tests {
         }
         // Other JSON values pass through untouched.
         let validation = validate_sticky_input(
-            &json_map(&[
+            &json_body(&[
                 ("description", serde_json::json!({"blocks": []})),
                 ("logo_props", serde_json::json!("plain-string")),
             ]),
@@ -2532,7 +2674,7 @@ mod tests {
             (over_u64, "int"),
             (serde_json::json!(true), "bool"),
         ] {
-            let errors = field_errors(&raw);
+            let errors = field_errors(&form_body::ParsedBody::json(raw.clone()));
             assert_eq!(errors.len(), 1, "{raw}");
             assert_eq!(errors[0].0, "non_field_errors");
             assert_eq!(
@@ -2544,7 +2686,7 @@ mod tests {
         }
         // A JSON null never reaches `to_internal_value`: the serializer
         // reports the friendlier message instead of the `NoneType` shape.
-        let errors = field_errors(&Value::Null);
+        let errors = field_errors(&form_body::ParsedBody::json(Value::Null));
         assert_eq!(
             errors,
             vec![(
@@ -2565,7 +2707,8 @@ mod tests {
         );
         for headers in [HeaderMap::new(), json_headers] {
             let parsed = parse_json_body(b"", &headers, 5_242_880).expect("empty body");
-            assert_eq!(parsed, Value::Object(Map::new()));
+            assert_eq!(parsed.value(), &Value::Object(Map::new()));
+            assert!(!parsed.is_form(), "an empty body is not an HTML form");
         }
         // A non-empty non-JSON body is 415 with the content type echoed.
         let mut text_headers = HeaderMap::new();
@@ -2612,9 +2755,10 @@ mod tests {
             5_242_880,
         )
         .expect("form body");
-        assert_eq!(parsed["name"], Value::String("other".to_owned()));
+        assert!(parsed.is_form(), "a form body flags the HTML-form rules");
+        assert_eq!(parsed.value()["name"], Value::String("other".to_owned()));
         assert_eq!(
-            parsed["description_html"],
+            parsed.value()["description_html"],
             Value::String("<p>hi</p>".to_owned())
         );
         // `_MediaType.match` honors the JSON wildcards (and case).
@@ -2626,12 +2770,127 @@ mod tests {
             );
             let parsed =
                 parse_json_body(br#"{"name":"n"}"#, &headers, 5_242_880).expect("json body");
+            assert!(!parsed.is_form(), "{content_type}");
             assert_eq!(
-                parsed["name"],
+                parsed.value()["name"],
                 Value::String("n".to_owned()),
                 "{content_type}"
             );
         }
+    }
+
+    /// A form `ParsedBody` (`is_form` on) from `(key, text)` pairs.
+    fn form_body(pairs: &[(&str, &str)]) -> form_body::ParsedBody {
+        form_body::ParsedBody::form(
+            pairs
+                .iter()
+                .map(|(key, text)| {
+                    (
+                        (*key).to_owned(),
+                        form_body::FormValue::Text((*text).to_owned()),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn form_empty_string_clears_nullable_and_skips_defaulted_fields() {
+        // DRF HTML-form `get_value` (`fields.py:402-424`): `''` on a
+        // nullable field without `allow_blank` arrives as `None`.
+        let validation = validate_sticky_input(&form_body(&[("deleted_at", "")]), &utc());
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(validation.write.deleted_at, Some(None));
+
+        // The audit FKs are the same (`RelatedField(null=True)`).
+        let validation = validate_sticky_input(&form_body(&[("created_by", "")]), &utc());
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(validation.write.created_by, Some(None));
+        let validation = validate_sticky_input(&form_body(&[("updated_by", "")]), &utc());
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+
+        // `FloatField(default=65535, required=False)` has no
+        // `allow_null`/`allow_blank`: `''` is the `empty` sentinel, so
+        // the field is skipped and the default keeps.
+        let validation = validate_sticky_input(&form_body(&[("sort_order", "")]), &utc());
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(validation.write.sort_order, None);
+
+        // A JSON body keeps the strict behavior: `deleted_at: ""` is the
+        // date-format 400 and `sort_order: ""` the number 400.
+        assert_eq!(
+            field_errors(&json_body(&[("deleted_at", serde_json::json!(""))])),
+            vec![(
+                "deleted_at".to_owned(),
+                vec![DATETIME_INVALID_MESSAGE.to_owned()]
+            )]
+        );
+        assert_eq!(
+            field_errors(&json_body(&[("sort_order", serde_json::json!(""))])),
+            vec![(
+                "sort_order".to_owned(),
+                vec![A_VALID_NUMBER_IS_REQUIRED.to_owned()]
+            )]
+        );
+    }
+
+    #[test]
+    fn form_blank_text_fields_validate_like_json_empty_strings() {
+        // Every blank-`allow_blank` text field passes `''` through as
+        // `""` on both paths (no divergence).
+        let validation = validate_sticky_input(
+            &form_body(&[
+                ("name", ""),
+                ("description_html", ""),
+                ("description_stripped", ""),
+                ("color", ""),
+                ("background_color", ""),
+            ]),
+            &utc(),
+        );
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(validation.write.name, Some(Some(String::new())));
+        assert_eq!(validation.write.description_html, Some(String::new()));
+        assert_eq!(validation.write.color, Some(Some(String::new())));
+        assert_eq!(validation.write.background_color, Some(Some(String::new())));
+    }
+
+    #[test]
+    fn form_json_field_values_are_json_loads_ed() {
+        // `JSONField.get_value`/`to_internal_value` (`fields.py:1758-1788`):
+        // a form value is a JSON string, so `'foo'`/`''` are the invalid
+        // message and `'{"a":1}'` stores the parsed object.
+        let invalid = vec![(
+            "description".to_owned(),
+            vec![JSON_INVALID_MESSAGE.to_owned()],
+        )];
+        assert_eq!(field_errors(&form_body(&[("description", "foo")])), invalid);
+        assert_eq!(field_errors(&form_body(&[("description", "")])), invalid);
+        assert_eq!(
+            field_errors(&form_body(&[("logo_props", "foo")])),
+            vec![(
+                "logo_props".to_owned(),
+                vec![JSON_INVALID_MESSAGE.to_owned()]
+            )]
+        );
+        let validation = validate_sticky_input(&form_body(&[("description", "{\"a\":1}")]), &utc());
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(
+            validation.write.description,
+            Some(serde_json::json!({"a": 1}))
+        );
+        // JSON bodies are unchanged: an explicit null is the `null`
+        // message, any other value passes through.
+        assert_eq!(
+            field_errors(&json_body(&[("description", Value::Null)])),
+            vec![("description".to_owned(), vec![MAY_NOT_BE_NULL.to_owned()])]
+        );
+        let validation = validate_sticky_input(
+            &json_body(&[("description", serde_json::json!("foo"))]),
+            &utc(),
+        );
+        assert!(validation.errors.is_empty(), "{:?}", validation.errors);
+        assert_eq!(validation.write.description, Some(serde_json::json!("foo")));
     }
 
     #[test]
@@ -2643,7 +2902,7 @@ mod tests {
             (serde_json::json!(" 1_0 "), 10.0),
             (serde_json::json!(true), 1.0),
         ] {
-            let validation = validate_sticky_input(&json_map(&[("sort_order", raw)]), &utc());
+            let validation = validate_sticky_input(&json_body(&[("sort_order", raw)]), &utc());
             assert!(validation.errors.is_empty(), "{:?}", validation.errors);
             assert_eq!(validation.write.sort_order, Some(want));
         }
@@ -2654,7 +2913,7 @@ mod tests {
             serde_json::json!("1__2"),
             serde_json::json!([1]),
         ] {
-            let errors = field_errors(&json_map(&[("sort_order", raw)]));
+            let errors = field_errors(&json_body(&[("sort_order", raw)]));
             assert_eq!(
                 errors,
                 vec![(
@@ -2663,7 +2922,7 @@ mod tests {
                 )]
             );
         }
-        let errors = field_errors(&json_map(&[(
+        let errors = field_errors(&json_body(&[(
             "sort_order",
             serde_json::json!("9".repeat(1001)),
         )]));
@@ -2682,7 +2941,7 @@ mod tests {
     fn audit_pk_null_passes_and_formats_queue_lookups() {
         let uuid = "11111111-1111-1111-1111-111111111111";
         let validation = validate_sticky_input(
-            &json_map(&[
+            &json_body(&[
                 ("created_by", serde_json::json!(uuid)),
                 ("updated_by", Value::Null),
             ]),
@@ -2696,22 +2955,24 @@ mod tests {
         assert_eq!(validation.pending[0].display, uuid);
         let upper = "AAAAAAAA-1111-1111-1111-111111111111";
         let validation = validate_sticky_input(
-            &json_map(&[("created_by", serde_json::json!(upper))]),
+            &json_body(&[("created_by", serde_json::json!(upper))]),
             &utc(),
         );
         assert!(validation.errors.is_empty());
         assert_eq!(validation.pending[0].display, upper);
         // Small ints take the `int` form and queue a lookup for the
         // derived UUID.
-        let validation =
-            validate_sticky_input(&json_map(&[("created_by", serde_json::json!(123))]), &utc());
+        let validation = validate_sticky_input(
+            &json_body(&[("created_by", serde_json::json!(123))]),
+            &utc(),
+        );
         assert!(validation.errors.is_empty());
         assert_eq!(validation.pending[0].uuid, Uuid::from_u128(123));
         assert_eq!(validation.pending[0].display, "123");
         // The full `u64` range fits in 128 bits (`uuid.UUID(int=...)`
         // accepts everything below 2**128), not just `i64`.
         let validation = validate_sticky_input(
-            &json_map(&[("created_by", serde_json::json!(u64::MAX))]),
+            &json_body(&[("created_by", serde_json::json!(u64::MAX))]),
             &utc(),
         );
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
@@ -2723,13 +2984,13 @@ mod tests {
         // Past `u64::MAX` the exact digits still reach the lookup;
         // past 2**128 they are out of range like negatives.
         let over_u64: Value = serde_json::from_str("18446744073709551616").expect("bignum");
-        let validation = validate_sticky_input(&json_map(&[("created_by", over_u64)]), &utc());
+        let validation = validate_sticky_input(&json_body(&[("created_by", over_u64)]), &utc());
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
         assert_eq!(validation.pending[0].uuid, Uuid::from_u128(1u128 << 64));
         assert_eq!(validation.pending[0].display, "18446744073709551616");
         let over_u128: Value =
             serde_json::from_str("340282366920938463463374607431768211456").expect("bignum");
-        let errors = field_errors(&json_map(&[("created_by", over_u128)]));
+        let errors = field_errors(&json_body(&[("created_by", over_u128)]));
         assert_eq!(
             errors,
             vec![(
@@ -2764,7 +3025,7 @@ mod tests {
                 "\u{201c}['x']\u{201d} is not a valid UUID.",
             ),
         ] {
-            let errors = field_errors(&json_map(&[("created_by", raw)]));
+            let errors = field_errors(&json_body(&[("created_by", raw)]));
             assert_eq!(
                 errors,
                 vec![("created_by".to_owned(), vec![message.to_owned()])]
@@ -2778,7 +3039,7 @@ mod tests {
     fn deleted_at_parses_iso_shapes_in_request_tz() {
         // Zulu.
         let validation = validate_sticky_input(
-            &json_map(&[("deleted_at", serde_json::json!("2026-01-02T03:04:05Z"))]),
+            &json_body(&[("deleted_at", serde_json::json!("2026-01-02T03:04:05Z"))]),
             &utc(),
         );
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
@@ -2796,8 +3057,10 @@ mod tests {
             "2026-01-02T05:04:05+0200",
             "2026-01-02T05:04:05+02:00",
         ] {
-            let validation =
-                validate_sticky_input(&json_map(&[("deleted_at", serde_json::json!(raw))]), &utc());
+            let validation = validate_sticky_input(
+                &json_body(&[("deleted_at", serde_json::json!(raw))]),
+                &utc(),
+            );
             assert!(
                 validation.errors.is_empty(),
                 "{raw}: {:?}",
@@ -2816,7 +3079,7 @@ mod tests {
         // Naive reads in the request zone (Tokyo is +9, no DST).
         let tokyo: Tz = "Asia/Tokyo".parse().expect("tz");
         let validation = validate_sticky_input(
-            &json_map(&[("deleted_at", serde_json::json!("2026-01-02T12:00:00"))]),
+            &json_body(&[("deleted_at", serde_json::json!("2026-01-02T12:00:00"))]),
             &tokyo,
         );
         assert!(validation.errors.is_empty(), "{:?}", validation.errors);
@@ -2830,7 +3093,7 @@ mod tests {
         );
         // Space separator, comma fraction truncated to 6 digits, null.
         let validation = validate_sticky_input(
-            &json_map(&[(
+            &json_body(&[(
                 "deleted_at",
                 serde_json::json!("2026-01-02 03:04:05,123456789"),
             )]),
@@ -2845,7 +3108,7 @@ mod tests {
                     .with_timezone(&Utc)
             ))
         );
-        let validation = validate_sticky_input(&json_map(&[("deleted_at", Value::Null)]), &utc());
+        let validation = validate_sticky_input(&json_body(&[("deleted_at", Value::Null)]), &utc());
         assert!(validation.errors.is_empty());
         assert_eq!(validation.write.deleted_at, Some(None));
     }
@@ -2891,7 +3154,7 @@ mod tests {
             serde_json::json!(123),
             serde_json::json!(true),
         ] {
-            let errors = field_errors(&json_map(&[("deleted_at", raw.clone())]));
+            let errors = field_errors(&json_body(&[("deleted_at", raw.clone())]));
             assert_eq!(
                 errors,
                 vec![(
@@ -2905,7 +3168,7 @@ mod tests {
         // (America/New_York sprang forward on 2026-03-08 02:00).
         let eastern: Tz = "America/New_York".parse().expect("tz");
         let errors = validate_sticky_input(
-            &json_map(&[("deleted_at", serde_json::json!("2026-03-08T02:30:00"))]),
+            &json_body(&[("deleted_at", serde_json::json!("2026-03-08T02:30:00"))]),
             &eastern,
         )
         .errors;
@@ -2919,7 +3182,7 @@ mod tests {
         // Conversion past year 9999 is the `overflow` message.
         let apia: Tz = "Pacific/Apia".parse().expect("tz");
         let errors = validate_sticky_input(
-            &json_map(&[("deleted_at", serde_json::json!("9999-12-31T23:30:00+00:00"))]),
+            &json_body(&[("deleted_at", serde_json::json!("9999-12-31T23:30:00+00:00"))]),
             &apia,
         )
         .errors;
@@ -2936,11 +3199,11 @@ mod tests {
     fn stripped_input_validates_then_discards() {
         // Valid input vanishes (`save()` recomputes); invalid input 400s.
         let validation = validate_sticky_input(
-            &json_map(&[("description_stripped", serde_json::json!("hand-set"))]),
+            &json_body(&[("description_stripped", serde_json::json!("hand-set"))]),
             &utc(),
         );
         assert!(validation.errors.is_empty());
-        let errors = field_errors(&json_map(&[(
+        let errors = field_errors(&json_body(&[(
             "description_stripped",
             serde_json::json!([1]),
         )]));
