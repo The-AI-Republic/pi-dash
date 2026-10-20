@@ -1532,7 +1532,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openCreateModal(): Promise<void> {
-    return todo("openCreateModal");
+    // The header action opens the shared work-item modal; wait for the
+    // title field, which only the modal renders.
+    await this.page.getByRole("button", { name: "Add work item" }).first().click({ timeout: 60_000 });
+    await this.page.getByPlaceholder("Title").first().waitFor({ timeout: 60_000 });
   }
 
   async createModalOpen(): Promise<boolean> {
@@ -1587,7 +1590,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async createTitleFocused(): Promise<boolean> {
-    return todo("createTitleFocused");
+    return this.page
+      .getByPlaceholder("Title")
+      .first()
+      .evaluate((element) => element === document.activeElement);
   }
 
   async modalTextContains(text: string): Promise<boolean> {
@@ -1646,15 +1652,27 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openLabelsPicker(): Promise<void> {
-    return todo("openLabelsPicker");
+    // The picker's trigger carries the field name as its accessible label.
+    await this.page.locator('[role="dialog"]').first().getByRole("button", { name: "Labels" }).first().click();
   }
 
-  async createLabelInModal(_name: string): Promise<void> {
-    return todo("createLabelInModal");
+  async createLabelInModal(name: string): Promise<void> {
+    // The search field lives in the picker popover, not the modal body.
+    const box = this.page.getByTestId("label-picker-search").first();
+    await box.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await box.fill(name);
+    await box.press("Enter");
+    await this.page
+      .getByTestId("label-picker-option")
+      .filter({ hasText: name })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async selectedLabelVisible(_name: string): Promise<boolean> {
-    return todo("selectedLabelVisible");
+  async selectedLabelVisible(name: string): Promise<boolean> {
+    const option = this.page.getByTestId("label-picker-option").filter({ hasText: name }).first();
+    if ((await option.count()) === 0) return false;
+    return (await option.getAttribute("aria-pressed")) === "true";
   }
 
   async hoverIssueRow(_issueName: string): Promise<void> {
@@ -1662,7 +1680,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async openToastViewAction(): Promise<string> {
-    return todo("openToastViewAction");
+    // The toast action is a new-tab anchor; capture the tab it opens.
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByRole("link", { name: "View work item" }).first().click(),
+    ]);
+    await popup.waitForLoadState("domcontentloaded").catch(() => undefined);
+    return popup.url();
   }
 
   async confirmArchive(): Promise<void> {
@@ -1672,15 +1696,27 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async confirmDeleteIssue(): Promise<void> {
-    return todo("confirmDeleteIssue");
+    // Scoped to the dialog: the open row menu behind it carries its own
+    // same-named entry.
+    await this.page
+      .locator('[role="dialog"]')
+      .first()
+      .getByRole("button", { name: "Delete", exact: true })
+      .first()
+      .click();
   }
 
-  async modalHasPlaceholder(_placeholder: string): Promise<boolean> {
-    return todo("modalHasPlaceholder");
+  async modalHasPlaceholder(placeholder: string): Promise<boolean> {
+    return (await this.page.locator('[role="dialog"]').first().getByPlaceholder(placeholder).count()) > 0;
   }
 
-  async fillModalPlaceholder(_placeholder: string, _text: string): Promise<void> {
-    return todo("fillModalPlaceholder");
+  async fillModalPlaceholder(placeholder: string, text: string): Promise<void> {
+    const field = this.page.locator('[role="dialog"]').first().getByPlaceholder(placeholder).first();
+    await field.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await field.click();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.press("Backspace");
+    await this.page.keyboard.type(text);
   }
 
   async expandListRows(): Promise<boolean> {
@@ -1711,8 +1747,8 @@ export class WebNewDriver implements ParityDriver {
     return todo("fillDescription");
   }
 
-  async countText(_text: string): Promise<number> {
-    return todo("countText");
+  async countText(text: string): Promise<number> {
+    return this.page.getByText(text, { exact: true }).count();
   }
 
   async openDraftsPage(workspaceSlug: string): Promise<void> {
@@ -1848,7 +1884,26 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async hoverCardRead(_issueName: string): Promise<{ text: string; priorityIcon: string; dateColor: string }> {
-    return todo("hoverCardRead");
+    // The card names the record in its key, title and state, so one open
+    // card is the read: no per-name scoping that a redesign could break.
+    const card = this.page.getByTestId("work-item-preview").first();
+    if ((await card.count()) === 0) return { text: "", priorityIcon: "", dateColor: "" };
+    const waited = await card
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!waited) return { text: "", priorityIcon: "", dateColor: "" };
+    return card.evaluate((element: HTMLElement) => {
+      const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+      const glyph = element.querySelector('[data-testid="preview-card-priority"] svg');
+      const priorityIcon = (glyph?.getAttribute("class") ?? "")
+        .split(/\s+/)
+        .filter((name) => name.startsWith("lucide-") && name !== "lucide")
+        .join(" ");
+      const dates = element.querySelector('[data-testid="preview-card-dates"]');
+      const dateColor = dates === null ? "" : getComputedStyle(dates).color;
+      return { text, priorityIcon, dateColor };
+    });
   }
 
   async modalTabOrder(): Promise<string[]> {
@@ -1856,7 +1911,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async focusCreateTitle(): Promise<void> {
-    return todo("focusCreateTitle");
+    await this.page.getByPlaceholder("Title").first().focus();
   }
 
   async openCyclePage(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {

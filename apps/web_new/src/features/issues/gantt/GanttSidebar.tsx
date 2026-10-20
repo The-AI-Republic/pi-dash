@@ -37,6 +37,10 @@ export interface GanttSidebarProps {
   windowEnd?: number;
   /** Manual-sort reorder; absent outside manual order (ISS-050). */
   reorder?: ReorderBinding | null;
+  /** Hover preview wrapper for row links (ISS-133). */
+  renderPreview?:
+    | ((row: GanttRow, trigger: React.ReactElement<Record<string, unknown>>) => React.ReactNode)
+    | undefined;
 }
 
 /** The reorder seam the sidebar calls on drop. */
@@ -65,6 +69,10 @@ interface SidebarRowProps {
   onDragOver: (event: React.MouseEvent, row: GanttRow) => void;
   /** True for the click that ends a drag, which must not open the row. */
   suppressClick: () => boolean;
+  /** Hover preview wrapper for the row link (ISS-133); absent leaves it plain. */
+  renderPreview?:
+    | ((row: GanttRow, trigger: React.ReactElement<Record<string, unknown>>) => React.ReactNode)
+    | undefined;
 }
 
 export function SidebarRowItem({
@@ -78,9 +86,38 @@ export function SidebarRowItem({
   onDragStart,
   onDragOver,
   suppressClick,
+  renderPreview,
 }: SidebarRowProps): React.ReactElement {
   const duration = durationLabel(row);
   const disabled = row.unconfirmed;
+  const link = (
+    <a
+      id={`issue-${row.id}`}
+      href={`/${workspaceSlug}/browse/${row.identifier}`}
+      aria-label={row.name}
+      data-archived={row.archived ? "true" : undefined}
+      data-peeked={peeked ? "true" : undefined}
+      onClick={(event) => {
+        if (suppressClick()) {
+          event.preventDefault();
+          return;
+        }
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        onOpenRow(row);
+      }}
+      className={cn(
+        "flex min-w-0 flex-1 items-center gap-(--space-2) truncate text-left",
+        "hover:underline focus-visible:outline-none"
+      )}
+    >
+      <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
+        {row.identifier}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{row.name}</span>
+    </a>
+  );
+  const rowLink = renderPreview === undefined ? link : renderPreview(row, link);
   const dragging = drag?.sourceId === row.id;
   const dropBefore = drag !== null && drag.targetId === row.id && drag.placement === "before";
   const dropAfter = drag !== null && drag.targetId === row.id && drag.placement === "after";
@@ -123,31 +160,7 @@ export function SidebarRowItem({
             />
           </>
         ) : (
-          <a
-            id={`issue-${row.id}`}
-            href={`/${workspaceSlug}/browse/${row.identifier}`}
-            aria-label={row.name}
-            data-archived={row.archived ? "true" : undefined}
-            data-peeked={peeked ? "true" : undefined}
-            onClick={(event) => {
-              if (suppressClick()) {
-                event.preventDefault();
-                return;
-              }
-              if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-              event.preventDefault();
-              onOpenRow(row);
-            }}
-            className={cn(
-              "flex min-w-0 flex-1 items-center gap-(--space-2) truncate text-left",
-              "hover:underline focus-visible:outline-none"
-            )}
-          >
-            <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
-              {row.identifier}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{row.name}</span>
-          </a>
+          rowLink
         )}
       </div>
       {duration !== null ? (
@@ -186,6 +199,7 @@ export function GanttSidebar({
   windowStart = 0,
   windowEnd = rows.length,
   reorder = null,
+  renderPreview,
 }: GanttSidebarProps): React.ReactElement {
   const visible = rows.slice(windowStart, windowEnd);
   const [drag, setDrag] = React.useState<DragState | null>(null);
@@ -284,6 +298,7 @@ export function GanttSidebar({
           onDragStart={onDragStart}
           onDragOver={onDragOver}
           suppressClick={suppressClick}
+          renderPreview={renderPreview}
         />
       ))}
       <div style={{ height: Math.max(0, rows.length - windowEnd) * ROW_HEIGHT }} aria-hidden="true" />

@@ -14,6 +14,7 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ToastHost } from "@pidash/kit";
 import { generateAssistantTitle } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -111,10 +112,10 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
-  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn(), notifySuccessWithAction: vi.fn() };
+  return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
 });
 
-import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
+import { getToastManager, notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
 const SLUG = "acme";
 const PROJECT_ATLAS = "223e4567-e89b-12d3-a456-426614174001";
@@ -690,6 +691,7 @@ function setup(
         onCreated={onCreated}
         {...props}
       />
+      <ToastHost manager={getToastManager()} />
     </QueryClientProvider>
   );
   return { ...stub, onOpenChange, onCreated, queryClient, view };
@@ -896,7 +898,9 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
     expect(posts(h.sent)[0]).toEqual({ name: "Fresh report" });
     expect(h.onCreated).toHaveBeenCalledWith(CREATED_ID);
-    expect(notifySuccess).toHaveBeenCalled();
+    // ISS-131: the landed create announces itself with its action toast.
+    expect(await screen.findByText("Work item created successfully")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "View work item" })).toHaveAttribute("href", "/acme/browse/ATL-7/");
     expect(h.calls.some((call) => call.url.endsWith(`/projects/${PROJECT_ATLAS}/issues/`))).toBe(true);
   });
 
@@ -913,18 +917,16 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     expect(posts(h.sent)).toHaveLength(1);
   });
 
-  it("offers the created item as a toast follow-up when the caller knows the prefix", async () => {
+  it("offers the created item as a new-tab view and a copy action", async () => {
     const user = userEvent.setup();
     setup({}, { projectIdentifier: "ATL" });
     await user.type(titleField(), "Linked report");
     save();
-    await waitFor(() =>
-      expect(notifySuccessWithAction).toHaveBeenCalledWith(
-        "Work item created successfully",
-        undefined,
-        expect.objectContaining({ actionLabel: "View work item" })
-      )
+    expect(await screen.findByRole("link", { name: "View work item" })).toHaveAttribute(
+      "href",
+      "/acme/browse/ATL-7/"
     );
+    expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
   });
 
   it("accepts the next submit once the in-flight create failed", async () => {

@@ -11,14 +11,21 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createIssue, type IssueCreateInput, type IssueCreateResult } from "@pidash/api-client";
 
+import { showToast } from "@pidash/kit";
+
 import { getAppClient } from "../../../core/api/client.js";
-import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
+import { getToastManager, notifyError } from "../../../shared/shell/index.js";
+import { copyWorkItemLink, workItemPath } from "../../../shared/shell/shareLink.js";
 import { createTempId } from "../freshness/fresh.js";
 import { insertTempRow, removeTempRow, tempIssueRow } from "../freshness/tempRows.js";
 import { issueKeys } from "./keys.js";
 
 /** Success title after a work item lands. */
 export const WORK_ITEM_CREATED_TITLE = "Work item created successfully";
+/** Toast action that opens the new work item in another tab (ISS-131). */
+export const CREATE_TOAST_VIEW_LABEL = "View work item";
+/** Toast action that copies the new work item's address (ISS-131). */
+export const CREATE_TOAST_COPY_LABEL = "Copy link";
 /** Failure title when the work item does not land. */
 export const WORK_ITEM_CREATE_FAILED_TITLE = "Couldn't create the work item";
 const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connection and try again.";
@@ -34,9 +41,38 @@ export interface WorkItemCreateInput {
   payload: IssueCreateInput;
   /** Grouped section bucket for the optimistic row (ISS-011). */
   tempGroupKey?: string | undefined;
-  /** Identifier prefix for the toast's "View work item" follow-up. */
+  /** Short code of the target project, so the toast can name the new key. */
   projectIdentifier?: string | undefined;
 }
+
+/**
+ * Success notices for a landed create (ISS-131): the toast carries a
+ * new-tab "View work item" link and a "Copy link" action that confirms
+ * on the toast itself. Without a project code there is no address to
+ * offer, so the plain notice stays.
+ */
+export function announceCreatedWorkItem(
+  workspaceSlug: string,
+  projectIdentifier: string | undefined,
+  created: IssueCreateResult
+): string {
+  if (projectIdentifier === undefined || projectIdentifier === "") {
+    return showToast(getToastManager(), { title: WORK_ITEM_CREATED_TITLE });
+  }
+  const path = workItemPath(workspaceSlug, `${projectIdentifier}-${created.sequence_id}`);
+  return showToast(getToastManager(), {
+    title: WORK_ITEM_CREATED_TITLE,
+    actions: [
+      { label: CREATE_TOAST_VIEW_LABEL, href: path },
+      { label: CREATE_TOAST_COPY_LABEL, run: () => void copyWorkItemLink(path, COPY_MESSAGES) },
+    ],
+  });
+}
+
+const COPY_MESSAGES = {
+  copied: "Copied the work item link.",
+  failed: "Couldn't copy the work item link.",
+} as const;
 
 /** Post one work item, refreshing the workspace lists after. */
 export function useCreateWorkItem(workspaceSlug: string) {
@@ -62,19 +98,7 @@ export function useCreateWorkItem(workspaceSlug: string) {
       }
     },
     onSuccess: (created, input) => {
-      // The spec's ISS-011 toast offers a follow-up action. The list knows
-      // the project prefix; callers without one keep the plain toast.
-      if (input.projectIdentifier === undefined) {
-        notifySuccess(WORK_ITEM_CREATED_TITLE);
-        return;
-      }
-      const identifier = input.projectIdentifier;
-      notifySuccessWithAction(WORK_ITEM_CREATED_TITLE, undefined, {
-        actionLabel: "View work item",
-        onAction: () => {
-          globalThis.location.assign(createdWorkItemPath(workspaceSlug, identifier, created.sequence_id));
-        },
-      });
+      announceCreatedWorkItem(workspaceSlug, input.projectIdentifier, created);
     },
     onError: () => {
       notifyError(WORK_ITEM_CREATE_FAILED_TITLE, WORK_ITEM_CREATE_FAILED_BODY);

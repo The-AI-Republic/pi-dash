@@ -3,10 +3,12 @@
 // See the LICENSE file for details.
 // Priority option shaping (parity/specs/issues.md §17, ISS-210). Five
 // fixed levels over the issue contract's enum, each with its own glyph;
-// the empty level is a real value, not a clear action. Urgent renders
-// outlined so it stands apart at a glance.
+// the empty level is a real value, not a clear action. Urgent is the
+// outlined alert and none the barred circle, matching the glyphs users
+// already read on every old surface; the three middle levels are signal
+// bars.
 import type { LucideIcon } from "lucide-react";
-import { ChevronDown, ChevronUp, ChevronsUp, Equal, Minus } from "lucide-react";
+import { AlertCircle, Ban, SignalHigh, SignalLow, SignalMedium } from "lucide-react";
 
 import { ISSUE_PRIORITIES } from "@pidash/api-client";
 
@@ -23,11 +25,11 @@ export const PRIORITY_LABELS: Record<PriorityLevel, string> = {
 };
 
 export const PRIORITY_ICONS: Record<PriorityLevel, LucideIcon> = {
-  urgent: ChevronsUp,
-  high: ChevronUp,
-  medium: Equal,
-  low: ChevronDown,
-  none: Minus,
+  urgent: AlertCircle,
+  high: SignalHigh,
+  medium: SignalMedium,
+  low: SignalLow,
+  none: Ban,
 };
 
 /** Glyph tones; urgent additionally renders an outline. */

@@ -48,6 +48,8 @@ const ROW: GanttRow = {
   durationDays: 5,
   stateId: null,
   sortOrder: 1,
+  priority: "none",
+  sequenceId: 7,
   archived: false,
   unconfirmed: false,
 };

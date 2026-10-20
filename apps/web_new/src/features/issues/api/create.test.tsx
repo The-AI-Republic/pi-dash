@@ -10,20 +10,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "./keys.js";
 import {
-  createdWorkItemPath,
+  CREATE_TOAST_COPY_LABEL,
+  CREATE_TOAST_VIEW_LABEL,
   useCreateWorkItem,
   WORK_ITEM_CREATED_TITLE,
   WORK_ITEM_CREATE_FAILED_TITLE,
   type WorkItemCreateInput,
 } from "./create.js";
 
-vi.mock("../../../shared/shell/index.js", () => ({
+vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/shell/index.js")>()),
   notifyError: vi.fn(),
   notifySuccess: vi.fn(),
-  notifySuccessWithAction: vi.fn(),
 }));
 
-import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
+import { ToastHost } from "@pidash/kit";
+
+import { getToastManager, notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 
@@ -89,7 +92,12 @@ describe("useCreateWorkItem", () => {
     function Probe(): React.ReactElement {
       const mutation = useCreateWorkItem("acme");
       save = (input) => mutation.mutate(input);
-      return <p>{`create:${mutation.status}`}</p>;
+      return (
+        <>
+          <p>{`create:${mutation.status}`}</p>
+          <ToastHost manager={getToastManager()} />
+        </>
+      );
     }
     render(
       <QueryClientProvider client={queryClient}>
@@ -114,14 +122,32 @@ describe("useCreateWorkItem", () => {
   it("posts the title and announces the new row", async () => {
     const h = renderHandle(201);
     h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE));
     // The oracle create-modal scenario keys on this exact sentence.
+    expect(await screen.findByText(WORK_ITEM_CREATED_TITLE)).toBeInTheDocument();
     expect(WORK_ITEM_CREATED_TITLE).toBe("Work item created successfully");
     const post = h.calls.find((call) => call.method === "POST");
     expect(post?.url).toBe(`https://api.test/api/workspaces/acme/projects/${PROJECT_ID}/issues/`);
     expect(JSON.parse(post?.body ?? "{}")).toEqual({ name: "Fresh report" });
     await waitFor(() => expect(h.invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.all("acme") }));
     expect(screen.getByText("create:success")).toBeInTheDocument();
+    // ISS-131: the toast offers the new record in another tab and a copy.
+    expect(screen.queryByTestId("toast-actions")).not.toBeInTheDocument();
+  });
+
+  it("offers a new-tab view and a copy link with the project code (ISS-131)", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, projectIdentifier: "WEB", payload: { name: "Fresh report" } });
+    const view = await screen.findByRole("link", { name: CREATE_TOAST_VIEW_LABEL });
+    expect(view).toHaveAttribute("href", "/acme/browse/WEB-7/");
+    expect(view).toHaveAttribute("target", "_blank");
+    expect(screen.getByRole("button", { name: CREATE_TOAST_COPY_LABEL })).toBeInTheDocument();
+  });
+
+  it("keeps the plain notice when the project code is unknown", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    expect(await screen.findByText(WORK_ITEM_CREATED_TITLE)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: CREATE_TOAST_VIEW_LABEL })).not.toBeInTheDocument();
   });
 
   it("announces the failure without creating", async () => {
@@ -130,19 +156,6 @@ describe("useCreateWorkItem", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(screen.getByText("create:error")).toBeInTheDocument();
-  });
-
-  it("offers a view action when the caller knows the project prefix", async () => {
-    const h = renderHandle(201);
-    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" }, projectIdentifier: "WEB" });
-    await waitFor(() =>
-      expect(notifySuccessWithAction).toHaveBeenCalledWith(
-        WORK_ITEM_CREATED_TITLE,
-        undefined,
-        expect.objectContaining({ actionLabel: "View work item" })
-      )
-    );
-    expect(createdWorkItemPath("acme", "WEB", 7)).toBe("/acme/browse/WEB-7");
   });
 });
 
@@ -216,7 +229,12 @@ describe("useCreateWorkItem temp rows", () => {
         queryFn: async () => ({ results: [...serverRows], total_count: serverRows.length }),
       });
       save = (input) => mutation.mutate(input);
-      return <p>{`create:${mutation.status}`}</p>;
+      return (
+        <>
+          <p>{`create:${mutation.status}`}</p>
+          <ToastHost manager={getToastManager()} />
+        </>
+      );
     }
     render(
       <QueryClientProvider client={queryClient}>
@@ -250,7 +268,7 @@ describe("useCreateWorkItem temp rows", () => {
     expect(h.cached().results[0]?.name).toBe("Fresh report");
     expect(h.cached().total_count).toBe(2);
     holdPost.release();
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith(WORK_ITEM_CREATED_TITLE));
+    expect(await screen.findByText(WORK_ITEM_CREATED_TITLE)).toBeInTheDocument();
     // The confirm invalidates the workspace lists, so the refetch carries
     // the server row instead of the temp one.
     await waitFor(() => expect(h.cached().results.some((entry) => entry.id.startsWith("temp-"))).toBe(false));

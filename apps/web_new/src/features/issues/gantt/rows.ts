@@ -29,6 +29,10 @@ export interface GanttRow {
   stateId: string | null;
   /** Manual rank behind sidebar reorder (ISS-050). */
   sortOrder: number;
+  /** Priority level, repeated on the hover preview card (ISS-133). */
+  priority: IssueListItem["priority"];
+  /** Server sequence, so the preview card can read the short key. */
+  sequenceId: number;
   archived: boolean;
   /**
    * An optimistic create that the server has not confirmed yet (ISS-006).
@@ -66,6 +70,8 @@ export function buildRows(issues: readonly IssueListItem[], projectIdentifier: s
       durationDays: startIso !== null && targetIso !== null ? diffDays(targetIso, startIso) + 1 : null,
       stateId: issue.state_id,
       sortOrder: issue.sort_order,
+      priority: issue.priority,
+      sequenceId: issue.sequence_id,
       archived: issue.archived_at !== null,
       unconfirmed: isTempRowId(issue.id),
     };

@@ -1,6 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Toasts: a stack of short confirmations. A notice carries a title, an
+// optional body and up to a few inline actions: a labelled button, an
+// anchor that opens in a new tab (the "view" affordance after a write),
+// or a copy action that swaps to its confirmation for a few seconds so
+// the user sees the clipboard write land. The confirmation is client
+// state only; it never changes what was copied.
 import { Toast as BaseToast } from "@base-ui-components/react/toast";
 import { X } from "lucide-react";
 import * as React from "react";
@@ -10,9 +16,23 @@ export type ToastHostManager = ReturnType<typeof BaseToast.createToastManager>;
 
 type ToastItem = ReturnType<typeof BaseToast.useToastManager>["toasts"][number];
 
+/** How long a copy action shows its confirmation. */
+export const TOAST_COPIED_RESET_MS = 3000;
+
 interface ToastActionData {
   actionLabel?: string | undefined;
   onAction?: (() => void) | undefined;
+  actions?: readonly ToastAction[] | undefined;
+}
+
+/** One inline action row on a toast. */
+export interface ToastAction {
+  /** Visible label, e.g. "View work item" or "Copy link". */
+  label: string;
+  /** Runs when the action is chosen (for a link, when it is followed). */
+  run?: (() => void) | undefined;
+  /** Render as an anchor opened in a new tab at this address. */
+  href?: string | undefined;
 }
 
 export function createKitToastManager(): ToastHostManager {
@@ -24,6 +44,8 @@ export interface ShowToastOptions {
   description?: string;
   actionLabel?: string;
   onAction?: () => void;
+  /** Inline actions rendered under the body, in order. */
+  actions?: readonly ToastAction[];
   /** Auto-dismiss delay in ms; 0 keeps the toast until dismissed. */
   timeout?: number;
 }
@@ -36,6 +58,7 @@ export function showToast(manager: ToastHostManager, options: ShowToastOptions):
     data: {
       ...(options.actionLabel === undefined ? {} : { actionLabel: options.actionLabel }),
       ...(options.onAction === undefined ? {} : { onAction: options.onAction }),
+      ...(options.actions === undefined ? {} : { actions: options.actions }),
     },
   });
 }
@@ -44,8 +67,59 @@ function actionOf(toast: ToastItem): ToastActionData {
   return (toast.data as ToastActionData | undefined) ?? {};
 }
 
+const actionClasses =
+  "inline-flex cursor-pointer items-center rounded-(--radius-control) px-(--space-2) py-px font-medium text-(--accent) hover:bg-(--subtle) hover:text-(--accent-hover) focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--focus-ring-color) focus-visible:outline-solid";
+
+/** One action row; a copy action keeps a short "Copied!" confirmation. */
+function ToastActionItem({ action, onChosen }: { action: ToastAction; onChosen: () => void }): React.ReactElement {
+  const [copied, setCopied] = React.useState(false);
+  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    []
+  );
+  // Copy actions are the ones with a run callback and no address: the
+  // clipboard write is the side effect, and its result is reported here.
+  if (action.href !== undefined) {
+    return (
+      <a
+        href={action.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={actionClasses}
+        onClick={() => {
+          action.run?.();
+          onChosen();
+        }}
+      >
+        {action.label}
+      </a>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className={actionClasses}
+      onClick={() => {
+        action.run?.();
+        if (action.run !== undefined) {
+          setCopied(true);
+          if (timer.current !== null) clearTimeout(timer.current);
+          timer.current = setTimeout(() => setCopied(false), TOAST_COPIED_RESET_MS);
+        } else {
+          onChosen();
+        }
+      }}
+    >
+      {copied ? "Copied!" : action.label}
+    </button>
+  );
+}
+
 function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostManager }): React.ReactElement {
-  const { actionLabel, onAction } = actionOf(toast);
+  const { actionLabel, onAction, actions = [] } = actionOf(toast);
   return (
     <BaseToast.Root
       toast={toast}
@@ -69,6 +143,13 @@ function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostMan
           >
             {actionLabel}
           </button>
+        ) : null}
+        {actions.length > 0 ? (
+          <div data-testid="toast-actions" className="mt-(--space-2) flex flex-wrap items-center gap-(--space-1)">
+            {actions.map((action) => (
+              <ToastActionItem key={action.label} action={action} onChosen={() => manager.close(toast.id)} />
+            ))}
+          </div>
         ) : null}
       </BaseToast.Content>
       <BaseToast.Close

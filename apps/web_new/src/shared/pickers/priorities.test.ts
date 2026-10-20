@@ -21,4 +21,12 @@ describe("priority options", () => {
       expect(PRIORITY_TONES[level].length).toBeGreaterThan(0);
     }
   });
+
+  it("uses the alert for urgent and the barred circle for none", () => {
+    expect(PRIORITY_ICONS.urgent.displayName ?? PRIORITY_ICONS.urgent.name).toBe("CircleAlert");
+    expect(PRIORITY_ICONS.none.displayName ?? PRIORITY_ICONS.none.name).toBe("Ban");
+    expect(PRIORITY_ICONS.high.displayName ?? PRIORITY_ICONS.high.name).toBe("SignalHigh");
+    expect(PRIORITY_ICONS.medium.displayName ?? PRIORITY_ICONS.medium.name).toBe("SignalMedium");
+    expect(PRIORITY_ICONS.low.displayName ?? PRIORITY_ICONS.low.name).toBe("SignalLow");
+  });
 });

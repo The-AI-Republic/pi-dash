@@ -8,6 +8,7 @@
 // while the chart keeps its own scroll state.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -242,6 +243,36 @@ describe("GanttLayout", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close preview" }));
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
     expect(document.querySelector(`[data-lane="${ISSUES[0]!.id}"]`)).not.toHaveAttribute("data-peeked");
+  });
+});
+
+describe("GanttLayout hover preview (ISS-133)", () => {
+  it("opens a preview card from a bar with its key, state and title", async () => {
+    const user = userEvent.setup();
+    renderLayout({
+      issues: [
+        issue({ start_date: "2026-10-01", target_date: "2026-10-05", state_id: STATE, name: "Dated row" }),
+        ...ISSUES.slice(1),
+      ],
+    });
+    const bar = screen.getAllByTestId("gantt-bar")[0]!;
+    await user.hover(bar);
+    const card = await screen.findByTestId("work-item-preview");
+    expect(card).toHaveTextContent("WEB-1");
+    expect(card).toHaveTextContent("Dated row");
+    expect(card).toHaveTextContent("Doing");
+    expect(screen.getByTestId("preview-card-dates")).toHaveTextContent("Oct 01, 2026 - Oct 05, 2026");
+  });
+
+  it("opens the same card from the sidebar reference", async () => {
+    const user = userEvent.setup();
+    renderLayout();
+    await user.hover(screen.getByRole("link", { name: "First" }));
+    const card = await screen.findByTestId("work-item-preview");
+    expect(card).toHaveTextContent("WEB-1");
+    // The first row carries no dates and no state, so neither line renders.
+    expect(screen.queryByTestId("preview-card-dates")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("preview-card-state")).not.toBeInTheDocument();
   });
 });
 
