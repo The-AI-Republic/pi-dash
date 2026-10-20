@@ -171,7 +171,7 @@ export function Sidebar({
       quickActions={quickActions}
       account={
         <>
-          {planBadge === undefined ? null : <div data-testid="sidebar-plan-badge">{planBadge}</div>}
+          {planBadge}
           <div className="min-w-0 flex-1">
             <UserMenu
               displayName={userLabel}

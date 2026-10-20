@@ -34,22 +34,6 @@ export const SIDEBAR_TOGGLE_FLAG = "sidebar-toggle";
  * this; the community edition leaves it absent and renders nothing.
  */
 export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
-/**
- * Workspace plan badge (CLOUD-038, parity/specs/cloud.md §8). Editions
- * whose server publishes a plan snapshot and an external account center
- * set this; the community edition leaves it absent because its billing
- * surface is the in-app upgrade entry, not an external account.
- */
-export const PLAN_BADGE_FLAG = "plan-badge";
-/**
- * Cloud API path (CLOUD-040, parity/specs/cloud.md §8). Editions whose web
- * server proxies only `/api/*` set this: the desktop agent then reads its
- * CSRF token from `/api/auth/get-csrf-token/` — the same proxying reason
- * cloud sign-out uses — instead of the client's default `/auth/` path.
- * The community edition leaves it absent and keeps the default path.
- */
-export const CLOUD_CSRF_FLAG = "cloud-csrf";
-
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
   id: string;

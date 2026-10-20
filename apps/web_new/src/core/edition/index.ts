@@ -13,7 +13,7 @@ export type {
   SidebarItem,
   SlotComponents,
 } from "./types.js";
-export { APP_RAIL_FLAG, CLOUD_CSRF_FLAG, ISSUE_DEDUPE_FLAG, PLAN_BADGE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
+export { APP_RAIL_FLAG, ISSUE_DEDUPE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
 export { isAppRailEnabled, isSidebarToggleEnabled, usesCloudCsrfPath } from "./flags.js";
 export {
   APPS_CATALOG_ROUTE_PATH,

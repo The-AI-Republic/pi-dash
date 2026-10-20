@@ -61,7 +61,7 @@ export function PlanBadge({ onOpenExternal, version }: PlanBadgeProps): React.Re
       aria-label={`${PLAN_BADGE_LABEL}: ${label}`}
       aria-disabled={destination === null || undefined}
       title={planBadgeHint(version)}
-      className="flex w-full items-center justify-between gap-(--space-2) rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-left text-(--text) enabled:hover:bg-(--subtle) aria-disabled:cursor-default aria-disabled:opacity-70"
+      className="flex w-full items-center rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-left text-(--text) enabled:hover:bg-(--subtle) aria-disabled:cursor-default"
       onClick={open}
     >
       <span className="text-caption truncate rounded-(--radius-full) bg-(--accent-subtle) px-(--space-2) py-(--space-0) font-medium text-(--accent)">

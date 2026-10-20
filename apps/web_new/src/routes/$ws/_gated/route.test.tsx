@@ -1258,6 +1258,9 @@ describe("gated layout shell wiring", () => {
 
   it("loads the plan badge from its own chunk inside the sidebar slot (CLOUD-038, size gate)", async () => {
     edition.flags["plan-badge"] = true;
+    // Installed first: the shell hands the badge the opener it reads at
+    // render time.
+    const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
     renderShell();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const slot = render(
@@ -1268,7 +1271,6 @@ describe("gated layout shell wiring", () => {
     try {
       // Resolving the boundary imports the split chunk and renders the
       // label from the plan the query mock serves.
-      const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
       const badge = await screen.findByRole("button", { name: "Plan: Upgrade" });
       expect(screen.queryByText("loading plan")).not.toBeInTheDocument();
       // The shell hands the badge the platform opener, so the desktop
