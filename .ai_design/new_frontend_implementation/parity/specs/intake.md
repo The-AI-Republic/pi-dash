@@ -746,11 +746,14 @@ and leaves the request pending, with no change.
 The accept write and the work-item edit are ordered, and the old order
 is the one to keep: the form's pre-submit hook runs first and writes
 `PATCH /api/workspaces/{ws}/projects/{pid}/intake-issues/{issueId}/`
-with `status=1`; then the form's ordinary update writes the fields the
-user actually changed. Because the submit is an edit diff, an untouched
-state field is not resent and cannot drag the item back to triage. The
-server's accept write has already moved the item from triage to the
-project's default state by the time the diff lands; if the user
+with `status=1`; then the form's ordinary update writes the changed
+fields. The form's edit submit is a dirty-field diff plus three
+unconditional echoes: `description_html` (the current editor HTML, or
+an empty paragraph), `type_id`, and `project_id`. It does **not** echo
+`state_id` unless the user changed the state, so the accept write's
+transition to the project's default state is not undone by the follow-up
+PATCH. The server's accept write has already moved the item from triage
+to the project's default state by the time the update lands; if the user
 deliberately picked another state in the form, that pick is part of the
 diff and lands after the transition, which is the intended outcome of an
 explicit edit. The server's accept validation requires a project default
@@ -1085,16 +1088,18 @@ NEWFRONT-630 (dedupe), NEWFRONT-689/692/693 (the surfaces it adapts).
 ## Data layer
 
 **Query keys.** All intake keys are nested under `workspaceScope`
-(`["workspace", slug]`) so workspace switching clears them:
+(`["ws", slug]`, the shared factory in `core/query/client.ts`) so
+workspace switching clears them. Every intake key factory therefore
+takes the workspace slug as its first argument:
 
-- `intakeKeys.list(projectId, { tab, filters, order })` — the infinite
+- `intakeKeys.list(workspaceSlug, projectId, { tab, filters, order })` — the infinite
   list (page param = cursor), including the tab's default status in the
   key. The key excludes `inboxIssueId`, so selecting a row does not
   refetch the list.
-- `intakeKeys.detail(projectId, issueId)` — one-shot detail read.
-- `intakeKeys.versions(projectId, issueId)` — description versions,
+- `intakeKeys.detail(workspaceSlug, projectId, issueId)` — one-shot detail read.
+- `intakeKeys.versions(workspaceSlug, projectId, issueId)` — description versions,
   shared through `issueKeys.descriptionVersions`.
-- `intakeKeys.search(projectId, term)` — duplicate-picker search.
+- `intakeKeys.search(workspaceSlug, projectId, term)` — duplicate-picker search.
 - reference data (`intakeState`, members, labels, states) uses
   `pickerKeys` from `shared/pickers/reference.ts`.
 
@@ -1130,7 +1135,7 @@ ignore, because the guest-creator property panel is read-only.
 old screen renders it (INT-004): with the default Open filters that is
 the pending total, and after the user narrows Open it is the narrowed
 total. The cache holds the list envelope per key, so
-`intakeKeys.list(projectId, { tab: "open", filters, order })` already
+`intakeKeys.list(workspaceSlug, projectId, { tab: "open", filters, order })` already
 carries the number; there is no `pendingCount` query of its own. Every
 create or triage mutation invalidates the Open list keys (and the Closed
 keys), and switching back to Open re-reads, so the badge reflects
