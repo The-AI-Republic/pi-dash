@@ -40,6 +40,7 @@ function stubLocator(overrides: Record<string, unknown> = {}) {
     locator: vi.fn(() => locator),
     getByRole: vi.fn(() => locator),
     getByText: vi.fn(() => locator),
+    getByTestId: vi.fn(() => locator),
     filter: vi.fn(() => locator),
     or: vi.fn(() => locator),
     allTextContents: vi.fn(async () => []),
@@ -59,11 +60,17 @@ function pageStub(overrides: Record<string, unknown> = {}): Page {
     waitForResponse: vi.fn(async () => stubResponse("GET", "https://api.test/api/runners/")),
     waitForURL: vi.fn(async () => undefined),
     waitForFunction: vi.fn(async () => undefined),
+    evaluate: vi.fn(async () => 0),
     getByRole: vi.fn(() => stubLocator()),
     getByText: vi.fn(() => stubLocator()),
     locator: vi.fn(() => stubLocator()),
     route: vi.fn(async (_pattern: string, _handler: unknown) => undefined),
     unroute: vi.fn(async (_pattern: string) => undefined),
+    on: vi.fn(),
+    off: vi.fn(),
+    waitForTimeout: vi.fn(async (_ms: number) => undefined),
+    waitForLoadState: vi.fn(async () => undefined),
+    reload: vi.fn(async () => undefined),
     ...overrides,
   } as unknown as Page;
 }
@@ -1345,5 +1352,315 @@ describe("pod driver methods (NEWFRONT-542, RUN-012–015)", () => {
     });
 
     expect(await new WebNewDriver(page).runnersSavePodEditCapturing({})).toEqual([{}]);
+  });
+});
+
+// --- Runs list and detail (NEWFRONT-545, RUN-016–022). These exercise the
+// --- new-app DOM contract: runs test ids, the runs API URLs, and pager state.
+
+function testIdPage(ids: Record<string, Locator>, overrides: Record<string, unknown> = {}): Page {
+  return pageStub({
+    getByTestId: vi.fn((id: string) => ids[id] ?? stubLocator()),
+    ...overrides,
+  });
+}
+
+function textNode(text: string, overrides: Record<string, unknown> = {}) {
+  return stubLocator({
+    count: vi.fn(async () => 1),
+    innerText: vi.fn(async () => text),
+    isVisible: vi.fn(async () => true),
+    ...overrides,
+  });
+}
+
+describe("runs list navigation", () => {
+  it("opens workspace and project runs with the idempotent list waiter", async () => {
+    const table = textNode("", { getByTestId: vi.fn(() => textNode("No runs yet.")) });
+    const page = testIdPage({ "runs-table": table }, { locator: vi.fn(() => stubLocator()) });
+    const driver = new WebNewDriver(page);
+
+    await driver.openRunsList("acme");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/runs", { timeout: 60_000 });
+    await driver.openRunsListAtPage("acme", 2, "p-1");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/projects/p-1/runners/runs?page=2", { timeout: 60_000 });
+    await driver.openRunDetail("acme", "run-1", "p-1");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/projects/p-1/runners/runs/run-1", { timeout: 60_000 });
+    expect(await driver.runsHistoryLength()).toBe(0);
+    expect((page.evaluate as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0]).toBeTypeOf("function");
+  });
+});
+
+describe("runsRows, runsPager, runsEmptyVisible", () => {
+  it("reads status and prompt from each row and skips the empty-state cell", async () => {
+    const rows = [
+      stubLocator({
+        getByTestId: vi.fn((id: string) =>
+          id === "runs-row-status" ? textNode("running") : textNode("parity prompt alpha")
+        ),
+      }),
+      stubLocator({
+        getByTestId: vi.fn((id: string) =>
+          id === "runs-row-status" ? textNode("cancelled") : textNode("parity prompt beta")
+        ),
+      }),
+    ];
+    const table = stubLocator({ getByTestId: vi.fn(() => stubLocator({ all: vi.fn(async () => rows) })) });
+    const driver = new WebNewDriver(testIdPage({ "runs-table": table }));
+
+    await expect(driver.runsRows()).resolves.toEqual([
+      { statusLabel: "running", prompt: "parity prompt alpha" },
+      { statusLabel: "cancelled", prompt: "parity prompt beta" },
+    ]);
+  });
+
+  it("reads the pager label and both disabled ends", async () => {
+    const buttons = stubLocator({
+      count: vi.fn(async () => 2),
+      first: () => buttons,
+      nth: (index: number) => stubLocator({ isDisabled: vi.fn(async () => (index === 0 ? false : true)) }),
+    });
+    const pager = stubLocator({
+      count: vi.fn(async () => 1),
+      getByTestId: vi.fn(() => textNode("Page 2 of 2")),
+      getByRole: vi.fn(() => buttons),
+    });
+    const driver = new WebNewDriver(testIdPage({ "runs-pager": pager }));
+
+    await expect(driver.runsPager()).resolves.toEqual({
+      label: "Page 2 of 2",
+      prevDisabled: false,
+      nextDisabled: true,
+    });
+  });
+
+  it("hides the pager when it is not rendered and reports an empty list only without rows", async () => {
+    const list = stubLocator({ getByText: vi.fn(() => textNode("No runs yet.")) });
+    const noPager = new WebNewDriver(
+      testIdPage({ "runs-list": list, "runs-row": stubLocator({ count: vi.fn(async () => 0) }) })
+    );
+    await expect(noPager.runsPager()).resolves.toBeNull();
+    await expect(noPager.runsEmptyVisible()).resolves.toBe(true);
+
+    const withRow = new WebNewDriver(
+      testIdPage({ "runs-list": list, "runs-row": stubLocator({ count: vi.fn(async () => 1) }) })
+    );
+    await expect(withRow.runsEmptyVisible()).resolves.toBe(false);
+  });
+
+  it("turns the pager and waits for the visible page label to change", async () => {
+    let label = "Page 2 of 2";
+    const pageLabelNode = stubLocator({ innerText: vi.fn(async () => label) });
+    const next = stubLocator({
+      click: vi.fn(async () => {
+        label = "Page 1 of 2";
+      }),
+    });
+    const pager = stubLocator({
+      getByTestId: vi.fn(() => pageLabelNode),
+      getByRole: vi.fn(() => next),
+    });
+    const table = stubLocator({ getByTestId: vi.fn(() => stubLocator({ all: vi.fn(async () => []) })) });
+    const page = testIdPage({ "runs-pager": pager, "runs-table": table }, { locator: vi.fn(() => stubLocator()) });
+    const driver = new WebNewDriver(page);
+
+    await driver.runsPrevPage();
+    expect(next.click).toHaveBeenCalled();
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(0);
+    const stuckPage = testIdPage(
+      { "runs-pager": pager },
+      {
+        waitForTimeout: vi.fn(async () => {
+          vi.setSystemTime(10_000_000);
+        }),
+      }
+    );
+    const stuck = new WebNewDriver(stuckPage);
+    await expect(stuck.runsPrevPage()).rejects.toThrow(/did not turn prev/);
+    vi.useRealTimers();
+  });
+
+  it("selects the row whose prompt contains the marker", async () => {
+    const first = stubLocator({
+      getByTestId: vi.fn((id: string) => textNode(id === "runs-row-prompt" ? "other" : "queued")),
+    });
+    const second = stubLocator({
+      getByTestId: vi.fn((id: string) => textNode(id === "runs-row-prompt" ? "wanted marker" : "running")),
+      click: vi.fn(async () => undefined),
+    });
+    const table = stubLocator({ getByTestId: vi.fn(() => stubLocator({ all: vi.fn(async () => [first, second]) })) });
+    const page = testIdPage({ "runs-table": table, "run-detail": textNode("detail", { count: vi.fn(async () => 1) }) });
+    const driver = new WebNewDriver(page);
+
+    await driver.runsSelectRun("wanted");
+    expect(second.click).toHaveBeenCalled();
+    await expect(driver.runsSelectRun("missing")).rejects.toThrow(/run row/);
+  });
+});
+
+describe("run detail reads", () => {
+  function detailPage() {
+    const ids: Record<string, Locator> = {
+      "run-detail": textNode("detail"),
+      "run-detail-id": textNode("run-1"),
+      "run-status": textNode("running"),
+      "run-executor": textNode("Local runner"),
+      "run-prompt": textNode("full prompt"),
+      "run-scheduler-link": textNode("Nightly", { getAttribute: vi.fn(async () => "/acme/projects/p/schedulers/b") }),
+      "run-error": textNode("raw failure"),
+      "run-error-source": textNode("Agent CLI"),
+      "run-error-kind": textNode("Sign-in failed"),
+      "run-error-summary": textNode("the summary"),
+      "run-error-action": textNode("Re-authenticate"),
+      "run-result": textNode('{"answer":42}'),
+      "run-result-summary": textNode("cloud summary"),
+      "run-cloud-panel": textNode("cloud"),
+      "run-cloud-tool": stubLocator({ all: vi.fn(async () => [textNode("search"), textNode("fetch")]) }),
+      "run-cloud-call": stubLocator({
+        all: vi.fn(async () => [
+          stubLocator({
+            getByTestId: vi.fn((id: string) =>
+              id === "run-cloud-call-name" ? textNode("search") : textNode("read · succeeded")
+            ),
+          }),
+        ]),
+      }),
+      "run-events": stubLocator({
+        locator: vi.fn(() =>
+          stubLocator({
+            all: vi.fn(async () => [
+              stubLocator({
+                getAttribute: vi.fn(async () => "run-event-row"),
+                locator: vi.fn(() => stubLocator({ nth: (i: number) => textNode(i === 0 ? "1" : "agent/message") })),
+              }),
+              stubLocator({
+                getAttribute: vi.fn(async () => "run-event-narrative-row"),
+                getByTestId: vi.fn(() => textNode("hello")),
+              }),
+              stubLocator({
+                getAttribute: vi.fn(async () => "run-event-row"),
+                locator: vi.fn(() => stubLocator({ nth: (i: number) => textNode(i === 0 ? "2" : "run/started") })),
+              }),
+            ]),
+          })
+        ),
+      }),
+      "run-cancel": textNode("Cancel run"),
+    };
+    return testIdPage(ids);
+  }
+
+  it("reports loaded state and every header, prompt and scheduler field", async () => {
+    const driver = new WebNewDriver(detailPage());
+    await expect(driver.runDetailState()).resolves.toBe("loaded");
+    await expect(driver.runDetailHeader()).resolves.toEqual({
+      id: "run-1",
+      statusLabel: "running",
+      executor: "Local runner",
+    });
+    await expect(driver.runDetailPrompt()).resolves.toBe("full prompt");
+    await expect(driver.runDetailScheduler()).resolves.toEqual({
+      name: "Nightly",
+      href: "/acme/projects/p/schedulers/b",
+    });
+  });
+
+  it("reads the error diagnostic, result summary and cloud panel", async () => {
+    const driver = new WebNewDriver(detailPage());
+    await expect(driver.runDetailError()).resolves.toEqual({
+      raw: "raw failure",
+      source: "Agent CLI",
+      kind: "Sign-in failed",
+      summary: "the summary",
+      action: "Re-authenticate",
+    });
+    await expect(driver.runDetailResult()).resolves.toEqual({ summary: "cloud summary", raw: '{"answer":42}' });
+    await expect(driver.runCloudPanel()).resolves.toEqual({
+      tools: ["search", "fetch"],
+      calls: [{ tool: "search", risk: "read", status: "succeeded" }],
+    });
+    await expect(driver.runEvents()).resolves.toEqual([
+      { seq: "1", kind: "agent/message", narrative: "hello" },
+      { seq: "2", kind: "run/started", narrative: null },
+    ]);
+  });
+
+  it("returns null blocks when the run does not carry them", async () => {
+    const driver = new WebNewDriver(testIdPage({}));
+    await expect(driver.runDetailHeader()).resolves.toBeNull();
+    await expect(driver.runDetailPrompt()).resolves.toBeNull();
+    await expect(driver.runDetailScheduler()).resolves.toBeNull();
+    await expect(driver.runDetailError()).resolves.toBeNull();
+    await expect(driver.runDetailResult()).resolves.toBeNull();
+    await expect(driver.runCloudPanel()).resolves.toBeNull();
+  });
+
+  it("distinguishes none, loading and unavailable panes", async () => {
+    await expect(new WebNewDriver(testIdPage({ "run-detail-none": textNode("none") })).runDetailState()).resolves.toBe(
+      "none"
+    );
+    await expect(
+      new WebNewDriver(testIdPage({ "run-detail-loading": textNode("loading") })).runDetailState()
+    ).resolves.toBe("loading");
+    await expect(
+      new WebNewDriver(testIdPage({ "run-detail-unavailable": textNode("gone") })).runDetailState()
+    ).resolves.toBe("unavailable");
+  });
+});
+
+describe("run detail loading and polling", () => {
+  it("reports the loading pane while a delayed detail fetch is in flight", async () => {
+    const page = testIdPage({
+      "run-detail-loading": stubLocator({ count: vi.fn(async () => 1) }),
+      "run-detail": stubLocator({ count: vi.fn(async () => 0) }),
+    });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.runDetailLoadingObserved("acme", "run-1")).resolves.toBe(true);
+    expect(page.route).toHaveBeenCalledWith("**/api/runners/runs/run-1/**", expect.any(Function));
+  });
+
+  it("counts only matching GET requests for list and detail polling", async () => {
+    let handler: ((request: { url(): string; method(): string }) => void) | null = null;
+    let requests: string[] = [];
+    const page = pageStub({
+      on: vi.fn((_event: string, fn: typeof handler) => {
+        handler = fn;
+      }),
+      off: vi.fn(),
+      waitForTimeout: vi.fn(async () => {
+        for (const url of requests) handler?.({ url: () => url, method: () => "GET" });
+        handler?.({ url: () => "https://api.test/api/runners/runs/run-1/", method: () => "POST" });
+      }),
+    });
+    const driver = new WebNewDriver(page);
+
+    requests = ["https://api.test/api/runners/runs/?page=1", "https://api.test/api/runners/runs/run-1/"];
+    await expect(driver.runsListPollCount(10)).resolves.toBe(1);
+    await expect(driver.runDetailPollCount("run-1", 10)).resolves.toBe(1);
+    expect(page.off).toHaveBeenCalled();
+  });
+});
+
+describe("run canceling", () => {
+  it("opens, reads and confirms the cancel dialog", async () => {
+    const confirm = stubLocator({ click: vi.fn(async () => undefined) });
+    const dialog = stubLocator({
+      count: vi.fn(async () => 1),
+      getByRole: vi.fn(() => stubLocator({ first: () => textNode("Cancel run?") })),
+      getByTestId: vi.fn((id: string) => (id === "run-cancel-confirm" ? confirm : textNode("stop copy"))),
+      waitFor: vi.fn(async () => undefined),
+    });
+    const cancel = textNode("Cancel run", { click: vi.fn(async () => undefined) });
+    const page = testIdPage({ "run-cancel": cancel }, { getByRole: vi.fn(() => dialog) });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.runCancelAvailable()).resolves.toBe(true);
+    await driver.runCancelOpen();
+    await expect(driver.runCancelDialog()).resolves.toEqual({ title: "Cancel run?", body: "stop copy" });
+    await driver.runCancelConfirm();
+    expect(confirm.click).toHaveBeenCalled();
   });
 });

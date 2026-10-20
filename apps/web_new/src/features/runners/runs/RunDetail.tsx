@@ -60,14 +60,22 @@ export interface RunDetailProps {
 export function RunDetail({ state, run, cancelling, onCancel, schedulerHref }: RunDetailProps): React.ReactElement {
   const [cancelOpen, setCancelOpen] = React.useState(false);
   if (state === "none") {
-    return <p className="text-body text-(--text-muted)">{RUN_DETAIL_NONE_TEXT}</p>;
+    return (
+      <p data-testid="run-detail-none" className="text-body text-(--text-muted)">
+        {RUN_DETAIL_NONE_TEXT}
+      </p>
+    );
   }
   if (state === "unavailable") {
-    return <p className="text-body text-(--danger)">{RUN_DETAIL_UNAVAILABLE_TEXT}</p>;
+    return (
+      <p data-testid="run-detail-unavailable" className="text-body text-(--danger)">
+        {RUN_DETAIL_UNAVAILABLE_TEXT}
+      </p>
+    );
   }
   if (state === "loading" || run === null) {
     return (
-      <p className="text-body flex items-center gap-(--space-2) text-(--text-muted)">
+      <p data-testid="run-detail-loading" className="text-body flex items-center gap-(--space-2) text-(--text-muted)">
         <Spinner size="small" />
         {RUN_DETAIL_LOADING_TEXT}
       </p>
