@@ -494,28 +494,40 @@ fn check_duplicate_throttle(asset_id: &Uuid) -> Result<(), Response> {
 /// and browsers send: JSON objects as-is, urlencoded and multipart text
 /// fields as strings. Duplicate keys keep the last value (`QueryDict.get`).
 /// Files in multipart bodies are ignored — the views never read
-/// `request.FILES`. Unparseable bodies answer the 500 fallback.
-fn parse_data(content_type: Option<&str>, body: &[u8]) -> Option<Map<String, Value>> {
+/// `request.FILES`. Malformed JSON answers `ParseError` 400 (DRF
+/// `JSONParser` raises it on the first `request.data` access and
+/// `handle_exception` renders it); non-object JSON (or an unparseable
+/// content type) surfaces the attribute errors the view code hits (500
+/// envelope).
+#[allow(clippy::result_large_err)]
+fn parse_data(content_type: Option<&str>, body: &[u8]) -> Result<Map<String, Value>, Response> {
     if body.is_empty() {
-        return Some(Map::new());
+        return Ok(Map::new());
     }
     let ct = content_type.unwrap_or("");
     if ct.contains("application/json") {
         match serde_json::from_slice::<Value>(body) {
-            Ok(Value::Object(map)) => Some(map),
+            Ok(Value::Object(map)) => Ok(map),
             // A JSON list/scalar has no `.get`: `AttributeError` → 500.
-            _ => None,
+            Ok(_) => Err(server_error()),
+            Err(error) => Err(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(format!(
+                    "{{\"detail\":\"JSON parse error - {error}\"}}",
+                )))
+                .expect("parse error response")),
         }
     } else if ct.contains("application/x-www-form-urlencoded") {
-        Some(parse_urlencoded(body))
+        Ok(parse_urlencoded(body))
     } else if ct.contains("multipart/form-data") {
         let boundary = ct.split("boundary=").nth(1).unwrap_or("").trim();
         if boundary.is_empty() {
-            return None;
+            return Err(server_error());
         }
-        Some(parse_multipart(body, boundary))
+        Ok(parse_multipart(body, boundary))
     } else {
-        None
+        Err(server_error())
     }
 }
 
@@ -864,8 +876,9 @@ async fn post_project_asset(
     {
         return denial;
     }
-    let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {
-        return server_error();
+    let data = match parse_data(content_type(&headers).as_deref(), &body) {
+        Ok(data) => data,
+        Err(response) => return response,
     };
     // `size = int(...)` raises before either validation (`v2.py:516`).
     let size = match parse_size(data.get("size"), state.settings().file_size_limit) {
@@ -1053,8 +1066,9 @@ async fn patch_project_asset(
             tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
         }
     }
-    let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {
-        return server_error();
+    let data = match parse_data(content_type(&headers).as_deref(), &body) {
+        Ok(data) => data,
+        Err(response) => return response,
     };
     let attributes = data
         .get("attributes")
@@ -1260,8 +1274,9 @@ async fn post_bulk_asset(
     {
         return denial;
     }
-    let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {
-        return server_error();
+    let data = match parse_data(content_type(&headers).as_deref(), &body) {
+        Ok(data) => data,
+        Err(response) => return response,
     };
     // `asset_ids=data.get("asset_ids", [])` (`:638`): `if not asset_ids`
     // (`:641-642`) rejects missing/null and every falsy shape
@@ -1559,8 +1574,9 @@ async fn post_duplicate_asset(
     if let Err(denial) = check_duplicate_throttle(&asset_id) {
         return denial;
     }
-    let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {
-        return server_error();
+    let data = match parse_data(content_type(&headers).as_deref(), &body) {
+        Ok(data) => data,
+        Err(response) => return response,
     };
     // QUIRK (`:739`): the key read here is `entity_id`, not the mint
     // endpoints' `entity_identifier`.
