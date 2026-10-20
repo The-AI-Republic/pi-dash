@@ -36,6 +36,11 @@ export interface RouteHarnessOptions {
   initialPath?: string;
   /** Whether the layout runs (the parent `_gated` waterfall tests this). */
   gatedLayout?: boolean;
+  /**
+   * Mirror the app's `trailingSlash` setting (`main.tsx`). Defaults to the
+   * router's own behavior; tests that pin an authored trailing slash opt in.
+   */
+  trailingSlash?: "preserve";
   transport: Transport;
 }
 
@@ -45,6 +50,7 @@ export function renderSettingsRoute({
   leafPath,
   initialPath,
   gatedLayout = true,
+  trailingSlash,
   transport,
 }: RouteHarnessOptions) {
   const apiClient = createAppClient("https://api.test", transport);
@@ -85,6 +91,7 @@ export function renderSettingsRoute({
   leafParentRoute.addChildren([leafRoute]);
   const leafAddress = leafPath === "/" ? "/acme/settings/" : `/acme/settings/${leafPath.replace(/\/$/, "")}/`;
   const router = createRouter({
+    ...(trailingSlash === undefined ? {} : { trailingSlash }),
     routeTree: rootRoute.addChildren([
       wsRoute.addChildren([
         gatedRoute.addChildren([settingsRoute.addChildren([layoutRoute.addChildren([leafParentRoute])])]),

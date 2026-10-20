@@ -29,6 +29,15 @@ export interface MembersTableProps {
   onOrderChange: (order: RosterFilters["order"]) => void;
   /** Resolves a stored avatar path to a renderable URL. */
   avatarUrl: (path: string | null) => string | null;
+  /** Signed-in user, so their own row offers Leave instead of Remove. */
+  actorUserId: string | null;
+  /** The caller's workspace role; admins get the account-type control. */
+  actorRole: number | null;
+  /** A role write is in flight. */
+  rolePending: boolean;
+  onRoleChange: (row: WorkspaceRosterMember, role: number) => void;
+  onRemove: (row: WorkspaceRosterMember) => void;
+  onLeave: () => void;
 }
 
 function sortableSpec(column: RosterTableColumn) {
@@ -98,6 +107,12 @@ export function MembersTable({
   order,
   onOrderChange,
   avatarUrl,
+  actorUserId,
+  actorRole,
+  rolePending,
+  onRoleChange,
+  onRemove,
+  onLeave,
 }: MembersTableProps): React.ReactElement {
   return (
     <div className="overflow-x-auto">
@@ -107,6 +122,9 @@ export function MembersTable({
             {ROSTER_COLUMNS.map((column) => (
               <HeaderCell key={column.key} column={column} order={order} onOrderChange={onOrderChange} />
             ))}
+            <th scope="col">
+              <span className="sr-only">Row actions</span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -116,6 +134,12 @@ export function MembersTable({
               workspaceSlug={workspaceSlug}
               row={row}
               avatarUrl={avatarUrl(row.member.avatar_url)}
+              actorUserId={actorUserId}
+              actorRole={actorRole}
+              rolePending={rolePending}
+              onRoleChange={onRoleChange}
+              onRemove={onRemove}
+              onLeave={onLeave}
             />
           ))}
         </tbody>

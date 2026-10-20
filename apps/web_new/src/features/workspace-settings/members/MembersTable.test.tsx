@@ -33,6 +33,16 @@ function row(display: string, active = true): WorkspaceRosterMember {
   };
 }
 
+/** Row actions plus the actor props every table needs (WSET-012/013). */
+const actions = {
+  actorUserId: "u-someone",
+  actorRole: 20,
+  rolePending: false,
+  onRoleChange: () => undefined,
+  onRemove: () => undefined,
+  onLeave: () => undefined,
+};
+
 describe("MembersTable", () => {
   it("renders the six column headers in order", () => {
     render(
@@ -42,6 +52,7 @@ describe("MembersTable", () => {
         order={null}
         onOrderChange={() => undefined}
         avatarUrl={() => null}
+        {...actions}
       />
     );
     expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent?.trim())).toEqual([
@@ -51,6 +62,7 @@ describe("MembersTable", () => {
       "Account type",
       "Authentication",
       "Joining date",
+      "Row actions",
     ]);
   });
 
@@ -63,6 +75,7 @@ describe("MembersTable", () => {
         order={{ column: "display_name", direction: "asc" }}
         onOrderChange={onOrderChange}
         avatarUrl={() => null}
+        {...actions}
       />
     );
     const header = screen.getByRole("columnheader", { name: /Display name/ });
@@ -84,6 +97,7 @@ describe("MembersTable", () => {
         order={{ column: "role", direction: "desc" }}
         onOrderChange={onOrderChange}
         avatarUrl={() => null}
+        {...actions}
       />
     );
     await userEvent.click(screen.getByRole("button", { name: "Sort by Account type" }));
@@ -101,6 +115,7 @@ describe("MembersTable", () => {
         order={null}
         onOrderChange={() => undefined}
         avatarUrl={avatarUrl}
+        {...actions}
       />
     );
     expect(avatarUrl).toHaveBeenCalledWith(null);
@@ -115,6 +130,7 @@ describe("MembersTable", () => {
         order={null}
         onOrderChange={() => undefined}
         avatarUrl={() => null}
+        {...actions}
       />
     );
     expect(screen.queryAllByTestId("member-row")).toEqual([]);

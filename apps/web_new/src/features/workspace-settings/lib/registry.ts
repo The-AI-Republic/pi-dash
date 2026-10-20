@@ -13,6 +13,8 @@ import type { WorkspaceSettingsSectionKey } from "./sections.js";
 
 export interface WorkspaceSettingsPageProps {
   workspaceSlug: string;
+  /** Navigation seam the shell owns; a page that leaves the workspace asks it to move on. */
+  onLeaveWorkspace?: (() => void) | undefined;
 }
 
 export type WorkspaceSettingsPageComponent = (props: WorkspaceSettingsPageProps) => React.ReactNode;

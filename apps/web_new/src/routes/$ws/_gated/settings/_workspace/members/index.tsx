@@ -19,8 +19,21 @@ export const Route = createFileRoute("/$ws/_gated/settings/_workspace/members/")
 
 function WorkspaceSettingsSectionPage(): React.ReactElement {
   const { ws } = Route.useParams();
+  const navigate = Route.useNavigate();
   React.useEffect(() => {
     void import("../../../../../../features/workspace-settings/members/register.js");
   }, []);
-  return <SettingsSectionOutlet workspaceSlug={ws} section="members" />;
+  return (
+    <SettingsSectionOutlet
+      workspaceSlug={ws}
+      section="members"
+      onLeaveWorkspace={() => {
+        // §13: the just-left workspace home renders the not-authorized gate
+        // from the still-cached workspace list, so navigation stays in the
+        // app. The address keeps its trailing slash, matching the oracle's
+        // landing URL and the delete-workspace flow.
+        void navigate({ to: "/$ws/", params: { ws } });
+      }}
+    />
+  );
 }

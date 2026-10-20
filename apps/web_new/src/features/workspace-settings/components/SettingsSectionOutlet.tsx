@@ -16,9 +16,19 @@ import { SettingsSectionPlaceholder } from "./SettingsSectionPlaceholder.js";
 export interface SettingsSectionOutletProps {
   workspaceSlug: string;
   section: WorkspaceSettingsSectionKey;
+  /** Forwarded to the registered body, so a page can leave the workspace through the router. */
+  onLeaveWorkspace?: (() => void) | undefined;
 }
 
-export function SettingsSectionOutlet({ workspaceSlug, section }: SettingsSectionOutletProps): React.ReactElement {
+export function SettingsSectionOutlet({
+  workspaceSlug,
+  section,
+  onLeaveWorkspace,
+}: SettingsSectionOutletProps): React.ReactElement {
   const Page = useWorkspaceSettingsPage(section);
-  return Page === null ? <SettingsSectionPlaceholder /> : <Page workspaceSlug={workspaceSlug} />;
+  return Page === null ? (
+    <SettingsSectionPlaceholder />
+  ) : (
+    <Page workspaceSlug={workspaceSlug} onLeaveWorkspace={onLeaveWorkspace} />
+  );
 }

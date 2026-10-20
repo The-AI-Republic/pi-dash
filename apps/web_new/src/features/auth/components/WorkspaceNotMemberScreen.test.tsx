@@ -22,7 +22,7 @@ import { WorkspaceNotMemberScreen } from "./WorkspaceNotMemberScreen.js";
 describe("WorkspaceNotMemberScreen", () => {
   it("points at invitations and creation with the first action focused", () => {
     render(<WorkspaceNotMemberScreen />);
-    expect(screen.getByRole("heading", { name: "Not a member of this workspace" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Not Authorized!" })).toBeVisible();
     const invites = screen.getByRole("link", { name: "View pending invitations" });
     expect(invites).toHaveFocus();
     expect(invites).toHaveAttribute("href", "/invitations");

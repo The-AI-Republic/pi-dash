@@ -255,7 +255,7 @@ describe("WorkspaceDenialNotice", () => {
     renderDenial("/acme", [{ id: "w1", slug: "acme", role: 15 }], transport);
     const invites = await screen.findByRole("link", { name: "View pending invitations" });
     expect(invites).toHaveFocus();
-    expect(screen.getByRole("heading", { name: "Not a member of this workspace" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Not Authorized!" })).toBeVisible();
   });
 
   it("renders nothing while the session reads load", async () => {

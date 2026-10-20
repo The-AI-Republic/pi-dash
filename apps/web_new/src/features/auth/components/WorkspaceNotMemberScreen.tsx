@@ -15,9 +15,10 @@ export function WorkspaceNotMemberScreen(): React.ReactElement {
   const focusPrimary = useFocusOnMount<HTMLAnchorElement>();
   return (
     <main className="flex min-h-screen flex-col items-center justify-center gap-(--space-2) bg-(--bg) p-(--space-8) text-center">
-      <h1 className="text-h2 text-(--text)">Not a member of this workspace</h1>
+      <h1 className="text-h2 text-(--text)">Not Authorized!</h1>
       <p className="text-body max-w-md text-(--text-muted)">
-        You don&apos;t belong to this workspace yet. Check your pending invitations, or create a workspace of your own.
+        You&apos;re not a member of this workspace, so its projects and settings stay closed to you. Ask an admin for an
+        invitation, or look for one already waiting for you.
       </p>
       <div className="flex items-center justify-center gap-(--space-2) pt-(--space-4)">
         <CrossAppLink
