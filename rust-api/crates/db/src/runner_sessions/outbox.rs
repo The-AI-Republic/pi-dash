@@ -120,7 +120,7 @@
 //! PIDASHCONV-551's).
 
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use redis::aio::MultiplexedConnection;
 use serde_json::{Map, Value};
@@ -240,6 +240,37 @@ fn info_field<'a>(entry: &'a redis::Value, key: &str) -> Option<&'a redis::Value
 /// verb's commands over its single client).
 async fn connect(client: &redis::Client) -> Result<MultiplexedConnection, redis::RedisError> {
     client.get_multiplexed_async_connection().await
+}
+
+/// Django's `REDIS_SOCKET_TIMEOUT` default
+/// (`pi_dash/settings/common.py:239`), used when the resolved setting is
+/// not a positive finite float.
+const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Open a multiplexed connection for a blocking `XREADGROUP`. The
+/// default config ([`redis::AsyncConnectionConfig::default`]) caps a
+/// response at 500 ms (redis 1.7.1 `DEFAULT_RESPONSE_TIMEOUT`), shorter
+/// than a 1 s poll slice, so every blocking read would die client-side
+/// and the loop would reconnect. Django's client uses
+/// `socket_timeout = REDIS_SOCKET_TIMEOUT`, so the response timeout is
+/// that socket timeout plus the block (`block_ms`), always outlasting
+/// the `BLOCK`.
+async fn connect_blocking(
+    client: &redis::Client,
+    block_ms: i64,
+    socket_timeout_secs: f64,
+) -> Result<MultiplexedConnection, redis::RedisError> {
+    let socket_timeout = if socket_timeout_secs.is_finite() && socket_timeout_secs > 0.0 {
+        Duration::try_from_secs_f64(socket_timeout_secs).unwrap_or(DEFAULT_RESPONSE_TIMEOUT)
+    } else {
+        DEFAULT_RESPONSE_TIMEOUT
+    };
+    let response_timeout = socket_timeout + Duration::from_millis(block_ms.max(0) as u64);
+    client
+        .get_multiplexed_async_connection_with_config(
+            &redis::AsyncConnectionConfig::new().set_response_timeout(Some(response_timeout)),
+        )
+        .await
 }
 
 /// Create the persistent stream + consumer group if missing
@@ -853,11 +884,12 @@ pub async fn read_for_session(
     block_ms: i64,
     count: i64,
     use_zero: bool,
+    socket_timeout_secs: f64,
 ) -> Result<Vec<DecodedMessage>, OutboxError> {
     let Some(client) = client else {
         return Ok(Vec::new());
     };
-    let mut connection = connect(client).await?;
+    let mut connection = connect_blocking(client, block_ms, socket_timeout_secs).await?;
     ensure_group(&mut connection, runner_id).await?;
     let last_id = if use_zero { "0" } else { ">" };
     let mut xreadgroup = redis::cmd("XREADGROUP");
@@ -1372,7 +1404,7 @@ mod tests {
         assert_eq!(none["is_pel_drained"], json!(false));
         block_on(clear_session_marker(None, &sid)).expect("clear");
         assert!(
-            block_on(read_for_session(None, &rid_str, &sid, 0, 100, false))
+            block_on(read_for_session(None, &rid_str, &sid, 0, 100, false, 5.0))
                 .expect("read")
                 .is_empty()
         );
@@ -2111,7 +2143,7 @@ mod tests {
             ]),
         ])]);
         let (client, log) = start_mock(vec![resp_ok(), reply]);
-        let messages = read_for_session(Some(&client), &rid, &sid, 0, 100, false)
+        let messages = read_for_session(Some(&client), &rid, &sid, 0, 100, false, 5.0)
             .await
             .expect("read");
         assert_eq!(
@@ -2153,7 +2185,7 @@ mod tests {
 
         // `use_zero` reads `0` instead of `>`.
         let (client, log) = start_mock(vec![resp_ok(), resp_array(vec![])]);
-        let messages = read_for_session(Some(&client), &rid, &sid, 0, 100, true)
+        let messages = read_for_session(Some(&client), &rid, &sid, 0, 100, true, 5.0)
             .await
             .expect("read zero");
         assert!(messages.is_empty());
@@ -2163,16 +2195,20 @@ mod tests {
         // Transport failures log and return no entries; nil (block
         // timeout) reads as absent.
         let (client, _) = start_mock(vec![resp_ok(), resp_err("boom")]);
-        assert!(read_for_session(Some(&client), &rid, &sid, 0, 100, false)
-            .await
-            .expect("read error")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &rid, &sid, 0, 100, false, 5.0)
+                .await
+                .expect("read error")
+                .is_empty()
+        );
         drop(client);
         let (client, _) = start_mock(vec![resp_ok(), b"$-1\r\n".to_vec()]);
-        assert!(read_for_session(Some(&client), &rid, &sid, 0, 100, false)
-            .await
-            .expect("read nil")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &rid, &sid, 0, 100, false, 5.0)
+                .await
+                .expect("read nil")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2788,10 +2824,12 @@ mod tests {
         );
         // A read creates the group (MKSTREAM) and finds nothing.
         let sid = fresh_id();
-        assert!(read_for_session(Some(&client), &rid, &sid, 1, 100, false)
-            .await
-            .expect("read")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &rid, &sid, 1, 100, false, 5.0)
+                .await
+                .expect("read")
+                .is_empty()
+        );
         let mut conn = live_conn(&client).await;
         assert_eq!(raw_exists(&mut conn, &keys::stream_key(&rid)).await, 1);
         cleanup(&client, &rid, &[&sid]).await;
@@ -2836,7 +2874,7 @@ mod tests {
         )
         .await;
 
-        let messages = read_for_session(Some(&client), &rid, &sid, 1, 100, false)
+        let messages = read_for_session(Some(&client), &rid, &sid, 1, 100, false, 5.0)
             .await
             .expect("read");
         assert_eq!(messages.len(), 3);
@@ -2858,10 +2896,12 @@ mod tests {
             0
         );
         // PEL replay after the ack finds nothing (use_zero_n 0).
-        assert!(read_for_session(Some(&client), &rid, &sid, 1, 100, true)
-            .await
-            .expect("read zero")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &rid, &sid, 1, 100, true, 5.0)
+                .await
+                .expect("read zero")
+                .is_empty()
+        );
         let fx = fixture();
         assert_eq!(fx["ack_for_session"]["acked"], json!(3));
         assert_eq!(fx["ack_for_session"]["acked_again"], json!(0));
