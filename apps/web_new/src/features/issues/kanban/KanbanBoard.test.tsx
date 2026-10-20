@@ -654,4 +654,10 @@ describe("KanbanBoard", () => {
     setup();
     expect(within(column("Done")).queryAllByTestId("kanban-card")).toHaveLength(0);
   });
+
+  it("falls back to the workspace edit standing when the host passes no override", () => {
+    mocks.permissions = { role: 15, isMember: true, canEdit: true, isAdmin: false };
+    setup({ canEdit: undefined });
+    expect(screen.getAllByRole("button", { name: /New work item/ }).length).toBeGreaterThan(0);
+  });
 });
