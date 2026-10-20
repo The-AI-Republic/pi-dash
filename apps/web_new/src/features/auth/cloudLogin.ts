@@ -77,6 +77,17 @@ function normalizedPath(pathname: string): string {
 }
 
 /**
+ * Fold a pathname to the spelling the router actually matches: percent
+ * escapes are decoded and the comparison is case-insensitive, so
+ * `/%6Cogin` and `/LoGiN` cannot slip past the loop guard.
+ */
+function routerPath(pathname: string): string {
+  // `resolveCloudReturnTarget` already proved the path decodes, so this is
+  // total for every value that reaches the guard.
+  return normalizedPath(decodeURIComponent(pathname)).toLowerCase();
+}
+
+/**
  * The target the handoff carries. A missing or unsafe `next_path` falls
  * back to the app root, and so does a target that resolves to the login
  * page itself: returning there would read as "sign-in did nothing".
@@ -85,7 +96,7 @@ export function cloudHandoffTarget(raw: string | null | undefined, origin: strin
   const resolved = resolveCloudReturnTarget(raw, origin);
   if (resolved === null) return "/";
   const pathname = new URL(resolved, origin).pathname;
-  return SIGN_IN_PATHS.has(normalizedPath(pathname)) ? "/" : resolved;
+  return SIGN_IN_PATHS.has(routerPath(pathname)) ? "/" : resolved;
 }
 
 /**

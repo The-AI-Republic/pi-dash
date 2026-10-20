@@ -119,6 +119,17 @@ describe("cloudHandoffTarget", () => {
     expect(cloudHandoffTarget("/login/", ORIGIN)).toBe("/");
   });
 
+  it("matches login aliases the way the router does, decoded and case-folded", () => {
+    expect(cloudHandoffTarget("/%6Cogin", ORIGIN)).toBe("/");
+    expect(cloudHandoffTarget("/LoGiN", ORIGIN)).toBe("/");
+    expect(cloudHandoffTarget("/SIGN-IN", ORIGIN)).toBe("/");
+    expect(cloudHandoffTarget("/%73ignin?next_path=%2Fdocs", ORIGIN)).toBe("/");
+  });
+
+  it("keeps paths that only share a prefix with a login alias", () => {
+    expect(cloudHandoffTarget("/login-help", ORIGIN)).toBe("/login-help");
+  });
+
   it("never loops onto the legacy sign-in aliases", () => {
     expect(cloudHandoffTarget("/sign-in", ORIGIN)).toBe("/");
     expect(cloudHandoffTarget("/signin", ORIGIN)).toBe("/");

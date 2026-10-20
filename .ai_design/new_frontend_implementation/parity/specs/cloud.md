@@ -193,7 +193,12 @@ must still resolve to the app's own origin once parsed — anything else is
 discarded and the flow falls back to the root. The parsed path is checked
 again after URL normalization, so encoded dot segments that would collapse
 into a protocol-relative path (for example `/%2e%2e//evil.example/x`) and
-encoded backslashes are discarded too. Bounces to sign-in carry the
+encoded backslashes are discarded too. That second check is intended
+behavior: the old app accepts those encoded forms (bug: NEWFRONT-777), so
+the oracle pins the old result as a `bug:` scenario and the new app rejects
+them. The login-loop guard decodes and case-folds the pathname before the
+alias check, because the router matches `/%6Cogin` and `/LoGiN` as `/login`
+(bug: NEWFRONT-778 for the old app's exact-match guard). Bounces to sign-in carry the
 preserved location as the root's `next_path` parameter (omitted when the
 location is the root itself); a fixed list of public and auth addresses
 (root, marketing pages, login and its legacy aliases, sign-up and
