@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -388,6 +389,20 @@ describe("EntityListScreen", () => {
     setCycleDetail(harness, { status: "ACTIVE", backlog_issues: 2 });
     expect(screen.queryByText(COMPLETED_CYCLE_NOTE)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
+  });
+
+  it("opens the move dialog from the prompt and closes it again (ISS-224)", async () => {
+    const user = userEvent.setup();
+    const harness = setup({}, [project()]);
+    setCycleDetail(harness, { status: "COMPLETED", backlog_issues: 2 });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move unfinished work" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Move unfinished work" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("falls back to a count envelope when results are not an array", () => {
