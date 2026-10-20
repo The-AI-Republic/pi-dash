@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
@@ -8,7 +9,8 @@ import {
   effectiveLabelParent,
   LABEL_ORDER_STEP,
   neighborLabelOrder,
-  resolveLabelChildBand,
+  readLabelDropSpans,
+  resolveLabelChildSlot,
   resolveLabelDrop,
   resolveLabelInto,
   resolveLabelSlot,
@@ -27,8 +29,8 @@ function row(id: string, sort: number, parent: string | null = null): Label {
   };
 }
 
-function span(id: string, top: number, nestable = true): LabelDropSpan {
-  return { id, top, bottom: top + 40, left: 0, right: 400, nestable };
+function span(id: string, top: number, nestable = true, parentId: string | null = null): LabelDropSpan {
+  return { id, top, bottom: top + 40, left: 0, right: 400, nestable, parentId };
 }
 
 describe("resolveLabelSlot", () => {
@@ -77,18 +79,64 @@ describe("resolveLabelInto", () => {
   });
 });
 
-describe("resolveLabelChildBand", () => {
-  const spans = [span("a", 0), span("b", 40, false)];
+describe("resolveLabelChildSlot", () => {
+  const spans = [span("a", 0), span("b", 40, false, "a"), span("c", 80, false, "a"), span("d", 120)];
 
-  it("matches the middle band of a child row", () => {
-    expect(resolveLabelChildBand(spans, 200, 60, "x")).toBe("b");
+  it("previews a slot above the child under the pointer", () => {
+    expect(resolveLabelChildSlot(spans, 200, 42, "x")).toEqual({ id: "b", after: false });
+    expect(resolveLabelChildSlot(spans, 200, 75, "x")).toEqual({ id: "b", after: false });
   });
 
-  it("skips top-level rows, the dragged row, and edge releases", () => {
-    expect(resolveLabelChildBand(spans, 200, 20, "x")).toBe(null);
-    expect(resolveLabelChildBand(spans, 200, 60, "b")).toBe(null);
-    expect(resolveLabelChildBand(spans, 10, 60, "x")).toBe(null);
-    expect(resolveLabelChildBand(spans, 200, 42, "x")).toBe(null);
+  it("previews a slot below the last child's lower half", () => {
+    expect(resolveLabelChildSlot(spans, 200, 95, "x")).toEqual({ id: "c", after: false });
+    expect(resolveLabelChildSlot(spans, 200, 115, "x")).toEqual({ id: "c", after: true });
+    expect(resolveLabelChildSlot(spans, 200, 100, "x")).toEqual({ id: "c", after: false });
+  });
+
+  it("never falls through a child row onto a top-level row", () => {
+    expect(resolveLabelChildSlot(spans, 200, 45, "x")).not.toBe(null);
+    expect(resolveLabelChildSlot(spans, 200, 140, "x")).toBe(null);
+  });
+
+  it("skips top-level rows, the dragged row, and points outside the row", () => {
+    expect(resolveLabelChildSlot(spans, 200, 20, "x")).toBe(null);
+    expect(resolveLabelChildSlot(spans, 200, 60, "b")).toBe(null);
+    expect(resolveLabelChildSlot(spans, -1, 60, "x")).toBe(null);
+    expect(resolveLabelChildSlot(spans, 401, 60, "x")).toBe(null);
+    expect(resolveLabelChildSlot(spans, 200, 200, "x")).toBe(null);
+  });
+});
+
+describe("readLabelDropSpans", () => {
+  it("measures every slot with its id, nestability and parent", () => {
+    const root = document.createElement("ul");
+    root.innerHTML = `
+      <li><div data-label-slot data-label-id="a" data-nestable="true"></div></li>
+      <li><div data-label-slot data-label-id="b" data-nestable="false" data-label-parent="a"></div></li>
+      <li><div data-label-slot></div></li>
+    `;
+    const rects: Record<string, [number, number, number, number]> = {
+      a: [0, 10, 100, 40],
+      b: [10, 50, 100, 80],
+    };
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement): DOMRect {
+      const [left, top, right, bottom] = rects[this.dataset["labelId"] ?? ""] ?? [0, 0, 0, 0];
+      return { left, top, right, bottom, x: left, y: top, width: right - left, height: bottom - top } as DOMRect;
+    };
+    try {
+      expect(readLabelDropSpans(root)).toEqual([
+        { id: "a", top: 10, bottom: 40, left: 0, right: 100, nestable: true, parentId: null },
+        { id: "b", top: 50, bottom: 80, left: 10, right: 100, nestable: false, parentId: "a" },
+      ]);
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = original;
+    }
+  });
+
+  it("measures nothing without a root", () => {
+    expect(readLabelDropSpans(null)).toEqual([]);
+    expect(readLabelDropSpans(undefined)).toEqual([]);
   });
 });
 
