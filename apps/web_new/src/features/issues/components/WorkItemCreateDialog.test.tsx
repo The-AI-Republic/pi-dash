@@ -1913,6 +1913,32 @@ describe("WorkItemCreateDialog context close and Create more (ISS-124/125)", () 
     expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
   });
 
+  it("asks before discarding a cycle the user picked on a project page", async () => {
+    const user = userEvent.setup();
+    setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { initialProjectId: PROJECT_ATLAS }
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Cycle" }));
+    await user.click((await screen.findAllByRole("option", { name: "Sprint 4" }))[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
+  });
+
+  it("asks before discarding a module the user picked on a project page", async () => {
+    const user = userEvent.setup();
+    setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { initialProjectId: PROJECT_ATLAS }
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Modules" })).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Modules" }));
+    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
+  });
+
   it("keeps the route cycle for the second item under Create more", async () => {
     const user = userEvent.setup();
     const h = setup(

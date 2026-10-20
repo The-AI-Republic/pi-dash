@@ -256,9 +256,13 @@ describe("hasDraftWorthKeeping", () => {
     expect(hasDraftWorthKeeping(form({ projectId: PROJECT, descriptionHtml: "<p></p>" }))).toBe(false);
   });
 
-  it("does not count membership context seeded from a route", () => {
-    expect(hasDraftWorthKeeping(form({ cycleId: "cycle" }))).toBe(false);
-    expect(hasDraftWorthKeeping(form({ moduleIds: ["module"] }))).toBe(false);
+  it("does not count membership a route seeded, but counts one the user picked", () => {
+    const engaged = { cycleId: "cycle", moduleIds: ["module"] };
+    expect(hasDraftWorthKeeping(form(engaged), engaged)).toBe(false);
+    expect(hasDraftWorthKeeping(form({ cycleId: "other" }), engaged)).toBe(true);
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["other"] }), engaged)).toBe(true);
+    expect(hasDraftWorthKeeping(form({ cycleId: "cycle" }))).toBe(true);
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["module"] }))).toBe(true);
   });
 
   it("counts an image-only or mention-only description", () => {

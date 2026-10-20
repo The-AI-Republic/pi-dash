@@ -222,12 +222,15 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
 
 /**
  * Whether the discard guard has anything worth keeping (ISS-120). The
- * project and the cycle/module memberships are context, not content, so
- * they never count (ISS-124: a form opened from a cycle or module page
- * is untouched until the user types); empty values and a description
- * without content do not either.
+ * project is context, not content, and so are the memberships a route
+ * seeded: an untouched form opened from a cycle or module page differs
+ * from its context in nothing (ISS-124/ISS-125). Empty values and a
+ * description without content do not count either.
  */
-export function hasDraftWorthKeeping(form: CreateFormState): boolean {
+/** Nothing seeded from the route: a caller with no context. */
+const NO_MEMBERSHIP: CreateMembership = { cycleId: null, moduleIds: [] };
+
+export function hasDraftWorthKeeping(form: CreateFormState, context: CreateMembership = NO_MEMBERSHIP): boolean {
   if (normalizeTitle(form.name) !== "") return true;
   if (hasStoredDescriptionContent(form.descriptionHtml)) return true;
   if (form.stateId !== null) return true;
@@ -235,6 +238,9 @@ export function hasDraftWorthKeeping(form: CreateFormState): boolean {
   if (form.assigneeIds.length > 0) return true;
   if (form.labelIds.length > 0) return true;
   if (form.startDate !== null || form.targetDate !== null) return true;
+  if (form.cycleId !== context.cycleId) return true;
+  if (form.moduleIds.length !== context.moduleIds.length) return true;
+  if (form.moduleIds.some((id, index) => id !== context.moduleIds[index])) return true;
   if (form.estimatePoint !== null) return true;
   if (form.execution !== null) return true;
   if (form.parentId !== null) return true;
