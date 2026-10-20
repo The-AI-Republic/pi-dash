@@ -268,56 +268,23 @@ async fn read_settings(pool: &sqlx::PgPool, user_id: uuid::Uuid) -> Result<Value
 // upsert (`QuerySet.update_or_create`, `views.py:71-76,93-98`)
 // ---------------------------------------------------------------------------
 
-/// Live preference-row id for one (user, job-scope): `job_id IS NULL` is
-/// the master switch, `job_id = $2` the per-job row. The doubled
-/// `deleted_at IS NULL` mirrors the manager filter plus the explicit
-/// `deleted_at__isnull=True` lookup, the same shape the queries layer
-/// emits.
-async fn live_preference_id(
-    pool: &sqlx::PgPool,
-    user_id: uuid::Uuid,
-    job_id: Option<uuid::Uuid>,
-) -> Result<Option<uuid::Uuid>, sqlx::Error> {
-    let row: Option<(uuid::Uuid,)> = match job_id {
-        None => {
-            sqlx::query_as(
-                r#"SELECT id FROM loop_user_preferences
-                   WHERE user_id = $1 AND job_id IS NULL
-                     AND deleted_at IS NULL AND deleted_at IS NULL
-                   LIMIT 1"#,
-            )
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?
-        }
-        Some(job) => {
-            sqlx::query_as(
-                r#"SELECT id FROM loop_user_preferences
-                   WHERE user_id = $1 AND job_id = $2
-                     AND deleted_at IS NULL AND deleted_at IS NULL
-                   LIMIT 1"#,
-            )
-            .bind(user_id)
-            .bind(job)
-            .fetch_optional(pool)
-            .await?
-        }
-    };
-    Ok(row.map(|row| row.0))
-}
-
 /// `update_or_create(user, job, deleted_at__isnull=True,
-/// defaults={"enabled"})`: a live row is updated in place (which flips a
-/// re-toggle instead of duplicating — the partial unique constraints
-/// would reject a second live row anyway); otherwise one row is inserted.
+/// defaults={"enabled"})`: Django runs this inside `transaction.atomic`,
+/// takes a `select_for_update()` on the live row, and on the create
+/// branch retries the lookup after an `IntegrityError`. That makes two
+/// concurrent first toggles both succeed. The SQL equivalent is one
+/// statement: the insert conflicts with the live partial unique index
+/// (`loop_pref_unique_user_master_when_active` for the master switch,
+/// `loop_pref_unique_user_job_when_active` per job) and turns into the
+/// same in-place update.
 ///
 /// `update_or_create` persists the update branch via
 /// `obj.save(update_fields={"enabled", <auto_now fields>})`
 /// (`django/db/models/query.py`): `BaseModel.save` still assigns
 /// `self.updated_by` through crum, but only in memory — `_save_table`
 /// writes the listed fields, so `updated_by` never reaches the row.
-/// The `UPDATE` therefore names `enabled` and `updated_at` only; on
-/// create `created_by` is the request user and `updated_by` stays
+/// The conflict update therefore names `enabled` and `updated_at` only;
+/// on create `created_by` is the request user and `updated_by` stays
 /// `None`.
 async fn upsert_preference(
     pool: &sqlx::PgPool,
@@ -325,48 +292,41 @@ async fn upsert_preference(
     job_id: Option<uuid::Uuid>,
     enabled: bool,
 ) -> Result<(), Denial> {
-    match live_preference_id(pool, user_id, job_id)
-        .await
-        .map_err(|_| Denial::ServerError)?
-    {
-        Some(id) => {
-            let now = chrono::Utc::now();
-            sqlx::query(
-                r#"UPDATE loop_user_preferences
-                   SET enabled = $1, updated_at = $2
-                   WHERE id = $3"#,
-            )
-            .bind(enabled)
-            .bind(now)
-            .bind(id)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            Ok(())
-        }
+    let now = chrono::Utc::now();
+    let sql = match job_id {
         None => {
-            let now = chrono::Utc::now();
-            sqlx::query(
-                r#"INSERT INTO loop_user_preferences
-                   (created_at, updated_at, created_by_id, updated_by_id,
-                    deleted_at, id, user_id, job_id, enabled)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
-            )
-            .bind(now)
-            .bind(now)
-            .bind(user_id)
-            .bind(None::<uuid::Uuid>)
-            .bind(None::<chrono::DateTime<chrono::Utc>>)
-            .bind(uuid::Uuid::new_v4())
-            .bind(user_id)
-            .bind(job_id)
-            .bind(enabled)
-            .execute(pool)
-            .await
-            .map_err(|_| Denial::ServerError)?;
-            Ok(())
+            r#"INSERT INTO loop_user_preferences
+               (created_at, updated_at, created_by_id, updated_by_id,
+                deleted_at, id, user_id, job_id, enabled)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT (user_id) WHERE job_id IS NULL AND deleted_at IS NULL
+               DO UPDATE SET enabled = EXCLUDED.enabled,
+                             updated_at = EXCLUDED.updated_at"#
         }
-    }
+        Some(_) => {
+            r#"INSERT INTO loop_user_preferences
+               (created_at, updated_at, created_by_id, updated_by_id,
+                deleted_at, id, user_id, job_id, enabled)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT (user_id, job_id) WHERE deleted_at IS NULL
+               DO UPDATE SET enabled = EXCLUDED.enabled,
+                             updated_at = EXCLUDED.updated_at"#
+        }
+    };
+    sqlx::query(sql)
+        .bind(now)
+        .bind(now)
+        .bind(user_id)
+        .bind(None::<uuid::Uuid>)
+        .bind(None::<chrono::DateTime<chrono::Utc>>)
+        .bind(uuid::Uuid::new_v4())
+        .bind(user_id)
+        .bind(job_id)
+        .bind(enabled)
+        .execute(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
