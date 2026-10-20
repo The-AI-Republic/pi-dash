@@ -59,6 +59,27 @@ describe("ProjectLogo", () => {
     );
   });
 
+  it("renders a chosen symbol in its colour", () => {
+    render(
+      <ProjectLogo logoProps={{ in_use: "icon", icon: { name: "rocket_launch", color: "#f97316" } }} identifier="WEB" />
+    );
+    const logo = screen.getByTestId("project-logo");
+    expect(logo).toHaveAttribute("data-mark", "icon");
+    expect(logo).not.toHaveTextContent("W");
+    expect(screen.getByTestId("project-logo-icon").getAttribute("style")).toContain("color");
+  });
+
+  it("draws a symbol without a colour in the inherited tone", () => {
+    render(<ProjectLogo logoProps={{ in_use: "icon", icon: { name: "star" } }} identifier="WEB" />);
+    expect(screen.getByTestId("project-logo-icon")).not.toHaveAttribute("style");
+    expect(screen.getByTestId("project-logo-icon")).not.toHaveAttribute("color");
+  });
+
+  it("falls back to the initial for a symbol name this frontend cannot draw", () => {
+    render(<ProjectLogo logoProps={{ in_use: "icon", icon: { name: "not_a_symbol" } }} identifier="WEB" />);
+    expect(screen.getByTestId("project-logo")).toHaveTextContent("W");
+  });
+
   it("renders a decimal emoji value after a save", () => {
     render(<ProjectLogo logoProps={{ in_use: "emoji", emoji: { value: "128293" } }} identifier="WEB" />);
     expect(screen.getByTestId("project-logo")).toHaveTextContent("🔥");

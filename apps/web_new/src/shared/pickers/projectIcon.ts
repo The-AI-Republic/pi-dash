@@ -255,6 +255,9 @@ export function projectMark(logo: Record<string, unknown>): ProjectMark {
   return { kind: "initial" };
 }
 
+/** Every stored Material icon name this frontend can draw, sorted. */
+export const PROJECT_ICON_NAMES: ReadonlyArray<string> = Object.keys(ICON_MAP).sort();
+
 /** The Lucide glyph for a stored Material icon name, when one exists. */
 export function projectIconGlyph(name: string): typeof Anchor | null {
   return ICON_MAP[name] ?? null;

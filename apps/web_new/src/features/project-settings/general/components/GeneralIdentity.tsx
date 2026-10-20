@@ -11,7 +11,6 @@ import { Image as ImageIcon, Smile } from "lucide-react";
 import * as React from "react";
 
 import { ProjectMark } from "../../../../shared/pickers/index.js";
-import { CREATE_ICON_CHOICES } from "../../../projects/index.js";
 import { VISIBILITY_OPTIONS } from "../rules.js";
 
 export interface GeneralIdentityProps {
@@ -91,6 +90,3 @@ export function GeneralIdentity({
     </section>
   );
 }
-
-/** Emoji choices the picker offers (the same alphabet the create dialog uses). */
-export const EMBLEM_CHOICES: readonly string[] = CREATE_ICON_CHOICES;

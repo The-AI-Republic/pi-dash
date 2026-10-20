@@ -550,14 +550,47 @@ describe("PSET-007 emblem", () => {
     expect(patchBodyAt(calls).logo_props).toEqual({ in_use: "emoji", emoji: { value: "128293" } });
   });
 
+  it("reaches any emoji, including one the create dialog does not offer", async () => {
+    const user = userEvent.setup();
+    const { calls } = await renderLoaded();
+    await user.click(screen.getByTestId("general-emblem-open"));
+    const picker = await screen.findByRole("dialog", { name: "Change emblem" });
+    await user.click(within(picker).getByRole("button", { name: "🚀" }));
+    expect(screen.getByTestId("project-mark")).toHaveAttribute("data-mark", "emoji");
+    expect(screen.getByTestId("project-mark")).toHaveTextContent("🚀");
+    save();
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    expect(patchBodyAt(calls).logo_props).toEqual({ in_use: "emoji", emoji: { value: "128640" } });
+  });
+
+  it("saves an icon pick and the header and rail follow it", async () => {
+    const user = userEvent.setup();
+    const { calls, queryClient } = await renderLoaded();
+    await user.click(screen.getByTestId("general-emblem-open"));
+    const picker = await screen.findByRole("dialog", { name: "Change emblem" });
+    await user.click(within(picker).getByRole("tab", { name: "Icon" }));
+    await user.type(within(picker).getByRole("textbox", { name: "Search" }), "anchor");
+    await user.click(within(picker).getAllByTestId("general-emblem-icon")[0]!);
+    expect(screen.getByTestId("project-mark")).toHaveAttribute("data-mark", "icon");
+    save();
+    await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
+    const written = { in_use: "icon", icon: { name: "anchor", color: "#6366f1" } };
+    expect(patchBodyAt(calls).logo_props).toEqual(written);
+    // The shell's shared project record carries the mark to the header and
+    // rail, which draw it through ProjectLogo.
+    await waitFor(() =>
+      expect(queryClient.getQueryData(authKeys.project("acme", UUID))).toMatchObject({ logo_props: written })
+    );
+  });
+
   it("filters the emoji grid and reports no match", async () => {
     const user = userEvent.setup();
     await renderLoaded();
     await user.click(screen.getByTestId("general-emblem-open"));
     const picker = await screen.findByRole("dialog", { name: "Change emblem" });
-    await user.type(within(picker).getByRole("textbox", { name: "Search emoji" }), "🔥");
+    await user.type(within(picker).getByRole("textbox", { name: "Search" }), "🔥");
     expect(within(picker).getAllByTestId("general-emblem-choice")).toHaveLength(1);
-    await user.type(within(picker).getByRole("textbox", { name: "Search emoji" }), "x");
+    await user.type(within(picker).getByRole("textbox", { name: "Search" }), "x");
     expect(within(picker).getByText("No emoji match that search.")).toBeInTheDocument();
   });
 

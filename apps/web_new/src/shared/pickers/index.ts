@@ -52,7 +52,7 @@ export type { ProjectPickerProps } from "./ProjectPicker.js";
 export { selectProjectMark, selectProjectOptions, toProjectOption } from "./projects.js";
 export { ProjectMark, resolveMarkSource } from "./ProjectMark.js";
 export type { ProjectMarkProps } from "./ProjectMark.js";
-export { projectIconGlyph, projectMark, projectMarkText } from "./projectIcon.js";
+export { PROJECT_ICON_NAMES, projectIconGlyph, projectMark, projectMarkText } from "./projectIcon.js";
 export type { ProjectMark as ProjectMarkSpec } from "./projectIcon.js";
 export type { ProjectOption, ProjectOptionsInput } from "./projects.js";
 export { CyclePicker } from "./CyclePicker.js";

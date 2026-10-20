@@ -53,6 +53,22 @@ describe("ProjectSettingsPage", () => {
     );
     expect(screen.getByTestId("project-logo")).toHaveTextContent("🔥");
   });
+
+  it("renders a saved icon mark in the header", () => {
+    render(
+      wrap(
+        {
+          ...BASE,
+          project: {
+            ...BASE.project!,
+            logoProps: { in_use: "icon", icon: { name: "rocket_launch", color: "#f97316" } },
+          },
+        },
+        <ProjectSettingsPage title="General">body</ProjectSettingsPage>
+      )
+    );
+    expect(screen.getByTestId("project-logo")).toHaveAttribute("data-mark", "icon");
+  });
 });
 
 describe("ProjectSettingsTabMount", () => {

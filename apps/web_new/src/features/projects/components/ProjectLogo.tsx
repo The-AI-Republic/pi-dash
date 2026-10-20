@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project logo box (SHELL-032, PSET-005/007). An uploaded image, an emoji
-// glyph, otherwise the short code's initial. Emoji marks are read through
+// glyph, a chosen symbol in its colour, otherwise the short code's initial. Emoji marks are read through
 // the shared decoder, so a stored decimal code-point value renders like the
 // literal character. Decorative: the card name already names the project
 // for assistive tech.
 import * as React from "react";
 
-import { projectMark, projectMarkText, resolveMarkSource } from "../../../shared/pickers/index.js";
+import { projectIconGlyph, projectMark, projectMarkText, resolveMarkSource } from "../../../shared/pickers/index.js";
 
 export interface ProjectLogoProps {
   /** Raw logo value from the project row; parsed defensively. */
@@ -34,6 +34,7 @@ export function selectLogoImage(logoProps: Record<string, unknown>): string | nu
 export function ProjectLogo({ logoProps, identifier, apiBaseUrl }: ProjectLogoProps): React.ReactElement {
   const mark = projectMark(logoProps);
   const image = mark.kind === "image" ? resolveMarkSource(mark.url, apiBaseUrl) : null;
+  const Icon = mark.kind === "icon" ? projectIconGlyph(mark.name) : null;
   return (
     <span
       aria-hidden="true"
@@ -41,10 +42,18 @@ export function ProjectLogo({ logoProps, identifier, apiBaseUrl }: ProjectLogoPr
       data-mark={mark.kind}
       className="text-h3 flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-(--radius-control) bg-(--subtle)"
     >
-      {image === null ? (
-        projectMarkText(mark, identifier)
-      ) : (
+      {image !== null ? (
         <img key={image} src={image} alt="" className="size-full object-cover" data-testid="project-logo-image" />
+      ) : Icon !== null && mark.kind === "icon" ? (
+        <Icon
+          size={22}
+          strokeWidth={1.5}
+          aria-hidden="true"
+          data-testid="project-logo-icon"
+          {...(mark.color === null ? {} : { color: mark.color, style: { color: mark.color } })}
+        />
+      ) : (
+        projectMarkText(mark, identifier)
       )}
     </span>
   );

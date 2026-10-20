@@ -127,6 +127,37 @@ describe("ProjectSettingsSidebar", () => {
     );
   });
 
+  it("renders an emblem picked from the wider emoji set in the rail", () => {
+    render(
+      <ProjectSettingsSidebar
+        workspaceSlug={WS}
+        projectId={PID}
+        projectName="Website relaunch"
+        logoProps={{ in_use: "emoji", emoji: { value: "128640" } }}
+        identifier="WEB"
+        role={ROLE_ADMIN}
+        pathname={`${ROOT}/`}
+      />
+    );
+    expect(screen.getByTestId("project-logo")).toHaveTextContent("🚀");
+  });
+
+  it("renders a chosen symbol in the rail", () => {
+    render(
+      <ProjectSettingsSidebar
+        workspaceSlug={WS}
+        projectId={PID}
+        projectName="Website relaunch"
+        logoProps={{ in_use: "icon", icon: { name: "rocket_launch", color: "#f97316" } }}
+        identifier="WEB"
+        role={ROLE_ADMIN}
+        pathname={`${ROOT}/`}
+      />
+    );
+    expect(screen.getByTestId("project-logo")).toHaveAttribute("data-mark", "icon");
+    expect(screen.getByTestId("project-logo-icon")).toBeInTheDocument();
+  });
+
   it("marks the canonical slash form and nothing else", () => {
     const active = renderSidebar(ROLE_ADMIN, `${ROOT}/members/`);
     expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("aria-current", "page");
