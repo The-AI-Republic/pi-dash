@@ -133,11 +133,28 @@ spellings.
 | `priority` | board address | Comma-joined priority values; five values total | `urgent`, `high`, `medium`, `low`, `none` (the fifth, `none`, is the unset level) |
 | `state` | board address | Comma-joined state UUIDs | One key, comma-separated values |
 | `labels` | board address | Comma-joined label UUIDs | Address-only facet (§3, SPC-036/037) |
-| `next_path` | landing address and every sign-in/sign-out link/form | Return address | Validated (§3, SPC-006); survives valid round trips |
+| `next_path` | landing address and every sign-in/sign-out link/form | Return address, **relative to the space subtree root** | One leading `/`, **no `/spaces` prefix**, query preserved; validated (§3, SPC-006). Two shapes exist — see the next rule |
 | `error_code` | landing address | Server error code after a native form post | Lands on the fixing step (§3, SPC-063) |
 | `email` | landing address | Pre-fills the address field | Optional |
 
 Rules that apply everywhere:
+
+- **Two `next_path` shapes — do not confuse them.** The carried value is
+  **subtree-relative**: it names a position inside `/spaces` and drops the
+  mount segment. A board at `/spaces/issues/<anchor>/` yields a value that
+  starts `/issues/<anchor>` and echoes the trailing slash the visitor is on;
+  with a filter, overlay or both the query rides along
+  (`/issues/<anchor>?board=kanban&peekId=…`, or with the slash before `?`).
+  The oracle carries the slash-less form and asserts only the anchor and the
+  parameters, so both spellings pass; the value must not gain a mount
+  segment. The server is what re-attaches
+  the spaces base (`base_host(..., is_space=True)` in
+  `apps/api/pi_dash/authentication/utils/host.py`, consumed by
+  `authentication/views/space/email.py` and the provider callbacks), so a
+  value that already carried `/spaces` would redirect to `/spaces/spaces/…`.
+  Only the **document address of the landing link** spells the mount out
+  (`/spaces/?next_path=…`) — that is a link the browser follows, not the value
+  in the hidden form field. SPC-006 and SPC-013 use the same split.
 
 - **View state lives in the address.** Board, open issue and filters are
   parsed with a zod `validateSearch`; invalid values fall back to defaults and
@@ -151,11 +168,12 @@ Rules that apply everywhere:
   `board` and `peekId` across; it does not carry filter parameters (old
   behavior, SPC-002). The new app preserves that set exactly — inventing
   extra parameter forwarding would be a divergence the oracle cannot prove.
-- **Opening a card preserves filters.** Clicking a card rewrites the address
-  keeping `board` and every filter key and adding `peekId`; closing drops only
-  `peekId`. (This is the target for SPC-030/042; the old app dropped filters
-  when a card was clicked from a filtered board — see §7, no separate bug ID,
-  folded into the same close/open address rule.)
+- **Opening a card preserves filters.** Activating the card's open region — the
+  **title link** in list rows, the **card body link** on board cards (SPC-027)
+  — rewrites the address keeping `board` and every filter key and adding
+  `peekId`; closing drops only `peekId`. (This is the target for SPC-030/042;
+  the old app dropped filters when a card was clicked from a filtered board —
+  see §7, no separate bug ID, folded into the same close/open address rule.)
 - **Masked spelling.** The old app's parameter names are part of its public
   links; the new app uses the same names. A future rename would need a
   redirect table and a new decision; the slices do not rename them.
@@ -228,7 +246,7 @@ new code; nothing is copied from `apps/space`.
 | Reactions (issue + comment chips, picker, grouping, own-highlight, reactor names) | Issues NEWFRONT-654 | Reuse **presentational** pieces (`ReactionBar`, `ReactionPicker`, `EmojiPicker`, and the model helpers `groupReactions`, `viewerHasReaction`, …) through the Issues barrel. Same caveat: public data goes through space's own query functions because the Issues hooks are workspace-scoped; the write path is the public reaction endpoints. |
 | Composer (rich text, attachments, mentions, edit) | Issues NEWFRONT-651/654 + `shared/editor` | Reuse `shared/editor/RichTextEditor` (lazy), `RichTextEditorHandle`, `RichTextView`, and the mention extension. The space composer adds the public image upload (public asset endpoint) and submits to the public comment endpoint. Member suggestions come from the public members endpoint. |
 | Shell toasts and notice helpers | `shared/shell/toaster.ts` (merged) | Reuse `notifySuccess`/`notifyError`/`notifyInfo` and mount one kit `ToastHost` in the space layout. The space layout owns its own host so it never depends on the workspace shell mounting. |
-| User menu / account menu | `shared/shell/UserMenu` (merged) | **Not reused.** It offers Your-work, Settings, deactivate and workspace role; none exist for a public visitor. Space builds a one-entry account popover (identity + sign out) from kit `Menu` + `Avatar` and posts the sign-out form (SPC-014). |
+| User menu / account menu | `shared/shell/UserMenu` (merged) | **Not reused.** It offers Your-work, Settings, deactivate and workspace role; none exist for a public visitor. Space builds a one-entry account popover (sign-out only; identity lives on the avatar + name trigger) from kit `Menu` + `Avatar` and posts the sign-out form (SPC-014). |
 | Clipboard copy helpers / copy-link button | `shared/shell/clipboard.ts`, `CopyWorkItemLinkButton` | The clipboard helper's notice text and the copy-link button are workspace-flavored. Space writes a tiny copy action in its own feature using `navigator.clipboard` and the shared toast (§3, SPC-045). |
 | Current user / instance config | `core/session` queries + `@pidash/api-client` `auth`/`instance` contracts (merged) | Space reads current user and instance config **through the public client**; it never imports the workspace session store or gate. |
 | Document head (title, robots, meta) | `shared/shell/document.tsx` `useDocumentHead` (merged) | Reuse for the board title and noindex (SPC-007/008). |
@@ -407,7 +425,10 @@ The landing carries the trailing slash (`/spaces/`) and the product badge
 One validator, used by every space entry point: landing `next_path`, the
 navbar sign-in link, the sign-out form, the vote/reaction/comment sign-in
 redirects, the auth forms' hidden field and every auth redirect the card
-follows. Rules (all must pass or the value is dropped):
+follows. **Shape:** the value is subtree-relative (§1.3) — it starts at the
+space root, carries no `/spaces` segment, keeps its query, and is encoded
+once wherever it appears inside a link. The server adds the mount on
+redirect. Rules (all must pass or the value is dropped):
 - a string,
 - starts with exactly one `/` (so `//host` and scheme URLs fail),
 - no backslash anywhere,
@@ -417,8 +438,12 @@ follows. Rules (all must pass or the value is dropped):
   `@`-encoded authority tricks, no `%2f%2f` escape that becomes an authority).
 Valid values keep their own query string (a board address with `board`,
 `peekId` and filters survives the round trip). When dropped, the visitor
-lands on the safe default: `/spaces/` for the gate (showing guidance if
-signed in, the card if not), and the board for the sign-in links.
+lands on the safe default: the spaces landing document (`/spaces/`) for the
+gate (showing guidance if signed in, the card if not), and the board for the
+sign-in links. The old app builds the value from the router's mount-stripped
+pathname (`usePathname()` under the `/spaces` basename) and the green oracle
+asserts the carried string `/issues/<anchor>/` with its query; the new app
+must produce the same shape, not a mount-prefixed one.
 This resolves inventory confirmation (5): `next_path` uses the same shared
 validator as every other return address; there is no second, weaker checker
 for the landing, and the new app implements one function in the space
@@ -529,8 +554,11 @@ meant for content behind it.
 
 **SPC-013 — Anonymous sign-in remembers the position.**
 The navbar account slot for an anonymous visitor is one sign-in control
-linking to `/spaces/?next_path=<current board address including board, every
-filter key and peekId, URL-encoded once>`. Rules:
+whose href is the spaces landing document with the return address as its
+query — `/spaces/?next_path=<value>` — where `<value>` is the **subtree-
+relative** current position (§1.3, SPC-006): `/issues/<anchor>` with
+`board`, every filter key and `peekId` in its own query, URL-encoded once.
+No `/spaces` segment appears inside the value. Rules:
 - The return address is the full current position, encoded as one value
   (old bug NEWFRONT-465: the board address was spliced unencoded, so the
   second and later parameters leaked out; the new app encodes once).
@@ -542,19 +570,28 @@ Reads: current-user (present/absent); the link is computed from the router
 search, not from a store snapshot.
 
 **SPC-014 — Account menu.**
-A signed-in visitor sees the avatar button with their display name
-(fallback: display name → first+last → email → a neutral label). Clicking
-opens a menu whose content is exactly: identity (avatar + name + email) and a
-sign-out action. Rules:
+A signed-in visitor sees an account trigger: avatar plus a single name line.
+The label fallback is display name → first + last name → email → a neutral
+translated label. That fallback is the **new-app intent**: the old trigger
+repeats the first name when there is no display name (NEWFRONT-823), which is
+a bug the new app does not rebuild. Clicking the trigger opens a menu whose
+content is **exactly one action**: sign-out. First and last name, email and
+avatar all live on the trigger, not inside the menu; the menu has no identity
+block, no profile link and no settings. Rules:
 - Sign-out is a native form post to `POST /auth/spaces/sign-out/` with the
   CSRF token (`GET /auth/get-csrf-token/`, fetched when the menu opens or at
-  mount) and a hidden `next_path` carrying the current board position
-  (board, filters, peekId — encoded once).
+  mount) and a hidden `next_path` carrying the subtree-relative current board
+  position — `/issues/<anchor>` plus board, filters and peekId in its query,
+  no `/spaces` segment, encoded once (§1.3, SPC-006). The form is rendered
+  only once the token has loaded; before that the menu is empty (old
+  behavior, harmless and not worth a spinner).
 - After sign-out the server redirects to the return address; the board
   reloads as anonymous chrome with the same position; the menu is gone.
 - No Your-work, settings, deactivate or workspace entries exist here.
 - The menu is absent inside embeds (SPC-015).
 FIELD: `display_name`, `first_name`, `last_name`, `email`, `avatar_url`.
+The trigger label is the only identity the oracle reads; it asserts the
+display name and that sign-out is offered.
 
 **SPC-015 — Embedded frame hides account controls.**
 The subtree detects an embedding frame (`window.self !== window.top`, same
@@ -811,10 +848,25 @@ the box does nothing to the board.
 **SPC-027 — Card identity.**
 Every card (list row or board card) shows the public key — the project
 `identifier` plus `-` plus the issue `sequence_id` — and the title truncated
-to one line, with the full title in a tooltip on hover/focus. The key is a
-link to the issue's address (adds `peekId`) and is keyboard focusable; the
-whole card is a link/button that opens the overlay (SPC-030). Titles and keys
+to one line, with the full title in a tooltip on hover/focus. Titles and keys
 come from the issue payload; no client-side padding or renumbering.
+The **open region** differs by layout, and the spec, the gate and the slice
+must name the same one:
+- **List row:** only the **title** is the link to the issue's address (it adds
+  `peekId`) and is the keyboard-focusable control that opens the overlay. The
+  key is plain text in its own element beside the title, outside the link;
+  the row itself and the property strip carry no activation. Activating the
+  key, a property chip or empty row space does nothing.
+- **Board (kanban) card:** the card body — key, title and property strip
+  together — is one link to the issue's address (adds `peekId`), and that is
+  the focusable control. The vote/reaction footer is a **sibling** of that
+  link (SPC-030, SPC-048), so its controls never open the overlay.
+That is the old app's shape and what the oracle pins (the list card's key is
+read from the row sibling, the board card's link carries `peekId`). The new
+app **may** widen list-row activation to the whole row as a new affordance,
+but that is a labelled addition, not parity: the gate keeps pinning title
+activation, and if the row is widened the key and chips must still not
+navigate twice.
 
 **SPC-028 — Card markers.**
 The card's property strip shows: the state marker with its name, the priority
@@ -900,9 +952,12 @@ workspace app's defaults.
 ### 3.7 Slice H — issue open, overlay shell, content and copy link
 
 **SPC-030 — Opening a card.**
-Clicking a card (or pressing Enter on a focused card) opens the issue overlay
-and writes `peekId` into the address **keeping `board` and every filter
-parameter**. The oracle pins the address contents (board + filters + peekId)
+Activating the card's open region — the **title link** in a list row, the
+**card body link** on a board card (SPC-027), by click or by Enter/Space on
+the focused control — opens the issue overlay and writes `peekId` into the
+address **keeping `board` and every filter parameter**. Clicking the list
+row's key or a property chip, or the board card's vote/reaction footer, does
+not open the overlay (SPC-027, SPC-048). The oracle pins the address contents (board + filters + peekId)
 and that the board is behind the open overlay; it does not pin history
 semantics. History follows the one model in SPC-022: opening pushes exactly
 one entry; closing replaces it (SPC-042). The old app dropped the filter
@@ -916,9 +971,9 @@ The board card's footer (votes/reactions, SPC-047/SPC-048) is a **sibling**
 of the card's link, not inside it: clicking a footer control toggles the
 vote/reaction and does **not** open the overlay or write `peekId`, and the
 same goes for keyboard activation of those controls. Only the link region
-(title/properties) opens the overlay. (The old app renders the footer
-outside the link for exactly this reason; the list layout has no footer at
-all — SPC-029.)
+(the whole card body on a board card, the title on a list row) opens the
+overlay. (The old app renders the footer outside the link for exactly this
+reason; the list layout has no footer at all — SPC-029.)
 
 **SPC-040 — Issue address opens the overlay.**
 An address with `peekId` loads the board and, while the board data loads,
@@ -1015,8 +1070,10 @@ is on.
   vote. One vote per visitor per issue.
 - The screen updates immediately (optimistic), then writes; a failed write
   re-reads the issue's stored votes and shows them with an error notice.
-- Anonymous clicks go to `/spaces/?next_path=<current full board position,
-  encoded once>` (§3.3, SPC-013; old bug NEWFRONT-465 truncated the position).
+- Anonymous clicks go to the spaces landing document with the subtree-relative
+  current board position as its `next_path`, encoded once (§1.3, SPC-006,
+  SPC-013; old bug NEWFRONT-465 truncated the position). No `/spaces` segment
+  appears inside the value — the server adds the mount on redirect.
   After sign-in the visitor returns to the same issue open.
 - Inside an embedding frame the controls stay visible with their counts but
   are inert: activating one does nothing (no write, no redirect), matching
@@ -1066,8 +1123,9 @@ alike (confirmation 3; NEWFRONT-461). With it on:
   illustration;
 - an empty thread shows the heading and a short empty line (never a blank
   area).
-The invitation's return address is the full current position, encoded once
-(old bug NEWFRONT-465 kept only the bare board). The server also refuses
+The invitation's return address is the full current, subtree-relative
+position (§1.3, SPC-006), encoded once (old bug NEWFRONT-465 kept only the
+bare board). The server also refuses
 comment writes and returns an empty list while the flag is off; the new app
 does not depend on that gate (it hides the section) but must not break when it
 happens (a disabled response renders as an empty thread).
@@ -1726,11 +1784,12 @@ pins the old behavior). The new app implements the intent in this column.
 | NEWFRONT-462 | SPC-059 | With no method enabled, both modes explain themselves in a dismissible banner and keep the address/mode; no misleading invalid-address error, no silent dead end. |
 | NEWFRONT-463 | SPC-036, SPC-037 | The initial fetch carries the address filters (state, priority, labels); no seed-without-fetch. |
 | NEWFRONT-464 | SPC-035 | Removing one value keeps survivors under the singular keys (`state`, `priority`, `labels`). |
-| NEWFRONT-465 | SPC-013, SPC-014, SPC-047, SPC-048, SPC-049, SPC-057 | Every sign-in/sign-out round trip carries the **full** position (board, filters, open issue), encoded exactly once. |
+| NEWFRONT-465 | SPC-013, SPC-014, SPC-047, SPC-048, SPC-049, SPC-057 | Every sign-in/sign-out round trip carries the **full** position (board, filters, open issue), encoded exactly once. The value stays subtree-relative (`/issues/<anchor>?…`, no `/spaces` segment) — one encoded value, not a mount-prefixed one (§1.3). |
 | NEWFRONT-466 | SPC-057 | Comment reaction pills name their reactors and mark the visitor's own from server-loaded rows (read the flat actor shape). |
 | NEWFRONT-467 | SPC-056 | A failed edit reconciles the row to the stored text. |
 | NEWFRONT-469 | SPC-015, SPC-029 | The frame gate hides the card-footer reaction add control too; the old card kept a working add control while the overlay hid it. |
 | NEWFRONT-822 | SPC-058, SPC-063 | **Parity: no banner.** The old card has no 5900 entry, so a throttled auth call lands in the unknown-code branch (step unchanged, address kept, no retry, no explanation) and the green oracle pins `banner: null`. The new app builds that parity behavior, so the row is flippable now; the filed issue tracks the *defect* (a visitor gets no explanation) and, if it is implemented, adds a translated try-again-later banner on the step that made the call, with a new intent scenario. Until then the catalog keeps 5900 unmodelled (§5.4). |
+| NEWFRONT-823 | SPC-014 | **Intent: first + last name in the trigger fallback.** The old trigger template repeats `first_name` (`display_name \|\| first_name first_name \|\| email \|\| neutral`), so a user without a display name reads their first name twice and the email/neutral fallbacks are unreachable. The new app builds display name → first + last → email → neutral, from the same current-user fields; the oracle reads the display-name case only. |
 | gate-only, no issue (addendum to NEWFRONT-463) | SPC-030/042 | Clicking a card from a filtered board keeps the filter keys in the address; the old app dropped them while the store kept filtering. Folded into SPC-030/042 and proven by the gate; NEWFRONT-463 covers the same address-loss family for the initial fetch. No separate issue: the gate scenario is the evidence and no user-visible divergence survives the intent. |
 | gate-only, no issue | SPC-022/030/042 | The one history model (settle replaces, open pushes, close replaces) is a new-app choice; the old app pushed on both layout settle and overlay open. It is folded into SPC-022 and pinned by the gate's address/history scenario, so no issue is filed — a Back that lands on a self-correcting malformed address is not a user-visible divergence once the address is already settled. |
 | gate-only, no issue (addendum to NEWFRONT-454) | SPC-020 | Settle only on layouts the board can render (list/kanban), instead of accepting any `view_props` flag the server says is enabled. The intent is folded into SPC-020; no issue because the deviation is only reachable in a configuration the publisher UI never produces. |
@@ -1738,7 +1797,8 @@ pins the old behavior). The new app implements the intent in this column.
 
 No row is left with an unowned old bug: NEWFRONT-469 carries the frame
 footer, NEWFRONT-822 carries the silent rate limit (built as parity, i.e.
-silent, until it is fixed), and the four gate-only items are either addenda
+silent, until it is fixed), NEWFRONT-823 carries the duplicated first-name
+fallback in the account trigger, and the four gate-only items are either addenda
 to filed bugs (463, 454, 467/459) or explicit new-app choices (the history
 model) proven by the gate's intent scenarios. If a slice finds a
 user-visible divergence in a configuration the gate cannot produce, it files
