@@ -1,6 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Toasts: a stack of short confirmations. A notice carries a title, an
+// optional body and up to a few inline actions: a labelled button, an
+// anchor that opens in a new tab (the "view" affordance after a write),
+// or a copy action that swaps to its confirmation for a few seconds so
+// the user sees the clipboard write land. The confirmation is client
+// state only; it never changes what was copied.
 import { Toast as BaseToast } from "@base-ui-components/react/toast";
 import { X } from "lucide-react";
 import * as React from "react";
@@ -10,9 +16,30 @@ export type ToastHostManager = ReturnType<typeof BaseToast.createToastManager>;
 
 type ToastItem = ReturnType<typeof BaseToast.useToastManager>["toasts"][number];
 
+/** How long a copy action shows its confirmation. */
+export const TOAST_COPIED_RESET_MS = 3000;
+
 interface ToastActionData {
-  actionLabel?: string | undefined;
-  onAction?: (() => void) | undefined;
+  actions?: readonly ToastAction[] | undefined;
+}
+
+/** One inline action row on a toast. */
+export interface ToastAction {
+  /** Visible label, e.g. "View work item" or "Copy link". */
+  label: string;
+  /**
+   * Runs when the action is chosen. A copy action may answer false when
+   * the write failed, so the confirmation is only claimed on success.
+   */
+  run?: (() => void | boolean | Promise<void | boolean>) | undefined;
+  /** Render as an anchor opened in a new tab at this address. */
+  href?: string | undefined;
+  /**
+   * Swap the label for this confirmation for a few seconds once the
+   * action reports success, instead of dismissing the notice. A copy
+   * action uses it so the user sees the write land.
+   */
+  confirmLabel?: string | undefined;
 }
 
 export function createKitToastManager(): ToastHostManager {
@@ -22,8 +49,8 @@ export function createKitToastManager(): ToastHostManager {
 export interface ShowToastOptions {
   title: string;
   description?: string;
-  actionLabel?: string;
-  onAction?: () => void;
+  /** Inline actions rendered under the body, in order. */
+  actions?: readonly ToastAction[];
   /** Auto-dismiss delay in ms; 0 keeps the toast until dismissed. */
   timeout?: number;
 }
@@ -33,10 +60,7 @@ export function showToast(manager: ToastHostManager, options: ShowToastOptions):
     title: options.title,
     ...(options.description === undefined ? {} : { description: options.description }),
     ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
-    data: {
-      ...(options.actionLabel === undefined ? {} : { actionLabel: options.actionLabel }),
-      ...(options.onAction === undefined ? {} : { onAction: options.onAction }),
-    },
+    ...(options.actions === undefined ? {} : { data: { actions: options.actions } }),
   });
 }
 
@@ -44,8 +68,40 @@ function actionOf(toast: ToastItem): ToastActionData {
   return (toast.data as ToastActionData | undefined) ?? {};
 }
 
+/** Action rows read as links on the notice; the copy row confirms in place. */
+const ACTION_CLASSES =
+  "inline-flex cursor-pointer items-center rounded-(--radius-control) px-(--space-2) py-px font-medium text-(--accent) hover:text-(--accent-hover)";
+
 function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostManager }): React.ReactElement {
-  const { actionLabel, onAction } = actionOf(toast);
+  const { actions = [] } = actionOf(toast);
+  const [copied, setCopied] = React.useState<string | null>(null);
+  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (timer.current !== null) clearTimeout(timer.current);
+    },
+    []
+  );
+  // A copy action reports whether the write landed; only then does its row
+  // swap to the confirmation, and it swaps back after a moment.
+  const choose = (action: ToastAction) => {
+    const close = () => manager.close(toast.id);
+    if (action.run === undefined) {
+      close();
+      return;
+    }
+    if (action.confirmLabel === undefined) {
+      action.run();
+      close();
+      return;
+    }
+    void Promise.resolve(action.run()).then((ok) => {
+      if (ok === false) return;
+      setCopied(action.label);
+      if (timer.current !== null) clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopied(null), TOAST_COPIED_RESET_MS);
+    });
+  };
   return (
     <BaseToast.Root
       toast={toast}
@@ -58,17 +114,30 @@ function ToastCard({ toast, manager }: { toast: ToastItem; manager: ToastHostMan
       <BaseToast.Content className="flex min-w-0 flex-1 flex-col gap-(--space-1)">
         <BaseToast.Title className="text-emphasis font-medium text-(--text)" />
         {toast.description ? <BaseToast.Description className="text-body text-(--text-muted)" /> : null}
-        {actionLabel ? (
-          <button
-            type="button"
-            onClick={() => {
-              onAction?.();
-              manager.close(toast.id);
-            }}
-            className="mt-(--space-2) cursor-pointer self-start font-medium text-(--accent) hover:text-(--accent-hover) focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-(--focus-ring-color) focus-visible:outline-solid"
-          >
-            {actionLabel}
-          </button>
+        {actions.length > 0 ? (
+          <div data-testid="toast-actions" className="mt-(--space-2) flex flex-wrap items-center gap-(--space-1)">
+            {actions.map((action) =>
+              action.href === undefined ? (
+                <button key={action.label} type="button" className={ACTION_CLASSES} onClick={() => choose(action)}>
+                  {copied === action.label ? action.confirmLabel : action.label}
+                </button>
+              ) : (
+                <a
+                  key={action.label}
+                  href={action.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={ACTION_CLASSES}
+                  onClick={() => {
+                    action.run?.();
+                    manager.close(toast.id);
+                  }}
+                >
+                  {action.label}
+                </a>
+              )
+            )}
+          </div>
         ) : null}
       </BaseToast.Content>
       <BaseToast.Close

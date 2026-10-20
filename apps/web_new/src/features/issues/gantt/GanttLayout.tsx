@@ -13,6 +13,7 @@ import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
 import { useCreateWorkItem } from "../api/create.js";
+import { WorkItemPreviewHover } from "../lifecycle/WorkItemPreviewCard.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { deriveReorder, type DropPlacement } from "./drag.js";
@@ -98,6 +99,30 @@ export function GanttLayout({
     projectRole,
     archived: false,
   });
+  // Bars and sidebar links open the hover preview card (ISS-133); the
+  // timeline's own state read already holds the name and group.
+  const renderPreview = React.useCallback(
+    (row: GanttRow, trigger: React.ReactElement<Record<string, unknown>>) => {
+      const state = states.find((entry) => entry.id === row.stateId);
+      return (
+        <WorkItemPreviewHover
+          trigger={trigger}
+          issue={{
+            id: row.id,
+            name: row.name,
+            sequence_id: row.sequenceId,
+            priority: row.priority,
+            start_date: row.startIso,
+            target_date: row.targetIso,
+            state_id: row.stateId,
+          }}
+          projectIdentifier={projectIdentifier}
+          state={state === undefined ? undefined : { name: state.name, group: state.group }}
+        />
+      );
+    },
+    [projectIdentifier, states]
+  );
 
   const reorder = React.useMemo(
     () =>
@@ -146,6 +171,7 @@ export function GanttLayout({
         onDatesChange={(issueId, dates) => mutations.moveBar(issueId, dates)}
         onPlantBlock={(issueId, dates) => mutations.plantBlock(issueId, dates)}
         quickAdd={quickAdd}
+        renderPreview={renderPreview}
       />
       {peek !== null ? (
         <GanttPeekPanel workspaceSlug={workspaceSlug} projectId={projectId} row={peek.row} onClose={closePeek} />

@@ -8,6 +8,7 @@ import { DAY_WIDTHS } from "./scale.js";
 import {
   PARTIAL_BAR_DAYS,
   ROW_OVERSCAN,
+  type GanttRow,
   barInView,
   barBox,
   buildRows,
@@ -89,7 +90,7 @@ describe("buildRows", () => {
 });
 
 describe("barBox", () => {
-  const row = {
+  const row: GanttRow = {
     id: "a",
     identifier: "WEB-1",
     name: "A",
@@ -98,6 +99,8 @@ describe("barBox", () => {
     durationDays: 3,
     stateId: null,
     sortOrder: 1,
+    priority: "none",
+    sequenceId: 7,
     archived: false,
     unconfirmed: false,
   };

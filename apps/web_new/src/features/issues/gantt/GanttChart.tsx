@@ -83,6 +83,13 @@ export interface GanttChartProps {
   onPlantBlock?: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
   /** Sticky quick-add entry (ISS-055); absent hides the control. */
   quickAdd?: React.ReactNode;
+  /**
+   * Hover preview for a reference surface (ISS-133). Receives the bar or
+   * sidebar link to wrap; absent leaves the surfaces plain.
+   */
+  renderPreview?:
+    | ((row: GanttRow, trigger: React.ReactElement<Record<string, unknown>>) => React.ReactNode)
+    | undefined;
 }
 
 interface SurfaceProps extends GanttChartProps {
@@ -187,6 +194,7 @@ function Bar({
   consumeGestureClick,
   range,
   zoom,
+  renderPreview,
 }: {
   row: GanttRow;
   box: GanttBarBox;
@@ -201,6 +209,7 @@ function Bar({
   consumeGestureClick: () => boolean;
   range: Parameters<typeof dayColumns>[0];
   zoom: GanttZoom;
+  renderPreview?: GanttChartProps["renderPreview"];
 }): React.ReactElement {
   // While a gesture runs the bar follows the pointer; on release the
   // persisted dates flow back through the list cache (ISS-051).
@@ -217,7 +226,7 @@ function Bar({
     drag !== null && drag.dates.startDate !== null && drag.dates.targetDate !== null
       ? datedBarBox(drag.dates.startDate, drag.dates.targetDate, range, zoom)
       : box;
-  return (
+  const bar = (
     <div
       id={`gantt-block-${row.id}`}
       data-testid="gantt-bar"
@@ -278,6 +287,8 @@ function Bar({
       ) : null}
     </div>
   );
+  // The hover preview wraps the bar as its reference surface (ISS-133).
+  return <>{renderPreview === undefined ? bar : renderPreview(row, bar)}</>;
 }
 
 function UndatedLane({
@@ -353,6 +364,7 @@ function GanttLanes({
   onDatesChange,
   onPlantBlock,
   rangeStartIso,
+  renderPreview,
 }: {
   rows: readonly GanttRow[];
   zoom: GanttZoom;
@@ -373,6 +385,7 @@ function GanttLanes({
   onDatesChange: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
   onPlantBlock: (issueId: string, dates: { startDate: string | null; endDate: string | null }) => void;
   rangeStartIso: string;
+  renderPreview?: GanttChartProps["renderPreview"];
 }): React.ReactElement {
   const visible = rows.slice(windowStart, windowEnd);
   const [drag, setDrag] = React.useState<BarDrag | null>(null);
@@ -484,6 +497,7 @@ function GanttLanes({
                 consumeGestureClick={consumeGestureClick}
                 range={range}
                 zoom={zoom}
+                renderPreview={renderPreview}
               />
             )}
             {box !== null && !barInView(box, viewportLeft, viewportWidth) ? (
@@ -519,6 +533,7 @@ function GanttSurface({
   onDatesChange,
   onPlantBlock,
   quickAdd,
+  renderPreview,
   todayIso,
   viewport,
   hoveredId,
@@ -649,6 +664,7 @@ function GanttSurface({
                 windowStart={window.start}
                 windowEnd={window.end}
                 reorder={reorder}
+                renderPreview={renderPreview}
               />
             )}
           </div>
@@ -703,6 +719,7 @@ function GanttSurface({
                 onDatesChange={onDatesChange ?? (() => undefined)}
                 onPlantBlock={onPlantBlock ?? (() => undefined)}
                 rangeStartIso={range.startIso}
+                renderPreview={renderPreview}
               />
             )}
           </div>

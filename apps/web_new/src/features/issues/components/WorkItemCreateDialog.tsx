@@ -800,7 +800,7 @@ export function WorkItemCreateDialog({
       {
         projectId,
         payload: buildCreatePayload(named),
-        ...(projectIdentifier === undefined ? {} : { projectIdentifier }),
+        projectIdentifier: offered.find((project) => project.id === projectId)?.identifier ?? projectIdentifier,
       },
       {
         onSettled: () => {

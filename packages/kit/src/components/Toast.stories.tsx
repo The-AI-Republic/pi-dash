@@ -22,8 +22,7 @@ export const Notifications = (): React.ReactElement => (
         showToast(manager, {
           title: "Archived",
           description: "Issue moved to the archive",
-          actionLabel: "Undo",
-          onAction: () => {},
+          actions: [{ label: "Undo", run: () => {} }],
         });
       }}
     >
