@@ -26,6 +26,11 @@ SEED_EMAIL = "contract.tester@example.com"
 SEED_SECONDARY_EMAIL = "contract.probe@example.com"
 SEED_AUTOSET_EMAIL = "contract.autoset@example.com"
 SEED_MEMBERSHIP_EMAIL = "contract.membership@example.com"
+# Views area (NEWFRONT-718): a project guest on the seeded project, plus a
+# shared view the main member owns. The guest's project view list must
+# narrow to its own rows while the flag is off, so a shared view it does
+# not own proves the narrowing.
+SEED_GUEST_EMAIL = "contract.guest@example.com"
 SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
 SEED_DEV_WORKSPACE_SLUG = "contract-dev"
@@ -292,6 +297,39 @@ def seed():
         member=membership_user,
     ).update(is_active=False)
     note("project-member", f"{project.identifier}/{membership_user.email}", False)
+
+    # Views guest fixture (NEWFRONT-718). Repaired on every seed, like the
+    # other consumable rows: the views contract suite signs in as this user
+    # and asserts the project and workspace view lists narrow to its own.
+    guest, guest_created = User.objects.get_or_create(
+        email=SEED_GUEST_EMAIL,
+        defaults={
+            "username": "contract.guest",
+            "first_name": "Contract",
+            "last_name": "Guest",
+            "is_active": True,
+        },
+    )
+    if guest_created or not guest.check_password(SEED_PASSWORD):
+        guest.password = make_password(SEED_PASSWORD)
+        guest.is_active = True
+        guest.save()
+    note("user", guest.email, guest_created)
+
+    _, guest_ws_created = WorkspaceMember.objects.update_or_create(
+        workspace=workspace,
+        member=guest,
+        defaults={"role": 5, "is_active": True},
+    )
+    note("workspace-member", f"{workspace.slug}/{guest.email}", guest_ws_created)
+
+    _, guest_project_created = ProjectMember.objects.update_or_create(
+        workspace=workspace,
+        project=project,
+        member=guest,
+        defaults={"role": 5, "is_active": True},
+    )
+    note("project-member", f"{project.identifier}/{guest.email}", guest_project_created)
 
     # Passwordless-style user: the set-password contract test signs in as
     # this user with the known seed password, then sets a fresh one — which
