@@ -753,19 +753,34 @@ const READ_BASE_COLUMNS: &str =
     pages.created_by_id AS created_by, pages.updated_by_id AS updated_by, \
     pages.view_props, pages.logo_props, pages.description_html";
 
+/// Exact DRF `ValidationError` body for a NUL in `?search=`: the raw value
+/// runs through `CharField(trim_whitespace=False, allow_blank=True)` whose
+/// `ProhibitNullCharactersValidator` rejects it before splitting.
+const SEARCH_NUL_BODY: &str = r#"["Null characters are not allowed."]"#;
+
 /// `?search=` terms (DRF `SearchFilter.get_search_terms` over
 /// `search_fields = ["name"]`, `base.py:79` + `BaseViewSet.filter_queryset`,
-/// `app/views/base.py:206-208`): commas read as spaces, split on
-/// whitespace; an absent or blank value filters nothing. Each term is an
-/// ANDed `name__icontains`.
-fn search_terms(raw: Option<&str>) -> Vec<String> {
+/// `app/views/base.py:206-208`): the raw value is validated first (NUL is a
+/// 400, never a stripped term), then commas read as spaces and the value
+/// splits on whitespace; an absent or blank value filters nothing. Each term
+/// is an ANDed `name__icontains`.
+#[allow(clippy::result_large_err)]
+fn search_terms(raw: Option<&str>) -> Result<Vec<String>, Response> {
     match raw {
-        Some(value) => value
-            .replace(',', " ")
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect(),
-        None => Vec::new(),
+        Some(value) => {
+            if value.contains('\x00') {
+                return Err(json_response(
+                    StatusCode::BAD_REQUEST,
+                    SEARCH_NUL_BODY.to_owned(),
+                ));
+            }
+            Ok(value
+                .replace(',', " ")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect())
+        }
+        None => Ok(Vec::new()),
     }
 }
 
@@ -991,7 +1006,6 @@ pub async fn list_pages(
     Query(query): Query<HashMap<String, String>>,
     extension: Option<Extension<SessionHandle>>,
 ) -> Response {
-    let search = search_terms(query.get("search").map(String::as_str));
     let user_id = match actor_user_id(extension.clone()) {
         Ok(id) => id,
         Err(denial) => return denial.into_response(),
@@ -1011,6 +1025,10 @@ pub async fn list_pages(
     let timezone = match read_timezone(pool, &user_id).await {
         Ok(timezone) => timezone,
         Err(denial) => return denial.into_response(),
+    };
+    let search = match search_terms(query.get("search").map(String::as_str)) {
+        Ok(search) => search,
+        Err(response) => return response,
     };
     let rows = match fetch_read_rows(
         pool,
@@ -1077,7 +1095,10 @@ pub async fn retrieve_page(
     };
     // `?search=` rides `get_queryset` (`base.py:88`) before the pk filter,
     // so it applies here exactly as on the list.
-    let search = search_terms(query.get("search").map(String::as_str));
+    let search = match search_terms(query.get("search").map(String::as_str)) {
+        Ok(search) => search,
+        Err(response) => return response,
+    };
     let rows = match fetch_read_rows(
         pool,
         &slug,
@@ -3744,7 +3765,10 @@ pub async fn page_create(
     // page, a row hidden by `?search=`, or any other row the queryset
     // hides) 404s through `handle_exception`, exactly like the propagating
     // `DoesNotExist`.
-    let search = search_terms(query.get("search").map(String::as_str));
+    let search = match search_terms(query.get("search").map(String::as_str)) {
+        Ok(search) => search,
+        Err(response) => return response,
+    };
     match fetch_detail_row(pool, &slug, &project_id, &page_id, &user_id, &search).await {
         Ok(Some(row)) => json_response(StatusCode::CREATED, render_create_row(&row, &timezone)),
         Ok(None) => Denial::ObjectNotFound.into_response(),
@@ -5447,18 +5471,34 @@ mod read_tests {
     /// nothing.
     #[test]
     fn search_terms_split_like_drf() {
-        assert!(search_terms(None).is_empty());
-        assert!(search_terms(Some("")).is_empty());
-        assert!(search_terms(Some("   ")).is_empty());
-        assert_eq!(search_terms(Some("home")), vec!["home".to_owned()]);
+        let terms = |raw| search_terms(raw).expect("terms");
+        assert!(terms(None).is_empty());
+        assert!(terms(Some("")).is_empty());
+        assert!(terms(Some("   ")).is_empty());
+        assert_eq!(terms(Some("home")), vec!["home".to_owned()]);
         assert_eq!(
-            search_terms(Some("  home   page ")),
+            terms(Some("  home   page ")),
             vec!["home".to_owned(), "page".to_owned()]
         );
         assert_eq!(
-            search_terms(Some("home,page")),
+            terms(Some("home,page")),
             vec!["home".to_owned(), "page".to_owned()]
         );
+    }
+
+    /// The raw value is validated before splitting: DRF's
+    /// `ProhibitNullCharactersValidator` answers 400 with the bare message
+    /// list, never a stripped term (PIDASHCONV-1227).
+    #[tokio::test]
+    async fn search_terms_reject_nul_like_drf() {
+        for raw in ["a\x00b", "\x00"] {
+            let response = search_terms(Some(raw)).expect_err("NUL rejects");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body collects");
+            assert_eq!(body, SEARCH_NUL_BODY.as_bytes());
+        }
     }
 
     /// `icontains` escaping matches the license-workspace vectors: LIKE
