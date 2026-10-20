@@ -12,27 +12,23 @@
 import * as React from "react";
 
 import {
-  useAddToolServer,
   useRemoveAssistantLlm,
   useRemoveAssistantVoice,
-  useRemoveToolServer,
   useSaveAssistantLlm,
   useSaveAssistantVoice,
   useTestAssistantLlm,
   useTestAssistantVoice,
-  useToggleToolServer,
 } from "../api/mutations.js";
-import { useAssistantLlm, useAssistantServers, useAssistantVoice } from "../api/queries.js";
+import { useAssistantLlm, useAssistantVoice } from "../api/queries.js";
 import { endpointForSave, keyForSave } from "../lib/rules.js";
 import { AssistantSectionsSkeleton } from "./AssistantSectionsSkeleton.js";
 import { emptyProviderForm, providerFormFrom, ProviderForm, type ProviderFormValues } from "./ProviderForm.js";
-import { emptyToolServerDraft, ToolServersForm, type ToolServerDraft } from "./ToolServersForm.js";
+import { ToolServersSection } from "./ToolServersSection.js";
 import { emptyVoiceForm, voiceFormFrom, VoiceForm, type VoiceFormValues } from "./VoiceForm.js";
 
 export function AssistantSettingsPage(): React.ReactElement {
   const llm = useAssistantLlm();
   const voice = useAssistantVoice();
-  const servers = useAssistantServers();
 
   const saveLlm = useSaveAssistantLlm();
   const testLlm = useTestAssistantLlm();
@@ -40,14 +36,9 @@ export function AssistantSettingsPage(): React.ReactElement {
   const saveVoice = useSaveAssistantVoice();
   const testVoice = useTestAssistantVoice();
   const removeVoice = useRemoveAssistantVoice();
-  const addServer = useAddToolServer();
-  const toggleServer = useToggleToolServer();
-  const removeServer = useRemoveToolServer();
 
   const [providerForm, setProviderForm] = React.useState<ProviderFormValues>(emptyProviderForm);
   const [voiceForm, setVoiceForm] = React.useState<VoiceFormValues>(emptyVoiceForm);
-  const [serverDraft, setServerDraft] = React.useState<ToolServerDraft>(emptyToolServerDraft);
-  const [pendingServerId, setPendingServerId] = React.useState<string | null>(null);
 
   // A config read seeds its form once; a later read only re-seeds when it
   // carries different values, so a write's answer never wipes typing.
@@ -103,18 +94,6 @@ export function AssistantSettingsPage(): React.ReactElement {
     );
   };
 
-  const addToolServer = (): void => {
-    const auth = serverDraft.authHeader.trim();
-    addServer.mutate(
-      {
-        name: serverDraft.name.trim(),
-        url: serverDraft.url.trim(),
-        ...(auth === "" ? {} : { auth_header: auth }),
-      },
-      { onSuccess: () => setServerDraft(emptyToolServerDraft()) }
-    );
-  };
-
   return (
     <div data-testid="assistant-settings-page" className="flex max-w-2xl flex-col gap-(--space-8)">
       <ProviderForm
@@ -141,28 +120,7 @@ export function AssistantSettingsPage(): React.ReactElement {
         removing={removeVoice.isPending}
       />
 
-      <ToolServersForm
-        servers={servers.data}
-        draft={serverDraft}
-        onDraftChange={setServerDraft}
-        onAdd={addToolServer}
-        onToggle={(server) => {
-          setPendingServerId(server.id);
-          toggleServer.mutate(
-            { serverId: server.id, isEnabled: !server.is_enabled },
-            { onSettled: () => setPendingServerId(null) }
-          );
-        }}
-        onRemove={(server) => {
-          setPendingServerId(server.id);
-          removeServer.mutate(
-            { serverId: server.id, name: server.name },
-            { onSettled: () => setPendingServerId(null) }
-          );
-        }}
-        adding={addServer.isPending}
-        pendingId={pendingServerId}
-      />
+      <ToolServersSection />
     </div>
   );
 }

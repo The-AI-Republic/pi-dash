@@ -4,9 +4,12 @@
 // Setup gating (parity/specs/agents.md §9, AGT-039/AGT-040). A model is
 // usable only when it has both a name and a stored key; the blank default
 // the config read answers with is "not set up", and an unresolved config
-// is not a verdict either way.
+// is not a verdict either way. The lane-aware check (CLOUD-037) lives
+// beside it and is what every assistant entry asks.
 
 import type { LlmConfig } from "@pidash/api-client";
+
+import { resolveLaneState } from "./lane.js";
 
 /** True when the user has a model name and a key to run it with. */
 export function isAssistantConfigured(
@@ -17,11 +20,13 @@ export function isAssistantConfigured(
 }
 
 /**
- * Whether the landing must swap its chat entry for the setup card. Only a
- * known configuration can lock the assistant: while the read is pending
- * the caller renders neither branch.
+ * Setup gating across credential lanes (CLOUD-037, from
+ * parity/specs/cloud.md §7). The assistant entries ask this instead of the
+ * self-supplied check alone, so a hosted or provider-account lane that
+ * carries its credential is ready even with no self-supplied key. Older
+ * backends without lane fields read as the self-supplied lane, and an
+ * unresolved config never reports setup.
  */
-export function needsSetup(config: Pick<LlmConfig, "model_name" | "has_api_key"> | undefined): boolean {
-  if (config === undefined) return false;
-  return !isAssistantConfigured(config);
+export function needsLaneSetup(config: LlmConfig | null | undefined): boolean {
+  return resolveLaneState(config).setupNeeded;
 }

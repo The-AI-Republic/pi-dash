@@ -16,7 +16,7 @@ import { useAssistantConfig } from "../api/queries.js";
 import { startFailureDetail, useDeliverFirstMessage } from "../api/mutations.js";
 import { EMPTY_CONVERSATION_HINT, HANDOFF_FAILED_TITLE } from "../lib/copy.js";
 import { readPendingMessage } from "../lib/navigation.js";
-import { needsSetup } from "../lib/gate.js";
+import { needsLaneSetup } from "../lib/gate.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { Composer } from "./Composer.js";
 import { SetupCard } from "./SetupCard.js";
@@ -60,7 +60,7 @@ export function ConversationGate({
     );
   }, [deliver, handoff, navigate, threadId, workspaceSlug]);
 
-  const setup = needsSetup(config.data);
+  const setup = needsLaneSetup(config.data);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">

@@ -4,9 +4,11 @@
 // Home assistant card (SHELL-007 card shell + NEWFRONT-603 quick entry,
 // parity/specs/agents.md §9 AGT-048 and §13). Members see a single-line
 // draft with an Ask action, suggestion chips that fill the draft without
-// sending, and up to five recent conversations newest-first. A keyless
-// Ask is refused with a notice and starts nothing; without a provider key
-// the card also carries the setup reminder. Guests never see the card.
+// sending, and up to five recent conversations newest-first. A lane with
+// no credential is refused with a notice and starts nothing, and the card
+// carries the setup reminder until an active lane is ready (CLOUD-037: a
+// hosted or account lane counts, not only a self-supplied key). Guests
+// never see the card.
 // Recents link into the assistant view by id; asks start there.
 
 import { Bot } from "lucide-react";
@@ -27,7 +29,7 @@ import {
   assistantLandingHref,
   assistantThreadHref,
   conversationLabel,
-  isAssistantConfigured,
+  needsLaneSetup,
   startFailureDetail,
   START_FAILED_TITLE,
   useStartConversation,
@@ -70,7 +72,7 @@ export function HomeAssistantCard({ workspaceSlug }: HomeAssistantCardProps): Re
 
   if (!canView) return null;
   if (threads.data === undefined || config.data === undefined) return null;
-  const configured = isAssistantConfigured(config.data);
+  const configured = !needsLaneSetup(config.data);
   const recent = recentConversations(threads.data);
 
   const ask = (): void => {

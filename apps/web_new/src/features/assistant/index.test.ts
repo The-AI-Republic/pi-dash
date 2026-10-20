@@ -14,7 +14,7 @@ import {
   ConversationGate,
   ConversationRail,
   HANDOFF_FAILED_TITLE,
-  needsSetup,
+  needsLaneSetup,
   SETUP_CARD_ACTION,
   SETUP_CARD_TITLE,
   SetupCard,
@@ -32,7 +32,15 @@ describe("assistant feature public API", () => {
     expect(assistantConfigQueryOptions).toBeTypeOf("function");
     expect(assistantLandingHref("acme")).toBe("/acme/assistant");
     expect(assistantThreadHref("acme", "t1")).toBe("/acme/assistant/t1");
-    expect(needsSetup({ model_name: "", has_api_key: false })).toBe(true);
+    expect(
+      needsLaneSetup({
+        provider_kind: "openai",
+        base_url: "",
+        model_name: "",
+        has_api_key: false,
+        last_verified_at: null,
+      })
+    ).toBe(true);
     expect(SETUP_CARD_TITLE).toBe("Set up your AI assistant");
     expect(SETUP_CARD_ACTION).toBe("Configure provider");
     expect(API_KEY_REMINDER).toContain("Please set your API key");

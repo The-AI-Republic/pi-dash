@@ -11,7 +11,7 @@
 // - sidebar entries carry a workspace-relative target with a leading
 //   slash, e.g. { id: "apps", label: "Apps", to: "/apps/" }, resolved
 //   against the active workspace slug by resolveEditionSidebarHref.
-import type { Edition } from "./types.js";
+import type { Edition, SettingsSection } from "./types.js";
 
 /** Workspace route segment the cloud edition declares for the Apps catalog. */
 export const APPS_CATALOG_ROUTE_PATH = "apps";
@@ -19,6 +19,21 @@ export const APPS_CATALOG_ROUTE_PATH = "apps";
 /** True when the edition declares the given workspace route segment. */
 export function isEditionRouteEnabled(edition: Edition, routePath: string): boolean {
   return (edition.routes ?? []).some((route) => route.path === routePath);
+}
+
+/**
+ * True when the edition declares an extra settings section with this id.
+ * The settings shell reads the sections once and lets each declared id
+ * replace the edition-neutral body with the edition's own screen
+ * (CLOUD-032, from the maintainer decision of 2026-10-18).
+ */
+export function isEditionSettingsSectionEnabled(edition: Edition, sectionId: string): boolean {
+  return (edition.settingsSections ?? []).some((section) => section.id === sectionId);
+}
+
+/** The declared section for an id, when the edition contributes one. */
+export function findEditionSettingsSection(edition: Edition, sectionId: string): SettingsSection | null {
+  return (edition.settingsSections ?? []).find((section) => section.id === sectionId) ?? null;
 }
 
 /**

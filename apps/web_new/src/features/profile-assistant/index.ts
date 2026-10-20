@@ -5,5 +5,6 @@
 
 export { AssistantSettingsPage } from "./components/AssistantSettingsPage.js";
 export { AssistantSettingsTab } from "./components/AssistantSettingsTab.js";
+export { ToolServersSection } from "./components/ToolServersSection.js";
 export { ASSISTANT_TAB_HEADING } from "./lib/copy.js";
 export { assistantSettingsKeys } from "./api/keys.js";

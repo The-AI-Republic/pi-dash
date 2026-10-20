@@ -15,6 +15,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { AssistantMessage, AssistantSendResponse, LlmConfig } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -177,6 +178,14 @@ describe("ConversationGate", () => {
   it("does not deliver when the state carries no message", async () => {
     renderGate({ config: KEYED, state: {} });
     await screen.findByTestId("assistant-empty-hint");
+    expect(sends).toEqual([]);
+  });
+
+  it("holds a typed draft without sending it from the shell", async () => {
+    renderGate({ config: KEYED });
+    const box = await screen.findByRole("textbox", { name: "Message the assistant" });
+    await userEvent.type(box, "hello{Enter}");
+    expect(box).toHaveValue("hello");
     expect(sends).toEqual([]);
   });
 

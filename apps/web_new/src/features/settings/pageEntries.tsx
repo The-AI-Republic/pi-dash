@@ -16,6 +16,7 @@ import { AssistantSettingsTab } from "../profile-assistant/index.js";
 import { IntegrationsSettingsTab } from "../profile-integrations/index.js";
 import { UpkeepSettingsTab } from "../profile-upkeep/index.js";
 import { useSessionExpiredRedirect } from "../../shared/shell/expiredRedirect.js";
+import { registerCloudAssistantSettings } from "../cloud-assistant/index.js";
 import { ApiTokensTab } from "./components/ApiTokensTab.js";
 import { GeneralSettingsTab } from "./components/GeneralSettingsTab.js";
 import { NotificationsTab } from "./components/NotificationsTab.js";
@@ -36,12 +37,16 @@ export function registerBuiltInSettingsTabs(): () => void {
   const unregisterAssistant = registerProfileSettingsPage("ai-assistant", () => <AssistantSettingsTab />);
   const unregisterUpkeep = registerProfileSettingsPage("auto-project-management", () => <UpkeepSettingsTab />);
   const unregisterIntegrations = registerProfileSettingsPage("integrations", () => <IntegrationsSettingsTab />);
+  // Registered last so an edition that declares the section supersedes the
+  // community assistant body rather than being overwritten by it.
+  const unregisterCloudAssistant = registerCloudAssistantSettings();
   return () => {
     unregisterGeneral();
     unregisterPreferences();
     unregisterSecurity();
     unregisterNotifications();
     unregisterApiTokens();
+    unregisterCloudAssistant();
     unregisterActivity();
     unregisterAssistant();
     unregisterUpkeep();
