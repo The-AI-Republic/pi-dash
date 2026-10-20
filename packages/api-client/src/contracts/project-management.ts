@@ -115,48 +115,6 @@ export async function updateProject(
   return client.parse(ProjectDetails, envelope.data, `PATCH ${path}`);
 }
 
-/**
- * The project row the settings General tab reads (PSET-005). It is the same
- * serializer as ProjectDetails, plus the agent-policy columns the tab owns
- * that the shared projection leaves off; the server sends the whole model.
- */
-export const ProjectSettingsDetail = z.object({
-  ...ProjectDetails.shape,
-  agent_ticking_enabled: z.boolean(),
-  agent_default_max_ticks: z.number(),
-  agent_default_interval_seconds: z.number(),
-  agent_review_default_interval_seconds: z.number(),
-  agent_test_default_interval_seconds: z.number(),
-});
-export type ProjectSettingsDetail = z.infer<typeof ProjectSettingsDetail>;
-
-/** GET /api/workspaces/<slug>/projects/<id>/ — the General tab's read. */
-export async function getProjectSettingsDetail(
-  client: ApiClient,
-  slug: string,
-  projectId: string
-): Promise<ProjectSettingsDetail> {
-  const path = `/api/workspaces/${slug}/projects/${projectId}/`;
-  const body = await client.getJson<unknown>(path);
-  return client.parse(ProjectSettingsDetail, body, `GET ${path}`);
-}
-
-/**
- * The same PATCH as updateProject, read back with the policy columns the
- * General tab owns. The server answers with the whole model, so the two
- * parsers differ only in how much of the answer each caller needs.
- */
-export async function updateProjectSettings(
-  client: ApiClient,
-  slug: string,
-  projectId: string,
-  input: ProjectUpdateInput
-): Promise<ProjectSettingsDetail> {
-  const path = `/api/workspaces/${slug}/projects/${projectId}/`;
-  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
-  return client.parse(ProjectSettingsDetail, envelope.data, `PATCH ${path}`);
-}
-
 /** One reserved identifier row: integer id, upper-cased name, owning project. */
 export const ProjectIdentifierMatch = z.object({
   id: z.number(),

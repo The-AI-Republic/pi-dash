@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createAppClient, getAppBaseUrl, getAppClient, resetAppClient } from "./client.js";
+import { createAppClient, getAppClient, resetAppClient } from "./client.js";
 import type { Platform } from "../platform/index.js";
 
 const platformHarness = vi.hoisted(() => ({ current: {} as Partial<Platform> }));
@@ -43,15 +43,5 @@ describe("app client default base address", () => {
     platformHarness.current = { kind: "web", apiOrigin: undefined };
     vi.stubGlobal("window", undefined);
     expect(createAppClient().baseUrl).toBe("http://localhost:8000");
-  });
-
-  it("resolves asset paths against the bootstrap client, or its default before bootstrap", () => {
-    platformHarness.current = { kind: "web" };
-    vi.stubGlobal("window", { location: { origin: "https://app.example.test" } });
-    expect(getAppBaseUrl()).toBe("https://app.example.test");
-    createAppClient("https://api.test");
-    expect(getAppBaseUrl()).toBe("https://api.test");
-    resetAppClient();
-    expect(getAppBaseUrl()).toBe("https://app.example.test");
   });
 });

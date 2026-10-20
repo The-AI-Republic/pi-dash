@@ -78,7 +78,6 @@ import {
   checkProjectIdentifier,
   createProject,
   deleteProject,
-  getProjectSettingsDetail,
   joinProjects,
   leaveProject,
   listFavoriteProjects,
@@ -86,10 +85,10 @@ import {
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
-  updateProjectSettings,
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "./contracts/project-management.js";
+import { getProjectSettingsDetail, updateProjectSettings } from "./contracts/project-settings-general.js";
 import {
   completeTour,
   createQuickLink,
@@ -180,8 +179,8 @@ import {
   deleteWorkspaceLogoAsset,
   uploadUserAvatar,
   uploadWorkspaceLogo,
-  uploadProjectAsset,
 } from "./contracts/assets.js";
+import { uploadProjectAsset } from "./contracts/project-settings-general.js";
 import { listCycles, updateCycle } from "./contracts/cycles.js";
 import { listModules, updateModule } from "./contracts/modules.js";
 import {
@@ -5415,6 +5414,46 @@ describe("project asset contracts", () => {
     );
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(413);
+  });
+
+  it("posts the bytes to the signed URL through fetch when no uploader is supplied", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+      const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+      await expect(uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file)).resolves.toBe(
+        "/api/assets/v2/static/asset-9/"
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [target, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(target).toBe("https://uploads.test/signed");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeInstanceOf(FormData);
+      expect((init.body as FormData).get("key")).toBe("emblems/asset-9.png");
+      expect((init.body as FormData).get("file")).toBe(file);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads the signed upload's refusal status through the default fetch leg", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 413 }))
+    );
+    try {
+      const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+      const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+      const failure = await uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file).then(
+        () => null,
+        (error: unknown) => error
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(413);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

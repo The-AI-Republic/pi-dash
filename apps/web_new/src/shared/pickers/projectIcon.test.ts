@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { decodeEmojiValue, projectIconGlyph, projectMark, projectMarkText } from "./projectIcon.js";
+import { decodeEmojiValue, projectMark, projectMarkText } from "./projectIcon.js";
 
 describe("projectMark", () => {
   it("reads the picked emoji", () => {
@@ -29,12 +29,20 @@ describe("projectMark", () => {
     [{ in_use: "icon" }],
     [{ in_use: "icon", icon: null }],
     [{ in_use: "icon", icon: { name: 7 } }],
-    [{ in_use: "icon", icon: { name: "no_such_material_symbol" } }],
+    [{ in_use: "icon", icon: { name: "  " } }],
     [{ in_use: "emoji", emoji: { value: "  " } }],
     [{ in_use: "emoji", emoji: { value: 3 } }],
     [{ in_use: "emoji", emoji: [] }],
   ])("falls back to the initial for %j", (logo) => {
     expect(projectMark(logo)).toEqual({ kind: "initial" });
+  });
+
+  it("reads any named icon; the glyph set decides what is drawable", () => {
+    expect(projectMark({ in_use: "icon", icon: { name: "no_such_material_symbol" } })).toEqual({
+      kind: "icon",
+      name: "no_such_material_symbol",
+      color: null,
+    });
   });
 
   it("prefers the emoji when the stored value names both", () => {
@@ -102,18 +110,6 @@ describe("decodeEmojiValue", () => {
   it("leaves an absurdly long list alone instead of overflowing", () => {
     const long = Array(300_000).fill("65").join("-");
     expect(decodeEmojiValue(long)).toBe(long);
-  });
-});
-
-describe("projectIconGlyph", () => {
-  it("maps a stored Material name to a glyph", () => {
-    expect(projectIconGlyph("rocket_launch")).not.toBeNull();
-    expect(projectIconGlyph("star")).not.toBeNull();
-  });
-
-  it("has no glyph for a name outside the set", () => {
-    expect(projectIconGlyph("made_up_symbol")).toBeNull();
-    expect(projectIconGlyph("")).toBeNull();
   });
 });
 

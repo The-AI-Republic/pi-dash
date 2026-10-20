@@ -142,7 +142,7 @@ describe("ProjectSettingsSidebar", () => {
     expect(screen.getByTestId("project-logo")).toHaveTextContent("🚀");
   });
 
-  it("renders a chosen symbol in the rail", () => {
+  it("renders a chosen symbol in the rail", async () => {
     render(
       <ProjectSettingsSidebar
         workspaceSlug={WS}
@@ -155,7 +155,7 @@ describe("ProjectSettingsSidebar", () => {
       />
     );
     expect(screen.getByTestId("project-logo")).toHaveAttribute("data-mark", "icon");
-    expect(screen.getByTestId("project-logo-icon")).toBeInTheDocument();
+    expect(await screen.findByTestId("project-logo-icon")).toBeInTheDocument();
   });
 
   it("marks the canonical slash form and nothing else", () => {

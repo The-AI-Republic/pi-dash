@@ -15,8 +15,8 @@ import {
   ProjectIdentifierCheck as DirectCheck,
   ProjectIdentifierMatch as DirectMatch,
   updateProject as directUpdate,
-  updateProjectSettings as directSettingsUpdate,
 } from "./contracts/project-management.js";
+import { updateProjectSettings as directSettingsUpdate } from "./contracts/project-settings-general.js";
 import {
   billingPlanAction,
   createPersonalApiToken,

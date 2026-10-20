@@ -153,57 +153,6 @@ export async function uploadWorkspaceLogo(
 }
 
 /**
- * Upload one project-owned image and resolve to its public URL.
- *
- * The grant and confirm legs ride the workspace asset route
- * (`POST /api/assets/v2/workspaces/<slug>/`) with the project id as
- * `entity_identifier`, which is the shape the server's workspace handler
- * accepts: it assigns `project_id` once from that identifier and its
- * confirm leg wires the asset onto the project's cover slot. The
- * project-scoped route is deliberately not used: its handler passes
- * `project_id` both explicitly and through the entity-id lookup, which
- * raises before the grant is answered. Nothing here rewires the signed-in
- * account's profile. Any failed leg rejects with ApiError.
- */
-export async function uploadProjectAsset(
-  client: ApiClient,
-  slug: string,
-  projectId: string,
-  entityType: "PROJECT_COVER",
-  file: File,
-  uploadBytes: ByteUpload = defaultByteUpload
-): Promise<string> {
-  const grantPath = `/api/assets/v2/workspaces/${slug}/`;
-  const envelope = await client.sendJson<unknown>("POST", grantPath, {
-    json: {
-      entity_identifier: projectId,
-      entity_type: entityType,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-    },
-  });
-  const grant = client.parse(SignedUserAsset, envelope.data, `POST ${grantPath}`);
-
-  const payload = new FormData();
-  for (const [key, value] of Object.entries(grant.upload_data.fields)) {
-    payload.append(key, value);
-  }
-  payload.append("file", file);
-  const uploaded = await uploadBytes(grant.upload_data.url, payload);
-  if (!uploaded.ok) {
-    throw new ApiError({
-      status: uploaded.status,
-      code: "http",
-      message: "The image upload was rejected.",
-    });
-  }
-
-  await client.patch(`/api/assets/v2/workspaces/${slug}/${encodeURIComponent(grant.asset_id)}/`);
-  return grant.asset_url;
-}
-
-/**
  * DELETE /api/assets/v2/workspaces/<slug>/<asset_id>/ — drops a current
  * logo asset (204) and unwires it from the workspace. The caller then
  * PATCHes the workspace with an emptied logo field.

@@ -11,7 +11,8 @@
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 
-import { projectIconGlyph, ProjectMark, projectMark } from "../../../../shared/pickers/index.js";
+import { ProjectMark, projectMark } from "../../../../shared/pickers/index.js";
+import { projectIconGlyph } from "../../../../shared/pickers/projectIconGlyphs.js";
 import {
   DEFAULT_EMBLEM_ICON_COLOR,
   EMBLEM_ICON_COLORS,

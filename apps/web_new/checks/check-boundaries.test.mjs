@@ -6,7 +6,7 @@
 // repo's ESM style; both spellings name the same file, so both pass.
 // Exercises the pure crossFeatureFailure helper directly.
 import { describe, expect, it } from "vitest";
-import { crossFeatureFailure, entriesCatalogFailure } from "./check-boundaries.mjs";
+import { crossFeatureFailure, entriesCatalogFailure, projectIconGlyphsFailure } from "./check-boundaries.mjs";
 
 const FROM = "features/search/panel.ts";
 
@@ -75,5 +75,39 @@ describe("entriesCatalogFailure", () => {
     expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "shared/shell/chromeState.js")).toBeNull();
     expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "shared/coexistence/CrossAppLink.js")).toBeNull();
     expect(entriesCatalogFailure("shared/shell/HelpMenu.tsx", "features/issues/panel.js")).toBeNull();
+  });
+});
+
+describe("projectIconGlyphsFailure", () => {
+  const MESSAGE =
+    "shared/pickers/projectIconGlyphs must stay out of eager closures (import it through ProjectIcon, or from the emblem picker)";
+  const GLYPHS = "shared/pickers/projectIconGlyphs.tsx";
+
+  it("fails eager marks and the shell importing the glyph map", () => {
+    expect(projectIconGlyphsFailure("shared/pickers/ProjectMark.tsx", GLYPHS)).toBe(MESSAGE);
+    expect(projectIconGlyphsFailure("shared/pickers/index.ts", "shared/pickers/projectIconGlyphs.js")).toBe(MESSAGE);
+    expect(
+      projectIconGlyphsFailure("features/projects/components/ProjectLogo.tsx", "shared/pickers/projectIconGlyphs.js")
+    ).toBe(MESSAGE);
+    expect(projectIconGlyphsFailure("routes/$ws/_gated/route.tsx", GLYPHS)).toBe(MESSAGE);
+  });
+
+  it("passes the lazy wrapper, the glyph module itself and the emblem picker", () => {
+    expect(projectIconGlyphsFailure("shared/pickers/ProjectIcon.tsx", GLYPHS)).toBeNull();
+    expect(projectIconGlyphsFailure("shared/pickers/projectIconGlyphs.tsx", GLYPHS)).toBeNull();
+    expect(projectIconGlyphsFailure("features/project-settings/general/emblemCatalog.ts", GLYPHS)).toBeNull();
+    expect(
+      projectIconGlyphsFailure(
+        "features/project-settings/general/emblemCatalog.ts",
+        "shared/pickers/projectIconGlyphs.js"
+      )
+    ).toBeNull();
+    expect(
+      projectIconGlyphsFailure("features/project-settings/general/components/EmblemPicker.tsx", GLYPHS)
+    ).toBeNull();
+  });
+
+  it("passes any other target", () => {
+    expect(projectIconGlyphsFailure("shared/pickers/ProjectMark.tsx", "shared/pickers/projectIcon.js")).toBeNull();
   });
 });

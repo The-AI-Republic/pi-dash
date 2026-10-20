@@ -7,7 +7,15 @@
 // names the project for assistive tech.
 import * as React from "react";
 
-import { projectIconGlyph, projectMark, projectMarkText } from "./projectIcon.js";
+import { projectMark, projectMarkText } from "./projectIcon.js";
+import { ProjectIcon } from "./ProjectIcon.js";
+
+/** Resolve a stored emblem path to something an <img> can load. */
+export function resolveMarkSource(url: string, apiBaseUrl: string | undefined): string {
+  if (/^[a-z][a-z\d+.-]*:/i.test(url) || url.startsWith("//")) return url;
+  if (apiBaseUrl === undefined || apiBaseUrl === "") return url;
+  return `${apiBaseUrl.replace(/\/+$/, "")}${url.startsWith("/") ? "" : "/"}${url}`;
+}
 
 export interface ProjectMarkProps {
   /** Raw logo value from the project row; parsed defensively. */
@@ -21,13 +29,6 @@ export interface ProjectMarkProps {
   apiBaseUrl?: string | undefined;
 }
 
-/** Resolve a stored emblem path to something an <img> can load. */
-export function resolveMarkSource(url: string, apiBaseUrl: string | undefined): string {
-  if (/^[a-z][a-z\d+.-]*:/i.test(url) || url.startsWith("//")) return url;
-  if (apiBaseUrl === undefined || apiBaseUrl === "") return url;
-  return `${apiBaseUrl.replace(/\/+$/, "")}${url.startsWith("/") ? "" : "/"}${url}`;
-}
-
 export function ProjectMark({
   logoProps,
   identifier,
@@ -36,7 +37,6 @@ export function ProjectMark({
   apiBaseUrl,
 }: ProjectMarkProps): React.ReactElement {
   const mark = projectMark(logoProps);
-  const Icon = mark.kind === "icon" ? projectIconGlyph(mark.name) : null;
   const fontSize = size <= 18 ? "text-meta" : "text-body";
   return (
     <span
@@ -54,13 +54,8 @@ export function ProjectMark({
           className="size-full object-cover"
           data-testid="project-mark-image"
         />
-      ) : Icon !== null && mark.kind === "icon" ? (
-        <Icon
-          size={Math.round(size * 0.7)}
-          strokeWidth={1.5}
-          aria-hidden="true"
-          {...(mark.color === null ? {} : { color: mark.color, style: { color: mark.color } })}
-        />
+      ) : mark.kind === "icon" ? (
+        <ProjectIcon mark={mark} identifier={identifier} size={Math.round(size * 0.7)} />
       ) : (
         <span aria-hidden="true">{projectMarkText(mark, identifier)}</span>
       )}

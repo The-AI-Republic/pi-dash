@@ -9,7 +9,8 @@
 // colour from the fixed swatches. There is no gallery and no provider
 // search — the catalogue is the whole surface.
 
-import { PROJECT_ICON_NAMES, projectMark } from "../../../shared/pickers/index.js";
+import { projectMark } from "../../../shared/pickers/index.js";
+import { PROJECT_ICON_NAMES } from "../../../shared/pickers/projectIconGlyphs.js";
 
 export interface EmblemEmoji {
   glyph: string;
