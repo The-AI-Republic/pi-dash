@@ -77,7 +77,7 @@ the single target: a locked view offers no layout switcher, no Display
 control and no filter toggle — those controls are absent, not disabled — and
 no Update view write (the server answers 400 for a locked PATCH). The old
 app kept the filter toggle on locked views and let guests reach Add; those
-pins are the recorded gap adjudicated in §15/§16, not part of the target. The
+pins are the recorded gap adjudicated in §16, not part of the target. The
 issue list still renders the saved layout.
 
 **Workspace add affordance.** A workspace custom view's "Add view" control is
@@ -87,8 +87,22 @@ is absent for guests. The oracle's guest-visible scenario is pinned as a gap
 
 **Roles and the visibility matrix.** Project roles and workspace roles are
 each admin, member, guest. "Can create a work item" means project member or
-admin. "Can write a view" means member or admin in the same scope, and the
-server additionally limits PATCH to the owner and DELETE to owner or admin.
+admin. Create entry points are not one uniform rule:
+- **Project** views: the header Add and the zero-views action render and
+  stay enabled for every project role that can see the list, guests
+  included (VIEW-003/009). The palette's create command is member-plus
+  (VIEW-042). The OSS create action carries no role decorator — the
+  viewset is only `IsAuthenticated` — so the dialog is the only gate and
+  the write is left to the server.
+- **Workspace** customs: the detail and strip Add controls are offered to
+  workspace admins and members only (VIEW-034/038) and are absent for
+  guests. That is a UI rule, as with the ungated row menus (§9): the OSS
+  create action itself carries no role decorator and does not refuse a
+  guest, so the gate proves absence of the control, not a server 403.
+
+The server limits PATCH to the creator/owner in both scopes and DELETE to
+the owner or an admin at the matching level. Favorites are member-plus, so
+guests see no star (VIEW-012).
 
 The server builds the visible set as `owned_by = me OR access = 1`, then
 narrows it: a **project guest** is narrowed to `owned_by = me` unless the
@@ -140,9 +154,21 @@ Project views:
   currently answers 200 with an empty serialized record rather than 404
   (bug NEWFRONT-227): blank `name`/`description`, `null` JSON fields
   (`filters`, `display_filters`, `display_properties`, `rich_filters`,
-  `logo_props`), no `id`, and no `access` value — not a JSON `null`. A
-  forbidden view answers 403/404. The contract normalises a response with
-  no `id` (or a blank name) to “not found”.
+  `logo_props`), no `id`, and no `access` value — not a JSON `null`. Read
+  failures are not uniform:
+  - A **project guest** asking for a shared view its narrowing hides gets
+    **403**.
+  - Another member's **owner-only** view is removed by the queryset before
+    that check. A member then receives the empty record above (200); a
+    project guest hits the permission check with no record and the old view
+    raises, so that request ends in a **500**.
+  - An id in no queryset at all (deleted, or another project's) yields the
+    empty record; there is no 404 path.
+
+  The contract normalises a response with no `id` (or a blank name) to
+  “not found”, and the screen treats a 403/404/500 read failure as the
+  missing-view state (§7): only a success carrying an `id` renders the
+  layout.
 - `PATCH BASE/views/{viewId}/` — update, owner only, refuses locked views
   with 400, refuses non-owners with 400. Body: any subset of the create
   fields; `access` and `is_locked` are read-only and cannot be changed
@@ -151,16 +177,24 @@ Project views:
 - `DELETE BASE/views/{viewId}/` — owner or admin. 204. The row is removed
   from list results; retrieve may still answer 200 for a deleted id, so
   list exclusion is the proof of deletion.
-- Favorites: `POST BASE/user-favorite-views/` with `{ view }`, 204; and
-  `DELETE BASE/user-favorite-views/{viewId}/`, 204. The list's
-  `is_favorite` annotation reads the same rows. The generic
-  `GET WS/user-favorites/?all=true` read backs the sidebar and is the
-  server proof that a view favorite exists (`entity_type` = `view`,
-  `entity_identifier` = view id, `project_id` set). The contract issue may
-  expose the thin favorite endpoints, or reuse the generic favorites
-  contract (SHELL-056) — one helper, never two. The `user-favorite-views/`
-  pair **is routed by the server** (both directions); it is live, unlike the
-  unrouted per-view issues endpoint in §17.
+- Favorites: the app writes a view favorite through the **generic**
+  favorites collection, not the legacy view pair. Add is
+  `POST WS/user-favorites/` with `{ entity_type: "view",
+  entity_identifier: <view id>, project_id: <project>, entity_data:
+  { name } }`; remove is `DELETE WS/user-favorites/{favoriteId}/`, where
+  `favoriteId` is the favorite row's own id (read from the workspace
+  favorites list or kept from the add response), **not** the view id.
+  `GET WS/user-favorites/?all=true` backs the sidebar and is the server
+  proof that a view favorite exists; the bare list omits view rows. The
+  list's `is_favorite` annotation reads the same `UserFavorite` rows.
+  Contracts: reuse the generic favorites contract (SHELL-056) behind one
+  helper; do not build a second one for views.
+- The legacy `POST BASE/user-favorite-views/` (`{ view }`) and
+  `DELETE BASE/user-favorite-views/{viewId}/` **are routed by the server**
+  but have no caller in the app — the view service methods that wrap them
+  are dead (§17). Do not write through them; their permission gate is
+  member-plus and their delete key is the view id, unlike the generic
+  path.
 
 Workspace views:
 - `GET WS/views/` — list customs visible to the caller (shared + own;
@@ -173,9 +207,13 @@ Workspace views:
   (`layout: "list"`, `order_by: "-created_at"`). The view lands shared
   (`access = 1`) for the same read-only reason.
 - `GET WS/views/{viewId}/` — retrieve; 200 with the record. Missing ids
-  return the same empty serialized record for project and workspace
-  retrieve; forbidden ids are rejected by the queryset and normalise to
-  not-found as above.
+  return the same empty serialized record as the project retrieve. The
+  retrieve is **not** guest-narrowed: its queryset is `owned_by = me OR
+  access = 1` with no guest step, so a workspace guest asking directly for
+  another member's shared custom gets 200. The list is narrowed (§1), and
+  the detail's visibility is the list's: a record the caller's list read
+  would not return is treated as not-found even when the retrieve answers
+  200 (§11). Do not read "forbidden" into a direct retrieve.
 - `PATCH WS/views/{viewId}/` — owner only, refuses locked views with 400.
 - `DELETE WS/views/{viewId}/` — owner or workspace admin; 204.
 
@@ -261,12 +299,11 @@ filters applied, the screen shows a themed illustration with the heading
 `Save custom views for your project` (oracle-asserted exactly), an
 explanation that views are saved filter sets for quick access and can be
 shared with teammates, and a primary "Create view" action that opens the
-create dialog. The action renders for every role that reached the list
-(guests included) and is disabled only by the same rule as the header Add
-button (§4): never disabled on OSS for a viewer of the list. In the cloud
-build where view creation is member-plus, the empty-state action is
-disabled for guests, as the oracle pins the enabled control for every role
-on OSS.
+create dialog. The action renders and stays enabled for every role that
+reached the list, guests included, in every edition: VIEW-009's acceptance
+text and the oracle both pin an enabled control for every project role, and
+creation itself is left to the server (VIEW-003). It is not disabled by the
+palette's member-plus rule, which governs only the command (VIEW-042).
 
 **No match (VIEW-010).** When the list is non-empty but the combination of
 name search and list filters excludes every view, the screen shows a
@@ -404,7 +441,7 @@ user can undo.
 **Entry points (VIEW-003).** The list header's primary "Add view" button opens
 the create dialog over the list (modal, page stays mounted). The zero-views
 empty state's create action opens the same dialog, and the palette's "New
-view" command (§14) and the `n v` sequence open it too. One dialog
+view" command (§12) and the `nv` sequence open it too. One dialog
 component, all entry points; opening it never navigates. Opening resets the
 form to defaults: title empty, description empty, shared access, List
 layout, group by state, default display properties, empty filter expression.
@@ -425,7 +462,7 @@ layout, group by state, default display properties, empty filter expression.
 - Layout — a menu offering List, Board, Calendar, Spreadsheet, Timeline in
   that order, with icons; the trigger shows the active layout's icon and
   label. Default List for project views, and no layout menu at all for
-  workspace views (fixed Spreadsheet, §12).
+  workspace views (fixed Spreadsheet, §10).
 - Display — the issues area's display-options control scoped to the chosen
   layout; entries whose project features are off (cycles, modules) are
   absent, not disabled.
@@ -471,10 +508,12 @@ it back; nothing writes it from the dialog.
 **Favorite (VIEW-012).** A star control renders on each row for project
 members and admins, not for guests. Clicking it stops the row navigation and
 optimistically flips the cached `is_favorite`; the footer/star state flips in
-the same frame. The write is `POST BASE/user-favorite-views/` with `{ view }`
-to add and `DELETE BASE/user-favorite-views/{viewId}/` to remove (or the
-generic favorites pair from §2). The toggle is **silent**: no success or
-failure toast fires. On failure the optimistic value reverts. On the first
+the same frame. The write is the generic favorites pair from §2: add
+`POST WS/user-favorites/` (entity type `view`, the view id, the project
+and the name), remove `DELETE WS/user-favorites/{favoriteId}/` using the
+favorite row's id. The legacy `user-favorite-views/` methods exist in the
+old service but nothing calls them; they are not the write path. The toggle
+is **silent**: no success or failure toast fires. On failure the optimistic value reverts. On the first
 successful add, the app opens the sidebar favorites menu (a local
 preference flag) so the user sees where the view landed. The list's
 Favorites filter reflects the change immediately. The row menu never closes
@@ -534,7 +573,7 @@ publish or unpublish. Publishing writes the view payload so the server sets
 `anchor`; the row then shows the Live marker, and unpublishing clears both.
 The dialog can be opened by clicking the Live marker too. OSS renders no
 publish entry, no Live marker and no published link; the server never sets
-`anchor` there. Cloud legs per §16.
+`anchor` there. Cloud legs per §14.
 
 ## 7. S5 — Project view detail, switcher, lock and issue body (VIEW-021–024, 028; NEWFRONT-723)
 
@@ -565,8 +604,10 @@ the set: an urgent-only expression shows urgent issues and hides low-priority
 ones, and the same set follows into another layout.
 
 **Missing or forbidden (VIEW-022).** Any read failure that means "this view
-is not visible to you" — 404, 403, or a 200 carrying an empty serialized
-record with no `id` (the observed old behavior for unknown ids, §2) —
+is not visible to you" — 404, 403, a 500 raised on the excluded record
+(another member's owner-only view, §2), or a 200 carrying an empty
+serialized record with no `id` (the observed old behavior for unknown
+ids, §2) —
 renders, instead of the layout, an empty
 state with an illustration, the heading "View does not exist", an
 explanation that the view does not exist or the viewer lacks permission, and
@@ -600,7 +641,7 @@ filter row. It does not implement the layouts or the filter builder.
 Spreadsheet and Timeline, in that order, as an icon row on wide viewports and
 a named dropdown on narrow ones. Picking one re-renders the current issues in
 that layout immediately and does not change the saved record until it is
-persisted. Persistence happens through the view's display update path (§9):
+persisted. Persistence happens through the view's display update path (§8):
 the switch marks the view dirty and enables Update view; saving sends the
 layout inside `display_filters` and the echo replaces the local state. A
 reload before saving restores the stored layout. Locked views render no
@@ -640,7 +681,7 @@ dirty state plus explicit persistence), cycle/module entries were absent
 regardless of the flag (intended: follow the flag), and locked views kept a
 working filter toggle (intended for locked views: no toggle at all, per
 VIEW-025/026's acceptance text; the pinned old behavior is adjudicated in
-§15/§16).
+§16).
 
 **Add work item (VIEW-027).** The header shows a primary button labelled
 "Add work item" (oracle-asserted exactly) only for users who can create work items in the project — project
@@ -720,8 +761,8 @@ when present
 `/{ws}/workspace-views/{id}`. A trailing overflow menu offers Edit View and
 Delete View. The menu renders for every member who can see the row, as the
 oracle pins; the server enforces ownership on PATCH (400 for non-owners) and
-ownership-or-admin on DELETE. Edit opens the workspace edit dialog (§12);
-Delete opens the confirmation (§12).
+ownership-or-admin on DELETE. Edit opens the workspace edit dialog (§10);
+Delete opens the confirmation (§10).
 
 **Loading and empty (VIEW-039).** While the customs fetch is in flight a
 skeleton list of row placeholders renders below the search field; it never
@@ -730,7 +771,7 @@ fetch), but the customs area shows the skeleton rather than an empty gap
 while loading. With no customs, the list shows only the four defaults: **no**
 custom empty state, no illustration, no call to action. A read failure shows
 an inline error with a retry that refetches. Unknown or forbidden custom ids
-on the detail resolve through the workspace missing-view state (§10), which
+on the detail resolve through the workspace missing-view state (§11), which
 is the same shape as VIEW-022 but returns to the workspace default view.
 Old bug: the old store returned `[]` while loading so no skeleton ever ran
 (NEWFRONT-230); intended is the skeleton above.
@@ -802,9 +843,13 @@ in the list (§9) offers only Edit View and Delete View per the oracle.
 ## 11. S9 — Workspace detail and cloud layout (VIEW-038, 040; NEWFRONT-729)
 
 **Detail screen (VIEW-038).** The route is
-`/{ws}/workspace-views/{viewId}`. For a custom view it reads
-`GET WS/views/{viewId}/`; for a default it uses the static definition (no
-read). The browser tab title stays the workspace name + "All Views" for both
+`/{ws}/workspace-views/{viewId}`. For a custom view it reads the caller's
+visible custom list and treats membership in that read as the access check;
+the retrieve (`GET WS/views/{viewId}/`) fills in the record once the id is
+known to be visible. Reading the retrieve alone is wrong: it is not
+guest-narrowed, so a workspace guest would otherwise see another member's
+shared custom that the list hides (§2). For a default the screen uses the
+static definition and makes no record read. The browser tab title stays the workspace name + "All Views" for both
 defaults and customs (the oracle pins this); the crumbs identify the current
 view — a "Views" crumb and the current view's name, or the localized
 default's label. The header's left side is the crumb/switcher; the right
@@ -827,8 +872,9 @@ absent, and no update is possible (server 400 if attempted). The "Add view"
 button is unaffected by another view's lock but still follows the role rule
 (workspace admins and members). The old app's guest-visible Add and
 locked-view toggle are pinned bugs, proved as target on `web_new` (§16).
-Unknown and forbidden ids show
-the missing-view empty state: illustration, the heading "View does not
+Unknown ids and ids the caller's list does not contain — another member's
+shared custom opened by a workspace guest, or a project guest's view with
+the flag off — show the missing-view empty state: illustration, the heading "View does not
 exist" (oracle-asserted exactly), the explanation, and a primary button
 labelled "Go to All work items" (oracle-asserted exactly) that returns to
 `workspace-views/all-issues` — the default view, not the list. The old app
@@ -842,7 +888,7 @@ helper's shape is the canonical example). Cloud fills the layout selector
 with the available layouts for the workspace all-issues surface, and the
 selection follows the same dirty/persist path as VIEW-025 through the
 workspace view's display payload. Locked views show no selector. The cloud
-leg is proved per §16.
+leg is proved per §14.
 
 ## 12. S10 — Project settings flag and command palette (VIEW-041, 042; NEWFRONT-736)
 
@@ -863,7 +909,7 @@ reads in the tab model, the list gate, the palette creation command and the
 detail filter row; the switch component itself belongs to NEWFRONT-582.
 
 **Command palette — create (VIEW-042).** A "New view" command sits in the
-palette's create group with the two-key sequence `n v`. Visibility and
+palette's create group with the two-key sequence `nv`. Visibility and
 enablement: a project context exists, the project's `issue_views_view` is
 on, and the caller is a project member or admin (guests never see it). It is
 hidden in every other context. Activating it opens the same views-owned
@@ -875,7 +921,7 @@ asserting. The palette's title rendering may carry a key-sequence badge; the
 oracle matches by substring.
 
 **Command palette — jump (VIEW-042).** An "Open a project view" command
-(with sequence `o v`) lists the current project's views as a palette
+(with sequence `ov`) lists the current project's views as a palette
 sub-page. It is visible for every role when a project context exists and
 `issue_views_view` is on (guests included), because it only navigates.
 Selecting a view navigates to that view's detail. The sub-page reads the
@@ -914,7 +960,8 @@ search Escape clears then collapses (VIEW-004). Dialogs expose a logical tab
 order: the title field, then the description field, then the remaining form
 controls and footer actions (Cancel, then submit), with no focus trap escape
 leak and a visible focus ring on every control. The only other keyboard entry
-is the palette's `n v` (VIEW-042). There are no views-specific modifier
+is the palette's `nv` (VIEW-042); the jump entry is `ov`. Both are two-key
+sequences typed without a separator, matching the shell registry. There are no views-specific modifier
 shortcuts. Old bug: the old dialog's Description field never received focus
 on Tab (NEWFRONT-241); intended is the order above, and slices build it.
 
@@ -1143,6 +1190,12 @@ Other gaps the oracle cells record, and how the spec resolves them:
 - **VIEW-027 guest phantom** — the guest test uses a
   `guest_view_all_features` project so the detail renders; Add is hidden
   there (§8). The default guest path is the missing-view state.
+- **VIEW-022 owner-only view for a guest** — the oracle's forbidden case is
+  a shared view (403). Another member's owner-only view is excluded before
+  the permission check: a project guest's retrieve raises (500), a member's
+  returns the empty record (200). Target: the same missing-view state in
+  every case; the gate proves a 500 read and an empty record both map to it,
+  as target, no oracle.
 - **VIEW-032 ungated row menus** — target is the oracle-pinned ungated
   render with server enforcement (§9); a client-side hide would lose the
   server's admin delete path.
@@ -1168,6 +1221,11 @@ Confirmed dead in the old app and **not** carried into the target:
   components; the workspace detail renders no layout selector on OSS.
 - The workspace view-properties write (`POST WS/workspace-views/`) has no
   caller and is not part of the views UX.
+- The legacy view-favorite endpoints (`POST BASE/user-favorite-views/`,
+  `DELETE BASE/user-favorite-views/{viewId}/`) are routed but uncalled; the
+  service methods wrapping them are dead. The app stars views through the
+  generic favorites collection (§2, §6). This is the inverse of the
+  per-view issues endpoint: that one is uncalled *and* unrouted.
 - `getViewIssues` in the project view service targets
   `BASE/views/{viewId}/issues/`, which the server does not route. The
   detail must use the generic issue list with the stored expression (§7).
@@ -1239,7 +1297,7 @@ and what each slice adds or reworks:
   contextual command hooks; toasts; the shared copy-link helper
   (`shared/shell/shareLink.ts`); the top bar,
   tab strip and sidebar aggregate row. S10 registers two commands plus a
-  picker page and the `n v` sequence; S1/S7 rely on the shell's tab model
+  picker page and the `nv` sequence; S1/S7 rely on the shell's tab model
   (`features/projects/tabs.ts`, `Views` tab gated by `issue_views_view`)
   and sidebar (`features/projects/sidebar.ts`, aggregate row active on
   `/workspace-views`).
