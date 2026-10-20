@@ -701,7 +701,12 @@ function titleField(): HTMLInputElement {
 
 /** The dialog's submit button lives in the footer, outside the form. */
 function save(): void {
-  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  // The form's own submit: a draft entry names it "Save to Drafts", every
+  // other entry "Save" (the issue entry also carries the inline shortcut).
+  const form = document.getElementById("work-item-create-form");
+  const submit = form?.querySelector('button[type="submit"]');
+  if (submit) fireEvent.click(submit);
+  else fireEvent.click(screen.getAllByRole("button", { name: /^(Save|Save to Drafts)$/ }).at(-1)!);
 }
 
 /** Type into the rich description; the editor's own content node takes
@@ -2410,9 +2415,8 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
     const user = userEvent.setup();
     const h = setup({}, { onCopySaved: vi.fn(async () => undefined) });
     expect(screen.getByRole("heading", { level: 2 }).textContent).toContain("draft");
-    expect(await screen.findByRole("button", { name: "Save" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Save to Drafts" })).toBeInTheDocument();
     expect(screen.queryByText("Create more")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Save to Drafts" })).not.toBeInTheDocument();
     await user.click(titleField());
     save();
     await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));

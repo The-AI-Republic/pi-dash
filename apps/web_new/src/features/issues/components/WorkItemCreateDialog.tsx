@@ -1002,7 +1002,9 @@ export function WorkItemCreateDialog({
   }
 
   const branchValue = form.gitWorkBranch;
-  const submitLabel = editing ? (busy ? "Saving…" : "Save") : busy ? "Saving…" : "Save";
+  // A new draft stores as a draft, not as an issue: the submit names that
+  // action (ISS-139/141), matching the standalone Save to Drafts entry.
+  const submitLabel = busy ? "Saving…" : drafting ? SAVE_DRAFT_BUTTON_LABEL : "Save";
   // An edit diffs against the row it opened with; without one (a draft
   // or issue whose snapshot did not parse) there is nothing to save.
   const saveDisabled = busy || (editing && baseline === null);
