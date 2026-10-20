@@ -80,8 +80,10 @@ links, composer).
 ## 2. Composer — draft, post, paste, attachments, notices, keyboard (CMT-001, 002, 009, 010, 011)
 
 Slice split: CMT-001, 002, 009, 011 and the mention autocomplete half of
-CMT-019 are NEWFRONT-812; the operation notices row CMT-010 is NEWFRONT-817
-(its upload-failure half depends on 812 landing first).
+CMT-019 are NEWFRONT-812; the operation notices row CMT-010 is NEWFRONT-817.
+The failed-upload notice is already built; 817 proves the one-notice rule and
+reconciles the `bug:` scenario that still asserts silence, so it needs only
+812's non-stuck draft node to be in place before the gate runs.
 
 ### 2.1 The composer (CMT-001)
 
@@ -111,15 +113,11 @@ time: a second Enter or click while the request is out is a no-op.
 and the shared editor: draft state, submit gating, Enter handling, the access
 switch, and image uploading with park-then-attach. **Missing:** paste
 handling is not asserted for the comment composer (the shared editor's paste
-rules were built for the description editor and are not proven here), and
-`RichTextView`/the editor's mention query wiring is not connected to the
-comment composer (that half is CMT-019, §6). One oracle-pinned deviation is
-also open: on a **failed** create the old composer clears the draft
-(`composer-notices.spec.ts` pins an empty draft after the failed post), while
-`CommentComposer` keeps the draft for a retry. The composer's own comment
-currently claims "the draft stays for a retry"; that is the intended product
-behaviour but it is **not** what the oracle locks. §11.3 records how the
-slice must reconcile it (oracle wins unless a new bug: scenario is filed).
+rules were built for the description editor and are not proven here), and the
+comment editor cannot yet store a mention at all (CMT-019, §6.1 — the comment
+extension set has no mention node). The failed-create draft is a real
+divergence, recorded once in §11.3 as a parity rule: a refused post **clears
+the draft** as the oracle pins, and `CommentComposer` currently keeps it.
 
 **Slice: NEWFRONT-812.**
 
@@ -135,15 +133,22 @@ field is `error`; nothing is stored. The same rule hides the item from that
 guest entirely — the detail screen shows the missing-item state and no
 composer. Turning the project flag on lets the guest post and see the
 composer. The rule is **server-side**; the client must not duplicate it as its
-own gate, but it must render the refusal sanely (one error notice, draft
-retained — see §11.3) and must not show a composer on an item it cannot load.
+own gate, and must not show a composer on an item it cannot load. A refused
+guest normally cannot reach the composer at all, so the refusal notice path is
+reachable only when the item was already open and the rule begins to apply
+(for example the flag is turned off mid-session): then one error notice
+carries the server text and the draft follows the refused-post rule in §11.3.
 
 **Verified gap.** `apps/web_new` has no client-side rule (correct) and no
 tested refusal path: the `commentFailureDetail` helper already surfaces an
-API error message, but the flow is unproven, and the missing-item state for
-the refused guest is a detail-screen concern of the issues area that must be
-confirmed, not assumed. **Slice: NEWFRONT-812** (proves the refusal, the
-missing state and the flag-on success together).
+API error message, but the flow is unproven. The missing-item state for the
+refused guest belongs to the detail screen (issues area, §21 of
+`parity/specs/issues.md`), not to this area: 812 **verifies** it by opening
+another member's item as the guest and asserts the item is hidden with no
+composer, and files the gap to the issues epic if the detail does not already
+render that state — it does not build a second empty state here.
+**Slice: NEWFRONT-812** (proves the refusal, the missing state and the
+flag-on success together).
 
 ### 2.3 Attachments (CMT-009)
 
@@ -167,15 +172,25 @@ submit usually re-arms but intermittently stays disabled) and NEWFRONT-147
 (an edit draft that keeps the image never arms save; only removing the image
 re-arms it). The **intended** behaviour is: a failed upload raises one error
 notice and keeps the draft; every image-bearing edit can be saved and keeps
-its attachments. Slices build the intended behaviour and leave the two `bug:`
-scenarios as regression tests.
+its attachments. The `bug:` scenarios lock the old behaviour; they cannot
+stay as they are once the intended behaviour lands, so the slice that fixes
+each one branches its scenario on `driver.target` — the established pattern
+(see the AUTH-013 scenario) — keeping the old-app leg on the old behaviour
+and asserting the fixed outcome on the `web_new` leg (§11.1, §11.2).
 
 **Verified gap.** Upload-and-attach on create and attach-on-edit-upload
 exist (`useCreateComment` attaches parked assets, `CommentEditForm` uploads
-with `commentId`). **Missing:** a visible failure notice for a failed upload
-(the hook's `onError` is where it belongs), a non-stuck draft node on
-failure, and keep-through-edit / duplicate semantics for an image that is
-already in the body. **Slice: NEWFRONT-812.**
+with `commentId`), and a refused upload already raises one error notice
+(`useUploadCommentImage`'s `onError`, pinned by a unit test). The edit form
+does not gate save on upload state at all — save is disabled only while
+saving or when the body is empty — so NEWFRONT-147's stuck-save branch cannot
+reproduce on it. **Missing:** a non-stuck draft node after a failed upload,
+and the **duplicate** round trip for an image already in a body: the old app
+duplicates the asset on edit so the new revision owns its picture, and the new
+app has no duplicate call today. **The upload-failure notice and its
+"exactly one notice" proof belong to CMT-010 in NEWFRONT-817**, which also has
+to reconcile the still-red `bug:` scenario that asserts silence. **Slice for
+duplicate-on-edit: NEWFRONT-812.**
 
 ### 2.4 Notices for comment operations (CMT-010)
 
@@ -190,17 +205,19 @@ one new notice. `apps/web_new` already raises titled notices
 (`Comment created successfully`, `Comment updated successfully`,
 `Comment removed successfully` — _pinned_ by the oracle) plus error titles,
 and the update/delete paths roll back their optimistic paint on failure. The
-create path's failed-post draft behaviour is the deviation in §2.1; the
-upload path's silent failure is NEWFRONT-145 (§2.3). There must never be two
-notices for one action (e.g. an attach failure after a successful create must
-not double-toast the create).
+create path's failed-post draft behaviour is the deviation in §11.3. There
+must never be two notices for one action (e.g. an attach failure after a
+successful create must not double-toast the create).
 
 **Verified gap.** Create/update/delete notices and rollbacks exist and are
-unit-tested. **Missing:** upload-failure notice, and a test that an attach
-failure does not duplicate the create notice. The notice inventory and the
-"exactly one notice" assertion are owned by CMT-010 in **NEWFRONT-817**; the
-upload-failure notice itself is part of the attachment fix in NEWFRONT-812,
-so 817 proves it once 812 has landed.
+unit-tested, and the failed-upload notice already exists (§2.3).
+**Missing:** a test that an attach failure does not duplicate the create
+notice, and the reconciliation of the upload-failure `bug:` scenario, which
+still asserts that a failed upload is silent. The notice inventory and the
+"exactly one notice" assertion are owned by CMT-010 in **NEWFRONT-817**; that
+slice decides how the `bug:` scenario is resolved (the intended behaviour is
+one notice, so the scenario must be updated to the fixed behaviour, not kept
+red).
 
 ### 2.5 Keyboard behaviour (CMT-011)
 
@@ -218,10 +235,12 @@ In both the composer and the inline edit form:
 
 The composer and edit form both already implement this shape (early return
 on `shiftKey || ctrlKey || metaKey`, empty-body guard, composing guard). The
-mid-upload case depends on submit being genuinely disabled during the upload
-(§2.3). **Verified gap:** nothing structural; the slice proves every branch
-with unit tests and keeps the mid-upload guarantee once the upload failure
-path is fixed. **Slice: NEWFRONT-812.**
+mid-upload rule is **not** implemented: both forms disable the submit/save
+control on `sending`/`saving` and empty content only, and neither tracks an
+upload in flight, so Enter during a stalled upload would post a body without
+the image. **Verified gap:** the slice tracks pending uploads and disables
+submit while any is in flight, then proves every keyboard branch, including
+the mid-upload no-op and the post-settle post. **Slice: NEWFRONT-812.**
 
 ## 3. Comment cards — identity, edit, delete, git-sync, fold (CMT-003, 004, 005, 008, 012)
 
@@ -241,8 +260,11 @@ The header shows:
 - the author's display name and avatar (from the comment's `actor_detail`);
 - a **bot** author renders a name that reads as a bot (the oracle only
   requires the author text to match `/bot/i`); the old client shows the
-  account's first name followed by "Bot". An **agent** comment additionally
-  shows its speaker label (fallback "AI Agent"); human comments show none;
+  account's first name followed by "Bot". The oracle also asserts that a
+  **human** author does **not** match `/bot/i`, so a human named with "Bot"
+  in their display name is rendered as stored, and a bot marker is only added
+  for bot accounts. An **agent** comment additionally shows its speaker label
+  (fallback "AI Agent"); human comments show none;
 - the relative time (e.g. "3 minutes ago") with a tooltip carrying the exact
   date/time (the oracle checks the tooltip contains the stored creation
   year);
@@ -252,8 +274,9 @@ The header shows:
 `speaker_type === "agent"`, otherwise `actor_detail.display_name`. Bot
 accounts (`actor_detail.is_bot`) therefore render their plain display name,
 which the oracle would reject. **Fix in NEWFRONT-813:** when the actor is a
-bot, render a bot-labelled name; keep the agent speaker label; keep the
-`UserLite.is_bot` field as the signal. Time/edited/avatar already match.
+bot, render a bot-labelled name (a suffix that matches `/bot/i` and is not
+applied to humans); keep the agent speaker label; keep the `UserLite.is_bot`
+field as the signal. Time/edited/avatar already match.
 
 ### 3.2 Inline edit (CMT-003)
 
@@ -267,12 +290,18 @@ with `comment_html`, and the card shows the new body and an edited marker.
 A pristine draft (no keystroke) leaves save **disabled** — only a real content
 change can be saved through the UI. Saving identical HTML through the API
 sets **no** `edited_at` (the server stamps only when `comment_html` differs),
-and the card then shows no edited marker. This pair is oracle-pinned and
-already matches `CommentEditForm` + `useUpdateComment` (which optimistically
-paints `edited_at` for a body patch and reconciles from the response).
+and the card then shows no edited marker.
 
-**Verified gap.** Present. **Slice: NEWFRONT-813** (proves the pristine,
-identical-patch and marker branches; the image-keeping branch is 812).
+**Verified gap.** The pristine rule is **not implemented**: `CommentEditForm`
+prefills the body and enables save whenever the prefilled body is non-empty,
+with no comparison against the original, so the pinned `composer-edit.spec.ts`
+step (save stays disabled until a keystroke) fails. The marker half matches:
+`useUpdateComment` optimistically paints `edited_at` for a body patch and
+reconciles from the response, and the server's value-changed check keeps an
+identical patch unstamped. **NEWFRONT-813** adds the pristine comparison
+(track the initial HTML and disable save until the body differs) and proves
+the pristine, identical-patch and marker branches. The image-keeping
+duplicate is 812 (§2.3).
 
 ### 3.3 Delete (CMT-004)
 
@@ -292,12 +321,15 @@ text contains "fail" and the server body contains "unbind"). After the
 repository is unbound, the same delete succeeds (204) and the card disappears.
 
 **Verified gap.** The contract carries `is_synced`, and `useDeleteComment`
-rolls back and shows `Couldn't delete the comment` with the server message —
-so the generic error path already produces a "Couldn't…" error notice and
-the server text. **Missing:** a dedicated 409 branch so the notice is
-specific ("unbind required") rather than relying on the fallback, plus
-tests for the 409 → rollback → unbind → 204 sequence. This is the refusal
-shape NEWFRONT-811 contracts. **Slice: NEWFRONT-813.**
+rolls back and shows the generic `Couldn't delete the comment` title with the
+server message. **Two gaps.** First, the oracle requires the visible notice
+text to contain _pinned_ **"fail"**; "Couldn't delete…" does not, so the
+current title cannot pass. Second, there is no dedicated 409 branch: the
+refusal must raise one error notice that reads as a failed removal (so its
+text contains "fail"), carries the server's unbind instruction, and leaves
+the card in place. The slice then proves 409 → rollback → unbind → 204 →
+card gone. This is the refusal shape NEWFRONT-811 contracts.
+**Slice: NEWFRONT-813.**
 
 ### 3.5 Fold (CMT-008)
 
@@ -322,12 +354,12 @@ label round-trip, the hidden reaction and the reload.
 One chronological feed merges property changes and comments on the detail
 screen. Each row shows actor, a per-field sentence in the product's voice,
 and a relative time with an exact-time hover. A brand-new item shows exactly
-one creation row. Every activity field the issues spec §15/§16 lists renders
-(assignment, state, priority, estimate, dates, labels, cycle, module, parent,
-relations, links, attachments, archive/restore, description, title,
-creation/deletion, intake decisions). Links inside entries navigate to the
-referenced entity (the oracle opens the first entry's link and requires the
-URL to contain `profile`).
+one creation row. The fields the issues spec §15/§16 lists render as
+sentences (assignment, state, priority, estimate, dates, labels, cycle,
+module, parent, relations, links, attachments, archive/restore, description,
+title, creation, intake decisions) — with one known exception below. Links
+inside entries navigate to the referenced entity (the oracle opens the first
+entry's link and requires the URL to contain `profile`).
 
 Reads: `GET /api/workspaces/{ws}/projects/{pid}/issues/{iid}/history/` with
 `activity_type=issue-property` for activities and `activity_type=issue-comment`
@@ -338,8 +370,15 @@ new app should keep the split reads until that bug is fixed, then a single
 read is a permissible refactor behind the same model.
 
 **Verified gap.** Built (`activity/api.ts` + `model.ts` `buildFeed`/`sortFeed`).
-**Slice: NEWFRONT-814** owns the row's incremental/refresh behaviour and
-proves the merge.
+The exception: a **deletion** activity arrives with `field="issue"` and
+`verb="deleted"` (the server stamps that field when an item is deleted), and
+`activitySentence` has no `issue` case — it only handles a null field — so the
+row is dropped instead of rendering "deleted the work item". The old renderer
+treated a missing field as `issue`, which is also what a creation row carries.
+**NEWFRONT-814** adds the `issue` field case (creation and deletion) so the
+deletion row renders, and keeps it in the always-visible group in
+`activityFilterOf` so narrowing the toggles cannot hide a deletion. The slice
+otherwise owns the row's incremental/refresh behaviour and proves the merge.
 
 ### 4.2 Sort (CMT-014)
 
@@ -520,9 +559,15 @@ does not. Suggestion sections are extensible (other entity kinds may be
 added), but only the Users section is required.
 
 **Verified gap.** Editor primitives and the search contract exist; the
-composer does not pass `onMentionQuery`/`insertMention`. **Slice:
-NEWFRONT-812** wires the comment composer (and the inline edit form) to the
-same picker; NEWFRONT-811 contracts the envelope (already present). The
+composer does not pass `onMentionQuery`/`insertMention`, and — more than
+wiring — the **comment editor has no mention node in its schema**: its
+extension set is the description set plus a plain image node, while the
+mention node is built only inside the description set. Inserting a mention
+there would not survive serialization, so the picker would appear to work and
+save text. **Slice: NEWFRONT-812** adds the mention node to the comment
+extension set (the same node shape the description editor uses) and wires the
+comment composer and inline edit form to the picker. The search envelope is
+already contracted and tested (NEWFRONT-811 need not re-add it). The
 render/save/notify half of mentions is NEWFRONT-815 (§6.2–6.3).
 
 ### 6.2 Render (CMT-020)
@@ -534,10 +579,12 @@ The oracle collects visible references and requires the anchor's text to be
 turn `mention-component` into a chip that carries the member id and a
 profile link; unknown ids still render a chip rather than raw markup.
 
-**Verified gap.** `sanitize.ts` turns a mention into a chip with
-`data-mention-id` and `class="mention-chip"`, but **no `href`**. The workspace
-slug is not passed to the renderer today. **Slice: NEWFRONT-815** adds the
-profile href (slug from context) for `user_mention` chips only.
+**Verified gap.** `renderableHtml` turns a mention into a chip whose text is
+`@<name>`, but the chip is a `span` carrying `data-mention-id` — **no
+`href`**, so it is not a link. The workspace slug is not passed to the
+renderer today. **Slice: NEWFRONT-815** makes the `user_mention` chip an
+anchor with the exact profile href (slug supplied by the card's context),
+leaving other entity kinds as plain chips.
 
 ### 6.3 Save and notify (CMT-021)
 
@@ -561,8 +608,16 @@ notification appearing in the mentioned member's inbox, and unmention
 clearing the link.
 
 **Verified gap.** Nothing client-side beyond §6.1/6.2; the missing piece is
-that the composer cannot produce mentions at all today (so the notify path
-is unproven end to end) and the notify scenario needs the editor flow.
+that the composer cannot produce mentions at all today (the comment schema
+has no mention node), so the notify path is unproven end to end and the
+scenario needs the editor flow. The "or description" half of this row refers
+to the description editor: where a work item's **description** can be edited
+from the detail, that is the description editor's own save path, not the
+comment composer's, and the server applies the same diff and fan-out to its
+markup. The oracle scenario exercises the comment flow only; 815 consumes
+812's editor fix for the comment half and must state explicitly that the
+description path is already covered by the description editor's existing
+mention wiring, or extend the scenario if a run finds it is not.
 **Seam to notifications NEWFRONT-76:** the notification row, inbox rendering
 and unread semantics are the notifications epic's; this area proves the
 notification exists with the right entity and sender. **Slice:
@@ -601,56 +656,80 @@ while the comment is folded (§3.5). The picker is per card.
 ### 7.3 Duplicates (CMT-024)
 
 One reaction per person per emoji. A duplicate add is refused with **400**
-and a body containing `Reaction already exists`; the UI must keep a single
-chip and raise one failure notice (**Reaction creation failed**), then
-re-read so the count never double-counts the viewer. A refused duplicate is
-not a successful add.
+and a body whose `error` names the duplicate; the UI must keep a single chip
+and raise one failure notice (**Reaction creation failed**), then re-read so
+the count never double-counts the viewer. A refused duplicate is not a
+successful add. The **comment** endpoint names the duplicate explicitly
+(`Reaction already exists for the user`); the issue endpoint returns the
+serializer's error without that sentence, and the oracle only requires a
+client error with an `error` field there. The client branches on the status,
+not on the wording.
 
 **Verified gap.** The generic error path shows the failure notice and the
 list re-reads on settle; there is no explicit duplicate parser, and no test
-of the 400 shape. NEWFRONT-811 contracts the refusal body; **NEWFRONT-817**
-proves the flow.
+of the 400 shape. NEWFRONT-811 pins the comment endpoint's typed refusal
+body; **NEWFRONT-817** proves the flow on both the issue and comment clusters.
 
 ## 8. API and contract reference (NEWFRONT-811)
 
 All paths are under the API origin and are workspace-scoped. `{iid}` is an
 issue UUID, `{cid}` a comment UUID.
 
-| Purpose                  | Method and path                                                                                  | Query / body                                                     | Success                                       |
-| ------------------------ | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | --------------------------------------------- |
-| Comment list             | `GET /api/workspaces/{ws}/projects/{pid}/issues/{iid}/history/`                                  | `activity_type=issue-comment`, `created_at__gt` (optional)       | 200, array of comments                        |
-| Property activities      | same                                                                                             | `activity_type=issue-property`, `created_at__gt` (optional)      | 200, array                                    |
-| Merged read              | same, no `activity_type`                                                                         | —                                                                | **500 today** (NEWFRONT-128); do not use      |
-| Create comment           | `POST …/issues/{iid}/comments/`                                                                  | `comment_html`, `access`, optional `comment_json`, `attachments` | 201, comment; guest refusal 400 `{error}`     |
-| Update comment           | `PATCH …/issues/{iid}/comments/{cid}/`                                                           | `comment_html`, `comment_json`, `access`, `labels`               | 200, comment; synced body fields refused 400  |
-| Delete comment           | `DELETE …/issues/{iid}/comments/{cid}/`                                                          | —                                                                | 204; git-synced 409 `{error: …unbind…}`       |
-| Issue reactions          | `POST …/issues/{iid}/reactions/`                                                                 | `reaction`                                                       | 201; duplicate 400                            |
-| Issue reaction removal   | `DELETE …/issues/{iid}/reactions/{reaction}/`                                                    | —                                                                | 204                                           |
-| Comment reactions        | `POST …/issues/{iid}/comments/{cid}/reactions/`                                                  | `reaction`                                                       | 201; duplicate 400 `Reaction already exists…` |
-| Comment reaction removal | `DELETE …/issues/{iid}/comments/{cid}/reactions/{reaction}/`                                     | —                                                                | 204                                           |
-| Image upload             | `POST /api/assets/v2/workspaces/{ws}/projects/{pid}/` then byte upload then `PATCH …/{assetId}/` | asset payload / bytes                                            | creates a parked asset                        |
-| Attach images            | bulk link from `comment-assets.ts`                                                               | asset ids + comment id                                           | 2xx                                           |
-| Mention search           | `GET /api/workspaces/{ws}/entity-search/`                                                        | `query`, `query_type=user_mention`, `project_id`, `count`        | 200 `{user_mention:[…]}`                      |
-| Mentioned notifications  | `GET /api/workspaces/{ws}/users/notifications/?mentioned=true`                                   | —                                                                | 200, inbox rows with `isMentioned`            |
+| Purpose                  | Method and path                                                                                  | Query / body                                                                                                        | Success                                                                 |
+| ------------------------ | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Comment list             | `GET /api/workspaces/{ws}/projects/{pid}/issues/{iid}/history/`                                  | `activity_type=issue-comment`, `created_at__gt` (optional)                                                          | 200, array of comments                                                  |
+| Property activities      | same                                                                                             | `activity_type=issue-property`, `created_at__gt` (optional)                                                         | 200, array                                                              |
+| Merged read              | same, no `activity_type`                                                                         | —                                                                                                                   | **500 today** (NEWFRONT-128); do not use                                |
+| Create comment           | `POST …/issues/{iid}/comments/`                                                                  | `comment_html`, `comment_json`, `access`, `labels` (no create-time `attachments`; images are linked after creation) | 201, comment; guest refusal 400 `{error}`                               |
+| Update comment           | `PATCH …/issues/{iid}/comments/{cid}/`                                                           | `comment_html`, `comment_json`, `access`, `labels`                                                                  | 200, comment; synced body fields refused 400                            |
+| Delete comment           | `DELETE …/issues/{iid}/comments/{cid}/`                                                          | —                                                                                                                   | 204; git-synced 409 `{error: …unbind…}`                                 |
+| Issue reactions          | `POST …/issues/{iid}/reactions/`                                                                 | `reaction`                                                                                                          | 201; duplicate 400                                                      |
+| Issue reaction removal   | `DELETE …/issues/{iid}/reactions/{reaction}/`                                                    | —                                                                                                                   | 204                                                                     |
+| Comment reactions        | `POST …/projects/{pid}/comments/{cid}/reactions/` (not under `/issues/`)                         | `reaction`                                                                                                          | 201; duplicate 400 `{error: "Reaction already exists…"}` (comment path) |
+| Comment reaction removal | `DELETE …/projects/{pid}/comments/{cid}/reactions/{reaction}/`                                   | —                                                                                                                   | 204                                                                     |
+| Image upload             | `POST /api/assets/v2/workspaces/{ws}/projects/{pid}/` then byte upload then `PATCH …/{assetId}/` | asset payload / bytes                                                                                               | creates a parked asset                                                  |
+| Attach images            | `POST /api/assets/v2/workspaces/{ws}/projects/{pid}/{cid}/bulk/`                                 | `{asset_ids: [...]}`                                                                                                | 204; skipped when the list is empty                                     |
+| Duplicate image on edit  | `POST /api/assets/v2/workspaces/{ws}/duplicate-assets/{assetId}/`                                | `entity_id` (comment id), `entity_type=COMMENT_DESCRIPTION`, `project_id`                                           | 200 `{asset_id}` (NEWFRONT-812 gap)                                     |
+| Mention search           | `GET /api/workspaces/{ws}/entity-search/`                                                        | `query`, `query_type=user_mention`, `project_id`, `count`                                                           | 200 `{user_mention:[…]}`                                                |
+| Mentioned notifications  | `GET /api/workspaces/{ws}/users/notifications/?mentioned=true`                                   | —                                                                                                                   | 200, inbox rows with `isMentioned`                                      |
 
 Comment fields the UI reads: `id`, `issue`, `actor`, `actor_detail`
 (`display_name`, `avatar_url`, `is_bot`), `comment_html`,
 `comment_stripped`, `access` (`INTERNAL`|`EXTERNAL`), `labels`,
 `edited_at`, `created_at`, `is_synced`, `comment_reactions`,
 `speaker_type` (`human`|`agent`|`system`|`integration`), `speaker_label`,
-`speaker_agent_run_id`. Activity fields: `id`, `field`, `verb`, `actor`,
-`actor_detail`, `created_at`, `new_value`, `old_value`, `comment` (comment
-rows) and the per-field payload.
+`speaker_agent_run_id`. `attachments` is a model array the response carries
+for images already linked to the row; it is not a create-time field — images
+arrive through the park/complete/bulk sequence above.
+
+Activity fields: `id`, `field`, `verb`, `actor`, `actor_detail`,
+`created_at`, `new_value`, `old_value`, `comment` (comment rows) and the
+per-field payload.
 
 Storage keys: `activity_sort_order` (`"asc"`/`"desc"`),
 `issue_activity_filters` (array of `ACTIVITY`|`COMMENT`|`STATE`|`ASSIGNEE`),
 comment fold marker label `fold`.
 
-Contracts to pin (NEWFRONT-811): the mention-search envelope (already in
-`entity-search.ts`), the git-sync 409 body, the duplicate-reaction 400 body,
-and the 204 delete shape — each with contract tests, without re-declaring
-endpoints already in `issue-comments.ts`, `comment-assets.ts`,
-`issue-activity.ts` and `issue-reactions.ts`.
+Contracts to pin (NEWFRONT-811): only the shapes that are genuinely absent
+after 613/570 —
+
+- the git-sync **409** body (`{error: …unbind…}` on comment delete) and the
+  synced-body **400** field errors on update, as narrow typed parsers so the
+  UI branches without string-matching;
+- the duplicate comment-reaction **400** body
+  (`{error: "Reaction already exists for the user"}`). The issue-reaction
+  duplicate is not this table's shape: the issue view creates it from a
+  serializer error, not the comment view's `IntegrityError` branch, so 811
+  pins whatever the contract test observes there rather than assuming the
+  same text;
+- the **204 empty-body** delete shapes for comments and reactions, asserted in
+  contract tests.
+
+Already covered and not to be re-added: the mention-search envelope
+(`entity-search.ts`, tested in `issue-modal-assets.test.ts`), comment
+list/create/update/delete (`issue-comments.ts`), the asset upload/attach legs
+(`comment-assets.ts`, including the `…/{cid}/bulk/` link) and both reaction
+collections (`issue-reactions.ts`, exercised by `comments.contract.test.ts`).
 
 ## 9. Permissions matrix
 
@@ -690,8 +769,11 @@ switch or mark.
 - Git-synced comment: delete refused; edit of the body fields is also
   refused by the server (400).
 - Duplicate reaction: single chip, one failure notice.
-- Failed upload: one error notice, draft retained, retry possible
-  (intended; NEWFRONT-145 fixes the silent current behavior).
+- Failed upload: one error notice, draft retained, retry possible (already
+  built; CMT-010/817 proves it and reconciles the silent `bug:` scenario).
+  A failed upload is not an attempted post, so it does not clear the draft.
+- Failed create: one error notice and an **empty** composer (the oracle's
+  rule, §11.3).
 
 ## 11. Recorded deviations (old bugs, linked issues)
 
@@ -700,25 +782,41 @@ switch or mark.
 Oracle `composer-attachments.spec.ts` locks: a failed upload surfaces **no**
 notice, leaves a stuck 0%-progress node, and submit usually re-arms but
 intermittently stays disabled until reload. Intended: one error notice,
-draft kept, submit usable. 812 builds the intended behaviour; the `bug:`
-scenario stays as the regression test.
+draft kept, submit usable. `apps/web_new` already raises the one error
+notice; the remaining work is the non-stuck draft node (812, §2.3) and the
+scenario reconciliation, which belongs to CMT-010 in **NEWFRONT-817**. The
+scenario currently asserts silence on both targets; 817 branches it on
+`driver.target` so the old-app leg keeps the silent outcome, while the
+`web_new` leg asserts exactly one error notice and a usable submit. It
+cannot stay red on `web_new`.
 
 ### 11.2 NEWFRONT-147 — image-keeping edit never arms save
 
 Oracle `composer-attachments.spec.ts` locks: opening the edit form on an
 image comment leaves save disabled indefinitely. Intended: keep/duplicate the
-image and save. 812 fixes and keeps the `bug:` scenario.
+image and save. The new edit form has no upload gating (save depends on
+`saving` and empty content only), so that branch cannot reproduce here; the
+real work is the **duplicate-on-edit** round trip (`POST
+/api/assets/v2/workspaces/{ws}/duplicate-assets/{assetId}/`, §8), added by
+**NEWFRONT-812**. That slice branches the scenario on `driver.target`: the
+old-app leg keeps the stuck-save outcome, and the `web_new` leg asserts that
+the edit arms save, saves, and keeps the image in the new body.
 
-### 11.3 Failed-create draft (oracle-pinned, no issue yet)
+### 11.3 Failed-create draft (one rule: parity — the composer clears)
 
 `composer-notices.spec.ts` pins that a **failed create clears the composer**
-(`composerDraftText()` is `""` after the aborted POST). That contradicts the
-composer's own "keep the draft for a retry" comment. The oracle is the
-behaviour reference, so 812 either (a) matches it (clear on the attempted
-post, success or failure) and deletes the misleading comment, or (b) files a
-`bug:`-style issue and a new scenario if the product decides keeping the
-draft is correct. Default: (a) — parity now, product change later as its own
-issue. This spec records the decision so the slice does not silently choose.
+(`composerDraftText()` is `""` after the aborted POST). The oracle is the
+behaviour reference, and `CommentComposer` today keeps the draft on a failed
+create. **The rule is parity: every attempted post clears the draft, success
+or failure**, and the composer's "keep the draft for a retry" comment goes.
+There is no product fork and no `bug:` issue for this; a future keep-the-draft
+scenario would be a separate product change with its own issue. Clearing the
+draft must also clear the composer's parked image ids: the composer keeps
+them in a ref and attaches every listed id on the next successful post, so
+leaving them would bind a failed post's images to the next, unrelated
+comment. The oracle does not observe that; 812 covers it with a unit test.
+In the edit form, a failed save keeps the draft — a separate form the oracle
+does not pin, and this rule does not apply to it.
 
 ### 11.4 NEWFRONT-128 — merged history read 500s
 
@@ -726,33 +824,33 @@ Split reads only (§4.1). Not a client bug.
 
 ## 12. Existing code, gap, and closing slice per row
 
-| Row     | What exists in `apps/web_new` today                                                                               | Verified gap vs oracle                                                                                            | Closing slice                        |
-| ------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| CMT-001 | `CommentComposer` (submit gating, double-submit guard, access switch, image park/attach); `CommentRichTextEditor` | Paste-formatting for the comment composer unproven; mention query not wired; failed-create draft diverges (§11.3) | NEWFRONT-812                         |
-| CMT-002 | Nothing specific; `commentFailureDetail` surfaces server messages                                                 | Refusal flow, missing-item state, flag-on success untested                                                        | NEWFRONT-812                         |
-| CMT-003 | `CommentEditForm` (prefill, Enter, discard); `useUpdateComment` (optimistic `edited_at`, reconcile)               | Branches need coverage; image-keeping branch blocked by §11.2                                                     | NEWFRONT-813                         |
-| CMT-004 | Overflow delete, optimistic removal, rollback, success notice                                                     | Prove; 409 branch below                                                                                           | NEWFRONT-813                         |
-| CMT-005 | `is_synced` in the contract; generic error rollback                                                               | No specific 409/unbind branch or test                                                                             | NEWFRONT-813                         |
-| CMT-006 | `showAccess`/`accessToggle`, `toggledAccess`, card marks                                                          | Anchored/non-anchored parity tests                                                                                | NEWFRONT-817                         |
-| CMT-007 | `commentDeepLink`, hash highlight (8 s), copy notice                                                              | Clipboard text/notice/highlight proof                                                                             | NEWFRONT-817                         |
-| CMT-008 | `withFold` label, card fold, hidden body & reactions                                                              | Label round-trip + reload proof                                                                                   | NEWFRONT-813                         |
-| CMT-009 | Upload-and-attach on create; attach-on-edit upload                                                                | Failed-upload notice; keep-image edit; duplicate                                                                  | NEWFRONT-812                         |
-| CMT-010 | Titled notices + rollback for create/update/delete                                                                | Upload-failure notice (built by 812); no double notice on attach failure; one-notice proof                        | NEWFRONT-817                         |
-| CMT-011 | Enter/Shift+Enter/modifier/empty guards in both forms                                                             | Mid-upload guarantee; full branch coverage                                                                        | NEWFRONT-812                         |
-| CMT-012 | `commentAuthorName` (agent label), avatar, relative time + tooltip, edited marker                                 | Bot accounts render plain name (need bot label)                                                                   | NEWFRONT-813                         |
-| CMT-013 | `buildFeed`/`sortFeed`/`composeFeed` over split history reads                                                     | Merge proof; keep split reads                                                                                     | NEWFRONT-814                         |
-| CMT-014 | `DEFAULT_SORT`, `SORT_STORAGE_KEY`, composer placement                                                            | Persistence/reload proof                                                                                          | NEWFRONT-814                         |
-| CMT-015 | Four filters, labels, last-filter guard, `FILTERS_STORAGE_KEY`                                                    | Storage shape and guard proof                                                                                     | NEWFRONT-814                         |
-| CMT-016 | `FeedSkeleton` (3 rows), empty renders nothing, error line                                                        | Both branches proof                                                                                               | NEWFRONT-814                         |
-| CMT-017 | Contracts accept `createdAfter`/`created_at__gt`; queries do not use it                                           | **No incremental read** — full refetch only                                                                       | NEWFRONT-814                         |
-| CMT-018 | `isIntake` flag drops copy-link; `CommentThread` unmounted outside browse                                         | Intake host (692/693) absent; surface wiring                                                                      | NEWFRONT-816                         |
-| CMT-019 | Editor `onMentionQuery`/`insertMention`, `searchMentionPeople` (used by description editor)                       | Comment composer/edit form not wired to the picker                                                                | NEWFRONT-812                         |
-| CMT-020 | Mention chip with `data-mention-id` in `RichTextView`                                                             | Chip has no profile `href`                                                                                        | NEWFRONT-815                         |
-| CMT-021 | Server-side mention diff/fan-out; notifications contract                                                          | End-to-end mention → notify → unmention unproven                                                                  | NEWFRONT-815                         |
-| CMT-022 | `IssueReactions`, picker, toggles, notices, archived disable                                                      | Proof set                                                                                                         | NEWFRONT-817                         |
-| CMT-023 | `CommentReactions` on card, hidden when folded/archived                                                           | Proof set                                                                                                         | NEWFRONT-817                         |
-| CMT-024 | Generic error notice + re-read                                                                                    | No duplicate-shape parser or 400 test                                                                             | NEWFRONT-817 (contract 811)          |
-| CMT-025 | Edition-neutral surfaces; no comment edition flags                                                                | No scenario proving edition sameness                                                                              | NEWFRONT-816 (scenario NEWFRONT-819) |
+| Row     | What exists in `apps/web_new` today                                                                               | Verified gap vs oracle                                                                                         | Closing slice                        |
+| ------- | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| CMT-001 | `CommentComposer` (submit gating, double-submit guard, access switch, image park/attach); `CommentRichTextEditor` | Paste-formatting unproven; no mention node/query (CMT-019); failed-create draft kept, oracle clears (§11.3)    | NEWFRONT-812                         |
+| CMT-002 | No client rule (correct); `commentFailureDetail` surfaces server messages                                         | Refusal flow and flag-on success untested; missing-item state verified, owned by issues §21                    | NEWFRONT-812                         |
+| CMT-003 | `CommentEditForm` (prefill, Enter, discard); `useUpdateComment` (optimistic `edited_at`, reconcile)               | **Pristine save not implemented** (save enabled on prefilled body); identical-patch/marker branches need proof | NEWFRONT-813                         |
+| CMT-004 | Overflow delete, optimistic removal, rollback, success notice                                                     | Prove; the synced 409 is CMT-005                                                                               | NEWFRONT-813                         |
+| CMT-005 | `is_synced` in the contract; generic error rollback                                                               | Generic title lacks "fail" (oracle-pinned); no 409/unbind branch or test                                       | NEWFRONT-813                         |
+| CMT-006 | `showAccess`/`accessToggle`, `toggledAccess`, card marks                                                          | Anchored/non-anchored parity tests                                                                             | NEWFRONT-817                         |
+| CMT-007 | `commentDeepLink`, hash highlight (8 s), copy notice                                                              | Clipboard text/notice/highlight proof                                                                          | NEWFRONT-817                         |
+| CMT-008 | `withFold` label, card fold, hidden body & reactions                                                              | Label round-trip + reload proof                                                                                | NEWFRONT-813                         |
+| CMT-009 | Upload-and-attach on create; attach-on-edit upload; failed-upload notice                                          | Non-stuck draft node on failure; **duplicate-on-edit** round trip; NEWFRONT-147 scenario reconciliation        | NEWFRONT-812                         |
+| CMT-010 | Titled notices + rollback for create/update/delete; failed-upload notice                                          | No double notice on attach failure; one-notice proof; reconcile the silent-upload `bug:` scenario              | NEWFRONT-817                         |
+| CMT-011 | Enter/Shift+Enter/modifier/empty guards in both forms                                                             | **No mid-upload disable** (no in-flight tracking); full keyboard branch coverage                               | NEWFRONT-812                         |
+| CMT-012 | `commentAuthorName` (agent label), avatar, relative time + tooltip, edited marker                                 | Bot accounts render plain name (need bot label)                                                                | NEWFRONT-813                         |
+| CMT-013 | `buildFeed`/`sortFeed`/`composeFeed` over split history reads                                                     | Deletion activity (`field="issue"`) dropped; merge proof; keep split reads                                     | NEWFRONT-814                         |
+| CMT-014 | `DEFAULT_SORT`, `SORT_STORAGE_KEY`, composer placement                                                            | Persistence/reload proof                                                                                       | NEWFRONT-814                         |
+| CMT-015 | Four filters, labels, last-filter guard, `FILTERS_STORAGE_KEY`                                                    | Storage shape and guard proof                                                                                  | NEWFRONT-814                         |
+| CMT-016 | `FeedSkeleton` (3 rows), empty renders nothing, error line                                                        | Both branches proof                                                                                            | NEWFRONT-814                         |
+| CMT-017 | Contracts accept `createdAfter`/`created_at__gt`; queries do not use it                                           | **No incremental read** — full refetch only                                                                    | NEWFRONT-814                         |
+| CMT-018 | `isIntake` flag drops copy-link; `CommentThread` unmounted outside browse                                         | Intake host (692/693) absent; surface wiring                                                                   | NEWFRONT-816                         |
+| CMT-019 | Editor `onMentionQuery`/`insertMention`, `searchMentionPeople` (used by description editor)                       | Comment editor **schema has no mention node**; composer/edit form also need the picker wiring                  | NEWFRONT-812                         |
+| CMT-020 | Mention chip (`@name`, `data-mention-id`) in `renderableHtml`                                                     | Chip is a `span`, no profile `href`; slug not passed to the renderer                                           | NEWFRONT-815                         |
+| CMT-021 | Server-side mention diff/fan-out; notifications contract                                                          | End-to-end mention → notify → unmention unproven                                                               | NEWFRONT-815                         |
+| CMT-022 | `IssueReactions`, picker, toggles, notices, archived disable                                                      | Proof set                                                                                                      | NEWFRONT-817                         |
+| CMT-023 | `CommentReactions` on card, hidden when folded/archived                                                           | Proof set                                                                                                      | NEWFRONT-817                         |
+| CMT-024 | Generic error notice + re-read                                                                                    | No typed duplicate-400 parser (811) or duplicate-flow test                                                     | NEWFRONT-817 (contract 811)          |
+| CMT-025 | Edition-neutral surfaces; no comment edition flags                                                                | No scenario proving edition sameness                                                                           | NEWFRONT-816 (scenario NEWFRONT-819) |
 
 Every row is in exactly one slice; the contracts slice NEWFRONT-811 owns no
 row and the area gate NEWFRONT-818 closes none on its own (it proves them).
