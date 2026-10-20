@@ -2,11 +2,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project schedulers list route composition (parity/specs/agents.md §2,
-// AGT-007): the route reads the caller's project role and workspace
+// Project schedulers list route composition (parity/specs/agents.md §2–§3,
+// AGT-007/010/012): the route reads the caller's project role and workspace
 // standing, hands the install dialog its permission flags and the list of
-// already-installed definitions, opens the dialog from the list header and
-// navigates a row to its install detail.
+// already-installed definitions, opens the dialog from the list header,
+// navigates a row to its install detail, and opens the edit and uninstall
+// dialogs from the row actions without navigating.
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SchedulerBinding } from "@pidash/api-client";
@@ -39,9 +40,13 @@ vi.mock("../../../../../../features/schedulers/index.js", () => ({
   InstallsList: ({
     onCreate,
     onOpenInstall,
+    onEditInstall,
+    onUninstallInstall,
   }: {
     onCreate: () => void;
     onOpenInstall: (binding: SchedulerBinding) => void;
+    onEditInstall: (binding: SchedulerBinding) => void;
+    onUninstallInstall: (binding: SchedulerBinding) => void;
   }) => (
     <div>
       <button type="button" onClick={onCreate}>
@@ -50,7 +55,23 @@ vi.mock("../../../../../../features/schedulers/index.js", () => ({
       <button type="button" onClick={() => onOpenInstall(binding())}>
         Open install
       </button>
+      <button type="button" onClick={() => onEditInstall(binding())}>
+        Edit install
+      </button>
+      <button type="button" onClick={() => onUninstallInstall(binding())}>
+        Uninstall install
+      </button>
     </div>
+  ),
+  EditInstallDialog: ({ binding, onSaved }: { binding: SchedulerBinding | null; onSaved: () => void }) => (
+    <div data-testid="edit-dialog" data-binding={binding?.id ?? ""}>
+      <button type="button" onClick={onSaved}>
+        Settle after edit
+      </button>
+    </div>
+  ),
+  UninstallInstallDialog: ({ binding }: { binding: SchedulerBinding | null }) => (
+    <div data-testid="uninstall-dialog" data-binding={binding?.id ?? ""} />
   ),
   InstallDialog: ({
     open,
@@ -154,6 +175,27 @@ describe("schedulers list route", () => {
     renderRoute();
     await user.click(screen.getByRole("button", { name: "Settle list" }));
     expect(hooks.bindings.refetch).toHaveBeenCalled();
+  });
+
+  it("opens and closes the edit dialog from a row, settling the list on save", async () => {
+    const user = userEvent.setup();
+    hooks.bindings = { data: [binding()], refetch: vi.fn() };
+    renderRoute();
+    expect(screen.getByTestId("edit-dialog")).toHaveAttribute("data-binding", "");
+    await user.click(screen.getByRole("button", { name: "Edit install" }));
+    expect(screen.getByTestId("edit-dialog")).toHaveAttribute("data-binding", "b1");
+    await user.click(screen.getByRole("button", { name: "Settle after edit" }));
+    expect(hooks.bindings.refetch).toHaveBeenCalled();
+  });
+
+  it("opens the uninstall dialog for the picked install only", async () => {
+    const user = userEvent.setup();
+    hooks.bindings = { data: [binding()], refetch: vi.fn() };
+    renderRoute();
+    expect(screen.getByTestId("uninstall-dialog")).toHaveAttribute("data-binding", "");
+    await user.click(screen.getByRole("button", { name: "Uninstall install" }));
+    expect(screen.getByTestId("uninstall-dialog")).toHaveAttribute("data-binding", "b1");
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("navigates a row to the install detail address", async () => {

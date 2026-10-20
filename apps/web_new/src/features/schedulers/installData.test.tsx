@@ -146,7 +146,7 @@ describe("enable switch", () => {
     expect(contracts.updateSchedulerBinding).toHaveBeenCalledWith(expect.anything(), SLUG, PROJECT, "b1", {
       enabled: false,
     });
-    expect(notifySuccess).toHaveBeenCalledWith("Install updated");
+    expect(notifySuccess).toHaveBeenCalledWith("Install updated", "It will not fire until re-enabled.");
     expect(invalidate).toHaveBeenCalledWith({ queryKey: bindingKeys.list(SLUG, PROJECT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: schedulerCatalogKey(SLUG) });
   });
@@ -160,7 +160,7 @@ describe("enable switch", () => {
       await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: false }).catch(() => undefined);
     });
     expect(queryClient.getQueryData<SchedulerBinding[]>(bindingKeys.list(SLUG, PROJECT))?.[0]?.enabled).toBe(true);
-    expect(notifyError).toHaveBeenCalledWith("Could not update the install", "Admins only");
+    expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Admins only");
   });
 
   it("leaves an unsettled list unsettled after a successful flip", async () => {
@@ -171,7 +171,7 @@ describe("enable switch", () => {
     await act(async () => {
       await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", enabled: true });
     });
-    expect(notifySuccess).toHaveBeenCalledWith("Install updated");
+    expect(notifySuccess).toHaveBeenCalledWith("Install updated", "It will fire on the next scheduled tick.");
   });
 
   it("keeps a missing cache empty when the optimistic write runs cold", async () => {

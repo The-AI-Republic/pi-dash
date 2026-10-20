@@ -7,18 +7,21 @@
 // for density plus docking. Density and per-workspace docking persist
 // through the rail store; the route mounts this only while the edition
 // enables the rail and the workspace keeps it docked.
-import { Check, Settings } from "lucide-react";
+import { Check, LayoutGrid, Settings } from "lucide-react";
 import * as React from "react";
 
 import { MENU_PORTAL_ID, OverlayPortal } from "./document.js";
 import { isRailUndocked, useRailState, type RailDensity } from "./railState.js";
 
-/** One edition dock entry rendered in the rail strip. */
+/**
+ * One edition dock entry rendered in the rail strip. The icon is the
+ * rail's own mark, not per-entry edition data: it is built here so the
+ * lazy rail chunk carries it instead of the eager shell.
+ */
 export interface RailDockItem {
   id: string;
   label: string;
   to: string;
-  icon: React.ReactNode;
 }
 
 export interface WorkspaceRailProps {
@@ -77,7 +80,7 @@ export function WorkspaceRail({ workspaceSlug, currentPath, dockItems }: Workspa
                   active ? "bg-(--subtle) text-(--text)" : "text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
                 }`}
               >
-                {item.icon}
+                <LayoutGrid size={20} strokeWidth={1.5} aria-hidden="true" />
                 {captioned ? <span className="text-caption max-w-full truncate">{item.label}</span> : null}
               </a>
             </li>

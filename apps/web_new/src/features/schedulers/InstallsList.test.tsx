@@ -214,7 +214,7 @@ describe("InstallsList", () => {
     const { user } = setup({ role: ROLE_ADMIN, projectRole: 20 });
     await screen.findByText("Weekly review");
     await user.click(screen.getByRole("switch", { name: "Disable scheduler" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Could not update the install", "Admins only"));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Admins only"));
   });
 
   it.each([ROLE_MEMBER, ROLE_GUEST])("reads only for workspace role %s", async (role) => {
