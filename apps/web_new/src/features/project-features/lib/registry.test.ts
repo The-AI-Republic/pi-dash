@@ -4,44 +4,38 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  findProjectFeature,
   isFeatureEnabled,
   nextFeatureValue,
   PROJECT_FEATURES,
   PROJECT_FEATURE_KEYS,
-  requireProjectFeature,
+  PROJECT_FEATURE_LIST,
 } from "./registry.js";
 
 describe("project feature registry", () => {
   it("lists exactly the five switches with distinct flags and routes", () => {
-    expect(PROJECT_FEATURES.map((feature) => feature.key)).toEqual([...PROJECT_FEATURE_KEYS]);
-    expect(new Set(PROJECT_FEATURES.map((feature) => feature.flag)).size).toBe(5);
-    expect(new Set(PROJECT_FEATURES.map((feature) => feature.suffix)).size).toBe(5);
-    expect(new Set(PROJECT_FEATURES.map((feature) => feature.areaSegment)).size).toBe(5);
+    expect(PROJECT_FEATURE_LIST.map((feature) => feature.key)).toEqual([...PROJECT_FEATURE_KEYS]);
+    expect(new Set(PROJECT_FEATURE_LIST.map((feature) => feature.flag)).size).toBe(5);
+    expect(new Set(PROJECT_FEATURE_LIST.map((feature) => feature.suffix)).size).toBe(5);
+    expect(new Set(PROJECT_FEATURE_LIST.map((feature) => feature.areaSegment)).size).toBe(5);
   });
 
   it("maps each key onto its own project boolean", () => {
-    expect(findProjectFeature("views")?.flag).toBe("issue_views_view");
-    expect(findProjectFeature("cycles")?.flag).toBe("cycle_view");
-    expect(findProjectFeature("intake")?.flag).toBe("inbox_view");
-    expect(findProjectFeature("modules")?.flag).toBe("module_view");
-    expect(findProjectFeature("pages")?.flag).toBe("page_view");
+    expect(PROJECT_FEATURES.views.flag).toBe("issue_views_view");
+    expect(PROJECT_FEATURES.cycles.flag).toBe("cycle_view");
+    expect(PROJECT_FEATURES.intake.flag).toBe("inbox_view");
+    expect(PROJECT_FEATURES.modules.flag).toBe("module_view");
+    expect(PROJECT_FEATURES.pages.flag).toBe("page_view");
   });
 
-  it("returns undefined for anything outside the five", () => {
-    expect(findProjectFeature("estimates")).toBeUndefined();
-    expect(findProjectFeature("")).toBeUndefined();
-  });
-
-  it("resolves every route key to its own definition", () => {
-    for (const feature of PROJECT_FEATURES) {
-      expect(requireProjectFeature(feature.key)).toBe(feature);
+  it("names each definition by its own key and mount suffix", () => {
+    for (const key of PROJECT_FEATURE_KEYS) {
+      expect(PROJECT_FEATURES[key].key).toBe(key);
+      expect(PROJECT_FEATURES[key].suffix).toBe(`/features/${key}`);
     }
   });
 
   it("reads only a true flag as on", () => {
-    const views = findProjectFeature("views");
-    if (views === undefined) throw new Error("missing views feature");
+    const views = PROJECT_FEATURES.views;
     expect(isFeatureEnabled({ issue_views_view: true }, views)).toBe(true);
     expect(isFeatureEnabled({ issue_views_view: false }, views)).toBe(false);
     expect(isFeatureEnabled({}, views)).toBe(false);
@@ -49,8 +43,7 @@ describe("project feature registry", () => {
   });
 
   it("flips the stored value and turns an absent flag on", () => {
-    const pages = findProjectFeature("pages");
-    if (pages === undefined) throw new Error("missing pages feature");
+    const pages = PROJECT_FEATURES.pages;
     expect(nextFeatureValue({ page_view: true }, pages)).toBe(false);
     expect(nextFeatureValue({ page_view: false }, pages)).toBe(true);
     expect(nextFeatureValue({}, pages)).toBe(true);

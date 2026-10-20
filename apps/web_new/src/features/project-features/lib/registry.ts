@@ -30,8 +30,8 @@ export interface ProjectFeatureDef {
   areaSegment: string;
 }
 
-export const PROJECT_FEATURES: readonly ProjectFeatureDef[] = [
-  {
+export const PROJECT_FEATURES = {
+  views: {
     key: "views",
     label: "Views",
     flag: "issue_views_view",
@@ -40,7 +40,7 @@ export const PROJECT_FEATURES: readonly ProjectFeatureDef[] = [
     suffix: "/features/views",
     areaSegment: "views",
   },
-  {
+  cycles: {
     key: "cycles",
     label: "Cycles",
     flag: "cycle_view",
@@ -49,7 +49,7 @@ export const PROJECT_FEATURES: readonly ProjectFeatureDef[] = [
     suffix: "/features/cycles",
     areaSegment: "cycles",
   },
-  {
+  intake: {
     key: "intake",
     label: "Intake",
     flag: "inbox_view",
@@ -58,7 +58,7 @@ export const PROJECT_FEATURES: readonly ProjectFeatureDef[] = [
     suffix: "/features/intake",
     areaSegment: "intake",
   },
-  {
+  modules: {
     key: "modules",
     label: "Modules",
     flag: "module_view",
@@ -67,7 +67,7 @@ export const PROJECT_FEATURES: readonly ProjectFeatureDef[] = [
     suffix: "/features/modules",
     areaSegment: "modules",
   },
-  {
+  pages: {
     key: "pages",
     label: "Pages",
     flag: "page_view",
@@ -76,23 +76,12 @@ export const PROJECT_FEATURES: readonly ProjectFeatureDef[] = [
     suffix: "/features/pages",
     areaSegment: "pages",
   },
-];
+} as const satisfies Record<ProjectFeatureKey, ProjectFeatureDef>;
 
-/** The switch definition for a tab key, or undefined outside the five. */
-export function findProjectFeature(key: string): ProjectFeatureDef | undefined {
-  return PROJECT_FEATURES.find((feature) => feature.key === key);
-}
-
-/** Index of the same five definitions by key; a registry test proves it whole. */
-const PROJECT_FEATURE_INDEX = PROJECT_FEATURES.reduce<Record<ProjectFeatureKey, ProjectFeatureDef>>(
-  (index, feature) => ({ ...index, [feature.key]: feature }),
-  {} as Record<ProjectFeatureKey, ProjectFeatureDef>
+/** Every switch in sidebar order. */
+export const PROJECT_FEATURE_LIST: readonly ProjectFeatureDef[] = PROJECT_FEATURE_KEYS.map(
+  (key) => PROJECT_FEATURES[key]
 );
-
-/** The switch definition a route leaf mounts. Every key resolves. */
-export function requireProjectFeature(key: ProjectFeatureKey): ProjectFeatureDef {
-  return PROJECT_FEATURE_INDEX[key];
-}
 
 /** Whether the project row carries the flag switched on. */
 export function isFeatureEnabled(

@@ -39,12 +39,11 @@ vi.mock("../api/featureQueries.js", async (importOriginal) => ({
 }));
 
 import { notifyPending } from "../../../shared/shell/index.js";
-import { PROJECT_FEATURES } from "../lib/registry.js";
+import { PROJECT_FEATURES, PROJECT_FEATURE_LIST, type ProjectFeatureKey } from "../lib/registry.js";
 import { ProjectFeatureSettings } from "./ProjectFeatureSettings.js";
 
-function renderFeature(key: string): void {
-  const feature = PROJECT_FEATURES.find((entry) => entry.key === key);
-  if (feature === undefined) throw new Error(`unknown feature ${key}`);
+function renderFeature(key: ProjectFeatureKey): void {
+  const feature = PROJECT_FEATURES[key];
   render(
     <QueryClientProvider client={new QueryClient()}>
       <ProjectFeatureSettings feature={feature} />
@@ -77,11 +76,11 @@ describe("ProjectFeatureSettings", () => {
     expect(screen.getByRole("heading", { name: "Enable views" })).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Enable views" })).toHaveAttribute("aria-checked", "false");
     expect(screen.getByTestId("project-feature-settings")).toHaveAttribute("data-feature", "views");
-    expect(screen.getByText(PROJECT_FEATURES[0]?.explainer ?? "")).toBeInTheDocument();
+    expect(screen.getByText(PROJECT_FEATURES.views.explainer)).toBeInTheDocument();
   });
 
   it("renders every one of the five tabs with its own switch", () => {
-    for (const feature of PROJECT_FEATURES) {
+    for (const feature of PROJECT_FEATURE_LIST) {
       const { unmount } = render(
         <QueryClientProvider client={new QueryClient()}>
           <ProjectFeatureSettings feature={feature} />

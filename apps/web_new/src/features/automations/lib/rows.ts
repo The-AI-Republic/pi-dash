@@ -41,9 +41,8 @@ export function selectCloseTarget(
 ): State | null {
   if (cancelled.length === 0) return null;
   const stored = project?.default_state ?? null;
-  // The guard above proves a first entry exists.
-  const first = cancelled[0] as State;
-  return cancelled.find((state) => state.id === stored) ?? first;
+  // A stale stored target never wins; otherwise the first cancelled state.
+  return cancelled.find((state) => state.id === stored) ?? cancelled[0] ?? null;
 }
 
 /** The state picker opens only when there is more than one cancelled state. */

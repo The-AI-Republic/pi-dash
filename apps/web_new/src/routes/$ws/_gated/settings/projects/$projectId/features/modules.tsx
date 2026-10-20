@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectFeatureSettings, requireProjectFeature } from "../../../../../../../features/project-features/index.js";
+import { ProjectFeatureSettings, PROJECT_FEATURES } from "../../../../../../../features/project-features/index.js";
 import { ProjectSettingsScreen } from "../../../../../../../features/project-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/features/modules")({
@@ -17,7 +17,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/f
 
 function SettingsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
-  const feature = requireProjectFeature("modules");
+  const feature = PROJECT_FEATURES.modules;
   return (
     <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="modules">
       <ProjectFeatureSettings feature={feature} />

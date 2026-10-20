@@ -87,4 +87,13 @@ describe("pages settings route", () => {
     expect(screen.getByTestId("project-settings-sidebar")).toBeInTheDocument();
     expect(screen.queryByRole("switch")).toBeNull();
   });
+
+  it("admits a workspace admin whose project role reads member", async () => {
+    harness.role = 15;
+    harness.workspaceRole = 20;
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
+    expect(screen.getByRole("switch")).toBeInTheDocument();
+    expect(screen.queryByTestId("project-settings-denied")).toBeNull();
+  });
 });

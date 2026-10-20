@@ -18,12 +18,11 @@ export {
 } from "./api/featureQueries.js";
 export type { FeaturePatch, UpdateFeatureInput } from "./api/featureQueries.js";
 export {
-  findProjectFeature,
   isFeatureEnabled,
   nextFeatureValue,
   PROJECT_FEATURES,
   PROJECT_FEATURE_KEYS,
-  requireProjectFeature,
+  PROJECT_FEATURE_LIST,
 } from "./lib/registry.js";
 export type { ProjectFeatureDef, ProjectFeatureFlag, ProjectFeatureKey } from "./lib/registry.js";
 export { ProjectFeatureSettings } from "./components/ProjectFeatureSettings.js";
