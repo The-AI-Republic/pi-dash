@@ -15,15 +15,17 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../../core/api/client.js";
 import { useMe, usePermissions } from "../../../../../core/session/index.js";
-import {
-  profileSegregationQueryOptions,
-  profileStatsQueryOptions,
-} from "../../../../../features/profile/api/queries.js";
+import { profileSegregationQueryOptions } from "../../../../../features/profile/api/queries.js";
 import { ProfileFrame } from "../../../../../features/profile/components/ProfileFrame.js";
 import { projectsQueryOptions } from "../../../../../features/projects/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/profile/$userId")({
   loader: async ({ context, params }) => {
+    // The profile reads ride a lazy module: the loader itself stays in
+    // the eager route file, and the first-route bundle budget counts
+    // everything that file imports (NEWFRONT-573).
+    const { profileSegregationQueryOptions, profileStatsQueryOptions } =
+      await import("../../../../../features/profile/api/queries.js");
     await Promise.all([
       context.queryClient.ensureQueryData(profileSegregationQueryOptions(context.apiClient, params.ws, params.userId)),
       // Sidebar project rows carry names, so the frame waits for the

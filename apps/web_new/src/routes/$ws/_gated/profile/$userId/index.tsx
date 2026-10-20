@@ -12,17 +12,19 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../../core/api/client.js";
 import { useMe } from "../../../../../core/session/index.js";
+import { ProfileOverview } from "../../../../../features/profile/components/ProfileOverview.js";
 import {
   PROFILE_OVERVIEW_ACTIVITY_SIZE,
   profileActivityQueryOptions,
   profileStatsQueryOptions,
 } from "../../../../../features/profile/api/queries.js";
-import { ProfileOverview } from "../../../../../features/profile/components/ProfileOverview.js";
 
 export const Route = createFileRoute("/$ws/_gated/profile/$userId/")({
   loader: async ({ context, params }) => {
     // Both reads render behind placeholders, so neither may hold the
     // route: a slow request leaves the frame, cards and skeletons up.
+    const { PROFILE_OVERVIEW_ACTIVITY_SIZE, profileActivityQueryOptions, profileStatsQueryOptions } =
+      await import("../../../../../features/profile/api/queries.js");
     void context.queryClient.prefetchQuery(profileStatsQueryOptions(context.apiClient, params.ws, params.userId));
     void context.queryClient.prefetchQuery(
       profileActivityQueryOptions(context.apiClient, params.ws, params.userId, PROFILE_OVERVIEW_ACTIVITY_SIZE)

@@ -28,6 +28,11 @@ import type { UserActivityPage } from "@pidash/api-client";
 export const Route = createFileRoute("/$ws/_gated/profile/$userId/$tabId")({
   loader: async ({ context, params }) => {
     if (params.tabId === "activity") {
+      // Loader modules stay in the eager route chunk, so the profile
+      // reads join lazily instead of counting against the first-route
+      // bundle budget (NEWFRONT-573).
+      const { PROFILE_ACTIVITY_PAGE_SIZE, profileActivityQueryOptions } =
+        await import("../../../../../features/profile/api/queries.js");
       await context.queryClient
         .ensureQueryData(
           profileActivityQueryOptions(context.apiClient, params.ws, params.userId, PROFILE_ACTIVITY_PAGE_SIZE)
