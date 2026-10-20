@@ -223,6 +223,14 @@ pub async fn resolve_gate(
 /// holds no active project-membership row (`_check_access_and_get_role`,
 /// `page.py:70-78`); a missing project row with a membership row present
 /// cannot happen (FK) and fails closed the same way.
+///
+/// The project row is read WITHOUT a `deleted_at IS NULL` filter: Django's
+/// permission layer (`_check_project_member_access`, `page.py:55-68`) only
+/// reads `ProjectMember`, so a soft-deleted project with a live membership
+/// passes the gate and reaches the view body, where the list/retrieve/
+/// summary handlers then 404 through `Project.objects.get` (see
+/// [`super::require_live_project`]). Filtering liveness here would 403 where
+/// Django proceeds.
 pub async fn tenant_context(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -246,7 +254,7 @@ pub async fn tenant_context(
     let project: Option<(uuid::Uuid, bool)> = sqlx::query_as(
         r#"SELECT p.workspace_id, p.guest_view_all_features FROM projects p
            JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
+           WHERE p.id = $1 AND w.slug = $2"#,
     )
     .bind(project_id)
     .bind(slug)

@@ -466,24 +466,17 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
-/// `_rewrite_project_kwarg` + `Project.resolve` (`app/views/base.py`,
-/// `db/models/project.py:192-219`): UUIDs pass through when the row exists
-/// in this workspace; other identifiers match `UPPER(identifier)` after
-/// trimming; misses raise `Http404("Project not found")`. Runs for
-/// authenticated requests only — anonymous callers 401 before it.
+/// `_rewrite_project_kwarg` (`app/views/base.py:66-78`): a UUID-shaped
+/// `project_id` returns early with no existence check — `uuid.UUID(str(raw))`
+/// succeeding is the whole test, so an unknown or cross-workspace UUID is
+/// handed to the permission layer verbatim, which denies with 403 (never the
+/// `{"detail":"Project not found"}` 404 that only a non-UUID `Project.resolve`
+/// miss produces). Non-UUID identifiers match `UPPER(identifier)` after
+/// trimming and 404 on a miss. Runs for authenticated requests only —
+/// anonymous callers 401 before it.
 async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid::Uuid, Denial> {
     if let Ok(id) = raw.parse::<uuid::Uuid>() {
-        let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-            r#"SELECT p.id FROM projects p
-               JOIN workspaces w ON w.id = p.workspace_id
-               WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        return row.map(|row| row.0).ok_or(Denial::ProjectNotFound);
+        return Ok(id);
     }
     let upper = normalize_resolve_identifier(raw);
     let row: Option<(uuid::Uuid,)> = sqlx::query_as(
@@ -497,6 +490,23 @@ async fn resolve_project_id(pool: &PgPool, slug: &str, raw: &str) -> Result<uuid
     .await
     .map_err(|_| Denial::ServerError)?;
     row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
+}
+
+/// `Project.objects.get(pk=project_id)` (`base.py:204,293,440`): the list,
+/// retrieve and summary view bodies read the live project row directly, and
+/// `Project` uses `SoftDeletionManager` (`db/mixins.py:56-66`), so a missing
+/// or soft-deleted row raises `DoesNotExist` → the `handle_exception` 404
+/// `{"error":"The required object does not exist."}`. Not workspace-scoped,
+/// matching `pk=` exactly; only these three handlers read the row (the
+/// permission layer, the favorite route, versions and duplicate never do).
+async fn require_live_project(pool: &PgPool, project_id: &uuid::Uuid) -> Result<(), Denial> {
+    let row: Option<(uuid::Uuid,)> =
+        sqlx::query_as(r#"SELECT p.id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#)
+            .bind(project_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|_| Denial::ServerError)?;
+    row.map(|_| ()).ok_or(Denial::ObjectNotFound)
 }
 
 /// The resolved `@allow_permission([ADMIN, MEMBER])` project context for
@@ -533,26 +543,15 @@ async fn favorite_gate(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    let workspace_id: Option<(uuid::Uuid,)> = sqlx::query_as(
-        r#"SELECT p.workspace_id FROM projects p
-           JOIN workspaces w ON w.id = p.workspace_id
-           WHERE p.id = $1 AND w.slug = $2 AND p.deleted_at IS NULL"#,
-    )
-    .bind(project_id)
-    .bind(slug)
-    .fetch_optional(pool)
-    .await
-    .map_err(|_| Denial::ServerError)?;
-    // `resolve_project_id` guarantees the project row; the lookup above
-    // re-reads it so the gate owns its workspace id.
     use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
-    let workspace_id = workspace_id.map(|row| row.0).ok_or(Denial::ServerError)?;
-    match role.map(|row| i32::from(row.0)) {
-        Some(ROLE_ADMIN) | Some(ROLE_MEMBER) => Ok(FavoriteGate {
-            user_id: *user_id,
-            project_id: *project_id,
-            workspace_id,
-        }),
+    // The gate is the membership decision alone (`@allow_permission` never
+    // reads the project): an unknown/cross-workspace UUID project 403s here
+    // BEFORE any project-row read, exactly like Django. Only once the role
+    // passes is the project row consulted — for its workspace id, WITHOUT a
+    // `deleted_at IS NULL` filter so a soft-deleted project with a live
+    // membership still passes and the favorite row is created (204).
+    let allowed = match role.map(|row| i32::from(row.0)) {
+        Some(ROLE_ADMIN) | Some(ROLE_MEMBER) => true,
         Some(_) => {
             let admin: Option<(i16,)> = sqlx::query_as(
                 r#"SELECT wm.role FROM workspace_members wm
@@ -565,18 +564,31 @@ async fn favorite_gate(
             .fetch_optional(pool)
             .await
             .map_err(|_| Denial::ServerError)?;
-            if admin.is_some_and(|row| i32::from(row.0) == ROLE_ADMIN) {
-                Ok(FavoriteGate {
-                    user_id: *user_id,
-                    project_id: *project_id,
-                    workspace_id,
-                })
-            } else {
-                Err(Denial::Forbidden)
-            }
+            admin.is_some_and(|row| i32::from(row.0) == ROLE_ADMIN)
         }
-        None => Err(Denial::Forbidden),
+        None => false,
+    };
+    if !allowed {
+        return Err(Denial::Forbidden);
     }
+    // A passing membership implies the project row exists (FK); a miss here
+    // is an impossible state, so it fails closed as a server error.
+    let workspace_id: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.workspace_id FROM projects p
+           JOIN workspaces w ON w.id = p.workspace_id
+           WHERE p.id = $1 AND w.slug = $2"#,
+    )
+    .bind(project_id)
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let workspace_id = workspace_id.map(|row| row.0).ok_or(Denial::ServerError)?;
+    Ok(FavoriteGate {
+        user_id: *user_id,
+        project_id: *project_id,
+        workspace_id,
+    })
 }
 
 /// Best-effort post-commit task enqueue (the D-02 intake pattern): without
@@ -1030,6 +1042,9 @@ pub async fn list_pages(
         Ok(search) => search,
         Err(response) => return response,
     };
+    if let Err(denial) = require_live_project(pool, &project_id).await {
+        return denial.into_response();
+    }
     let rows = match fetch_read_rows(
         pool,
         &slug,
@@ -1093,6 +1108,9 @@ pub async fn retrieve_page(
         Ok(timezone) => timezone,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_live_project(pool, &project_id).await {
+        return denial.into_response();
+    }
     // `?search=` rides `get_queryset` (`base.py:88`) before the pk filter,
     // so it applies here exactly as on the list.
     let search = match search_terms(query.get("search").map(String::as_str)) {
@@ -1199,6 +1217,9 @@ pub async fn pages_summary(
         Ok(gate) => gate,
         Err(denial) => return denial.into_response(),
     };
+    if let Err(denial) = require_live_project(pool, &project_id).await {
+        return denial.into_response();
+    }
     let row: (i64, i64, i64) = match sqlx::query_as(&summary_sql(gate.guest_scoped))
         .bind(slug.as_str())
         .bind(user_id)
