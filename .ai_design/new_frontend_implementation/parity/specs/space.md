@@ -86,8 +86,13 @@ The space app is public. That has concrete consequences the slices implement:
 - **No workspace session gate.** The subtree never calls the session gate,
   never redirects to the workspace sign-in, and never imports workspace
   membership, permissions or sidebar features. It is reachable while signed
-  out, and it renders identically whether or not the visitor happens to be
-  signed in.
+  out. Signed in or not, the board itself is the same: the same data, the same
+  rows, the same filters and layout. What differs is confined to two slots —
+  the account area (a sign-in control for an anonymous visitor, the avatar
+  menu for a signed-in one; SPC-013/SPC-014) and the write affordances
+  (composer versus invitation, vote and reaction write state; SPC-049,
+  SPC-055). Nothing in the board body is hidden, gated, or rearranged by
+  session state.
 - **No session-expiry middleware.** `apps/web_new`'s default API client marks
   the workspace session expired on any 401 and bounces to sign-in. A 401 on
   the space subtree is a legitimate anonymous state (current-user,
@@ -1070,17 +1075,22 @@ happens (a disabled response renders as an empty thread).
 **SPC-050 — Comment rows.**
 Each row: avatar (uploaded image when present, else the author's initial with
 a stable colour), display name, the age line — a **relative age** of the
-comment's creation/edited time ("3 hours ago" shape, from the shared
-`timeAgo` helper, updating without a refetch on a coarse timer) (old bug
+comment's creation time ("3 hours ago" shape, from the shared `timeAgo`
+helper, updating without a refetch on a coarse timer) (old bug
 NEWFRONT-459 rendered no age; the target matches the workspace rows),
 bot-marked authors, the formatted rich body (`RichTextView`, asset links
 resolved through the public asset URL), and the reaction row (SPC-057).
 Bot marking is part of the **author line itself**, not a second badge node:
 when `actor_detail.is_bot` is true, the author name is rendered as the account
 first name followed by " Bot" (the oracle asserts the author text ends in
-" Bot"); the rest of the row shape is identical to a human row. Edits show an
-edited marker. Author and body come from `actor_detail`,
-`comment_html` (fallback `comment_stripped`), `created_at`/`updated_at`.
+" Bot"); the rest of the row shape is identical to a human row. Author and
+body come from `actor_detail`, `comment_html` (fallback `comment_stripped`),
+`created_at`/`updated_at`. The old space rows render **no edited marker**:
+nothing under `apps/space/**` consumes `edited_at` and no space scenario
+asserts one. If J1 reuses the workspace comment card, the age line's
+"(edited)" suffix comes with that card — that is **reused workspace
+presentation, not old space parity**, and no gate scenario may require it.
+The space card, if written locally, likewise does not add one.
 
 **SPC-051 — Folded comments.**
 A comment whose `labels` include the fold marker renders collapsed: header
@@ -1170,9 +1180,11 @@ and an undo affordance only if the kit/product provides one (no new decision).
 **SPC-056 — Comment edits.**
 Edit switches the row's body to the rich editor with Save and Cancel; Save
 swaps the content immediately (optimistic), persists with `PATCH
-.../comments/:commentId/`, and on success shows the edited marker and a
-notice. On failure the row **reconciles to the stored text** and shows an
-error notice (old bug NEWFRONT-467 left the phantom edit on screen) — the
+.../comments/:commentId/`, and on success shows a notice. No edited marker is
+part of the parity rule (SPC-050: the old row does not render one); a reused
+workspace card's "(edited)" suffix may appear but is not gate-provable. On
+failure the row **reconciles to the stored text** and shows an error notice
+(old bug NEWFRONT-467 left the phantom edit on screen) — the
 save failure path refetches the thread (or rolls back the optimistic patch to
 the last server value) so the view never disagrees with the server. Cancel
 restores the previous content with no request. Only the owner can edit
@@ -1436,7 +1448,7 @@ the payloads carry more.
 
 | Call | Method + path | Parameters | Response fields read | Rows |
 | --- | --- | --- | --- | --- |
-| Board settings | `GET /api/public/anchor/:anchor/settings/` | — | `anchor`, `entity_name` (= `project`), `is_comments_enabled`, `is_reactions_enabled`, `is_votes_enabled`, `is_activity_enabled`, `view_props.{list,kanban}`, `project_details.{id, identifier, name, logo_props, cover_image, description}`, `workspace_detail.{slug}` | 001, 003, 004, 010, 020, 029, 041, 047, 048, 049, 057 |
+| Board settings | `GET /api/public/anchor/:anchor/settings/` | — | `anchor`, `entity_name` (= `project`), `is_comments_enabled`, `is_reactions_enabled`, `is_votes_enabled`, `view_props.{list,kanban}`, `project_details.{id, identifier, name, logo_props, cover_image, description}`, `workspace_detail.{slug}`. `is_activity_enabled` rides in the payload but is **not read** by this area: it is an unread passthrough (§5.5), and every activity/comment gate is `is_comments_enabled` | 001, 003, 004, 010, 020, 029, 041, 047, 048, 049, 057 |
 | Legacy resolve | `GET /api/public/workspaces/:slug/projects/:id/anchor/` | path `slug`, `project_id` | `anchor`, `entity_name` | 002 |
 | Board metadata | `GET /api/public/anchor/:anchor/meta/` | — | `name`, `description` (only; the payload also carries `id`, `identifier`, `cover_image`, `icon_prop`, `emoji`, which the UI reads but deliberately does not display — `cover_image` never becomes an image tag) | 007 |
 | Issues (grouped) | `GET /api/public/anchor/:anchor/issues/` | `group_by=state_id`, `sub_group_by` (unused), `per_page` (50), `cursor` (first request is the literal `50:0:0`; later pages send the group's opaque `next_cursor` from the response; the group fallback `50:1:0` is not a first request), `order_by=-created_at`, filters `state`, `priority`, `labels` (comma-joined), unknown filter keys ignored | envelope: `grouped_by`, `total_count`, `next_cursor`, `next_page_results`, `results` keyed by state UUID → `{results: [...], total_results}`; each issue is a flat dict with exactly `id`, `name`, `state_id`, `sort_order`, `estimate_point`, `priority`, `start_date`, `target_date`, `sequence_id`, `project_id`, `parent_id`, `cycle_id`, `created_by`, `state__group`, `label_ids`, `assignee_ids`, `module_ids`, `vote_items`, `reaction_items` — the card reads `id`, `name`, `state_id`, `priority`, `target_date`, `label_ids`, `sequence_id` and the embedded `vote_items`/`reaction_items`; there is **no** nested `state`, `project`, `votes` or `reactions` key | 023, 024, 026, 027, 028, 033, 036, 037 |
@@ -1487,7 +1499,7 @@ failed write (notice + refetch), not as a silent success.
 
 | Call | Method + path | Body/params | Response fields read | Rows |
 | --- | --- | --- | --- | --- |
-| Comments list | `GET /api/public/anchor/:anchor/issues/:id/comments/` | — (server filters `access=EXTERNAL`, order `created_at`) | `id`, `actor`, `actor_detail.{id, display_name, avatar, avatar_url, is_bot}`, `comment_html`, `comment_stripped`, `created_at`, `updated_at`, `edited_at`, `labels` (fold marker), `speaker_type`, `speaker_label`, `comment_reactions[]` (`reaction`, `actor_detail`) | 049–052, 057 |
+| Comments list | `GET /api/public/anchor/:anchor/issues/:id/comments/` | — (server filters `access=EXTERNAL`, order `created_at`) | `id`, `actor`, `actor_detail.{id, display_name, avatar, avatar_url, is_bot}`, `comment_html`, `comment_stripped`, `created_at`, `updated_at`, `labels` (fold marker), `speaker_type`, `speaker_label`, `comment_reactions[]` (`reaction`, `actor_detail`). `edited_at` is an unread passthrough (SPC-050: no space row renders an edited marker) | 049–052, 057 |
 | Comment create | `POST /api/public/anchor/:anchor/issues/:id/comments/` | `{comment_html, comment_json?, access: "EXTERNAL"}` (no asset field: the body carries the image nodes) | created row (`id` needed for the link step) | 053, 054 |
 | Comment edit | `PATCH /api/public/anchor/:anchor/issues/:id/comments/:commentId/` | `{comment_html, comment_json?}` (owner only) | updated row | 055, 056 |
 | Comment delete | `DELETE /api/public/anchor/:anchor/issues/:id/comments/:commentId/` | — (owner only) | 204 | 055 |
@@ -1593,6 +1605,8 @@ requires them to model:
 
 - `BoardSettings`: the settings object above, with `view_props` a loose
   boolean record and `project_details` nullable (the placeholder case).
+  `is_activity_enabled` is declared as an optional passthrough only; no space
+  component reads it, and no gate scenario derives behavior from it.
 - `BoardMeta`: `{name?, description?, cover_image?}` — all optional.
 - `BoardIssuePage`: the grouped envelope with `results` a record keyed by
   state id and `{results, total_results}` values, plus the top-level
@@ -1605,7 +1619,8 @@ requires them to model:
   `votes` or `reactions` key on either; `vote_items` and `reaction_items` are
   the engagement arrays.
 - `PublicComment`: the comment row incl. `actor_detail`, `labels`,
-  `speaker_type`, `speaker_label`, `edited_at`, `comment_reactions`.
+  `speaker_type`, `speaker_label`, `comment_reactions`, plus `edited_at` as an
+  optional passthrough that no space component reads (SPC-050).
 - `PublicReaction` / `PublicVote`: the flat actor shapes (`actor_details` on
   `vote_items` and `reaction_items`, §5.1; `actor_detail` on a list comment's
   `comment_reactions`, and the flat `reaction.actor_detail` the comment-row
@@ -1683,7 +1698,7 @@ written from this spec**, not adapted from `apps/space`.
 | **G** cards/read-only | kit `Tooltip`; `timeAgo` (shared/lib); `LayoutIcon` | Public card/list row (key, title, markers), board card footer wiring (slice I), highlight, read-only guarantees, no-focus/no-reconnect query defaults |
 | **H** overlay/copy | `PeekPanel` **read-only title variant** (requires the shell change noted in §2; until then H cannot mount the editable field), `RichTextView`, kit `Dialog`/`Skeleton`; Issues detail **not** reused | Three presentations wrapper, read-only detail body, property panel (state/priority/due + overdue), copy-link action, skeletons, close/address rules |
 | **I** votes/reactions | Issues `ReactionBar`/`ReactionPicker`/`EmojiPicker` + model helpers; kit | Public vote control (overlay + card footer), public issue-reaction wiring (space queries + public endpoints), sign-in redirect with encoded position, frame gating |
-| **J1** comments thread | fold helpers, bot mark, `RichTextView`, `timeAgo`; `CommentCard` **only after** the Issues own-line-speaker/public-scope change (§2), otherwise space's own card | Public comments query; gating/invitation; thread layout; fold; edited marker; comments error/retry state; the own-line agent speaker label (SPC-052) either through the changed card or in the space card |
+| **J1** comments thread | fold helpers, bot mark, `RichTextView`, `timeAgo`; `CommentCard` **only after** the Issues own-line-speaker/public-scope change (§2), otherwise space's own card | Public comments query; gating/invitation; thread layout; fold; comments error/retry state (no edited marker: not old space behavior, SPC-050); the own-line agent speaker label (SPC-052) either through the changed card or in the space card |
 | **J2** composer | `RichTextEditor` (lazy), mention extension, `RichTextView`; kit | Public composer (Enter submit, upload → asset ids, mid-upload guard), member mention source from the public members endpoint, owner menu, edit reconcile, comment reactions against public endpoints, notices |
 
 Cross-cutting rule for the slices: when an Issues component needs a prop it
