@@ -4,9 +4,27 @@ Merges past ``AgentRun`` rows (``kind=past``) with future RRULE expansion
 (``kind=scheduled``) over a ``from``/``to`` window defaulting to ±30 days.
 """
 
+import datetime
+
 from . import seed_scheduler as seed_s
 from .test_project_bindings import bind_list
 from .test_workspace_schedulers import sched_list
+
+
+def minute_bound(days: float) -> datetime.datetime:
+    """``now + days`` truncated to minute precision (an exact instant)."""
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(days=days)
+    ).replace(second=0, microsecond=0)
+
+
+def minute_z(days: float) -> str:
+    """``minute_bound(days)`` suffixed ``Z`` — the ``fromisoformat``-only
+    shape the hand-rolled Rust chain rejected (PIDASHCONV-1202): no
+    seconds, so ``parse_from_rfc3339`` fails and the old code fell back to
+    the ±30-day default window."""
+    return minute_bound(days).strftime("%Y-%m-%dT%H:%MZ")
 
 
 def occurrences(world):
@@ -134,6 +152,51 @@ def test_window_too_large(org):
         "error": "window_too_large",
         "detail": "date window must be <= 90 days",
     }
+
+
+def test_minute_precision_window_is_honoured(org):
+    # Both bounds are minute-precision `Z` — no seconds. Rust's old
+    # hand-rolled parser returned None for these and silently served the
+    # ±30-day default with a 200; Django parses them and 400s. Parity
+    # requires the requested window to be validated, not dropped.
+    r = org.request(
+        "GET", occurrences(org), "guest",
+        params={"from": minute_z(1), "to": minute_z(-1)},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {
+        "error": "invalid_window", "detail": "`to` must be >= `from`",
+    }
+
+    # A >90-day window at minute precision must 400 window_too_large.
+    r = org.request(
+        "GET", occurrences(org), "guest",
+        params={"from": minute_z(-80), "to": minute_z(11)},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {
+        "error": "window_too_large",
+        "detail": "date window must be <= 90 days",
+    }
+
+
+def test_minute_precision_window_bounds_occurrences(org):
+    # A valid minute-precision window must return only the occurrences
+    # inside it — the caller's window is honoured, not swapped for the
+    # ±30-day default.
+    _hourly(org)
+    r = org.request(
+        "GET", occurrences(org), "guest",
+        params={"from": minute_z(-1), "to": minute_z(1)},
+    )
+    assert r.status_code == 200, r.text
+    rows = r.json()["occurrences"]
+    # Compare against the same instants rendered DRF-style (``+00:00``,
+    # seconds present) so the lexicographic bound matches the row format.
+    lo = minute_bound(-1).isoformat()
+    hi = minute_bound(1).isoformat()
+    assert len(rows) > 0
+    assert all(lo <= occ["dtstart"] <= hi for occ in rows)
 
 
 def test_garbage_window_falls_back_to_defaults(org):

@@ -73,6 +73,7 @@
 //!    (`T00:00:00:04` → `.040000`) and any single Unicode scalar as the
 //!    date/time separator — reproduced, not sanitized.
 
+use chrono::{NaiveDate, NaiveDateTime};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -512,6 +513,40 @@ pub fn normalize_iso_datetime(raw: &str) -> Result<String, String> {
     let replaced = raw.replace('Z', "+00:00");
     match parse_iso_datetime(&replaced) {
         Ok((date, time, offset_us)) => Ok(render_iso_datetime(date, time, offset_us)),
+        Err(IsoFail::Invalid) => Err(format!(
+            "Invalid isoformat string: {}",
+            py_repr_str(&replaced)
+        )),
+        Err(IsoFail::Range(message)) => Err(message),
+    }
+}
+
+/// `parse_iso_utc`'s core (`utils/iso_datetime.py:19-33`): `raw` with every
+/// `Z` replaced by `+00:00` (PB-0599), parsed the way
+/// `datetime.fromisoformat` does, and returned as the naive clock reading
+/// plus the parsed offset in microseconds (`None` = a naive value, i.e.
+/// Python's `tzinfo is None` branch). `Err` carries the same `ValueError`
+/// text as [`normalize_iso_datetime`].
+///
+/// Callers that need a tz-aware UTC value do the attach/convert themselves
+/// (`occurrences.rs`: naive → UTC attached, aware → subtract the offset),
+/// which is why the parts cross the seam instead of a rendered string.
+pub(crate) fn parse_iso_parts(raw: &str) -> Result<(NaiveDateTime, Option<i64>), String> {
+    // Like Python's `str.replace`: every `Z` occurrence, not just a suffix.
+    let replaced = raw.replace('Z', "+00:00");
+    match parse_iso_datetime(&replaced) {
+        Ok((date, time, offset_us)) => {
+            // `check_date_range`/`check_time_range` already bounded the
+            // fields (`1..=9999`, `0..=23`/`0..=59`), so the chrono
+            // constructors cannot fail; the `ok_or` keeps this fallible
+            // path panic-free if that ever drifts.
+            let naive = NaiveDate::from_ymd_opt(date.year, date.month, date.day)
+                .and_then(|d| {
+                    d.and_hms_micro_opt(time.hour, time.minute, time.second, time.microsecond)
+                })
+                .ok_or_else(|| format!("Invalid isoformat string: {}", py_repr_str(&replaced)))?;
+            Ok((naive, offset_us))
+        }
         Err(IsoFail::Invalid) => Err(format!(
             "Invalid isoformat string: {}",
             py_repr_str(&replaced)

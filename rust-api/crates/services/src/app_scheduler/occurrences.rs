@@ -50,12 +50,14 @@
 //! `(Vec<DateTime<Utc>>, hit_cap)`. The closure takes raw JSON (not
 //! coerced datetimes) precisely so ISO coercion stays with the merged
 //! RRULE engine the occurrences handler (PIDASHCONV-635) closes over —
-//! this module coerces nothing. There is no public shared port of
-//! `parse_iso_utc` (only a private copy in the jobs ticker's fire path),
-//! so [`parse_iso_utc`] is ported locally here: it is the translation of
-//! `occurrences.py`'s import, not a fork of a public helper. This file
-//! must never name the jobs crate (jobs already depends on services; the
-//! crate graph is acyclic, Porting guide).
+//! this module coerces nothing. There is no public shared copy of
+//! `parse_iso_utc` (the jobs ticker keeps a private copy in its fire
+//! path), but the parsing ENGINE is shared: [`parse_iso_utc`] routes
+//! `occurrences.py`'s `fromisoformat` call through
+//! [`super::shape::parse_iso_parts`], the CPython-faithful port already
+//! used for rdates/exdates — a translation of the Python call, not a fork
+//! of a helper. This file must never name the jobs crate (jobs already
+//! depends on services; the crate graph is acyclic, Porting guide).
 //!
 //! # Ported quirks (translate, don't redesign — also listed in the PR)
 //!
@@ -77,21 +79,21 @@
 //! 6. A window that fills to exactly 5000 rows WITHOUT any binding
 //!    reporting `hit_cap` reports `has_more == false` (same lines).
 //!
-//! # Deliberate scope
+//! # Parse coverage
 //!
-//! [`parse_iso_utc`] covers the fixture-pinned grammar (RFC 3339 aware,
-//! space-separator aware, naive datetime with `T`/space, date-only) plus
-//! everything the merged first translation of the same Python function
-//! accepts. Exotic `fromisoformat`-only shapes (basic `YYYYMMDD`, week
-//! dates, comma fractions) fall back to `None` → window defaults — the
-//! same failure mode as garbage input, and unpinned by any fixture.
+//! [`parse_iso_utc`] delegates to the same CPython `fromisoformat` port
+//! the serializer uses, so it accepts everything Python 3.12 does:
+//! minute/hour precision, date-only, the basic `YYYYMMDDThhmmss` shape,
+//! `±HHMM` offsets, week dates, comma fractions, and the space separator.
+//! Only genuine `ValueError`s map to `None` (window defaults) — a valid
+//! caller window is never silently dropped (PIDASHCONV-1202).
 //!
 //! Out of scope (owned by the occurrences handler, PIDASHCONV-635): the
 //! project existence/scope 404, route registration, the
 //! `{occurrences, has_more, next_window_start}` envelope rendering, and
 //! the `expand_binding` closure body.
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -128,39 +130,30 @@ pub const DEFAULT_TZID: &str = "UTC";
 ///
 /// `None`/empty → `None`; `value.replace("Z", "+00:00")` (EVERY `Z`,
 /// quirk 4) then `fromisoformat` (`ValueError` → `None`); naive → UTC
-/// attached; aware → converted to UTC. The fallback chain mirrors the
-/// merged first translation of the same function: strict RFC 3339 (any
-/// numeric offset), space-separator with offset (mangled to `T`), naive
-/// `T`/space datetimes with optional fraction, date-only at midnight.
-/// Anything else → `None` (the caller applies window defaults).
+/// attached; aware → converted to UTC. Parsing goes through
+/// [`super::shape::parse_iso_parts`], the CPython-faithful port, so every
+/// form Python 3.12 accepts is honoured (`occurrences.py` imports the same
+/// helper). Anything the port rejects → `None` (the caller applies window
+/// defaults), matching Python's `except ValueError`.
 pub fn parse_iso_utc(value: Option<&str>) -> Option<DateTime<Utc>> {
     let value = value?;
     if value.is_empty() {
         return None;
     }
-    // Python `str.replace` hits every occurrence, not just a suffix.
-    let normalized = value.replace('Z', "+00:00");
-    if let Ok(aware) = DateTime::parse_from_rfc3339(&normalized) {
-        return Some(aware.with_timezone(&Utc));
-    }
-    // `datetime.fromisoformat` also accepts a space separator with an offset.
-    if normalized.contains(' ') {
-        let mangled = normalized.replacen(' ', "T", 1);
-        if let Ok(aware) = DateTime::parse_from_rfc3339(&mangled) {
-            return Some(aware.with_timezone(&Utc));
-        }
-    }
-    // Naive → assume UTC. `%.f` matches with or without a fraction.
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(&normalized, format) {
-            return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
-        }
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(&normalized, "%Y-%m-%d") {
-        let naive = date.and_hms_opt(0, 0, 0)?;
-        return Some(DateTime::from_naive_utc_and_offset(naive, Utc));
-    }
-    None
+    // Route through the CPython-faithful `datetime.fromisoformat` port
+    // (the same engine `shape.rs` uses for rdates/exdates): it accepts
+    // every 3.12 form the hand-rolled RFC 3339/strftime chain rejected —
+    // minute/hour precision, colonless `+0000` offsets, the basic
+    // `YYYYMMDDThhmmss` shape. Parse failure → `None` (the caller applies
+    // the window default), matching `ValueError -> None`.
+    let (naive, offset_us) = super::shape::parse_iso_parts(value).ok()?;
+    // `d.tzinfo is None` → UTC attached; aware → `astimezone(UTC)`, i.e.
+    // subtract the offset from the wall reading.
+    let utc_naive = match offset_us {
+        None => naive,
+        Some(micros) => naive.checked_sub_signed(Duration::microseconds(micros))?,
+    };
+    Some(DateTime::from_naive_utc_and_offset(utc_naive, Utc))
 }
 
 /// The two window rejections (`occurrences.py:91-103`).
@@ -722,6 +715,62 @@ mod tests {
         // only when the result is a valid datetime (here it is not).
         assert_eq!(parse_iso_utc(Some("ZZ")), None);
         assert_eq!(parse_iso_utc(Some("2024-01-01T00:00:00+00:00junk")), None);
+    }
+
+    // PIDASHCONV-1202: `fromisoformat`-only forms the old hand-rolled
+    // RFC 3339/strftime chain rejected now parse (the caller window is
+    // honoured instead of silently defaulted). Expected values verified
+    // against CPython 3.12 `datetime.fromisoformat(value.replace("Z",
+    // "+00:00"))` (see `probe1202.py`).
+    #[test]
+    fn parse_iso_utc_covers_fromisoformat_forms() {
+        // Minute precision, `Z`, and `±HH:MM`.
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T00:00Z")),
+            Some(utc(2026, 10, 20, 0, 0, 0))
+        );
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T00:00+05:00")),
+            Some(utc(2026, 10, 19, 19, 0, 0))
+        );
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T00:00")),
+            Some(utc(2026, 10, 20, 0, 0, 0))
+        );
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T13:30-08:00")),
+            Some(utc(2026, 10, 20, 21, 30, 0))
+        );
+        // Hour only.
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T05")),
+            Some(utc(2026, 10, 20, 5, 0, 0))
+        );
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T05Z")),
+            Some(utc(2026, 10, 20, 5, 0, 0))
+        );
+        // Colonless `+0000` / `-0530` offsets.
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T00:00:00+0000")),
+            Some(utc(2026, 10, 20, 0, 0, 0))
+        );
+        assert_eq!(
+            parse_iso_utc(Some("2026-10-20T00:00-0530")),
+            Some(utc(2026, 10, 20, 5, 30, 0))
+        );
+        // Basic format.
+        assert_eq!(
+            parse_iso_utc(Some("20261020T000000Z")),
+            Some(utc(2026, 10, 20, 0, 0, 0))
+        );
+        assert_eq!(
+            parse_iso_utc(Some("20261020T133045+0530")),
+            Some(utc(2026, 10, 20, 8, 0, 45))
+        );
+        // Still garbage → None (no window is invented from junk).
+        assert_eq!(parse_iso_utc(Some("20261020T99")), None);
+        assert_eq!(parse_iso_utc(Some("2026-10-20T00:00Zx")), None);
     }
 
     // F36-07 `validation.cases`: both 400 bodies byte for byte —
