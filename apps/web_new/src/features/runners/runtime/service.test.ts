@@ -5,11 +5,28 @@
 import { waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const editionFlags = vi.hoisted(() => ({ current: {} as Record<string, boolean> }));
+
+vi.mock("../../../core/edition/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../core/edition/index.js")>();
+  const { edition: _edition, ...rest } = original;
+  return {
+    ...rest,
+    edition: {
+      id: "test",
+      get flags(): Record<string, boolean> {
+        return editionFlags.current;
+      },
+    },
+  };
+});
+
 vi.mock("@pidash/api-client", async (importOriginal) => {
   const original = await importOriginal<typeof import("@pidash/api-client")>();
   return {
     ...original,
     getAgentProfile: vi.fn(),
+    getCloudCsrfToken: vi.fn(),
     postAgentToken: vi.fn(),
     createDesktopEnroll: vi.fn(),
     deleteDesktopEnroll: vi.fn(),
@@ -24,6 +41,7 @@ import {
   createDesktopEnroll,
   deleteDesktopEnroll,
   getAgentProfile,
+  getCloudCsrfToken,
   getIssue,
   getProject,
   listProjects,
@@ -202,9 +220,11 @@ beforeEach(() => {
   resetRuntimeServiceForTests();
   vi.stubGlobal("localStorage", memoryStorage());
   globalThis.sessionStorage.clear();
+  editionFlags.current = {};
   vi.clearAllMocks();
   vi.mocked(getAgentProfile).mockResolvedValue(profile());
   vi.mocked(postAgentToken).mockResolvedValue(token());
+  vi.mocked(getCloudCsrfToken).mockResolvedValue({ csrf_token: "cloud-csrf" });
   vi.mocked(createDesktopEnroll).mockResolvedValue(enrollResult());
   vi.mocked(deleteDesktopEnroll).mockResolvedValue(undefined);
   vi.mocked(getProject).mockResolvedValue(projectDetail());
@@ -1073,5 +1093,90 @@ describe("disposeRuntimeForSignOut", () => {
     const deleteOrder = vi.mocked(deleteDesktopEnroll).mock.invocationCallOrder[0] ?? 0;
     expect(tokenOrder).toBeGreaterThan(0);
     expect(deleteOrder).toBeGreaterThan(tokenOrder);
+  });
+});
+
+describe("cloud credential path", () => {
+  it("reads the cloud CSRF path before minting the desktop credential", async () => {
+    editionFlags.current = { "cloud-csrf": true };
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
+    expect(getCloudCsrfToken).toHaveBeenCalledWith(client);
+    expect(postAgentToken).toHaveBeenCalledWith(client, { csrfToken: "cloud-csrf" });
+    expect(vi.mocked(postAgentToken).mock.invocationCallOrder[0]).toBeGreaterThan(
+      vi.mocked(getCloudCsrfToken).mock.invocationCallOrder[0] ?? 0
+    );
+    expect(runtime.writeModelToken).toHaveBeenCalledWith("tok");
+  });
+
+  it("keeps the client's own CSRF plumbing off the cloud", async () => {
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime });
+    expect(getCloudCsrfToken).not.toHaveBeenCalled();
+    expect(postAgentToken).toHaveBeenCalledWith(client);
+  });
+});
+
+describe("agent credential refusals", () => {
+  const refusal = (status: number, body: unknown) => new ApiError({ status, code: "http", message: "refused", body });
+
+  it("names the self-supplied-lane refusal when the mint answers with it", async () => {
+    vi.mocked(postAgentToken).mockRejectedValue(refusal(409, { error: "byok_not_supported_on_desktop" }));
+    const runtime = fakeRuntime();
+    resume(runtime);
+    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(EngineUnavailableError);
+    expect((failure as EngineUnavailableError).code).toBe("byok_not_supported_on_desktop");
+    expect((failure as Error).message).toMatch(/hosted model lane/i);
+    expect(runtime.writeModelToken).not.toHaveBeenCalled();
+  });
+
+  it("names a revoked gateway session", async () => {
+    vi.mocked(postAgentToken).mockRejectedValue(refusal(401, { error: "gateway_session_revoked" }));
+    const runtime = fakeRuntime();
+    resume(runtime);
+    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(EngineUnavailableError);
+    expect((failure as EngineUnavailableError).message).toMatch(/sign in again/i);
+    // A 401 through the recovery path still signs the native side out.
+    expect(runtime.signOutNative).toHaveBeenCalledWith();
+  });
+
+  it("names the browser-session refusal the profile gate answers", async () => {
+    vi.mocked(getAgentProfile).mockRejectedValue(refusal(403, { error: "desktop_session_required" }));
+    const runtime = fakeRuntime();
+    resume(runtime);
+    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(EngineUnavailableError);
+    expect((failure as EngineUnavailableError).message).toMatch(/desktop app/i);
+    expect(postAgentToken).not.toHaveBeenCalled();
+  });
+
+  it("keeps a refusal code this build does not name as the raw failure", async () => {
+    const refusalError = refusal(409, { error: "feature_off" });
+    vi.mocked(postAgentToken).mockRejectedValue(refusalError);
+    const runtime = fakeRuntime();
+    resume(runtime);
+    const failure = await connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime }).catch(
+      (error: unknown) => error
+    );
+    expect(failure).toBe(refusalError);
+    expect(failure).not.toBeInstanceOf(EngineUnavailableError);
+  });
+
+  it("leaves transport failures alone", async () => {
+    const transport = new ApiError({ status: 0, code: "network", message: "offline" });
+    vi.mocked(postAgentToken).mockRejectedValue(transport);
+    const runtime = fakeRuntime();
+    resume(runtime);
+    await expect(connectProject({ workspaceSlug: "ws", projectId: "p", client, runtime })).rejects.toBe(transport);
   });
 });

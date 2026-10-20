@@ -12,7 +12,12 @@
 
 import { isApiError } from "@pidash/api-client";
 
-/** One plain-language sentence per server or client reason code. */
+/**
+ * One plain-language sentence per server or client reason code. Each
+ * names what the viewer can do; the self-supplied-lane refusal points at
+ * the hosted lane and says the supplied key still serves cloud runs
+ * (parity/specs/cloud.md §8, CLOUD-040).
+ */
 export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   // Agent profile and machine gates (managed_runner/errors.py order).
   managed_runner_disabled: "The built-in agent is switched off on this server.",
@@ -25,7 +30,7 @@ export const AGENT_REASON_MESSAGES: Readonly<Record<string, string>> = {
   gateway_scopes_missing:
     "Your sign-in is missing permission to reach the model gateway. Sign out, then sign in again to grant it.",
   byok_not_supported_on_desktop:
-    "The built-in agent cannot use your own provider key on this computer yet; other surfaces keep using that key.",
+    "The desktop agent runs on the hosted model lane. Choose that lane in AI Assistant settings; the provider key you supplied still serves cloud runs.",
   no_managed_runner_for_project: "This computer has not enrolled a runner for this project yet.",
 
   // Credential and permission literals from the profile and token endpoints.

@@ -5,11 +5,13 @@
 // Settings tab address (parity/specs/profile.md §5, PROF-009): a known
 // tab renders through the seam, an unknown one forwards to the default
 // tab with the query kept.
+import { QueryClient } from "@tanstack/react-query";
 import { cleanup, screen } from "@testing-library/react";
 import { isRedirect, Outlet, type RouteComponent } from "@tanstack/react-router";
 import * as React from "react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createAppClient } from "../../../core/api/client.js";
 import { registerProfileSettingsPage, resetProfileSettingsPages } from "../../../features/settings/lib/registry.js";
 import { renderProfileSettingsRoute, resetProfileRouteHarness } from "../-routeHarness.js";
 import { defaultTabHref, Route as IndexRoute } from "./index.js";
@@ -61,18 +63,79 @@ describe("unknown tab address", () => {
     expect(unknownTabHref("?tab=all")).toBe("/settings/profile/general/?tab=all");
   });
 
-  it("passes a known tab through its loader", () => {
-    expect(
-      TabRoute.options.beforeLoad?.({ params: { tab: "security" }, location: { searchStr: "" } } as never)
-    ).toBeUndefined();
+  it("passes a known tab through its loader", async () => {
+    await expect(
+      TabRoute.options.beforeLoad?.({
+        context: guardedContext(instanceConfig(true)),
+        params: { tab: "security" },
+        location: { searchStr: "" },
+      } as never)
+    ).resolves.toBeUndefined();
   });
 
-  it("forwards an unknown tab from its loader", () => {
-    const thrown = thrownFrom(() =>
-      TabRoute.options.beforeLoad?.({ params: { tab: "not-a-tab" }, location: { searchStr: "?x=1" } } as never)
-    );
+  it("forwards an unknown tab from its loader", async () => {
+    const thrown = await Promise.resolve()
+      .then(() =>
+        TabRoute.options.beforeLoad?.({
+          context: guardedContext(instanceConfig(true)),
+          params: { tab: "not-a-tab" },
+          location: { searchStr: "?x=1" },
+        } as never)
+      )
+      .then(
+        () => null,
+        (error: unknown) => error
+      );
     expect(isRedirect(thrown)).toBe(true);
     expect((thrown as { options: { href: string } }).options.href).toBe("/settings/profile/general/?x=1");
+  });
+
+  it("forwards the password address on a cloud-managed instance (CLOUD-035)", async () => {
+    const context = guardedContext(instanceConfig(false));
+    const thrown = await TabRoute.options
+      .beforeLoad?.({
+        context,
+        params: { tab: "security" },
+        location: { searchStr: "?x=1" },
+      } as never)
+      .then(
+        () => null,
+        (error: unknown) => error
+      );
+    expect(isRedirect(thrown)).toBe(true);
+    expect((thrown as { options: { href: string } }).options.href).toBe("/settings/profile/general/?x=1");
+  });
+
+  it("serves the password address on a self-managed instance", async () => {
+    const context = guardedContext(instanceConfig(true));
+    await expect(
+      TabRoute.options.beforeLoad?.({ context, params: { tab: "security" }, location: { searchStr: "" } } as never)
+    ).resolves.toBeUndefined();
+  });
+
+  it("serves a tab no instance withholds without reading the instance", async () => {
+    const getJson = vi.fn();
+    const context = { queryClient: new QueryClient(), apiClient: { getJson } as never };
+    await expect(
+      TabRoute.options.beforeLoad?.({
+        context,
+        params: { tab: "ai-assistant" },
+        location: { searchStr: "" },
+      } as never)
+    ).resolves.toBeUndefined();
+    expect(getJson).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the default tab for a segment the loader let through", async () => {
+    registerProfileSettingsPage("general", () => <p>general body</p>);
+    renderProfileSettingsRoute({
+      layoutComponent: () => <Outletish />,
+      leafComponent: TabRoute.options.component as RouteComponent,
+      leafPath: "$tab",
+      initialPath: "/settings/profile/not-a-tab/",
+      transport: transport(),
+    });
+    expect(await screen.findByText("general body")).toBeInTheDocument();
   });
 
   it("renders the registered body for a known tab", async () => {
@@ -87,6 +150,34 @@ describe("unknown tab address", () => {
     expect(await screen.findByText("security body")).toBeInTheDocument();
   });
 });
+
+function guardedContext(config: Record<string, unknown>) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const apiClient = createAppClient("https://api.test", async (url: string) => ({
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => JSON.stringify({ config }),
+  }));
+  return { queryClient, apiClient };
+}
+
+/** The full instance row the contract parses; only the marker varies. */
+function instanceConfig(selfManaged: boolean): Record<string, unknown> {
+  return {
+    enable_signup: true,
+    is_workspace_creation_disabled: false,
+    is_google_enabled: false,
+    is_github_enabled: false,
+    is_gitlab_enabled: false,
+    is_gitea_enabled: false,
+    is_magic_login_enabled: false,
+    is_email_password_enabled: true,
+    is_smtp_configured: false,
+    is_self_managed: selfManaged,
+    instance_changelog_url: "",
+  };
+}
 
 function Outletish(): React.ReactElement {
   return <Outlet />;

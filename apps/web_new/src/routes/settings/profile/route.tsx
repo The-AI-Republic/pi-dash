@@ -33,12 +33,12 @@ export const Route = createFileRoute("/settings/profile")({
     // Loaded with the page, not with the router: the gate pulls the whole
     // signed-in decision tree, which no other first paint needs.
     const { loadProfileSettingsLayout } = await import("../../../features/settings/loadProfileSettings.js");
-    const { workspaces } = await loadProfileSettingsLayout({
+    const { workspaces, selfManaged } = await loadProfileSettingsLayout({
       queryClient: context.queryClient,
       apiClient: context.apiClient,
       href: `${location.pathname}${location.searchStr}`,
     });
-    return { workspaces };
+    return { workspaces, selfManaged };
   },
   component: ProfileSettingsLayout,
 });
@@ -59,7 +59,12 @@ function ProfileSettingsLayout(): React.ReactElement {
 
   return (
     <>
-      <ProfileSettingsShell activeTab={tab} workspaces={workspaces} onNavigate={onNavigate}>
+      <ProfileSettingsShell
+        activeTab={tab}
+        workspaces={workspaces}
+        selfManaged={context.selfManaged}
+        onNavigate={onNavigate}
+      >
         <Outlet />
       </ProfileSettingsShell>
       <ToastHost manager={getToastManager()} />

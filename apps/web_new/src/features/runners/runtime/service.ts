@@ -15,17 +15,21 @@ import {
   deleteDesktopEnroll,
   getAgentProfile,
   getIssue,
+  getCloudCsrfToken,
   getProject,
   isApiError,
   listProjects,
   postAgentToken,
+  type AgentToken,
   type ApiClient,
 } from "@pidash/api-client";
 
+import { edition } from "../../../core/edition/index.js";
 import type { AgentHostCheck, AgentRuntimeApi } from "../../../core/platform/index.js";
 import type { RuntimeSignOutChoice } from "../../../core/session/index.js";
 import { agentReasonMessage } from "../../../shared/lib/agentReasons.js";
 import { restoreApprovalModes, stashApprovalModes } from "./approvalModes.js";
+import { agentRefusalCode, isKnownAgentReason } from "./reasons.js";
 
 /** Server executor kind for the bundled on-machine agent. */
 export const MANAGED_RUNNER_KIND = "managed_runner";
@@ -225,10 +229,46 @@ function assertHostUsable(doctor: AgentHostCheck): void {
   }
 }
 
+/**
+ * Mint the engine credential through the build's CSRF path: the cloud
+ * deployment proxies only `/api/*`, so the agent reads its token from the
+ * cloud sibling instead of the client's default `/auth/` read
+ * (CLOUD-040, parity/specs/cloud.md §8). Every other build keeps the
+ * client's own plumbing.
+ */
+export function agentCredentialRequest(client: ApiClient, options: AgentCredentialOptions): Promise<AgentToken> {
+  if (!options.cloudCsrf) return postAgentToken(client);
+  return getCloudCsrfToken(client).then((csrf) => postAgentToken(client, { csrfToken: csrf.csrf_token }));
+}
+
+/** Which CSRF path the credential mint reads for this build. */
+export interface AgentCredentialOptions {
+  /** Cloud deployments: read `/api/auth/get-csrf-token/` and send it. */
+  cloudCsrf: boolean;
+}
+
+/** Mint with the edition's CSRF choice (cloud builds read the `/api/` sibling). */
+function mintAgentCredential(client: ApiClient): Promise<AgentToken> {
+  return agentCredentialRequest(client, { cloudCsrf: edition.flags["cloud-csrf"] === true });
+}
+
+/**
+ * A managed-runner refusal whose code this build names: the caller gets
+ * the situation-specific sentence, not a generic failure. Any other
+ * failure keeps its own error.
+ */
+export function agentRefusalError(error: unknown): unknown {
+  if (!isApiError(error)) return error;
+  const code = agentRefusalCode(error.body);
+  return code !== null && isKnownAgentReason(code) ? new EngineUnavailableError(code) : error;
+}
+
 /** Read the server profile, write the engine setup, renew an expiring credential. */
 async function configure(input: { client: ApiClient; runtime: AgentRuntimeApi }): Promise<void> {
   const { client, runtime } = input;
-  const profile = await withSessionRecovery(runtime, () => getAgentProfile(client));
+  const profile = await withSessionRecovery(runtime, () => getAgentProfile(client)).catch((error) => {
+    throw agentRefusalError(error);
+  });
   if (!profile.available) {
     state.chatReady.clear();
     await runtime.stopDaemon();
@@ -244,7 +284,9 @@ async function configure(input: { client: ApiClient; runtime: AgentRuntimeApi })
     },
   });
   if (state.tokenExpiresAt < Date.now() + CREDENTIAL_RENEW_BEFORE_MS) {
-    const credential = await withSessionRecovery(runtime, () => postAgentToken(client));
+    const credential = await withSessionRecovery(runtime, () => mintAgentCredential(client)).catch((error) => {
+      throw agentRefusalError(error);
+    });
     const expiresAt = Date.parse(credential.expires_at);
     if (!credential.token || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
       throw new Error("The desktop session expired. Sign in again.");

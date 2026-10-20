@@ -58,12 +58,18 @@ export function findProfileSettingsTab(id: ProfileSettingsTabId): ProfileSetting
   return tab;
 }
 
-/** Sidebar groups with their tabs, in display order. */
-export function profileSettingsGroups(): Array<ProfileSettingsGroup & { tabs: ProfileSettingsTab[] }> {
+/**
+ * Sidebar groups with their tabs, in display order. Withholding a tab
+ * drops it from this list; a group left empty is left out instead of
+ * rendering a heading over nothing.
+ */
+export function profileSettingsGroups(
+  isServed: (tab: ProfileSettingsTabId) => boolean = () => true
+): Array<ProfileSettingsGroup & { tabs: ProfileSettingsTab[] }> {
   return PROFILE_SETTINGS_GROUPS.map((group) => ({
     ...group,
-    tabs: PROFILE_SETTINGS_TABS.filter((tab) => tab.group === group.id),
-  }));
+    tabs: PROFILE_SETTINGS_TABS.filter((tab) => tab.group === group.id && isServed(tab.id)),
+  })).filter((group) => group.tabs.length > 0);
 }
 
 /** The document title for a tab: the sidebar label plus the page name. */

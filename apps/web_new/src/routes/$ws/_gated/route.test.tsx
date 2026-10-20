@@ -71,6 +71,7 @@ const harness = vi.hoisted(() => ({
     onUserSettings: () => void;
   },
   updateControl: undefined as React.ReactNode,
+  planBadge: undefined as React.ReactNode,
   createEntry: null as null | {
     workspaceSlug: string;
     projects: Array<{ id: string; name: string; memberRole: number | null; archived: boolean }>;
@@ -260,6 +261,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       onYourWork: () => void;
       onUserSettings: () => void;
       updateControl: React.ReactNode;
+      planBadge?: React.ReactNode;
     }) => {
       harness.sidebar = {
         personalEntries: props.personalEntries,
@@ -282,6 +284,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         onYourWork: props.onYourWork,
         onUserSettings: props.onUserSettings,
       };
+      harness.planBadge = props.planBadge;
       harness.updateControl = props.updateControl;
       return React.createElement(
         React.Fragment,
@@ -563,6 +566,11 @@ describe("gated layout shell wiring", () => {
       mockImplementation: (run: (options: { queryKey: readonly unknown[] }) => unknown) => void;
     };
     plainQuery.mockImplementation((options) => {
+      // The plan badge rides the lazy chunk below the shell; serve it a
+      // free plan so the test can see the resolved label.
+      if (options.queryKey[0] === "cloud-billing") {
+        return { data: { is_paid: false, migration_required: false, user_center_url: "https://home.test/account" } };
+      }
       if (options.queryKey[0] === "ws" && options.queryKey[2] === "projects" && options.queryKey[3] === "list") {
         if (projectsResult !== null) return projectsResult;
         return {
@@ -643,6 +651,19 @@ describe("gated layout shell wiring", () => {
             }),
         };
       }
+      if (url.endsWith("/api/billing/me/plan/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () =>
+            JSON.stringify({
+              is_paid: false,
+              migration_required: false,
+              user_center_url: "https://home.test/account",
+            }),
+        };
+      }
       // The members read 404s: the create dialog renders with no lead list.
       return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
     }) as never);
@@ -676,6 +697,7 @@ describe("gated layout shell wiring", () => {
     globalThis.localStorage.clear();
     delete edition.flags["app-rail"];
     delete edition.flags["sidebar-toggle"];
+    delete edition.flags["plan-badge"];
     delete edition.rail;
     delete edition.sidebar;
     harness.topBar = null;
@@ -1219,6 +1241,41 @@ describe("gated layout shell wiring", () => {
     expect(harness.sidebar?.editionEntries).toEqual([]);
   });
 
+  it("mounts the plan badge lazily (CLOUD-038)", () => {
+    renderShell();
+    const badge = harness.planBadge;
+    expect(React.isValidElement(badge)).toBe(true);
+    // The slot only suspends around the split badge; the feature's own
+    // suites prove the plan read, labels and focus refresh.
+    expect((badge as React.ReactElement).type).toBe(Suspense);
+  });
+
+  it("loads the plan badge from its own chunk inside the sidebar slot (CLOUD-038, size gate)", async () => {
+    edition.flags["plan-badge"] = true;
+    // Installed first: the badge opens through the platform.
+    const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
+    renderShell();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const slot = render(
+      <QueryClientProvider client={queryClient}>
+        <Suspense fallback={<span>loading plan</span>}>{harness.planBadge}</Suspense>
+      </QueryClientProvider>
+    );
+    try {
+      // Resolving the boundary imports the split chunk and renders the
+      // label from the plan the query mock serves.
+      const badge = await screen.findByRole("button", { name: "Plan: Upgrade" });
+      expect(screen.queryByText("loading plan")).not.toBeInTheDocument();
+      // The badge opens through the platform, so the desktop build uses
+      // its own window rather than the web page.
+      await userEvent.setup().click(badge);
+      expect(openExternal).toHaveBeenCalledWith("https://home.test/account");
+      openExternal.mockRestore();
+    } finally {
+      slot.unmount();
+    }
+  });
+
   it("fills the shell's sidebar slot with the desktop update control (SHELL-102)", () => {
     renderShell();
     // The shell only owns the mount point; the desktop area supplies the
@@ -1578,11 +1635,11 @@ describe("gated layout shell wiring", () => {
       }
     });
 
-    it("opens the shortcut list from the help menu", () => {
+    it("opens the shortcut list from the help menu", async () => {
       renderShell();
       const menu = renderNode(harness.topBar?.helpMenu);
       try {
-        fireEvent.click(screen.getByTestId("topbar-help-menu"));
+        fireEvent.click(await screen.findByTestId("topbar-help-menu"));
         fireEvent.click(screen.getByRole("menuitem", { name: "Keyboard shortcuts" }));
         expect(useShortcutsDialog.getState().open).toBe(true);
       } finally {

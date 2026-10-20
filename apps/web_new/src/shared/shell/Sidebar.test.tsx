@@ -135,6 +135,19 @@ describe("Sidebar", () => {
     expect(screen.getByText("update ready")).toBeInTheDocument();
   });
 
+  it("mounts no plan badge unless the edition slot is filled (CLOUD-038)", () => {
+    render(sidebar());
+    expect(screen.queryByRole("button", { name: "Upgrade" })).not.toBeInTheDocument();
+  });
+
+  it("mounts the plan badge above the account row (CLOUD-038)", () => {
+    render(sidebar({ planBadge: <button type="button">Upgrade</button> }));
+    const badge = screen.getByRole("button", { name: "Upgrade" });
+    expect(badge).toBeInTheDocument();
+    const account = screen.getByTestId("sidebar-user-menu");
+    expect(badge.compareDocumentPosition(account) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("routes the switcher and user-menu callbacks through", async () => {
     const user = userEvent.setup();
     const handlers = {

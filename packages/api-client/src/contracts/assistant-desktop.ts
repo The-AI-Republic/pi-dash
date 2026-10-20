@@ -6,7 +6,7 @@
 // chat never calls these — only desktop-gated sessions may — but the
 // shapes are contracted here so the desktop path typechecks.
 import * as z from "zod/mini";
-import { ApiClient } from "../client.js";
+import { ApiClient, CSRF_HEADER } from "../client.js";
 import { isApiError } from "../errors.js";
 import { dateTime } from "./fields.js";
 import { AssistantApiError } from "./assistant-errors.js";
@@ -40,13 +40,26 @@ export const AgentToken = z.object({
 });
 export type AgentToken = z.infer<typeof AgentToken>;
 
+/** Options for the credential mint. */
+export interface PostAgentTokenOptions {
+  /**
+   * A CSRF token read elsewhere, e.g. the cloud path on a deployment
+   * whose web server proxies only `/api/*` (the desktop agent's reason).
+   * Supplied, it replaces the client's default token read.
+   */
+  csrfToken?: string;
+}
+
 /**
  * Mint a short-lived engine credential with an empty-body POST. The
  * desktop re-fetches before expiry; nothing persists server-side.
  */
-export async function postAgentToken(client: ApiClient): Promise<AgentToken> {
+export async function postAgentToken(client: ApiClient, options: PostAgentTokenOptions = {}): Promise<AgentToken> {
   const path = "/api/users/me/ai-assistant/agent-token/";
-  const envelope = await client.sendJson<unknown>("POST", path);
+  const envelope = await client.sendJson<unknown>("POST", path, {
+    json: {},
+    ...(options.csrfToken === undefined ? {} : { headers: { [CSRF_HEADER]: options.csrfToken } }),
+  });
   return client.parse(AgentToken, envelope.data, `POST ${path}`);
 }
 

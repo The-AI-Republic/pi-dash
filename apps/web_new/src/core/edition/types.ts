@@ -34,7 +34,6 @@ export const SIDEBAR_TOGGLE_FLAG = "sidebar-toggle";
  * this; the community edition leaves it absent and renders nothing.
  */
 export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
-
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
   id: string;

@@ -5,7 +5,7 @@
 // Settings shell (parity/specs/profile.md §5, PROF-010): grouped tab
 // navigation, active state, back control, workspace shortcuts, and the
 // plain-link fallbacks for modified clicks and back to home.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -16,10 +16,15 @@ const WORKSPACES = [
   { id: "ws-2", slug: "beta", name: "beta studio" },
 ];
 
-function setup(activeTab: "general" | "security" | "api-tokens" = "general") {
+function setup(activeTab: "general" | "security" | "api-tokens" = "general", selfManaged?: boolean) {
   const onNavigate = vi.fn();
   render(
-    <ProfileSettingsShell activeTab={activeTab} workspaces={WORKSPACES} onNavigate={onNavigate}>
+    <ProfileSettingsShell
+      activeTab={activeTab}
+      workspaces={WORKSPACES}
+      selfManaged={selfManaged}
+      onNavigate={onNavigate}
+    >
       <p>tab body</p>
     </ProfileSettingsShell>
   );
@@ -42,6 +47,21 @@ describe("ProfileSettingsShell", () => {
       "href",
       "/settings/profile/api-tokens/"
     );
+  });
+
+  it("hides the password tab on a cloud-managed instance (CLOUD-035)", () => {
+    setup("general", false);
+    expect(screen.queryByRole("link", { name: "Security" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Profile" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "AI Assistant" })).toBeInTheDocument();
+  });
+
+  it("keeps the password tab on a self-managed instance and while the answer is unknown", () => {
+    setup("general", true);
+    expect(screen.getByRole("link", { name: "Security" })).toBeInTheDocument();
+    cleanup();
+    setup("general", undefined);
+    expect(screen.getByRole("link", { name: "Security" })).toBeInTheDocument();
   });
 
   it("carries the title, sidebar label and the tab body", () => {

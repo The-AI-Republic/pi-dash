@@ -38,6 +38,11 @@ describe("AGENT_REASON_MESSAGES", () => {
       expect(sentence).not.toMatch(/_/);
     }
   });
+
+  it("points the self-supplied-key refusal at the hosted lane", () => {
+    expect(agentReasonMessage("byok_not_supported_on_desktop")).toMatch(/hosted model lane/i);
+    expect(agentReasonMessage("byok_not_supported_on_desktop")).toMatch(/cloud runs/i);
+  });
 });
 
 describe("agentReasonMessage", () => {
