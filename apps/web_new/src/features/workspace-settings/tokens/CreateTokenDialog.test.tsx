@@ -88,6 +88,28 @@ function readBlob(blob: Blob): Promise<string> {
   });
 }
 
+/**
+ * No per-keystroke delay: userEvent's default schedules a timer between
+ * every character, so typing the long title below spent seconds of real
+ * time. A test that runs out of budget mid-typing used to leave its queued
+ * keystrokes to land in the next test's fields.
+ */
+function typingUser() {
+  return userEvent.setup({ delay: null });
+}
+
+/**
+ * Over-long titles go in as one value rather than 256 awaited keystrokes.
+ * The control is a plain input with no paste handler or maxlength, so this
+ * reaches the same onChange path; a maxlength would truncate the value and
+ * fail the validation assertion below.
+ */
+async function enterTitle(user: ReturnType<typeof typingUser>, value: string): Promise<void> {
+  const title = screen.getByPlaceholderText("Title");
+  await user.click(title);
+  await user.paste(value);
+}
+
 afterEach(() => {
   resetAppClient();
   vi.restoreAllMocks();
@@ -97,7 +119,7 @@ describe("CreateTokenDialog validation", () => {
   it("closes on Escape before the reveal", async () => {
     const onClose = vi.fn();
     const { wrapper } = harness((url) => json(url, "{}"));
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={onClose} now={NOW} />, { wrapper });
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
@@ -105,7 +127,7 @@ describe("CreateTokenDialog validation", () => {
 
   it("rejects an empty title inline without creating", async () => {
     const { calls, wrapper } = harness((url) => json(url, "{}"));
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.click(screen.getByRole("button", { name: "Generate token" }));
     expect(await screen.findByText(TITLE_REQUIRED_ERROR)).toBeInTheDocument();
@@ -114,21 +136,21 @@ describe("CreateTokenDialog validation", () => {
 
   it("rejects blank and over-long titles inline", async () => {
     const { wrapper } = harness((url) => json(url, "{}"));
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
-    const title = screen.getByPlaceholderText("Title");
-    await user.type(title, "   ");
+    await enterTitle(user, "   ");
     await user.click(screen.getByRole("button", { name: "Generate token" }));
     expect(await screen.findByText(TITLE_REQUIRED_ERROR)).toBeInTheDocument();
-    await user.clear(title);
-    await user.type(title, "x".repeat(256));
+    await user.clear(screen.getByPlaceholderText("Title"));
+    await enterTitle(user, "x".repeat(256));
+    expect(screen.getByPlaceholderText("Title")).toHaveValue("x".repeat(256));
     await user.click(screen.getByRole("button", { name: "Generate token" }));
     expect(await screen.findByText(TITLE_TOO_LONG_ERROR)).toBeInTheDocument();
   });
 
   it("shows the missing-expiry notice and keeps the dialog open", async () => {
     const { calls, wrapper } = harness((url) => json(url, "{}"));
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("button", { name: "Generate token" }));
@@ -140,7 +162,7 @@ describe("CreateTokenDialog validation", () => {
   it("cancels without closing through the create request", async () => {
     const onClose = vi.fn();
     const { calls, wrapper } = harness((url) => json(url, "{}"));
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={onClose} now={NOW} />, { wrapper });
     await user.click(screen.getByText("Cancel"));
     expect(onClose).toHaveBeenCalledOnce();
@@ -157,7 +179,7 @@ describe("CreateTokenDialog create and reveal", () => {
     Object.assign(URL, { createObjectURL, revokeObjectURL });
     const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.type(screen.getByPlaceholderText("Description"), "Nightly deploy");
@@ -205,7 +227,7 @@ describe("CreateTokenDialog create and reveal", () => {
     Object.assign(URL, { createObjectURL, revokeObjectURL: vi.fn() });
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("switch", { name: "Never expires" }));
@@ -222,7 +244,7 @@ describe("CreateTokenDialog create and reveal", () => {
 
   it("keeps the form and reports a failed create", async () => {
     const { calls, wrapper } = harness((url) => json(url, '{"detail":"Label is required"}', 400));
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("button", { name: "Set expiration" }));
@@ -263,7 +285,7 @@ describe("CreateTokenDialog create and reveal", () => {
       }),
       revokeObjectURL: vi.fn(),
     });
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("switch", { name: "Never expires" }));
@@ -279,7 +301,7 @@ describe("CreateTokenDialog create and reveal", () => {
     const { wrapper } = harness((url) => json(url, JSON.stringify(created), 201));
     Object.assign(URL, { createObjectURL: vi.fn(() => "blob:esc"), revokeObjectURL: vi.fn() });
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={onClose} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("switch", { name: "Never expires" }));
@@ -298,7 +320,7 @@ describe("CreateTokenDialog create and reveal", () => {
     const { wrapper } = harness((url) => json(url, JSON.stringify(created), 201));
     Object.assign(URL, { createObjectURL: vi.fn(() => "blob:backdrop"), revokeObjectURL: vi.fn() });
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={onClose} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("switch", { name: "Never expires" }));
@@ -326,7 +348,7 @@ describe("CreateTokenDialog create and reveal", () => {
     );
     Object.assign(URL, { createObjectURL: vi.fn(() => "blob:cache"), revokeObjectURL: vi.fn() });
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={() => undefined} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("switch", { name: "Never expires" }));
@@ -354,7 +376,7 @@ describe("CreateTokenDialog create and reveal", () => {
     Object.assign(URL, { createObjectURL: vi.fn(() => "blob:pending"), revokeObjectURL: vi.fn() });
     vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
     const onClose = vi.fn();
-    const user = userEvent.setup();
+    const user = typingUser();
     render(<CreateTokenDialog open onClose={onClose} now={NOW} />, { wrapper });
     await user.type(screen.getByPlaceholderText("Title"), "Deploy bot");
     await user.click(screen.getByRole("switch", { name: "Never expires" }));
