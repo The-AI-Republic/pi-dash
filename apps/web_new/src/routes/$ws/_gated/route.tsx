@@ -19,7 +19,6 @@ import * as React from "react";
 import {
   edition,
   isAppRailEnabled,
-  isPlanBadgeEnabled,
   isSidebarToggleEnabled,
   resolveEditionSidebarHref,
 } from "../../../core/edition/index.js";
@@ -519,12 +518,9 @@ function WorkspaceShell({
               </React.Suspense>
             }
             planBadge={
-              isPlanBadgeEnabled(edition) ? (
+              edition.flags["plan-badge"] === true ? (
                 <React.Suspense fallback={null}>
-                  <LazyPlanBadge
-                    onOpenExternal={(url: string) => void platform.openExternal(url)}
-                    version={APP_VERSION}
-                  />
+                  <LazyPlanBadge onOpenExternal={platform.openExternal} version={APP_VERSION} />
                 </React.Suspense>
               ) : undefined
             }

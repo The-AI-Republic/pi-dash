@@ -24,26 +24,19 @@ export interface SettingsTabOutletProps {
   selfManaged?: boolean | undefined;
 }
 
+function QuietBody(): React.ReactElement {
+  return (
+    <div data-testid="profile-settings-tab-loading" aria-busy="true" className="flex flex-col gap-(--space-3)">
+      <Skeleton className="h-8 w-48" />
+      <Skeleton className="h-4 w-full" />
+      <Skeleton className="h-4 w-2/3" />
+    </div>
+  );
+}
+
 export function SettingsTabOutlet({ tab, selfManaged }: SettingsTabOutletProps): React.ReactElement {
   const Page = useProfileSettingsPage(tab);
-  if (!isProfileSettingsTabServed(tab, selfManaged)) {
-    return (
-      <div data-testid="profile-settings-tab-loading" aria-busy="true" className="flex flex-col gap-(--space-3)">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-4 w-full" />
-        <Skeleton className="h-4 w-2/3" />
-      </div>
-    );
-  }
-  if (Page === null) {
-    return (
-      <div data-testid="profile-settings-tab-loading" aria-busy="true" className="flex flex-col gap-(--space-3)">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-4 w-full" />
-        <Skeleton className="h-4 w-2/3" />
-      </div>
-    );
-  }
+  if (Page === null || !isProfileSettingsTabServed(tab, selfManaged)) return <QuietBody />;
   const Body = Page;
   return <Body />;
 }

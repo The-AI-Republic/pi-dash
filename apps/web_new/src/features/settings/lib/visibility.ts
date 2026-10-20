@@ -10,18 +10,15 @@
 // so a slow read never strands a self-managed operator's password page.
 import type { ProfileSettingsTabId } from "./tabNavigation.js";
 
-/** Tabs an instance config can withdraw. */
-const CONFIG_GATED_TABS: ReadonlySet<ProfileSettingsTabId> = new Set(["security"]);
-
 /**
  * True when the tab is served here. `selfManaged` is the instance
  * config's marker: `undefined` while unknown, and unknown keeps the
  * tab. A self-managed instance serves the password tab; a hosted
- * (cloud-managed) one withdraws it.
+ * (cloud-managed) one withdraws it. The password tab is the only
+ * config-gated tab today.
  */
 export function isProfileSettingsTabServed(tab: ProfileSettingsTabId, selfManaged: boolean | undefined): boolean {
-  if (!CONFIG_GATED_TABS.has(tab)) return true;
-  return selfManaged !== false;
+  return tab !== "security" || selfManaged !== false;
 }
 
 /** The tab a withdrawn address forwards to. */
