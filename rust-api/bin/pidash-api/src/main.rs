@@ -237,18 +237,15 @@ async fn worker(concurrency: u32) -> MainResult {
     };
     // Task handlers register through the shared OSS composition
     // (`pidash_jobs::register_oss_handlers`, PIDASHCONV-918); any
-    // still-unregistered name forwards to Python. The async inputs —
-    // the Mongo sink and the boot-loaded fire-tick states — load here,
-    // exactly as before; registration itself is a pure function of
-    // the context.
+    // still-unregistered name forwards to Python. The async input —
+    // the Mongo sink — loads here, exactly as before; registration
+    // itself is a pure function of the context.
     let mut registry = pidash_jobs::Registry::new();
     let settings = settings_from_env()?;
     let mongo = pidash_db::tasks_cleanup::cleanup_queries::MongoSink::from_env().await;
     if mongo.is_none() {
         tracing::info!("MongoDB not configured; cleanup tasks will delete from Postgres only");
     }
-    let fire_tick_states =
-        pidash_jobs::orchestration::LiveFireTickSeam::load_states(pools.primary()).await?;
     // The CE assistant seam: the same default `serve` installs on the
     // app state, so worker-side runs-creation gates answer exactly as
     // the serve-side gates do (PIDASHCONV-1054). The cloud binary
@@ -286,7 +283,6 @@ async fn worker(concurrency: u32) -> MainResult {
             pools: pools.clone(),
             settings,
             mongo,
-            fire_tick_states,
             seed_dir: seed_data_dir(),
             assistant_seam,
         },

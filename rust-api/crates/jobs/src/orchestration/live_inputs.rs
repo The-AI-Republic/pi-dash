@@ -28,9 +28,6 @@
 //!   `dispatch_deps` verdict-map shape, PIDASHCONV-1051); the sync `H`
 //!   closure then reads the verdict map (a user outside the map answers
 //!   closed, the same as a missing config row).
-//! * [`load_states`]: the boot-time state cache the sync seam methods
-//!   resolve through (the shim docs bless a cached resolver: "cutover
-//!   wiring provides a cached one").
 //!
 //! The universe queries carry no soft-delete guards: presence is keyed
 //! by id, so an extra id is harmless while a missing one would answer
@@ -53,8 +50,6 @@ use pidash_services::orchestration::dispatch::{
     DispatchError, PodRunnerMatcher, LIVE_ASSIGNEE_CANDIDATES_SQL,
 };
 use pidash_services::runner_sessions::guards as g;
-
-use super::fire_tick_seam::StateView;
 
 // ---------------------------------------------------------------------------
 // Call cache
@@ -340,24 +335,6 @@ pub(crate) fn profile_fn(
             reason_code: profile.reason_code,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Boot-time state cache
-// ---------------------------------------------------------------------------
-
-/// Every live state row: the sync seam methods resolve
-/// `is_ticking_state` / tick intervals through this boot-loaded map
-/// (states change rarely; the shim docs bless a cached resolver).
-pub(crate) async fn load_states(pool: &PgPool) -> Result<HashMap<Uuid, StateView>, sqlx::Error> {
-    let rows: Vec<(Uuid, String, String)> =
-        sqlx::query_as(r#"SELECT "id", "name", "group" FROM "states" WHERE "deleted_at" IS NULL"#)
-            .fetch_all(pool)
-            .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, name, group)| (id, StateView { id, name, group }))
-        .collect())
 }
 
 #[cfg(test)]

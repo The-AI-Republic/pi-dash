@@ -10,9 +10,11 @@
 //!
 //! One transaction locks the ticker row (`SELECT ... FOR UPDATE`, locking
 //! only our own row — the Python `select_for_update(of=("self",))`) and
-//! reads the related issue (`state_id`, `project_id`) and project tick
-//! columns the way `select_related("issue", "issue__state",
-//! "issue__project")` does (related rows are read, never locked). After
+//! reads the related issue (`state_id`, `project_id`), its state row
+//! (`name`, `group` — resolved live every fire, no `deleted_at`
+//! filter, PIDASHCONV-1218), and project tick columns the way
+//! `select_related("issue", "issue__state", "issue__project")` does
+//! (related rows are read, never locked). After
 //! the lock the row is re-checked (missing → `False`, disabled → `False`,
 //! `next_run_at` `None`-or-future → `False`), then the switch gate (a
 //! non-free claim with `user_disabled` set or the project flag off disarms
@@ -72,6 +74,7 @@ use rand08::SeedableRng;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::orchestration::StateView;
 use pidash_db::tasks_ticker::models::{
     jitter_seconds, pool_size_or_default, TickerDisarmReason, INFINITE_MAX_TICKS,
 };
@@ -163,11 +166,16 @@ pub struct SeamAnswers {
 /// implementor's own pool handle (never the claim transaction).
 pub trait FireTickSeam: Send + Sync {
     /// `orchestration.agent_phases.is_ticking_state` (`agent_ticker.py:187`).
-    fn is_ticking_state(&self, state_id: Option<Uuid>) -> bool;
+    ///
+    /// The state row is resolved live by the caller (`read_claim` joins
+    /// it, like Django's `select_related("issue__state")`): a cached
+    /// boot-time map cannot see a project/state created after start
+    /// (PIDASHCONV-1218).
+    fn is_ticking_state(&self, state: Option<&StateView>) -> bool;
 
     /// `ticker.effective_interval_seconds()` (`:241`): the stage→column
     /// resolution plus the project-column read with the stage default.
-    fn tick_interval_seconds(&self, state_id: Option<Uuid>, project: &ProjectTickCols) -> i64;
+    fn tick_interval_seconds(&self, state: Option<&StateView>, project: &ProjectTickCols) -> i64;
 
     /// `_active_run_for(issue) is not None` (`:197`).
     fn has_active_run(
@@ -509,12 +517,36 @@ async fn read_claim(
         pending_entry_trigger: row.try_get("pending_entry_trigger")?,
     };
     let issue_id: Uuid = row.try_get("issue_id")?;
-    let issue = sqlx::query("SELECT state_id, project_id FROM issues WHERE id = $1")
-        .bind(issue_id)
-        .fetch_optional(&mut **tx)
-        .await?;
-    let (state_id, project_id): (Option<Uuid>, Option<Uuid>) = match issue {
-        Some(issue) => (issue.try_get("state_id")?, issue.try_get("project_id")?),
+    // `select_related("issue__state")`: resolve the state row live, with
+    // no `deleted_at` filter (a soft-deleted state still resolves — the
+    // FK does not care), so a state created or renamed after the worker
+    // booted is seen (PIDASHCONV-1218).
+    let issue = sqlx::query(
+        r#"SELECT i.state_id AS state_id, i.project_id AS project_id,
+                  s.name AS state_name, s."group" AS state_group
+           FROM issues i
+           LEFT JOIN states s ON s.id = i.state_id
+           WHERE i.id = $1"#,
+    )
+    .bind(issue_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (state, project_id): (Option<StateView>, Option<Uuid>) = match issue {
+        Some(issue) => {
+            let state_id: Option<Uuid> = issue.try_get("state_id")?;
+            let state = match state_id {
+                Some(id) => {
+                    let name: Option<String> = issue.try_get("state_name")?;
+                    let group: Option<String> = issue.try_get("state_group")?;
+                    match (name, group) {
+                        (Some(name), Some(group)) => Some(StateView { id, name, group }),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+            (state, issue.try_get("project_id")?)
+        }
         None => (None, None),
     };
     let project = match project_id {
@@ -534,7 +566,7 @@ async fn read_claim(
     Ok(Some(ClaimRead {
         snapshot,
         issue_id,
-        state_id,
+        state,
         project,
     }))
 }
@@ -544,7 +576,8 @@ async fn read_claim(
 pub struct ClaimRead {
     pub snapshot: TickerSnapshot,
     pub issue_id: Uuid,
-    pub state_id: Option<Uuid>,
+    /// The issue's state row, resolved live in the claim transaction.
+    pub state: Option<StateView>,
     pub project: ProjectTickCols,
 }
 
@@ -694,7 +727,7 @@ pub async fn fire_tick(
             Ok(false)
         }
         PreDecision::Proceed { free_claim, cap } => {
-            if !seam.is_ticking_state(read.state_id) {
+            if !seam.is_ticking_state(read.state.as_ref()) {
                 return Ok(false);
             }
             if seam.has_active_run(read.issue_id).await? {
@@ -711,7 +744,7 @@ pub async fn fire_tick(
                 );
                 return Ok(false);
             }
-            let interval = seam.tick_interval_seconds(read.state_id, &read.project);
+            let interval = seam.tick_interval_seconds(read.state.as_ref(), &read.project);
             let jitter = jitter_seconds(interval, rng);
             let answers = SeamAnswers {
                 ticking_state: true,
@@ -1316,12 +1349,12 @@ mod tests {
     async fn registry_owns_fire_tick_after_register() {
         struct NoSeam;
         impl FireTickSeam for NoSeam {
-            fn is_ticking_state(&self, _state: Option<Uuid>) -> bool {
+            fn is_ticking_state(&self, _state: Option<&StateView>) -> bool {
                 true
             }
             fn tick_interval_seconds(
                 &self,
-                _state: Option<Uuid>,
+                _state: Option<&StateView>,
                 _project: &ProjectTickCols,
             ) -> i64 {
                 10800

@@ -1911,9 +1911,9 @@ mod tests {
         pidash_jobs::loop_fire::register_fire(&mut registry, pool.clone());
         pidash_jobs::tasks_ticker::scan::register_scanners(&mut registry, pool.clone());
         // Real registrations (the same calls `worker()` makes): the
-        // live tick seam over test-default settings with an empty
-        // state map, and the live scheduler dispatch. Construction
-        // does no I/O, so the lazy pool suffices.
+        // live tick seam over test-default settings, and the live
+        // scheduler dispatch. Construction does no I/O, so the lazy
+        // pool suffices.
         let dispatch_settings = pidash_db::config::Settings::test_defaults();
         // The same CE assistant seam `worker()` installs (PIDASHCONV-1054).
         let dispatch_assistant_seam =
@@ -1927,7 +1927,6 @@ mod tests {
                 pool.clone(),
                 dispatch_settings.cloud_agent.clone(),
                 dispatch_settings.managed_runner.clone(),
-                std::collections::HashMap::new(),
                 std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
                 dispatch_assistant_seam.clone(),
             )),

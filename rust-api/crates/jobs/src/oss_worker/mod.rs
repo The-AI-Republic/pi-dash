@@ -44,25 +44,20 @@ pub mod model_runtime;
 pub mod redis_origin;
 pub mod runner_seams;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-
-use uuid::Uuid;
 
 use pidash_db::config::Settings;
 use pidash_db::tasks_cleanup::cleanup_queries::MongoSink;
 use pidash_db::Pools;
 use pidash_services::extensions::{AssistantModelSeam, NoExtraToolsets};
 
-use crate::orchestration::StateView;
 use crate::worker::Registry;
 
 /// The OSS worker's registration inputs: everything
 /// [`register_oss_handlers`] needs beyond the registry.
 ///
 /// The caller loads the async pieces (`mongo` via
-/// `MongoSink::from_env`, `fire_tick_states` via
-/// `LiveFireTickSeam::load_states`) exactly as `worker()` did before
+/// `MongoSink::from_env`) exactly as `worker()` did before
 /// PIDASHCONV-918; the helper only registers.
 pub struct OssWorkerCtx {
     /// The worker's pools (handlers close over clones).
@@ -71,8 +66,6 @@ pub struct OssWorkerCtx {
     pub settings: Settings,
     /// The Mongo sink for cleanup tasks, if MongoDB is configured.
     pub mongo: Option<MongoSink>,
-    /// The boot-loaded fire-tick state map.
-    pub fire_tick_states: HashMap<Uuid, StateView>,
     /// Seed-data dir for `workspace_seed` (`SEED_DIR` env or `seeds/`).
     pub seed_dir: PathBuf,
     /// The assistant model-provider seam the worker-side
@@ -95,7 +88,6 @@ pub struct OssWorkerCtx {
 /// workers own identical registries:
 ///
 /// ```rust
-/// use std::collections::HashMap;
 /// use pidash_db::config::Settings;
 /// use pidash_jobs::oss_worker::{register_oss_handlers, OssWorkerCtx};
 /// use pidash_jobs::worker::Registry;
@@ -133,7 +125,6 @@ pub struct OssWorkerCtx {
 ///     pools: pidash_db::Pools::primary_only(pool),
 ///     settings,
 ///     mongo: None,
-///     fire_tick_states: HashMap::new(),
 ///     seed_dir: std::env::temp_dir(),
 ///     assistant_seam: std::sync::Arc::new(DefaultSeam),
 /// };
@@ -260,7 +251,7 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // seams: the tick seam prefetches creator presence per fire and
     // runs the jobs continuation driver; the scheduler dispatch runs
     // the jobs scheduler driver over a live EntriesSeam. Both need
-    // dispatch settings + the boot-loaded state map.
+    // dispatch settings.
     crate::tasks_ticker::fire_tick::register_fire_tick(
         registry,
         ctx.pools.primary().clone(),
@@ -268,7 +259,6 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
             ctx.pools.primary().clone(),
             ctx.settings.cloud_agent.clone(),
             ctx.settings.managed_runner.clone(),
-            ctx.fire_tick_states.clone(),
             std::sync::Arc::new(NoExtraToolsets),
             ctx.assistant_seam.clone(),
         )),
@@ -504,7 +494,6 @@ mod tests {
             pools: Pools::primary_only(pool),
             settings,
             mongo: None,
-            fire_tick_states: HashMap::new(),
             seed_dir: std::env::temp_dir(),
             assistant_seam: std::sync::Arc::new(DefaultSeam),
         };
