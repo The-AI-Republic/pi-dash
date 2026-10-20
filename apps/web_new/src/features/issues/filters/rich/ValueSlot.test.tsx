@@ -1905,7 +1905,9 @@ describe("ValueSlot project marks", () => {
     // Applied-first ordering leaves alphabetical: Emoji, Iconic, Plain.
     expect(marks.map((mark) => mark.getAttribute("data-mark"))).toEqual(["emoji", "icon", "initial"]);
     expect(marks[0]).toHaveTextContent("🚀");
-    expect(marks[1]!.querySelector("svg")).not.toBeNull();
+    // The glyph set rides its own chunk; the mark shows the initial until it
+    // arrives, so wait for the drawn symbol rather than sampling the first frame.
+    await waitFor(() => expect(marks[1]!.querySelector("svg")).not.toBeNull());
     expect(marks[1]!.querySelector("svg")!.getAttribute("stroke")).toBe("#f97316");
     expect(marks[2]).toHaveTextContent("P");
   });
