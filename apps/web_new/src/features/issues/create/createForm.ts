@@ -65,6 +65,39 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
 }
 
 /**
+ * The fields a listing surface can pre-set when it opens the create modal
+ * (ISS-011/ISS-012): the section's grouping value plus the project's
+ * default state. Cycle and module memberships ride the post-create
+ * bridge, so they are not part of this payload.
+ */
+export interface CreateFormInitialValues {
+  stateId?: string | null | undefined;
+  priority?: string | undefined;
+  assigneeIds?: string[] | undefined;
+  labelIds?: string[] | undefined;
+  cycleId?: string | null | undefined;
+  moduleIds?: string[] | undefined;
+}
+
+/** A blank form with the caller's listing prefill applied. */
+export function initialCreateForm(
+  projectId: string | null,
+  initial: CreateFormInitialValues = {},
+  descriptionHtml = "",
+  name = ""
+): CreateFormState {
+  const form = emptyCreateForm(projectId, descriptionHtml);
+  form.name = name;
+  if (initial.stateId !== undefined && initial.stateId !== null) form.stateId = initial.stateId;
+  if (initial.priority !== undefined && initial.priority !== "none") form.priority = initial.priority;
+  if (initial.assigneeIds !== undefined) form.assigneeIds = [...initial.assigneeIds];
+  if (initial.labelIds !== undefined) form.labelIds = [...initial.labelIds];
+  if (initial.cycleId !== undefined) form.cycleId = initial.cycleId;
+  if (initial.moduleIds !== undefined) form.moduleIds = [...initial.moduleIds];
+  return form;
+}
+
+/**
  * The form after a successful create while Create more is on (ISS-119).
  * The project and the route's cycle/module context stay, so the next
  * item lands where the modal opened; everything else is a new item. The

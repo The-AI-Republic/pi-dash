@@ -76,6 +76,7 @@ import {
   toCreateProjectOption,
   titleError,
   visibleDescriptionHtml,
+  type CreateFormInitialValues,
   type CreateFormState,
   type CreateMembership,
 } from "../create/createForm.js";
@@ -140,10 +141,14 @@ export interface WorkItemCreateDialogProps {
   projects: WorkItemCreateProject[];
   /** Pre-selected target, e.g. the project whose page opened the dialog. */
   initialProjectId?: string;
+  /** Prefix for the success toast's "View work item" action. */
+  projectIdentifier?: string | undefined;
   /** Workspace create standing; guests never open the form. */
   canCreate?: boolean;
   /** Fired after a create lands, with the server's row id. */
   onCreated?: (issueId: string) => void;
+  /** Listing prefill: the section's grouping value and default state (ISS-011/ISS-012). */
+  initialValues?: CreateFormInitialValues | undefined;
   /** Edit the named row instead of creating one (ISS-126). */
   edit?: WorkItemEditTarget | null;
   /** Route context preseeding a new item's cycle or module (ISS-124). */
@@ -226,13 +231,26 @@ function freshForm(workspaceSlug: string, projectId: string | null, name = ""): 
   return state;
 }
 
-/** A blank form seeded from a cycle or module page (ISS-124). */
+/**
+ * A blank form seeded from a cycle or module page (ISS-124), plus the
+ * listing prefill a section hands the modal (ISS-011/ISS-012): its
+ * grouping value and the project's default state. Route context wins
+ * over a prefill cycle/module, since the page decides where the item
+ * lands.
+ */
 function contextForm(
   workspaceSlug: string,
   projectId: string | null,
-  context: WorkItemCreateContext | undefined
+  context: WorkItemCreateContext | undefined,
+  initial: CreateFormInitialValues | undefined
 ): CreateFormState {
   const state = freshForm(workspaceSlug, projectId);
+  if (initial?.stateId != null) state.stateId = initial.stateId;
+  if (initial?.priority !== undefined && initial.priority !== "none") state.priority = initial.priority;
+  if (initial?.assigneeIds !== undefined) state.assigneeIds = [...initial.assigneeIds];
+  if (initial?.labelIds !== undefined) state.labelIds = [...initial.labelIds];
+  if (initial?.cycleId !== undefined) state.cycleId = initial.cycleId;
+  if (initial?.moduleIds !== undefined) state.moduleIds = [...initial.moduleIds];
   if (context?.cycleId != null) state.cycleId = context.cycleId;
   if (context?.moduleId != null) state.moduleIds = [context.moduleId];
   return state;
@@ -303,8 +321,10 @@ export function WorkItemCreateDialog({
   workspaceSlug,
   projects,
   initialProjectId,
+  projectIdentifier,
   canCreate = true,
   onCreated,
+  initialValues,
   edit = null,
   context,
   draftId = null,
@@ -457,7 +477,8 @@ export function WorkItemCreateDialog({
         ? null
         : resolveProjectId(offered, lockedProjectId ?? initialProjectId ?? editProjectId ?? null);
     const starting = edit === null ? null : editStart(edit, projectId);
-    let next = starting ?? contextForm(workspaceSlug, projectId, editing ? undefined : context);
+    let next =
+      starting ?? contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
     routeMembership.current = membershipForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
@@ -490,6 +511,7 @@ export function WorkItemCreateDialog({
     editing,
     editProjectId,
     context,
+    initialValues,
   ]);
 
   // The detail read answers after the first paint: adopt its description
@@ -700,6 +722,7 @@ export function WorkItemCreateDialog({
       {
         projectId,
         payload: buildCreatePayload(named),
+        ...(projectIdentifier === undefined ? {} : { projectIdentifier }),
       },
       {
         onSettled: () => {

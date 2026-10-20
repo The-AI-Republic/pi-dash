@@ -37,12 +37,14 @@ export const DISPLAY_SWITCH_LABELS: Record<DisplaySwitchKey, string> = {
 /** Grouping labels by stored dimension key. */
 export const GROUP_DIMENSION_LABELS: Record<string, string> = {
   state: "States",
+  "state_detail.group": "State groups",
   priority: "Priority",
   cycle: "Cycle",
   module: "Module",
   labels: "Labels",
   assignees: "Assignees",
   created_by: "Created by",
+  team_project: "Team project",
 };
 
 /** Label for the ungrouped choice. */
@@ -94,12 +96,14 @@ export interface LayoutDisplayMatrix {
 
 const LIST_GROUP: readonly (string | null)[] = [
   "state",
+  "state_detail.group",
   "priority",
   "cycle",
   "module",
   "labels",
   "assignees",
   "created_by",
+  "team_project",
   null,
 ];
 

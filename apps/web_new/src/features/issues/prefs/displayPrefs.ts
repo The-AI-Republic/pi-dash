@@ -67,12 +67,13 @@ function parseProperties(value: unknown): Record<string, boolean> {
 }
 
 /**
- * Parse the stored filter keys into display preferences. Empty groups and
- * sub-issues default to hidden: the ISS-002 oracle restores grouping
- * without a show_empty_groups key and sees only the populated group, and
- * the ISS-079/ISS-080 oracle renders both switches unchecked when their
- * keys are absent. Fresh server records seed both keys true, so new users
- * still start with everything shown.
+ * Parse the stored filter keys into display preferences. Empty groups
+ * default to hidden because the ISS-002 oracle restores grouping without a
+ * show_empty_groups key and sees only the populated group. Sub-issues are
+ * the opposite: ISS-079 defines the switch as on by default, and list reads
+ * need that default to include child rows when a record predates the key.
+ * Fresh server records seed both keys, so the legacy default only matters
+ * for old or reset records.
  */
 export function parseDisplayPrefs(
   displayFilters: Record<string, unknown>,
@@ -84,7 +85,7 @@ export function parseDisplayPrefs(
     subGroupBy: parseGroupKey(displayFilters["sub_group_by"]),
     orderBy: parseOrderBy(displayFilters["order_by"]),
     showEmptyGroups: displayFilters["show_empty_groups"] === true,
-    showSubIssues: displayFilters["sub_issue"] === true,
+    showSubIssues: displayFilters["sub_issue"] !== false,
     calendar: parseCalendar(displayFilters["calendar"]),
     properties: parseProperties(displayProperties),
   };

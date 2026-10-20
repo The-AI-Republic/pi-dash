@@ -176,6 +176,11 @@ export interface DateRangePickerProps {
   /** Hover clear resetting both ends. Defaults to false. */
   clearable?: boolean | undefined;
   testId?: string | undefined;
+  /** Fully custom trigger; overrides the default value button. */
+  trigger?: React.ReactElement<Record<string, unknown>> | undefined;
+  /** Controlled popup state; omit for the picker's own state. */
+  open?: boolean | undefined;
+  onOpenChange?: ((open: boolean) => void) | undefined;
 }
 
 function mergedLabel(
@@ -205,8 +210,16 @@ export function DateRangePicker({
   disabled = false,
   clearable = false,
   testId = "date-range-picker",
+  trigger,
+  open: controlledOpen,
+  onOpenChange,
 }: DateRangePickerProps): React.ReactElement {
-  const [open, setOpen] = React.useState(false);
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false);
+  const open = controlledOpen ?? uncontrolledOpen;
+  function setOpen(next: boolean): void {
+    if (controlledOpen === undefined) setUncontrolledOpen(next);
+    onOpenChange?.(next);
+  }
   const normalizedStart = normalizeWeekStart(weekStart);
   const showClear = clearable && (value.start !== null || value.end !== null) && !disabled;
   const empty = value.start === null && value.end === null;
@@ -217,32 +230,34 @@ export function DateRangePicker({
         open={open}
         onOpenChange={setOpen}
         trigger={
-          <button
-            type="button"
-            aria-label={label}
-            disabled={disabled}
-            data-testid={`${testId}-trigger`}
-            className={
-              empty
-                ? "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                : "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
-            }
-          >
-            <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
-            {mode === "merged" ? (
-              mergedLabel(value, mergedPlaceholder, fromPlaceholder, toPlaceholder)
-            ) : (
-              <span className="inline-flex items-center gap-(--space-2)">
-                <span className={value.start === null ? "text-(--text-muted)" : undefined}>
-                  {value.start === null ? fromPlaceholder : formatDay(value.start)}
+          trigger ?? (
+            <button
+              type="button"
+              aria-label={label}
+              disabled={disabled}
+              data-testid={`${testId}-trigger`}
+              className={
+                empty
+                  ? "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                  : "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              }
+            >
+              <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+              {mode === "merged" ? (
+                mergedLabel(value, mergedPlaceholder, fromPlaceholder, toPlaceholder)
+              ) : (
+                <span className="inline-flex items-center gap-(--space-2)">
+                  <span className={value.start === null ? "text-(--text-muted)" : undefined}>
+                    {value.start === null ? fromPlaceholder : formatDay(value.start)}
+                  </span>
+                  <ArrowRight size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
+                  <span className={value.end === null ? "text-(--text-muted)" : undefined}>
+                    {value.end === null ? toPlaceholder : formatDay(value.end)}
+                  </span>
                 </span>
-                <ArrowRight size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
-                <span className={value.end === null ? "text-(--text-muted)" : undefined}>
-                  {value.end === null ? toPlaceholder : formatDay(value.end)}
-                </span>
-              </span>
-            )}
-          </button>
+              )}
+            </button>
+          )
         }
       >
         <DateRangeCalendar

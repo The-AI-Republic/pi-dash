@@ -10,7 +10,7 @@
 // out of the route chunk; context empty-state copy arrives with ISS-068.
 
 import { useSuspenseQuery } from "@tanstack/react-query";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
@@ -32,24 +32,20 @@ import {
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
 import {
   ResolvedAnalyticsEntry,
-  ResolvedIssueList,
   loadIssueListLeaves,
   primeIssueListLeaves,
 } from "../../../../../../features/issues/components/lazyLeaves.js";
+import { loadListLayout, resolvedListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
-const LazyIssueFilters = React.lazy(() => import("../../../../../../features/issues/filters/rich/IssueFilters.js"));
-
-// The timeline boundary (and the chart code behind it) only matters when
-// the timeline layout is chosen, so the route chunk carries neither
-// (Quality gates, NEWFRONT-677): the skeleton shows while its chunk lands.
-const LazyGanttTimeline = React.lazy(() =>
-  import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
-    default: module.GanttTimeline,
-  }))
-);
-
+// The list layout is a separate chunk so the route stays inside the
+// initial-JS budget (Quality gates). `beforeLoad` awaits it with the data,
+// so the component mounts once instead of suspending after commit.
+import { LazyIssueFilters, preloadIssueFilters } from "../../../../../../features/issues/filters/rich/lazy.js";
+// Start the filter chunk with the route module so the first layout render
+// does not suspend and mount the layout twice (NEWFRONT-619).
+preloadIssueFilters();
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { registerCommands } from "../../../../../../shared/commands/index.js";
 import { notifyError } from "../../../../../../shared/shell/index.js";
@@ -73,6 +69,15 @@ const LazySpreadsheetLayout = React.lazy(() =>
 const LazyWorkItemCreateDialog = React.lazy(() =>
   import("../../../../../../features/issues/components/WorkItemCreateDialog.js").then((module) => ({
     default: module.WorkItemCreateDialog,
+  }))
+);
+
+// The timeline is only rendered when the stored layout selects it. Its
+// boundary module would otherwise join the route's initial closure even
+// though the list first paint never mounts it (Quality gates).
+const LazyGanttTimeline = React.lazy(() =>
+  import("../../../../../../features/issues/gantt/GanttTimeline.js").then((module) => ({
+    default: module.GanttTimeline,
   }))
 );
 
@@ -113,9 +118,11 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
           orderByOf(record)
         )
       );
-      // The list and analytics leaves ride their own chunk (Quality gates);
-      // await it with the data so the first commit is the screen itself.
-      await loadIssueListLeaves();
+      // The list and analytics leaves, and the list layout itself, ride
+      // their own chunks (Quality gates); await them with the data so the
+      // first commit is the screen itself. The list layout reads its own
+      // first page, including the stored sub-issue and empty-group flags.
+      await Promise.all([loadIssueListLeaves(), loadListLayout()]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -150,6 +157,14 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
     const search = Route.useSearch();
     const context = Route.useRouteContext();
     const queryClient = context.queryClient;
+    const navigate = useNavigate();
+    const peekKey = search.peekIssueId ?? null;
+    const setPeekKey = (key: string | null): void => {
+      const next = { ...search };
+      if (key === null) delete next.peekIssueId;
+      else next.peekIssueId = key;
+      void navigate({ to: ".", search: next, replace: true } as never);
+    };
 
     const { data: projects } = useSuspenseQuery(projectsQueryOptions(context.apiClient, params.ws));
     const project = projects.find((entry) => entry.id === params.projectId) ?? null;
@@ -185,6 +200,10 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         orderByOf(preferences)
       )
     );
+    // The stored rich filters (ISS-095–099) scope the list's first page and
+    // every later page; without conditions this is the plain flat read. The
+    // list layout owns that page (its own chunk) and reads it itself, so the
+    // route only needs the flat totals for the layout root.
     React.useEffect(
       () =>
         registerCommands([
@@ -289,11 +308,19 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
               </React.Suspense>
             );
           }
+          const ResolvedListLayout = resolvedListLayout();
           return (
-            <ResolvedIssueList
-              issues={issues.results}
+            <ResolvedListLayout
+              workspaceSlug={params.ws}
+              entity={{ scope: "project", projectId: params.projectId }}
+              projectId={params.projectId}
               projectIdentifier={project.identifier}
-              layout={search.layout ?? "list"}
+              prefs={prefs}
+              canEdit={canEdit}
+              richFilters={preferences.rich_filters}
+              peekKey={peekKey}
+              onPeekChange={setPeekKey}
+              compact={search.layout === "compact"}
             />
           );
         }}

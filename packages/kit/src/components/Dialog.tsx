@@ -68,7 +68,7 @@ export function Dialog({
         >
           <div className="flex items-start justify-between gap-(--space-4)">
             <div className="flex flex-col gap-(--space-2)">
-              <BaseDialog.Title className="text-h3 text-(--text)">{title}</BaseDialog.Title>
+              <BaseDialog.Title className="text-h4-medium text-(--text)">{title}</BaseDialog.Title>
               {description ? (
                 <BaseDialog.Description className="text-body text-(--text-muted)">{description}</BaseDialog.Description>
               ) : null}

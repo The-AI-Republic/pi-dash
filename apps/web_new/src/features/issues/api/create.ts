@@ -12,7 +12,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createIssue, type IssueCreateInput, type IssueCreateResult } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
 import { createTempId } from "../freshness/fresh.js";
 import { insertTempRow, removeTempRow, tempIssueRow } from "../freshness/tempRows.js";
 import { issueKeys } from "./keys.js";
@@ -23,10 +23,19 @@ export const WORK_ITEM_CREATED_TITLE = "Work item created successfully";
 export const WORK_ITEM_CREATE_FAILED_TITLE = "Couldn't create the work item";
 const WORK_ITEM_CREATE_FAILED_BODY = "Nothing was created — check your connection and try again.";
 
+/** Browse route for a created row, used by the toast's follow-up action. */
+export function createdWorkItemPath(workspaceSlug: string, projectIdentifier: string, sequenceId: number): string {
+  return `/${workspaceSlug}/browse/${projectIdentifier}-${sequenceId}`;
+}
+
 /** One submit: the target project plus everything the dialog collected. */
 export interface WorkItemCreateInput {
   projectId: string;
   payload: IssueCreateInput;
+  /** Grouped section bucket for the optimistic row (ISS-011). */
+  tempGroupKey?: string | undefined;
+  /** Identifier prefix for the toast's "View work item" follow-up. */
+  projectIdentifier?: string | undefined;
 }
 
 /** Post one work item, refreshing the workspace lists after. */
@@ -42,7 +51,8 @@ export function useCreateWorkItem(workspaceSlug: string) {
         tempIssueRow(tempId, input.payload.name, {
           startDate: input.payload.start_date ?? null,
           targetDate: input.payload.target_date ?? null,
-        })
+        }),
+        input.tempGroupKey
       );
       try {
         return await createIssue(getAppClient(), workspaceSlug, input.projectId, input.payload);
@@ -51,8 +61,20 @@ export function useCreateWorkItem(workspaceSlug: string) {
         throw error;
       }
     },
-    onSuccess: () => {
-      notifySuccess(WORK_ITEM_CREATED_TITLE);
+    onSuccess: (created, input) => {
+      // The spec's ISS-011 toast offers a follow-up action. The list knows
+      // the project prefix; callers without one keep the plain toast.
+      if (input.projectIdentifier === undefined) {
+        notifySuccess(WORK_ITEM_CREATED_TITLE);
+        return;
+      }
+      const identifier = input.projectIdentifier;
+      notifySuccessWithAction(WORK_ITEM_CREATED_TITLE, undefined, {
+        actionLabel: "View work item",
+        onAction: () => {
+          globalThis.location.assign(createdWorkItemPath(workspaceSlug, identifier, created.sequence_id));
+        },
+      });
     },
     onError: () => {
       notifyError(WORK_ITEM_CREATE_FAILED_TITLE, WORK_ITEM_CREATE_FAILED_BODY);

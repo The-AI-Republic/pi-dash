@@ -41,14 +41,14 @@ describe("parseDisplayPrefs", () => {
     });
   });
 
-  it("defaults an empty record to the list layout with hidden empties", () => {
+  it("defaults an empty record to the list layout, hidden empties and shown sub-issues", () => {
     expect(parseDisplayPrefs({}, {})).toEqual({
       layout: "list",
       groupBy: null,
       subGroupBy: null,
       orderBy: "sort_order",
       showEmptyGroups: false,
-      showSubIssues: false,
+      showSubIssues: true,
       calendar: { mode: "month", showWeekends: true },
       properties: {},
     });
@@ -72,7 +72,7 @@ describe("parseDisplayPrefs", () => {
     expect(prefs.subGroupBy).toBeNull();
     expect(prefs.orderBy).toBe("sort_order");
     expect(prefs.showEmptyGroups).toBe(false);
-    expect(prefs.showSubIssues).toBe(false);
+    expect(prefs.showSubIssues).toBe(true);
     expect(prefs.calendar).toEqual({ mode: "month", showWeekends: true });
     expect(prefs.properties).toEqual({ priority: true });
   });
@@ -106,7 +106,7 @@ describe("buildPrefsPatch", () => {
         order_by: "sort_order",
         sub_group_by: null,
         show_empty_groups: false,
-        sub_issue: false,
+        sub_issue: true,
         calendar: { layout: "month", show_weekends: true },
       },
       display_properties: {},

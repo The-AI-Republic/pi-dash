@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "./keys.js";
 import {
+  createdWorkItemPath,
   useCreateWorkItem,
   WORK_ITEM_CREATED_TITLE,
   WORK_ITEM_CREATE_FAILED_TITLE,
@@ -19,9 +20,10 @@ import {
 vi.mock("../../../shared/shell/index.js", () => ({
   notifyError: vi.fn(),
   notifySuccess: vi.fn(),
+  notifySuccessWithAction: vi.fn(),
 }));
 
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess, notifySuccessWithAction } from "../../../shared/shell/index.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 
@@ -128,6 +130,19 @@ describe("useCreateWorkItem", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(screen.getByText("create:error")).toBeInTheDocument();
+  });
+
+  it("offers a view action when the caller knows the project prefix", async () => {
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" }, projectIdentifier: "WEB" });
+    await waitFor(() =>
+      expect(notifySuccessWithAction).toHaveBeenCalledWith(
+        WORK_ITEM_CREATED_TITLE,
+        undefined,
+        expect.objectContaining({ actionLabel: "View work item" })
+      )
+    );
+    expect(createdWorkItemPath("acme", "WEB", 7)).toBe("/acme/browse/WEB-7");
   });
 });
 
@@ -283,5 +298,46 @@ describe("useCreateWorkItem temp rows", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(h.cached().results.map((entry) => entry.id)).toEqual(["123e4567-e89b-12d3-a456-426614174000"]);
     expect(h.cached().total_count).toBe(1);
+  });
+
+  it("posts group prefill fields and paints the matching grouped bucket", async () => {
+    const calls: Array<{ method: string; body: string }> = [];
+    const groupedKey = [...issueKeys.lists("acme", PROJECT_ID), "grouped"] as const;
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
+      }
+      calls.push({ method: init.method ?? "GET", body: init.body ?? "" });
+      return { status: 201, url, headers: { get: () => null }, text: async () => JSON.stringify(createdRow()) };
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(groupedKey, {
+      results: { state: { results: [], total_results: 0 } },
+      total_count: 0,
+    });
+    let save: ((input: WorkItemCreateInput) => void) | null = null;
+    function Probe(): React.ReactElement {
+      const mutation = useCreateWorkItem("acme");
+      save = (input) => mutation.mutate(input);
+      return <p>{mutation.status}</p>;
+    }
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Probe />
+      </QueryClientProvider>
+    );
+    (save as ((input: WorkItemCreateInput) => void) | null)?.({
+      projectId: PROJECT_ID,
+      payload: { name: "Grouped create", state_id: PROJECT_ID, priority: "high", label_ids: ["label-1"] },
+      tempGroupKey: "state",
+    });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalled());
+    const post = calls.find((call) => call.method === "POST");
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      name: "Grouped create",
+      state_id: PROJECT_ID,
+      priority: "high",
+      label_ids: ["label-1"],
+    });
   });
 });

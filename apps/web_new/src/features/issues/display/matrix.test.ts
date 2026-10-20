@@ -38,7 +38,18 @@ describe("layoutDisplayMatrix", () => {
   it("offers the full panel on list with a clearing choice", () => {
     const matrix = layoutDisplayMatrix("list");
     expect(matrix.properties).toHaveLength(13);
-    expect(matrix.groupBy).toEqual(["state", "priority", "cycle", "module", "labels", "assignees", "created_by", null]);
+    expect(matrix.groupBy).toEqual([
+      "state",
+      "state_detail.group",
+      "priority",
+      "cycle",
+      "module",
+      "labels",
+      "assignees",
+      "created_by",
+      "team_project",
+      null,
+    ]);
     expect(matrix.subGroupBy).toBeNull();
     expect(matrix.orderBy).toEqual([
       "sort_order",
@@ -101,6 +112,7 @@ describe("layoutDisplayMatrix", () => {
     }
     expect(ORDER_OPTION_LABELS["-created_at"]).toBe("Last created");
     expect(GROUP_DIMENSION_LABELS["state"]).toBe("States");
+    expect(GROUP_DIMENSION_LABELS["state_detail.group"]).toBe("State groups");
   });
 });
 

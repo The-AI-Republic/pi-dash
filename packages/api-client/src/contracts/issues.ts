@@ -273,3 +273,58 @@ export async function listArchivedIssues(
   const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-issues/`);
   return client.parse(IssueListResponse, body, "GET archived issues");
 }
+
+/**
+ * One cycle's issues (the cycle page's list layout). Same envelope and
+ * row projection as the project list; the path scopes to the cycle.
+ */
+export async function listCycleIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string,
+  query: IssueListQuery = {}
+): Promise<IssueListResponse> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`;
+  const body = await client.getJson<unknown>(path, { query: issueListQueryParams(query) });
+  return client.parse(IssueListResponse, body, `GET ${path}`);
+}
+
+/** Grouped variant of the cycle list; same bucket shape as the project. */
+export async function listGroupedCycleIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string,
+  query: IssueListQuery & { groupBy: string }
+): Promise<GroupedIssueListResponse> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`;
+  const body = await client.getJson<unknown>(path, { query: issueListQueryParams(query) });
+  return client.parse(GroupedIssueListResponse, body, `GET ${path}`);
+}
+
+/** One module's issues (the module page's list layout). */
+export async function listModuleIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  moduleId: string,
+  query: IssueListQuery = {}
+): Promise<IssueListResponse> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/modules/${moduleId}/issues/`;
+  const body = await client.getJson<unknown>(path, { query: issueListQueryParams(query) });
+  return client.parse(IssueListResponse, body, `GET ${path}`);
+}
+
+/** Grouped variant of the module list; same bucket shape as the project. */
+export async function listGroupedModuleIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  moduleId: string,
+  query: IssueListQuery & { groupBy: string }
+): Promise<GroupedIssueListResponse> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/modules/${moduleId}/issues/`;
+  const body = await client.getJson<unknown>(path, { query: issueListQueryParams(query) });
+  return client.parse(GroupedIssueListResponse, body, `GET ${path}`);
+}

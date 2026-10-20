@@ -16,6 +16,8 @@ export type IssueLayout = z.infer<typeof IssueLayout>;
 
 export const IssueSearch = z.object({
   layout: z.optional(IssueLayout),
+  /** Open row peek; cleared on close (ISS-013). */
+  peekIssueId: z.optional(z.string()),
 });
 export type IssueSearch = z.infer<typeof IssueSearch>;
 

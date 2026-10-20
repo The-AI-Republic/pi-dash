@@ -13,7 +13,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, createClient } from "@pidash/api-client";
 import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../../../core/api/client.js";
 import {
@@ -22,6 +22,8 @@ import {
   type IssueSearch,
   type PrefsRecord,
 } from "../../../../../../features/issues/index.js";
+import { listPageQueryOptions } from "../../../../../../features/issues/list/pages.js";
+import { loadListLayout } from "../../../../../../features/issues/list/lazy.js";
 import { projectsQueryOptions } from "../../../../../../features/projects/index.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { clearCommands, listCommands } from "../../../../../../shared/commands/index.js";
@@ -70,9 +72,38 @@ describe("issues denial tolerance", () => {
   it("loads through when the issues and preferences reads succeed", async () => {
     const apiClient = failingClient(200);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {} as never).queryKey, {
+    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}).queryKey, {
       grouped_by: null,
-    } as never);
+      sub_grouped_by: null,
+      total_count: 0,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: 0,
+      total_results: 0,
+      results: [],
+    } satisfies IssueListResponse);
+    queryClient.setQueryData(
+      listPageQueryOptions(apiClient, PARAMS.ws, {
+        entity: { scope: "project", projectId: PARAMS.projectId },
+        groupBy: null,
+        orderBy: "sort_order",
+        showSubIssues: true,
+      }).queryKey,
+      {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      }
+    );
     queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
       display_filters: { layout: "list" },
       display_properties: {},
@@ -99,9 +130,26 @@ describe("issues denial tolerance", () => {
       }),
     });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {} as never).queryKey, {
-      grouped_by: null,
-    } as never);
+    queryClient.setQueryData(
+      listPageQueryOptions(apiClient, PARAMS.ws, {
+        entity: { scope: "project", projectId: PARAMS.projectId },
+        groupBy: null,
+        orderBy: "sort_order",
+        showSubIssues: true,
+      }).queryKey,
+      {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      }
+    );
     const beforeLoad = Route.options.beforeLoad;
     if (!beforeLoad) throw new Error("missing beforeLoad");
     await expect(
@@ -338,6 +386,7 @@ function renderScreen(
   queryClient.setQueryData(
     sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {
       orderBy: "-created_at",
+      showSubIssues: true,
       richExpression: prefs.rich_filters,
     }).queryKey,
     {
@@ -360,7 +409,10 @@ function renderScreen(
   );
   if (options.unfilteredSheetRows !== undefined) {
     queryClient.setQueryData(
-      sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, { orderBy: "-created_at" }).queryKey,
+      sheetIssuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {
+        orderBy: "-created_at",
+        showSubIssues: true,
+      }).queryKey,
       {
         pages: [
           {
@@ -381,6 +433,28 @@ function renderScreen(
     );
   }
   queryClient.setQueryData(pickerCyclesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId).queryKey, []);
+  queryClient.setQueryData(
+    listPageQueryOptions(apiClient, PARAMS.ws, {
+      entity: ENTITY,
+      groupBy: null,
+      orderBy: orderByOf(prefs),
+      showSubIssues: true,
+      richFilters: prefs.rich_filters,
+    }).queryKey,
+    {
+      grouped_by: null,
+      sub_grouped_by: null,
+      total_count: totalCount,
+      next_cursor: "",
+      prev_cursor: "",
+      next_page_results: false,
+      prev_page_results: false,
+      count: rows.length,
+      total_results: totalCount,
+      results: rows,
+    } satisfies IssueListResponse
+  );
+
   const Component = Route.options.component;
   if (!Component) throw new Error("issues route has no component");
   render(
@@ -392,13 +466,34 @@ function renderScreen(
   );
 }
 
+// jsdom reports zero element sizes; give the flat list's scroll region and
+// rows a height so the virtualized rows mount.
+const realHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+beforeEach(() => {
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get(this: HTMLElement) {
+      if (this.getAttribute("role") === "region" || this.getAttribute("data-testid") === "list-scroll") return 400;
+      if (this.hasAttribute("data-index")) return 44;
+      return realHeight?.get?.call(this) ?? 0;
+    },
+  });
+});
+
 afterEach(() => {
+  if (realHeight) Object.defineProperty(HTMLElement.prototype, "offsetHeight", realHeight);
   resetAppClient();
   clearCommands();
   vi.restoreAllMocks();
 });
 
 describe("project issues screen", () => {
+  // The route awaits the list layout chunk in beforeLoad; these tests render
+  // the component directly, so resolve the same chunk first.
+  beforeAll(async () => {
+    await loadListLayout();
+  });
+
   it("composes the layout root with the project title and its rows", async () => {
     const now = new Date().toISOString();
     renderScreen({}, 1, [issueRow({ created_at: now, updated_at: now })]);
@@ -409,8 +504,9 @@ describe("project issues screen", () => {
     // its module resolves (NEWFRONT-669, size gate).
     const row = await screen.findByLabelText("WEB-42");
     expect(row).toHaveTextContent("Fix login");
-    expect(row).toHaveClass("h-11");
-    expect(row).not.toHaveClass("h-8");
+    const block = screen.getByTestId("list-row");
+    expect(block).toHaveClass("h-11");
+    expect(block).not.toHaveClass("h-8");
   });
 
   it("mounts the rich-filter entry in the desktop and mobile headers", async () => {
@@ -434,6 +530,31 @@ describe("project issues screen", () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.spyOn(Route, "useRouteContext").mockReturnValue({ queryClient, apiClient } as never);
     queryClient.setQueryData(projectsQueryOptions(apiClient, PARAMS.ws).queryKey, [projectSeed()]);
+    queryClient.setQueryData(
+      listPageQueryOptions(apiClient, PARAMS.ws, {
+        entity: { scope: "project", projectId: PARAMS.projectId },
+        groupBy: null,
+        orderBy: "sort_order",
+        showSubIssues: true,
+        richFilters: rich,
+      }).queryKey,
+      {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 1,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 1,
+        results: [],
+      } satisfies IssueListResponse
+    );
+    queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
+      ...prefsSeed(),
+      rich_filters: rich,
+    });
     queryClient.setQueryData(issuesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId, {}, rich).queryKey, {
       grouped_by: null,
       sub_grouped_by: null,
@@ -446,10 +567,6 @@ describe("project issues screen", () => {
       total_results: 1,
       results: [],
     } satisfies IssueListResponse);
-    queryClient.setQueryData(prefsQueryOptions(apiClient, PARAMS.ws, ENTITY).queryKey, {
-      ...prefsSeed(),
-      rich_filters: rich,
-    });
     const Component = Route.options.component;
     if (!Component) throw new Error("issues route has no component");
     render(
@@ -506,13 +623,13 @@ describe("project issues screen", () => {
     }
   });
 
-  it("passes the compact density through from the search param", () => {
+  it("passes the compact density through from the search param", async () => {
     const now = new Date().toISOString();
     renderScreen({ layout: "compact" }, 1, [issueRow({ created_at: now, updated_at: now })]);
 
-    const row = screen.getByLabelText("WEB-42");
-    expect(row).toHaveClass("h-8");
-    expect(row).not.toHaveClass("h-11");
+    const block = await screen.findByTestId("list-row");
+    expect(block).toHaveClass("h-8");
+    expect(block).not.toHaveClass("h-11");
   });
 
   it("offers the timeline in the layout switcher", () => {
@@ -667,6 +784,15 @@ describe("project issues screen", () => {
       prefs: spreadsheetPrefsSeed(),
     });
     expect(await screen.findByRole("button", { name: "Add work item" })).toBeDisabled();
+  });
+
+  it("renders the list read-only for an archived project", async () => {
+    renderScreen({}, 1, [issueRow()], {
+      project: { archived_at: "2026-01-01T00:00:00Z", member_role: 20 },
+    });
+    expect(await screen.findByTestId("quick-add-disabled")).toHaveTextContent("New work items are read-only for you");
+    expect(screen.queryByRole("button", { name: "New work item" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add to All work items" })).not.toBeInTheDocument();
   });
 
   it("renders the interim empty state when the project has no issues", () => {

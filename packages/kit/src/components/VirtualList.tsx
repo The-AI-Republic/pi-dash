@@ -17,6 +17,13 @@ export interface VirtualListProps<T> {
   /** Accessible name for the scroll region. */
   label: string;
   className?: string;
+  /**
+   * Content after the virtualized rows, still inside the scroll region.
+   * Pagination sentinels belong here: a footer can only intersect once the
+   * reader reaches the end, while a sibling of the scroller is visible
+   * immediately and would page through the whole list on mount.
+   */
+  footer?: React.ReactNode;
 }
 
 const containerClasses = "relative overflow-auto";
@@ -29,6 +36,7 @@ export function VirtualList<T>({
   overscan = 4,
   label,
   className,
+  footer,
 }: VirtualListProps<T>): React.ReactElement {
   const parentRef = React.useRef<HTMLDivElement>(null);
   const estimate = React.useCallback(
@@ -52,6 +60,9 @@ export function VirtualList<T>({
             <div
               key={getKey(item, virtualRow.index)}
               data-index={virtualRow.index}
+              // Rows can grow after mount (inline sub-issue expansion), so
+              // measured height, not the estimate, owns their offsets.
+              ref={virtualizer.measureElement}
               style={{
                 position: "absolute",
                 top: 0,
@@ -65,6 +76,7 @@ export function VirtualList<T>({
           );
         })}
       </div>
+      {footer}
     </div>
   );
 }

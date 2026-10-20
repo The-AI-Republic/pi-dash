@@ -12,6 +12,7 @@ import {
   emptyCreateForm,
   hasDraftWorthKeeping,
   hasMembership,
+  initialCreateForm,
   isCreatableProjectId,
   isTitleAcceptable,
   membershipForForm,
@@ -354,5 +355,31 @@ describe("resetForCreateMore", () => {
     expect(next.cycleId).toBe("cycle");
     expect(next.moduleIds).toEqual(["module"]);
     expect(next.name).toBe("");
+  });
+});
+
+describe("initialCreateForm", () => {
+  it("applies a section's grouping value over a blank form", () => {
+    const form = initialCreateForm(PROJECT, {
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      cycleId: "cycle-1",
+      moduleIds: ["module-1"],
+    });
+    expect(form).toMatchObject({
+      projectId: PROJECT,
+      stateId: "state-1",
+      priority: "high",
+      assigneeIds: ["member-1"],
+      labelIds: ["label-1"],
+      cycleId: "cycle-1",
+      moduleIds: ["module-1"],
+    });
+  });
+
+  it("leaves the form blank when the section has no value", () => {
+    expect(initialCreateForm(PROJECT)).toEqual(emptyCreateForm(PROJECT));
   });
 });

@@ -71,6 +71,15 @@ describe("Dialog", () => {
     expect(body.parentElement).toHaveClass("mt-(--space-8)");
   });
 
+  it("renders its title as the shared dialog heading style", () => {
+    render(
+      <Dialog title="Confirm" open onOpenChange={() => undefined}>
+        <p>Body copy</p>
+      </Dialog>
+    );
+    expect(screen.getByRole("heading", { name: "Confirm" })).toHaveClass("text-h4-medium");
+  });
+
   it("accepts a body class override so the copy can sit tight below the title", () => {
     render(
       <Dialog title="Confirm" open onOpenChange={() => undefined} bodyClassName="mt-(--space-4)">

@@ -250,8 +250,12 @@ export {
   getIssue,
   listArchivedIssues,
   listGlobalIssues,
+  listGroupedCycleIssues,
   listGroupedIssues,
+  listGroupedModuleIssues,
+  listCycleIssues,
   listIssues,
+  listModuleIssues,
   listSubGroupedIssues,
 } from "./contracts/issues.js";
 export type { IssueListQuery } from "./contracts/issues.js";
@@ -293,6 +297,7 @@ export {
   MembershipWriteResult,
   SubscriptionStatus,
   addIssueToCycle,
+  addIssuesToModule,
   createIssue,
   deleteIssue,
   getSubscriptionStatus,

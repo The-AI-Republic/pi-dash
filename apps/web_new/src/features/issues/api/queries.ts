@@ -11,6 +11,7 @@ import {
   getIssue,
   listDescriptionVersions,
   listIssues,
+  listSubIssues,
   type ApiClient,
 } from "@pidash/api-client";
 
@@ -92,6 +93,20 @@ export function descriptionVersionQueryOptions(
   return queryOptions({
     queryKey: issueKeys.descriptionVersion(workspaceSlug, projectId, issueId, versionId),
     queryFn: () => getDescriptionVersion(client, workspaceSlug, projectId, issueId, versionId),
+    staleTime: LIST_STALE_TIME_MS,
+  });
+}
+
+/** Flat list page size (spec §2: one hundred per page when ungrouped). */
+export const FLAT_PAGE_SIZE = 100;
+/** Grouped page size (fifty per group). */
+export const GROUPED_PAGE_SIZE = 50;
+
+/** Children of one work item, loaded lazily by the row expander. */
+export function subIssuesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, issueId: string) {
+  return queryOptions({
+    queryKey: [...issueKeys.all(workspaceSlug), "sub-issues", projectId, issueId] as const,
+    queryFn: () => listSubIssues(client, workspaceSlug, projectId, issueId, { perPage: 50 }),
     staleTime: LIST_STALE_TIME_MS,
   });
 }

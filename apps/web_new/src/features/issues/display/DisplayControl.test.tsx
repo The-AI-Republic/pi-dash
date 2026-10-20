@@ -171,7 +171,8 @@ describe("DisplayControl", () => {
     const empties = within(options).getByRole("button", { name: "Show empty groups" });
     const subItems = within(options).getByRole("button", { name: "Show sub-work items" });
     expect(empties).toHaveAttribute("aria-pressed", "false");
-    expect(subItems).toHaveAttribute("aria-pressed", "false");
+    // ISS-079: the sub-item switch is on unless a record explicitly says no.
+    expect(subItems).toHaveAttribute("aria-pressed", "true");
 
     await user.click(empties);
     await waitFor(() => expect(patches).toHaveLength(1));
@@ -179,7 +180,7 @@ describe("DisplayControl", () => {
 
     await user.click(subItems);
     await waitFor(() => expect(patches).toHaveLength(2));
-    expect(patches[1]!.body.display_filters?.["sub_issue"]).toBe(true);
+    expect(patches[1]!.body.display_filters?.["sub_issue"]).toBe(false);
   });
 
   it("resolves the panel matrix to the offered layout, not the stored one", async () => {
