@@ -2,6 +2,9 @@
 
 Area prefix: `INT-`. Editions covered: oss, cloud, desktop.
 
+Area spec: `parity/specs/intake.md` (NEWFRONT-687) — the behavior the
+new build implements, including the intended-vs-observed dispositions.
+
 Sources surveyed: the project intake route
 `apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/intake/`
 (`layout.tsx`, `page.tsx`); the component tree
