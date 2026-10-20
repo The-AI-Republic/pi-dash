@@ -222,8 +222,16 @@ Behaviour:
   to the active system's id (again, not "the first row"). On success
   show a success notice saying estimates were **enabled** (_pinned_
   direction word "enabled") and set the switch on.
-- Pending: the switch is disabled while the write is in flight; a
-  second click cannot fire a second write.
+- Pending: the **old app has no pending state for this switch**. The
+  switch is disabled by role only (`disabled={!isAdmin}`); while a
+  write is in flight it stays operable and a second click fires a
+  second project update, whose direction is computed from the same
+  stale reference (so two rapid clicks can send the same value twice,
+  and their results race). The new app disables the switch while the
+  write is in flight so a second click cannot fire a second write;
+  that is a deliberate improvement, not old behaviour, and slice 741
+  records it as a divergence (the oracle does not exercise a double
+  click).
 - Failure: show an error notice and leave the switch exactly where it
   was. The notice's **title** contains the word "Error" (_pinned_; the
   old app's title is "Error!"). This is not optional: the oracle reads
@@ -396,8 +404,14 @@ system).
 - Cancel closes the dialog at either step with no API call and no local
   persistence. Reopening starts again at step one with defaults: points
   family selected, no starter chosen, values and errors cleared.
-- Closing by Escape/overlay behaves as Cancel when no write is in
-  flight; during a submit the dialog is not dismissable.
+- Dismissal: the **old dialog has no Escape or overlay-close
+  behaviour**. It mounts without a close handler on the modal root, so
+  Escape and a backdrop click do nothing at any step, write in flight
+  or not; only the Cancel button and the post-success close leave it.
+  The new app treats Escape/overlay as Cancel when no write is in
+  flight and ignores both during a submit. That is a deliberate
+  improvement; slice 742 records it as a divergence (the oracle drives
+  Cancel and submit only and does not assert either dismissal).
 - Step two has Cancel plus the primary submit ("Create estimate");
   step one has only Cancel (there is nothing to submit yet).
 - The dialog's footer is fixed at the bottom; long value lists scroll
@@ -460,19 +474,28 @@ Starter sets by family (exact values, order is the initial key order):
   - T-Shirt Sizes: `XS, S, M, L, XL, XXL`
   - Easy to hard: `Easy, Medium, Hard, Very Hard`
 - **time** (cloud only)
-  - Hours: `1, 2, 3, 4, 5, 6` (stored as minute counts; any preview or
-    rendered value is humanized, so 1 reads "1m" and 6 reads "6m").
-  - The old structure renders the scratch-and-template block only for
-    non-cloud families, so choosing time in that build exposes a radio
-    with no card and no path to step two: a dead end, not a starter.
-    The cloud slice must not copy that dead end. It defines a working
-    minimum from the family catalogue (recommended: the Hours template,
-    with a two-value subset for scratch), pins the exact set in a unit
-    test, and sends only values the server accepts. No invented
-    templates and no empty value set.
+  - Custom (scratch; hidden from the template list): `1, 2`
+  - Hours: `1, 2, 3, 4, 5, 6`
+  - Stored unit: **whole minutes as a decimal string** (`"1"` …
+    `"6"`); the stored text is never the humanized form. Every preview
+    and rendered value is humanized by the shared formatter, so the
+    Hours card reads `1m, 2m, 3m, 4m, 5m, 6m` and the scratch card
+    reads `1m, 2m`. Both cards load exactly those stored values into
+    step two.
+  - Decision (this spec, not the old app): the old structure renders
+    the scratch-and-template block only for non-cloud families, so
+    choosing time in that build exposes a radio with no card and no
+    path to step two — a dead end, not a starter. The cloud slice must
+    not copy that dead end. It offers the family's one template
+    (Hours, the `hours` entry of the family catalogue) plus the
+    two-value scratch set above, pins both in a unit test, and sends
+    only values the server accepts. No invented templates, no empty
+    value set, and no other time template until the catalogue gains
+    one.
 
 The scratch card is always present (first) and always loads the
-family's minimal two-value set for points/categories. Templates are
+family's minimal two-value set (points and categories as above; time
+where the edition offers it, §3.3's decision). Templates are
 never pre-selected. Picking a card moves to step two with those values
 and no call to the server. Browsing starters and cancelling stores
 nothing.
@@ -505,10 +528,14 @@ Double-clicking the value text opens the same inline editor as the
 pencil. The inline editor is a single-line input seeded with the raw
 value (time: the raw minute number, not the humanized text), focused on
 open, with a confirm and a cancel. Enter or confirm commits the draft;
-Escape or cancel discards it. Committing an empty draft leaves an empty
-row (which then fails validation) rather than silently removing it.
-While the editor is open the row's other controls may be subdued, but
-removing or reordering the row must close the editor.
+cancel discards it. The **old editor has no Escape handler**: its
+inputs bind change/submit only, so Escape does nothing and the draft
+stays in the field. The new app makes Escape discard the draft like
+cancel; slice 742 records that as a divergence. Committing an empty
+draft leaves an empty row (which then fails validation) rather than
+silently removing it. While the editor is open the row's other
+controls may be subdued, but removing or reordering the row must close
+the editor.
 
 ### 3.5 Reordering (EST-011, D21)
 
@@ -554,12 +581,21 @@ chosen family:
   categories — the old client compares exact strings). The 602 model
   lowercases categories; slice 742 changes it to the exact comparison
   the oracle pins.
-- **Length cap.** Input is capped at **20 characters while typing**
-  (the old constant and the server serializer cap are both 20). A paste
-  longer than 20 is truncated to 20 rather than accepted and rejected
-  later. The 602 model uses 40 and an explicit "too long" message; that
-  divergence is recorded as remaining work in §8 and must be brought to
-  20 by slice 742.
+- **Length cap.** The cap is **20 characters** (the old input constant
+  and the server serializer's check are both 20). The old client
+  enforces it by **ignoring the whole edit**: its change handler
+  assigns the new string only when its length is at most 20, so typing
+  the 21st character changes nothing and pasting 25 characters leaves
+  the field at its previous value (no truncation, no error message, no
+  visual cut). The new app truncates an over-long change to its first
+  20 characters instead, which keeps the typed prefix the user meant
+  and cannot submit more than the server accepts; slice 742 records
+  truncation as a deliberate divergence. Either rule ends at ≤20
+  characters and neither silently submits more. The oracle types
+  character by character, which cannot distinguish the two, so the
+  gate does not pin one. The 602 model uses 40 and an explicit "too
+  long" message; that divergence is recorded as remaining work in §8
+  and must be brought to 20 by slice 742.
 
 Presentation: an invalid row shows an inline marker (an information
 icon with a tooltip, or an equivalent inline error), and the message is
@@ -763,7 +799,11 @@ Confirmation dialog:
 - Actions: Cancel (secondary) and a destructive confirm ("Delete
   Estimate" old copy; any destructive label naming deletion). While the
   write is pending the confirm shows a busy state ("Deleting" old copy)
-  and both actions are disabled; the dialog is not dismissable.
+  and both actions are disabled. Dismissal: the old confirmation also
+  mounts without a close handler, so Escape and a backdrop click do
+  nothing at any time; the new app allows them as Cancel while idle and
+  ignores them while the write is pending (a deliberate improvement,
+  recorded with the create dialog's dismissal divergence in §9.3).
 - Cancel closes and changes nothing: the system, the project link and
   every work item keep their values.
 
@@ -825,8 +865,8 @@ client must handle, not behaviours it may assume away.
 | No point list at all (field absent or not a list)         | `POST estimates/`                                          | 400 (serializer list error)                                                                                                                                                                                                                                          | client always sends a list of ≥2                                                                                                                |
 | Empty point object `{}` in the list                       | `POST estimates/`                                          | 400 as a **nested field error**, not the flat form: `value` is a required field on the point serializer, so DRF rejects the object before `validate()` runs and the response is `[{"value": ["This field is required."]}]` (`key` carries a model default, so it is not flagged); the `non_field_errors: "Estimate points are required"` sentence is reachable only on the partial point-update path. The system row is written before validation and can remain empty (bug 346) | client never sends empty entries; report the failure and refresh                                                                                |
 | Explicitly empty point list `[]`                          | `POST estimates/`                                          | **accepted** (200) and stores a system with zero values — a server gap the oracle does not pin; the client always sends ≥2                                                                                                                                           | client always sends ≥2                                                                                                                          |
-| Value longer than 20 characters, bulk create              | `POST estimates/`                                          | 400 with a field error naming the 20-character cap; the point rows are not stored (an empty system row can remain, bug 346)                                                                                                                                          | client caps at 20 (§3.6)                                                                                                                        |
-| Value longer than 20 characters, point update             | `PATCH .../estimate-points/{ptid}/`                        | 400 with a field error; nothing stored                                                                                                                                                                                                                               | client caps at 20                                                                                                                               |
+| Value longer than 20 characters, bulk create              | `POST estimates/`                                          | 400 `[{"non_field_errors": ["Value can't be more than 20 characters"]}]` (one entry per offending point). The cap lives in `EstimatePointSerializer.validate`, which raises a plain string, so DRF files it under `non_field_errors`, **not** under `value`; the point rows are not stored (an empty system row can remain, bug 346) | client caps at 20 (§3.6)                                                                                                                        |
+| Value longer than 20 characters, point update             | `PATCH .../estimate-points/{ptid}/`                        | 400 `{"non_field_errors": ["Value can't be more than 20 characters"]}` (the partial serializer skips the required-field check, then the same `validate` raises); nothing stored                                                                                                                                                     | client caps at 20                                                                                                                               |
 | Value longer than 20 characters, system update            | `PATCH estimates/{eid}/`                                   | **accepted**: this path writes keys and values without serializer validation (bounded only by the column)                                                                                                                                                            | client caps at 20; do not rely on the server here (contracts B should note this inconsistency)                                                  |
 | Bulk create validates after storing the system            | `POST estimates/`                                          | a refused point list can leave an empty system row behind (NEWFRONT-346, §9.2)                                                                                                                                                                                       | do not pre-empt; on failure the client reports failure and refreshes; do not auto-delete the orphan                                             |
 | Single-point create requires key and value                | `POST .../estimate-points/`                                | 400 `{"error": "Key and value are required"}` when either is falsy                                                                                                                                                                                                   | client always sends both                                                                                                                        |
@@ -844,7 +884,7 @@ client must handle, not behaviours it may assume away.
 | Point key omitted                                         | `POST estimates/` bulk                                     | default 0 for that row (bulk creation does **not** renumber)                                                                                                                                                                                                         | the client always sends 1..n; the oracle re-positions API-created systems before proving gapless delete                                         |
 | Project update needs project admin or workspace admin     | `PATCH projects/{pid}/`                                    | 200; 403 otherwise                                                                                                                                                                                                                                                   | switch and delete-time unlink                                                                                                                   |
 | Archived project                                          | `PATCH projects/{pid}/`                                    | 400 archived projects cannot be updated                                                                                                                                                                                                                              | the settings screen is not offered for archived projects; a failure is surfaced                                                                 |
-| Issue estimate write                                      | `PATCH projects/{pid}/issues/{iid}/` with `estimate_point` | 200; 400 when the point is not in this project                                                                                                                                                                                                                       | picker/write path (§6.1)                                                                                                                        |
+| Issue estimate write                                      | `PATCH projects/{pid}/issues/{iid}/` with `estimate_point` | **204 with an empty body** on success (the issue view returns no representation); 400 when the point is not in this project                                                                                                                                            | picker/write path (§6.1)                                                                                                                        |
 
 Guest note: guests can read the system list and a single system, but
 cannot read project-points, create, update or delete. Since the
@@ -908,7 +948,7 @@ set the server checks the project membership row.
 | `DELETE estimates/{eid}/`                             | 204   | 204                 | 403                                         | 403            | 401                                     |
 | `POST/PATCH/DELETE .../estimate-points/`              | yes   | yes                 | 403                                         | 403            | 401                                     |
 | `PATCH projects/{pid}/` (link/unlink)                 | 200   | 403                 | 403                                         | 403            | 401                                     |
-| Issue estimate write (`estimate_point`)               | 200   | 200                 | 200 if the guest created the item, else 403 | 403            | 401                                     |
+| Issue estimate write (`estimate_point`)               | 204   | 204                 | 204 if the guest created the item, else 403 | 403            | 401                                     |
 | Read the estimate on a work item (detail, peek, feed) | yes   | yes                 | yes                                         | no item access | public/peek rules of the owning surface |
 
 UI consequences to implement:
@@ -952,8 +992,19 @@ Issues owns the generic property row and the dropdown family
   its search box, and offers nothing actionable. The old behaviour is
   the same: the options list is the clear row only and the picker does
   not write.
-- **Search.** The shared picker's search filters the option labels
-  (substring); the estimate picker adds nothing special.
+- **Search.** The old picker matches the search term as a
+  case-insensitive substring of the **raw stored value**, not of the
+  displayed label. For points and categories the two are the same
+  string; for **time** they are not: a stored `90` displays "1h 30m"
+  while search compares against "90", so typing `1h` finds nothing and
+  typing `90` finds the row whose label never shows "90". The `${value}`
+  filter is built from the stored text, and the clear row is indexed by
+  its "No estimate" label. This is a pinned quirk, **bug:
+  NEWFRONT-820**, not intended behaviour; slice 744 (picker) and the
+  palette page (EST-021, §6.5) must decide explicitly: match the
+  displayed label (the natural behaviour) and record the divergence,
+  or keep matching the stored value. Do not describe the old app as
+  filtering labels.
 - **Write.** One issue update carrying `estimate_point` = the chosen
   point id, or `null` for the clear row. Optimistic apply across the
   cached issue rows, rollback plus an error notice on failure
@@ -1167,7 +1218,7 @@ bodies are DRF shapes: a field map for serializer errors, or
 | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
 | `GET`    | `/estimates/`                              | —                                                                                                                                                                              | 200, array of systems, each with nested `points` (nested values arrive in the model's default `value` ordering — sort by `key` client-side) | 401 anon, 403 non-member                                                                                                                                                                                                                                                                                                                                                                                                      | 001, 003, 005, 006, 024 |
 | `GET`    | `/estimates/{eid}/`                        | —                                                                                                                                                                              | 200, one system with `points`                                                                                                               | 404 `{"error": "The required object does not exist."}` for an id outside this project; 403/401                                                                                                                                                                                                                                                                                                                                | 024, 026                |
-| `POST`   | `/estimates/`                              | `{"estimate": {"name"?, "type"?, "last_used"?}, "estimate_points": [{"key", "value", "description"?}]}` (the `estimate` object itself is required; the client always sends it) | 200, created system with `points`                                                                                                           | 400 absent/non-list points (DRF list error under `non_field_errors`); 400 for an empty point object as a nested field error `[{"value": ["This field is required."]}]` (not the flat `{"error": …}` form and not the `non_field_errors` sentence, which belongs to the partial point update); 400 over-long value (field error); 400 duplicate name (`{"error": "The payload is not valid"}`); a request without the `estimate` object is malformed (server error, never sent by the client); 403 | 013, 024, 025           |
+| `POST`   | `/estimates/`                              | `{"estimate": {"name"?, "type"?, "last_used"?}, "estimate_points": [{"key", "value", "description"?}]}` (the `estimate` object itself is required; the client always sends it) | 200, created system with `points`                                                                                                           | 400 absent/non-list points (DRF list error under `non_field_errors`); 400 for an empty point object as a nested field error `[{"value": ["This field is required."]}]` (not the flat `{"error": …}` form and not the `non_field_errors` sentence, which belongs to the partial point update); 400 over-long value in bulk create: `[{"non_field_errors": ["Value can't be more than 20 characters"]}]` (raised as a plain string in `validate`, so DRF files it under `non_field_errors`, not under `value`); 400 duplicate name (`{"error": "The payload is not valid"}`); a request without the `estimate` object is malformed (server error, never sent by the client); 403 | 013, 024, 025           |
 | `PATCH`  | `/estimates/{eid}/`                        | `{"estimate"?: {"name"?, "type"?}, "estimate_points": [{"id", "key", "value"}]}`                                                                                               | 200, system with `points`                                                                                                                   | 400 empty/absent list (`{"error": "Estimate points are required"}`), 403; **no length or content validation** (see the matrix below)                                                                                                                                                                                                                                                                                          | 014, 025                |
 | `DELETE` | `/estimates/{eid}/`                        | —                                                                                                                                                                              | 204                                                                                                                                         | 403, 404                                                                                                                                                                                                                                                                                                                                                                                                                      | 016, 024                |
 | `GET`    | `/project-estimates/`                      | —                                                                                                                                                                              | 200, array of values of the project's linked system; `[]` when unlinked                                                                     | 403 guest/outsider, 401                                                                                                                                                                                                                                                                                                                                                                                                       | 017, 024                |
@@ -1188,7 +1239,7 @@ archived ordering); everything else is passthrough.
 | Method  | Path                            | Body                                                             | Success     | Errors                                                                                                                           | Rows          |
 | ------- | ------------------------------- | ---------------------------------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `PATCH` | `/projects/{pid}/`              | `{"estimate": "<system id>"}` or `{"estimate": null}`            | 200 project | 403 non-admin (project or workspace), 400 archived project                                                                       | 004, 013, 016 |
-| `PATCH` | `/projects/{pid}/issues/{iid}/` | `{"estimate_point": "<point id>"}` or `{"estimate_point": null}` | 200 issue   | 400 point not in project: `{"estimate_point": ["Estimate point is not valid please pass a valid estimate_point_id"]}`, 403 guest | 017, 021, 023 |
+| `PATCH` | `/projects/{pid}/issues/{iid}/` | `{"estimate_point": "<point id>"}` or `{"estimate_point": null}` | 204, empty body | 400 point from another project: `{"non_field_errors": ["Estimate point is not valid please pass a valid estimate_point_id"]}` (the check raises a plain-string `ValidationError` in `validate()`, so DRF files it under `non_field_errors`); 400 unknown/non-existent id: `{"estimate_point": ["Invalid pk \"…\" - object does not exist."]}` (the FK field rejects it before `validate()`); 403 guest unless the guest created the item | 017, 021, 023 |
 
 The project read (`GET /projects/{pid}/`) carries `estimate` (id or
 null) and is the source of the switch and gating. The issue read
@@ -1231,7 +1282,7 @@ the difference. The spec above is binding where it differs.
 | EST-001 | Admin gate comes from the settings shell; screen renders under it; heading and content                                                                                                                                            | Slice 740 proves the member/guest denial carries no estimate controls (the shell gate is shared) and keeps the screen's own `canManage` branch                                                                                                          |
 | EST-002 | Four-skeleton loader while the list is pending                                                                                                                                                                                    | Slice 740: a failed read must show an error + retry **instead of** the empty/content below it (602 renders an error paragraph and then falls through to the empty state, which reads as "no systems"; the error branch must return early)               |
 | EST-003 | Empty state with title and add action for admins; no action otherwise. Creation is reachable only from the empty state: 602 head `7afa61f34` removed the extra populated-screen button and asserts its absence in a test                                                                                                                                                             | mainly proven by existing tests; slice 740 confirms                                                                                                                                                                                                     |
-| EST-004 | Switch reads `project.estimate`; toggles by writing the active id/null; success notices name the direction; disabled while pending and without manage rights                                                                      | Slice 741: the **error title must contain "Error"** (§2.3) — 602's "Couldn’t change estimates" has neither that word nor a direction, so the EST-004 oracle scenario fails on it as-is; keep the snap-back and add the direction-correct body (bug 341) |
+| EST-004 | Switch reads `project.estimate`; toggles by writing the active id/null; success notices name the direction; disabled while pending (the deliberate divergence in §2.3/§9.3 — the old switch is role-disabled only) and without manage rights | Slice 741: the **error title must contain "Error"** (§2.3) — 602's "Couldn’t change estimates" has neither that word nor a direction, so the EST-004 oracle scenario fails on it as-is; keep the snap-back and add the direction-correct body (bug 341) |
 | EST-005 | Active row with name and values joined; time humanized by the shared formatter                                                                                                                                                    | nothing structural; slice 741 covers the time-format branch                                                                                                                                                                                             |
 | EST-006 | Archived section with heading, explainer containing "older versions", newest-first ordering, zero controls, **and** an outbound `https://` link in a new tab (added by 602's review fix `35c290cb7`, asserted in its screen test) | nothing structural (603/602 review fix)                                                                                                                                                                                                                 |
 | EST-007 | Delete-only active row in OSS; no edit control; zero controls on archived rows                                                                                                                                                    | nothing structural (edit lands with EST-014 in cloud)                                                                                                                                                                                                   |
@@ -1239,7 +1290,7 @@ the difference. The spec above is binding where it differs.
 | EST-009 | Points/categories radios only                                                                                                                                                                                                     | Slice 742: build the family catalogue with an edition capability so time can be added by the cloud edition; keep time absent in OSS                                                                                                                     |
 | EST-010 | Custom + Fibonacci/Linear/Squares; T-Shirt Sizes; previews                                                                                                                                                                        | Slice 742: add the missing categories "Easy to hard" starter and time starters for cloud; previews must humanize time                                                                                                                                   |
 | EST-011 | Rows with edit (pencil + double-click), remove hidden at 2, add hidden at 6, renumber on remove                                                                                                                                   | Slice 742: **real drag reorder** (602 lists rows without a drag source); keyboard move actions; add allocates max+1                                                                                                                                     |
-| EST-012 | Per-row problems; submit blocked; submitted gate                                                                                                                                                                                  | Slice 742: cap **20** (602 uses 40 and a "40 characters" message); exact category duplicate comparison (602 lowercases); pinned messages; input truncation while typing                                                                                 |
+| EST-012 | Per-row problems; submit blocked; submitted gate                                                                                                                                                                                  | Slice 742: cap **20** (602 uses 40 and a "40 characters" message); exact category duplicate comparison (602 lowercases); pinned messages; over-long edits resolve to 20 characters (old app ignores the edit; new app truncates — a recorded divergence, §3.6) |
 | EST-013 | Create with family name/type/last_used and keys 1..n; success closes + refetch; failure keeps dialog open; no project write                                                                                                       | Slice 742: prove the flag is set and the project link is untouched (§3.8); time never submitted in OSS                                                                                                                                                  |
 | EST-014 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): update dialog, PATCH existing ids + point add/delete routing, empty-set failure, persistence across refetch                                                                                                                          |
 | EST-015 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): single-value delete confirmation, reassignment/clear, renumber, history caveat                                                                                                                                                       |
@@ -1350,10 +1401,32 @@ behaviour (noted per row).
   outcome (linked project ends up unlinked after any successful delete)
   and let slice 743 decide only with oracle evidence; do not subtly
   claim the two conditions are the same. Gate: align when 809 is fixed.
+- **NEWFRONT-820 — the estimate picker searches the stored value, not
+  the label.** Time options display "1h 30m" while the search index is
+  the stored `90`, so a label search fails and a stored-value search
+  matches text the user cannot see. Intended: search what is shown.
+  Not pinned by an oracle scenario. New app: slice 744 picks and
+  records the rule (§6.1); gate aligns when 820 is resolved.
 - **No estimate search.** `estimate-search.tsx` renders a placeholder
   and is mounted nowhere; EST-028 pins the absence of list search. Do
   not build a search field, and do not cite that file as a behaviour
   source.
+
+### 9.3 Deliberate divergences from the old app
+
+These are target improvements, not old behaviour and not bugs. Each
+slice that implements one records it in its PR description so review
+and the area gate can tell intent from drift. None is pinned by an
+oracle scenario, so none can fail the gate on its own.
+
+| Divergence | Old behaviour | New behaviour | Owner |
+| --- | --- | --- | --- |
+| Switch pending state | Enabled during a write; a second click fires a second update from the same stale reference | Disabled while the write is in flight (§2.3) | 741 |
+| Dialog dismissal | Create and delete dialogs mount without a close handler: Escape/backdrop do nothing | Escape/backdrop cancel when idle; ignored while a write is pending (§3.1, §4.3) | 742, 743 |
+| Inline editor Escape | No Escape handler; the draft stays | Escape discards the draft like cancel (§3.4) | 742 |
+| Over-long edits | The whole change is ignored when it exceeds 20 characters | The change is truncated to its first 20 characters (§3.6) | 742 |
+| Time starter (cloud) | No starter block for cloud families: choosing time is a dead end | Hours template plus a two-value scratch set, stored as minutes (§3.3) | 743 |
+| Key allocation on add | `length + 1`, which can reuse a key | `max + 1`, keys contiguous 1..n (D21, §9.1) | 742, 743 |
 
 ## 10. Desktop and editions (EST-029)
 
