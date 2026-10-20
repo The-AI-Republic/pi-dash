@@ -1006,7 +1006,9 @@ Issues owns the generic property row and the dropdown family
   or keep matching the stored value. Do not describe the old app as
   filtering labels.
 - **Write.** One issue update carrying `estimate_point` = the chosen
-  point id, or `null` for the clear row. Optimistic apply across the
+  point id, or `null` for the clear row. It answers **204 with no
+  body** (§7.2) — there is no updated issue to read back, so the client
+  updates its cache from the request, or refetches. Optimistic apply across the
   cached issue rows, rollback plus an error notice on failure
   ("Couldn't save the estimate" in the 602 write path), then refetch.
   Permission follows the item, not a blanket rule: admin and member can
@@ -1115,6 +1117,18 @@ Issues'. Estimates owns:
   selected. Choosing a value runs the same write as the inline picker
   (§6.1), produces the same history, and closes the palette. Choosing
   the current value still closes without a write.
+- **Search inside the page.** The page has no filter of its own; what
+  narrows it is the palette's shared search box, applied by the
+  palette's command list to the **rendered row text** while the query
+  is non-empty. Opening a page clears the query, so the page starts
+  showing every value and the user opts into filtering by typing;
+  clearing the box restores the full list. The rows are indexed by the
+  string they show — "1h 30m" for a stored `90` — so §6.1's
+  stored-value search quirk (NEWFRONT-820) does **not** apply here.
+  The two surfaces search different things in the old app; the new
+  app should make them agree deliberately (slice 744). The old page
+  shows a plain "no estimate found" line only when the active system
+  has no values at all.
 - The page must not appear when estimates are off: the command is
   absent, not disabled, and no estimate page is registered for that
   item.
