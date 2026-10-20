@@ -89,9 +89,10 @@ export function EntityListScreen({
   const resolvedTitle = title ?? cycle?.name ?? loadedModule?.name ?? (entity.scope === "module" ? "Module" : "Cycle");
   const resolvedCompletedCycle = completedCycle ?? isCompletedCycle(cycle?.status);
   const resolvedCompletedModule = completedModule ?? isCompletedModule(loadedModule?.status);
-  // The transfer prompt reads the cycle's own detail: its snapshot and
-  // transferable counts decide the button (ISS-224). The read stays off
-  // for module and project scopes.
+  // The transfer prompt reads the cycle's own detail: completed status
+  // and unfinished counts decide the button, and a frozen progress
+  // snapshot does not take it away (ISS-224). The read stays off for
+  // module and project scopes.
   const cycleIdForTransfer = entity.scope === "cycle" ? entity.cycleId : "";
   const cycleDetail = useCycleDetail(workspaceSlug, projectId, cycleIdForTransfer, cycleIdForTransfer !== "");
   const transferCycle = cycleDetail.data ?? null;

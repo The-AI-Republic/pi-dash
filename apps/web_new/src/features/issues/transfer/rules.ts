@@ -11,8 +11,6 @@
 // cycle's progress snapshot), so the button stays up after a move,
 // exactly as the oracle observes on the old app.
 
-import type { CycleDetail } from "@pidash/api-client";
-
 /** The counts the gate reads. */
 export interface TransferableCycleFields {
   status?: string | undefined;
@@ -61,15 +59,4 @@ export function transferTargetOptions<T extends { id: string; name: string; stat
     if (needle === "") return true;
     return cycle.name.toLowerCase().includes(needle);
   });
-}
-
-/** Narrow a detail read to the fields the gate needs. */
-export function transferFieldsOf(cycle: CycleDetail | undefined): TransferableCycleFields | null {
-  if (cycle === undefined) return null;
-  return {
-    status: cycle.status,
-    backlog_issues: cycle.backlog_issues,
-    unstarted_issues: cycle.unstarted_issues,
-    started_issues: cycle.started_issues,
-  };
 }

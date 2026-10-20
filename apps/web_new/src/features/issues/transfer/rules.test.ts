@@ -8,7 +8,6 @@ import {
   isCompletedCycleStatus,
   showsCompletedCycleNote,
   transferableIssueCount,
-  transferFieldsOf,
   transferTargetOptions,
   type TransferableCycleFields,
 } from "./rules.js";
@@ -79,27 +78,5 @@ describe("transferTargetOptions", () => {
     expect(transferTargetOptions(cycles, "source", "spring").map((cycle) => cycle.id)).toEqual([]);
     expect(transferTargetOptions(cycles, "source", "SPRINT").map((cycle) => cycle.id)).toEqual(["active", "draft"]);
     expect(transferTargetOptions(cycles, "active", "  backlog ").map((cycle) => cycle.id)).toEqual(["plain"]);
-  });
-});
-
-describe("transferFieldsOf", () => {
-  it("narrows a detail row and passes undefined through", () => {
-    expect(transferFieldsOf(undefined)).toBeNull();
-    expect(
-      transferFieldsOf({
-        id: "c",
-        project_id: "p",
-        name: "C",
-        start_date: null,
-        end_date: null,
-        status: "COMPLETED",
-        backlog_issues: 2,
-      } as never)
-    ).toEqual({
-      status: "COMPLETED",
-      backlog_issues: 2,
-      unstarted_issues: undefined,
-      started_issues: undefined,
-    });
   });
 });
