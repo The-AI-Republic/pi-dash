@@ -1201,6 +1201,22 @@ Other gaps the oracle cells record, and how the spec resolves them:
   server's admin delete path.
 - **VIEW-042 palette title badges** — matched by substring; target keeps the
   registry rendering (shell-owned).
+- **VIEW-013 icon picker** — the old emoji grid never settles under
+  automation, so the oracle pins only the Emoji/Icon tabs and proves
+  persistence with a glyph pick. Target: both tabs, the emoji pick writing
+  `logo_props.in_use = "emoji"`; the gate proves the emoji write on
+  `web_new` through the picker's own grid (no virtualization timing) and
+  the glyph path on both apps.
+- **VIEW-028 issue source** — no `views/{id}/issues/` route exists; the
+  oracle proves the set through the generic list. Target: unchanged. The
+  gate adds a cheap request-spy probe (the VIEW-046 precedent) asserting the
+  detail issues no request to the unrouted path; this is a new gate probe,
+  not something the oracle already covers.
+- **VIEW-044 no-other-shortcuts** — the oracle asserts Escape, tab order
+  and the palette sequence only; the "no other view shortcuts" half is
+  source-verified (the sole views key handler is the search Escape). Target:
+  keep it that way; a unit test on the views screens' key handlers proves no
+  modifier chord is bound, and the gate does not invent a browser probe.
 - **VIEW-043 owner-only PATCH** — the watcher is a member and the mutator
   the owner, because that is the only pair the server allows to mutate.
 - **VIEW-045 workspace tab title** — target keeps "All Views" and proves
