@@ -18,6 +18,7 @@ import { generateAssistantTitle } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { pickerKeys } from "../../../shared/pickers/reference.js";
 import { withTimeout } from "../create/createApi.js";
 import { ISSUE_DEDUPE_FLAG } from "../create/dedupe.js";
@@ -31,9 +32,9 @@ import { CREATE_DIALOG_TITLE, WorkItemCreateDialog, type WorkItemCreateProject }
 
 // These cases drive the whole strip through real menus, calendars and a
 // debounced editor; each interaction is a full popover round trip. Under a
-// loaded CI worker the full-property case needs well over the 5 s default,
-// so give the file headroom without relaxing any assertion.
-vi.setConfig({ testTimeout: 30_000 });
+// loaded CI worker a single case can need well over the 5 s default, so
+// use the measured full-run budget without relaxing any assertion.
+vi.setConfig({ testTimeout: FULL_RUN_TEST_TIMEOUT_MS });
 
 // The real editor is a lazy tiptap surface with its own suite. The dialog
 // only composes it, so a textarea stands in and reports HTML through the
@@ -956,7 +957,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
 });
 
 describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
-  it("posts every property the form offers", async () => {
+  it("posts the state, target, priority, member and label strip", async () => {
     const user = userEvent.setup();
     const h = setup({
       estimateSystem: true,
@@ -986,6 +987,32 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     await user.click(screen.getByRole("button", { name: "Labels" }));
     await user.click(await screen.findByTestId(/label-picker-option/));
 
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({
+      name: "Everything at once",
+      state_id: STATE_ID,
+      priority: "high",
+      assignee_ids: [WORKSPACE_ID],
+      label_ids: [STATE_ID],
+    });
+  });
+
+  it("posts the dates and the estimate from the strip", async () => {
+    const user = userEvent.setup();
+    const h = setup({
+      estimateSystem: true,
+      projects: {
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }),
+        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
+      },
+    });
+    await waitFor(() => expect(screen.getByText("Estimate")).toBeInTheDocument());
+    await user.type(titleField(), "Placed and estimated");
+
+    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(await screen.findByRole("option", { name: /Local pod/ }));
+
     const inMonthDays = (): HTMLButtonElement[] =>
       Array.from(document.querySelectorAll<HTMLButtonElement>('[data-day][data-in-month="true"]'));
     await user.click(screen.getByRole("button", { name: "Start date" }));
@@ -1000,12 +1027,6 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const dueIso = dueDay.dataset.day as string;
     await user.click(dueDay);
 
-    await user.click(screen.getByRole("button", { name: "Cycle" }));
-    await user.click((await screen.findAllByRole("option", { name: "Sprint 4" }))[0]!);
-
-    await user.click(screen.getByRole("button", { name: "Modules" }));
-    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
-
     const estimateSlot = within(screen.getByText("Estimate").parentElement as HTMLElement);
     await user.click(estimateSlot.getByRole("button", { name: "None" }));
     await user.click(await screen.findByRole("option", { name: "3" }));
@@ -1013,17 +1034,35 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
     expect(posts(h.sent)[0]).toMatchObject({
-      name: "Everything at once",
-      state_id: STATE_ID,
-      priority: "high",
-      assignee_ids: [WORKSPACE_ID],
-      label_ids: [STATE_ID],
+      name: "Placed and estimated",
       start_date: startIso,
       target_date: dueIso,
       estimate_point: PARENT_ID,
       assigned_pod_id: PARENT_ID,
       agent_executor: "local_runner",
     });
+  });
+
+  it("posts the cycle and module picks as bridge writes, not create fields", async () => {
+    const user = userEvent.setup();
+    const h = setup({
+      projects: {
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }),
+        [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
+      },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cycle" })).toBeInTheDocument());
+    await user.type(titleField(), "Sprint and module");
+
+    await user.click(screen.getByRole("button", { name: "Cycle" }));
+    await user.click((await screen.findAllByRole("option", { name: "Sprint 4" }))[0]!);
+
+    await user.click(screen.getByRole("button", { name: "Modules" }));
+    await user.click((await screen.findAllByRole("option", { name: "Checkout" }))[0]!);
+
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "Sprint and module" });
     // The create endpoint takes no cycle or module: both attach after
     // the row exists, through their bridge writes (ISS-117).
     expect(posts(h.sent)[0]).not.toHaveProperty("cycle_id");
