@@ -112,6 +112,8 @@ pub enum Denial {
     /// `custom_404_view`, prod): unmatched paths, including non-UUID
     /// ids under `<uuid:>` converters (PIDASHCONV-360; DEBUG renders
     /// the HTML technical page instead, so no JSON can match there).
+    /// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space
+    /// after the colon.
     PageNotFound,
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
@@ -148,7 +150,7 @@ impl Denial {
             ),
             Denial::PageNotFound => (
                 StatusCode::NOT_FOUND,
-                r#"{"error":"Page not found."}"#.to_owned(),
+                r#"{"error": "Page not found."}"#.to_owned(),
             ),
             Denial::BadError(message) => (
                 StatusCode::BAD_REQUEST,

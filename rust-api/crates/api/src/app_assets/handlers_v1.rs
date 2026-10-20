@@ -82,7 +82,9 @@ use pidash_services::app_assets::{queries_v1, shape};
 /// Resolver 404 for a non-UUID `<uuid:workspace_id>` segment (global
 /// `handler404`, `pi_dash/urls.py:15`). The `str` converter on
 /// `asset_key` / `slug` never rejects, so only the workspace id parses.
-const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// `JsonResponse` bytes, i.e. `json.dumps` defaults with the space after
+/// the colon.
+const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// `FileAssetSerializer` missing-file error (`asset.py` + DRF `FileField`):
 /// 400 `{"asset": ["No file was submitted."]}`.

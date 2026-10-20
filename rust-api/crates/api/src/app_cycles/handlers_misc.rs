@@ -109,8 +109,9 @@ pub const INVALID_DETAIL_BODY: &str = r#"{"error":"Please provide valid detail"}
 pub const INVALID_PAYLOAD_BODY: &str = r#"{"error":"The payload is not valid"}"#;
 /// Django prod `custom_404_view` (`app/views/error_404.py`): unmatched
 /// paths, including non-UUID ids under `<uuid:>` converters (the D-32
-/// intake `PageNotFound` twin).
-pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error":"Page not found."}"#;
+/// intake `PageNotFound` twin). `JsonResponse` bytes, i.e. `json.dumps`
+/// defaults with the space after the colon.
+pub const PAGE_NOT_FOUND_BODY: &str = r#"{"error": "Page not found."}"#;
 
 /// Date-check without both dates (`base.py:526-530`).
 pub const DATE_CHECK_REQUIRED_BODY: &str =
