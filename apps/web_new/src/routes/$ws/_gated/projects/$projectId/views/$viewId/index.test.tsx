@@ -13,6 +13,8 @@ import { ApiError, createClient, type IssueListResponse, type Project } from "@p
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../../../../../testing/testBudget.js";
+
 import { createAppClient, resetAppClient } from "../../../../../../../core/api/client.js";
 import { sessionKeys } from "../../../../../../../core/session/queries.js";
 import { authKeys } from "../../../../../../../features/auth/queries.js";
@@ -28,6 +30,11 @@ const PARAMS = {
 };
 const USER = "123e4567-e89b-12d3-a456-426614174000";
 const ENTITY = { scope: "project", projectId: PARAMS.projectId } as const;
+
+// Lazy layout and filter leaves resolve their chunk on first render. Under a
+// full-suite run that import can outlast the 1 s query default, so every
+// wait below that crosses a lazy boundary uses the measured full-run budget.
+const LAZY_WAIT = { timeout: FULL_RUN_TEST_TIMEOUT_MS };
 const EXPRESSION = { and: [{ state_group__in: "unstarted" }] };
 
 function viewRecord() {
@@ -277,20 +284,20 @@ describe("saved view load", () => {
 describe("saved view screen", () => {
   it("renders the view's name as the title and its stored expression in the row", async () => {
     renderScreen();
-    expect(await screen.findByRole("heading", { name: "Unstarted work" })).toBeInTheDocument();
-    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Unstarted work" }, LAZY_WAIT)).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("State Group");
   });
 
   it("offers Save as for the owned view and Update view once the row changes", async () => {
     const user = userEvent.setup();
     renderScreen();
-    expect(await screen.findByTestId("rich-save-view")).toHaveTextContent("Save as");
-    const pill = await screen.findByTestId("rich-condition");
+    expect(await screen.findByTestId("rich-save-view", undefined, LAZY_WAIT)).toHaveTextContent("Save as");
+    const pill = await screen.findByTestId("rich-condition", undefined, LAZY_WAIT);
 
     await user.click(within(pill).getByRole("button", { name: /^is$/ }));
-    await user.click(await screen.findByRole("option", { name: "is not" }));
-    expect(await screen.findByRole("button", { name: "Update view" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("option", { name: "is not" }, LAZY_WAIT));
+    expect(await screen.findByRole("button", { name: "Update view" }, LAZY_WAIT)).toBeInTheDocument();
   });
 
   it("reads a default view record as untouched: no Update view on mount", async () => {
@@ -308,7 +315,7 @@ describe("saved view screen", () => {
       },
       display_properties: { priority: true, state: true, key: true },
     });
-    expect(await screen.findByTestId("rich-save-view")).toHaveTextContent("Save as");
+    expect(await screen.findByTestId("rich-save-view", undefined, LAZY_WAIT)).toHaveTextContent("Save as");
     expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
   });
 
@@ -321,9 +328,9 @@ describe("saved view screen", () => {
       },
       1
     );
-    const switcher = await screen.findByTestId("layout-switcher-segmented");
+    const switcher = await screen.findByTestId("layout-switcher-segmented", undefined, LAZY_WAIT);
     expect(switcher.querySelector('[data-layout="gantt_chart"]')).not.toBeNull();
-    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
+    expect(await screen.findByTestId("gantt-layout", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.queryByLabelText("WEB-1")).toBeNull();
   });
 
@@ -346,11 +353,11 @@ describe("saved view screen", () => {
         text: async () => JSON.stringify({ ...viewRecord(), ...body }),
       };
     });
-    const switcher = await screen.findByTestId("layout-switcher-segmented");
+    const switcher = await screen.findByTestId("layout-switcher-segmented", undefined, LAZY_WAIT);
     const timeline = within(switcher).getByRole("button", { name: /timeline|gantt/i });
     await user.click(timeline);
-    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: "Update view" }));
+    expect(await screen.findByTestId("gantt-layout", undefined, LAZY_WAIT)).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Update view" }, LAZY_WAIT));
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0]?.["display_filters"]).toMatchObject({ layout: "gantt_chart" });
     expect(Object.keys(patches[0] ?? {}).sort()).toEqual(["display_filters", "display_properties", "rich_filters"]);
@@ -404,14 +411,14 @@ describe("saved view loader and route states", () => {
 
   it("asks for another project when the record points at one outside the list", async () => {
     renderScreen(20, viewRecord(), 0, undefined, [{ ...projectSeed(), id: USER }]);
-    expect(await screen.findByRole("heading", { name: "Project not found" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Project not found" }, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByText("Pick another project from the sidebar.")).toBeInTheDocument();
     expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
   });
 
   it("shows the no-match state when the view's filters exclude every row", async () => {
     renderScreen(20, viewRecord(), 0, undefined, undefined, 3);
-    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "No matching issues" })).toBeInTheDocument();
     expect(screen.getByText("No issues match the current filters.")).toBeInTheDocument();
   });

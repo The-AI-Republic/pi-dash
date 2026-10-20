@@ -15,6 +15,8 @@ import type { IssueListItem, IssueListResponse, Project } from "@pidash/api-clie
 import * as React from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../../../../testing/testBudget.js";
+
 import { createAppClient, resetAppClient } from "../../../../../../core/api/client.js";
 import {
   issuesQueryOptions,
@@ -45,6 +47,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
 
 const PARAMS = { ws: "acme", projectId: "223e4567-e89b-12d3-a456-426614174001" };
 const ENTITY = { scope: "project", projectId: PARAMS.projectId } as const;
+
+// Lazy layout and filter leaves resolve their chunk on first render. Under a
+// full-suite run that import can outlast the 1 s query default, so every
+// wait below that crosses a lazy boundary uses the measured full-run budget.
+const LAZY_WAIT = { timeout: FULL_RUN_TEST_TIMEOUT_MS };
 
 function failingClient(status: number) {
   return createClient({
@@ -502,7 +509,7 @@ describe("project issues screen", () => {
     expect(screen.getByTestId("layout-switcher-segmented")).toBeInTheDocument();
     // The list is a lazy leaf; the route chunk shows the list skeleton until
     // its module resolves (NEWFRONT-669, size gate).
-    const row = await screen.findByLabelText("WEB-42");
+    const row = await screen.findByLabelText("WEB-42", undefined, LAZY_WAIT);
     expect(row).toHaveTextContent("Fix login");
     const block = screen.getByTestId("list-row");
     expect(block).toHaveClass("h-11");
@@ -512,7 +519,7 @@ describe("project issues screen", () => {
   it("mounts the rich-filter entry in the desktop and mobile headers", async () => {
     renderScreen({}, 1, [issueRow()]);
 
-    const triggers = await screen.findAllByTestId("rich-filter-add");
+    const triggers = await screen.findAllByTestId("rich-filter-add", undefined, LAZY_WAIT);
     expect(triggers).toHaveLength(2);
     for (const trigger of triggers) {
       expect(trigger).toHaveAccessibleName(/Add filter/);
@@ -577,7 +584,7 @@ describe("project issues screen", () => {
       </QueryClientProvider>
     );
 
-    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getAllByTestId("rich-condition")).toHaveLength(1);
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("Urgent");
   });
@@ -585,7 +592,7 @@ describe("project issues screen", () => {
   it("mounts the analytics entry in the desktop and mobile headers", async () => {
     renderScreen({}, 1, [issueRow()], { role: 20 });
 
-    const entries = await screen.findAllByTestId("issues-analytics-entry");
+    const entries = await screen.findAllByTestId("issues-analytics-entry", undefined, LAZY_WAIT);
     expect(entries).toHaveLength(2);
     for (const entry of entries) expect(entry).toHaveAccessibleName(/Analytics/);
   });
@@ -596,20 +603,20 @@ describe("project issues screen", () => {
 
     // The row still renders, so the absence is the role gate, not a
     // missing render.
-    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument();
   });
 
   it("offers Save view only when the project enables views", async () => {
     const rich = { priority__in: "urgent" };
     renderScreen({}, 1, [issueRow()], { role: 20, richFilters: rich, project: { issue_views_view: true } });
-    expect(await screen.findByTestId("rich-save-view")).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-save-view", undefined, LAZY_WAIT)).toBeInTheDocument();
   });
 
   it("hides Save view when the project disables views", async () => {
     const rich = { priority__in: "urgent" };
     renderScreen({}, 1, [issueRow()], { role: 20, richFilters: rich, project: { issue_views_view: false } });
-    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.queryByTestId("rich-save-view")).not.toBeInTheDocument();
   });
 
@@ -646,7 +653,7 @@ describe("project issues screen", () => {
 
     // The timeline is a lazy leaf; the route chunk shows the list skeleton
     // until its module resolves.
-    expect(await screen.findByTestId("gantt-layout")).toBeInTheDocument();
+    expect(await screen.findByTestId("gantt-layout", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(1);
     expect(screen.getByTestId("gantt-count")).toHaveTextContent("1 work item");
     expect(screen.queryByLabelText("WEB-42")).toBeNull();
@@ -673,7 +680,7 @@ describe("project issues screen", () => {
     renderScreen({}, 1, [issueRow()]);
     const add = screen.getByRole("button", { name: "Add work item" });
     fireEvent.click(add);
-    expect(await screen.findByPlaceholderText("Title")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Title", undefined, LAZY_WAIT)).toBeInTheDocument();
   });
 
   it("keeps the header entry out of reach for a guest on every project", () => {
@@ -736,7 +743,7 @@ describe("project issues screen", () => {
   it("offers the spreadsheet layout and renders it from the stored preference", async () => {
     renderScreen({}, 1, [issueRow()], { prefs: spreadsheetPrefsSeed() });
 
-    expect(await screen.findByRole("table")).toBeInTheDocument();
+    expect(await screen.findByRole("table", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByText("Work items")).toBeInTheDocument();
     // The sheet carries its own quick-add row; the header entry sits beside it.
     expect(
@@ -747,7 +754,7 @@ describe("project issues screen", () => {
   it("hides the spreadsheet estimate column when the project has no estimate system", async () => {
     renderScreen({}, 1, [issueRow()], { project: { estimate: null }, prefs: spreadsheetPrefsSeed() });
 
-    await screen.findByRole("table");
+    await screen.findByRole("table", undefined, LAZY_WAIT);
     expect(screen.getAllByRole("columnheader").map((header) => header.textContent)).not.toContain("Estimate");
   });
 
@@ -764,7 +771,7 @@ describe("project issues screen", () => {
       unfilteredSheetRows: [matching, excluded],
     });
 
-    await screen.findByRole("table");
+    await screen.findByRole("table", undefined, LAZY_WAIT);
     expect(screen.getByText("Urgent row")).toBeInTheDocument();
     expect(screen.queryByText("Low row")).not.toBeInTheDocument();
   });
@@ -775,7 +782,7 @@ describe("project issues screen", () => {
       project: { member_role: 5 },
       prefs: spreadsheetPrefsSeed(),
     });
-    expect(await screen.findByRole("button", { name: "Add work item" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Add work item" }, LAZY_WAIT)).toBeDisabled();
   });
 
   it("renders the spreadsheet read-only for an archived project", async () => {
@@ -783,7 +790,7 @@ describe("project issues screen", () => {
       project: { archived_at: "2026-01-01T00:00:00Z" },
       prefs: spreadsheetPrefsSeed(),
     });
-    expect(await screen.findByRole("button", { name: "Add work item" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "Add work item" }, LAZY_WAIT)).toBeDisabled();
   });
 
   it("renders the list read-only for an archived project", async () => {
