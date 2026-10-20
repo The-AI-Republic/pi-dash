@@ -74,7 +74,7 @@ pub async fn serve_swagger_ui(State(state): State<AppState>, req: Request) -> Re
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    let (renderer, media_type) = match ui_renderer(&req) {
+    let (renderer, _accepted_media_type) = match ui_renderer(&req) {
         Ok(picked) => picked,
         Err(NegotiationError::NotFound) => return unknown_format(),
         Err(NegotiationError::NotAcceptable) => return not_acceptable(),
@@ -82,11 +82,11 @@ pub async fn serve_swagger_ui(State(state): State<AppState>, req: Request) -> Re
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(renderer, media_type, denied.wait, false);
+        return super::throttled(renderer, denied.wait, false);
     }
     super::view_response(
         StatusCode::OK,
-        &negotiate::content_type(&media_type, renderer),
+        &negotiate::content_type(renderer),
         fill_csrf_token(new_csrf_token()).into_bytes(),
         false,
     )
@@ -99,7 +99,7 @@ pub async fn serve_redoc(State(state): State<AppState>, req: Request) -> Respons
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    let (renderer, media_type) = match ui_renderer(&req) {
+    let (renderer, _accepted_media_type) = match ui_renderer(&req) {
         Ok(picked) => picked,
         Err(NegotiationError::NotFound) => return unknown_format(),
         Err(NegotiationError::NotAcceptable) => return not_acceptable(),
@@ -107,11 +107,11 @@ pub async fn serve_redoc(State(state): State<AppState>, req: Request) -> Respons
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(renderer, media_type, denied.wait, false);
+        return super::throttled(renderer, denied.wait, false);
     }
     super::view_response(
         StatusCode::OK,
-        &negotiate::content_type(&media_type, renderer),
+        &negotiate::content_type(renderer),
         REDOC_TEMPLATE.as_bytes().to_vec(),
         false,
     )
@@ -125,7 +125,7 @@ pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> 
     if !super::rust_serves(&state) {
         return crate::edge::proxy(State(state), req).await;
     }
-    let (renderer, media_type) = match ui_renderer(&req) {
+    let (renderer, _accepted_media_type) = match ui_renderer(&req) {
         Ok(picked) => picked,
         Err(NegotiationError::NotFound) => return unknown_format(),
         Err(NegotiationError::NotAcceptable) => return not_acceptable(),
@@ -133,11 +133,11 @@ pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> 
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(renderer, media_type, denied.wait, false);
+        return super::throttled(renderer, denied.wait, false);
     }
     super::view_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        &negotiate::content_type(&media_type, renderer),
+        &negotiate::content_type(renderer),
         NOT_ALLOWED_BODY.as_bytes().to_vec(),
         false,
     )

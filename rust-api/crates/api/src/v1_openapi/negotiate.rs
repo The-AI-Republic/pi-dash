@@ -145,7 +145,8 @@ pub fn accept_header(req: &Request) -> String {
 }
 
 /// `DefaultContentNegotiation.select_renderer`: pick a renderer and the
-/// media type echoed in `Content-Type`.
+/// accepted media type DRF passes to `renderer.render` (the response
+/// `Content-Type` comes from the renderer itself, see [`content_type`]).
 pub fn select_renderer(
     renderers: &[Renderer],
     format: Option<&str>,
@@ -200,13 +201,15 @@ pub fn select_renderer(
     Err(NegotiationError::NotAcceptable)
 }
 
-/// `Content-Type` of a response rendered by `renderer` for the negotiated
-/// `accepted` media type: DRF appends `; charset=<charset>` when the
-/// renderer carries a charset (`response.py:54-72`).
-pub fn content_type(accepted: &str, renderer: Renderer) -> String {
+/// `Content-Type` of a response rendered by `renderer`: DRF takes the
+/// renderer's own media type (not the matched `Accept` token) and appends
+/// `; charset=<charset>` when the renderer carries a charset
+/// (`response.py:64-72`). Accept parameters such as `q` or `indent` never
+/// reach the header.
+pub fn content_type(renderer: Renderer) -> String {
     match renderer.charset() {
-        Some(charset) => format!("{accepted}; charset={charset}"),
-        None => accepted.to_string(),
+        Some(charset) => format!("{}; charset={charset}", renderer.media_type()),
+        None => renderer.media_type().to_string(),
     }
 }
 
@@ -489,22 +492,20 @@ mod tests {
         );
     }
 
-    /// `Content-Type` appends the charset only for charset-bearing
-    /// renderers.
+    /// `Content-Type` comes from the renderer and appends its charset; the
+    /// matched `Accept` token and its params (for example `q`) are ignored.
     #[test]
     fn content_type_appends_charset_by_renderer() {
         assert_eq!(
-            content_type("application/vnd.oai.openapi", Renderer::Yaml),
+            content_type(Renderer::Yaml),
             "application/vnd.oai.openapi; charset=utf-8"
         );
         assert_eq!(
-            content_type("application/json", Renderer::Json2),
-            "application/json"
+            content_type(Renderer::Yaml2),
+            "application/yaml; charset=utf-8"
         );
-        assert_eq!(
-            content_type("text/html", Renderer::Html),
-            "text/html; charset=utf-8"
-        );
+        assert_eq!(content_type(Renderer::Json2), "application/json");
+        assert_eq!(content_type(Renderer::Html), "text/html; charset=utf-8");
     }
 
     /// Precedence and matching match DRF on the tricky tokens.

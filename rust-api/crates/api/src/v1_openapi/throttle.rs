@@ -206,21 +206,14 @@ pub const RATE_LIMIT_MESSAGE: &str = "RATE_LIMIT_EXCEEDED";
 pub struct SchemaThrottled {
     /// Which renderer serializes the denial (the negotiated renderer).
     pub renderer: Renderer,
-    /// The negotiated `accepted_media_type`, echoed in `Content-Type`.
-    pub media_type: String,
     /// The [`throttle_wait`] output driving `Retry-After`.
     pub wait: Option<f64>,
 }
 
 impl SchemaThrottled {
-    /// Build a denial for `renderer` / `media_type` with the given throttle
-    /// wait.
-    pub fn new(renderer: Renderer, media_type: impl Into<String>, wait: Option<f64>) -> Self {
-        SchemaThrottled {
-            renderer,
-            media_type: media_type.into(),
-            wait,
-        }
+    /// Build a denial for `renderer` with the given throttle wait.
+    pub fn new(renderer: Renderer, wait: Option<f64>) -> Self {
+        SchemaThrottled { renderer, wait }
     }
 }
 
@@ -228,10 +221,7 @@ impl IntoResponse for SchemaThrottled {
     fn into_response(self) -> Response {
         let mut builder = Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(
-                header::CONTENT_TYPE,
-                content_type(&self.media_type, self.renderer),
-            );
+            .header(header::CONTENT_TYPE, content_type(self.renderer));
         if let Some(secs) = retry_after_secs(self.wait) {
             builder = builder.header(header::RETRY_AFTER, secs.to_string());
         }
@@ -460,17 +450,14 @@ mod tests {
     #[test]
     fn denial_content_types_match_fixture() {
         assert_eq!(
-            content_type(Renderer::Yaml.media_type(), Renderer::Yaml),
+            content_type(Renderer::Yaml),
             "application/vnd.oai.openapi; charset=utf-8"
         );
         assert_eq!(
-            content_type(Renderer::Json.media_type(), Renderer::Json),
+            content_type(Renderer::Json),
             "application/vnd.oai.openapi+json"
         );
-        assert_eq!(
-            content_type(Renderer::Html.media_type(), Renderer::Html),
-            "text/html; charset=utf-8"
-        );
+        assert_eq!(content_type(Renderer::Html), "text/html; charset=utf-8");
         assert_eq!(Renderer::Yaml.denial_body(), DENIAL_BODY_YAML);
         assert_eq!(Renderer::Json.denial_body(), DENIAL_BODY_JSON);
         assert_eq!(Renderer::Html.denial_body(), DENIAL_BODY_UI);
@@ -481,9 +468,7 @@ mod tests {
     /// handler-layer contract, see the module docs).
     #[tokio::test]
     async fn yaml_denial_response_is_byte_identical() {
-        let response =
-            SchemaThrottled::new(Renderer::Yaml, Renderer::Yaml.media_type(), Some(58.8))
-                .into_response();
+        let response = SchemaThrottled::new(Renderer::Yaml, Some(58.8)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 1024)
@@ -512,9 +497,7 @@ mod tests {
     /// `Retry-After`.
     #[tokio::test]
     async fn json_denial_response_is_byte_identical() {
-        let response =
-            SchemaThrottled::new(Renderer::Json, Renderer::Json.media_type(), Some(31.0))
-                .into_response();
+        let response = SchemaThrottled::new(Renderer::Json, Some(31.0)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 1024)
@@ -542,9 +525,7 @@ mod tests {
     /// `get_exception_template` fallback text + `Retry-After`.
     #[tokio::test]
     async fn ui_denial_response_is_byte_identical() {
-        let response =
-            SchemaThrottled::new(Renderer::Html, Renderer::Html.media_type(), Some(60.0))
-                .into_response();
+        let response = SchemaThrottled::new(Renderer::Html, Some(60.0)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 1024)
@@ -572,8 +553,7 @@ mod tests {
     /// `Retry-After` header (`views.py:90-91`).
     #[tokio::test]
     async fn denial_without_wait_omits_retry_after() {
-        let response =
-            SchemaThrottled::new(Renderer::Yaml, Renderer::Yaml.media_type(), None).into_response();
+        let response = SchemaThrottled::new(Renderer::Yaml, None).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
     }

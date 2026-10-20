@@ -114,3 +114,21 @@ def test_unsafe_method_body_follows_accept():
     assert r.text == (
         'detail:\n  string: Method "POST" not allowed.\n  code: method_not_allowed\n'
     )
+
+
+@pytest.mark.contract
+@pytest.mark.parametrize(
+    ("accept", "content_type"),
+    [
+        ("application/json; q=0.5", JSON_CT),
+        ("application/yaml; q=0.9", VENDOR_YAML_CT),
+        ("*/*; q=0.5", YAML_CT),
+    ],
+)
+def test_accept_params_do_not_leak_into_content_type(accept, content_type):
+    """DRF sets Content-Type from the chosen renderer's media type, not from
+    the matched Accept token: `q` (and any other Accept parameter) is dropped.
+    """
+    r = sc.negotiate(sc.SCHEMA, accept)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == content_type

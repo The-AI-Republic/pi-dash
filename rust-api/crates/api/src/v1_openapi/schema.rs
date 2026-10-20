@@ -110,7 +110,7 @@ pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
     }
     let format = super::last_format_value(req.uri().query().unwrap_or(""));
     let accept = negotiate::accept_header(&req);
-    let (renderer, media_type) =
+    let (renderer, _accepted_media_type) =
         match negotiate::select_renderer(&DOC_RENDERERS, format.as_deref(), &accept) {
             Ok(picked) => picked,
             Err(NegotiationError::NotFound) => {
@@ -133,7 +133,7 @@ pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(renderer, media_type, denied.wait, true);
+        return super::throttled(renderer, denied.wait, true);
     }
     let body = if renderer.is_json() {
         pidash_services::v1_openapi::doc::render_json().into_bytes()
@@ -141,7 +141,7 @@ pub async fn serve(State(state): State<AppState>, req: Request) -> Response {
         pidash_services::v1_openapi::doc::render_yaml().into_bytes()
     };
     doc_response(
-        negotiate::content_type(&media_type, renderer),
+        negotiate::content_type(renderer),
         disposition(renderer.format()),
         body,
     )
@@ -157,7 +157,7 @@ pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> 
     }
     let format = super::last_format_value(req.uri().query().unwrap_or(""));
     let accept = negotiate::accept_header(&req);
-    let (renderer, media_type) =
+    let (renderer, _accepted_media_type) =
         match negotiate::select_renderer(&DOC_RENDERERS, format.as_deref(), &accept) {
             Ok(picked) => picked,
             Err(NegotiationError::NotFound) => {
@@ -180,7 +180,7 @@ pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> 
     let ident = super::peer_ident(&req);
     let session = super::session_handle(&req);
     if let Some(denied) = super::throttle_verdict(&state, ident, session).await {
-        return super::throttled(renderer, media_type, denied.wait, true);
+        return super::throttled(renderer, denied.wait, true);
     }
     let method = req.method().as_str();
     let body = if renderer.is_json() {
@@ -200,7 +200,7 @@ pub async fn method_not_allowed(State(state): State<AppState>, req: Request) -> 
     };
     super::view_response(
         StatusCode::METHOD_NOT_ALLOWED,
-        &negotiate::content_type(&media_type, renderer),
+        &negotiate::content_type(renderer),
         body.as_bytes().to_vec(),
         true,
     )

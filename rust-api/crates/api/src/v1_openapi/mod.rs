@@ -464,13 +464,8 @@ pub(crate) fn view_response(
 
 /// Answer a throttled request: the renderer-appropriate 429 denial plus
 /// the view shell (`Allow`, and `Vary` on the doc routes).
-pub(crate) fn throttled(
-    renderer: Renderer,
-    media_type: String,
-    wait: Option<f64>,
-    vary_accept: bool,
-) -> Response {
-    let denied = SchemaThrottled::new(renderer, media_type, wait).into_response();
+pub(crate) fn throttled(renderer: Renderer, wait: Option<f64>, vary_accept: bool) -> Response {
+    let denied = SchemaThrottled::new(renderer, wait).into_response();
     view_shell(denied, vary_accept)
 }
 
