@@ -616,3 +616,235 @@ describe("delete marker and blank name error", () => {
     await expect(driver.wsSettingsNameError()).resolves.toBeNull();
   });
 });
+
+// Integrations driver methods (NEWFRONT-539, WSET-016–018). A locator
+// whose chained reads (role, text) answer with the same overrides keeps
+// these probes independent of the card's internal markup.
+function cardElement(overrides: LocatorStub = {}): LocatorStub {
+  const self: LocatorStub = {
+    ...element(overrides),
+    ...overrides,
+    first: () => self,
+    locator: () => self,
+    getByRole: () => self,
+    getByText: () => self,
+  };
+  return self;
+}
+
+function integrationsPage(overrides: Record<string, unknown> = {}): Page {
+  return stubPage({
+    url: () => "http://localhost:3010/acme/settings/integrations/",
+    title: vi.fn(async () => "Acme - Integrations"),
+    getByTestId: vi.fn(() => cardElement()),
+    getByRole: vi.fn(() => cardElement()),
+    getByPlaceholder: vi.fn(() => cardElement()),
+    getByText: vi.fn(() => cardElement()),
+    locator: vi.fn(() => cardElement()),
+    ...overrides,
+  });
+}
+
+describe("web-new workspace settings integrations driver", () => {
+  it("opens the page and settles on the GitHub card heading", async () => {
+    const page = integrationsPage();
+    await new WebNewDriver(page).wsSettingsOpenIntegrations("acme");
+    expect(page.goto as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("/acme/settings/integrations");
+    expect(page.getByRole as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("heading", {
+      name: "GitHub",
+      exact: true,
+    });
+  });
+
+  it("retries once when neither the cards nor the denial settle", async () => {
+    const waits = [Promise.reject(new Error("timeout")), Promise.resolve()];
+    let call = 0;
+    const page = integrationsPage({
+      getByRole: vi.fn(() => ({
+        ...cardElement(),
+        first: () => ({
+          ...cardElement(),
+          waitFor: async () => {
+            const next = waits[call] ?? Promise.resolve();
+            call += 1;
+            return next;
+          },
+        }),
+      })),
+    });
+    await new WebNewDriver(page).wsSettingsOpenIntegrations("acme");
+    expect(page.goto as ReturnType<typeof vi.fn>).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when both rounds settle on nothing", async () => {
+    const page = integrationsPage({
+      getByRole: vi.fn(() => ({
+        ...cardElement(),
+        first: () => ({
+          ...cardElement(),
+          waitFor: async () => {
+            throw new Error("timeout");
+          },
+        }),
+      })),
+    });
+    await expect(new WebNewDriver(page).wsSettingsOpenIntegrations("acme")).rejects.toThrow(
+      /neither cards nor the denial/
+    );
+  });
+
+  it("reads the denial, the heading and the provider titles in order", async () => {
+    const driver = new WebNewDriver(integrationsPage());
+    expect(await driver.wsSettingsIntegrationsNotAuthorized()).toBe(true);
+    expect(await driver.wsSettingsIntegrationsHeadingVisible()).toBe(true);
+    expect(await driver.wsSettingsIntegrationsProviderTitles()).toEqual(["GitHub", "GitLab"]);
+    expect(await driver.wsSettingsPageTitle()).toBe("Acme - Integrations");
+  });
+
+  it("skips provider titles that are absent", async () => {
+    const page = integrationsPage({ getByRole: vi.fn(() => cardElement({ count: async () => 0 })) });
+    expect(await new WebNewDriver(page).wsSettingsIntegrationsProviderTitles()).toEqual([]);
+  });
+
+  it("reads each provider's first header paragraph as its status, collapsing whitespace", async () => {
+    const page = integrationsPage({
+      getByTestId: vi.fn(() => cardElement({ innerText: async () => "  Connected as\n octo  " })),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsGithubStatusText()).toBe("Connected as octo");
+    expect(await driver.wsSettingsGitlabStatusText()).toBe("Connected as octo");
+  });
+
+  it("answers no status when the card or its header line is absent", async () => {
+    const noCard = integrationsPage({ getByTestId: vi.fn(() => cardElement({ count: async () => 0 })) });
+    expect(await new WebNewDriver(noCard).wsSettingsGithubStatusText()).toBeNull();
+    const noLine = integrationsPage({
+      getByTestId: vi.fn(() => ({
+        ...cardElement(),
+        locator: () => cardElement({ count: async () => 0 }),
+      })),
+    });
+    expect(await new WebNewDriver(noLine).wsSettingsGitlabStatusText()).toBeNull();
+    const blank = integrationsPage({
+      getByTestId: vi.fn(() => cardElement({ innerText: async () => "   " })),
+    });
+    expect(await new WebNewDriver(blank).wsSettingsGithubStatusText()).toBeNull();
+  });
+
+  it("fills the token fields and reads their values", async () => {
+    const fill = vi.fn(async () => undefined);
+    const page = integrationsPage({
+      getByPlaceholder: vi.fn(() => cardElement({ fill, inputValue: async () => "value" })),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsGithubTokenFill("token");
+    expect(page.getByPlaceholder as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("github_pat_...");
+    expect(fill).toHaveBeenCalledWith("token", { timeout: 30_000 });
+    expect(await driver.wsSettingsGithubTokenValue()).toBe("value");
+    await driver.wsSettingsGitlabTokenFill("token");
+    expect(page.getByPlaceholder as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("glpat-...");
+    expect(await driver.wsSettingsGitlabTokenValue()).toBe("value");
+  });
+
+  it("answers blank token values when the field is not on the page", async () => {
+    const page = integrationsPage({ getByPlaceholder: vi.fn(() => cardElement({ count: async () => 0 })) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsGithubTokenValue()).toBe("");
+    expect(await driver.wsSettingsGitlabTokenValue()).toBe("");
+  });
+
+  it("reports Connect enabled only when its control exists", async () => {
+    const enabled = integrationsPage({
+      getByTestId: vi.fn(() => cardElement({ isEnabled: async () => true })),
+    });
+    const driver = new WebNewDriver(enabled);
+    expect(await driver.wsSettingsGithubConnectEnabled()).toBe(true);
+    expect(await driver.wsSettingsGitlabConnectEnabled()).toBe(true);
+    const absent = integrationsPage({ getByTestId: vi.fn(() => cardElement({ count: async () => 0 })) });
+    expect(await new WebNewDriver(absent).wsSettingsGithubConnectEnabled()).toBe(false);
+    expect(await new WebNewDriver(absent).wsSettingsGitlabConnectEnabled()).toBe(false);
+    const disabled = integrationsPage({
+      getByTestId: vi.fn(() => cardElement({ isEnabled: async () => false })),
+    });
+    expect(await new WebNewDriver(disabled).wsSettingsGithubConnectEnabled()).toBe(false);
+  });
+
+  it("clicks Connect and waits for each provider's POST", async () => {
+    const clicked: string[] = [];
+    const page = integrationsPage({
+      getByTestId: vi.fn(() => cardElement({ click: async () => clicked.push("connect") })),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsGithubConnect();
+    await driver.wsSettingsGitlabConnect();
+    expect(clicked).toEqual(["connect", "connect"]);
+    const predicates = (page.waitForResponse as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([predicate]: [(response: unknown) => boolean]) => predicate
+    );
+    expect(
+      predicates.some((predicate: (response: unknown) => boolean) =>
+        predicate({
+          url: () => "http://localhost:3010/api/workspaces/acme/integrations/github/connect/",
+          request: () => ({ method: () => "POST" }),
+        })
+      )
+    ).toBe(true);
+    expect(
+      predicates.some((predicate: (response: unknown) => boolean) =>
+        predicate({
+          url: () => "http://localhost:3010/api/workspaces/acme/integrations/git/accounts/",
+          request: () => ({ method: () => "POST" }),
+        })
+      )
+    ).toBe(true);
+  });
+
+  it("reads the connected marker and the disconnect control", async () => {
+    const driver = new WebNewDriver(integrationsPage());
+    expect(await driver.wsSettingsGithubConnected()).toBe(true);
+    expect(await driver.wsSettingsGitlabConnected()).toBe(true);
+    expect(await driver.wsSettingsGithubDisconnectVisible()).toBe(true);
+    expect(await driver.wsSettingsGitlabDisconnectVisible()).toBe(true);
+    const absent = integrationsPage({ getByTestId: vi.fn(() => cardElement({ count: async () => 0 })) });
+    expect(await new WebNewDriver(absent).wsSettingsGithubDisconnectVisible()).toBe(false);
+    expect(await new WebNewDriver(absent).wsSettingsGitlabDisconnectVisible()).toBe(false);
+  });
+
+  it("clicks Disconnect and waits for the GitHub POST and the GitLab DELETE", async () => {
+    const clicked: string[] = [];
+    const page = integrationsPage({
+      getByTestId: vi.fn(() => cardElement({ click: async () => clicked.push("disconnect") })),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsGithubDisconnect();
+    await driver.wsSettingsGitlabDisconnect();
+    expect(clicked).toEqual(["disconnect", "disconnect"]);
+    const predicates = (page.waitForResponse as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([predicate]: [(response: unknown) => boolean]) => predicate
+    );
+    expect(
+      predicates.some((predicate: (response: unknown) => boolean) =>
+        predicate({
+          url: () => "http://localhost:3010/api/workspaces/acme/integrations/github/disconnect/",
+          request: () => ({ method: () => "POST" }),
+        })
+      )
+    ).toBe(true);
+    expect(
+      predicates.some((predicate: (response: unknown) => boolean) =>
+        predicate({
+          url: () => "http://localhost:3010/api/workspaces/acme/integrations/git/accounts/abc/",
+          request: () => ({ method: () => "DELETE" }),
+        })
+      )
+    ).toBe(true);
+  });
+
+  it("fills the GitLab host field", async () => {
+    const fill = vi.fn(async () => undefined);
+    const page = integrationsPage({ getByPlaceholder: vi.fn(() => cardElement({ fill })) });
+    await new WebNewDriver(page).wsSettingsGitlabHostFill("https://gitlab.example.com");
+    expect(page.getByPlaceholder as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("https://gitlab.com");
+    expect(fill).toHaveBeenCalledWith("https://gitlab.example.com", { timeout: 30_000 });
+  });
+});

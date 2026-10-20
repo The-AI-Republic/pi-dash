@@ -23,6 +23,9 @@ function defaultBaseUrl(): string {
 }
 
 let appClient: ApiClient | null = null;
+let providerClient: ApiClient | null = null;
+let appTransport: Transport | null = null;
+let appBaseUrl = "";
 
 /**
  * Build the singleton client. Called once at bootstrap; also points the
@@ -30,14 +33,41 @@ let appClient: ApiClient | null = null;
  * Tests pass a stub transport; the app always uses platform.fetch.
  */
 export function createAppClient(baseUrl: string = defaultBaseUrl(), transport?: Transport): ApiClient {
+  // Resolve the transport once so the provider sibling always sends through
+  // the same channel as the app client — platform.fetch in both builds,
+  // including the desktop shell's HTTP bridge (DESK-020).
+  const resolvedTransport = transport ?? toApiTransport(platform);
   const client = createClient({
     baseUrl,
-    transport: transport ?? toApiTransport(platform),
+    transport: resolvedTransport,
     middleware: [createSessionMiddleware()],
   });
   appClient = client;
+  providerClient = null;
+  appTransport = resolvedTransport;
+  appBaseUrl = baseUrl;
   setSessionClient(client);
   return client;
+}
+
+/**
+ * Sibling client for provider-credential writes (NEWFRONT-421): a GitHub
+ * or GitLab token rejection answers 401, but that credential is not the
+ * signed-in session. This client shares the app's origin and transport and
+ * skips only the session-expiry middleware; every other call still uses
+ * the app client, so a real expired session keeps signing out.
+ */
+export function getProviderWriteClient(): ApiClient {
+  if (!appClient || appTransport === null) {
+    throw new Error("App client is not configured yet. Call createAppClient at bootstrap.");
+  }
+  if (providerClient === null) {
+    providerClient = createClient({
+      baseUrl: appBaseUrl,
+      transport: appTransport,
+    });
+  }
+  return providerClient;
 }
 
 /** The bootstrap client. Throws before createAppClient has run. */
@@ -51,4 +81,7 @@ export function getAppClient(): ApiClient {
 /** Drop the singleton. Tests only; the app never rebuilds its client. */
 export function resetAppClient(): void {
   appClient = null;
+  providerClient = null;
+  appTransport = null;
+  appBaseUrl = "";
 }

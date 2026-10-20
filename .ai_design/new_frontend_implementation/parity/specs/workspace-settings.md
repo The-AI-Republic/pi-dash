@@ -400,7 +400,10 @@ Disconnected, the card shows the provider mark and name, an explainer
 naming the fine-grained personal token with issue read access and the
 mirroring behavior, an external help link to token creation, a masked
 token field, and a Connect control that stays disabled until the field
-holds a non-blank token. Connecting sends POST
+holds a non-blank token. The oracle reads the explainer and pins the
+phrase `fine-grained PAT` in it (the GitLab explainer likewise carries
+`GitLab token`, §17), so the copy names the token that way.
+Connecting sends POST
 `.../integrations/github/connect/` with the trimmed token. Success
 clears the field, re-reads the status, and shows a `Connected` notice
 reporting the verified credential. A rejected token must show a

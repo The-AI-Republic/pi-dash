@@ -18261,71 +18261,202 @@ export class WebNewDriver implements ParityDriver {
   // --- Workspace-settings developer oracle (NEWFRONT-412, WSET-016..024,
   // --- WSET-041). Throwing stubs per the shared driver contract; the new
   // --- app implements them later.
-  async wsSettingsOpenIntegrations(_workspaceSlug: string): Promise<void> {
-    return todo("wsSettingsOpenIntegrations");
+  async wsSettingsOpenIntegrations(workspaceSlug: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/integrations`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("heading", { name: "GitHub", exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] integrations page settled on neither cards nor the denial view.");
   }
+
   async wsSettingsIntegrationsNotAuthorized(): Promise<boolean> {
-    return todo("wsSettingsIntegrationsNotAuthorized");
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
   }
+
   async wsSettingsIntegrationsHeadingVisible(): Promise<boolean> {
-    return todo("wsSettingsIntegrationsHeadingVisible");
+    return (await this.page.getByRole("heading", { name: "Integrations", exact: true }).count()) > 0;
   }
+
   async wsSettingsIntegrationsProviderTitles(): Promise<string[]> {
-    return todo("wsSettingsIntegrationsProviderTitles");
+    const titles: string[] = [];
+    for (const name of ["GitHub", "GitLab"] as const) {
+      const head = this.page.getByRole("heading", { name, exact: true });
+      if ((await head.count()) > 0) titles.push(name);
+    }
+    return titles;
   }
+
   async wsSettingsPageTitle(): Promise<string> {
-    return todo("wsSettingsPageTitle");
+    return this.page.title();
   }
+
+  /** One provider card, keyed by the test id the page puts on its section. */
+  private wsSettingsProviderCard(provider: "github" | "gitlab") {
+    return this.page.getByTestId(`integration-card-${provider}`).first();
+  }
+
+  private async wsSettingsCardStatusText(provider: "github" | "gitlab"): Promise<string | null> {
+    const card = this.wsSettingsProviderCard(provider);
+    if ((await card.count()) === 0) return null;
+    // The status line is the first paragraph in the card header.
+    const line = card.locator("header p").first();
+    if ((await line.count()) === 0) return null;
+    const text = ((await line.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
+  }
+
   async wsSettingsGithubStatusText(): Promise<string | null> {
-    return todo("wsSettingsGithubStatusText");
+    return this.wsSettingsCardStatusText("github");
   }
-  async wsSettingsGithubTokenFill(_token: string): Promise<void> {
-    return todo("wsSettingsGithubTokenFill");
+
+  async wsSettingsGithubTokenFill(token: string): Promise<void> {
+    await this.page.getByPlaceholder("github_pat_...").fill(token, { timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsGithubTokenValue(): Promise<string> {
-    return todo("wsSettingsGithubTokenValue");
+    const field = this.page.getByPlaceholder("github_pat_...");
+    if ((await field.count()) === 0) return "";
+    return field.first().inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private wsSettingsGithubConnectButton() {
+    return this.wsSettingsProviderCard("github").getByRole("button", { name: "Connect", exact: true });
+  }
+
   async wsSettingsGithubConnectEnabled(): Promise<boolean> {
-    return todo("wsSettingsGithubConnectEnabled");
+    const control = this.wsSettingsGithubConnectButton();
+    if ((await control.count()) === 0) return false;
+    return control.first().isEnabled();
   }
+
   async wsSettingsGithubConnect(): Promise<void> {
-    return todo("wsSettingsGithubConnect");
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/integrations/github/connect/") && response.request().method() === "POST",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGithubConnectButton().first().click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
+
   async wsSettingsGithubConnected(): Promise<boolean> {
-    return todo("wsSettingsGithubConnected");
+    return (await this.wsSettingsProviderCard("github").getByText("Connected as", { exact: false }).count()) > 0;
   }
+
+  private wsSettingsGithubDisconnectButton() {
+    return this.wsSettingsProviderCard("github").getByRole("button", { name: "Disconnect", exact: true });
+  }
+
   async wsSettingsGithubDisconnectVisible(): Promise<boolean> {
-    return todo("wsSettingsGithubDisconnectVisible");
+    return (await this.wsSettingsGithubDisconnectButton().count()) > 0;
   }
+
   async wsSettingsGithubDisconnect(): Promise<void> {
-    return todo("wsSettingsGithubDisconnect");
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/integrations/github/disconnect/") && response.request().method() === "POST",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGithubDisconnectButton().first().click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
+
   async wsSettingsGitlabStatusText(): Promise<string | null> {
-    return todo("wsSettingsGitlabStatusText");
+    return this.wsSettingsCardStatusText("gitlab");
   }
-  async wsSettingsGitlabHostFill(_host: string): Promise<void> {
-    return todo("wsSettingsGitlabHostFill");
+
+  async wsSettingsGitlabHostFill(host: string): Promise<void> {
+    await this.page.getByPlaceholder("https://gitlab.com").fill(host, { timeout: WebNewDriver.WAIT_MS });
   }
-  async wsSettingsGitlabTokenFill(_token: string): Promise<void> {
-    return todo("wsSettingsGitlabTokenFill");
+
+  async wsSettingsGitlabTokenFill(token: string): Promise<void> {
+    await this.page.getByPlaceholder("glpat-...").fill(token, { timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsGitlabTokenValue(): Promise<string> {
-    return todo("wsSettingsGitlabTokenValue");
+    const field = this.page.getByPlaceholder("glpat-...");
+    if ((await field.count()) === 0) return "";
+    return field.first().inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private wsSettingsGitlabConnectButton() {
+    return this.wsSettingsProviderCard("gitlab").getByRole("button", { name: "Connect", exact: true });
+  }
+
   async wsSettingsGitlabConnectEnabled(): Promise<boolean> {
-    return todo("wsSettingsGitlabConnectEnabled");
+    const control = this.wsSettingsGitlabConnectButton();
+    if ((await control.count()) === 0) return false;
+    return control.first().isEnabled();
   }
+
   async wsSettingsGitlabConnect(): Promise<void> {
-    return todo("wsSettingsGitlabConnect");
+    const settled = this.page
+      .waitForResponse(
+        (response) => response.url().includes("/integrations/git/accounts/") && response.request().method() === "POST",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGitlabConnectButton().first().click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
+
   async wsSettingsGitlabConnected(): Promise<boolean> {
-    return todo("wsSettingsGitlabConnected");
+    return (await this.wsSettingsProviderCard("gitlab").getByText("Connected as", { exact: false }).count()) > 0;
   }
+
+  private wsSettingsGitlabDisconnectButton() {
+    return this.wsSettingsProviderCard("gitlab").getByRole("button", { name: "Disconnect", exact: true });
+  }
+
   async wsSettingsGitlabDisconnectVisible(): Promise<boolean> {
-    return todo("wsSettingsGitlabDisconnectVisible");
+    return (await this.wsSettingsGitlabDisconnectButton().count()) > 0;
   }
+
   async wsSettingsGitlabDisconnect(): Promise<void> {
-    return todo("wsSettingsGitlabDisconnect");
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          /\/integrations\/git\/accounts\/[^/]+\/$/.test(response.url()) && response.request().method() === "DELETE",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.wsSettingsGitlabDisconnectButton().first().click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
   // --- Workspace webhooks (NEWFRONT-541, WSET-019-024/041). The list, its
   // --- creation dialog and one-time reveal, the detail form, regeneration
