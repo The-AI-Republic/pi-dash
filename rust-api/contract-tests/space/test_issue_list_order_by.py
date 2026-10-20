@@ -75,3 +75,19 @@ def test_issue_list_order_by_valid_fields_still_sort(anon_client, world, seeder,
     assert names("-sequence_id") == ["order-b", "order-a", "order-z", "Contract issue"]
     assert names("priority") == ["Contract issue", "order-z", "order-b", "order-a"]
     assert names("state__name") == ["order-a", "Contract issue", "order-b", "order-z"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "project__default_assignee",
+        "project__workspace",
+        "state__project",
+        "parent__state",
+        "workspace__owner",
+    ],
+)
+def test_issue_list_order_by_relation_fk_field_aliases_are_valid(anon_client, world, value):
+    response = anon_client.get(_issues_url(world), params={"order_by": value})
+    assert response.status_code == 200, response.text
+    assert [row["name"] for row in response.json()["results"]] == ["Contract issue"]

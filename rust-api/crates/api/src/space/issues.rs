@@ -800,37 +800,30 @@ fn related_order_expr(field: &str) -> Option<String> {
             "workspace" => ("\"workspaces\"", WORKSPACE_ORDER_COLUMNS),
             _ => return None,
         };
-        if column.contains("__") || !columns.contains(&column) {
+        if column.contains("__") {
             return None;
         }
+        let column = order_column(columns, column)?;
         Some(format!("{table}.\"{column}\""))
     } else {
-        let column = issue_order_column(field)?;
+        let column = order_column(ISSUE_ORDER_COLUMNS, field)?;
         Some(format!("\"issues\".\"{column}\""))
     }
 }
 
-/// The `Issue` column a bare `order_by` name resolves to. Django accepts both
-/// model field names and their attnames (`state` / `state_id`, `pk` / `id`);
-/// the SQL projection has only one column for each pair.
-fn issue_order_column(field: &str) -> Option<&'static str> {
-    let column = match field {
-        "pk" => "id",
-        "state" => "state_id",
-        "project" => "project_id",
-        "workspace" => "workspace_id",
-        "parent" => "parent_id",
-        "created_by" => "created_by_id",
-        "updated_by" => "updated_by_id",
-        "estimate_point" => "estimate_point_id",
-        "type" => "type_id",
-        "assigned_pod" => "assigned_pod_id",
-        other => other,
-    };
-    ISSUE_ORDER_COLUMNS
-        .iter()
-        .copied()
-        .find(|known| *known == column)
+/// Resolve a Django model field name against a fixed column allowlist. Django's
+/// `order_by` accepts both field names and attnames (`state` / `state_id`,
+/// `default_assignee` / `default_assignee_id`, `pk` / `id`); the SQL projection
+/// has one column for each pair. Unknown names fail closed.
+fn order_column(columns: &'static [&'static str], field: &str) -> Option<&'static str> {
+    if field == "pk" {
+        return columns.iter().copied().find(|known| *known == "id");
+    }
+    if let Some(column) = columns.iter().copied().find(|known| *known == field) {
+        return Some(column);
+    }
+    let attname = format!("{field}_id");
+    columns.iter().copied().find(|known| *known == attname)
 }
 
 /// Fixed allowlists for `order_by`. Django resolves the name against model
