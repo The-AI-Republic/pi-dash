@@ -17614,11 +17614,13 @@ export class WebNewDriver implements ParityDriver {
 
   private async waitRunsListSettled(timeoutMs = WebNewDriver.WAIT_MS): Promise<void> {
     await this.page.getByTestId("runs-table").waitFor({ timeout: timeoutMs });
+    // A pending first page renders one spinner row inside the table. Wait
+    // for actual content instead: either a data row or the empty marker,
+    // which only exists once loading has finished.
     await this.page
-      .locator('[data-testid="runs-row"], [data-testid="runs-list"] tbody tr')
+      .locator('[data-testid="runs-row"], [data-testid="runs-empty"]')
       .first()
-      .waitFor({ timeout: timeoutMs })
-      .catch(() => undefined);
+      .waitFor({ timeout: timeoutMs });
   }
 
   private async waitRunDetailSettled(timeoutMs = WebNewDriver.WAIT_MS): Promise<void> {

@@ -69,6 +69,7 @@ describe("RunsList", () => {
   it("shows the empty state with no pager and no rows", () => {
     renderList(page({ results: [], count: 0, total_count: 0, total_pages: 0 }));
     expect(screen.getByText(RUNS_EMPTY_TEXT)).toBeInTheDocument();
+    expect(screen.getByTestId("runs-empty")).toHaveTextContent(RUNS_EMPTY_TEXT);
     expect(screen.queryByTestId("runs-pager")).toBeNull();
     expect(screen.queryAllByTestId("runs-row")).toHaveLength(0);
   });
@@ -77,6 +78,7 @@ describe("RunsList", () => {
     renderList(undefined, 1, true);
     expect(screen.queryByText(RUNS_EMPTY_TEXT)).toBeNull();
     expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.queryByTestId("runs-empty")).toBeNull();
   });
 
   it("labels the page and disables the ends", () => {

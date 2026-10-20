@@ -1377,7 +1377,8 @@ function textNode(text: string, overrides: Record<string, unknown> = {}) {
 describe("runs list navigation", () => {
   it("opens workspace and project runs with the idempotent list waiter", async () => {
     const table = textNode("", { getByTestId: vi.fn(() => textNode("No runs yet.")) });
-    const page = testIdPage({ "runs-table": table }, { locator: vi.fn(() => stubLocator()) });
+    const settled = stubLocator();
+    const page = testIdPage({ "runs-table": table }, { locator: vi.fn(() => settled) });
     const driver = new WebNewDriver(page);
 
     await driver.openRunsList("acme");
@@ -1388,6 +1389,24 @@ describe("runs list navigation", () => {
     expect(page.goto).toHaveBeenLastCalledWith("/acme/projects/p-1/runners/runs/run-1", { timeout: 60_000 });
     expect(await driver.runsHistoryLength()).toBe(0);
     expect((page.evaluate as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0]).toBeTypeOf("function");
+    expect(page.locator).toHaveBeenCalledWith('[data-testid="runs-row"], [data-testid="runs-empty"]');
+    expect(settled.waitFor).toHaveBeenCalled();
+  });
+
+  it("does not settle on the pending spinner row", async () => {
+    const table = textNode("");
+    const pending = stubLocator({
+      first: () => pending,
+      waitFor: vi.fn(async () => {
+        throw new Error("timeout waiting for runs content");
+      }),
+    });
+    const page = testIdPage({ "runs-table": table }, { locator: vi.fn(() => pending) });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.openRunsList("acme")).rejects.toThrow("timeout waiting for runs content");
+    expect(page.locator).toHaveBeenCalledWith('[data-testid="runs-row"], [data-testid="runs-empty"]');
+    expect(page.locator).not.toHaveBeenCalledWith('[data-testid="runs-row"], [data-testid="runs-list"] tbody tr');
   });
 });
 

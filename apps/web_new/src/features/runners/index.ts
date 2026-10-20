@@ -58,18 +58,6 @@ export type { RuntimeNoticeInput, RuntimeSupervisorProps } from "./runtime/Super
 export { decideProjectRunnersAccess, decideWorkspaceRunnersAccess, type RunnersAccess } from "./access.js";
 export { buildRunnersAreaValue, RunnersAreaProvider, useRunnersArea, type RunnersAreaValue } from "./area.js";
 export { runnersKeys, type RunnersScope } from "./api/keys.js";
-export {
-  isTerminalRun,
-  RUN_DETAIL_POLL_INTERVAL_MS,
-  RUNS_PAGE_SIZE,
-  RUNS_POLL_INTERVAL_MS,
-  runQueryOptions,
-  runsQueryOptions,
-  TERMINAL_RUN_STATUSES,
-  useCancelRun,
-  useRun,
-  useRuns,
-} from "./api/runs.js";
 export { useDeleteRunner, useRevokeRunner } from "./api/mutations.js";
 export {
   PODS_POLL_INTERVAL_MS,
@@ -109,29 +97,10 @@ export { RunnersProjectShell } from "./RunnersProjectShell.js";
 export type { RunnersProjectShellProps } from "./RunnersProjectShell.js";
 export { RunnersWorkspaceShell } from "./RunnersWorkspaceShell.js";
 export type { RunnersWorkspaceShellProps } from "./RunnersWorkspaceShell.js";
-export {
-  errorKindLabel,
-  errorSourceTone,
-  eventNarrative,
-  eventTime,
-  executorLabel,
-  executorTone,
-  hasFailure,
-  pageLabel,
-  parseRunsPage,
-  resultJson,
-  resultSummary,
-  runsHref,
-  runsPageSearch,
-  startedLabel,
-} from "./runs/runsModel.js";
-export { RUN_CANCEL_TITLE, canCancelRun, cancelBodyKind, RunDetail } from "./runs/RunDetail.js";
-export type { RunDetailProps } from "./runs/RunDetail.js";
-export { RUNS_EMPTY_TEXT, RunsList } from "./runs/RunsList.js";
-export type { RunsListProps } from "./runs/RunsList.js";
-export { schedulerBindingHref, RunsScreen } from "./runs/RunsScreen.js";
-export type { RunsScreenProps } from "./runs/RunsScreen.js";
-export { RUN_STATUS_LABELS, RUN_STATUS_TONES, runStatusLabel, runStatusTone } from "./runs/runStatus.js";
+// RUN-022: the shared status badge is consumed outside this area (the
+// scheduler-binding detail), so it belongs on the public barrel. The runs
+// screens and their model stay internal to this feature and are imported
+// directly by the runs routes.
 export { RunStatusBadge } from "./runs/RunStatusBadge.js";
 export type { RunStatusBadgeProps } from "./runs/RunStatusBadge.js";
 export { runnersBase, runnersPath } from "./scope.js";

@@ -61,7 +61,8 @@ vi.mock("../../../../features/runners/runs/RunsScreen.js", () => ({
 const { sessionKeys, setSessionClient } = await import("../../../../core/session/index.js");
 const { Route: LayoutRoute } = await import("./route.js");
 const { Route: IndexRoute } = await import("./index.js");
-const { Route: RunsRoute } = await import("./runs.{-$runId}.js");
+const { Route: RunsRoute } = await import("./runs.index.js");
+const { Route: RunDetailRoute } = await import("./runs.$id.js");
 const { Route: ApprovalsRoute } = await import("./approvals.js");
 const { Route: DetailRoute } = await import("./detail/$runnerId.js");
 const { Route: ChatRoute } = await import("./chat/$runnerId.js");
@@ -98,6 +99,8 @@ beforeEach(() => {
   vi.spyOn(IndexRoute, "useParams").mockReturnValue(params.value);
   vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: 2 });
   vi.spyOn(RunsRoute, "useParams").mockReturnValue({ ws: "acme" });
+  vi.spyOn(RunDetailRoute, "useSearch").mockReturnValue({ page: 2 });
+  vi.spyOn(RunDetailRoute, "useParams").mockReturnValue({ ws: "acme", id: "run-1" });
   setSessionClient({} as never);
 });
 
@@ -155,8 +158,7 @@ describe("workspace runners section routes", () => {
   });
 
   it("passes the run id from the address to the same screen", () => {
-    vi.spyOn(RunsRoute, "useParams").mockReturnValue({ ws: "acme", runId: "run-1" });
-    mount(RunsRoute.options.component);
+    mount(RunDetailRoute.options.component);
     expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
   });
 

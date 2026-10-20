@@ -75,7 +75,11 @@ export function RunsList({ data, loading, page, onPage, onSelect }: RunsListProp
               ))}
               {runs.length === 0 ? (
                 <tr>
-                  <td colSpan={3} className="px-(--space-3) py-(--space-8) text-center text-(--text-muted)">
+                  <td
+                    colSpan={3}
+                    data-testid={loading ? undefined : "runs-empty"}
+                    className="px-(--space-3) py-(--space-8) text-center text-(--text-muted)"
+                  >
                     {loading ? <Spinner size="small" /> : RUNS_EMPTY_TEXT}
                   </td>
                 </tr>
