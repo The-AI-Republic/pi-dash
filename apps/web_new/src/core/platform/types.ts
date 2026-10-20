@@ -128,6 +128,135 @@ export interface AgentRuntimeApi {
 }
 
 /**
+ * Local chat over the bundled daemon (RUN-033-036). The engine runs on
+ * this machine and is reached through native IPC, never a cloud relay;
+ * the store below is the per-account local transcript the chat page
+ * renders. Sessions always read back open and carry the working
+ * directory, engine thread and last-write time the page needs.
+ */
+export interface LocalChatSessionRecord {
+  id: string;
+  title: string;
+  /** Workspace the conversation belongs to. */
+  workspace: string;
+  /** Runner id rides here; the store has no dedicated runner column. */
+  project: string;
+  working_dir: string;
+  engine_version: string;
+  /** Engine thread the session resumes into, null before the first turn. */
+  engine_thread_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** One transcript row as the local store keeps it (unix milliseconds). */
+export interface LocalChatEventRecord {
+  id: string;
+  session_id: string;
+  seq: number;
+  role: string;
+  content: string;
+  tool_calls: string | null;
+  approval_decision: string | null;
+  created_at: number;
+}
+
+/** Fields the store takes when opening a conversation. */
+export interface LocalChatNewSession {
+  workspace: string;
+  /** Runner id, stored in the record's `project` column. */
+  runner: string;
+}
+
+/** One streamed engine frame, already narrowed by the native side. */
+export type LocalChatFrame =
+  | {
+      result: "chat_started";
+      data: { chat_session_id: string; local_thread_id: string; local_session_id?: string; started_at: string };
+    }
+  | { result: "chat_message_started"; data: { chat_session_id: string; message_id: string; turn_id?: string } }
+  | {
+      result: "chat_event";
+      data: { chat_session_id: string; kind: string; payload: Record<string, unknown> };
+    }
+  | {
+      result: "chat_approval_request";
+      data: {
+        chat_session_id: string;
+        local_approval_id: string;
+        kind: string;
+        payload: Record<string, unknown>;
+        reason?: string;
+        expires_at?: string;
+      };
+    }
+  | {
+      result: "chat_message_completed";
+      data: {
+        chat_session_id: string;
+        message_id: string;
+        turn_id?: string;
+        assistant_message?: string;
+        status: string;
+      };
+    }
+  | { result: "chat_failed"; data: { chat_session_id: string; code: string; detail?: string } }
+  | { result: "chat_closed"; data: { chat_session_id: string } };
+
+/** Which inline decision the user made (RUN-034). */
+export type LocalChatDecision = "accept" | "decline" | "accept_for_session";
+
+/**
+ * The bundled daemon's chat surface (RUN-033-036). Every turn is scoped
+ * to one workspace; `mode` is the approval mode captured when the
+ * engine thread spawns, and `localThreadId` resumes an existing one.
+ */
+export interface LocalChatApi {
+  listSessions(account: string): Promise<LocalChatSessionRecord[]>;
+  createSession(account: string, input: LocalChatNewSession): Promise<LocalChatSessionRecord>;
+  getSession(account: string, sessionId: string): Promise<LocalChatSessionRecord | null>;
+  listEvents(account: string, sessionId: string): Promise<LocalChatEventRecord[]>;
+  appendEvent(
+    account: string,
+    sessionId: string,
+    event: { role: string; content: string }
+  ): Promise<LocalChatEventRecord>;
+  setThreadId(account: string, sessionId: string, engineThreadId: string): Promise<void>;
+  warm(input: {
+    workspaceSlug: string;
+    sessionId: string;
+    cwd: string | undefined;
+    mode: string;
+    localThreadId: string | undefined;
+  }): Promise<void>;
+  send(input: {
+    workspaceSlug: string;
+    sessionId: string;
+    messageId: string;
+    content: string;
+    cwd: string | undefined;
+    mode: string;
+    localThreadId: string | undefined;
+  }): Promise<void>;
+  cancel(input: { workspaceSlug: string; sessionId: string; reason: string | undefined }): Promise<void>;
+  close(input: { workspaceSlug: string; sessionId: string }): Promise<void>;
+  decide(input: {
+    workspaceSlug: string;
+    sessionId: string;
+    localApprovalId: string;
+    decision: LocalChatDecision;
+  }): Promise<void>;
+  /**
+   * Follow the engine's frames and transport failures. Returns the
+   * unsubscribe; calling it twice is safe.
+   */
+  subscribe(handlers: {
+    onFrame: (frame: LocalChatFrame) => void;
+    onError: (event: { chat_session_id: string; message: string }) => void;
+  }): Unsubscribe;
+}
+
+/**
  * Local session teardown (desktop only). The auth area calls this after the
  * sign-out POST (AUTH-017): the daemon stop, credential destroy and server
  * enrollment removal run before the POST through the runners disposal
@@ -250,6 +379,7 @@ export interface Platform {
   menu?: MenuApi;
   deepLinks?: DeepLinkApi;
   agentRuntime?: AgentRuntimeApi;
+  localChat?: LocalChatApi;
   cliSetup?: CliSetupApi;
   updates?: UpdaterApi;
   sessionTeardown?: SessionTeardownApi;

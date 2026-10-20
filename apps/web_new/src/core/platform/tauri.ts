@@ -19,6 +19,10 @@ import type {
   DeepLinkApi,
   EventStream,
   FetchInit,
+  LocalChatApi,
+  LocalChatDecision,
+  LocalChatFrame,
+  LocalChatNewSession,
   PendingUpdate,
   Platform,
   SessionTeardownApi,
@@ -773,6 +777,85 @@ const desktopCliSetup: CliSetupApi = {
     }),
 };
 
+/** Native event carrying one streamed engine frame (chat.rs). */
+export const CHAT_FRAME_EVENT = "chat://frame";
+/** Native event carrying a transport-level failure for one session. */
+export const CHAT_ERROR_EVENT = "chat://error";
+
+/**
+ * Listen to a native event, when the shell exposes its event bus. Without
+ * one the subscription is inert: frames simply never arrive.
+ */
+function listenNative<T>(event: string, handler: (payload: T) => void): Promise<Unsubscribe> {
+  const events = tauriWindow()?.__TAURI__?.event;
+  if (!events) return Promise.resolve(() => undefined);
+  return events.listen<T>(event, (message) => handler(message.payload));
+}
+
+const desktopLocalChat: LocalChatApi = {
+  listSessions: (account) => invokeNative("chat_list_sessions", { account }),
+  createSession: (account, input: LocalChatNewSession) =>
+    invokeNative("chat_create_session", {
+      account,
+      session: { workspace: input.workspace, project: input.runner },
+    }),
+  getSession: (account, sessionId) => invokeNative("chat_get_session", { account, sessionId }),
+  listEvents: (account, sessionId) => invokeNative("chat_list_events", { account, sessionId }),
+  appendEvent: (account, sessionId, event) =>
+    invokeNative("chat_append_event", {
+      account,
+      sessionId,
+      event: { role: event.role, content: event.content },
+    }),
+  setThreadId: (account, sessionId, engineThreadId) =>
+    invokeNative("chat_set_thread_id", { account, sessionId, engineThreadId }),
+  warm: (input) =>
+    invokeNative("chat_warm", {
+      workspace: input.workspaceSlug,
+      chatSessionId: input.sessionId,
+      cwd: input.cwd,
+      mode: input.mode,
+      localThreadId: input.localThreadId,
+    }),
+  send: (input) =>
+    invokeNative("chat_send", {
+      workspace: input.workspaceSlug,
+      chatSessionId: input.sessionId,
+      messageId: input.messageId,
+      content: input.content,
+      cwd: input.cwd,
+      mode: input.mode,
+      localThreadId: input.localThreadId,
+    }),
+  cancel: (input) =>
+    invokeNative("chat_cancel", {
+      workspace: input.workspaceSlug,
+      chatSessionId: input.sessionId,
+      reason: input.reason,
+    }),
+  close: (input) => invokeNative("chat_close", { workspace: input.workspaceSlug, chatSessionId: input.sessionId }),
+  decide: (input: { workspaceSlug: string; sessionId: string; localApprovalId: string; decision: LocalChatDecision }) =>
+    invokeNative("chat_decide", {
+      workspace: input.workspaceSlug,
+      chatSessionId: input.sessionId,
+      localApprovalId: input.localApprovalId,
+      decision: input.decision,
+    }),
+  subscribe: ({ onFrame, onError }) => {
+    let cancelled = false;
+    const stops: Unsubscribe[] = [];
+    const track = (promise: Promise<Unsubscribe>): void => {
+      void promise.then((stop) => (cancelled ? stop() : stops.push(stop)));
+    };
+    track(listenNative<LocalChatFrame>(CHAT_FRAME_EVENT, onFrame));
+    track(listenNative<{ chat_session_id: string; message: string }>(CHAT_ERROR_EVENT, onError));
+    return () => {
+      cancelled = true;
+      for (const stop of stops.splice(0)) stop();
+    };
+  },
+};
+
 export const platform: Platform = {
   kind: "desktop",
   get apiOrigin() {
@@ -804,6 +887,7 @@ export const platform: Platform = {
   window: desktopWindow,
   deepLinks: desktopDeepLinks,
   agentRuntime: desktopAgentRuntime,
+  localChat: desktopLocalChat,
   updates: desktopUpdater,
   cliSetup: desktopCliSetup,
   sessionTeardown: desktopSessionTeardown,

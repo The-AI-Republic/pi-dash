@@ -11,17 +11,29 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatSubscriptionHandlers } from "./transport.js";
-import { STREAM_RETRY_BASE_MS, STREAM_RETRY_MAX_MS, streamErrorMessage, useChatStream } from "./useChatStream.js";
+import {
+  parkedApproval,
+  STREAM_RETRY_BASE_MS,
+  STREAM_RETRY_MAX_MS,
+  streamErrorMessage,
+  useChatStream,
+} from "./useChatStream.js";
 
 const transportState = vi.hoisted(() => ({
   transport: null as unknown,
   handlers: [] as ChatSubscriptionHandlers[],
   subscriptions: [] as { sessionId: string; after: number }[],
   unsubscribes: [] as Array<ReturnType<typeof vi.fn>>,
+  installs: new Set<() => void>(),
 }));
 
 vi.mock("./transport.js", () => ({
+  chatTransportForRunner: () => transportState.transport,
   getChatTransport: () => transportState.transport,
+  subscribeChatTransport: (listener: () => void) => {
+    transportState.installs.add(listener);
+    return () => transportState.installs.delete(listener);
+  },
 }));
 
 const STAMP = "2026-10-19T10:00:00Z";
@@ -98,6 +110,63 @@ describe("streamErrorMessage", () => {
   });
 });
 
+describe("transport installs", () => {
+  it("reopens the feed on the transport installed after mount", async () => {
+    transportState.installs.clear();
+    const firstUnsubscribe = vi.fn();
+    const secondUnsubscribe = vi.fn();
+    const cloud = {
+      subscribeChatEvents: vi.fn(
+        (_sessionId: string, _after: number, _handlers: ChatSubscriptionHandlers) => firstUnsubscribe
+      ),
+    };
+    const local = {
+      subscribeChatEvents: vi.fn(
+        (_sessionId: string, _after: number, _handlers: ChatSubscriptionHandlers) => secondUnsubscribe
+      ),
+    };
+    transportState.transport = cloud;
+    const { result } = renderHook(() => useChatStream("s-1", [], callbacks(), "r-1"));
+    expect(cloud.subscribeChatEvents).toHaveBeenCalledTimes(1);
+
+    transportState.transport = local;
+    act(() => {
+      for (const listener of transportState.installs) listener();
+    });
+
+    expect(firstUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(local.subscribeChatEvents).toHaveBeenCalledTimes(1);
+    // The feed it reopens keeps the conversation the page was on.
+    expect(local.subscribeChatEvents.mock.calls[0]?.[0]).toBe("s-1");
+    expect(result.current.messages).toEqual([]);
+  });
+});
+
+describe("parkedApproval", () => {
+  it("reads no request from an empty feed", () => {
+    expect(parkedApproval([])).toBeNull();
+  });
+
+  it("keeps the newest request while the turn is parked", () => {
+    const first = frame(1, { kind: "chat_approval_request", message: null, payload: { local_approval_id: "a" } });
+    const second = frame(2, { kind: "chat_approval_request", message: null, payload: { local_approval_id: "b" } });
+    expect(parkedApproval([first, second])?.seq).toBe(2);
+  });
+
+  it("drops the request once a terminal frame follows it", () => {
+    const request = frame(1, { kind: "chat_approval_request", message: null, payload: { local_approval_id: "a" } });
+    expect(parkedApproval([request, frame(2, { kind: "turn_completed", message: null, payload: {} })])).toBeNull();
+    expect(parkedApproval([request, frame(3, { kind: "chat_failed", message: null, payload: {} })])).toBeNull();
+    expect(parkedApproval([request, frame(4, { kind: "chat_closed", message: null, payload: {} })])).toBeNull();
+  });
+
+  it("keeps a request raised again after a turn ended", () => {
+    const request = frame(4, { kind: "chat_approval_request", message: null, payload: { local_approval_id: "c" } });
+    const ended = frame(2, { kind: "turn_completed", message: null, payload: {} });
+    expect(parkedApproval([ended, request])?.seq).toBe(4);
+  });
+});
+
 describe("useChatStream", () => {
   it("subscribes from the start for a session and stops on unmount", () => {
     const { unmount } = renderHook(({ id }) => useChatStream(id, [], callbacks()), { initialProps: { id: "s-1" } });
@@ -164,6 +233,18 @@ describe("useChatStream", () => {
     unmount();
     act(() => handler.onError?.(new Error("late")));
     expect(result.current.error).toBeNull();
+  });
+
+  it("exposes the parked approval and forgets it at the turn's end", () => {
+    const { result } = renderHook(() => useChatStream("s-1", [], callbacks()));
+    act(() =>
+      transportState.handlers[0]?.onEvent?.(
+        frame(3, { kind: "chat_approval_request", message: null, payload: { local_approval_id: "a" } })
+      )
+    );
+    expect(result.current.approval?.payload["local_approval_id"]).toBe("a");
+    act(() => transportState.handlers[0]?.onEvent?.(frame(4, { kind: "chat_closed", message: null, payload: {} })));
+    expect(result.current.approval).toBeNull();
   });
 
   it("keeps a parked approval in the strip without clearing it", () => {

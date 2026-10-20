@@ -11,10 +11,11 @@
 
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { createChatSession, warmChatSession, type ChatSession, type Runner } from "@pidash/api-client";
+import type { ChatSession, Runner } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { chatKeys } from "./keys.js";
+import { openChatSession, prepareChatSession } from "./transport.js";
 import { warmUpStep, type WarmUpStep } from "./chatState.js";
 
 export interface WarmUpInput {
@@ -35,7 +36,7 @@ export interface WarmUpInput {
 /** Prepare one session, tolerating a cold start that fails. */
 async function warmQuietly(sessionId: string): Promise<void> {
   try {
-    await warmChatSession(getAppClient(), sessionId);
+    await prepareChatSession(getAppClient(), sessionId);
   } catch {
     /* Warm-up only saves latency; the session stays usable. */
   }
@@ -102,7 +103,7 @@ export function useWarmUp(input: WarmUpInput): boolean {
     void (async () => {
       let created: ChatSession;
       try {
-        created = await createChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
+        created = await openChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
       } catch {
         // Leave the history as-is; the next decision (or New chat) retries.
         if (liveRunnerRef.current === runnerId) setCreating(false);

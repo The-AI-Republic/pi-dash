@@ -10,11 +10,12 @@
 
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { createChatSession, type ChatSession } from "@pidash/api-client";
+import type { ChatSession } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { chatKeys } from "./keys.js";
+import { openChatSession } from "./transport.js";
 
 /** Toast headline when a new conversation cannot be opened. */
 export const NEW_CHAT_FAILED_TITLE = "Unable to start chat";
@@ -69,7 +70,7 @@ export function useNewChat({
     inFlightRef.current = true;
     setCreating(true);
     try {
-      const created = await createChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
+      const created = await openChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
       // The viewer moved to another contact while the create was in
       // flight: the session belongs to the contact no longer on screen,
       // so it must not be published, selected or remembered here.

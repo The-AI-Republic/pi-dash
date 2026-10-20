@@ -63,6 +63,21 @@ describe("RunnersAreaShell", () => {
     expect(screen.queryByText("child")).toBeNull();
   });
 
+  it("passes the local contacts to the rail", () => {
+    render(
+      <RunnersAreaShell
+        scope={{ workspaceSlug: "acme" }}
+        access="allowed"
+        runners={[runner]}
+        pathname="/acme/runners"
+        localContacts={[{ id: "pidash-builtin", name: "Built-in agent", label: "Local", unavailableReason: null }]}
+      >
+        <p>child</p>
+      </RunnersAreaShell>
+    );
+    expect(screen.getByText("Built-in agent")).toBeInTheDocument();
+  });
+
   it("composes the rail and the content column for an admitted viewer", () => {
     render(
       <RunnersAreaShell

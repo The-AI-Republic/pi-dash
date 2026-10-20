@@ -2,11 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Runner chat page (NEWFRONT-549 RUN-025/026/028/032, messaging
-// NEWFRONT-551 RUN-027/029/030/031). Composition: the runner comes from
-// the address, the history column lists the runner's conversations and
-// picks one, opening the runner prepares a session, the live feed streams
-// the reply and derives the activity strip, and the composer/header carry
-// send, stop and close with the state the transport reports.
+// NEWFRONT-551 RUN-027/029/030/031, desktop chat NEWFRONT-553
+// RUN-033-036). Composition: the runner comes from the address, the history
+// column lists the runner's conversations and picks one, opening the
+// runner prepares a session, the live feed streams the reply and derives
+// the activity strip, and the composer/header carry send, stop and close
+// with the state the transport reports. On the desktop, the header also
+// carries the approval mode and a parked approval renders above the
+// composer; the cloud transport has neither verb, so neither shows.
 
 import * as React from "react";
 
@@ -27,6 +30,17 @@ import { ChatHeader } from "./ChatHeader.js";
 import { ChatHistory } from "./ChatHistory.js";
 import { ChatTranscript } from "./ChatTranscript.js";
 import { useChatMessages, useChatRunner, useChatSessions } from "./queries.js";
+import { ChatApprovalMode } from "./ChatApprovalMode.js";
+import { ChatApprovalPrompt } from "./ChatApprovalPrompt.js";
+import {
+  approvalRemainingMs,
+  pendingApprovalFromEvent,
+  rememberApprovalMode,
+  storedApprovalMode,
+  type ApprovalMode,
+  type PendingApproval,
+} from "./approvalCopy.js";
+import { chatTransportForRunner, subscribeChatTransport } from "./transport.js";
 import { useChatActions } from "./useChatActions.js";
 import { useChatStream } from "./useChatStream.js";
 import { useNewChat } from "./useNewChat.js";
@@ -155,6 +169,65 @@ export function RunnerChatPage({
     setDraft("");
   }, [runnerId]);
 
+  // The desktop bootstrap installs the local transport after the runtime
+  // resumes, which can be after this page mounted; follow the seam so the
+  // approval controls appear and sends take the local path from then on.
+  const [surface, setSurface] = React.useState(() => chatTransportForRunner(runnerId));
+  React.useEffect(() => {
+    setSurface(chatTransportForRunner(runnerId));
+    return subscribeChatTransport(() => setSurface(chatTransportForRunner(runnerId)));
+  }, [runnerId]);
+  const transport = surface;
+  // The approval controls belong to the local engine and to the contact it
+  // serves; the cloud transport has no decision verb, so cloud and web never
+  // render them, and neither does a server runner on the desktop (RUN-034/035).
+  const approvalsSupported = typeof transport.decideChatApproval === "function";
+  const [approvalMode, setApprovalModeState] = React.useState<ApprovalMode>(() => storedApprovalMode(runnerId));
+  const approvalModeRef = React.useRef(approvalMode);
+  const [pendingApproval, setPendingApproval] = React.useState<PendingApproval | null>(null);
+  const [deciding, setDeciding] = React.useState(false);
+  const [decisionError, setDecisionError] = React.useState<string | null>(null);
+
+  const chooseMode = React.useCallback(
+    (mode: ApprovalMode) => {
+      approvalModeRef.current = mode;
+      setApprovalModeState(mode);
+      // Persist per runner; the value the engine captures is handed to the
+      // session, so a turn already in flight keeps the mode it started with.
+      rememberApprovalMode(runnerId, mode);
+      // The runner-level value covers a conversation the page has not
+      // created yet; the session-level one covers the one on screen.
+      transport.setRunnerApprovalMode?.(runnerId, mode);
+      if (session !== null) transport.setApprovalMode?.(session.id, mode);
+    },
+    [runnerId, session?.id, transport]
+  );
+
+  const decideApproval = React.useCallback(
+    async (decision: "accept" | "decline" | "accept_for_session") => {
+      const request = pendingApproval;
+      if (request === null || session === null || transport.decideChatApproval === undefined) return;
+      setDeciding(true);
+      // Clear optimistically so a slow round-trip does not leave a stale
+      // prompt; a refusal puts it back so the choice can be retried. The
+      // previous refusal's reason goes with it, so a retry that lands does
+      // not leave an error nobody can dismiss beside the cleared prompt.
+      setPendingApproval(null);
+      setDecisionError(null);
+      try {
+        await transport.decideChatApproval(session.id, request.localApprovalId, decision);
+      } catch (error) {
+        setDecisionError(
+          error instanceof Error && error.message !== "" ? error.message : "The decision did not reach the agent."
+        );
+        setPendingApproval(request);
+      } finally {
+        setDeciding(false);
+      }
+    },
+    [pendingApproval, session, transport]
+  );
+
   const refetchSessions = React.useCallback(() => {
     void sessions.refetch();
   }, [sessions]);
@@ -162,13 +235,67 @@ export function RunnerChatPage({
     void messages.refetch();
   }, [messages]);
 
-  const stream = useChatStream(session?.id ?? null, messages.data ?? [], {
-    onHistoryRefresh: () => {
-      refetchSessions();
-      refetchMessages();
+  const onApprovalCleared = React.useCallback(() => {
+    setPendingApproval(null);
+    setDecisionError(null);
+  }, []);
+  const stream = useChatStream(
+    session?.id ?? null,
+    messages.data ?? [],
+    {
+      onHistoryRefresh: () => {
+        refetchSessions();
+        refetchMessages();
+      },
+      onApprovalCleared,
     },
-    onApprovalCleared: () => undefined,
-  });
+    runnerId
+  );
+
+  // A different conversation starts with no prompt and no carried refusal.
+  React.useEffect(() => {
+    setPendingApproval(null);
+    setDecisionError(null);
+  }, [session?.id]);
+
+  // Fold a parked request into the page. Only one prompt shows at a time
+  // (RUN-034): a newer request replaces the one on screen.
+  const approvalEvent = stream.approval;
+  React.useEffect(() => {
+    if (!approvalsSupported || approvalEvent === null) return;
+    const request = pendingApprovalFromEvent(approvalEvent.payload);
+    if (request !== null) setPendingApproval(request);
+  }, [approvalsSupported, approvalEvent]);
+
+  // The runner drops a request at its own deadline; stop offering buttons
+  // for it at the same moment rather than after a failed decision.
+  React.useEffect(() => {
+    if (pendingApproval === null) return;
+    const remaining = approvalRemainingMs(pendingApproval, Date.now());
+    if (remaining === null) return;
+    if (remaining <= 0) {
+      setPendingApproval(null);
+      return;
+    }
+    const timer = setTimeout(() => setPendingApproval(null), remaining);
+    return () => clearTimeout(timer);
+  }, [pendingApproval]);
+
+  // Load the stored mode for the contact on screen, and hand it to the
+  // session the page is about to warm (RUN-035).
+  React.useEffect(() => {
+    if (!approvalsSupported) return;
+    approvalModeRef.current = storedApprovalMode(runnerId);
+    setApprovalModeState(approvalModeRef.current);
+    // Hand it over before warm-up can create a conversation for this
+    // runner, so that first thread spawns under the stored mode.
+    transport.setRunnerApprovalMode?.(runnerId, approvalModeRef.current);
+  }, [approvalsSupported, runnerId, transport]);
+
+  React.useEffect(() => {
+    if (!approvalsSupported || session === null) return;
+    transport.setApprovalMode?.(session.id, approvalModeRef.current);
+  }, [approvalsSupported, session, transport]);
 
   const actions = useChatActions({
     workspaceSlug,
@@ -188,7 +315,17 @@ export function RunnerChatPage({
     <section aria-label="Runner chat" data-testid="runner-chat" className="flex h-full min-h-0 w-full">
       <ChatHistory entries={entries} onSelect={select} onNewChat={() => void newChat.start()} busy={newChat.busy} />
       <div className="flex min-w-0 flex-1 flex-col px-(--space-4) pb-(--space-4)">
-        <ChatHeader summary={summary} {...(session === null ? {} : { onClose: () => void actions.close() })} />
+        <ChatHeader
+          summary={summary}
+          {...(session === null ? {} : { onClose: () => void actions.close() })}
+          {...(approvalsSupported
+            ? {
+                // The mode applies to the next thread, so a send in flight
+                // does not lock it.
+                actions: <ChatApprovalMode value={approvalMode} onChange={chooseMode} />,
+              }
+            : {})}
+        />
         <ChatTranscript
           messages={stream.messages}
           loading={messages.isPending && session !== null}
@@ -212,6 +349,22 @@ export function RunnerChatPage({
             </button>
           </div>
         )}
+        {approvalsSupported && pendingApproval !== null ? (
+          <ChatApprovalPrompt
+            request={pendingApproval}
+            onDecide={(decision) => void decideApproval(decision)}
+            busy={deciding}
+          />
+        ) : null}
+        {decisionError === null ? null : (
+          <div
+            role="alert"
+            data-testid="chat-approval-error"
+            className="text-meta mb-(--space-2) rounded-(--radius-control) border border-(--danger) px-(--space-3) py-(--space-2) text-(--danger)"
+          >
+            {decisionError}
+          </div>
+        )}
         <ChatComposer
           blockedReason={blockedReason}
           draft={draft}
@@ -222,7 +375,12 @@ export function RunnerChatPage({
             void actions.send(value, setDraft);
           }}
           turnInFlight={turnInFlight}
-          onStop={() => void actions.stop()}
+          onStop={() => {
+            // Interrupting answers any parked request, so it must not stay
+            // on screen as buttons that can no longer do anything.
+            onApprovalCleared();
+            void actions.stop();
+          }}
           sending={actions.sending}
           dictationAvailable={dictationAvailable}
         />

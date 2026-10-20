@@ -10,12 +10,12 @@
 // sessions, stop and close re-read sessions.
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { createChatSession, type ChatSession } from "@pidash/api-client";
+import type { ChatSession } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { chatKeys } from "./keys.js";
-import { getChatTransport } from "./transport.js";
+import { chatTransportForRunner, openChatSession } from "./transport.js";
 
 /** Toast headline when the server will not take a message. */
 export const SEND_FAILED_TITLE = "Message not sent";
@@ -91,7 +91,7 @@ export function useChatActions({
   const ensureSession = React.useCallback(async (): Promise<ChatSession> => {
     const current = sessionRef.current;
     if (current !== null && current.status === "open") return current;
-    const created = await createChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
+    const created = await openChatSession(getAppClient(), { workspace: workspaceId, runner: runnerId });
     publishSession(created);
     return created;
   }, [publishSession, runnerId, workspaceId]);
@@ -109,11 +109,7 @@ export function useChatActions({
         // message belongs to the contact no longer on screen.
         if (liveRunnerRef.current !== runnerId) return;
         if (target.id !== sessionRef.current?.id) onSelectSession(target.id);
-        const transport = getChatTransport();
-        // The desktop transport hands the runner's approval mode to the
-        // engine here; the cloud transport has no such step.
-        transport.applyApprovalMode?.(target.id);
-        await transport.sendChatMessage(target.id, content);
+        await chatTransportForRunner(runnerId).sendChatMessage(target.id, content);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: chatKeys.messages(workspaceSlug, target.id) }),
           queryClient.invalidateQueries({ queryKey: chatKeys.sessions(workspaceSlug, runnerId) }),
@@ -141,14 +137,14 @@ export function useChatActions({
     // Interrupting answers any parked approval, so it is dropped at once
     // rather than left as a button that can no longer do anything.
     setSendError(null);
-    await getChatTransport().cancelChat(current.id, "user_cancelled");
+    await chatTransportForRunner(runnerId).cancelChat(current.id, "user_cancelled");
     await queryClient.invalidateQueries({ queryKey: chatKeys.sessions(workspaceSlug, runnerId) });
   }, [queryClient, runnerId, workspaceSlug]);
 
   const close = React.useCallback(async (): Promise<void> => {
     const current = sessionRef.current;
     if (current === null) return;
-    await getChatTransport().closeChat(current.id);
+    await chatTransportForRunner(runnerId).closeChat(current.id);
     await queryClient.invalidateQueries({ queryKey: chatKeys.sessions(workspaceSlug, runnerId) });
   }, [queryClient, runnerId, workspaceSlug]);
 

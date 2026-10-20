@@ -42,6 +42,8 @@ vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
 
 import { makeRunner, makeSession, testClient, wrapper } from "./harness.js";
 import { RUNNER_CHAT_PAGE_TITLE, RunnerChatPage, runnerChatDocumentTitle } from "./RunnerChatPage.js";
+import { APPROVAL_MODE_COPY, approvalModeKey } from "./approvalCopy.js";
+import { getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
 
 const runner = makeRunner();
 const openSession = makeSession({ id: "open", last_message_at: "2026-10-18T11:00:00Z" });
@@ -57,6 +59,7 @@ const refetchMessages = vi.fn(async () => undefined);
 const stream = {
   messages: [] as unknown[],
   activity: [] as { seq: number; label: string }[],
+  approval: null as Record<string, unknown> | null,
   error: null as string | null,
   dismissError: dismissStreamError,
 };
@@ -138,11 +141,14 @@ beforeEach(() => {
   stream.messages = hooks.useChatMessages().data;
   stream.activity = [];
   stream.error = null;
+  stream.approval = null;
   actions.sending = false;
   actions.sendError = null;
   hooks.useChatStream.mockReturnValue(stream);
   hooks.useChatActions.mockReturnValue(actions);
   hooks.useDictationConfig.mockReturnValue({ data: undefined, isPending: false });
+  globalThis.localStorage.clear();
+  setChatTransport(null);
 });
 
 describe("runnerChatDocumentTitle", () => {
@@ -422,7 +428,7 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
   it("subscribes to the resolved conversation and renders its live rows", () => {
     hooks.useChatStream.mockReturnValue(stream);
     renderPage();
-    expect(hooks.useChatStream).toHaveBeenLastCalledWith("open", expect.any(Array), expect.any(Object));
+    expect(hooks.useChatStream).toHaveBeenLastCalledWith("open", expect.any(Array), expect.any(Object), "r-1");
     expect(hooks.useChatActions).toHaveBeenLastCalledWith(
       expect.objectContaining({ runnerId: "r-1", session: openSession })
     );
@@ -504,6 +510,21 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
     expect(hooks.useDictationConfig).toHaveBeenLastCalledWith(true);
   });
 
+  it("ignores the parked approval on a transport that cannot decide one", () => {
+    stream.approval = {
+      id: 1,
+      session: "open",
+      message: null,
+      seq: 1,
+      kind: "chat_approval_request",
+      payload: { local_approval_id: "a-1", approval_kind: "command_execution", command: "ls" },
+      created_at: "2026-10-18T11:00:00Z",
+    };
+    renderPage();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+  });
+
   it("refreshes history and transcript from the stream's own refresh signal", () => {
     renderPage();
     const callbacks = (hooks.useChatStream.mock.calls.at(-1) as unknown[] | undefined)?.[2] as
@@ -513,5 +534,234 @@ describe("RunnerChatPage messaging (RUN-027/029/030/031)", () => {
     expect(refetchSessions).toHaveBeenCalledTimes(1);
     expect(refetchMessages).toHaveBeenCalledTimes(1);
     expect(callbacks?.onApprovalCleared()).toBeUndefined();
+  });
+});
+
+describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
+  const decide = vi.fn(async () => undefined as void);
+  const localTransport = (owns: (runnerId: string) => boolean = () => true): ChatTransport => ({
+    subscribeChatEvents: vi.fn(() => () => undefined),
+    sendChatMessage: vi.fn(),
+    cancelChat: vi.fn(async () => ({ ok: true })),
+    closeChat: vi.fn(async () => openSession),
+    setApprovalMode: vi.fn(),
+    setRunnerApprovalMode: vi.fn(),
+    decideChatApproval: decide,
+    ownsRunner: owns,
+  });
+  const approval = {
+    id: 9,
+    session: "open",
+    message: null,
+    seq: 9,
+    kind: "chat_approval_request",
+    payload: {
+      local_approval_id: "a-1",
+      approval_kind: "command_execution",
+      reason: "checks the build",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      command: "npm test",
+    },
+    created_at: new Date().toISOString(),
+  };
+
+  beforeEach(() => {
+    decide.mockClear();
+    setChatTransport(localTransport());
+  });
+
+  it("shows the mode control and the parked request", () => {
+    stream.approval = approval;
+    renderPage();
+    expect(screen.getByRole("group", { name: "Approval mode" })).toBeInTheDocument();
+    const prompt = screen.getByRole("alertdialog", { name: "Approval requested" });
+    expect(prompt).toHaveTextContent("npm test");
+    expect(prompt).toHaveTextContent("checks the build");
+  });
+
+  it("clears the prompt optimistically and answers through the transport", async () => {
+    let settle: () => void = () => undefined;
+    decide.mockImplementationOnce(() => new Promise<void>((resolve) => (settle = () => resolve())));
+    stream.approval = approval;
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(decide).toHaveBeenCalledWith("open", "a-1", "accept");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await React.act(async () => settle());
+  });
+
+  it("puts the prompt back with the reason when the decision fails", async () => {
+    decide.mockRejectedValueOnce(new Error("socket closed"));
+    stream.approval = approval;
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(await screen.findByTestId("chat-approval-error")).toHaveTextContent("socket closed");
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("clears the refusal reason once a retried decision lands", async () => {
+    decide.mockRejectedValueOnce(new Error("socket closed"));
+    stream.approval = approval;
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await screen.findByTestId("chat-approval-error");
+    stream.approval = { ...approval, seq: 10, id: 10 };
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await vi.waitFor(() => expect(screen.queryByTestId("chat-approval-error")).toBeNull());
+  });
+
+  it("names a decision failure that carries nothing readable", async () => {
+    decide.mockRejectedValueOnce({});
+    stream.approval = approval;
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }));
+    expect(await screen.findByTestId("chat-approval-error")).toHaveTextContent("did not reach the agent");
+  });
+
+  it("drops the prompt at the request's own deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      stream.approval = {
+        ...approval,
+        payload: { ...approval.payload, expires_at: new Date(Date.now() + 5_000).toISOString() },
+      };
+      renderPage();
+      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+      await React.act(async () => {
+        vi.advanceTimersByTime(5_001);
+      });
+      expect(screen.queryByRole("alertdialog")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops the prompt when stop interrupts the turn", async () => {
+    stream.approval = approval;
+    // A turn in flight is what turns the send control into stop.
+    hooks.useChatSessions.mockReturnValue({
+      data: [{ ...openSession, active_message_id: "m-2" }, closedSession],
+      isPending: false,
+      refetch: refetchSessions,
+    });
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: "Stop response" }));
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("persists the chosen mode and hands it to the session and the runner", async () => {
+    const transport = getChatTransport();
+    renderPage();
+    await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    expect(globalThis.localStorage.getItem(approvalModeKey("r-1"))).toBe("ask");
+    expect(transport.setApprovalMode).toHaveBeenCalledWith("open", "ask");
+    expect(transport.setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
+  });
+
+  it("loads the stored mode for the contact on screen", () => {
+    globalThis.localStorage.setItem(approvalModeKey("r-1"), "workspace");
+    renderPage();
+    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.workspace.label })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
+  it("hands the stored mode to the session the page warms", () => {
+    globalThis.localStorage.setItem(approvalModeKey("r-1"), "ask");
+    const transport = getChatTransport();
+    renderPage();
+    expect(transport.setApprovalMode).toHaveBeenCalledWith("open", "ask");
+    // Handed over at mount, before warm-up can create a conversation.
+    expect(transport.setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
+  });
+
+  it("keeps a server runner on the cloud path and hides the approval controls", () => {
+    setChatTransport(localTransport((runnerId) => runnerId === "pidash-builtin"));
+    renderPage();
+    expect(screen.queryByRole("group", { name: "Approval mode" })).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("falls back to full access for an unrecognized stored value", () => {
+    globalThis.localStorage.setItem(approvalModeKey("r-1"), "yolo");
+    renderPage();
+    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+  });
+
+  it("still remembers the choice when no conversation is open yet", async () => {
+    hooks.useChatSessions.mockReturnValue({ data: [], isPending: false, refetch: refetchSessions });
+    render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+    // No session to name, so only the runner-level value is handed over.
+    expect(getChatTransport().setApprovalMode).not.toHaveBeenCalledWith("", "ask");
+    expect(getChatTransport().setRunnerApprovalMode).toHaveBeenCalledWith("r-1", "ask");
+    expect(globalThis.localStorage.getItem(approvalModeKey("r-1"))).toBe("ask");
+  });
+
+  it("keeps the mode control usable while a send is in flight", async () => {
+    actions.sending = true;
+    renderPage();
+    expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toBeEnabled();
+  });
+
+  it("falls back to full access when storage refuses the read", () => {
+    const getItem = vi.spyOn(globalThis.localStorage, "getItem").mockImplementation(() => {
+      throw new Error("private mode");
+    });
+    try {
+      renderPage();
+      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.full_access.label })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      );
+    } finally {
+      getItem.mockRestore();
+    }
+  });
+
+  it("never shows a request whose deadline already passed", () => {
+    stream.approval = {
+      ...approval,
+      payload: { ...approval.payload, expires_at: new Date(Date.now() - 1_000).toISOString() },
+    };
+    renderPage();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("refuses to answer a request when no conversation is open", async () => {
+    // A parked request can outlive its session for the render that drops it;
+    // there is no session id to answer against, so nothing is sent.
+    hooks.useChatSessions.mockReturnValue({ data: [], isPending: false, refetch: refetchSessions });
+    stream.approval = approval;
+    render(<RunnerChatPage workspaceSlug="acme" runnerId="r-1" requestedSessionId={null} onSelectSession={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it("keeps working when storage refuses the write", async () => {
+    const storage = globalThis.localStorage;
+    const setItem = vi.spyOn(storage, "setItem").mockImplementation(() => {
+      throw new Error("private mode");
+    });
+    try {
+      renderPage();
+      await userEvent.click(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label }));
+      expect(screen.getByRole("button", { name: APPROVAL_MODE_COPY.ask.label })).toHaveAttribute(
+        "aria-pressed",
+        "true"
+      );
+      expect(getChatTransport().setApprovalMode).toHaveBeenCalledWith("open", "ask");
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });

@@ -88,8 +88,18 @@ interface SupervisorRouteParams {
   issueKey?: string | undefined;
 }
 
+/** Install the local chat transport once its chunk has loaded. */
+function registerLocalChatTransportLazily(): void {
+  void import("../chat/localBootstrap.js").then(
+    (module) => module.registerLocalChatTransport(),
+    () => undefined
+  );
+}
+
 export function RuntimeSupervisor(props: RuntimeSupervisorProps): React.ReactElement | null {
-  const { registerChatTransport } = props;
+  // The desktop chat transport is loaded on demand: the supervisor itself
+  // rides the first-paint chain, and most builds never take this path.
+  const registerChatTransport = props.registerChatTransport ?? registerLocalChatTransportLazily;
   const client = getAppClient();
   const queryClient = useQueryClient();
   const runtime = platform.agentRuntime;

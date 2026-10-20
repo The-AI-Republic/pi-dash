@@ -9,7 +9,19 @@ import type { ApiClient, ChatEvent } from "@pidash/api-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { platform, type EventStream, type StreamInit, type StreamMessage } from "../../../core/platform/index.js";
-import { createCloudChatTransport, getChatTransport, setChatTransport, type ChatTransport } from "./transport.js";
+import {
+  chatTransportForRunner,
+  createCloudChatTransport,
+  fetchChatMessages,
+  fetchChatRunner,
+  fetchChatSessions,
+  getChatTransport,
+  openChatSession,
+  prepareChatSession,
+  setChatTransport,
+  subscribeChatTransport,
+  type ChatTransport,
+} from "./transport.js";
 
 const client = { baseUrl: "https://api.test" } as ApiClient;
 
@@ -174,6 +186,106 @@ describe("active transport", () => {
   });
 });
 
+describe("read and write seams", () => {
+  it("opens a conversation through the API when no transport replaces it", async () => {
+    const send = vi.fn(async () => ({ data: { id: "s-new" } }));
+    const parse = vi.fn(() => ({ id: "s-new" }));
+    const api = { sendJson: send, parse } as unknown as ApiClient;
+    await expect(openChatSession(api, { workspace: "ws-id", runner: "r-1" })).resolves.toEqual({ id: "s-new" });
+    expect(send).toHaveBeenCalledWith("POST", "/api/runners/chat/sessions/", {
+      json: { workspace: "ws-id", runner: "r-1" },
+    });
+  });
+
+  it("opens a conversation through the active transport when it has the verb", async () => {
+    const createChatSession = vi.fn(async () => ({ id: "local" }));
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      createChatSession,
+    } as unknown as ChatTransport);
+    await expect(openChatSession({} as ApiClient, { workspace: "ws-id", runner: "r-1" })).resolves.toEqual({
+      id: "local",
+    });
+    expect(createChatSession).toHaveBeenCalledWith({ workspace: "ws-id", runner: "r-1" });
+  });
+
+  it("falls through to the API for everything the local transport declines", async () => {
+    const sendJson = vi.fn(async () => ({ data: { id: "s-new" } }));
+    const getJson = vi.fn(async () => []);
+    const parse = vi.fn((_schema: unknown, body: unknown) => body);
+    const api = { sendJson, getJson, parse } as unknown as ApiClient;
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      chatRunner: vi.fn(async () => null),
+      listChatSessions: vi.fn(async () => null),
+      createChatSession: vi.fn(async () => null),
+      listChatMessages: vi.fn(async () => null),
+      ownsChatSession: vi.fn(async () => false),
+    } as unknown as ChatTransport);
+    await expect(openChatSession(api, { workspace: "ws-id", runner: "r-1" })).resolves.toEqual({ id: "s-new" });
+    expect(sendJson).toHaveBeenCalledWith("POST", "/api/runners/chat/sessions/", {
+      json: { workspace: "ws-id", runner: "r-1" },
+    });
+    await expect(fetchChatSessions(api, "ws-id", "r-1")).resolves.toEqual([]);
+    await expect(fetchChatMessages(api, "s-1")).resolves.toEqual([]);
+    expect(getJson).toHaveBeenCalledWith("/api/runners/chat/sessions/s-1/messages/");
+  });
+
+  it("reads a server runner's detail even while a local transport is installed", async () => {
+    const getJson = vi.fn(async () => ({ id: "r-1" }));
+    const parse = vi.fn(() => ({ id: "r-1" }));
+    const api = { getJson, parse } as unknown as ApiClient;
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      chatRunner: vi.fn(async (runnerId: string) => (runnerId === "pidash-builtin" ? { id: runnerId } : null)),
+    } as unknown as ChatTransport);
+    await expect(fetchChatRunner(api, "pidash-builtin")).resolves.toEqual({ id: "pidash-builtin" });
+    await expect(fetchChatRunner(api, "r-1")).resolves.toEqual({ id: "r-1" });
+    expect(getJson).toHaveBeenCalledWith("/api/runners/r-1/");
+  });
+
+  it("reads a transcript from the local store only when the transport owns it", async () => {
+    const listChatMessages = vi.fn(async () => [{ id: "m-local" }]);
+    const ownsChatSession = vi.fn(async (sessionId: string) => sessionId === "local");
+    setChatTransport({
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      listChatMessages,
+      ownsChatSession,
+    } as unknown as ChatTransport);
+    const api = { getJson: vi.fn(async () => []), parse: vi.fn(() => []) } as unknown as ApiClient;
+    await expect(fetchChatMessages(api, "local")).resolves.toEqual([{ id: "m-local" }]);
+    await expect(fetchChatMessages(api, "server")).resolves.toEqual([]);
+    expect(ownsChatSession).toHaveBeenCalledWith("server");
+  });
+
+  it("keeps a server contact on the cloud surface while the local transport is installed", () => {
+    const local = {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+    } as unknown as ChatTransport;
+    setChatTransport(local);
+    expect(chatTransportForRunner("pidash-builtin")).toBe(local);
+    expect(chatTransportForRunner("r-1")).not.toBe(local);
+    // A transport that names no contacts is the whole surface.
+    const whole = { subscribeChatEvents: vi.fn(() => () => undefined) } as unknown as ChatTransport;
+    setChatTransport(whole);
+    expect(chatTransportForRunner("r-1")).toBe(whole);
+  });
+
+  it("notifies subscribers when the transport is replaced or restored", () => {
+    const listener = vi.fn();
+    const stop = subscribeChatTransport(listener);
+    const custom = { subscribeChatEvents: vi.fn(() => () => undefined) } as unknown as ChatTransport;
+    setChatTransport(custom);
+    expect(listener).toHaveBeenCalledTimes(1);
+    setChatTransport(null);
+    expect(listener).toHaveBeenCalledTimes(2);
+    stop();
+    setChatTransport(custom);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("createCloudChatTransport resilience", () => {
   it("reports a message that cannot be read as a channel failure", async () => {
     const unreadable = { event: "chat.event" } as unknown as StreamMessage;
@@ -327,5 +439,47 @@ describe("createCloudChatTransport resilience", () => {
     const transport = createCloudChatTransport({ getClient: () => rows });
     await transport.cancelChat("s-21");
     expect(calls).toEqual([{ reason: "user_cancelled" }]);
+  });
+});
+
+describe("prepareChatSession ownership", () => {
+  function warmClient(): { api: ApiClient; calls: string[] } {
+    const calls: string[] = [];
+    const api = {
+      sendJson: async () => {
+        calls.push("warm");
+        return { data: { ok: true } };
+      },
+      parse: () => ({ ok: true }),
+    } as unknown as ApiClient;
+    return { api, calls };
+  }
+
+  it("warms a server session through the API while the local transport is installed", async () => {
+    const local = {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      ownsChatSession: async (sessionId: string) => sessionId === "local-session",
+      warmChatSession: vi.fn(async () => undefined),
+    } as unknown as ChatTransport;
+    setChatTransport(local);
+    const { api, calls } = warmClient();
+    await prepareChatSession(api, "server-session");
+    expect(calls).toEqual(["warm"]);
+    expect(local.warmChatSession).not.toHaveBeenCalled();
+  });
+
+  it("warms its own conversation through the engine without touching the API", async () => {
+    const local = {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      ownsChatSession: async (sessionId: string) => sessionId === "local-session",
+      warmChatSession: vi.fn(async () => undefined),
+    } as unknown as ChatTransport;
+    setChatTransport(local);
+    const { api, calls } = warmClient();
+    await prepareChatSession(api, "local-session");
+    expect(local.warmChatSession).toHaveBeenCalledWith("local-session");
+    expect(calls).toEqual([]);
   });
 });

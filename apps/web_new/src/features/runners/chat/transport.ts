@@ -12,14 +12,20 @@
 import {
   cancelChat,
   type CancelChatResult,
+  createChatSession,
   ChatEvent,
   CHAT_EVENT_STREAM_NAME,
   chatEventsUrl,
   closeChat,
+  getRunner,
+  listChatMessages,
+  listChatSessions,
   sendChatMessage,
+  warmChatSession,
   type ApiClient,
   type ChatMessage,
   type ChatSession,
+  type Runner,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -59,11 +65,35 @@ export interface ChatTransport {
   /** Close the conversation; answers the updated session. */
   closeChat(sessionId: string): Promise<ChatSession>;
   /**
-   * Hand the runner's approval mode to the conversation before a turn.
-   * Desktop transports implement this for their local engine; the cloud
-   * path has no approval mode, so it is absent there.
+   * Record the approval mode the engine should capture for this session's
+   * next thread (RUN-035). Desktop transports keep it in memory; the
+   * cloud path has no approval mode, so it is absent there.
    */
-  applyApprovalMode?(sessionId: string): void;
+  setApprovalMode?(sessionId: string, mode: string): void;
+  /**
+   * Record the mode for every thread this runner spawns next (RUN-035).
+   * A conversation the page creates after it loaded its own choice still
+   * warms under it.
+   */
+  setRunnerApprovalMode?(runnerId: string, mode: string): void;
+  /** Answer one inline approval (RUN-034); desktop only. */
+  decideChatApproval?(sessionId: string, localApprovalId: string, decision: string): Promise<void>;
+  /**
+   * Read and write verbs. The cloud implementations are `@pidash/api-client`
+   * calls; a desktop transport answers them from the local store and
+   * daemon for the bundled engine only, which is why they are optional
+   * and why every one of them may decline a contact or conversation that
+   * belongs to the server by answering `null`.
+   */
+  chatRunner?(runnerId: string): Promise<Runner | null>;
+  listChatSessions?(workspaceId: string, runnerId: string): Promise<ChatSession[] | null>;
+  createChatSession?(input: { workspace: string; runner: string }): Promise<ChatSession | null>;
+  listChatMessages?(sessionId: string): Promise<ChatMessage[] | null>;
+  warmChatSession?(sessionId: string): Promise<void>;
+  /** Whether this transport's store carries the conversation. */
+  ownsChatSession?(sessionId: string): Promise<boolean>;
+  /** Whether this contact is served by this transport rather than the server. */
+  ownsRunner?(runnerId: string): boolean;
 }
 
 /** Opens an event stream; injectable so the parser can be tested without a server. */
@@ -144,7 +174,90 @@ export function getChatTransport(): ChatTransport {
   return activeTransport;
 }
 
+const transportListeners = new Set<() => void>();
+
 /** Replace the default (desktop bootstrap, tests); `null` restores the default. */
 export function setChatTransport(transport: ChatTransport | null | undefined): void {
   activeTransport = transport ?? cloudTransport;
+  for (const listener of transportListeners) listener();
+}
+
+/**
+ * The transport for one contact. A desktop transport that ships the bundled
+ * engine serves only that contact; every runner the server owns keeps the
+ * cloud path. A transport that does not say which contacts it serves is
+ * the surface itself (tests, and a whole-surface replacement).
+ */
+export function chatTransportForRunner(runnerId: string): ChatTransport {
+  if (activeTransport.ownsRunner === undefined) return activeTransport;
+  return activeTransport.ownsRunner(runnerId) ? activeTransport : cloudTransport;
+}
+
+/**
+ * Called after the active transport is replaced or restored. A page that
+ * mounted before the desktop bootstrap finished re-reads the seam so its
+ * controls and verbs follow the transport that is actually installed.
+ */
+export function subscribeChatTransport(listener: () => void): () => void {
+  transportListeners.add(listener);
+  return () => {
+    transportListeners.delete(listener);
+  };
+}
+
+/**
+ * Runner detail for the chat header. A transport that ships the bundled
+ * engine answers for it; anything it declines or any other contact is a
+ * server row and is read through the API, so installing the desktop seam
+ * never breaks a cloud runner's page.
+ */
+export async function fetchChatRunner(client: ApiClient, runnerId: string): Promise<Runner> {
+  const local = await activeTransport.chatRunner?.(runnerId);
+  return local ?? getRunner(client, runnerId);
+}
+
+/** History list for one runner; the same decline rule applies. */
+export async function fetchChatSessions(
+  client: ApiClient,
+  workspaceId: string,
+  runnerId: string
+): Promise<ChatSession[]> {
+  const local = await activeTransport.listChatSessions?.(workspaceId, runnerId);
+  return local ?? listChatSessions(client, { workspace: workspaceId, runner: runnerId });
+}
+
+/** Open a conversation against the runner; the same decline rule applies. */
+export async function openChatSession(
+  client: ApiClient,
+  input: { workspace: string; runner: string }
+): Promise<ChatSession> {
+  const local = await activeTransport.createChatSession?.(input);
+  return local ?? createChatSession(client, input);
+}
+
+/**
+ * One conversation's saved transcript. A local transport knows whether the
+ * session came from its store before attempting to read a transcript that
+ * the server would answer 404 for.
+ */
+export async function fetchChatMessages(client: ApiClient, sessionId: string): Promise<ChatMessage[]> {
+  const owned = activeTransport.ownsChatSession === undefined || (await activeTransport.ownsChatSession(sessionId));
+  if (!owned) return listChatMessages(client, sessionId);
+  const local = await activeTransport.listChatMessages?.(sessionId);
+  return local ?? listChatMessages(client, sessionId);
+}
+
+/**
+ * Prepare a session so its first turn streams promptly (RUN-028). A local
+ * transport warms only the conversations its own store carries; a session
+ * the server owns keeps the warm endpoint even while the desktop seam is
+ * installed, exactly like the other read verbs.
+ */
+export async function prepareChatSession(client: ApiClient, sessionId: string): Promise<void> {
+  const owned = activeTransport.ownsChatSession === undefined || (await activeTransport.ownsChatSession(sessionId));
+  if (owned && activeTransport.warmChatSession) {
+    await activeTransport.warmChatSession(sessionId);
+    return;
+  }
+  await warmChatSession(client, sessionId);
 }

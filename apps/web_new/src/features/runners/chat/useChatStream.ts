@@ -22,12 +22,25 @@ import {
   refreshesHistory,
   type ActivityRow,
 } from "./events.js";
-import { getChatTransport, type ChatSubscriptionHandlers } from "./transport.js";
+import { chatTransportForRunner, subscribeChatTransport, type ChatSubscriptionHandlers } from "./transport.js";
 
 /** First wait before reopening a dropped feed; doubles per failure. */
 export const STREAM_RETRY_BASE_MS = 1_000;
 /** Longest wait between reopen attempts. */
 export const STREAM_RETRY_MAX_MS = 15_000;
+
+/**
+ * The approval request still waiting for an answer: the last approval
+ * frame, provided no terminal frame came after it.
+ */
+export function parkedApproval(events: readonly ChatEvent[]): ChatEvent | null {
+  let parked: ChatEvent | null = null;
+  for (const event of events) {
+    if (event.kind === "chat_approval_request") parked = event;
+    else if (isTerminalEvent(event.kind)) parked = null;
+  }
+  return parked;
+}
 
 /** Read an error worth showing to the person; a shrug reads as null. */
 export function streamErrorMessage(error: unknown): string | null {
@@ -48,6 +61,12 @@ export interface ChatStreamView {
   messages: ChatMessage[];
   /** Activity strip rows, newest last. */
   activity: ActivityRow[];
+  /**
+   * The parked inline approval, when the last approval request has not
+   * been followed by a terminal frame (RUN-034). Desktop only in effect:
+   * the cloud transport never emits approval requests.
+   */
+  approval: ChatEvent | null;
   /** The last stream failure worth naming, until a frame or a dismissal clears it. */
   error: string | null;
   dismissError: () => void;
@@ -62,7 +81,8 @@ export interface ChatStreamView {
 export function useChatStream(
   sessionId: string | null,
   baseMessages: readonly ChatMessage[],
-  callbacks: ChatStreamCallbacks
+  callbacks: ChatStreamCallbacks,
+  runnerId = ""
 ): ChatStreamView {
   const [liveMessages, setLiveMessages] = React.useState<ChatMessage[]>([]);
   const [events, setEvents] = React.useState<ChatEvent[]>([]);
@@ -111,9 +131,22 @@ export function useChatStream(
     setTranscriptSession(sessionId);
   }, [sessionId]);
 
+  // The desktop bootstrap can install the local transport after this page
+  // mounted, which changes the feed a conversation must follow: reopen on
+  // the new seam so its frames reach the page instead of a stale stream.
+  const [surface] = React.useState(() => ({ transport: chatTransportForRunner(runnerId) }));
+  React.useEffect(() => {
+    surface.transport = chatTransportForRunner(runnerId);
+    return subscribeChatTransport(() => {
+      surface.transport = chatTransportForRunner(runnerId);
+      setSurfaceVersion((version) => version + 1);
+    });
+  }, [runnerId, surface]);
+  const [surfaceVersion, setSurfaceVersion] = React.useState(0);
+
   React.useEffect(() => {
     if (sessionId === null) return;
-    const transport = getChatTransport();
+    const transport = surface.transport;
     let unsubscribe: (() => void) | null = null;
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -168,13 +201,14 @@ export function useChatStream(
       if (timer !== null) clearTimeout(timer);
       unsubscribe?.();
     };
-  }, [sessionId]);
+  }, [runnerId, sessionId, surface, surfaceVersion]);
 
   const dismissError = React.useCallback(() => setError(null), []);
 
   return {
     messages: transcriptSession === sessionId ? liveMessages : [...baseMessages],
     activity: React.useMemo(() => activityRows(events), [events]),
+    approval: React.useMemo(() => parkedApproval(events), [events]),
     error,
     dismissError,
   };

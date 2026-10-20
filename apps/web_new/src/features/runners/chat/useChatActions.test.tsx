@@ -21,7 +21,11 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, ...contracts };
 });
 vi.mock("../../../shared/shell/index.js", () => notify);
-vi.mock("./transport.js", () => ({ getChatTransport: () => active.transport }));
+vi.mock("./transport.js", () => ({
+  chatTransportForRunner: () => active.transport,
+  getChatTransport: () => active.transport,
+  openChatSession: (...args: unknown[]) => contracts.createChatSession(...args),
+}));
 
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
 const { makeSession, testClient } = await import("./harness.js");
@@ -41,7 +45,7 @@ function transport(): import("./transport.js").ChatTransport {
     sendChatMessage: vi.fn(async (_id: string, content: string) => ({ id: "m-1", content }) as ChatMessage),
     cancelChat: vi.fn(async () => ({ ok: true })),
     closeChat: vi.fn(async () => openSession),
-    applyApprovalMode: vi.fn(),
+    setApprovalMode: vi.fn(),
   };
 }
 
@@ -111,7 +115,6 @@ describe("send", () => {
     expect(onSelectSession).toHaveBeenCalledWith("fresh");
     expect(onCreated).toHaveBeenCalledWith(created);
     expect(client.getQueryData<ChatSession[]>(chatKeys.sessions("acme", "r-1"))?.[0]?.id).toBe("fresh");
-    expect(active.transport.applyApprovalMode).toHaveBeenCalledWith("fresh");
   });
 
   it("opens a conversation when the current one is closed", async () => {
@@ -237,7 +240,7 @@ describe("send", () => {
   });
 
   it("works with a transport that has no approval-mode step", async () => {
-    const { applyApprovalMode: _approvalMode, ...withoutApproval } = transport();
+    const { setApprovalMode: _approvalMode, ...withoutApproval } = transport();
     active.transport = withoutApproval;
     const { view } = setup();
     await act(async () => view.result.current.send("hello", vi.fn()));

@@ -17,6 +17,7 @@ import { decideProjectRunnersAccess } from "./access.js";
 import { buildRunnersAreaValue, RunnersAreaProvider } from "./area.js";
 import { useRunnersRail } from "./api/queries.js";
 import { RunnersAreaShell } from "./components/RunnersAreaShell.js";
+import { useLocalContact } from "./chat/localContact.js";
 import { runnersBase } from "./scope.js";
 
 /** Breadcrumb label for the project-scoped runners area (RUN-005 pins it). */
@@ -46,6 +47,7 @@ export function RunnersProjectShell({
     projectId,
   });
   const { pathname } = useLocation();
+  const localContacts = useLocalContact();
   const rail = useRunnersRail(workspaceSlug, workspaceId, projectId, access === "allowed");
   const crumbHref = `${runnersBase({ workspaceSlug, projectId })}/`;
   // The project name is chrome, not a gate input: it renders when known and
@@ -77,6 +79,7 @@ export function RunnersProjectShell({
         runners={rail.data ?? []}
         pathname={pathname}
         chrome={chrome}
+        localContacts={localContacts}
       >
         {children}
       </RunnersAreaShell>
