@@ -36,10 +36,13 @@ interface SortMenuCopy {
   descending: string;
 }
 
-/** Menu wording per column: text sorts A–Z, dates oldest first, roles light to heavy. */
+/**
+ * Menu wording per column, always describing the order the table produces:
+ * text (and the role word, which the spec makes the role key) sorts A–Z,
+ * dates sort oldest first.
+ */
 function sortMenuCopy(column: MemberColumnKey): SortMenuCopy {
   if (column === "joining_date") return { ascending: "Oldest first", descending: "Newest first" };
-  if (column === "role") return { ascending: "Guest to Admin", descending: "Admin to Guest" };
   return { ascending: "A to Z", descending: "Z to A" };
 }
 

@@ -304,6 +304,33 @@ describe("MembersSettings sort", () => {
     );
   });
 
+  it("labels the Account type menu with the order its role-word sort produces", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(screen.getByRole("button", { name: "Sort by Account type" }));
+    const ascending = await screen.findByRole("menuitem", { name: /A to Z/ });
+    await user.click(ascending);
+    // The role word is the sort key: A to Z reads Admin, Guest, Member,
+    // which is exactly what the menu claims and what the table paints.
+    expect(screen.getAllByTestId("member-roster-row").map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Ada Lovelace"),
+      expect.stringContaining("Linus Torvalds"),
+      expect.stringContaining("Grace Hopper"),
+    ]);
+    expect(screen.getByRole("button", { name: "Sort by Account type" })).toHaveAttribute(
+      "data-sort-marker",
+      "Ascending"
+    );
+    await user.click(screen.getByRole("button", { name: "Sort by Account type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Z to A/ }));
+    expect(screen.getAllByTestId("member-roster-row").map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Grace Hopper"),
+      expect.stringContaining("Linus Torvalds"),
+      expect.stringContaining("Ada Lovelace"),
+    ]);
+  });
+
   it("keeps the sort across a remount", async () => {
     happyPath();
     const user = userEvent.setup();
