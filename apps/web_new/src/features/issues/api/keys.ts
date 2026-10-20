@@ -43,4 +43,13 @@ export const issueKeys = {
     [...issueKeys.all(workspaceSlug), "activity", projectId, issueId] as const,
   /** Per-entity display preferences (ISS-002). */
   prefs: (workspaceSlug: string, ...part: string[]) => [...issueKeys.all(workspaceSlug), "prefs", ...part] as const,
+  /** Relations widget read for one work item (ISS-179). */
+  widgetRelations: (workspaceSlug: string, issueId: string) =>
+    [...issueKeys.all(workspaceSlug), "widget-relations", issueId] as const,
+  /** Links widget read for one work item (ISS-184). */
+  widgetLinks: (workspaceSlug: string, issueId: string) =>
+    [...issueKeys.all(workspaceSlug), "widget-links", issueId] as const,
+  /** Relation-picker candidate search for one work item (ISS-180). */
+  widgetCandidates: (workspaceSlug: string, issueId: string, query: string, workspaceSearch: boolean) =>
+    [...issueKeys.all(workspaceSlug), "widget-candidates", issueId, query, workspaceSearch] as const,
 };

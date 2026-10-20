@@ -228,6 +228,7 @@ interface BrowseExtras {
   details?: "member" | "archived";
   me?: boolean;
   archivedIssue?: boolean;
+  syncedIssue?: boolean;
   estimate?: string | null;
   intake?: boolean;
   liteStatus?: number;
@@ -349,10 +350,26 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
         state_distribution: extras.child === true || extras.foreignChild === true ? { completed: [CHILD_ID] } : {},
         total_count: extras.child === true || extras.foreignChild === true ? 1 : 0,
       });
+    } else if (url.includes("/issue-relation/")) {
+      status = 200;
+      body = JSON.stringify({
+        blocking: [],
+        blocked_by: [],
+        duplicate: [],
+        relates_to: [],
+        start_after: [],
+        start_before: [],
+        finish_after: [],
+        finish_before: [],
+      });
+    } else if (url.includes("/issue-links/")) {
+      status = 200;
+      body = JSON.stringify([]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
-      body = JSON.stringify(extras.archivedIssue === true ? { ...row, archived_at: "2024-03-04" } : row);
+      const stamped = extras.archivedIssue === true ? { ...row, archived_at: "2024-03-04" } : row;
+      body = JSON.stringify(extras.syncedIssue === true ? { ...stamped, is_synced: true } : stamped);
     } else if (url.endsWith("/projects/details/")) {
       status = 200;
       if (extras.details !== undefined) {
@@ -485,6 +502,27 @@ describe("browse route", () => {
     await screen.findByRole("button", { name: /Edited by/ });
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Title" })).not.toBeInTheDocument();
+  });
+
+  it("mounts the widget stack with live relation and link entries for a member", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    await waitFor(() => expect(within(widget).getByRole("button", { name: "Add relation" })).toBeEnabled());
+    expect(within(widget).getByRole("button", { name: "Add link" })).toBeEnabled();
+  });
+
+  it("keeps the widget stack read-only on an archived issue", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widget).getByRole("button", { name: "Add relation" })).toBeDisabled();
+    expect(within(widget).getByRole("button", { name: "Add link" })).toBeDisabled();
+  });
+
+  it("keeps the widget stack read-only on a synced issue", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, syncedIssue: true });
+    const widget = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widget).getByRole("button", { name: "Add relation" })).toBeDisabled();
+    expect(within(widget).getByRole("button", { name: "Add link" })).toBeDisabled();
   });
 
   it("renders unknown keys without the strip, linking home", async () => {

@@ -19,6 +19,13 @@ import type { WorkItemCreateProject } from "../components/WorkItemCreateDialog.j
 import { SubIssueSection, type SubIssueSectionHandle } from "./SubIssueSection.js";
 import { subIssueTitle } from "./rules.js";
 
+/** Which action-row entry each later widget's slot fills. */
+const ACTION_SLOT: Record<WidgetSectionSlot["label"], WidgetActionLabel> = {
+  Relations: "Add relation",
+  Links: "Add link",
+  Attachments: "Attach",
+};
+
 /** The five action-row entries, in render order. */
 export const WIDGET_ACTION_LABELS = [
   "Add sub-work item",
@@ -49,9 +56,15 @@ function actionIcon(label: WidgetActionLabel): React.ReactElement {
   }
 }
 
-/** A later widget's collapsible slot, in the fixed order. */
+/**
+ * A later widget's collapsible slot, in the fixed order. `action` is the
+ * action-row control that belongs to this widget (the add-relation menu
+ * or the add-link button); a slot without one keeps the row's entry
+ * disabled. The section itself renders only when it has content.
+ */
 export interface WidgetSectionSlot {
   label: "Relations" | "Links" | "Attachments";
+  action?: React.ReactNode;
   node: React.ReactNode;
 }
 
@@ -106,6 +119,10 @@ export function SubIssuesWidget({
     >
       <div className="flex flex-wrap items-center gap-(--space-2)">
         {WIDGET_ACTION_LABELS.map((label) => {
+          const slot = extraSections.find((section) => ACTION_SLOT[section.label] === label);
+          if (slot?.action !== undefined) {
+            return <React.Fragment key={label}>{slot.action}</React.Fragment>;
+          }
           const implemented = SUB_ISSUES_WIDGET_ACTIONS.includes(label);
           const button = (
             <Button variant="secondary" size="medium" disabled={!canAdd || !implemented} data-widget-action={label}>
