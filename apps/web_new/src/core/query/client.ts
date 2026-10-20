@@ -26,7 +26,12 @@ export function createQueryClient(): QueryClient {
     defaultOptions: {
       queries: {
         staleTime: LIST_STALE_TIME_MS,
-        refetchOnWindowFocus: true,
+        // No focus/reconnect refetch (parity/specs/issues.md §18,
+        // ISS-221): another user's write appears only on reload or the
+        // owner's own post-mutation refetch. The agent-status panel's
+        // fifteen-second poll (ISS-164) sets its own interval.
+        refetchOnWindowFocus: false,
+        refetchOnReconnect: false,
         retry: (failureCount, error) => failureCount < 2 && isRetryable(error),
       },
       mutations: {

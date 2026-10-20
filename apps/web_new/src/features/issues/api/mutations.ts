@@ -22,6 +22,7 @@ import { rollbackSnapshots, snapshotQueries, type QuerySnapshot } from "../../..
 import { notifyError } from "../../../shared/shell/index.js";
 import type { LiteResolution } from "./browse.js";
 import { issueKeys } from "./keys.js";
+import { withIssueFields } from "./optimisticRows.js";
 
 /** Notice title when a title save is refused. */
 export const TITLE_SAVE_FAILED_TITLE = "Couldn't save the title";
@@ -81,11 +82,9 @@ export function applyIssuePatchLite(
 ): LiteResolution | undefined {
   if (previous?.lite === undefined || previous.lite === null || previous.lite.id !== issueId) return previous;
   return {
-    lite: {
-      ...previous.lite,
-      ...(patch.name !== undefined ? { name: patch.name } : {}),
-      ...(patch.description_html !== undefined ? { description_html: patch.description_html } : {}),
-    },
+    lite: withIssueFields(previous.lite, issueId, patch as Record<string, unknown>, {
+      knownFieldsOnly: true,
+    }) as LiteResolution["lite"],
   };
 }
 

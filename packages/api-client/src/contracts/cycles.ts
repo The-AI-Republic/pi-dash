@@ -47,6 +47,41 @@ export async function listCycles(client: ApiClient, slug: string, projectId: str
   return client.parse(CycleList, body, `GET cycles ${projectId}`);
 }
 
+/**
+ * The fields the completed-cycle transfer prompt reads (ISS-224). Once a
+ * transfer runs, the server freezes the pre-move counts into
+ * `progress_snapshot`; a snapshot that is present (non-empty) means the
+ * cycle can no longer transfer. The four issue counts are the pre-freeze
+ * live progress the detail serializer also carries.
+ */
+export const CycleDetail = z.object({
+  id: uuid(),
+  project_id: uuid(),
+  name: z.string(),
+  description: z.optional(z.string()),
+  start_date: nullableDateTime(),
+  end_date: nullableDateTime(),
+  // Uppercase lifecycle marker (DRAFT, ACTIVE, COMPLETED, ...).
+  status: z.optional(z.string()),
+  progress_snapshot: z.optional(z.nullable(z.record(z.string(), z.unknown()))),
+  total_issues: z.optional(z.number()),
+  backlog_issues: z.optional(z.number()),
+  unstarted_issues: z.optional(z.number()),
+  started_issues: z.optional(z.number()),
+});
+export type CycleDetail = z.infer<typeof CycleDetail>;
+
+/** GET .../cycles/<id>/: the cycle with its progress snapshot and counts. */
+export async function getCycle(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string
+): Promise<CycleDetail> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/`);
+  return client.parse(CycleDetail, body, `GET cycle ${cycleId}`);
+}
+
 export interface CyclePatch {
   name?: string;
   description?: string;

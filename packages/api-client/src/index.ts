@@ -748,8 +748,10 @@ export type {
 export {
   CycleList,
   CycleListItem,
+  CycleDetail,
   CycleTransferResult,
   CycleUpdate,
+  getCycle,
   listCycles,
   transferCycleIssues,
   updateCycle,

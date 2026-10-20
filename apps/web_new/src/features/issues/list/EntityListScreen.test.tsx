@@ -33,7 +33,8 @@ vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: tru
 vi.mock("../../projects/index.js", () => ({ projectsQueryOptions: mocks.projects }));
 vi.mock("./pages.js", () => ({ listPageQueryOptions: mocks.listPage }));
 vi.mock("../prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
-vi.mock("../../../shared/pickers/reference.js", () => ({
+vi.mock("../../../shared/pickers/reference.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/pickers/reference.js")>()),
   pickerCyclesQueryOptions: mocks.pickerCycles,
   pickerModulesQueryOptions: mocks.pickerModules,
 }));
@@ -68,6 +69,7 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
     noMatchState: React.ReactNode;
     headerActions: React.ReactNode;
     displayControl: React.ReactNode;
+    filterRow?: React.ReactNode;
   }) => (
     <div
       data-testid="layout-root"
@@ -77,6 +79,7 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
       data-offered={props.offered.join(",")}
     >
       <div data-testid="header-actions">{props.headerActions}</div>
+      <div data-testid="banner">{props.filterRow}</div>
       <div data-testid="display-slot">{props.displayControl}</div>
       <div data-testid="empty-state">{props.emptyState}</div>
       <div data-testid="no-match-state">{props.noMatchState}</div>
@@ -116,6 +119,7 @@ vi.mock("./lazy.js", async (importOriginal) => {
 
 import { EntityListScreen, type EntityListScreenProps } from "./EntityListScreen.js";
 import type { IssuesEntity } from "../prefs/entities.js";
+import { transferKeys } from "../transfer/api.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
@@ -328,6 +332,50 @@ describe("EntityListScreen", () => {
   it("passes project standing rather than the workspace role alone", () => {
     setup({}, [project({ archived_at: "2026-01-01T00:00:00Z", member_role: 20 })]);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
+  });
+
+  it("shows the completed-cycle transfer prompt while work can move (ISS-224)", () => {
+    const harness = setup({}, [project()]);
+    const client = (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient;
+    client?.setQueryData(transferKeys.cycle("acme", PROJECT, CYCLE), {
+      id: CYCLE,
+      project_id: PROJECT,
+      name: "Sprint 1",
+      start_date: null,
+      end_date: null,
+      status: "COMPLETED",
+      progress_snapshot: {},
+      backlog_issues: 2,
+    });
+    harness.view.rerender(
+      <QueryClientProvider client={client as QueryClient}>
+        <EntityListScreen {...harness.props} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByText("Completed cycles are not editable.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Transfer work items" })).toBeInTheDocument();
+  });
+
+  it("keeps the note but drops the transfer button once the snapshot froze", () => {
+    const harness = setup({}, [project()]);
+    const client = (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient;
+    client?.setQueryData(transferKeys.cycle("acme", PROJECT, CYCLE), {
+      id: CYCLE,
+      project_id: PROJECT,
+      name: "Sprint 1",
+      start_date: null,
+      end_date: null,
+      status: "COMPLETED",
+      progress_snapshot: { total_issues: 2 },
+      backlog_issues: 2,
+    });
+    harness.view.rerender(
+      <QueryClientProvider client={client as QueryClient}>
+        <EntityListScreen {...harness.props} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByText("Completed cycles are not editable.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Transfer work items" })).not.toBeInTheDocument();
   });
 
   it("falls back to a count envelope when results are not an array", () => {

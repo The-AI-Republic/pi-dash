@@ -24,7 +24,22 @@ import {
   StatePicker,
 } from "../../../shared/pickers/index.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
-import { usePickerCycles, usePickerModules, usePickerStates } from "../../../shared/pickers/reference.js";
+import {
+  usePickerCycles,
+  usePickerEstimates,
+  usePickerModules,
+  usePickerStates,
+  usePickerWorkspaceMembers,
+} from "../../../shared/pickers/reference.js";
+import { selectActiveEstimate } from "@pidash/api-client";
+import { selectEstimateOptions } from "../../../shared/pickers/estimates.js";
+import {
+  countLabel,
+  labelNamesTooltip,
+  ReadOnlyDate,
+  ReadOnlyMembers,
+  ReadOnlyProperty,
+} from "../readonly/ReadOnlyProperty.js";
 import { Avatar } from "@pidash/kit";
 import { sheetCellId, type SheetColumn } from "./model.js";
 
@@ -78,6 +93,11 @@ export function SheetPropertyCell({
     >
       {editable && editableKey !== null ? (
         <EditableCell columnKey={editableKey} issue={issue} context={context} onDone={focus} disabled={false} />
+      ) : // A row whose own state froze shows every property as a value
+      // with no affordance (ISS-220); a sheet that is merely not
+      // editable keeps the plain read-only cell it always had.
+      context.isRowReadOnly(issue) ? (
+        <FrozenPropertyValue issue={issue} column={column} context={context} />
       ) : (
         <ReadOnlyCell issue={issue} column={column} context={context} />
       )}
@@ -446,6 +466,54 @@ function ReadOnlyCell({
   }
 }
 
+/**
+ * A frozen row's property value, with no trigger at all (ISS-220): the
+ * row is archived, synced or inside a completed cycle, so every column
+ * reads as icon plus value and an explicit "None" when unset.
+ */
+function FrozenPropertyValue({
+  issue,
+  column,
+  context,
+}: {
+  issue: IssueListItem;
+  column: SheetColumn;
+  context: SheetCellContext;
+}): React.ReactElement {
+  switch (column.key) {
+    case "state":
+      return <FrozenState issue={issue} context={context} />;
+    case "priority":
+      return <ReadOnlyProperty kind="priority" value={PRIORITY_LABELS[issue.priority]} />;
+    case "assignee":
+      return <FrozenAssignees issue={issue} context={context} />;
+    case "labels":
+      return <FrozenLabels issue={issue} context={context} />;
+    case "modules":
+      return <FrozenModules issue={issue} context={context} />;
+    case "cycle":
+      return <FrozenCycle issue={issue} context={context} />;
+    case "start_date":
+      return <ReadOnlyDate iso={issue.start_date ?? null} />;
+    case "due_date":
+      return <ReadOnlyDate iso={issue.target_date ?? null} />;
+    case "estimate":
+      return <FrozenEstimate issue={issue} context={context} />;
+    case "created_on":
+      return <ReadOnlyProperty kind="date" value={formatDay(issue.created_at.slice(0, 10))} />;
+    case "updated_on":
+      return <ReadOnlyProperty kind="date" value={formatDay(issue.updated_at.slice(0, 10))} />;
+    case "link":
+      return <ReadOnlyProperty kind="parent" value={String(issue.link_count ?? 0)} />;
+    case "attachment_count":
+      return <ReadOnlyProperty kind="parent" value={String(issue.attachment_count ?? 0)} />;
+    case "sub_issue_count":
+      return <ReadOnlyProperty kind="parent" value={countLabel(issue.sub_issues_count ?? 0, "sub-work item")} />;
+    default:
+      return <ReadOnlyProperty kind="parent" value={null} />;
+  }
+}
+
 function ReadOnlyStateName({
   issue,
   context,
@@ -456,6 +524,105 @@ function ReadOnlyStateName({
   const states = usePickerStates(context.workspaceSlug, context.projectId, true);
   const name = states.data?.find((state) => state.id === issue.state_id)?.name ?? "";
   return <span>{name}</span>;
+}
+
+/**
+ * The names behind a list of reference ids, in the order the ids were
+ * stored. A missing row (a reference the caller cannot see, or a read
+ * that has not answered yet) is skipped, so a frozen row shows the
+ * counts it has rather than placeholders.
+ */
+function referenceNames<T extends { id: string }>(
+  rows: readonly T[] | undefined,
+  ids: readonly string[],
+  nameOf: (row: T) => string
+): string[] {
+  if (rows === undefined) return [];
+  const names: string[] = [];
+  for (const id of ids) {
+    const row = rows.find((candidate) => candidate.id === id);
+    if (row !== undefined) names.push(nameOf(row));
+  }
+  return names;
+}
+
+function stateName(states: readonly { id: string; name: string }[] | undefined, stateId: string | null): string | null {
+  if (stateId === null) return null;
+  const names = referenceNames(states, [stateId], (state) => state.name);
+  return names[0] ?? null;
+}
+
+function FrozenState({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const states = usePickerStates(context.workspaceSlug, context.projectId, true);
+  return <ReadOnlyProperty kind="state" value={stateName(states.data, issue.state_id)} />;
+}
+
+const PRIORITY_LABELS: Record<IssueListItem["priority"], string | null> = {
+  urgent: "Urgent",
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  none: null,
+};
+
+/**
+ * Assignee ids with the directory's names. The directory already loads
+ * with the sheet, so a missing entry renders the id's short form; while
+ * the directory is still arriving the same short form stands in.
+ */
+function FrozenAssignees({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const members = usePickerWorkspaceMembers(context.workspaceSlug, true);
+  const names = React.useMemo(
+    () =>
+      issue.assignee_ids.map((id) => {
+        const member = members.data?.find((row) => row.member.id === id);
+        return { id, name: member?.member.display_name ?? id.slice(0, 2) };
+      }),
+    [issue.assignee_ids, members.data]
+  );
+  return <ReadOnlyMembers members={names} />;
+}
+
+function FrozenLabels({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const labels = useLabels(context.workspaceSlug, context.projectId, true);
+  const names = React.useMemo(
+    () => referenceNames(labels.data, issue.label_ids, (label) => label.name),
+    [issue.label_ids, labels.data]
+  );
+  return (
+    <ReadOnlyProperty
+      kind="labels"
+      value={issue.label_ids.length === 0 ? null : countLabel(issue.label_ids.length, "label")}
+      tooltip={labelNamesTooltip(names)}
+    />
+  );
+}
+
+function FrozenCycle({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const cycles = usePickerCycles(context.workspaceSlug, context.projectId, true);
+  const name = issue.cycle_id === null ? null : (cycles.data?.find((row) => row.id === issue.cycle_id)?.name ?? null);
+  return <ReadOnlyProperty kind="cycle" value={name} />;
+}
+
+function FrozenModules({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const modules = usePickerModules(context.workspaceSlug, context.projectId, true);
+  const names = referenceNames(modules.data, issue.module_ids, (row) => row.name);
+  return (
+    <ReadOnlyProperty
+      kind="module"
+      value={issue.module_ids.length === 0 ? null : countLabel(issue.module_ids.length, "module")}
+      tooltip={labelNamesTooltip(names)}
+    />
+  );
+}
+
+function FrozenEstimate({ issue, context }: { issue: IssueListItem; context: SheetCellContext }): React.ReactElement {
+  const estimates = usePickerEstimates(context.workspaceSlug, context.projectId, true);
+  const system = estimates.data === undefined ? undefined : selectActiveEstimate(estimates.data);
+  const value =
+    issue.estimate_point === null || issue.estimate_point === undefined ? null : String(issue.estimate_point);
+  const option = system === undefined ? undefined : selectEstimateOptions(system).find((row) => row.id === value);
+  return <ReadOnlyProperty kind="estimate" value={option?.label ?? value} />;
 }
 
 export function formatDayOrBlank(iso: string | null): string {

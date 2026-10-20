@@ -374,6 +374,216 @@ describe("SheetPropertyCell", () => {
     expect(screen.queryByRole("button", { name: /in progress/i })).not.toBeInTheDocument();
   });
 
+  it("renders every frozen column as a triggerless value with a None fallback", async () => {
+    stubClient();
+    const frozen = context({ isRowReadOnly: () => true });
+    const row = issue({ cycle_id: CYCLE, label_ids: [LABEL], module_ids: [MODULE], assignee_ids: [MEMBER] });
+    const { unmount } = renderCell("priority", frozen, row);
+    expect(screen.getByText("High")).toBeInTheDocument();
+    unmount();
+
+    const kinds = {
+      state: "state",
+      assignee: "assignee",
+      labels: "labels",
+      modules: "module",
+      cycle: "cycle",
+      estimate: "estimate",
+    };
+    for (const [key, kind] of Object.entries(kinds)) {
+      const rendered = renderCell(key, frozen, row);
+      await vi.waitFor(() =>
+        expect(rendered.container.querySelector(`[data-readonly-property="${kind}"]`), key).not.toBeNull()
+      );
+      expect(within(rendered.container).queryByRole("button")).not.toBeInTheDocument();
+      rendered.unmount();
+    }
+
+    const empty = renderCell("cycle", frozen, issue({ cycle_id: null }));
+    expect(within(empty.container).getByText("None")).toBeInTheDocument();
+    empty.unmount();
+
+    for (const key of ["created_on", "updated_on", "link", "attachment_count", "sub_issue_count"]) {
+      const rendered = renderCell(key, frozen, issue());
+      expect(rendered.container.querySelector("[data-readonly-property]")).not.toBeNull();
+      expect(within(rendered.container).queryByRole("button")).not.toBeInTheDocument();
+      rendered.unmount();
+    }
+  });
+
+  it("renders a frozen column it does not know as a None value", () => {
+    // The sheet's own column list never reaches this arm; it is the
+    // defensive default for a column added ahead of its renderer (say a
+    // new count), so a frozen row shows None instead of an edit trigger.
+    const frozen = context({ isRowReadOnly: () => true });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const unknown = render(
+      <QueryClientProvider client={queryClient}>
+        <table>
+          <tbody>
+            <tr>
+              <SheetPropertyCell
+                issue={issue()}
+                column={{ key: "future_count", label: "Future", sort: { ascending: "x", descending: "-x" } }}
+                context={frozen}
+                rowIndex={0}
+                columnIndex={1}
+                onKeyDown={() => {}}
+              />
+            </tr>
+          </tbody>
+        </table>
+      </QueryClientProvider>
+    );
+    expect(unknown.container.querySelector('[data-readonly-property="parent"]')).not.toBeNull();
+    expect(within(unknown.container).getByText("None")).toBeInTheDocument();
+    expect(within(unknown.container).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("renders frozen pickers as None until their reference data loads", async () => {
+    // Nothing answers these reads: the row still paints values rather than
+    // suspending or showing a trigger, which is the contract for a frozen
+    // row whose references have not arrived yet.
+    createAppClient("https://api.test", () => new Promise<never>(() => {}));
+    const frozen = context({ isRowReadOnly: () => true });
+    const row = issue({ state_id: null, assignee_ids: [MEMBER], label_ids: [LABEL], module_ids: [MODULE] });
+    for (const key of ["state", "assignee", "labels", "modules"]) {
+      const rendered = renderCell(key, frozen, row);
+      await vi.waitFor(() => expect(rendered.container.querySelector("[data-readonly-property]"), key).not.toBeNull());
+      expect(within(rendered.container).queryByRole("button"), key).not.toBeInTheDocument();
+      rendered.unmount();
+    }
+  });
+
+  it("names frozen references once their pickers answer", async () => {
+    stubClient();
+    const frozen = context({ isRowReadOnly: () => true });
+    const row = issue({ cycle_id: CYCLE, state_id: STATE, label_ids: [LABEL], module_ids: [MODULE] });
+    const state = renderCell("state", frozen, row);
+    await vi.waitFor(() => expect(within(state.container).getByText("In progress")).toBeInTheDocument());
+    state.unmount();
+    const cycle = renderCell("cycle", frozen, row);
+    await vi.waitFor(() => expect(within(cycle.container).getByText("Cycle 1")).toBeInTheDocument());
+    cycle.unmount();
+    const modules = renderCell("modules", frozen, row);
+    await vi.waitFor(() => expect(within(modules.container).getByText("1 module")).toBeInTheDocument());
+    modules.unmount();
+  });
+
+  it("falls back to the raw id while frozen references are still resolving", () => {
+    // The pickers have not answered: the row shows the stored ids rather
+    // than an empty value and no trigger.
+    createAppClient("https://api.test", () => new Promise<never>(() => {}));
+    const frozen = context({ isRowReadOnly: () => true });
+    const row = issue({ assignee_ids: [MEMBER], label_ids: [LABEL], module_ids: [MODULE] });
+    const assignee = renderCell("assignee", frozen, row);
+    expect(within(assignee.container).getAllByText(MEMBER.slice(0, 2)).length).toBeGreaterThan(0);
+    assignee.unmount();
+    const labels = renderCell("labels", frozen, row);
+    expect(within(labels.container).getByText("1 label")).toBeInTheDocument();
+    labels.unmount();
+    const modules = renderCell("modules", frozen, row);
+    expect(within(modules.container).getByText("1 module")).toBeInTheDocument();
+    modules.unmount();
+  });
+
+  it("names frozen references and ignores ids the reference data lacks", async () => {
+    stubClient();
+    const frozen = context({ isRowReadOnly: () => true });
+    const unknown = "923e4567-e89b-12d3-a456-426614174008";
+    const assignees = renderCell("assignee", frozen, issue({ assignee_ids: [MEMBER, unknown] }));
+    await vi.waitFor(() => expect(within(assignees.container).getByText(/Pat Member/)).toBeInTheDocument());
+    assignees.unmount();
+    const labels = renderCell("labels", frozen, issue({ label_ids: [LABEL, unknown] }));
+    expect(within(labels.container).getByText("2 labels")).toBeInTheDocument();
+    labels.unmount();
+    const modules = renderCell("modules", frozen, issue({ module_ids: [MODULE, unknown] }));
+    expect(within(modules.container).getByText("2 modules")).toBeInTheDocument();
+    modules.unmount();
+    const state = renderCell("state", frozen, issue({ state_id: unknown }));
+    expect(within(state.container).getByText("None")).toBeInTheDocument();
+  });
+
+  it("shows None for frozen multi-value columns with nothing assigned", () => {
+    stubClient();
+    const frozen = context({ isRowReadOnly: () => true });
+    for (const key of ["labels", "modules"]) {
+      const rendered = renderCell(key, frozen, issue({ label_ids: [], module_ids: [] }));
+      expect(within(rendered.container).getByText("None"), key).toBeInTheDocument();
+      rendered.unmount();
+    }
+  });
+
+  it("resolves frozen label and module names once their pickers answer", async () => {
+    stubClient();
+    const frozen = context({ isRowReadOnly: () => true });
+    const unknown = "923e4567-e89b-12d3-a456-426614174008";
+    const labels = renderCell("labels", frozen, issue({ label_ids: [LABEL, unknown] }));
+    await vi.waitFor(() => expect(within(labels.container).getByText("2 labels")).toBeInTheDocument());
+    labels.unmount();
+    const modules = renderCell("modules", frozen, issue({ module_ids: [MODULE, unknown] }));
+    await vi.waitFor(() => expect(within(modules.container).getByText("2 modules")).toBeInTheDocument());
+    modules.unmount();
+    const named = renderCell("state", frozen, issue({ state_id: STATE }));
+    await vi.waitFor(() => expect(within(named.container).getByText("In progress")).toBeInTheDocument());
+    named.unmount();
+  });
+
+  it("falls back to the stored estimate when no option matches", async () => {
+    stubClient();
+    const frozen = context({ isRowReadOnly: () => true });
+    const known = renderCell("estimate", frozen, issue({ estimate_point: ESTIMATE }));
+    await vi.waitFor(() => expect(within(known.container).queryByText(ESTIMATE)).not.toBeInTheDocument());
+    known.unmount();
+    const unknown = renderCell("estimate", frozen, issue({ estimate_point: "no-such-option" }));
+    expect(within(unknown.container).getByText("no-such-option")).toBeInTheDocument();
+    unknown.unmount();
+    const clear = renderCell("estimate", frozen, issue({ estimate_point: null }));
+    expect(within(clear.container).getByText("None")).toBeInTheDocument();
+    clear.unmount();
+    const blank = renderCell("estimate", frozen, issue({ estimate_point: undefined }));
+    expect(within(blank.container).getByText("None")).toBeInTheDocument();
+  });
+
+  it("renders frozen dates and an unknown column as None", () => {
+    const frozen = context({ isRowReadOnly: () => true });
+    const start = renderCell("start_date", frozen, issue({ start_date: "2026-10-15" }));
+    expect(within(start.container).getByText("2026-10-15")).toBeInTheDocument();
+    start.unmount();
+    const noStart = renderCell("start_date", frozen, issue({ start_date: null, target_date: "2026-10-20" }));
+    expect(within(noStart.container).getByText("None")).toBeInTheDocument();
+    noStart.unmount();
+    const due = renderCell("due_date", frozen, issue({ target_date: "2026-10-20" }));
+    expect(within(due.container).getByText("2026-10-20")).toBeInTheDocument();
+    due.unmount();
+    const noDue = renderCell("due_date", frozen, issue({ target_date: null }));
+    expect(within(noDue.container).getByText("None")).toBeInTheDocument();
+  });
+
+  it("renders frozen counts without a trigger", () => {
+    const frozen = context({ isRowReadOnly: () => true });
+    const link = renderCell("link", frozen, issue());
+    expect(within(link.container).getByText("1")).toBeInTheDocument();
+    expect(within(link.container).queryByRole("button")).not.toBeInTheDocument();
+    link.unmount();
+    const attachment = renderCell("attachment_count", frozen, issue());
+    expect(within(attachment.container).getByText("3")).toBeInTheDocument();
+    attachment.unmount();
+    const subIssues = renderCell("sub_issue_count", frozen, issue());
+    expect(within(subIssues.container).getByText("2 sub-work items")).toBeInTheDocument();
+    subIssues.unmount();
+    const blank = issue({ link_count: null, attachment_count: null, sub_issues_count: null });
+    for (const [key, text] of [
+      ["link", "0"],
+      ["attachment_count", "0"],
+      ["sub_issue_count", "0 sub-work items"],
+    ] as const) {
+      const empty = renderCell(key, frozen, blank);
+      expect(within(empty.container).getByText(text), key).toBeInTheDocument();
+      empty.unmount();
+    }
+  });
+
   it("renders the remaining read-only value branches", () => {
     const { unmount } = renderCell("assignee", context({ editable: false }), issue({ assignee_ids: [MEMBER] }));
     expect(screen.getByText("72")).toBeInTheDocument();

@@ -17,12 +17,29 @@ import { createMemoryStore } from "../platform/storage.js";
 import { createRealtimeHub } from "./realtime.js";
 
 describe("query client defaults", () => {
-  it("uses list freshness and refetch-on-focus with no mutation retries", () => {
+  it("uses list freshness with no focus/reconnect refetch and no mutation retries", () => {
     const client = createQueryClient();
     expect(client.getDefaultOptions().queries?.staleTime).toBe(LIST_STALE_TIME_MS);
-    expect(client.getDefaultOptions().queries?.refetchOnWindowFocus).toBe(true);
+    // ISS-221: another user's write must not appear without a reload.
+    expect(client.getDefaultOptions().queries?.refetchOnWindowFocus).toBe(false);
+    expect(client.getDefaultOptions().queries?.refetchOnReconnect).toBe(false);
     expect(client.getDefaultOptions().mutations?.retry).toBe(false);
     expect(REFERENCE_STALE_TIME_MS).toBeGreaterThan(LIST_STALE_TIME_MS);
+  });
+
+  it("never refetches an issue query on focus, reconnect or a timer", () => {
+    const client = createQueryClient();
+    for (const key of [
+      ["ws", "acme", "issues", "list"],
+      ["ws", "acme", "issues", "detail", "1"],
+      ["ws", "acme", "issues", "browse", "ACME-1"],
+    ]) {
+      client.setQueryData(key, { ok: true });
+      const defaults = client.getQueryDefaults(key);
+      expect(defaults.refetchOnWindowFocus ?? false).toBe(false);
+      expect(defaults.refetchOnReconnect ?? false).toBe(false);
+      expect(defaults.refetchInterval ?? false).toBe(false);
+    }
   });
 
   it("scopes every key under the workspace", () => {

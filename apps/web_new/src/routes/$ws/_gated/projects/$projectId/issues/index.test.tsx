@@ -659,6 +659,19 @@ describe("project issues screen", () => {
     expect(screen.queryByLabelText("WEB-42")).toBeNull();
   });
 
+  it("renders the timeline read-only for an archived project (ISS-222)", async () => {
+    renderScreen({}, 1, [issueRow({ start_date: "2026-10-01", target_date: "2026-10-05" })], {
+      project: { archived_at: "2026-01-01T00:00:00Z" },
+      displayFilters: { layout: "gantt_chart", group_by: null, order_by: "sort_order" },
+    });
+
+    expect(await screen.findByTestId("gantt-layout", undefined, LAZY_WAIT)).toBeInTheDocument();
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("gantt-resize-left")).toHaveLength(0);
+    expect(screen.queryAllByTestId("gantt-undated-lane")).toHaveLength(0);
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+  });
+
   it("explains a project that is not in the visible list", () => {
     renderScreen({}, 1, [issueRow()], { projects: [{ ...projectSeed(), id: ISSUE_UUID }] });
 

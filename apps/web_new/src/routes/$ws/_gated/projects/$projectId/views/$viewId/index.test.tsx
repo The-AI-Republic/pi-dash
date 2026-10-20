@@ -334,6 +334,22 @@ describe("saved view screen", () => {
     expect(screen.queryByLabelText("WEB-1")).toBeNull();
   });
 
+  it("renders the view's timeline read-only for an archived project (ISS-222)", async () => {
+    renderScreen(
+      20,
+      {
+        ...viewRecord(),
+        display_filters: { layout: "gantt_chart", order_by: "sort_order" } as Record<string, unknown>,
+      },
+      1,
+      undefined,
+      [{ ...projectSeed(), archived_at: "2026-01-01T00:00:00Z" }]
+    );
+    expect(await screen.findByTestId("gantt-layout", undefined, LAZY_WAIT)).toBeInTheDocument();
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+  });
+
   it("turns a layout switch in the header into an Update view carrying the view's settings", async () => {
     const user = userEvent.setup();
     const patches: Array<Record<string, unknown>> = [];

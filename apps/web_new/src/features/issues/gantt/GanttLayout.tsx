@@ -23,7 +23,13 @@ import { GanttQuickAdd } from "./GanttQuickAdd.js";
 import { canEditTimeline } from "./permissions.js";
 import { buildRows, type GanttRow } from "./rows.js";
 import { addDays } from "./scale.js";
-import { stateColorOf, useGanttPeek, useGanttStates, useProjectMemberRole } from "./useGanttData.js";
+import {
+  stateColorOf,
+  useGanttPeek,
+  useGanttStates,
+  useProjectArchived,
+  useProjectMemberRole,
+} from "./useGanttData.js";
 import { useGanttMutations } from "./useGanttMutations.js";
 
 /**
@@ -93,11 +99,14 @@ export function GanttLayout({
   const barColors = React.useMemo(() => barColorsFor(rows, states), [rows, states]);
   const { peek, openRow, closePeek } = useGanttPeek(workspaceSlug);
   const projectRole = useProjectMemberRole(workspaceSlug, projectId);
+  // An archived project hides every edit affordance (ISS-222). The
+  // layout reads that from the list the route already holds.
+  const archived = useProjectArchived(workspaceSlug, projectId);
   const mutations = useGanttMutations(workspaceSlug, projectId);
   const create = useCreateWorkItem(workspaceSlug);
   const canEdit = canEditTimeline({
     projectRole,
-    archived: false,
+    archived,
   });
   // Bars and sidebar links open the hover preview card (ISS-133); the
   // timeline's own state read already holds the name and group.

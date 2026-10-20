@@ -176,6 +176,9 @@ describe("issue patch updaters", () => {
   it("paints the detail cache, leaving absent caches alone", () => {
     expect(applyIssuePatchDetail(issueRow(), { name: "New" })?.name).toBe("New");
     expect(applyIssuePatchDetail(issueRow(), { description_html: "<p>new</p>" })?.description_html).toBe("<p>new</p>");
+    expect(applyIssuePatchDetail(issueRow(), { priority: "low" })?.priority).toBe("low");
+    expect(applyIssuePatchDetail(issueRow(), { state_id: "state-b" })?.state_id).toBe("state-b");
+    expect(applyIssuePatchDetail(issueRow(), { assignee_ids: [] })?.assignee_ids).toEqual([]);
     expect(applyIssuePatchDetail(issueRow(), {})).toEqual(issueRow());
     expect(applyIssuePatchDetail(undefined, { name: "New" })).toBeUndefined();
   });
@@ -240,6 +243,7 @@ describe("issue patch updaters", () => {
   it("renames the matching list row only", () => {
     const renamed = applyIssuePatchList(listPage(), ISSUE, { name: "New" });
     expect(renamed?.results[0]?.name).toBe("New");
+    expect(applyIssuePatchList(listPage(), ISSUE, { priority: "low" })?.results[0]?.priority).toBe("low");
     expect(applyIssuePatchList(listPage(), OTHER, { name: "New" })).toEqual(listPage());
     expect(applyIssuePatchList(listPage(), ISSUE, { description_html: "<p>x</p>" })).toEqual(listPage());
     expect(applyIssuePatchList(undefined, ISSUE, { name: "New" })).toBeUndefined();

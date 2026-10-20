@@ -28,6 +28,7 @@ import {
   issueKeys,
   liteIssueQueryOptions,
 } from "../../../../features/issues/index.js";
+import { mayDeleteWorkItem } from "../../../../features/issues/lifecycle/rules.js";
 import {
   LinkActionButton,
   LinksWidget,
@@ -163,6 +164,13 @@ function BrowseIssueDetail({
     moduleView: project?.module_view ?? false,
     meId: me.data?.id ?? null,
     standing: { memberRole: project?.member_role ?? null, archived: project?.archived_at != null },
+    mayDelete:
+      project?.archived_at == null &&
+      mayDeleteWorkItem({
+        viewerId: me.data?.id ?? null,
+        creatorId: issue.created_by,
+        projectRole: project?.member_role ?? null,
+      }),
     refresh: async () => context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });

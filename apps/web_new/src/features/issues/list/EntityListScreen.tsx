@@ -25,6 +25,10 @@ import type { IssuesEntity } from "../prefs/entities.js";
 import { pickerCyclesQueryOptions, pickerModulesQueryOptions } from "../../../shared/pickers/reference.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
 import { isCompletedModule } from "../../../shared/pickers/modules.js";
+import { useCycleDetail } from "../transfer/api.js";
+import { canTransferCycleIssues, showsCompletedCycleNote } from "../transfer/rules.js";
+import { TransferIssuesDialog } from "../transfer/TransferIssuesDialog.js";
+import { TransferIssuesPrompt } from "../transfer/TransferIssuesPrompt.js";
 
 export interface EntityListScreenProps {
   workspaceSlug: string;
@@ -85,6 +89,15 @@ export function EntityListScreen({
   const resolvedTitle = title ?? cycle?.name ?? loadedModule?.name ?? (entity.scope === "module" ? "Module" : "Cycle");
   const resolvedCompletedCycle = completedCycle ?? isCompletedCycle(cycle?.status);
   const resolvedCompletedModule = completedModule ?? isCompletedModule(loadedModule?.status);
+  // The transfer prompt reads the cycle's own detail: its snapshot and
+  // transferable counts decide the button (ISS-224). The read stays off
+  // for module and project scopes.
+  const cycleIdForTransfer = entity.scope === "cycle" ? entity.cycleId : "";
+  const cycleDetail = useCycleDetail(workspaceSlug, projectId, cycleIdForTransfer, cycleIdForTransfer !== "");
+  const transferCycle = cycleDetail.data ?? null;
+  const completedNote = showsCompletedCycleNote(transferCycle);
+  const canTransfer = canTransferCycleIssues(transferCycle);
+  const [transferOpen, setTransferOpen] = React.useState(false);
   // Stored rich filters scope the list in cycle/module context too.
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
   const richFilters = preferences.rich_filters;
@@ -173,6 +186,20 @@ export function EntityListScreen({
       noMatchState={<EntityEmptyState title={resolvedTitle} />}
       headerActions={display}
       displayControl={display}
+      filterRow={
+        completedNote ? (
+          <>
+            <TransferIssuesPrompt canTransfer={canTransfer} onOpen={() => setTransferOpen(true)} />
+            <TransferIssuesDialog
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              cycleId={cycleIdForTransfer}
+              open={transferOpen}
+              onClose={() => setTransferOpen(false)}
+            />
+          </>
+        ) : null
+      }
     />
   );
 }

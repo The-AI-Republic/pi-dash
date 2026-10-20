@@ -16,6 +16,7 @@ import type { State } from "@pidash/api-client";
 import { getAppClient } from "../../../core/api/client.js";
 import { useProjectRoles } from "../../auth/index.js";
 import { useNarrowViewport } from "../../../shared/shell/index.js";
+import { projectsQueryOptions } from "../../projects/index.js";
 import type { GanttRow } from "./rows.js";
 
 /** Query key suffix for one project's state list under the workspace. */
@@ -41,6 +42,19 @@ export function useGanttStates(workspaceSlug: string, projectId: string): State[
 export function useProjectMemberRole(workspaceSlug: string, projectId: string): number | null {
   const roles = useProjectRoles(workspaceSlug);
   return roles.data?.[projectId] ?? null;
+}
+
+/**
+ * Whether the project is archived, read from the workspace's project
+ * list the gated route already holds (ISS-222). An archive hides every
+ * edit affordance; a project the list does not carry reads as live so
+ * the timeline never goes read-only on a missing row.
+ */
+export function useProjectArchived(workspaceSlug: string, projectId: string): boolean {
+  const client = getAppClient();
+  const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
+  const project = projects?.find((row) => row.id === projectId);
+  return project !== undefined && project.archived_at !== null;
 }
 
 /** Pick the state that colors a row's bar. */
