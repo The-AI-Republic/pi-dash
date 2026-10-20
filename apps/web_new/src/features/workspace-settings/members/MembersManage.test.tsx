@@ -88,6 +88,12 @@ interface ServerState {
   invitations: unknown[];
   /** Status answered by the next write per method. */
   status?: Partial<Record<"POST" | "PATCH" | "DELETE", number>>;
+  /**
+   * Runs before a write is answered, so a test can change what the server
+   * would return on the next read — the oracle's refused-write setup drops
+   * the row server-side first.
+   */
+  beforeWrite?: (method: "POST" | "PATCH" | "DELETE", url: string) => void;
 }
 
 function transportFor(state: ServerState) {
@@ -135,6 +141,7 @@ function transportFor(state: ServerState) {
     if (method === "GET" && url.endsWith(`/api/workspaces/${SLUG}/members/`)) return json(200, state.roster);
     if (method === "GET" && url.endsWith(`/api/workspaces/${SLUG}/invitations/`)) return json(200, state.invitations);
     const status = state.status?.[method as "POST" | "PATCH" | "DELETE"] ?? 200;
+    state.beforeWrite?.(method as "POST" | "PATCH" | "DELETE", url);
     if (method === "DELETE") return json(status, {});
     if (status !== 200) return json(status, { detail: "The required object does not exist." });
     if (method === "PATCH" && url.includes("/invitations/")) {
@@ -264,6 +271,21 @@ describe("MembersPage pending invitations (WSET-010)", () => {
     expect(screen.queryByTestId("pending-invitations")).not.toBeInTheDocument();
   });
 
+  it("keeps a refused invitation role on the stored value even when the server already dropped the row", async () => {
+    const state: ServerState = { role: 20, roster: ROSTER, invitations: [invitation("ada@example.com", 15)] };
+    state.status = { PATCH: 404 };
+    state.beforeWrite = () => {
+      state.invitations = [];
+    };
+    setup(state);
+    await waitFor(() => expect(screen.getByTestId("pending-invitation-row")).toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "Role for ada@example.com" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Admin" }));
+    await waitFor(() => expect(toast.notifyError).toHaveBeenCalledWith("Error!", expect.any(String)));
+    const row = pendingRowFor("ada@example.com");
+    expect(within(row).getByRole("button", { name: "Role for ada@example.com" })).toHaveTextContent("Member");
+  });
+
   it("changes an invitation role through its own endpoint", async () => {
     const { calls } = setup({ role: 20, roster: ROSTER, invitations: [invitation("ada@example.com", 15)] });
     await waitFor(() => expect(screen.getByTestId("pending-invitation-row")).toBeInTheDocument());
@@ -332,8 +354,13 @@ describe("MembersPage pending invitations (WSET-010)", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("closes after a failed withdrawal and toasts the server's reason", async () => {
-    setup({ role: 20, roster: ROSTER, invitations: [invitation("ada@example.com")], status: { DELETE: 404 } });
+  it("closes after a failed withdrawal, toasts the reason, and keeps the row visible", async () => {
+    const state: ServerState = { role: 20, roster: ROSTER, invitations: [invitation("ada@example.com")] };
+    state.status = { DELETE: 404 };
+    state.beforeWrite = () => {
+      state.invitations = [];
+    };
+    setup(state);
     await waitFor(() => expect(screen.getByTestId("pending-invitation-row")).toBeInTheDocument());
     await openPendingMenu("ada@example.com");
     await userEvent.click(await screen.findByRole("menuitem", { name: "Remove" }));
@@ -375,6 +402,24 @@ describe("MembersPage roster actions (WSET-012/013)", () => {
     expect(screen.queryByRole("button", { name: /Role for/ })).not.toBeInTheDocument();
   });
 
+  it("keeps a refused member role on the previous value even when the server already dropped the row", async () => {
+    const state: ServerState = { role: 20, roster: ROSTER, invitations: [] };
+    state.status = { PATCH: 400 };
+    state.beforeWrite = () => {
+      state.roster = ROSTER.filter((row) => row.member.id !== OTHER_ID);
+    };
+    setup(state);
+    await waitFor(() => expect(screen.getAllByTestId("member-row").length).toBeGreaterThan(0));
+    await userEvent.click(
+      within(rowFor("parity-mention@example.com")).getByRole("button", { name: "Role for parity-mention@example.com" })
+    );
+    await userEvent.click(await screen.findByRole("option", { name: "Admin" }));
+    await waitFor(() => expect(toast.notifyError).toHaveBeenCalledWith("Error!", expect.any(String)));
+    expect(
+      within(rowFor("parity-mention@example.com")).getByRole("button", { name: "Role for parity-mention@example.com" })
+    ).toHaveTextContent("Member");
+  });
+
   it("removes another member behind the naming confirmation", async () => {
     const { calls } = setup({ role: 20, roster: ROSTER, invitations: [] });
     await waitFor(() => expect(screen.getAllByTestId("member-row").length).toBeGreaterThan(0));
@@ -393,8 +438,13 @@ describe("MembersPage roster actions (WSET-012/013)", () => {
     expect(toast.notifySuccess).not.toHaveBeenCalled();
   });
 
-  it("toasts a failed removal and leaves the row in place", async () => {
-    setup({ role: 20, roster: ROSTER, invitations: [], status: { DELETE: 404 } });
+  it("toasts a failed removal and leaves the row in place even when the server already dropped it", async () => {
+    const state: ServerState = { role: 20, roster: ROSTER, invitations: [] };
+    state.status = { DELETE: 404 };
+    state.beforeWrite = () => {
+      state.roster = ROSTER.filter((row) => row.member.id !== OTHER_ID);
+    };
+    setup(state);
     await waitFor(() => expect(screen.getAllByTestId("member-row").length).toBeGreaterThan(0));
     await openMemberMenu("parity-mention@example.com");
     await userEvent.click(await screen.findByRole("menuitem", { name: "Remove" }));

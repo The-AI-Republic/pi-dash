@@ -29,8 +29,10 @@ function WorkspaceSettingsSectionPage(): React.ReactElement {
       section="members"
       onLeaveWorkspace={() => {
         // §13: the just-left workspace home renders the not-authorized gate
-        // from the still-cached workspace list, so navigation stays in the app.
-        void navigate({ to: "/$ws", params: { ws } });
+        // from the still-cached workspace list, so navigation stays in the
+        // app. The address keeps its trailing slash, matching the oracle's
+        // landing URL and the delete-workspace flow.
+        void navigate({ to: "/$ws/", params: { ws } });
       }}
     />
   );

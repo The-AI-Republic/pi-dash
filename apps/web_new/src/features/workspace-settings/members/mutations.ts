@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Writes behind the members page (parity/specs/workspace-settings.md
-// §10–§13; WSET-009/010/012/013). Each write refreshes the roster and the
-// pending list when it settles, so the page shows what the server stored
-// even when a row was refused. Notifications live here because every
-// caller speaks them the same way.
+// §10–§13; WSET-009/010/012/013). A successful write refreshes the roster
+// and the pending list so the page shows what the server stored. A refused
+// write keeps the cached rows as they were, so the row that was edited
+// stays visible with its previous role (§11–§13). Notifications live here
+// because every caller speaks them the same way.
 //
 // Role writes stay quiet on success — the row's own label is the signal —
 // and toast only on failure. Submission and withdrawal always speak.
@@ -93,7 +94,7 @@ export function useChangeInvitationRole(workspaceSlug: string) {
     onError: (error: unknown) => {
       notifyError(WRITE_FAILED_TITLE, failureMessage(error, INVITATION_ROLE_FAILED_MESSAGE));
     },
-    onSettled: refresh,
+    onSuccess: refresh,
   });
 }
 
@@ -107,13 +108,13 @@ export function useWithdrawInvitation(workspaceSlug: string) {
   return useMutation({
     mutationFn: (input: WithdrawInvitationInput) =>
       withdrawWorkspaceInvite(getAppClient(), workspaceSlug, input.invitationId),
-    onSuccess: () => {
+    onSuccess: async () => {
       notifySuccess(INVITATION_REMOVED_TITLE, INVITATION_REMOVED_MESSAGE);
+      await refresh();
     },
     onError: (error: unknown) => {
       notifyError(WRITE_FAILED_TITLE, failureMessage(error, INVITATION_WITHDRAW_FAILED_MESSAGE));
     },
-    onSettled: refresh,
   });
 }
 
@@ -131,7 +132,7 @@ export function useChangeMemberRole(workspaceSlug: string) {
     onError: (error: unknown) => {
       notifyError(WRITE_FAILED_TITLE, failureMessage(error, MEMBER_ROLE_FAILED_MESSAGE));
     },
-    onSettled: refresh,
+    onSuccess: refresh,
   });
 }
 
@@ -147,7 +148,7 @@ export function useRemoveMember(workspaceSlug: string) {
     onError: (error: unknown) => {
       notifyError(WRITE_FAILED_TITLE, failureMessage(error, MEMBER_REMOVE_FAILED_MESSAGE));
     },
-    onSettled: refresh,
+    onSuccess: refresh,
   });
 }
 

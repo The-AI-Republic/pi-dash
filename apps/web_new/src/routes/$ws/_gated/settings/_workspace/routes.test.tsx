@@ -186,18 +186,21 @@ describe("workspace settings section routes", () => {
   });
 
   // §13: a successful leave hands navigation to the shell, which lands on
-  // the just-left workspace home (and its gate) rather than the picker.
+  // the just-left workspace home (and its gate) rather than the picker. The
+  // oracle polls for the slash-terminated address.
   it("sends a leaver to the just-left workspace home", async () => {
     registerWorkspaceSettingsPage("members", LeaveProbe);
     const view = renderSettingsRoute({
       layoutComponent: LayoutComponent,
       component: MembersRoute.options.component as RouteComponent,
       leafPath: "members",
+      // The app router keeps authored trailing slashes (`main.tsx`).
+      trailingSlash: "preserve",
       transport: settingsTransport({ role: 20 }),
     });
     const button = await screen.findByRole("button", { name: "Leave for the test" });
     await userEvent.click(button);
-    await vi.waitFor(() => expect(view.router.state.location.pathname).toBe("/acme"));
+    await vi.waitFor(() => expect(view.router.state.location.pathname).toBe("/acme/"));
   });
 
   it("mounts the webhooks list page for its own address", async () => {

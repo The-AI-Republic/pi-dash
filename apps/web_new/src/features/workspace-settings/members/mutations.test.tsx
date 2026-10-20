@@ -146,14 +146,16 @@ describe("useChangeInvitationRole", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.invitations(SLUG) });
   });
 
-  it("toasts a refused change, which leaves the stored role to the refresh", async () => {
+  it("toasts a refused change and keeps the row on screen with its previous role", async () => {
     contracts.updateWorkspaceInviteRole.mockRejectedValue(new Error("gone"));
     const { result, invalidate } = setup(() => useChangeInvitationRole(SLUG));
     await act(async () => {
       await expect(result.current.mutateAsync({ invitationId: "inv", role: 5 })).rejects.toThrow("gone");
     });
     expect(toast.notifyError).toHaveBeenCalledWith(WRITE_FAILED_TITLE, "gone");
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.invitations(SLUG) });
+    // §11: a refused write never re-reads, so the row cannot vanish when
+    // the server already dropped it.
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });
 
@@ -167,7 +169,7 @@ describe("useWithdrawInvitation", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.invitations(SLUG) });
   });
 
-  it("toasts a failed withdrawal while the row stays for the refresh", async () => {
+  it("toasts a failed withdrawal and leaves the visible row untouched", async () => {
     contracts.withdrawWorkspaceInvite.mockRejectedValue(new Error("not found"));
     const { result, invalidate } = setup(() => useWithdrawInvitation(SLUG));
     await act(async () => {
@@ -175,7 +177,8 @@ describe("useWithdrawInvitation", () => {
     });
     expect(toast.notifyError).toHaveBeenCalledWith(WRITE_FAILED_TITLE, "not found");
     expect(toast.notifySuccess).not.toHaveBeenCalled();
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.invitations(SLUG) });
+    // §11: the row stays visible after a refused withdrawal.
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });
 
@@ -190,14 +193,15 @@ describe("useChangeMemberRole", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.roster(SLUG) });
   });
 
-  it("toasts a refused change so the roster read settles back to the stored role", async () => {
+  it("toasts a refused change and keeps the row showing its previous role", async () => {
     contracts.updateWorkspaceMemberRole.mockRejectedValue(new Error("You cannot change your own role"));
     const { result, invalidate } = setup(() => useChangeMemberRole(SLUG));
     await act(async () => {
       await expect(result.current.mutateAsync({ membershipId: "m1", role: 5 })).rejects.toThrow("own role");
     });
     expect(toast.notifyError).toHaveBeenCalledWith(WRITE_FAILED_TITLE, "You cannot change your own role");
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.roster(SLUG) });
+    // §12: no refresh on failure, so the row keeps its previous role.
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it("falls back to its own wording when the refusal has no reason", async () => {
@@ -220,14 +224,15 @@ describe("useRemoveMember", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.roster(SLUG) });
   });
 
-  it("carries the server's reason for a failed removal", async () => {
+  it("carries the server's reason for a failed removal and keeps the row", async () => {
     contracts.removeWorkspaceMember.mockRejectedValue(new Error("The required object does not exist."));
     const { result, invalidate } = setup(() => useRemoveMember(SLUG));
     await act(async () => {
       await expect(result.current.mutateAsync({ membershipId: "m1" })).rejects.toThrow("does not exist");
     });
     expect(toast.notifyError).toHaveBeenCalledWith(WRITE_FAILED_TITLE, "The required object does not exist.");
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: rosterKeys.roster(SLUG) });
+    // §13: a refused removal leaves the row active and visible.
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it("falls back to its own wording when the refusal has no reason", async () => {
