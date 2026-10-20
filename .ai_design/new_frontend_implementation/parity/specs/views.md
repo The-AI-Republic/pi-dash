@@ -37,7 +37,7 @@ area gate turns passing rows into `new green`.
 
 Intended behavior wins over pinned old bugs. Where the oracle records a
 `bug:` scenario or a gap against the row's acceptance text, the slice
-builds the behavior stated here and the gate adjudicates as §17 says.
+builds the behavior stated here and the gate adjudicates as §18 says.
 
 ## 1. Vocabulary and shared rules
 
@@ -69,21 +69,39 @@ shows a globe glyph labelled Public), `0` is owner-only (a lock glyph
 labelled Private). New views take the shared default in every edition
 unless the cloud dialog sends an explicit value.
 
-**Locked views.** `is_locked` is a server-set flag. A locked view renders
-its saved layout read-only chrome: no layout switcher, no Display control,
-no Update view write. The View-046 baseline is what the oracle pins today:
-the filter toggle still shows on locked views (a gap against VIEW-025/026
-wording, see §17). Slices build the acceptance text: locked views hide the
-layout switcher and the Display control, and the filter toggle is visible
-but the saved query cannot be persisted (the server answers 400).
+**Locked views.** `is_locked` is a server-set flag. The acceptance text is
+the single target: a locked view offers no layout switcher, no Display
+control and no filter toggle — those controls are absent, not disabled — and
+no Update view write (the server answers 400 for a locked PATCH). The old
+app kept the filter toggle on locked views and let guests reach Add; those
+pins are the recorded gap adjudicated in §15/§16, not part of the target. The
+issue list still renders the saved layout.
 
-**Roles.** Project roles are admin, member, guest; workspace roles are
-admin, member, guest. "Can create a work item" means project member or
+**Workspace add affordance.** A workspace custom view's Add-view control is
+offered only to workspace admins and members (VIEW-034/038's Who column) and
+is absent for guests. The oracle's guest-visible scenario is pinned as a gap
+(§16).
+
+**Roles and the visibility matrix.** Project roles and workspace roles are
+each admin, member, guest. "Can create a work item" means project member or
 admin. "Can write a view" means member or admin in the same scope, and the
 server additionally limits PATCH to the owner and DELETE to owner or admin.
-Guests see only shared views unless the project turns on
-`guest_view_all_features`; on the workspace surface a guest sees shared
-custom views plus their own.
+
+The server builds the visible set as `owned_by = me OR access = 1`, then
+narrows it: a **project guest** is narrowed to `owned_by = me` unless the
+project sets `guest_view_all_features`; a **workspace guest** is always
+narrowed to `owned_by = me`. Therefore:
+- Project list — admins and members see every shared view plus their own
+  owner-only views. A project guest with the flag off sees only views they
+  own (shared by them or owner-only); with the flag on they see all shared
+  views plus their own. A guest never sees another member's owner-only view.
+- Workspace list — admins and members see every shared custom view plus
+  their own; a workspace guest sees only the views they own, regardless of
+  their `access`.
+- A guest's own owner-only view is fully visible to that guest: it carries
+  the Private badge and the lock indicator under VIEW-011/024's rules, and
+  the access filter's owner-only option matches it. The narrowing hides
+  other people's records, never the caller's own view from the caller.
 
 **No live updates.** Lists and details fetch on mount and on the acting
 user's own writes. They never poll, subscribe or refresh on another user's
@@ -130,7 +148,9 @@ Project views:
   server proof that a view favorite exists (`entity_type` = `view`,
   `entity_identifier` = view id, `project_id` set). The contract issue may
   expose the thin favorite endpoints, or reuse the generic favorites
-  contract (SHELL-056) — one helper, never two.
+  contract (SHELL-056) — one helper, never two. The `user-favorite-views/`
+  pair **is routed by the server** (both directions); it is live, unlike the
+  unrouted per-view issues endpoint in §17.
 
 Workspace views:
 - `GET WS/views/` — list customs visible to the caller (shared + own;
@@ -148,7 +168,7 @@ Issue reads behind a view:
   filter parameters, plus `order_by` from the view's display filters, page
   size 100 and cursor. There is **no** `BASE/views/{viewId}/issues/` route
   (the old service had a method for it but the server does not route it —
-  dead code, see §21). The detail therefore applies the stored expression
+  dead code, see §17). The detail therefore applies the stored expression
   to the generic project issue list client-side, exactly as the issues
   screen does.
 - `GET WS/issues/` for the workspace all-issues surface (issues area), with
@@ -192,7 +212,7 @@ enabled only for a project admin and does nothing visually when disabled;
 for members and guests it still renders, disabled. Activating it navigates
 to the project's features settings screen (the per-feature route under
 `/{ws}/settings/projects/{p}/features/`), not the bare features index
-(§17, NEWFRONT-247). The gate replaces the skeleton: no list fetch is made
+(§15, NEWFRONT-247). The gate replaces the skeleton: no list fetch is made
 while the gate shows, and no Add button renders.
 
 **Loading (VIEW-008).** While the first list fetch is in flight the screen
@@ -245,7 +265,8 @@ last.
 **Search (VIEW-004).** Collapsed, the header shows only a search icon
 button. Activating it expands a text field and moves focus into it in the
 same interaction; typing filters the rows by case-insensitive substring of
-the view name (the display name; empty names render as "Untitled"). Escape
+the view name (the display name; a record with no name shows a localized placeholder
+   instead of a blank cell). Escape
 behaves in two steps: with a non-empty query it clears the query and keeps
 the field open and focused; with an empty query it collapses the field and
 moves focus back to the trigger. A pointer press outside the field collapses
@@ -304,7 +325,7 @@ underlying view records are never modified or deleted.
 
 Old bug: removing one dimension replaced the whole filter object, wiping
 sibling dimensions (NEWFRONT-216). Intended: removal edits only the
-dimension being removed and every sibling survives (§17). The oracle pins
+dimension being removed and every sibling survives (§15). The oracle pins
 the wipe as a `bug:` scenario; the gate proves the intended behavior on
 `web_new`.
 
@@ -418,9 +439,11 @@ retrieve endpoint may keep answering for the id, so list exclusion is the
 proof. A deleted view's favorites row disappears with it.
 
 **Copy link and new tab (VIEW-018).** Copy link writes the absolute URL of
-the view's detail page to the clipboard and shows a success notice "Link
-Copied!" with a short confirmation line. The clipboard write is the client's
-share helper (the same one other areas use), not a server call. Open in new
+the view's detail page to the clipboard through the shell's shared copy-link
+helper (`apps/web_new/src/shared/shell/shareLink.ts`) and shows a success
+notice whose text contains the oracle-asserted fragment `Link Copied`, plus
+a short confirmation line whose wording the slice owns. The helper is the
+client-side copy path, not a server call. Open in new
 tab opens that same absolute URL in a new tab; the standalone render is the
 detail page (VIEW-021). Both exist for every role that sees the row, on the
 list and on the detail header.
@@ -459,7 +482,7 @@ area's (NEWFRONT-71); this area only hands the layout root (a) the stored
 expression, (b) the stored `order_by`, (c) the stored display settings, and
 (d) the saved view record. The list query is the generic project issue list
 with the expression serialized; **there is no per-view issues endpoint**
-(dead code, §21). A zero-result list shows the layout's own empty state; a
+(dead code, §17). A zero-result list shows the layout's own empty state; a
 matched-but-empty page shows the no-match state. Sampling proves the set:
 an urgent-only expression shows urgent issues and hides low-priority ones,
 and the same set follows into another layout.
@@ -469,10 +492,12 @@ is not visible to you" — 404, 403, or a 200 with a null body (the observed
 old behavior for unknown ids) — renders, instead of the layout, an empty
 state with an illustration, the heading "View does not exist", an
 explanation that the view does not exist or the viewer lacks permission, and
-a primary button "View other views" that returns to the project views list.
+a primary action returning to the project views list (the slice picks its
+label; the driver matches a control whose accessible text reads as views,
+back or list).
 The header chrome is not rendered in this state (no layout controls, no Add,
 no menu). This is the intended behavior; the old app rendered a nameless
-phantom for unknown ids (§17, NEWFRONT-227).
+phantom for unknown ids (§15, §18, NEWFRONT-227).
 
 **Switcher (VIEW-023).** The last breadcrumb is a dropdown listing every
 saved view of the project, with a search box that filters by name
@@ -534,7 +559,9 @@ gate must keep passing.
 Old gaps: layout/display edits were local-only until Update view (intended:
 dirty state plus explicit persistence), cycle/module entries were absent
 regardless of the flag (intended: follow the flag), and locked views kept a
-working filter toggle (intended: toggle visible, persistence refused).
+working filter toggle (intended for locked views: no toggle at all, per
+VIEW-025/026's acceptance text; the pinned old behavior is adjudicated in
+§15/§16).
 
 **Add work item (VIEW-027).** The header shows a primary Add work item
 button only for users who can create work items in the project — project
@@ -547,12 +574,25 @@ modified by adding an item. No quick-add affordance is added by this area;
 the layouts' own quick-add behavior belongs to the issues area.
 
 **Save as (VIEW-048).** When the live expression or display state differs
-from the record (a dirty view), the filter row offers "Save as" next to
-"Update view". Save as opens the create dialog prefilled with the current
-name plus " 2" (a counter that keeps appending while duplicates exist) and
-the live snapshot; the user may change any field. Saving POSTs a new project
-view with the current payload and navigates to the new view's detail. The
-original record is untouched. With nothing dirty, Save as is not offered.
+from the record (a dirty view), the filter row offers a Save-as trigger next
+to Update view. Save as opens the create dialog prefilled with:
+- the current name plus a flat ` 2` suffix (exactly `${name} 2`; it is not a
+  counter and does not append further copies when that name exists),
+- the record's description, icon and access (cloud) unchanged,
+- the live expression and display snapshot.
+
+A record with no name prefills a localized placeholder name, not a copied
+string. The user may change any field. Saving POSTs a new project view with
+the current payload and navigates to the new view's detail; the original
+record is untouched.
+
+**Intended tightening.** Save as is offered only when the view is dirty,
+even if the record already stores a filter expression. The old row offered
+it whenever any filter existed, which let a user duplicate an already-saved
+view without changing anything. VIEW-048's acceptance text ("after any
+unsaved filter or layout change") is the target; the gate proves Save as is
+**absent** on an unchanged view with stored filters as well as present after
+a change, so the narrowing is deliberate rather than a lost capability.
 
 ## 9. S7 — Workspace list, defaults, custom rows and loading (VIEW-029–032, 039; NEWFRONT-725)
 
@@ -563,8 +603,8 @@ first). The browser tab title is the workspace name, a separator, then "All
 Views". The search filters **both** groups by a case-insensitive substring of
 the displayed name; a query that matches nothing in a group hides that group
 entirely. The list reads `GET WS/views/` once on mount. Guests see the
-defaults plus only their own shared/owned customs (server-enforced; the
-screen renders whatever the server returns). No Add control lives on this
+defaults plus only the customs they own (server-enforced, §1; owner-only
+ones included — the screen renders whatever the server returns). No Add control lives on this
 page (creation lives on the detail header, §10).
 
 **Static defaults (VIEW-030).** The four defaults always render, in order:
@@ -617,7 +657,7 @@ ownership rules as VIEW-037. A trailing add button at the right of the strip,
 rendered only for workspace members and admins, opens the create dialog. The
 strip scrolls with a thin horizontal scrollbar and never wraps. The oracle
 pins the old app's **absence** of this strip because the old header
-component was never mounted (dead code, §21). The acceptance text requires
+component was never mounted (dead code, §17). The acceptance text requires
 the strip, so slices build it and the gate proves it on `apps/web_new` as
 "target, no oracle" (§18).
 
@@ -639,9 +679,10 @@ intact. Escape and Cancel close without saving.
 **Edit (VIEW-035).** The dialog opens prefilled from the record's current
 title, description, access (cloud), display settings and expression. Saving
 PATCHes `WS/views/{viewId}/`, adopts the echo, refreshes the live filter
-state of the open detail and toasts "View updated successfully". Failure
-shows the error notice and keeps the dialog open on the entered values; it
-must **not** be silent. Old bug: the store swallowed the failure, so nothing
+state of the open detail, and shows a success notice whose text contains
+`updated successfully` (the wording beyond that fragment is the slice's).
+Failure shows the error notice and keeps the dialog open on the entered
+values; it must **not** be silent. Old bug: the store swallowed the failure, so nothing
 was shown (NEWFRONT-232); intended is the error notice above.
 
 **Delete (VIEW-036).** A confirmation dialog with the same permanent-loss
@@ -658,8 +699,9 @@ menu offers Edit, Open in new tab, Copy link and Delete. Edit and Delete are
 gated as in VIEW-016/017 (owner for edit, owner or workspace admin for
 delete); Open and Copy are available to everyone who can see the view. On a
 default view's detail the menu offers only Open in new tab and Copy link.
-The examples: copy toasts the same "Link Copied!" notice and writes the
-absolute detail URL; open in new tab loads it standalone. The row-level menu
+Copy uses the same shared copy-link helper and the same `Link Copied`
+notice fragment as VIEW-018 and writes the absolute detail URL; open in new
+tab loads it standalone. The row-level menu
 in the list (§9) offers only Edit View and Delete View per the oracle.
 
 ## 11. S9 — Workspace detail and cloud layout (VIEW-038, 040; NEWFRONT-729)
@@ -672,9 +714,11 @@ defaults and customs (the oracle pins this); the crumbs identify the current
 view — a "Views" crumb and the current view's name, or the localized
 default's label. The header's left side is the crumb/switcher; the right
 side carries, in order: the layout selector (cloud, §below), the filter
-toggle, the Display control (absent for locked views), an Add-view button
-that opens the create dialog, and the view quick menu (custom) or the default
-quick menu. The body mounts the issues area's all-issues layout root for both
+toggle, the Display control, an Add-view button (workspace admins and
+members only) that opens the create dialog, and the view quick menu (custom)
+or the default quick menu. On a locked custom the layout selector (cloud),
+filter toggle and Display control are all absent; the Add-view button and
+quick menu remain as above. The body mounts the issues area's all-issues layout root for both
 defaults and customs: defaults apply their fixed condition (assigned to me,
 created by me, subscribed, or no extra condition for all items) and customs
 apply their stored expression. Adding a work item is not part of this header;
@@ -683,9 +727,12 @@ the all-issues body's own capabilities are the issues area's.
 The switcher spans the four defaults and the customs with a search box; a
 pick navigates to that view's detail in the same tab.
 
-Locked customs: the Display control hides; the filter toggle stays visible
-(as pinned) and cannot persist; the Add-view button stays (creating a new
-view is unaffected by another view's lock). Unknown and forbidden ids show
+Locked customs: the layout selector, filter toggle and Display control are
+absent, and no update is possible (server 400 if attempted). The Add-view
+button is unaffected by another view's lock but still follows the role rule
+(workspace admins and members). The old app's guest-visible Add and
+locked-view toggle are pinned bugs, proved as target on `web_new` (§16).
+Unknown and forbidden ids show
 the missing-view empty state: illustration, "View does not exist", the
 explanation, and a primary button that returns to `workspace-views/all-issues`
 (the default view, not the list — the oracle pins that destination).
@@ -838,49 +885,60 @@ flag's downstream effects (§12).
 desktop slot or flag is added for views. If a desktop-only entry ever
 appears, it is a new row, not a silent capability.
 
-**Cloud edition (VIEW-019/020/040).** The new app's edition contract has
-named slots (`apps/web_new/src/core/edition/types.ts`: `issueDetailSidebarAfter`,
-`desktopSignInCard`, `godModeCloudEntry`) and per-edition flags
-(`app-rail`, `sidebar-toggle`, `issue-dedupe`). Building web_new today sets
-only the OSS module; the cloud module lives outside this repository's tree
-and is swapped through the `@pidash/edition` alias at build time. Therefore
-the cloud-side behavior of these three rows is **not observable on the
-current stack**: the cloud build does not yet exist.
+**Cloud edition (VIEW-019/020/040).** The edition contract exposes three
+named slots (`apps/web_new/src/core/edition/types.ts`:
+`issueDetailSidebarAfter`, `desktopSignInCard`, `godModeCloudEntry`) and the
+flags `app-rail`, `sidebar-toggle` and `issue-dedupe`. **None of them
+covers access, publish or layout selection**, and `apps/web_new` today builds
+only the OSS module. The cloud module lives outside this repository's tree
+and is swapped in through the `@pidash/edition` alias at build time.
 
-What each leg builds:
-- OSS legs assert absence. VIEW-019: no access selector renders and a
-  created view stores shared access. VIEW-020: no publish entry, no Live
-  marker, no published link. VIEW-040: no layout selector; the saved
-  spreadsheet renders.
-- Cloud legs run the stack with `PARITY_ORACLE_EDITION=cloud` (the parity
-  stack's cloud mode, `e2e/parity/stack/parity-cloud.test.mjs` demonstrates
-  the selection) and assert the presence and behavior of the access selector
-  (create a private view, see the lock badge and lock glyph, filter by
-  access), the publish flow (publish produces an `anchor`, the row shows
-  Live, the link copies, unpublish clears both), and the workspace layout
-  selector (switching changes the rendering and persists in the custom's
-  display payload).
+The parity stack's cloud mode (`PARITY_ORACLE_EDITION=cloud`, demonstrated
+by `e2e/parity/stack/parity-cloud.test.mjs`) serves the **old cloud app**
+behind the proxy. It is an oracle: it can record what the old cloud build
+does, but it cannot prove `apps/web_new` behavior. Cloud legs therefore run
+for reference only, and the new app's cloud behavior is provable only once a
+cloud edition of `apps/web_new` exists.
 
-Slot decision: giving views a cloud slot (e.g. an access-selector or
-publish slot in `SlotComponents`) is a design decision. If a slice decides
-one is needed, it must name it on the wiki "Decisions and open questions"
-page in the PR; until then a cloud slice reuses the existing edition flags
-and a documented local seam module, not an ad-hoc condition on the OSS build.
-This spec does not open such a decision.
+What each leg covers:
+- OSS legs assert absence. VIEW-019: no access selector in the create/edit
+  dialogs and a created view stores shared access. VIEW-020: no publish
+  entry, no Live marker, no published link. VIEW-040: no workspace layout
+  selector; the saved spreadsheet renders.
+- Cloud legs on the oracle (reference) exercise: the access selector
+  (create a private view, see the lock badge and lock indicator, filter by
+  access), the publish flow (publish sets `anchor`, the row shows Live, the
+  link copies, unpublish clears both), and the workspace layout selector
+  (switching changes rendering and persists in the custom's display
+  payload). These scenarios are the target text for the slices; they are
+  not evidence about `web_new`.
+- Cloud legs on `web_new`, once a cloud edition of the new app is buildable
+  in the runner's checkout, prove the same scenarios against `web_new` and
+  are what turns these rows `new green` on the cloud edition.
 
-If the cloud stack cannot serve the surface when the gate runs, the gate
-marks the cloud leg `blocked: <reason>` (for example `blocked: cloud build
-not available in this checkout`), files **one** fix sub-issue under the epic
-naming the blocker, and does not hold the rest of the area. A row keeps its
-`oracle green` status and does not become `new green` until its cloud leg
-passes; the OSS legs alone are not enough for these three rows.
+**Slot decision.** At least one of these three rows needs a new edition
+slot: access/publish have no seam today, so the cloud build cannot add the
+selector or publish entry without one. Adding a slot (its name, its
+position, and which edition fills it) is a **Decisions-page decision** — the
+PR that needs one must name it on "Decisions and open questions" and link
+this issue. The spec does not settle it; until that decision lands, the
+slices build the OSS legs and the local seam modules only, never an ad-hoc
+condition on the OSS build.
+
+**Blocked cloud leg.** If a cloud edition of `web_new` cannot be built in
+the checkout the gate runs in, the gate marks each cloud leg
+`blocked: cloud build not available in this checkout` (or the specific
+reason), files **one** fix sub-issue under the epic naming the blocker, and
+does not hold the rest of the area. The row keeps `oracle green`; it does
+not become `new green` until its cloud leg passes. OSS legs alone are not
+enough for VIEW-019, VIEW-020 and VIEW-040.
 
 ## 15. Bug markers (observed → intended → adjudication)
 
-The six rows whose oracle cells carry a `bug:` scenario. In every case the
-slice builds the intended behavior stated here; the gate proves the intended
-behavior on `apps/web_new` and treats the pinned scenario as "target, no
-oracle" (§18).
+The rows whose oracle cells carry a `bug:` scenario: VIEW-002, 007, 014,
+022, 035, 039 and 044. In every case the slice builds the intended behavior
+stated here; the gate proves the intended behavior on `apps/web_new` and
+treats the pinned scenario as "target, no oracle" (§18).
 
 **VIEW-002 — NEWFRONT-247.** Observed: the gate's "Manage features" button
 navigates to the bare `/{ws}/settings/projects/{p}/features` address, which
@@ -914,6 +972,14 @@ failed PATCH, so the dialog stays open on the entered values with no notice.
 Intended: the error notice fires and the dialog keeps the input for retry.
 The gate proves the notice and that the server record is unchanged.
 
+**VIEW-039 — NEWFRONT-230.** Observed: the workspace list goes straight
+from the static defaults to the customs with no skeleton, so the first paint
+flickers and the defaults move once customs arrive. Intended: the skeleton
+list in §9 renders while customs load, is mutually exclusive with the
+defaults and the loaded customs, and is replaced in one commit; with no
+customs the defaults stand alone with no special empty art. The gate proves
+skeleton → rows (never both) and the defaults-only result.
+
 **VIEW-044 — NEWFRONT-241.** Observed: Tab from the title skips the
 Description field and jumps to the footer actions. Intended: Title →
 Description → remaining fields → Cancel → submit. The gate proves the
@@ -938,10 +1004,15 @@ as `new green (target, no oracle)` instead of requiring an oracle leg.
 - **VIEW-034/036 — success notices.** The oracle records a silent delete and
   a kept-dialog failure path; the acceptance text asks for notices. Target:
   §10. Proof on `web_new` for the notice and the failure retention.
-- **VIEW-038 — locked and guest rules.** Oracle records Display hidden but
-  filter toggle and Add still visible for locked; guests see Add. Target is
-  §11's rule: locked hides Display and layout; toggle visible but not
-  persistable; Add remains (creation is unaffected). Proof on `web_new`.
+- **VIEW-038 — locked and guest rules.** Oracle records the old app hiding
+  Display on locked views while keeping the filter toggle, and showing Add
+  to guests. Target is VIEW-025/026/034/038's acceptance text (§1, §10,
+  §11): a locked view hides the layout switcher, Display **and** the filter
+  toggle, and Add is offered only to workspace admins and members. Proof on
+  `web_new`: locked view has no toggle, no Display, no switcher; a guest
+  sees neither the list/detail Add nor the strip's add button. The oracle
+  scenarios that pin the old gap are recorded as bugs and not re-run as
+  passes.
 - **VIEW-040 — layout selector.** OSS oracle pins absence; the cloud leg
   proves presence (§14). If cloud is blocked, the row stays `oracle green`.
 - **VIEW-006 — access filter.** OSS oracle pins absence; cloud leg proves
@@ -1053,7 +1124,8 @@ and what each slice adds or reworks:
   component).
 - **Shell.** `shared/commands` registry + palette + sequences;
   `shared/shell/entries/WorkspaceEntries.tsx` (workspace catalogs);
-  contextual command hooks; toasts; the copy-share helper; the top bar,
+  contextual command hooks; toasts; the shared copy-link helper
+  (`shared/shell/shareLink.ts`); the top bar,
   tab strip and sidebar aggregate row. S10 registers two commands plus a
   picker page and the `n v` sequence; S1/S7 rely on the shell's tab model
   (`features/projects/tabs.ts`, `Views` tab gated by `issue_views_view`)
@@ -1083,7 +1155,7 @@ and what each slice adds or reworks:
     and display control.
   - S4 (722): new row quick menu, edit/delete/publish dialogs and favorite
     toggle; reuses kit menu/dialog/switch, the workspace favorite write,
-    the copy-share helper and toasts.
+    the shared copy-link helper and toasts.
   - S5 (723): new detail header, switcher, lock glyph, missing-view state;
     reworks `SavedViewScreen.tsx`; reuses issues layout root, breadcrumb
     dropdown pattern, kit popover/menu.
