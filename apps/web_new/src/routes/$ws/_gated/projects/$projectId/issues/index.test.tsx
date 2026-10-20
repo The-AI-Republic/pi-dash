@@ -34,15 +34,32 @@ import * as queryModule from "../../../../../../core/query/optimistic.js";
 import * as shellModule from "../../../../../../shared/shell/index.js";
 import { authKeys } from "../../../../../../features/auth/queries.js";
 import { sessionKeys } from "../../../../../../core/session/queries.js";
+import { loadKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
 import { sheetIssuesQueryOptions } from "../../../../../../features/issues/spreadsheet/data.js";
 import { pickerCyclesQueryOptions } from "../../../../../../shared/pickers/reference.js";
 import { Route } from "./index.js";
 
+// The board's own reads and rendering belong to its slice suite; this file
+// proves the route offers the layout, awaits its chunk and wires the props.
+const kanbanProps: { current: Record<string, unknown> | null } = { current: null };
+vi.mock("../../../../../../features/issues/kanban/lazy.js", () => {
+  const KanbanBoard = (props: Record<string, unknown>) => {
+    kanbanProps.current = props;
+    return <div data-testid="kanban-layout" data-props={JSON.stringify(Object.keys(props).sort())} />;
+  };
+  return { loadKanbanLayout: async () => ({ default: KanbanBoard }), resolvedKanbanLayout: () => KanbanBoard };
+});
+
+const routeNavigate = vi.hoisted(() => ({ fn: (..._args: unknown[]) => undefined as unknown }));
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
   return {
     ...original,
     Link: ({ children }: { children?: React.ReactNode }) => <a href="#work-item">{children}</a>,
+    useNavigate:
+      () =>
+      (...args: unknown[]) =>
+        routeNavigate.fn(...args),
   };
 });
 
@@ -752,6 +769,66 @@ describe("project issues screen", () => {
     if (!errorComponent) throw new Error("missing errorComponent");
     render(React.createElement(errorComponent, { error: "nope", reset: () => {} }));
     expect(screen.getByText("Something went wrong.")).toBeInTheDocument();
+  });
+
+  it("validates the search params the route reads", () => {
+    const validate = Route.options.validateSearch;
+    if (typeof validate !== "function") throw new Error("missing validateSearch");
+    expect(validate({ peekIssueId: "WEB-42", layout: "compact" })).toEqual({
+      peekIssueId: "WEB-42",
+      layout: "compact",
+    });
+    // An unknown layout drops the whole record back to absent.
+    expect(validate({ layout: "kanban" })).toEqual({});
+  });
+
+  it("offers the kanban board in the layout switcher", () => {
+    renderScreen({}, 1, [issueRow()]);
+
+    const switcher = screen.getByTestId("layout-switcher-segmented");
+    expect(switcher.querySelector('[data-layout="kanban"]')).not.toBeNull();
+  });
+
+  it("renders the board when kanban is the stored layout", async () => {
+    // The route's beforeLoad awaits this chunk; a direct render of the
+    // screen skips that step, so resolve it the way the loader does.
+    await loadKanbanLayout();
+    renderScreen({}, 1, [issueRow()], {
+      displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
+    });
+
+    const board = await screen.findByTestId("kanban-layout", undefined, LAZY_WAIT);
+    expect(JSON.parse(board.getAttribute("data-props") ?? "[]")).toEqual([
+      "canEdit",
+      "entity",
+      "onPeekChange",
+      "peekKey",
+      "prefs",
+      "projectId",
+      "projectIdentifier",
+      "richFilters",
+      "workspaceSlug",
+    ]);
+    expect(screen.queryByTestId("list-row")).toBeNull();
+  });
+
+  it("passes the peek param to the board and writes peek changes back to the URL", async () => {
+    const navigate = vi.fn();
+    routeNavigate.fn = navigate;
+    renderScreen({ peekIssueId: "WEB-42", layout: "compact" }, 1, [issueRow()], {
+      displayFilters: { layout: "kanban", group_by: null, order_by: "sort_order" },
+    });
+    await screen.findByTestId("kanban-layout", undefined, LAZY_WAIT);
+    expect(kanbanProps.current?.["peekKey"]).toBe("WEB-42");
+    const change = kanbanProps.current?.["onPeekChange"] as (key: string | null) => void;
+    change("WEB-43");
+    expect(navigate).toHaveBeenCalledWith({
+      to: ".",
+      search: { peekIssueId: "WEB-43", layout: "compact" },
+      replace: true,
+    });
+    change(null);
+    expect(navigate).toHaveBeenLastCalledWith({ to: ".", search: { layout: "compact" }, replace: true });
   });
 
   it("offers the spreadsheet layout and renders it from the stored preference", async () => {

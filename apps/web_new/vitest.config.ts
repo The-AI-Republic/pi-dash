@@ -55,6 +55,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-sameness.test.ts",
       "e2e/parity/drivers/web-assistant-core.test.ts",
       "e2e/parity/drivers/web-new-gantt.test.ts",
+      "e2e/parity/drivers/web-new-kanban.test.ts",
       "e2e/parity/drivers/web-new-modal.test.ts",
       "e2e/parity/drivers/web-new-comments.test.ts",
       "e2e/parity/drivers/web-new-layouts.test.ts",

@@ -7330,14 +7330,6 @@ export class WebNewDriver implements ParityDriver {
   // --- NEWFRONT-118 (layouts B): kanban board + gantt timeline stubs.
   // --- Appended; existing stubs above are untouched.
 
-  async kanbanOpenBoard(): Promise<void> {
-    return todo("kanbanOpenBoard");
-  }
-
-  async kanbanBoardVisible(): Promise<boolean> {
-    return todo("kanbanBoardVisible");
-  }
-
   // --- Issues timeline (NEWFRONT-624, ISS-044–049). The header switcher
   // --- marks the active layout with aria-pressed; the chart carries the
   // --- header/prose titles and day-indexed cells the scenarios read.
@@ -7424,60 +7416,233 @@ export class WebNewDriver implements ParityDriver {
     await this.boardSwitcherSegments().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  /** Switch to the board through the header switcher or dropdown. */
+  async kanbanOpenBoard(): Promise<void> {
+    await this.boardSwitcherSegments().first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if (await this.kanbanBoardVisible()) return;
+    const segment = this.page.locator('[data-layout="kanban"]').first();
+    const candidates = [segment, this.page.getByTestId("layout-switcher-dropdown").getByRole("button").first()];
+    for (const candidate of candidates) {
+      if (!(await candidate.isVisible().catch(() => false))) continue;
+      await candidate.click({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+      if (await this.isShown(this.page.locator('[role="menuitem"], [role="menuitemradio"]').first())) {
+        await this.page
+          .getByRole("menuitem", { name: "Board", exact: true })
+          .first()
+          .click({ timeout: WebNewDriver.WAIT_MS })
+          .catch(() => undefined);
+      }
+      if (await this.kanbanBoardVisible()) break;
+    }
+    await this.page.getByTestId("kanban-board").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async kanbanBoardVisible(): Promise<boolean> {
+    return this.isShown(this.page.getByTestId("kanban-board").first());
+  }
+
+  /** Name and count from one column header or lane header. */
+  private async kanbanHeaderFacts(
+    root: Locator,
+    nameTestId: string,
+    countTestId: string,
+    keyAttribute: string
+  ): Promise<KanbanColumn> {
+    const label = root.getByTestId(nameTestId).first();
+    const name = (
+      (await label.getAttribute("title").catch(() => null)) ??
+      (await label.innerText().catch(() => null)) ??
+      ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    const count = root.getByTestId(countTestId).first();
+    const countText = (await count.innerText().catch(() => null)) ?? "";
+    const parsed = Number.parseInt(countText.trim(), 10);
+    return {
+      id: (await root.getAttribute(keyAttribute).catch(() => null)) ?? name,
+      name,
+      count: Number.isNaN(parsed) ? 0 : parsed,
+      rendered: await this.isShown(root),
+    };
+  }
+
   async kanbanColumns(): Promise<KanbanColumn[]> {
-    return todo("kanbanColumns");
+    const roots =
+      (await this.page.getByTestId("kanban-group-header").count()) > 0
+        ? this.page.getByTestId("kanban-group-header")
+        : this.page.getByTestId("kanban-column");
+    const total = await roots.count();
+    const out: KanbanColumn[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const root = roots.nth(index);
+      out.push(await this.kanbanHeaderFacts(root, "kanban-group-name", "kanban-group-count", "data-column-key"));
+    }
+    return out;
   }
 
   async kanbanSwimlanes(): Promise<KanbanColumn[]> {
-    return todo("kanbanSwimlanes");
+    const lanes = this.page.getByTestId("kanban-lane");
+    const total = await lanes.count();
+    const out: KanbanColumn[] = [];
+    for (let index = 0; index < total; index += 1) {
+      out.push(
+        await this.kanbanHeaderFacts(lanes.nth(index), "kanban-lane-name", "kanban-lane-count", "data-lane-key")
+      );
+    }
+    return out;
   }
 
   async kanbanCards(): Promise<KanbanCard[]> {
-    return todo("kanbanCards");
+    const cards = this.page.getByTestId("kanban-card");
+    const total = await cards.count();
+    const out: KanbanCard[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const card = cards.nth(index);
+      out.push({
+        issueId: (await card.getAttribute("data-issue-id").catch(() => null)) ?? "",
+        name: (
+          (await card
+            .getByTestId("kanban-card-name")
+            .first()
+            .innerText()
+            .catch(() => null)) ?? ""
+        ).trim(),
+        groupId: (await card.getAttribute("data-group-key").catch(() => null)) ?? "",
+        subGroupId: (await card.getAttribute("data-lane-key").catch(() => null)) ?? "",
+      });
+    }
+    return out;
   }
 
-  async kanbanColumnCards(_columnName: string): Promise<string[]> {
-    return todo("kanbanColumnCards");
+  private async kanbanColumnByName(columnName: string): Promise<Locator> {
+    const columns = this.page.getByTestId("kanban-column");
+    const total = await columns.count();
+    for (let index = 0; index < total; index += 1) {
+      const column = columns.nth(index);
+      if ((await column.getAttribute("data-column-name").catch(() => null)) === columnName) return column;
+    }
+    throw new Error(`[parity] no kanban column named ${JSON.stringify(columnName)}.`);
   }
 
-  async kanbanToggleColumn(_columnName: string): Promise<void> {
-    return todo("kanbanToggleColumn");
+  async kanbanColumnCards(columnName: string): Promise<string[]> {
+    const column = await this.kanbanColumnByName(columnName);
+    const cards = column.getByTestId("kanban-card-name");
+    const total = await cards.count();
+    const out: string[] = [];
+    for (let index = 0; index < total; index += 1) out.push(((await cards.nth(index).innerText()) ?? "").trim());
+    return out;
   }
 
-  async kanbanColumnCollapsed(_columnName: string): Promise<boolean> {
-    return todo("kanbanColumnCollapsed");
+  async kanbanToggleColumn(columnName: string): Promise<void> {
+    const column = await this.kanbanColumnByName(columnName);
+    const collapsed = (await column.getAttribute("data-collapsed").catch(() => null)) === "true";
+    const control = column.getByRole("button", {
+      name: collapsed ? `Expand ${columnName} column` : `Collapse ${columnName} column`,
+      exact: true,
+    });
+    await control.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.kanbanColumnCollapsed(columnName), { timeout: WebNewDriver.WAIT_MS }).toBe(!collapsed);
   }
 
-  async kanbanToggleSwimlane(_laneName: string): Promise<void> {
-    return todo("kanbanToggleSwimlane");
+  async kanbanColumnCollapsed(columnName: string): Promise<boolean> {
+    const column = await this.kanbanColumnByName(columnName);
+    return (await column.getAttribute("data-collapsed").catch(() => null)) === "true";
   }
 
-  async kanbanSwimlaneCollapsed(_laneName: string): Promise<boolean> {
-    return todo("kanbanSwimlaneCollapsed");
+  private async kanbanLaneByName(laneName: string): Promise<Locator> {
+    const lanes = this.page.getByTestId("kanban-lane");
+    const total = await lanes.count();
+    for (let index = 0; index < total; index += 1) {
+      const lane = lanes.nth(index);
+      const label = lane.getByTestId("kanban-lane-name").first();
+      const text = (
+        (await label.getAttribute("title").catch(() => null)) ??
+        (await label.innerText().catch(() => null)) ??
+        ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text === laneName) return lane;
+    }
+    throw new Error(`[parity] no kanban swimlane named ${JSON.stringify(laneName)}.`);
   }
 
-  async kanbanCardIdentifier(_issueName: string): Promise<string | null> {
-    return todo("kanbanCardIdentifier");
+  async kanbanToggleSwimlane(laneName: string): Promise<void> {
+    const lane = await this.kanbanLaneByName(laneName);
+    const header = lane.getByTestId("kanban-lane-header").first();
+    const collapsed = (await header.getAttribute("aria-expanded").catch(() => null)) === "false";
+    await header.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.kanbanSwimlaneCollapsed(laneName), { timeout: WebNewDriver.WAIT_MS }).toBe(!collapsed);
   }
 
-  async kanbanCardShowsProperties(_issueName: string): Promise<boolean> {
-    return todo("kanbanCardShowsProperties");
+  async kanbanSwimlaneCollapsed(laneName: string): Promise<boolean> {
+    const lane = await this.kanbanLaneByName(laneName);
+    const header = lane.getByTestId("kanban-lane-header").first();
+    return (await header.getAttribute("aria-expanded").catch(() => null)) === "false";
   }
 
-  async kanbanCardHover(_issueName: string): Promise<void> {
-    return todo("kanbanCardHover");
+  private async kanbanCardByName(issueName: string): Promise<Locator> {
+    const cards = this.page.getByTestId("kanban-card");
+    const total = await cards.count();
+    for (let index = 0; index < total; index += 1) {
+      const card = cards.nth(index);
+      const name = (
+        (await card
+          .getByTestId("kanban-card-name")
+          .first()
+          .innerText()
+          .catch(() => null)) ?? ""
+      ).trim();
+      if (name === issueName) return card;
+    }
+    throw new Error(`[parity] no kanban card titled ${JSON.stringify(issueName)}.`);
   }
 
-  async kanbanCardQuickActionsVisible(_issueName: string): Promise<boolean> {
-    return todo("kanbanCardQuickActionsVisible");
+  async kanbanCardIdentifier(issueName: string): Promise<string | null> {
+    const card = await this.kanbanCardByName(issueName);
+    const text = (
+      (await card
+        .getByTestId("kanban-card-link")
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    ).trim();
+    return /^[A-Z]+-\d+/.exec(text)?.[0] ?? null;
   }
 
-  async kanbanCardHref(_issueName: string): Promise<string | null> {
-    return todo("kanbanCardHref");
+  async kanbanCardShowsProperties(issueName: string): Promise<boolean> {
+    const card = await this.kanbanCardByName(issueName);
+    const strip = card.getByTestId("kanban-card-properties").first();
+    if ((await strip.count()) === 0) return false;
+    return (await strip.getByTestId("inline-property-strip").count()) > 0;
   }
 
-  async kanbanOpenCardPeek(_issueName: string): Promise<void> {
-    return todo("kanbanOpenCardPeek");
+  async kanbanCardHover(issueName: string): Promise<void> {
+    const card = await this.kanbanCardByName(issueName);
+    await card.getByTestId("kanban-card-name").first().hover({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async kanbanCardQuickActionsVisible(issueName: string): Promise<boolean> {
+    const card = await this.kanbanCardByName(issueName);
+    return this.isShown(card.getByRole("button", { name: `Actions for ${issueName}`, exact: true }).first());
+  }
+
+  async kanbanCardHref(issueName: string): Promise<string | null> {
+    const card = await this.kanbanCardByName(issueName);
+    const href = await card
+      .getByTestId("kanban-card-link")
+      .first()
+      .getAttribute("href")
+      .catch(() => null);
+    return href ?? null;
+  }
+
+  async kanbanOpenCardPeek(issueName: string): Promise<void> {
+    const card = await this.kanbanCardByName(issueName);
+    await card.getByTestId("kanban-card-link").first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issue-preview").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.issuePeekTitle(), { timeout: WebNewDriver.WAIT_MS }).toBe(issueName);
   }
 
   private issuePeekPanel(): Locator {
@@ -7502,12 +7667,19 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => this.issuePeekVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
 
-  async kanbanColumnHasQuickAdd(_columnName: string): Promise<boolean> {
-    return todo("kanbanColumnHasQuickAdd");
+  async kanbanColumnHasQuickAdd(columnName: string): Promise<boolean> {
+    const column = await this.kanbanColumnByName(columnName);
+    return this.isShown(column.getByTestId("kanban-quick-add").first());
   }
 
-  async kanbanQuickAdd(_columnName: string, _title: string): Promise<void> {
-    return todo("kanbanQuickAdd");
+  async kanbanQuickAdd(columnName: string, title: string): Promise<void> {
+    const column = await this.kanbanColumnByName(columnName);
+    const entry = column.getByRole("button", { name: /New work item/ }).first();
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    const field = column.getByLabel("Work item title", { exact: true }).first();
+    await field.fill(title);
+    await field.press("Enter");
+    await expect.poll(() => this.kanbanColumnCards(columnName), { timeout: 120_000 }).toContain(title);
   }
 
   async kanbanHeaderCreateVisible(_columnName: string): Promise<boolean> {
