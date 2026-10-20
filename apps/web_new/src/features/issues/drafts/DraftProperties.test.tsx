@@ -207,11 +207,45 @@ describe("DraftProperties", () => {
     expect(calls.some((call) => call.name === "estimate")).toBe(false);
   });
 
+  it("hides the estimate picker for a project without a point scale", () => {
+    states.mockReturnValue({ data: [] } as never);
+    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ estimate_point: ESTIMATE }), project({ estimate: null }));
+    expect(calls.some((call) => call.name === "estimate")).toBe(false);
+  });
+
+  it("shows a numeric estimate point as its string value", () => {
+    states.mockReturnValue({ data: [] } as never);
+    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ estimate_point: 3 }), project({ estimate: ESTIMATE }));
+    expect(calls.find((call) => call.name === "estimate")?.["value"]).toBe("3");
+  });
+
   it("reads a null estimate point as no value", () => {
     states.mockReturnValue({ data: [] } as never);
     estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
     stubClient();
     const { calls } = renderStrip(draft({ estimate_point: null }), project({ estimate: ESTIMATE }));
+    expect(calls.find((call) => call.name === "estimate")?.["value"]).toBeNull();
+  });
+
+  it("holds the estimate picker back while its point list is still pending", () => {
+    states.mockReturnValue({ data: [] } as never);
+    estimates.mockReturnValue({} as never);
+    stubClient();
+    const { calls } = renderStrip(draft({ estimate_point: ESTIMATE }), project({ estimate: ESTIMATE }));
+    expect(calls.some((call) => call.name === "estimate")).toBe(false);
+  });
+
+  it("reads a row that carries no estimate column as no value", () => {
+    states.mockReturnValue({ data: [] } as never);
+    estimates.mockReturnValue({ data: [{ id: ESTIMATE }] } as never);
+    stubClient();
+    const row = draft();
+    delete (row as { estimate_point?: unknown }).estimate_point;
+    const { calls } = renderStrip(row, project({ estimate: ESTIMATE }));
     expect(calls.find((call) => call.name === "estimate")?.["value"]).toBeNull();
   });
 

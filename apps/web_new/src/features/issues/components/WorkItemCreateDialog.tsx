@@ -434,7 +434,9 @@ export function WorkItemCreateDialog({
     return formFromSnapshot(
       {
         id: "draft-copy",
-        name: draftSeed.input.name ?? null,
+        // A copy opens under its duplicated title (ISS-139), not the
+        // original row name its payload carried before the suffix.
+        name: draftSeed.title,
         description_html: draftSeed.input.description_html ?? "",
         state_id: draftSeed.input.state_id ?? null,
         priority: draftSeed.input.priority ?? "none",
@@ -453,9 +455,7 @@ export function WorkItemCreateDialog({
   const [form, setForm] = React.useState<CreateFormState>(() =>
     edit !== null
       ? (editStart(edit, resolveProjectId(offered, initialProjectId ?? editProjectId ?? null)) ?? seededForm(null))
-      : seededDraftForm !== null
-        ? { ...seededDraftForm, name: draftSeed?.title ?? seededDraftForm.name }
-        : seededForm(resolveProjectId(offered, initialProjectId ?? null))
+      : (seededDraftForm ?? seededForm(resolveProjectId(offered, initialProjectId ?? null)))
   );
   // What the edit opened with: every submit diffs against it. A create
   // never has one, so its submit always builds a full payload.
@@ -547,9 +547,8 @@ export function WorkItemCreateDialog({
     // keeps the listing prefill the base introduced.
     let next =
       starting ??
-      (seededDraftForm !== null
-        ? { ...seededDraftForm, name: draftSeed?.title ?? seededDraftForm.name }
-        : contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues));
+      seededDraftForm ??
+      contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
     routeMembership.current = membershipForForm(next);
     openedDescription.current = starting?.descriptionHtml ?? null;
