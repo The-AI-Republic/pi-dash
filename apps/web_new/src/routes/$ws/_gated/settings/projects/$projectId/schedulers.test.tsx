@@ -136,7 +136,7 @@ describe("schedulers settings route", () => {
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByTestId("project-settings-sidebar")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Oops! You are not authorized to view this page" })).toBeInTheDocument();
-    expect(screen.getByTestId("project-settings-tab-schedulers")).toHaveAttribute("data-active", "true");
+    expect(screen.queryByTestId("project-settings-tab-schedulers")).not.toBeInTheDocument();
     expect(screen.queryByTestId("installs-list")).not.toBeInTheDocument();
   });
 
