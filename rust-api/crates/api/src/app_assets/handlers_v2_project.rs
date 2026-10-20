@@ -2404,7 +2404,15 @@ async fn s3_copy_object(
     // 500 fallback with the row left behind.
     let (url, headers) = copy_auth_headers(storage, scheme, host, src_key, dst_key, &Utc::now())
         .map_err(|_| CopyError::Transport)?;
-    let client = reqwest::Client::new();
+    // botocore's defaults apply (`storage.py` passes no timeout
+    // `Config`): 60s to connect, 60s to read. Bound the client the same
+    // way so a wedged object store yields a transport error (→ the 500
+    // fallback) instead of hanging the handler forever (PIDASHCONV-1156).
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(60))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|_| CopyError::Transport)?;
     let mut request = client.put(&url).body(Vec::new());
     for (name, value) in &headers {
         request = request.header(name.as_str(), value.as_str());
@@ -2915,6 +2923,53 @@ mod tests {
             Some("throttle_asset_abc".to_owned())
         );
         assert_eq!(guards::ASSET_THROTTLE_REQUESTS, 5);
+    }
+
+    /// A wedged object store must not hang the duplicate copy forever
+    /// (PIDASHCONV-1156). The client is bounded like botocore's defaults
+    /// (60s connect / 60s read), so a black-hole peer — one that accepts
+    /// the connection and never answers — comes back as the transport
+    /// error the duplicate handler maps to a 500, not an unbounded wait.
+    /// Before the fix this never returns (the test would time out at 90s).
+    #[tokio::test]
+    async fn s3_copy_is_bounded_against_a_black_hole() {
+        use std::time::{Duration, Instant};
+        // Accept every connection and hold it open without ever replying.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind black hole");
+        let addr = listener.local_addr().expect("black-hole addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        // Path-style endpoint (`endpoint_url` set) so the copy targets the
+        // black hole regardless of the request Host.
+        let mut storage = test_storage();
+        storage.use_minio = false;
+        storage.endpoint_url = Some(format!("http://{addr}"));
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(90),
+            s3_copy_object(
+                &storage,
+                "http",
+                &addr.to_string(),
+                "ws/orig.png",
+                "ws/dup.png",
+            ),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let result = outcome.expect("s3_copy_object never returned: copy is unbounded");
+        assert_eq!(result, Err(CopyError::Transport));
+        // Bounded by botocore's ~60s read timeout, well under the 90s cap.
+        assert!(
+            elapsed < Duration::from_secs(75),
+            "copy took {elapsed:?}, expected ~60s"
+        );
     }
 }
 
