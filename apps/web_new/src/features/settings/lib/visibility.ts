@@ -20,6 +20,3 @@ import type { ProfileSettingsTabId } from "./tabNavigation.js";
 export function isProfileSettingsTabServed(tab: ProfileSettingsTabId, selfManaged: boolean | undefined): boolean {
   return tab !== "security" || selfManaged !== false;
 }
-
-/** The tab a withdrawn address forwards to. */
-export const WITHDRAWN_TAB_FALLBACK: ProfileSettingsTabId = "general";

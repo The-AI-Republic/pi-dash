@@ -7,7 +7,6 @@
 // import tabNavigation.ts directly.
 
 import { PROFILE_SETTINGS_TAB_IDS, type ProfileSettingsTabId } from "./tabNavigation.js";
-import { isProfileSettingsTabServed } from "./visibility.js";
 
 export type ProfileSettingsGroupId = "personal" | "developer";
 
@@ -71,11 +70,6 @@ export function profileSettingsGroups(
     ...group,
     tabs: PROFILE_SETTINGS_TABS.filter((tab) => tab.group === group.id && isServed(tab.id)),
   })).filter((group) => group.tabs.length > 0);
-}
-
-/** The served tabs in display order; the sidebar and address guard share it. */
-export function servedProfileSettingsTabs(selfManaged: boolean | undefined): ProfileSettingsTab[] {
-  return PROFILE_SETTINGS_TABS.filter((tab) => isProfileSettingsTabServed(tab.id, selfManaged));
 }
 
 /** The document title for a tab: the sidebar label plus the page name. */

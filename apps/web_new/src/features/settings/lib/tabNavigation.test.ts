@@ -3,13 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import {
-  PROFILE_SETTINGS_TABS,
-  findProfileSettingsTab,
-  profileSettingsGroups,
-  profileSettingsTitle,
-  servedProfileSettingsTabs,
-} from "./tabs.js";
+import { PROFILE_SETTINGS_TABS, findProfileSettingsTab, profileSettingsGroups, profileSettingsTitle } from "./tabs.js";
 import {
   DEFAULT_PROFILE_SETTINGS_TAB,
   isProfileSettingsTab,
@@ -18,6 +12,7 @@ import {
   queryWithoutMark,
   resolveProfileSettingsTab,
 } from "./tabNavigation.js";
+import { isProfileSettingsTabServed } from "./visibility.js";
 
 describe("profile settings addresses", () => {
   it("lists the nine tab ids in display order", () => {
@@ -77,10 +72,14 @@ describe("profile settings sidebar model", () => {
     ).toEqual(["developer"]);
   });
 
-  it("lists the served tabs from the instance marker", () => {
-    expect(servedProfileSettingsTabs(false).map((tab) => tab.id)).not.toContain("security");
-    expect(servedProfileSettingsTabs(true).map((tab) => tab.id)).toContain("security");
-    expect(servedProfileSettingsTabs(undefined).map((tab) => tab.id)).toContain("security");
+  it("lists the tabs the instance serves from its marker", () => {
+    const ids = (selfManaged: boolean | undefined): string[] =>
+      profileSettingsGroups((tab) => isProfileSettingsTabServed(tab, selfManaged))
+        .flatMap((group) => group.tabs)
+        .map((tab) => tab.id);
+    expect(ids(false)).not.toContain("security");
+    expect(ids(true)).toContain("security");
+    expect(ids(undefined)).toContain("security");
   });
 
   it("finds a tab by id and titles the document", () => {

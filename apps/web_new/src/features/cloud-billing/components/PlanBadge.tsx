@@ -10,6 +10,8 @@
 
 import * as React from "react";
 
+import { edition } from "../../../core/edition/index.js";
+import { platform } from "../../../core/platform/index.js";
 import { useCloudPlan } from "../api/queries.js";
 import { accountCenterUrl, isCloudPlan, planLabel } from "../lib/plan.js";
 
@@ -26,11 +28,6 @@ export function planBadgeHint(version: string): string {
 
 export interface PlanBadgeProps {
   /**
-   * Opens an external address. The shell supplies the platform opener so
-   * the desktop build uses its own window; the default is the browser's.
-   */
-  onOpenExternal?: ((url: string) => void) | undefined;
-  /**
    * The running app version for the hover hint. The shell reads it once
    * and passes it down: the badge itself stays out of the initial chain,
    * and importing the version there would pull the shell chunk back in.
@@ -38,7 +35,10 @@ export interface PlanBadgeProps {
   version: string;
 }
 
-export function PlanBadge({ onOpenExternal, version }: PlanBadgeProps): React.ReactElement | null {
+export function PlanBadge({ version }: PlanBadgeProps): React.ReactElement | null {
+  // Only editions that publish a plan snapshot show the badge. The lazy
+  // chunk is shared, so the gate lives here and the read stays idle.
+  if (edition.flags["plan-badge"] !== true) return null;
   const plan = useCloudPlan(true);
   // Nothing has answered yet: rendering a made-up label would be a claim
   // about the account the badge cannot back up.
@@ -47,8 +47,7 @@ export function PlanBadge({ onOpenExternal, version }: PlanBadgeProps): React.Re
   const destination = accountCenterUrl(plan.data);
   const open = (): void => {
     if (destination === null) return;
-    if (onOpenExternal !== undefined) onOpenExternal(destination);
-    else globalThis.window?.open(destination, "_blank", "noopener,noreferrer");
+    void platform.openExternal(destination);
   };
 
   // The native title carries the version hint: it reaches mouse and
@@ -61,12 +60,10 @@ export function PlanBadge({ onOpenExternal, version }: PlanBadgeProps): React.Re
       aria-label={`${PLAN_BADGE_LABEL}: ${label}`}
       aria-disabled={destination === null || undefined}
       title={planBadgeHint(version)}
-      className="flex w-full items-center rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-2) py-(--space-1) text-left text-(--text) enabled:hover:bg-(--subtle) aria-disabled:cursor-default"
+      className="text-caption w-full truncate rounded-(--radius-full) bg-(--accent-subtle) px-(--space-2) py-(--space-1) text-left font-medium text-(--accent) enabled:hover:brightness-95 aria-disabled:cursor-default"
       onClick={open}
     >
-      <span className="text-caption truncate rounded-(--radius-full) bg-(--accent-subtle) px-(--space-2) py-(--space-0) font-medium text-(--accent)">
-        {label}
-      </span>
+      {label}
     </button>
   );
 }

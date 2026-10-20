@@ -38,7 +38,8 @@ describe("cloud-model refusals", () => {
   });
 
   it("says the gateway outage retries on its own", () => {
-    expect(agentReasonMessage("gateway_unavailable")).toMatch(/retries/i);
+    // "will retry shortly": the retry is automatic, not a viewer action.
+    expect(agentReasonMessage("gateway_unavailable")).toMatch(/retr(y|ies)/i);
   });
 });
 

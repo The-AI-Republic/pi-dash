@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { WITHDRAWN_TAB_FALLBACK, isProfileSettingsTabServed } from "./visibility.js";
+import { isProfileSettingsTabServed } from "./visibility.js";
 
 describe("profile tab visibility", () => {
   it("withdraws the password tab only on a hosted instance", () => {
@@ -21,9 +21,5 @@ describe("profile tab visibility", () => {
       expect(isProfileSettingsTabServed("ai-assistant", selfManaged)).toBe(true);
       expect(isProfileSettingsTabServed("api-tokens", selfManaged)).toBe(true);
     }
-  });
-
-  it("forwards a withdrawn address to the general tab", () => {
-    expect(WITHDRAWN_TAB_FALLBACK).toBe("general");
   });
 });

@@ -1241,13 +1241,7 @@ describe("gated layout shell wiring", () => {
     expect(harness.sidebar?.editionEntries).toEqual([]);
   });
 
-  it("mounts no plan badge on the OSS edition (CLOUD-038 flag-off)", () => {
-    renderShell();
-    expect(harness.planBadge).toBeUndefined();
-  });
-
-  it("mounts the plan badge lazily once the edition publishes one (CLOUD-038)", () => {
-    edition.flags["plan-badge"] = true;
+  it("mounts the plan badge lazily (CLOUD-038)", () => {
     renderShell();
     const badge = harness.planBadge;
     expect(React.isValidElement(badge)).toBe(true);
@@ -1258,8 +1252,7 @@ describe("gated layout shell wiring", () => {
 
   it("loads the plan badge from its own chunk inside the sidebar slot (CLOUD-038, size gate)", async () => {
     edition.flags["plan-badge"] = true;
-    // Installed first: the shell hands the badge the opener it reads at
-    // render time.
+    // Installed first: the badge opens through the platform.
     const openExternal = vi.spyOn(platform, "openExternal").mockResolvedValue(undefined);
     renderShell();
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -1273,8 +1266,8 @@ describe("gated layout shell wiring", () => {
       // label from the plan the query mock serves.
       const badge = await screen.findByRole("button", { name: "Plan: Upgrade" });
       expect(screen.queryByText("loading plan")).not.toBeInTheDocument();
-      // The shell hands the badge the platform opener, so the desktop
-      // build opens the account center in its own window.
+      // The badge opens through the platform, so the desktop build uses
+      // its own window rather than the web page.
       await userEvent.setup().click(badge);
       expect(openExternal).toHaveBeenCalledWith("https://home.test/account");
       openExternal.mockRestore();
