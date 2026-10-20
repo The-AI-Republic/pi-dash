@@ -1216,14 +1216,18 @@ export class WebNewDriver implements ParityDriver {
     // Shared by the rules and intake scenarios, which need any role landed
     // on one workspace before driving its surface. Sign-in is a no-op for a
     // live session: the entry bounces to the remembered workspace, which may
-    // be a different one, so sign out first and always end on the workspace
-    // the caller asked for. A throttled shared stack can swallow a whole
+    // be a different one. Enter first — the bounce lands on the workspace
+    // shell, which is where the sign-out command lives; a settings page
+    // renders outside that shell, so signing out before navigating has no
+    // palette to press. Then sign out so the caller always ends on the
+    // workspace it asked for. A throttled shared stack can swallow a whole
     // pass, so retry it a bounded number of times.
+    await this.openEntry();
     if (!(await this.isSignedOut().catch(() => false))) {
       await this.signOutViaCommandPalette();
     }
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await this.openEntry();
+      if (attempt > 0) await this.openEntry();
       await this.signInWithPassword(email, password);
       const landed = await this.page
         .waitForURL(new RegExp(`/${workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/|$)`), { timeout: 60_000 })
@@ -3969,6 +3973,12 @@ export class WebNewDriver implements ParityDriver {
     // Same settle point as the driver's other navigations: parsed DOM, so a
     // late sub-resource cannot stall the wait after the app is interactive.
     await this.page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+    // A reload can land on a document whose module graph never runs under
+    // load, leaving an empty mount point; one more reload gets a fresh
+    // graph. Anything that mounted is left alone, so a slow paint never
+    // turns into a reload.
+    if (await this.appMounted()) return;
+    await this.page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
   async projectQuickAddVisible(): Promise<boolean> {
@@ -4071,7 +4081,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async signOutViaCommandPalette(): Promise<void> {
+    // A slow paint can outlast the whole attempt even though the sign-out
+    // already happened, so every attempt ends by checking for the entry;
+    // an already signed-out page returns instead of retrying a palette that
+    // is no longer there.
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.isSignedOut().catch(() => false)) return;
       await this.dismissTourIfShown();
       try {
         await this.page.getByRole("button", { name: "Open command palette" }).click({ timeout: 15_000 });
@@ -4082,14 +4097,10 @@ export class WebNewDriver implements ParityDriver {
         return;
       } catch {
         await this.page.keyboard.press("Escape").catch(() => {});
+        if (await this.isSignedOut().catch(() => false)) return;
       }
     }
-    await this.dismissTourIfShown();
-    await this.page.getByRole("button", { name: "Open command palette" }).click();
-    const filter = this.page.getByPlaceholder("Type a command…");
-    await filter.fill("Sign out");
-    await this.page.getByRole("option", { name: "Sign out" }).first().click();
-    await this.waitForSignedOut();
+    throw new Error("[parity] sign-out never reached the entry.");
   }
 
   async isSignedOut(): Promise<boolean> {

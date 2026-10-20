@@ -33,6 +33,13 @@ function chain(count: number): StubLocator {
 }
 
 /** The selector each call read, so the test can assert what was excluded. */
+/** The smallest locator shape the driver's visibility and click reads use. */
+function element(overrides: Record<string, unknown>): StubLocator {
+  const node = chain(1);
+  Object.assign(node, overrides);
+  return node;
+}
+
 function recordedPage(sectionCount: number, noticeCount: number) {
   const filters: unknown[] = [];
   const section = chain(sectionCount);
@@ -126,5 +133,74 @@ describe("appMounted", () => {
     const driver = new WebNewDriver(mountPage(new Error("Execution context was destroyed")).page);
 
     expect(await (driver as unknown as { appMounted: () => Promise<boolean> }).appMounted()).toBe(true);
+  });
+});
+
+describe("signOutViaCommandPalette", () => {
+  it("returns when the page is already on the entry, without pressing the palette", async () => {
+    const click = vi.fn(async () => undefined);
+    const page = {
+      getByPlaceholder: () => element({ isVisible: async () => true }),
+      getByRole: () => element({ click }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await driver.signOutViaCommandPalette();
+
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it("gives up with a bounded error instead of waiting on a palette that never appears", async () => {
+    const click = vi.fn(async () => {
+      throw new Error("timeout");
+    });
+    const page = {
+      getByPlaceholder: () => element({ isVisible: async () => false }),
+      getByRole: () => element({ click }),
+      keyboard: { press: async () => undefined },
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver as unknown as { dismissTourIfShown: () => Promise<void> }, "dismissTourIfShown").mockImplementation(
+      async () => undefined
+    );
+
+    await expect(driver.signOutViaCommandPalette()).rejects.toThrow("sign-out never reached the entry");
+
+    expect(click).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("reloadPage", () => {
+  it("reloads a document whose mount point stayed empty", async () => {
+    const reload = vi.fn(async () => undefined);
+    let mounted = false;
+    const page = {
+      reload,
+      locator: () => ({
+        evaluate: async () => {
+          if (mounted) return true;
+          mounted = true;
+          return false;
+        },
+      }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await driver.reloadPage();
+
+    expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves a mounted document alone", async () => {
+    const reload = vi.fn(async () => undefined);
+    const page = {
+      reload,
+      locator: () => ({ evaluate: async () => true }),
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+
+    await driver.reloadPage();
+
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });
