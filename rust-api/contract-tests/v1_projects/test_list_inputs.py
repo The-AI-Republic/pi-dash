@@ -82,6 +82,16 @@ def test_default_agent_executor_json_array(seed):
     }
 
 
+def test_default_agent_executor_apostrophe_uses_cpython_quotes(seed):
+    # CPython repr picks double quotes for a string containing a single
+    # quote (and no double quote): str(["it's"]) is `["it's"]`.
+    r = _form_patch(seed, "default_agent_executor=it's")
+    assert r.status_code == 400, r.text
+    assert r.json() == {
+        "default_agent_executor": ["\"[\"it's\"]\" is not a valid choice."]
+    }
+
+
 # --- PrimaryKeyRelatedField over a UUID pk: curly-quoted repr ----------------
 
 
@@ -95,6 +105,14 @@ def test_project_lead_json_array(seed):
     r = _json_patch(seed, {"project_lead": [""]})
     assert r.status_code == 400, r.text
     assert r.json() == {"project_lead": ["\u201c['']\u201d is not a valid UUID."]}
+
+
+def test_project_lead_apostrophe_uses_cpython_quotes(seed):
+    r = _json_patch(seed, {"project_lead": ["it's"]})
+    assert r.status_code == 400, r.text
+    assert r.json() == {
+        "project_lead": ["\u201c[\"it's\"]\u201d is not a valid UUID."]
+    }
 
 
 def test_default_assignee_form_value(seed):
