@@ -41,7 +41,8 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
   useJoinProject: () => ({ isPending: false, mutate: vi.fn() }),
 }));
 
-vi.mock("../../../../../../features/project-settings/members/api.js", () => ({
+vi.mock("../../../../../../features/project-settings/members/api.js", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
   MEMBERS_LOAD_FAILED_TITLE: "Couldn't load the members",
   useProjectMemberships: () => ({
     status: "success",
@@ -53,6 +54,13 @@ vi.mock("../../../../../../features/project-settings/members/api.js", () => ({
     data: [],
     isPending: false,
   }),
+  useProjectDefaults: () => ({ status: "success", data: { id: harness.params.projectId }, isPending: false }),
+  useAddProjectMembers: () => ({ isPending: false, mutate: vi.fn() }),
+  useUpdateProjectMemberRole: () => ({ isPending: false, mutate: vi.fn() }),
+  useRemoveProjectMember: () => ({ isPending: false, mutate: vi.fn() }),
+  useLeaveProject: () => ({ isPending: false, mutate: vi.fn() }),
+  useSaveProjectDefaults: () => ({ isPending: false, mutate: vi.fn() }),
+  useMemberEditor: () => ({ editing: null, setEditing: vi.fn(), roleOverride: null, setRoleOverride: vi.fn() }),
   notifyMembersLoadFailure: vi.fn(),
 }));
 
@@ -89,7 +97,7 @@ describe("members settings route", () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByRole("heading", { level: 1, name: "Members" })).toBeInTheDocument();
-    expect(screen.getByTestId("project-settings-members")).toHaveAttribute("data-slice", "NEWFRONT-574");
+    expect(screen.getByTestId("project-settings-members")).toHaveAttribute("data-slice", "NEWFRONT-579");
     expect(screen.getByTestId("project-settings-tab-members")).toHaveAttribute("data-active", "true");
   });
 

@@ -1077,6 +1077,14 @@ describe("project contracts", () => {
     expect(parsed[0]?.member_role).toBe(20);
   });
 
+  it("carries the default assignee when the row has one and tolerates its absence", async () => {
+    const withAssignee = { ...project, default_assignee: UUID2 };
+    const client = createClient({ baseUrl: "https://api.test", transport: json([withAssignee, project]) });
+    const parsed = await listProjects(client, "acme");
+    expect(parsed[0]?.default_assignee).toBe(UUID2);
+    expect(parsed[1]?.default_assignee).toBeUndefined();
+  });
+
   it("hits the workspace-scoped URL", async () => {
     const transport = recordingTransport(() => fakeResponse({ body: "[]" }));
     const client = createClient({ baseUrl: "https://api.test", transport });
@@ -2417,6 +2425,18 @@ describe("project lifecycle contracts", () => {
     const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
     expect(patchCall?.init.method).toBe("PATCH");
     expect(patchCall?.init.body).toBe(JSON.stringify({ description: "Updated" }));
+  });
+
+  it("patches the default assignee and guest visibility, clearing the assignee with null", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { ...details, guest_view_all_features: true } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProject(client, "acme", UUID2, {
+      default_assignee: null,
+      guest_view_all_features: true,
+    });
+    expect(updated.guest_view_all_features).toBe(true);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.body).toBe(JSON.stringify({ default_assignee: null, guest_view_all_features: true }));
   });
 
   it("patches the automations fields the settings page owns", async () => {

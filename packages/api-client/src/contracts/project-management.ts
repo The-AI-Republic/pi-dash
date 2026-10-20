@@ -53,6 +53,10 @@ export interface ProjectUpdateInput {
   description?: string;
   network?: number;
   project_lead?: string | null;
+  /** Default assignee for new work items; null clears the slot (PSET-026). */
+  default_assignee?: string | null;
+  /** Guests see every work item when true (PSET-026). */
+  guest_view_all_features?: boolean;
   timezone?: string;
   /** Project mark: the emoji/icon/uploaded-emblem object the row stores. */
   logo_props?: Record<string, unknown>;

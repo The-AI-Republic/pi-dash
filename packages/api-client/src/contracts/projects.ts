@@ -46,6 +46,9 @@ export const Project = z.object({
   /** Whether project members may edit workflow states (PSET-034). */
   members_can_edit_states: z.optional(z.boolean()),
   project_lead: nullableUuid(),
+  // The retrieve serializer carries the default assignee; the list
+  // `.values()` projection omits it, so older list fixtures predate it.
+  default_assignee: z.optional(nullableUuid()),
   network: z.number(),
   created_at: dateTime(),
   updated_at: dateTime(),
