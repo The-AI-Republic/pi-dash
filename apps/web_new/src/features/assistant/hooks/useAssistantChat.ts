@@ -118,6 +118,14 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
   // earlier turn and must not claim the view; the closure's `busy` cannot
   // police that because the subscription is not re-created on every render.
   const awaitingStartRef = React.useRef<string | null>(null);
+  // Whether the stored transcript page has been handed to the reducer. The
+  // event channel opens before `GET .../messages/` resolves, so a replay can
+  // arrive with no rows on screen yet; a lifecycle event from that window
+  // describes a turn the page has not shown, and reading it (there is no
+  // transcript to compare against) would settle the turn the server reports
+  // active. Until the page applies, the list's `has_active_turn` is the only
+  // clock (AGT-042).
+  const pageAppliedRef = React.useRef(false);
 
   // When the latest turn started, on this clock. A thread-list read taken at
   // or after this point is the server's answer about that turn; an older one
@@ -206,13 +214,16 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     turnRef.current = null;
     awaitingStartRef.current = null;
     startSeqRef.current = 0;
+    pageAppliedRef.current = false;
     setBusy(false);
     setError(null);
     setStartedAt(0);
   }, [workspaceSlug, threadId]);
 
   React.useEffect(() => {
-    if (page.data !== undefined) dispatch({ type: "page", rows: page.data });
+    if (page.data === undefined) return;
+    pageAppliedRef.current = true;
+    dispatch({ type: "page", rows: page.data });
   }, [page.data]);
 
   // The rows as the event handler sees them. A replayed `turn_started` is
@@ -247,6 +258,10 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     const turnId = (event.payload as { turn_id?: unknown }).turn_id;
     if (typeof turnId !== "string") return "";
     if (turnRef.current !== null) return turnId === turnRef.current ? turnId : null;
+    // A cold load whose page has not applied yet has no rows to compare a
+    // replayed terminal against, so it cannot decide anything; only a send's
+    // own turn (named by its response) is safe to follow before that point.
+    if (!pageAppliedRef.current && awaitingStartRef.current === null) return null;
     // No start seen yet (a cold load): a terminal only describes the turn on
     // screen when the transcript still looks mid-turn, the tail either has no
     // turn of its own or belongs to that turn, and the page holds no reply
@@ -275,6 +290,11 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
             if (event.seq <= startSeqRef.current) break;
             const awaiting = awaitingStartRef.current;
             if (awaiting !== null && turnId !== awaiting) break;
+            // The replay can beat the stored page on a cold load. A start
+            // served before the page lands describes a turn this view has no
+            // evidence about, and adopting it would let the same replay's
+            // terminal settle the turn the server reports active.
+            if (!pageAppliedRef.current && awaiting === null) break;
             // A cold-load replay serves the starts of turns whose answers the
             // page already holds; those are history, and replaying them would
             // let their terminals unlock a turn the server says is running.

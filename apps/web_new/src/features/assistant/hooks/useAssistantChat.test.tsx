@@ -60,6 +60,8 @@ interface SetupOptions {
   active?: boolean;
   /** Hold each list read until the test resolves it. */
   holdListReads?: boolean;
+  /** Hold the transcript read until the test resolves it. */
+  holdTranscriptReads?: boolean;
   /** Fail every send with this code instead of queueing a turn. */
   sendFailure?: string;
 }
@@ -86,6 +88,7 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
   // it to prove the settle path does not need a new transcript row.
   const server = { active: options.active ?? true };
   const held: Array<() => void> = [];
+  const heldTranscripts: Array<() => void> = [];
   createAppClient("https://api.test", (async (url: string, init: { method?: string }) => {
     const path = new URL(url).pathname;
     if (path.endsWith("/ai-assistant/threads/") && init.method !== "POST") {
@@ -129,6 +132,9 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
     }
     if (path.endsWith("/messages/")) {
       reads += 1;
+      if (options.holdTranscriptReads === true) {
+        await new Promise<void>((resolve) => heldTranscripts.push(resolve));
+      }
       return {
         status: 200,
         url,
@@ -139,7 +145,7 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
     return { status: 500, url, headers: { get: () => null }, text: async () => "{}" };
   }) as never);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  queryClient.setQueryData(transcriptKey("acme", THREAD_ID), initial);
+  if (options.holdTranscriptReads !== true) queryClient.setQueryData(transcriptKey("acme", THREAD_ID), initial);
   const hook = renderHook(() => useAssistantChat("acme", THREAD_ID), {
     wrapper: ({ children }: { children: React.ReactNode }) => (
       <QueryClientProvider client={queryClient}>
@@ -158,6 +164,10 @@ function setup(initial: AssistantMessage[], options: SetupOptions = {}) {
     /** Release every held list read, newest answer included. */
     releaseListReads: () => {
       for (const resolve of held.splice(0)) resolve();
+    },
+    /** Release every held transcript read. */
+    releaseTranscriptReads: () => {
+      for (const resolve of heldTranscripts.splice(0)) resolve();
     },
   };
 }
@@ -404,6 +414,53 @@ describe("useAssistantChat", () => {
         created_at: "2026-01-01T00:00:01Z",
       });
     });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+    act(() => {
+      server.active = false;
+    });
+    await waitFor(() => expect(result.current.running).toBe(false), { timeout: TURN_POLL_MS * 3 });
+  });
+
+  it("keeps an active cold load running when the replay beats the transcript page", async () => {
+    // On a fresh load the event channel opens before `GET .../messages/`
+    // resolves. If the replay's old start and terminal land first, there is
+    // no transcript to compare them against, and accepting them would settle
+    // a turn the server reports active: the poll never starts and the answer
+    // only appears on a manual reload (AGT-042).
+    const { result, server, releaseTranscriptReads } = setup(
+      [
+        row({ id: "u", seq: 1, turn_id: "old" }),
+        row({ id: "a", role: "assistant", seq: 2, content: "done", turn_id: "old" }),
+      ],
+      { active: true, holdTranscriptReads: true }
+    );
+    await waitFor(() => expect(stream.subscriptions.length).toBeGreaterThan(0));
+    expect(result.current.loaded).toBe(false);
+    act(() => {
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 70,
+        thread: THREAD_ID,
+        message: null,
+        seq: 70,
+        kind: "turn_started",
+        payload: { turn_id: "old" },
+        created_at: "2026-01-01T00:00:00Z",
+      });
+      stream.subscriptions.at(-1)?.onEvent({
+        id: 71,
+        thread: THREAD_ID,
+        message: null,
+        seq: 71,
+        kind: "turn_completed",
+        payload: { turn_id: "old", usage: {} },
+        created_at: "2026-01-01T00:00:01Z",
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.running).toBe(true);
+    act(() => releaseTranscriptReads());
+    await waitFor(() => expect(result.current.loaded).toBe(true));
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(result.current.running).toBe(true);
     act(() => {
