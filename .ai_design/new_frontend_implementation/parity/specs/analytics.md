@@ -325,10 +325,15 @@ Rendering rules:
   only the true extremes: the lowest nonzero segment gets a rounded bottom,
   the highest nonzero segment gets a rounded top, and interior segments have
   square ends. Zero-value segments have no visible end.
-- Fill stacked segments from the theme chart palette in schema order. Palette
-  source is `@pidash/kit` color tokens; keep the first ten categorical slots
-  stable and extend deterministically beyond ten with generated hues rather
-  than cycling and duplicating colors.
+- Fill stacked segments from the theme chart palette in schema order. There is
+  no categorical chart palette in `@pidash/kit` today (D12 defines only the
+  neutral UI tokens), so slice B owns adding one to the kit as a ten-slot
+  light/dark token pair. The first ten light slots must be, in order,
+  `#6172e8`, `#8b6edb`, `#e05f99`, `#29a383`, `#cb8a37`, `#3aa7c1`, `#f1b24a`,
+  `#e84855`, `#50c799`, `#b35f9e`; the oracle pins exactly these. Extend
+  deterministically beyond ten with generated hues rather than cycling and
+  duplicating colors. Chart components read the tokens; analytics must not
+  carry a second hard-coded palette.
 
 If the custom read fails or returns no rows, show the same compact guidance
 panel used by the other chart sections and no table. A successful response
@@ -714,8 +719,10 @@ must not alter the production request or response shape.
 - There is no chart dependency or shared chart wrapper in `apps/web_new` yet.
   Add Recharts 3 per decision D15 through a lazy `import()` boundary, wrapped
   in new `shared/charts` components that accept typed data/series and read
-  kit color tokens. This slice owns the catalog, dependency allowlist and
-  lockfile update.
+  kit color tokens. This slice also adds the ten-slot categorical chart palette
+  to kit tokens described in §10; the light values are oracle-pinned and the
+  kit currently has no chart palette. This slice owns the catalog, dependency
+  allowlist, kit token change and lockfile update.
 - Build radar and summary new. Reuse `ProjectMark` for project identity and
   kit `Tooltip` for long names. Reuse `projectsQueryOptions`/the project store
   to resolve active-project ids; do not copy project display logic.
@@ -776,8 +783,10 @@ must not alter the production request or response shape.
 - Reuse the slice D table shell and CSV builder; pass an assignee-first column
   definition and an assignee count label. Do not fork the table.
 - Reuse `usePermissions`/`useProjectRoles` for any trigger guard analytics
-  itself owns. Cycle and module triggers stay in their areas (NEWFRONT-712 for
-  cycles; MOD-032 for modules, not yet sliced).
+  itself owns. Cycle and module triggers stay in their areas: NEWFRONT-712
+  (CYC-033) for cycles and NEWFRONT-802 (Modules slice J, MOD-032) for modules.
+  Neither needs a reverse edge to slice E; those slices mount the trigger and
+  consume this dialog.
 
 ### Contracts (NEWFRONT-728)
 
@@ -809,7 +818,7 @@ The contracts slice owns zod request/response schemas and contract tests in
 | ANL-008 | Five work-items cards with exact labels/order; dialog keeps same labels; epic branch unreachable.                                                                                                                 | Same; no epic wording branch.                                                                                                          |
 | ANL-009 | Two smoothed areas, legend `Resolved`,`Created`, `MMM DD, YYYY` labels, loader, guidance on failed read.                                                                                                          | Same. Monthly workspace buckets and daily scoped buckets.                                                                              |
 | ANL-010 | Metric only `Work item` even with points estimation; fixed x list; split excludes x; every re-pick re-queries.                                                                                                    | Same. Settled as intended, not a bug.                                                                                                  |
-| ANL-011 | Priority and state colors; date labels current-year `MMM D`, other-year `MMM D, YYYY`, missing `None`; no legend; stacked schema order; only extreme ends rounded; first ten palette slots fixed; 11th generated. | Same. Palette comes from kit tokens; day-only grouping.                                                                                |
+| ANL-011 | Priority and state colors; date labels current-year `MMM D`, other-year `MMM D, YYYY`, missing `None`; no legend; stacked schema order; only extreme ends rounded; first ten palette slots fixed; 11th generated. | Same. Slice B adds the fixed ten-slot chart palette to kit tokens; day-only grouping.                                                  |
 | ANL-012 | `Priority`,`Count`; label `3 Priority`; rows repeat chart values; search and filtered export.                                                                                                                     | Same, generalized to the current x-axis label and optional split columns.                                                              |
 | ANL-013 | `Project`,`Backlog`,`Started`,`Unstarted`,`Completed`,`Cancelled`; `2 Projects`; five skeleton rows; guidance with zero count on failed read.                                                                     | Same.                                                                                                                                  |
 | ANL-014 | Project/cycle titles; module oracle has double space; spinner; wide toggle md+; scoped requests; close restores `All projects`; guest has no trigger.                                                             | Same, except the module title uses one space (declared corrected divergence). Scope is dialog-local; workspace picker unchanged.       |
@@ -858,9 +867,10 @@ components. The named Issues slices were reviewed as potential dependencies:
   does not render issue rows, filter controls, kanban cards, bulk actions,
   issue detail, or peek. Do not create edges to these.
 - Cycle trigger owner is NEWFRONT-712 (CYC-033); it already depends on slice E
-  and must not gain a reverse edge. Module trigger owner is MOD-032 under
-  NEWFRONT-82 and has no slice yet; analytics records that the trigger is
-  external and does not build a module trigger itself.
+  and must not gain a reverse edge. Module trigger owner is NEWFRONT-802
+  (Modules slice J, MOD-032, under NEWFRONT-82) and likewise needs no reverse
+  edge to slice E: it mounts the trigger and consumes this dialog. Analytics
+  records that both triggers are external and does not build either itself.
 
 The only genuinely shared pieces in this area are the project picker, project
 creation dialog, project marks and avatars, kit dialog/combobox/table/chart
