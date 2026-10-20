@@ -128,16 +128,19 @@ Project views:
   updated-at descending. Query: `fields` (comma list, optional). Response:
   array of records.
 - `POST BASE/views/` — create. Body: `name` (required, ≤255), `description`,
-  `logo_props`, `access` (cloud only), `rich_filters`, `filters`,
-  `display_filters`, `display_properties`. Responds 201 with the record.
-  Validation errors are 400 with field messages.
+  `logo_props`, `rich_filters`, `filters`, `display_filters`,
+  `display_properties`. No `access` and no `is_locked`: both are
+  serializer read-only fields, DRF drops them, and the model default
+  (`access = 1`, shared) applies in every edition. Responds 201 with the
+  record. Validation errors are 400 with field messages.
 - `GET BASE/views/{viewId}/` — retrieve. 200 with the record. A missing id
   currently answers 200 with a null body (bug NEWFRONT-227); a forbidden
   view answers 403/404. The contract must treat a null body as “not found”.
 - `PATCH BASE/views/{viewId}/` — update, owner only, refuses locked views
   with 400, refuses non-owners with 400. Body: any subset of the create
-  fields. Responds 200 with the record (the echo is the source of truth
-  after a save).
+  fields; `access` and `is_locked` are read-only and cannot be changed
+  through this endpoint. Responds 200 with the record (the echo is the
+  source of truth after a save).
 - `DELETE BASE/views/{viewId}/` — owner or admin. 204. The row is removed
   from list results; retrieve may still answer 200 for a deleted id, so
   list exclusion is the proof of deletion.
@@ -157,7 +160,8 @@ Workspace views:
   workspace guests see only their own). The server accepts `order_by` and
   defaults to newest first; the screen keeps that order. Array of records.
 - `POST WS/views/` — create. Body as the project create minus project.
-  New views default to the spreadsheet layout and an empty expression.
+  New views default to the spreadsheet layout and an empty expression, and
+  land shared (`access = 1`) for the same read-only reason.
 - `GET WS/views/{viewId}/` — retrieve; 200 with the record, missing/
   forbidden handled as above.
 - `PATCH WS/views/{viewId}/` — owner only, refuses locked views with 400.
@@ -185,9 +189,12 @@ Feature flags and favorites:
 
 Coverage the contracts issue owns: the list, retrieve (including the null
 body normalisation), create, patch echo, delete for both scopes; the
-favorites pair or a documented reuse of the generic favorites contract; and
-the list-read contract for the issue query the detail mounts. The thin
-`SavedView` schema already exists (ISS-104) — extend it, do not fork it.
+create and patch request types omit `access` and `is_locked` (a caller
+that types them as writable would build a selector whose writes are
+silently discarded); the favorites pair or a documented reuse of the
+generic favorites contract; and the list-read contract for the issue query
+the detail mounts. The thin `SavedView` schema already exists (ISS-104) —
+extend it, do not fork it.
 
 ## 3. S1 — Project views list shell, gate, states and row identity (VIEW-001, 002, 008, 009, 010, 011; NEWFRONT-719)
 
@@ -205,15 +212,15 @@ role rule.
 **Flag gate (VIEW-002).** When the project record has
 `issue_views_view === false`, the route does not render the header controls
 or any rows. Instead the whole content area shows a centered empty state:
-themed illustration, a heading stating that views are not enabled for the
-project, a short explanation that views can be turned on from project
-settings, and one primary button labelled "Manage features". The button is
-enabled only for a project admin and does nothing visually when disabled;
-for members and guests it still renders, disabled. Activating it navigates
-to the project's features settings screen (the per-feature route under
-`/{ws}/settings/projects/{p}/features/`), not the bare features index
-(§15, NEWFRONT-247). The gate replaces the skeleton: no list fetch is made
-while the gate shows, and no Add button renders.
+themed illustration, the heading `Views are not enabled for the project.`
+(oracle-asserted exactly), a short explanation that views can be turned on
+from project settings, and one primary button labelled "Manage features".
+The button is enabled only for a project admin and does nothing visually
+when disabled; for members and guests it still renders, disabled.
+Activating it navigates to the project's features settings screen (the
+per-feature route under `/{ws}/settings/projects/{p}/features/`), not the
+bare features index (§15, NEWFRONT-247). The gate replaces the skeleton:
+no list fetch is made while the gate shows, and no Add button renders.
 
 **Loading (VIEW-008).** While the first list fetch is in flight the screen
 shows a skeleton list of row placeholders sized like the real rows, inside
@@ -221,23 +228,24 @@ the same content frame. The skeleton is mutually exclusive with rows and
 with both empty states: once data arrives it is replaced in one commit.
 
 **Zero views (VIEW-009).** With a successful, empty list and no search or
-filters applied, the screen shows a themed illustration with a heading
-inviting the user to save custom views for the project, an explanation that
-views are saved filter sets for quick access and can be shared with
-teammates, and a primary "Create view" action that opens the create dialog.
-The action renders for every role that reached the list (guests included)
-and is disabled only by the same rule as the header Add button (§4): never
-disabled on OSS for a viewer of the list. In the cloud build where view
-creation is member-plus, the empty-state action is disabled for guests, as
-the oracle pins the enabled control for every role on OSS.
+filters applied, the screen shows a themed illustration with the heading
+`Save custom views for your project` (oracle-asserted exactly), an
+explanation that views are saved filter sets for quick access and can be
+shared with teammates, and a primary "Create view" action that opens the
+create dialog. The action renders for every role that reached the list
+(guests included) and is disabled only by the same rule as the header Add
+button (§4): never disabled on OSS for a viewer of the list. In the cloud
+build where view creation is member-plus, the empty-state action is
+disabled for guests, as the oracle pins the enabled control for every role
+on OSS.
 
 **No match (VIEW-010).** When the list is non-empty but the combination of
 name search and list filters excludes every view, the screen shows a
-search-themed empty state: heading "No matching results." with a
-suggestion to adjust the search terms. It never mutates or filters the
-underlying list data; clearing the query or filters restores the rows in
-their sorted order. If the project has no views at all, VIEW-009 wins even
-with a search typed.
+search-themed empty state: heading `No matching results.` (oracle-asserted
+exactly) with a suggestion to adjust the search terms. It never mutates or
+filters the underlying list data; clearing the query or filters restores
+the rows in their sorted order. If the project has no views at all,
+VIEW-009 wins even with a search typed.
 
 **Row identity (VIEW-011).** Each row shows, left to right: the view's
 custom logo when `logo_props.in_use` is set (emoji or glyph icon, 16px),
@@ -251,8 +259,11 @@ any link). On narrow viewports the row's quick menu moves into the row and
 the action cluster collapses to the star plus menu.
 
 Empty and error copy for this screen must match the oracle-asserted
-strings exactly: the gate heading, "Manage features", "All Views" and the
-tab-title separator are parity-pinned by the driver.
+strings exactly. Pinned by the driver: the gate heading
+`Views are not enabled for the project.`; the zero-views heading
+`Save custom views for your project`; the no-match heading
+`No matching results.`; "Manage features"; "All Views"; and the tab-title
+separator. Everything else in these states is free prose.
 
 ## 4. S2 — List search, sort, filters and applied chips (VIEW-004–007; NEWFRONT-720)
 
@@ -293,7 +304,10 @@ trigger).
 **Filters (VIEW-006).** The filters menu opens a panel with its own search
 box that narrows the *options* (not the rows) by name. Dimensions:
 - Favorites — a single on/off row; when on, only rows whose
-  `is_favorite` is true stay.
+  `is_favorite` is true stay. The panel's option search shows the
+  oracle-asserted `No matches found` line when the query matches no
+  option; that line belongs to the issues-owned filter-section primitive
+  (ISS-094), so S2 reuses it rather than writing a views-local one.
 - Access — shared/owner-only multi-select. It is a **cloud-only** dimension:
   the OSS build renders no Access section at all (probe: the panel has no
   Access heading and no access values). The list filter, when present,
@@ -376,8 +390,11 @@ close it while a submit is pending. Closing discards everything.
 
 **Submit (VIEW-014, VIEW-019).** Submitting validates locally first (title
 required, ≤255) and then POSTs `BASE/views/` with: `name`, `description`,
-`logo_props`, `access` when the selector exists, `rich_filters`,
-`display_filters`, `display_properties`. The layout key is included in
+`logo_props`, `rich_filters`, `display_filters`, `display_properties`.
+The body carries no `access` in any edition: the field is serializer
+read-only, so a selector value sent here would be dropped and every create
+would still land shared. A cloud access choice writes through the cloud
+path decided in §14, never through this body. The layout key is included in
 `display_filters`; a Board layout without a grouping is sent with
 `group_by: "state"` (a create-time normalization the oracle pins). On 201
 the dialog closes, a success notice "View created successfully" appears, and
@@ -386,12 +403,16 @@ the router navigates to the new view's detail page. On failure the dialog
 failure ("Failed to create view…"), and nothing is created. Old bug:
 failure wiped the form (NEWFRONT-221); intended is keep-and-retry.
 
-**Access selector (VIEW-019).** Cloud only. The shared option is selected by
-default; owner-only explains that only the owner will see the view. The
-choice is sent as `access` (1 or 0) on create and on edit; the list badge,
-the Access list filter (§4) and the detail lock glyph (§7) all follow the
-stored value. OSS sends no `access` and the server default (shared) applies.
-The cloud leg is proved per §16.
+**Access selector (VIEW-019).** Cloud only, and only once the cloud
+access write path exists (§14): `access` is read-only on the create and
+patch endpoints, so the selector cannot ride the OSS body in any edition.
+Target: the shared option is selected by default; owner-only explains that
+only the owner will see the view. The cloud build's own write path stores
+the value; the list badge, the Access list filter (§4) and the detail lock
+glyph (§7) then follow the stored record. OSS renders no selector and every
+created view is shared by the model default. The read side is proven per
+§14/§16 by planting `access` on the record through the server and reading
+it back; nothing writes it from the dialog.
 
 ## 6. S4 — Favorite, row menu, edit, delete, publish (VIEW-012, 015–018, 020; NEWFRONT-722)
 
@@ -415,10 +436,12 @@ sits after Copy link. Each action is a menu item with an icon; choosing one
 closes the menu. A click on a menu item never triggers the row link.
 
 **Edit (VIEW-015).** Edit opens the same dialog as create, in "Update View"
-mode, prefilled from the record: title, description, icon, access (cloud),
-layout, display options and the stored expression. Saving PATCHes
-`BASE/views/{viewId}/` with the changed fields and the normalized payload
-(same keys as create, including the layout and display objects). Success is
+mode, prefilled from the record: title, description, icon, layout, display
+options and the stored expression; the cloud build shows the record's
+access read-only beside its own access write path (§14), because `access`
+cannot be patched on this API. Saving PATCHes `BASE/views/{viewId}/` with
+the changed fields and the normalized payload (same writable keys as
+create, including the layout and display objects). Success is
 **silent** — no success toast — closes the dialog and refreshes the list row
 and the view's live filter state from the PATCH echo; the detail page, if
 open behind, adopts the echoed stored values. Failure shows an error notice
@@ -482,10 +505,12 @@ area's (NEWFRONT-71); this area only hands the layout root (a) the stored
 expression, (b) the stored `order_by`, (c) the stored display settings, and
 (d) the saved view record. The list query is the generic project issue list
 with the expression serialized; **there is no per-view issues endpoint**
-(dead code, §17). A zero-result list shows the layout's own empty state; a
-matched-but-empty page shows the no-match state. Sampling proves the set:
-an urgent-only expression shows urgent issues and hides low-priority ones,
-and the same set follows into another layout.
+(dead code, §17). A zero-result list shows the layout's own empty state,
+whose heading is the oracle-asserted `View work items will appear here`
+(the layout owns the rest of the copy; the views area does not re-render
+it); a matched-but-empty page shows the no-match state. Sampling proves
+the set: an urgent-only expression shows urgent issues and hides low-priority
+ones, and the same set follows into another layout.
 
 **Missing or forbidden (VIEW-022).** Any read failure that means "this view
 is not visible to you" — 404, 403, or a 200 with a null body (the observed
@@ -546,8 +571,9 @@ filters. Its Save as/Update view triggers are the issues-owned controls from
 area's dialog without changing the payload**: the row computes the same
 snapshot (normalized expression, display filters, display properties) and
 hands it to the views-owned create/edit dialog; the dialog adds only the
-view-specific fields (name, description, icon, access, and cloud publish) and
-POSTs/PATCHes the same keys. The views area owns the dialog chrome; the
+view-specific fields (name, description, icon, and the cloud access/publish
+path) and POSTs/PATCHes the same keys — never `access` or `is_locked`,
+which the API ignores (§1). The views area owns the dialog chrome; the
 issues area owns the builder and the snapshot. Save as opens the create
 dialog prefilled with the current snapshot; Update view is offered only for
 the owner of an unlocked, changed, non-default view and PATCHes that record
@@ -573,26 +599,37 @@ settles; when it does not match, it does not appear. The view record is never
 modified by adding an item. No quick-add affordance is added by this area;
 the layouts' own quick-add behavior belongs to the issues area.
 
-**Save as (VIEW-048).** When the live expression or display state differs
-from the record (a dirty view), the filter row offers a Save-as trigger next
-to Update view. Save as opens the create dialog prefilled with:
-- the current name plus a flat ` 2` suffix (exactly `${name} 2`; it is not a
-  counter and does not append further copies when that name exists),
-- the record's description, icon and access (cloud) unchanged,
-- the live expression and display snapshot.
+**Save as (VIEW-048).** When the view is dirty — the live expression or
+display state differs from the record — the filter row offers a Save-as
+trigger next to Update view. Save as opens the create dialog prefilled with
+exactly two things:
+- the current record name plus a flat ` 2` suffix (exactly `${name} 2`;
+  it is not a counter and does not append further copies when that name
+  already exists),
+- the live expression and display snapshot from the filter row.
 
-A record with no name prefills a localized placeholder name, not a copied
-string. The user may change any field. Saving POSTs a new project view with
-the current payload and navigates to the new view's detail; the original
-record is untouched.
+It does not carry the record's description, icon or access; those stay at
+the dialog's create defaults. A record with no name prefills a localized
+placeholder name, not a copied string. The user may change any field.
+Saving POSTs a new project view with the current payload and navigates to
+the new view's detail; the original record is untouched. The oracle asserts
+the `${name} 2` prefill, the duplicate's presence in the list, and the
+snapshot it was created from; it asserts nothing about carried metadata.
 
-**Intended tightening.** Save as is offered only when the view is dirty,
-even if the record already stores a filter expression. The old row offered
-it whenever any filter existed, which let a user duplicate an already-saved
-view without changing anything. VIEW-048's acceptance text ("after any
-unsaved filter or layout change") is the target; the gate proves Save as is
-**absent** on an unchanged view with stored filters as well as present after
-a change, so the narrowing is deliberate rather than a lost capability.
+**Rework S6 owns (NEWFRONT-724).** Today's `apps/web_new` row comes from
+the issues area and must change in two ways:
+- `offersSaveAs` currently offers Save as on any unlocked saved view, clean
+  or dirty, and the issues unit test asserts that clean-view offer. The
+  target is dirty-only: even when the record already stores a filter
+  expression, Save as is **absent** until something changes. The old app
+  offered it whenever any filter existed, which let a user duplicate an
+  already-saved view without changing anything. VIEW-048's acceptance text
+  ("after any unsaved filter or layout change") is the target; the gate
+  proves both the absent clean case and the present dirty case, so the
+  narrowing is deliberate rather than a lost capability.
+- The prefill stays exactly name plus snapshot as above. Carrying any
+  further record field is a new behavior, not the ported one, and would
+  need its own proof.
 
 ## 9. S7 — Workspace list, defaults, custom rows and loading (VIEW-029–032, 039; NEWFRONT-725)
 
@@ -666,19 +703,21 @@ workspace detail header and the strip's trailing add button open the
 workspace create dialog. Both are offered to workspace members and admins
 and hidden for guests (VIEW-038's acceptance text); the oracle records the
 old app rendering the detail Add for guests as a gap the slices correct. Fields:
-title (required, ≤255, inline errors), description, access (cloud only),
+title (required, ≤255, inline errors), description, the cloud access
+control (read-only access on this API — its write path is §14's),
 Display (fixed to the spreadsheet set — no layout picker, no Sub-group by),
 and the workspace-level rich filter builder, mounted expanded. Submitting
-POSTs `WS/views/` with the title, description, access (cloud),
+POSTs `WS/views/` with the title, description,
 `display_filters` (spreadsheet, ordering default newest first),
-`display_properties` and `rich_filters`. Success toasts "View created
+`display_properties` and `rich_filters`; the view lands shared. Success toasts "View created
 successfully" and navigates to the new view's detail. Failure toasts an
 error ("View could not be created…") and keeps the dialog open with input
 intact. Escape and Cancel close without saving.
 
 **Edit (VIEW-035).** The dialog opens prefilled from the record's current
-title, description, access (cloud), display settings and expression. Saving
-PATCHes `WS/views/{viewId}/`, adopts the echo, refreshes the live filter
+title, description, display settings and expression (cloud access is
+read-only and cannot be patched). Saving PATCHes `WS/views/{viewId}/`,
+adopts the echo, refreshes the live filter
 state of the open detail, and shows a success notice whose text contains
 `updated successfully` (the wording beyond that fragment is the slice's).
 Failure shows the error notice and keeps the dialog open on the entered
@@ -791,9 +830,10 @@ their page.
 view/Save as/Update view triggers are issues-owned. They must call into the
 views-owned dialog (§8) with the same payload computed by
 `buildViewCreate`/`buildViewPatch` in the issues feature: `name`,
-`description`, `rich_filters`, `display_filters`, `display_properties`, and
-in the cloud `access`/publish fields. The views dialog must not re-serialize
-the expression or the display settings differently. Update view remains
+`description`, `rich_filters`, `display_filters`, `display_properties`.
+The views dialog must not re-serialize the expression or the display
+settings differently, and it adds no `access` (read-only, §1) and no
+publish field to that payload. Update view remains
 owner/unlocked/changed-gated; default workspace views never update. When this
 slice lands, the issues area's minimal save form is replaced by the real
 dialog and the issues gate keeps passing.
@@ -918,12 +958,15 @@ What each leg covers:
 
 **Slot decision.** At least one of these three rows needs a new edition
 slot: access/publish have no seam today, so the cloud build cannot add the
-selector or publish entry without one. Adding a slot (its name, its
-position, and which edition fills it) is a **Decisions-page decision** — the
-PR that needs one must name it on "Decisions and open questions" and link
-this issue. The spec does not settle it; until that decision lands, the
-slices build the OSS legs and the local seam modules only, never an ad-hoc
-condition on the OSS build.
+selector or publish entry without one. The access slot is also the **write
+path**: `access` is serializer read-only (§1), so the cloud selector's
+value cannot ride the OSS create or patch body; the slot must own its own
+call. Adding a slot (its name, its position, which edition fills it, and
+where its write goes) is a **Decisions-page decision** — the PR that needs
+one must name it on "Decisions and open questions" and link this issue. The
+spec does not settle it; until that decision lands, the slices build the
+OSS legs and the local seam modules only, never an ad-hoc condition on the
+OSS build.
 
 **Blocked cloud leg.** If a cloud edition of `web_new` cannot be built in
 the checkout the gate runs in, the gate marks each cloud leg
@@ -1063,9 +1106,12 @@ Confirmed dead in the old app and **not** carried into the target:
 - `getViewIssues` in the project view service targets
   `BASE/views/{viewId}/issues/`, which the server does not route. The
   detail must use the generic issue list with the stored expression (§7).
-- The per-view issue store and workspace issue store classes in the
-  project-views folder are type-only or superseded; behavior flows through
-  the filter store and the generic list.
+- The old per-view issue store is live, not type-only: it is constructed by
+  the root store and fetches through the generic issue list with the view's
+  expression. Only its `getViewIssues` service method (the unrouted
+  `/issues/` endpoint) is dead. The workspace issue store class is
+  superseded by the filter store; do not rebuild either store, but do keep
+  the filter-store fetch wiring the new tree already has.
 - The `ce` re-export stores for project views, global views and team views
   are pure re-exports or never-used subclasses.
 - Analytics element ids on the header buttons are dropped by decision (see
@@ -1087,7 +1133,8 @@ for VIEW-019/020/040). For every row:
 - A cloud leg that cannot run is `blocked: <reason>`, files one fix
   sub-issue and does not hold the area (§14); the row stays `oracle green`.
 On 100% green the gate adds the views path prefixes to the migrated-route
-list (F-09) and moves the epic to Done; on a real failure it files fix
+list (F-09); the epic can close once every one of its rows is green, and
+the gate does not move the epic itself. On a real failure it files fix
 sub-issues and waits on them.
 
 ## 19. Reuse map (survey of `apps/web_new` on `web-new-dev`)
