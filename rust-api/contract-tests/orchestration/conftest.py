@@ -7,6 +7,9 @@ relations endpoints, and Celery tasks published in wire format. Asserts read
 the engine's tables (issue_agent_ticker, agent_run, issues, issue_comments).
 """
 
+import base64
+import hashlib
+
 import httpx
 import pytest
 
@@ -41,3 +44,44 @@ def api_client():
 
     w = world.build("oc")
     return w, api.Api(w.api_key)
+
+
+# -- web (app-tier) client ------------------------------------------------
+#
+# The web issue PATCH lives at /api/workspaces/<slug>/projects/<pid>/issues/
+# and authenticates with the ``session-id`` cookie, not ``X-Api-Key``. Forge
+# a DB session exactly like the app_issues suite (stdlib HMAC keyed by the
+# pinned test SECRET_KEY); the seeded user's password field is overwritten to
+# a known pbkdf2 hash so the forged ``_auth_user_hash`` verifies.
+
+_WEB_PW_SALT = "cts1216seed"
+_WEB_DK = hashlib.pbkdf2_hmac("sha256", b"cts1216-password", _WEB_PW_SALT.encode(), 10000)
+WEB_PASSWORD_FIELD = "pbkdf2_sha256$10000$%s$%s" % (
+    _WEB_PW_SALT,
+    base64.b64encode(_WEB_DK).decode(),
+)
+
+
+@pytest.fixture
+def web_client():
+    from _harness import world
+    from _harness.auth import authed_client, forge_session_key, get_secret_key
+
+    w = world.build("ocw")
+    with db.connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE users SET password = %s WHERE id = %s",
+                (WEB_PASSWORD_FIELD, w.user_id),
+            )
+        session_key = forge_session_key(
+            conn,
+            user_id=w.user_id,
+            password_field=WEB_PASSWORD_FIELD,
+            secret=get_secret_key(),
+        )
+    client = authed_client(env.BASE_URL, session_key)
+    try:
+        yield w, client
+    finally:
+        client.close()

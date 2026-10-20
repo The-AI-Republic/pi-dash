@@ -76,7 +76,6 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use sqlx::Row;
 
-use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_db::app_pages::strip::sync_description_stripped;
 use pidash_db::tasks_ticker::models::issue_agent_ticker::{
     IssueAgentTicker, COLUMNS as TICKER_COLUMNS, TABLE as TICKER_TABLE,
@@ -88,25 +87,12 @@ use pidash_services::app_issues::{
     IssueDetailBaseRow, IssueDetailRow, ListParams, ParseOptions, GITHUB_ISSUE_SYNC_PROBE_SQL,
     GIT_ISSUE_SYNC_PROBE_SQL,
 };
-use pidash_services::dispatch::policy::UserFlags;
 use pidash_services::orchestration::blockers::{
     has_open_blockers_sql, relations_summary, summary_sql, BlockerRow,
 };
 use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_services::orchestration::creation::{
-    AdmissionError, ExecutionFields, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView,
-    RenderBundle, RenderedTurn, RunView, RunnerView, StateView,
-};
-use pidash_services::orchestration::creation::{
-    CreationError, CreationSeam, ExecutionError, ExecutionRequest, FinalizeAgentRunSeam,
-    STATE_SELECT_SQL,
-};
-use pidash_services::orchestration::entries::{
-    capture_prior_state, fire_state_transition, EntriesSeam, FireOutcome, FireRequest,
-    PreflightSeam, CLOCK_POLICY_SQL, PRIOR_STATE_SELECT_SQL,
-};
-use pidash_services::prompting::composer::OverrideRow;
-use pidash_types::dispatch::AgentExecutorKind;
+use pidash_services::orchestration::creation::STATE_SELECT_SQL;
+use pidash_services::orchestration::entries::{FireOutcome, FireRequest, CLOCK_POLICY_SQL};
 use pidash_types::orchestration::StateRef;
 
 use super::queries_core::{archive_retrieve_sql, archive_scope_where, ARCHIVE_JOINS};
@@ -1330,10 +1316,7 @@ pub async fn archive_issue(
     enqueue_activity(&context.pool, kwargs).await;
     // `save()`: the pre-save snapshot, the write with its recomputes,
     // then the explicit post-save fire.
-    let mut seam = ArchiveSignalSeam {
-        pool: &context.pool,
-    };
-    let prev = capture_prior_state(&mut seam, Some(issue_id))
+    let prev = crate::issue_transition::capture_prior_state_pool(&context.pool, Some(issue_id))
         .await
         .map_err(|_| Denial::ServerError)?;
     let now = chrono::Utc::now();
@@ -1354,7 +1337,9 @@ pub async fn archive_issue(
         .await
         .map_err(|_| Denial::ServerError)?;
     fire_after_save(
+        &state,
         &context.pool,
+        context.gate.user_id,
         issue_id,
         prev,
         row.state_id,
@@ -1416,10 +1401,7 @@ pub async fn unarchive_issue(
     // `save()` state half: NULL takes the default-state assignment (and
     // skips the `completed_at` recompute); a set id with no row raises
     // `DoesNotExist` (404) — after the enqueue, like the `save()` raise.
-    let mut seam = ArchiveSignalSeam {
-        pool: &context.pool,
-    };
-    let prev = capture_prior_state(&mut seam, Some(issue_id))
+    let prev = crate::issue_transition::capture_prior_state_pool(&context.pool, Some(issue_id))
         .await
         .map_err(|_| Denial::ServerError)?;
     let now = chrono::Utc::now();
@@ -1451,7 +1433,9 @@ pub async fn unarchive_issue(
         .await
         .map_err(|_| Denial::ServerError)?;
     fire_after_save(
+        &state,
         &context.pool,
+        context.gate.user_id,
         issue_id,
         prev,
         state_id,
@@ -2030,21 +2014,23 @@ async fn fetch_bulk_issues(
 /// I/O; a failed handler is logged with the verbatim line (the counter
 /// already bumped inside) and the save stands; only a *lookup* storage
 /// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition`.
+/// `fire_state_transition`. Drives the one live seam (PIDASHCONV-1216).
+#[allow(clippy::too_many_arguments)]
 async fn fire_after_save(
+    state: &AppState,
     pool: &sqlx::PgPool,
+    actor_id: uuid::Uuid,
     issue_id: uuid::Uuid,
     prev_state_id: Option<uuid::Uuid>,
     current_state_id: Option<uuid::Uuid>,
     created_by: Option<uuid::Uuid>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), Denial> {
-    let mut seam = ArchiveSignalSeam { pool };
-    let mut preflight = ArchivePreflight;
-    let outcome = fire_state_transition(
-        &mut seam,
-        &mut preflight,
-        &FireRequest {
+    let outcome = crate::issue_transition::fire_issue_transition(
+        state,
+        pool,
+        actor_id,
+        FireRequest {
             issue_id,
             prev_state_id,
             current_state_id,
@@ -2063,335 +2049,12 @@ async fn fire_after_save(
     Ok(())
 }
 
-/// The live 594 seam for the archive saves. Only two methods can run
-/// here: [`EntriesSeam::prior_state_id`] (the pre-save snapshot) and
-/// [`CreationSeam::state`] (the transition's state lookups) — the fire
-/// short-circuits on equal states before any other seam use, and the one
-/// reachable transition (NULL-state unarchive assigning a non-ticking
-/// default) early-returns before the drivers run. The remaining arms
-/// answer a store error, which the fire swallows like a handler raise
-/// (counter + log line, save stands) rather than crashing the request.
-struct ArchiveSignalSeam<'a> {
-    pool: &'a sqlx::PgPool,
-}
-
-/// The archive saves never dispatch, so preflight never runs.
-struct ArchivePreflight;
-
-fn seam_unreachable<T>(method: &str) -> Result<T, CreationError> {
-    Err(CreationError::Db(format!(
-        "archive signal seam: {method} runs only past a state change"
-    )))
-}
-
-impl CreationSeam for ArchiveSignalSeam<'_> {
-    async fn issue(&mut self, _issue_id: uuid::Uuid) -> Result<IssueView, CreationError> {
-        seam_unreachable("issue")
-    }
-
-    async fn project(&mut self, _project_id: uuid::Uuid) -> Result<ProjectView, CreationError> {
-        seam_unreachable("project")
-    }
-
-    async fn state(
-        &mut self,
-        state_id: Option<uuid::Uuid>,
-    ) -> Result<Option<StateView>, CreationError> {
-        let Some(state_id) = state_id else {
-            return Ok(None);
-        };
-        let row: Option<(uuid::Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        match row {
-            None => Err(CreationError::MissingRow(format!(
-                "states row {state_id} is gone"
-            ))),
-            Some((id, name, group)) => Ok(Some(StateView { id, name, group })),
-        }
-    }
-
-    async fn latest_prior_run(
-        &mut self,
-        _issue_id: uuid::Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("latest_prior_run")
-    }
-
-    async fn active_run_for(
-        &mut self,
-        _issue_id: uuid::Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("active_run_for")
-    }
-
-    async fn run(&mut self, _run_id: uuid::Uuid) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("run")
-    }
-
-    async fn runner(
-        &mut self,
-        _runner_id: uuid::Uuid,
-    ) -> Result<Option<RunnerView>, CreationError> {
-        seam_unreachable("runner")
-    }
-
-    async fn assigned_pod(
-        &mut self,
-        _pod_id: uuid::Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        seam_unreachable("assigned_pod")
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        _project_id: uuid::Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        seam_unreachable("default_pod_for_project")
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        _issue_id: uuid::Uuid,
-    ) -> Result<Option<uuid::Uuid>, CreationError> {
-        seam_unreachable("resume_parent_run_id")
-    }
-
-    async fn work_item_id_for_run(
-        &mut self,
-        _run_id: uuid::Uuid,
-    ) -> Result<Option<uuid::Uuid>, CreationError> {
-        seam_unreachable("work_item_id_for_run")
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        _issue_id: uuid::Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        seam_unreachable("lock_issue_for_handoff")
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        _run_id: uuid::Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("lock_run_for_handoff")
-    }
-
-    async fn user_flags(&mut self, _user_id: uuid::Uuid) -> Result<UserFlags, CreationError> {
-        seam_unreachable("user_flags")
-    }
-
-    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
-        seam_unreachable("insert_run")
-    }
-
-    async fn save_prompt(
-        &mut self,
-        _run_id: uuid::Uuid,
-        _prompt: &str,
-        _manifest: &Value,
-    ) -> Result<(), CreationError> {
-        seam_unreachable("save_prompt")
-    }
-
-    async fn save_run_config(
-        &mut self,
-        _run_id: uuid::Uuid,
-        _config: &Value,
-    ) -> Result<(), CreationError> {
-        seam_unreachable("save_run_config")
-    }
-
-    async fn execution_fields(
-        &mut self,
-        _req: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        Err(CreationError::Db(
-            "archive signal seam: execution_fields runs only past a state change".to_owned(),
-        )
-        .into())
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        _workspace_id: uuid::Uuid,
-        _executor_kind: AgentExecutorKind,
-        _automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        seam_unreachable("lock_cloud_creation_capacity")
-    }
-
-    fn dispatch_after_commit(&mut self, _run_id: uuid::Uuid) {}
-
-    async fn render_bundle(
-        &mut self,
-        _issue_id: uuid::Uuid,
-        _run_id: uuid::Uuid,
-        _parent_run_id: Option<uuid::Uuid>,
-        _trigger: &str,
-        _created_by_id: uuid::Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        seam_unreachable("render_bundle")
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        String::new()
-    }
-}
-
-impl FinalizeAgentRunSeam for ArchiveSignalSeam<'_> {
-    async fn finalize_failed_run(
-        &mut self,
-        _run_id: uuid::Uuid,
-        _error_code: &str,
-        _error: &str,
-        _now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<RunView, CreationError> {
-        seam_unreachable("finalize_failed_run")
-    }
-}
-
-impl EntriesSeam for ArchiveSignalSeam<'_> {
-    async fn prior_state_id(
-        &mut self,
-        issue_id: uuid::Uuid,
-    ) -> Result<Option<uuid::Uuid>, CreationError> {
-        let row: Option<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        Ok(row.and_then(|(_, state_id)| state_id))
-    }
-
-    async fn queued_follow_up(
-        &mut self,
-        _issue_id: uuid::Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("queued_follow_up")
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        _issue_id: uuid::Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        seam_unreachable("lock_ticker")
-    }
-
-    async fn save_ticker(
-        &mut self,
-        _row: &IssueAgentTicker,
-        _write: pidash_services::orchestration::clock::ClockWrite,
-    ) -> Result<(), CreationError> {
-        seam_unreachable("save_ticker")
-    }
-
-    fn set_rollback(&mut self) {}
-
-    async fn clock_policy(
-        &mut self,
-        _project_id: uuid::Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        seam_unreachable("clock_policy")
-    }
-
-    async fn binding(
-        &mut self,
-        _binding_id: uuid::Uuid,
-    ) -> Result<pidash_services::orchestration::entries::BindingView, CreationError> {
-        seam_unreachable("binding")
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        _pod_id: uuid::Uuid,
-        _project_id: Option<uuid::Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        seam_unreachable("scheduler_override_pod")
-    }
-
-    async fn workspace(
-        &mut self,
-        _workspace_id: uuid::Uuid,
-    ) -> Result<pidash_services::orchestration::entries::WorkspaceView, CreationError> {
-        seam_unreachable("workspace")
-    }
-
-    async fn scheduler_row(
-        &mut self,
-        _scheduler_id: uuid::Uuid,
-    ) -> Result<pidash_services::orchestration::entries::SchedulerView, CreationError> {
-        seam_unreachable("scheduler_row")
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        _workspace_id: uuid::Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        seam_unreachable("scheduler_override_rows")
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        _user_id: uuid::Uuid,
-        _workspace_slug: &str,
-        _project_id: uuid::Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        seam_unreachable("project_role_facts")
-    }
-
-    async fn has_usable_llm_config(&mut self, _user_id: uuid::Uuid) -> Result<bool, CreationError> {
-        seam_unreachable("has_usable_llm_config")
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<
-        Result<uuid::Uuid, pidash_db::orchestration::workpad::AgentUserCollisionError>,
-        CreationError,
-    > {
-        seam_unreachable("agent_system_user")
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        _row: &pidash_services::orchestration::entries::NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        seam_unreachable("insert_scheduler_run")
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        _context: &Value,
-        _index: &pidash_services::prompting::composer::OverrideIndex,
-        _workspace_id: Option<&str>,
-        _executor_kind: Option<&str>,
-        _tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        Err("archive signal seam: compose_scheduler_turn runs only past a state change".to_owned())
-    }
-}
-
-impl PreflightSeam for ArchivePreflight {
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        _issue_id: uuid::Uuid,
-        _creator_id: uuid::Uuid,
-        _pod_id: uuid::Uuid,
-        _triggered_by: &str,
-    ) -> Result<bool, CreationError> {
-        seam_unreachable("preflight_eligibility_or_bounce")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::v1_cycles_modules::json_cpython::parse_request_bytes;
     use pidash_services::app_issues::{ISSUE_DETAIL_ARCHIVE_FIELDS, ISSUE_DETAIL_BASE_FIELDS};
+    use pidash_services::orchestration::entries::fire_state_transition;
 
     fn uid(n: u128) -> uuid::Uuid {
         uuid::Uuid::from_u128(n)
@@ -2896,8 +2559,8 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgresql://127.0.0.1:1/archive_probe")
             .expect("lazy pool");
-        let mut seam = ArchiveSignalSeam { pool: &pool };
-        let mut preflight = ArchivePreflight;
+        let mut seam = crate::issue_transition::test_support::LazyStateSeam { pool: &pool };
+        let mut preflight = crate::issue_transition::test_support::UnreachedPreflight;
         let now = chrono::Utc::now();
         let outcome = fire_state_transition(
             &mut seam,
@@ -2927,8 +2590,8 @@ mod tests {
             .acquire_timeout(std::time::Duration::from_secs(2))
             .connect_lazy("postgresql://127.0.0.1:1/archive_probe")
             .expect("lazy pool");
-        let mut seam = ArchiveSignalSeam { pool: &pool };
-        let mut preflight = ArchivePreflight;
+        let mut seam = crate::issue_transition::test_support::LazyStateSeam { pool: &pool };
+        let mut preflight = crate::issue_transition::test_support::UnreachedPreflight;
         let now = chrono::Utc::now();
         let outcome = fire_state_transition(
             &mut seam,

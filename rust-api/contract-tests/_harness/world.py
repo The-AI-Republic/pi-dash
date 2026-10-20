@@ -212,6 +212,40 @@ def make_run(issue_id: str, workspace_id: str, creator_id: str, pod_id: str,
     return run_id
 
 
+def make_online_runner(owner_id: str, workspace_id: str, pod_id: str,
+                       name: str | None = None) -> str:
+    """Seed an online runner row bound to `pod_id` and owned by `owner_id`.
+
+    Satisfies the general (non-managed) dispatch matcher
+    (`pod_has_runner_general_sql`): owner in the issue's eligible owner set,
+    in the pod, `status='online'`, `provisioning != 'desktop_bundled'`.
+    """
+    runner_id = uid()
+    _exec(
+        """INSERT INTO runner
+               (id, owner_id, workspace_id, pod_id, name, host_label,
+                provisioning, visibility, status, capabilities,
+                os, arch, runner_version,
+                refresh_token_hash, refresh_token_fingerprint,
+                refresh_token_generation, previous_refresh_token_hash,
+                access_token_signing_key_version,
+                enrollment_token_hash, enrollment_token_fingerprint,
+                enrolled_at, revoked_at, revoked_reason,
+                dev_machine_id, dev_metadata, protocol_version,
+                created_at, updated_at)
+           VALUES (%s,%s,%s,%s,%s,'', 'manual',0,'online','[]',
+                   '','','',
+                   '','',0,'',1,
+                   '','',
+                   NULL,NULL,'',
+                   NULL,'{}',1,
+                   now(),now())""",
+        (runner_id, owner_id, workspace_id, pod_id,
+         name or f"runner-{secrets.token_hex(4)}"),
+    )
+    return runner_id
+
+
 def make_pod(workspace_id: str, project_id: str, name: str | None = None,
              *, is_default: bool = False) -> str:
     pod_id = uid()

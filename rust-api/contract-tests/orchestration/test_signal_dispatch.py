@@ -119,3 +119,168 @@ def test_non_trigger_state_creates_no_ticker(api_client):
                            {"state": w.states["Unstarted"]["id"]})
     assert r.status_code == 200, r.text
     assert _ticker(issue) is None
+
+
+# ---------------------------------------------------------------------------
+# PIDASHCONV-1216: entering/leaving the bucket from the web (app-tier) surface
+# and the v1 create path, with an eligible runner so the entry run is created.
+# ---------------------------------------------------------------------------
+
+
+def _web_base(w):
+    return f"/api/workspaces/{w.workspace_slug}/projects/{w.project_id}"
+
+
+def _issue_run(issue_id):
+    return db.fetchone(
+        get_database_url(),
+        "SELECT status, trigger FROM agent_run WHERE work_item_id=%s "
+        "ORDER BY created_at DESC LIMIT 1",
+        (issue_id,),
+    )
+
+
+def _runner_world(w):
+    """A default pod with one online runner owned by the issue creator."""
+    pod = world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    world.make_online_runner(w.user_id, w.workspace_id, pod)
+    return pod
+
+
+def test_web_enter_bucket_arms_ticker_and_creates_queued_run(web_client):
+    """Web PATCH Backlog → In Progress with an eligible runner: the ticker
+    arms (enabled, next_run_at) and a QUEUED/assigned state-transition run
+    appears for the issue (PIDASHCONV-1216)."""
+    w, client = web_client
+    _runner_world(w)
+    issue = world.make_issue(w, "webenter", "Backlog")
+    assert _ticker(issue) is None
+
+    r = client.patch(
+        f"{_web_base(w)}/issues/{issue}/",
+        json={"state": w.states["In Progress"]["id"]},
+    )
+    assert r.status_code == 204, r.text
+
+    assert _issue_state(issue) == w.states["In Progress"]["id"]
+    tick = _ticker(issue)
+    assert tick is not None
+    assert tick["enabled"] is True
+    assert tick["next_run_at"] is not None
+    run = _issue_run(issue)
+    assert run is not None, "entry run was not created"
+    assert run["status"] in ("queued", "assigned")
+    assert run["trigger"] == "state_transition"
+
+
+def test_v1_enter_bucket_creates_queued_run(api_client):
+    """v1 PATCH Backlog → In Progress with an eligible runner: ticker arms and
+    the entry run is created (PIDASHCONV-1216)."""
+    w, client = api_client
+    _runner_world(w)
+    issue = world.make_issue(w, "v1enter", "Backlog")
+
+    r = client.patch_issue(
+        w.workspace_slug, w.project_id, issue, {"state": w.states["In Progress"]["id"]}
+    )
+    assert r.status_code == 200, r.text
+
+    tick = _ticker(issue)
+    assert tick is not None
+    assert tick["enabled"] is True
+    assert tick["next_run_at"] is not None
+    run = _issue_run(issue)
+    assert run is not None, "entry run was not created"
+    assert run["status"] in ("queued", "assigned")
+    assert run["trigger"] == "state_transition"
+
+
+def test_v1_create_directly_in_progress_creates_queued_run(api_client):
+    """v1 POST create directly in In Progress: the new row has no prior state,
+    so the fire arms the clock and creates the entry run (PIDASHCONV-1216)."""
+    w, client = api_client
+    _runner_world(w)
+
+    r = client.client.post(
+        f"/api/v1/workspaces/{w.workspace_slug}/projects/{w.project_id}/work-items/",
+        json={"name": "v1-create-in-progress", "state": w.states["In Progress"]["id"]},
+    )
+    assert r.status_code == 201, r.text
+    issue = r.json()["id"]
+
+    tick = _ticker(issue)
+    assert tick is not None
+    assert tick["enabled"] is True
+    assert tick["next_run_at"] is not None
+    run = _issue_run(issue)
+    assert run is not None, "entry run was not created"
+    assert run["status"] in ("queued", "assigned")
+    assert run["trigger"] == "state_transition"
+
+
+def test_web_leave_bucket_disarms(web_client):
+    """Web PATCH In Progress → Done disarms the ticker (left_ticking_state)."""
+    w, client = web_client
+    issue = world.make_issue(w, "webleave", "In Progress")
+    world.set_ticker(issue, used=3, granted=0, waited=0)
+
+    r = client.patch(
+        f"{_web_base(w)}/issues/{issue}/", json={"state": w.states["Done"]["id"]}
+    )
+    assert r.status_code == 204, r.text
+
+    tick = _ticker(issue)
+    assert tick["enabled"] is False
+    assert tick["disarm_reason"] == "left_ticking_state"
+    assert tick["next_run_at"] is None
+    assert (tick["used"], tick["granted"], tick["waited"]) == (3, 0, 0)
+
+
+def test_v1_leave_bucket_disarms(api_client):
+    """v1 PATCH In Progress → Done disarms the ticker (left_ticking_state)."""
+    w, client = api_client
+    issue = world.make_issue(w, "v1leave", "In Progress")
+    world.set_ticker(issue, used=3, granted=0, waited=0)
+
+    r = client.patch_issue(
+        w.workspace_slug, w.project_id, issue, {"state": w.states["Done"]["id"]}
+    )
+    assert r.status_code == 200, r.text
+
+    tick = _ticker(issue)
+    assert tick["enabled"] is False
+    assert tick["disarm_reason"] == "left_ticking_state"
+    assert tick["next_run_at"] is None
+    assert (tick["used"], tick["granted"], tick["waited"]) == (3, 0, 0)
+
+
+def test_web_enter_bucket_bounces_without_runner(web_client):
+    """Web PATCH Backlog → In Progress with a runnerless pod: the preflight
+    bounces the issue back to Backlog, comments, and disarms the ticker."""
+    w, client = web_client
+    world.make_pod(w.workspace_id, w.project_id, is_default=True)
+    issue = world.make_issue(w, "webbounce", "Backlog")
+
+    comments_before = db.fetchone(
+        get_database_url(),
+        "SELECT count(*) AS n FROM issue_comments WHERE issue_id=%s",
+        (issue,),
+    )["n"]
+    r = client.patch(
+        f"{_web_base(w)}/issues/{issue}/",
+        json={"state": w.states["In Progress"]["id"]},
+    )
+    assert r.status_code == 204, r.text
+
+    assert _issue_state(issue) == w.states["Backlog"]["id"]
+    tick = _ticker(issue)
+    assert tick is not None
+    assert tick["enabled"] is False
+    assert tick["disarm_reason"] == "left_ticking_state"
+    comments = db.fetchall(
+        get_database_url(),
+        "SELECT comment_html FROM issue_comments WHERE issue_id=%s ORDER BY created_at",
+        (issue,),
+    )
+    assert len(comments) == comments_before + 1
+    assert "no eligible runner" in comments[-1]["comment_html"]

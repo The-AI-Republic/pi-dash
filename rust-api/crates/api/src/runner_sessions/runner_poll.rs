@@ -1225,7 +1225,7 @@ async fn drain_for_runner_by_id(
 /// `drain_pod_by_id` (`matcher.py:242-251`): pod lookup (miss ⇒ `Ok`,
 /// no tx), else the drain loop. A dispatch failure propagates — the
 /// row stays `ASSIGNED` while the caller observes the failure.
-async fn drain_pod_by_id(
+pub(crate) async fn drain_pod_by_id(
     pool: &sqlx::postgres::PgPool,
     state: &AppState,
     pod_id: Uuid,

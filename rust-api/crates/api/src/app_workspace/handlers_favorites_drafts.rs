@@ -90,12 +90,10 @@
 //!
 //! `Issue.save()` fires the orchestration `post_save` receiver (`capture_prior_state` +
 //! `fire_state_transition`). This module calls the merged
-//! `pidash_services::orchestration::entries` drivers with a minimal seam: the pre-save
-//! snapshot and the transition's state lookups run live; deeper driver arms (run
-//! creation, clock reconcile, scheduler, preflight) report unreachable and the fire
-//! swallows them like a handler raise (counter + log line, save stands) — exactly the
-//! truncation the D-26 handlers-A port ships, and the HTTP surface is unaffected either
-//! way. The `github_signals` completion-comment leg fires only on updates
+//! `pidash_services::orchestration::entries` drivers through the one live seam
+//! (`crate::issue_transition`): the ticker reconcile, preflight and run creation all run
+//! live against the request pool, exactly like Django's receiver. The
+//! `github_signals` completion-comment leg fires only on updates
 //! (`created → return`), never on this path.
 
 use std::collections::BTreeMap;
@@ -111,10 +109,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use pidash_auth::permissions::allow::AllowFacts;
-use pidash_auth::permissions::membership::ProjectRoleFacts;
 use pidash_auth::permissions::{ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER};
 use pidash_db::app_pages::strip::sync_description_stripped;
-use pidash_db::tasks_ticker::models::issue_agent_ticker::IssueAgentTicker;
 use pidash_jobs::celery::CeleryTaskMessage;
 use pidash_jobs::queue::{self, NewJob};
 use pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK;
@@ -137,17 +133,7 @@ use pidash_services::dispatch::admission::{
 use pidash_services::dispatch::policy::{
     cloud_agent_is_configured, managed_runner_is_enabled, UserFlags,
 };
-use pidash_services::orchestration::clock::ProjectClockPolicy;
-use pidash_services::orchestration::creation::{
-    AdmissionError, CreationError, CreationSeam, ExecutionError, ExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RenderedTurn, RunView, RunnerView, StateView, STATE_SELECT_SQL,
-};
-use pidash_services::orchestration::entries::{
-    capture_prior_state, fire_state_transition, EntriesSeam, FireOutcome, FireRequest,
-    PreflightSeam, PRIOR_STATE_SELECT_SQL,
-};
-use pidash_services::prompting::composer::OverrideRow;
+use pidash_services::orchestration::entries::{FireOutcome, FireRequest};
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason};
 use pidash_types::v1_assets::sticky as sticky_kernel;
 use pidash_types::WorkspaceId;
@@ -6767,9 +6753,12 @@ async fn write_default_assignee(
 /// I/O; a failed handler is logged with the verbatim line (the counter
 /// already bumped inside) and the save stands; only a *lookup* storage
 /// failure propagates to the 500 — exactly the `try` placement in
-/// `fire_state_transition`.
+/// `fire_state_transition`. Drives the one live seam (PIDASHCONV-1216).
+#[allow(clippy::too_many_arguments)]
 async fn fire_after_save(
+    state: &AppState,
     pool: &sqlx::PgPool,
+    actor_id: Uuid,
     issue_id: Uuid,
     prev_state_id: Option<Uuid>,
     current_state_id: Option<Uuid>,
@@ -6777,12 +6766,11 @@ async fn fire_after_save(
     created_by: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<(), Denial> {
-    let mut seam = DraftSignalSeam { pool };
-    let mut preflight = DraftPreflight;
-    let outcome = fire_state_transition(
-        &mut seam,
-        &mut preflight,
-        &FireRequest {
+    let outcome = crate::issue_transition::fire_issue_transition(
+        state,
+        pool,
+        actor_id,
+        FireRequest {
             issue_id,
             prev_state_id,
             current_state_id,
@@ -6799,314 +6787,6 @@ async fn fire_after_save(
         tracing::error!("{log_line}");
     }
     Ok(())
-}
-
-/// The live seam for the draft-to-issue save. Only two methods run live:
-/// [`EntriesSeam::prior_state_id`] (the pre-save snapshot) and
-/// [`CreationSeam::state`] (the transition's state lookups) — the fire
-/// short-circuits on equal states before any other seam use, and
-/// transitions into non-trigger states return before the drivers run. A
-/// transition that WOULD dispatch answers a store error, which the fire
-/// swallows like a handler raise (counter + log line, save stands)
-/// rather than crashing the request — the HTTP surface is unaffected
-/// either way.
-struct DraftSignalSeam<'a> {
-    pool: &'a sqlx::PgPool,
-}
-
-/// The draft-to-issue save never dispatches through preflight, so it
-/// never runs.
-struct DraftPreflight;
-
-fn seam_unreachable<T>(method: &str) -> Result<T, CreationError> {
-    Err(CreationError::Db(format!(
-        "draft signal seam: {method} runs only past a state change"
-    )))
-}
-
-impl CreationSeam for DraftSignalSeam<'_> {
-    async fn issue(&mut self, _issue_id: Uuid) -> Result<IssueView, CreationError> {
-        seam_unreachable("issue")
-    }
-
-    async fn project(&mut self, _project_id: Uuid) -> Result<ProjectView, CreationError> {
-        seam_unreachable("project")
-    }
-
-    async fn state(&mut self, state_id: Option<Uuid>) -> Result<Option<StateView>, CreationError> {
-        let Some(state_id) = state_id else {
-            return Ok(None);
-        };
-        let row: Option<(Uuid, String, String)> = sqlx::query_as(STATE_SELECT_SQL)
-            .bind(state_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        match row {
-            None => Err(CreationError::MissingRow(format!(
-                "states row {state_id} is gone"
-            ))),
-            Some((id, name, group)) => Ok(Some(StateView { id, name, group })),
-        }
-    }
-
-    async fn latest_prior_run(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("latest_prior_run")
-    }
-
-    async fn active_run_for(&mut self, _issue_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("active_run_for")
-    }
-
-    async fn run(&mut self, _run_id: Uuid) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("run")
-    }
-
-    async fn runner(&mut self, _runner_id: Uuid) -> Result<Option<RunnerView>, CreationError> {
-        seam_unreachable("runner")
-    }
-
-    async fn assigned_pod(&mut self, _pod_id: Uuid) -> Result<Option<PodView>, CreationError> {
-        seam_unreachable("assigned_pod")
-    }
-
-    async fn default_pod_for_project(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<Option<PodView>, CreationError> {
-        seam_unreachable("default_pod_for_project")
-    }
-
-    async fn resume_parent_run_id(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<Uuid>, CreationError> {
-        seam_unreachable("resume_parent_run_id")
-    }
-
-    async fn work_item_id_for_run(&mut self, _run_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        seam_unreachable("work_item_id_for_run")
-    }
-
-    async fn lock_issue_for_handoff(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<LockedIssue>, CreationError> {
-        seam_unreachable("lock_issue_for_handoff")
-    }
-
-    async fn lock_run_for_handoff(
-        &mut self,
-        _run_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("lock_run_for_handoff")
-    }
-
-    async fn user_flags(&mut self, _user_id: Uuid) -> Result<UserFlags, CreationError> {
-        seam_unreachable("user_flags")
-    }
-
-    async fn insert_run(&mut self, _row: &NewAgentRun) -> Result<RunView, CreationError> {
-        seam_unreachable("insert_run")
-    }
-
-    async fn save_prompt(
-        &mut self,
-        _run_id: Uuid,
-        _prompt: &str,
-        _manifest: &Value,
-    ) -> Result<(), CreationError> {
-        seam_unreachable("save_prompt")
-    }
-
-    async fn save_run_config(
-        &mut self,
-        _run_id: Uuid,
-        _config: &Value,
-    ) -> Result<(), CreationError> {
-        seam_unreachable("save_run_config")
-    }
-
-    async fn execution_fields(
-        &mut self,
-        _req: &ExecutionRequest,
-    ) -> Result<ExecutionFields, ExecutionError> {
-        Err(CreationError::Db(
-            "draft signal seam: execution_fields runs only past a state change".to_owned(),
-        )
-        .into())
-    }
-
-    async fn lock_cloud_creation_capacity(
-        &mut self,
-        _workspace_id: Uuid,
-        _executor_kind: AgentExecutorKind,
-        _automatic: bool,
-    ) -> Result<Option<AdmissionError>, CreationError> {
-        seam_unreachable("lock_cloud_creation_capacity")
-    }
-
-    fn dispatch_after_commit(&mut self, _run_id: Uuid) {}
-
-    async fn render_bundle(
-        &mut self,
-        _issue_id: Uuid,
-        _run_id: Uuid,
-        _parent_run_id: Option<Uuid>,
-        _trigger: &str,
-        _created_by_id: Uuid,
-    ) -> Result<RenderBundle, CreationError> {
-        seam_unreachable("render_bundle")
-    }
-
-    fn extra_toolsets_schema_tool(&self) -> String {
-        String::new()
-    }
-}
-
-impl FinalizeAgentRunSeam for DraftSignalSeam<'_> {
-    async fn finalize_failed_run(
-        &mut self,
-        _run_id: Uuid,
-        _error_code: &str,
-        _error: &str,
-        _now: DateTime<Utc>,
-    ) -> Result<RunView, CreationError> {
-        seam_unreachable("finalize_failed_run")
-    }
-}
-
-impl EntriesSeam for DraftSignalSeam<'_> {
-    async fn prior_state_id(&mut self, issue_id: Uuid) -> Result<Option<Uuid>, CreationError> {
-        let row: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(PRIOR_STATE_SELECT_SQL)
-            .bind(issue_id)
-            .fetch_optional(self.pool)
-            .await
-            .map_err(|error| CreationError::Db(error.to_string()))?;
-        Ok(row.and_then(|(_, state_id)| state_id))
-    }
-
-    async fn queued_follow_up(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<RunView>, CreationError> {
-        seam_unreachable("queued_follow_up")
-    }
-
-    async fn lock_ticker(
-        &mut self,
-        _issue_id: Uuid,
-    ) -> Result<Option<IssueAgentTicker>, CreationError> {
-        seam_unreachable("lock_ticker")
-    }
-
-    async fn save_ticker(
-        &mut self,
-        _row: &IssueAgentTicker,
-        _write: pidash_services::orchestration::clock::ClockWrite,
-    ) -> Result<(), CreationError> {
-        seam_unreachable("save_ticker")
-    }
-
-    fn set_rollback(&mut self) {}
-
-    async fn clock_policy(
-        &mut self,
-        _project_id: Uuid,
-    ) -> Result<ProjectClockPolicy, CreationError> {
-        seam_unreachable("clock_policy")
-    }
-
-    async fn binding(
-        &mut self,
-        _binding_id: Uuid,
-    ) -> Result<pidash_services::orchestration::entries::BindingView, CreationError> {
-        seam_unreachable("binding")
-    }
-
-    async fn scheduler_override_pod(
-        &mut self,
-        _pod_id: Uuid,
-        _project_id: Option<Uuid>,
-    ) -> Result<Option<PodView>, CreationError> {
-        seam_unreachable("scheduler_override_pod")
-    }
-
-    async fn workspace(
-        &mut self,
-        _workspace_id: Uuid,
-    ) -> Result<pidash_services::orchestration::entries::WorkspaceView, CreationError> {
-        seam_unreachable("workspace")
-    }
-
-    async fn scheduler_row(
-        &mut self,
-        _scheduler_id: Uuid,
-    ) -> Result<pidash_services::orchestration::entries::SchedulerView, CreationError> {
-        seam_unreachable("scheduler_row")
-    }
-
-    async fn scheduler_override_rows(
-        &mut self,
-        _workspace_id: Uuid,
-    ) -> Result<Vec<OverrideRow>, CreationError> {
-        seam_unreachable("scheduler_override_rows")
-    }
-
-    async fn project_role_facts(
-        &mut self,
-        _user_id: Uuid,
-        _workspace_slug: &str,
-        _project_id: Uuid,
-    ) -> Result<ProjectRoleFacts, CreationError> {
-        seam_unreachable("project_role_facts")
-    }
-
-    async fn has_usable_llm_config(&mut self, _user_id: Uuid) -> Result<bool, CreationError> {
-        seam_unreachable("has_usable_llm_config")
-    }
-
-    async fn agent_system_user(
-        &mut self,
-    ) -> Result<
-        Result<Uuid, pidash_db::orchestration::workpad::AgentUserCollisionError>,
-        CreationError,
-    > {
-        seam_unreachable("agent_system_user")
-    }
-
-    async fn insert_scheduler_run(
-        &mut self,
-        _row: &pidash_services::orchestration::entries::NewSchedulerRun,
-    ) -> Result<RunView, CreationError> {
-        seam_unreachable("insert_scheduler_run")
-    }
-
-    fn compose_scheduler_turn(
-        &mut self,
-        _context: &Value,
-        _index: &pidash_services::prompting::composer::OverrideIndex,
-        _workspace_id: Option<&str>,
-        _executor_kind: Option<&str>,
-        _tool_catalog_version: i64,
-    ) -> Result<RenderedTurn, String> {
-        Err("draft signal seam: compose_scheduler_turn runs only past a state change".to_owned())
-    }
-}
-
-impl PreflightSeam for DraftPreflight {
-    async fn preflight_eligibility_or_bounce(
-        &mut self,
-        _issue_id: Uuid,
-        _creator_id: Uuid,
-        _pod_id: Uuid,
-        _triggered_by: &str,
-    ) -> Result<bool, CreationError> {
-        seam_unreachable("preflight_eligibility_or_bounce")
-    }
 }
 
 fn host_settings_of(state: &AppState) -> HostSettings<'_> {
@@ -7593,12 +7273,13 @@ async fn draft_to_issue(
         )
         .await?;
     }
-    let mut seam = DraftSignalSeam { pool: &pool };
-    let prev = capture_prior_state(&mut seam, None)
+    let prev = crate::issue_transition::capture_prior_state_pool(&pool, None)
         .await
         .map_err(|_| Denial::ServerError)?;
     fire_after_save(
+        &state,
         &pool,
+        user_id,
         row.id,
         prev,
         row.state_id,

@@ -1143,6 +1143,94 @@ pub async fn dispatch_deps(
     ))
 }
 
+/// Same as [`dispatch_deps`] but for callers that hold ids rather than the
+/// v1 action rows (the orchestration signal fire, which runs after the save
+/// committed). Builds the same creator universe and LLM presence from the
+/// issue/project rows directly, so the closure types are identical.
+pub async fn dispatch_deps_for_ids(
+    state: &AppState,
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue_id: Uuid,
+    now_unix_secs: i64,
+) -> Result<
+    (
+        pidash_jobs::orchestration::StoreDeps<
+            RequestCache,
+            impl Fn(Uuid) -> bool + Clone + Send + Sync,
+            impl Fn(Option<Uuid>) -> pidash_services::dispatch::LlmProfile + Clone + Send + Sync,
+        >,
+        LiveMatcher,
+    ),
+    Denial,
+> {
+    let universe = creator_universe_for_ids(pool, actor_id, issue_id).await?;
+    let presence = Arc::new(fetch_llm_presence(pool, &universe).await?);
+    let verdicts = Arc::new(gate_verdicts(state, &presence).await);
+    Ok((
+        pidash_jobs::orchestration::StoreDeps {
+            cloud: state.settings().cloud_agent.clone(),
+            managed: state.settings().managed_runner.clone(),
+            cache: RequestCache::default(),
+            has_usable_llm_config: gate_fn(verdicts),
+            toolsets: state.toolsets().clone(),
+            llm_profile: profile_fn(presence),
+            now_unix_secs,
+        },
+        LiveMatcher::new(pool.clone()),
+    ))
+}
+
+/// The id-only twin of [`creator_universe`]: the actor first, then the
+/// issue creator, project lead, default assignee, and live assignees.
+async fn creator_universe_for_ids(
+    pool: &PgPool,
+    actor_id: Uuid,
+    issue_id: Uuid,
+) -> Result<Vec<Uuid>, Denial> {
+    let mut ids: Vec<Uuid> = vec![actor_id];
+    let issue: Option<(Option<Uuid>, Option<Uuid>)> =
+        sqlx::query_as(r#"SELECT "created_by_id", "project_id" FROM "issues" WHERE "id" = $1"#)
+            .bind(issue_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| db_error(error, "fetch-issue-creator"))?;
+    let (created_by_id, project_id) = issue.unwrap_or((None, None));
+    if let Some(id) = created_by_id {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if let Some(project_id) = project_id {
+        let project: Option<(Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+            r#"SELECT "project_lead_id", "default_assignee_id" FROM "projects" WHERE "id" = $1"#,
+        )
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "fetch-project-creators"))?;
+        if let Some((lead, assignee)) = project {
+            for id in [lead, assignee].into_iter().flatten() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    let assignees: Vec<(Uuid, bool, bool)> =
+        sqlx::query_as(pidash_services::orchestration::dispatch::LIVE_ASSIGNEE_CANDIDATES_SQL)
+            .bind(issue_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|error| db_error(error, "fetch-assignees"))?;
+    for (id, _, _) in assignees {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
 /// Draw the call's jitter from the issue's effective interval
 /// (`jitter_seconds(effective_interval_seconds())`), as the scheduling
 /// functions do before each re-time.
