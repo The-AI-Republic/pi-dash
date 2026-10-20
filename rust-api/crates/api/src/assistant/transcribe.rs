@@ -214,6 +214,7 @@ fn provider_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(CONNECT_TIMEOUT_SECS))
             .read_timeout(std::time::Duration::from_secs(READ_TIMEOUT_SECS))
             .build()
@@ -581,6 +582,77 @@ mod tests {
             provider_transcriptions_url("https://x/v1///"),
             "https://x/v1/audio/transcriptions"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_client_does_not_follow_redirects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redirect stub");
+        let addr = listener.local_addr().expect("redirect stub address");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let server_hits = Arc::clone(&hits);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => return,
+                };
+                let hit = server_hits.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let body = if hit == 1 {
+                    ""
+                } else {
+                    r#"{"text":"internal-secret"}"#
+                };
+                let mut response = if hit == 1 {
+                    format!(
+                        "HTTP/1.1 307 Temporary Redirect\r\n\
+                         Location: http://{addr}/internal\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    )
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    )
+                };
+                response.push_str(body);
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let response = provider_client()
+            .post(format!("http://{addr}/audio/transcriptions"))
+            .body("audio")
+            .send()
+            .await
+            .expect("redirect stub responds");
+
+        assert_eq!(
+            response.status().as_u16(),
+            307,
+            "the provider client must surface the 3xx instead of chasing it"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the redirect target must never be requested"
+        );
+        assert_eq!(classify_provider_status(307), None);
+        server.abort();
     }
 
     #[test]
