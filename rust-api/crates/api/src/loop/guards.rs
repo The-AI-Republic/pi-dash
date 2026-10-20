@@ -339,12 +339,22 @@ fn is_int_list_prop(name: &str) -> bool {
     )
 }
 
-/// A parsed single RRULE value: the FREQ (if any) and INTERVAL (if any).
-/// Every other property only affects validity, like in `dateutil`.
+/// A parsed single RRULE value. FREQ and INTERVAL drive our own checks;
+/// the `until`/`bysetpos`/`by*` values are kept so the `rrule.__init__`
+/// semantic checks (`check_rrule_init_semantics`) can run exactly as in
+/// `dateutil`. Properties that only affect validity (COUNT, BYDAY, …) are
+/// validated during parsing and not retained.
 #[derive(Debug, Default)]
 struct ParsedRule {
     freq: Option<String>,
     interval: Option<i64>,
+    /// `Some(true)` when an `UNTIL` value carries a zone (`Z`/offset),
+    /// `Some(false)` when it is naive, `None` when absent.
+    until: Option<bool>,
+    bysetpos: Option<Vec<i64>>,
+    byhour: Option<Vec<i64>>,
+    byminute: Option<Vec<i64>>,
+    bysecond: Option<Vec<i64>>,
 }
 
 /// Python-`int()`-shaped integer parse for RRULE values: surrounding
@@ -359,23 +369,35 @@ fn parse_rrule_int(value: &str) -> Option<i64> {
 /// formats below accept every such value. Anything else is invalid,
 /// matching the verdict (if not the internal wording) of `dateutil`.
 fn parse_loose_datetime(value: &str) -> bool {
+    parse_loose_datetime_aware(value).is_some()
+}
+
+/// [`parse_loose_datetime`] plus the parsed value's timezone-awareness:
+/// `Some(true)` when it carries a zone (`Z`/offset), `Some(false)` when it
+/// is naive, `None` when unparseable. `rrule.__init__` compares the
+/// awareness of `DTSTART` and `UNTIL` (`rrule.py:465-472`), so the
+/// distinction the boolean form discards is needed here.
+fn parse_loose_datetime_aware(value: &str) -> Option<bool> {
     if chrono::DateTime::parse_from_rfc3339(value).is_ok() {
-        return true;
+        return Some(true);
     }
-    const FORMATS: [&str; 7] = [
-        "%Y%m%dT%H%M%SZ",
-        "%Y%m%dT%H%M%S",
-        "%Y%m%d",
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
+    const FORMATS: [(&str, bool); 7] = [
+        ("%Y%m%dT%H%M%SZ", true),
+        ("%Y%m%dT%H%M%S", false),
+        ("%Y%m%d", false),
+        ("%Y-%m-%dT%H:%M:%S%.f", false),
+        ("%Y-%m-%dT%H:%M:%S", false),
+        ("%Y-%m-%d %H:%M:%S", false),
+        ("%Y-%m-%d", false),
     ];
-    FORMATS.iter().any(|fmt| {
-        chrono::NaiveDateTime::parse_from_str(value, fmt).is_ok()
-            || chrono::NaiveDate::parse_from_str(value, fmt)
-                .map(|_| ())
-                .is_ok()
+    FORMATS.iter().find_map(|(fmt, aware)| {
+        if chrono::NaiveDateTime::parse_from_str(value, fmt).is_ok()
+            || chrono::NaiveDate::parse_from_str(value, fmt).is_ok()
+        {
+            Some(*aware)
+        } else {
+            None
+        }
     })
 }
 
@@ -471,17 +493,24 @@ fn parse_single_rule(line: &str) -> Result<ParsedRule, String> {
                 None => return Err(format!("invalid '{name}': {prop_value}")),
             }
         } else if is_int_list_prop(name) {
-            let ok = prop_value
+            match prop_value
                 .split(',')
                 .map(parse_rrule_int)
-                .collect::<Option<Vec<_>>>()
-                .is_some();
-            if !ok {
-                return Err(format!("invalid '{name}': {prop_value}"));
+                .collect::<Option<Vec<i64>>>()
+            {
+                Some(values) => match name {
+                    "BYSETPOS" => parsed.bysetpos = Some(values),
+                    "BYHOUR" => parsed.byhour = Some(values),
+                    "BYMINUTE" => parsed.byminute = Some(values),
+                    "BYSECOND" => parsed.bysecond = Some(values),
+                    _ => {}
+                },
+                None => return Err(format!("invalid '{name}': {prop_value}")),
             }
         } else if name == "UNTIL" {
-            if !parse_loose_datetime(prop_value) {
-                return Err(format!("invalid 'UNTIL': {prop_value}"));
+            match parse_loose_datetime_aware(prop_value) {
+                Some(aware) => parsed.until = Some(aware),
+                None => return Err(format!("invalid 'UNTIL': {prop_value}")),
             }
         } else if name == "WKST" {
             if !WEEKDAYS.contains(&prop_value) {
@@ -521,6 +550,86 @@ fn check_freq_interval(parsed: &ParsedRule) -> Result<(), String> {
         return Err(format!("INTERVAL must be >= 1, got {interval}"));
     }
     Ok(())
+}
+
+/// The `rrule.__init__` semantic checks `rrulestr` runs for us on the Django
+/// side (`dateutil/rrule.py:465-499,838-848`), returning the bare
+/// `dateutil` message so the caller wraps it as `invalid RRULE: …`. Only the
+/// properties the stored subset can carry are checked: `UNTIL` awareness
+/// against the always-aware anchor, the `BYSETPOS` range, and the
+/// `BYHOUR`/`BYMINUTE`/`BYSECOND` ranges (which `dateutil` enforces by
+/// building a `datetime.time` per `(hour, minute, second)` combination,
+/// lowest FREQ below `HOURLY`). `BYMONTH`, `BYMONTHDAY`, `BYYEARDAY` and
+/// `BYWEEKNO` have no range check in `rrule.__init__` — confirmed against a
+/// live `dateutil` — so they are deliberately not checked here.
+fn check_rrule_init_semantics(parsed: &ParsedRule) -> Result<(), String> {
+    // `if self._dtstart and self._until:` — the anchor is aware
+    // (`_validate_writes` passes no dtstart, so `validate_rrule_string`
+    // uses `datetime.now(tz=utc)`), so only a naive UNTIL mismatches.
+    if parsed.until == Some(false) {
+        return Err(
+            "RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware".to_owned(),
+        );
+    }
+
+    // bysetpos must be in [-366, -1] or [1, 366].
+    if let Some(positions) = &parsed.bysetpos {
+        for pos in positions {
+            if *pos == 0 || !(-366..=366).contains(pos) {
+                return Err("bysetpos must be between 1 and 366, or between -366 and -1".to_owned());
+            }
+        }
+    }
+
+    // Below HOURLY, `dateutil` materializes `datetime.time(hour, minute,
+    // second)` for every combination; CPython raises the range errors.
+    // `dateutil` sorts and de-duplicates each set, and an absent list falls
+    // back to the anchor's (always in-range) components — a single in-range
+    // sentinel models that without changing which invalid value is hit
+    // first in the h→m→s iteration order.
+    if matches!(
+        parsed.freq.as_deref(),
+        Some("YEARLY" | "MONTHLY" | "WEEKLY" | "DAILY")
+    ) {
+        let hours = sorted_set(parsed.byhour.as_deref().unwrap_or(&[0]));
+        let minutes = sorted_set(parsed.byminute.as_deref().unwrap_or(&[0]));
+        let seconds = sorted_set(parsed.bysecond.as_deref().unwrap_or(&[0]));
+        for hour in &hours {
+            if !(0..=23).contains(hour) {
+                return Err("hour must be in 0..23".to_owned());
+            }
+            for minute in &minutes {
+                if !(0..=59).contains(minute) {
+                    return Err("minute must be in 0..59".to_owned());
+                }
+                for second in &seconds {
+                    if !(0..=59).contains(second) {
+                        return Err("second must be in 0..59".to_owned());
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `dateutil` stores each `BYxxx` list as a sorted set.
+fn sorted_set(values: &[i64]) -> Vec<i64> {
+    let mut out = values.to_vec();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// `rrulestr` runs `rrule.__init__` before Django applies its own FREQ/
+/// INTERVAL constraints, so the constructor's semantic checks come first; a
+/// missing FREQ is the constructor's `TypeError` and wins over both.
+fn check_parsed_rule(parsed: &ParsedRule) -> Result<(), String> {
+    if parsed.freq.is_none() {
+        return check_freq_interval(parsed);
+    }
+    check_rrule_init_semantics(parsed).map_err(|msg| format!("invalid RRULE: {msg}"))?;
+    check_freq_interval(parsed)
 }
 
 /// Check the date values of an `RDATE`/`EXDATE`/`DTSTART` line
@@ -577,7 +686,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
 
     if lines.len() == 1 && (!lines[0].contains(':') || lines[0].starts_with("RRULE:")) {
         let parsed = parse_single_rule(lines[0]).map_err(invalid)?;
-        return check_freq_interval(&parsed);
+        return check_parsed_rule(&parsed);
     }
 
     // Multi-property mode. `dateutil` assembles a set (which never carries
@@ -629,7 +738,7 @@ pub fn validate_rrule_string(rrule_str: &str) -> Result<(), String> {
     }
     if rrule_count == 1 && !forces_set {
         if let Some(parsed) = &only_rule {
-            return check_freq_interval(parsed);
+            return check_parsed_rule(parsed);
         }
     }
     // `rrule_count == 0` (e.g. a lone `DTSTART:` line) hits `rrulevals[0]`

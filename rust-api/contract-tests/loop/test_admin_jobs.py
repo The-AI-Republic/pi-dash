@@ -6,6 +6,8 @@ admin surface exposes the full job (prompt, ``min_role``, RRULE); unknown
 write keys are ignored, so ``is_builtin`` can never be flipped by API.
 """
 
+import pytest
+
 from . import seed_loop as seed_l
 
 JOBS = "/api/instances/loop/jobs/"
@@ -135,6 +137,67 @@ def test_create_rejects_bad_rrule(org):
     body = r.json()
     assert body["error"] == "invalid_rrule"
     assert body["detail"] == "invalid RRULE: invalid 'BYHOUR': XX"
+
+
+# Rules ``dateutil``'s ``rrule.__init__`` rejects but the token-only check
+# accepted: a naive UNTIL under the aware admin anchor, an out-of-range
+# BYSETPOS, and out-of-range BYHOUR/BYMINUTE/BYSECOND. The detail is the
+# ``dateutil`` text wrapped by ``validate_rrule_string`` (``invalid RRULE: …``).
+INVALID_RRULE_VECTORS = [
+    (
+        "FREQ=DAILY;UNTIL=20271231",
+        "invalid RRULE: RRULE UNTIL values must be specified in UTC when "
+        "DTSTART is timezone-aware",
+    ),
+    (
+        "FREQ=DAILY;UNTIL=20271231T000000",
+        "invalid RRULE: RRULE UNTIL values must be specified in UTC when "
+        "DTSTART is timezone-aware",
+    ),
+    (
+        "FREQ=DAILY;BYSETPOS=0",
+        "invalid RRULE: bysetpos must be between 1 and 366, or between "
+        "-366 and -1",
+    ),
+    ("FREQ=DAILY;BYMINUTE=60", "invalid RRULE: minute must be in 0..59"),
+    ("FREQ=DAILY;BYHOUR=25", "invalid RRULE: hour must be in 0..23"),
+    ("FREQ=WEEKLY;BYSECOND=61", "invalid RRULE: second must be in 0..59"),
+]
+
+
+def _slug_for(rrule: str, tag: str) -> str:
+    stem = "".join(ch for ch in rrule.lower() if ch.isalnum())
+    return f"sv-{stem[:40]}-{tag}"
+
+
+@pytest.mark.parametrize("rrule,expected", INVALID_RRULE_VECTORS)
+def test_create_rejects_semantically_invalid_rrule(org, rrule, expected):
+    # Each rule the flywheel table lists is a 400 ``invalid_rrule`` carrying
+    # the ``dateutil`` detail, and no row is written.
+    slug = _slug_for(rrule, org.tag)
+    r = org.adm("POST", JOBS, "admin", json=valid_payload(slug, rrule=rrule))
+    assert r.status_code == 400, (rrule, r.status_code, r.text)
+    assert r.json() == {"error": "invalid_rrule", "detail": expected}, rrule
+    row = org.conn.execute(
+        "SELECT count(*) FROM loop_jobs WHERE slug=%s", (slug,)
+    ).fetchone()
+    assert row[0] == 0, rrule
+
+
+@pytest.mark.parametrize("rrule,expected", INVALID_RRULE_VECTORS)
+def test_patch_rejects_semantically_invalid_rrule(org, rrule, expected):
+    job = seed_l.create_loop_job(
+        org.conn, slug=f"sp-{org.tag}", public_name="SP",
+        rrule="FREQ=DAILY;BYHOUR=2",
+    )
+    r = org.adm("PATCH", detail(job["id"]), "admin", json={"rrule": rrule})
+    assert r.status_code == 400, (rrule, r.status_code, r.text)
+    assert r.json() == {"error": "invalid_rrule", "detail": expected}, rrule
+    # A rejected PATCH leaves the stored rule untouched.
+    row = org.conn.execute(
+        "SELECT rrule FROM loop_jobs WHERE id=%s", (job["id"],)
+    ).fetchone()
+    assert row[0] == "FREQ=DAILY;BYHOUR=2"
 
 
 def test_create_rejects_empty_rrule(org):
