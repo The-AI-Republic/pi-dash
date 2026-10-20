@@ -25,7 +25,7 @@ import type { IssuesEntity } from "../prefs/entities.js";
 import { pickerCyclesQueryOptions, pickerModulesQueryOptions } from "../../../shared/pickers/reference.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
 import { isCompletedModule } from "../../../shared/pickers/modules.js";
-import { useCycleDetail } from "../transfer/api.js";
+import { useCycleProgress } from "../transfer/api.js";
 import { canTransferCycleIssues, showsCompletedCycleNote } from "../transfer/rules.js";
 import { TransferIssuesDialog } from "../transfer/TransferIssuesDialog.js";
 import { TransferIssuesPrompt } from "../transfer/TransferIssuesPrompt.js";
@@ -89,13 +89,14 @@ export function EntityListScreen({
   const resolvedTitle = title ?? cycle?.name ?? loadedModule?.name ?? (entity.scope === "module" ? "Module" : "Cycle");
   const resolvedCompletedCycle = completedCycle ?? isCompletedCycle(cycle?.status);
   const resolvedCompletedModule = completedModule ?? isCompletedModule(loadedModule?.status);
-  // The transfer prompt reads the cycle's own detail: completed status
-  // and unfinished counts decide the button, and a frozen progress
-  // snapshot does not take it away (ISS-224). The read stays off for
-  // module and project scopes.
+  // The transfer prompt pairs the picker row's completed status with the
+  // progress endpoint's unfinished counts (ISS-224): the cycle list has no
+  // per-group breakdown. The progress endpoint keeps serving the frozen
+  // pre-move counts after a transfer, so the action stays up. The read
+  // stays off for module and project scopes.
   const cycleIdForTransfer = entity.scope === "cycle" ? entity.cycleId : "";
-  const cycleDetail = useCycleDetail(workspaceSlug, projectId, cycleIdForTransfer, cycleIdForTransfer !== "");
-  const transferCycle = cycleDetail.data ?? null;
+  const progress = useCycleProgress(workspaceSlug, projectId, cycleIdForTransfer, cycleIdForTransfer !== "");
+  const transferCycle = cycle === undefined ? null : { status: cycle.status, ...(progress.data ?? {}) };
   const completedNote = showsCompletedCycleNote(transferCycle);
   const canTransfer = canTransferCycleIssues(transferCycle);
   const [transferOpen, setTransferOpen] = React.useState(false);

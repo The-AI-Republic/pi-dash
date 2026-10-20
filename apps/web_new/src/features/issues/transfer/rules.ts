@@ -5,11 +5,11 @@
 // ISS-224). A completed cycle offers the transfer prompt, and only a
 // completed cycle does: the wording talks about active cycles, but the
 // server derives completed from the dates and the oracle pins the
-// prompt to that state. The button appears while the cycle still holds
-// backlog, unstarted or started work. A move leaves the source's
-// counts as the page first read them (the server freezes them into the
-// cycle's progress snapshot), so the button stays up after a move,
-// exactly as the oracle observes on the old app.
+// prompt to that state. The button appears while the cycle's progress
+// read still reports backlog, unstarted or started work. After a move the
+// server freezes the source's counts into its progress snapshot and the
+// progress endpoint keeps serving them, so the button stays up exactly as
+// the oracle observes on the old app.
 
 /** The counts the gate reads. */
 export interface TransferableCycleFields {

@@ -1,12 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Cycle detail read (ISS-224): the transfer prompt needs the progress
-// snapshot plus the backlog/unstarted/started counts the detail
-// serializer sends next to it.
+// Cycle progress read (ISS-224): the transfer prompt needs the
+// backlog/unstarted/started counts the progress endpoint reports, the
+// frozen ones included once a transfer has run.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
-import { getCycle, transferCycleIssues } from "./cycles.js";
+import { getCycleProgress, transferCycleIssues } from "./cycles.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -24,41 +24,24 @@ function stubClient(body: unknown): { client: ApiClient; urls: string[] } {
   return { client, urls };
 }
 
-const CYCLE_ROW = {
-  id: UUID,
-  project_id: UUID2,
-  name: "Sprint 4",
-  start_date: "2026-01-01T00:00:00Z",
-  end_date: "2026-02-01T00:00:00Z",
-  status: "COMPLETED",
+const PROGRESS = {
   total_issues: 3,
   backlog_issues: 2,
   unstarted_issues: 1,
   started_issues: 0,
 };
 
-describe("getCycle", () => {
-  it("reads the detail route and parses the counts", async () => {
-    const { client, urls } = stubClient(CYCLE_ROW);
-    const cycle = await getCycle(client, "acme", UUID2, UUID);
-    expect(urls).toEqual([`/api/workspaces/acme/projects/${UUID2}/cycles/${UUID}/`]);
-    expect(cycle.status).toBe("COMPLETED");
-    expect(cycle.backlog_issues).toBe(2);
-    expect(cycle.unstarted_issues).toBe(1);
-    expect(cycle.progress_snapshot).toBeUndefined();
+describe("getCycleProgress", () => {
+  it("reads the progress route and parses the counts", async () => {
+    const { client, urls } = stubClient(PROGRESS);
+    const progress = await getCycleProgress(client, "acme", UUID2, UUID);
+    expect(urls).toEqual([`/api/workspaces/acme/projects/${UUID2}/cycles/${UUID}/progress/`]);
+    expect(progress).toEqual(PROGRESS);
   });
 
-  it("carries a frozen progress snapshot after a transfer", async () => {
-    const { client } = stubClient({ ...CYCLE_ROW, progress_snapshot: { total_issues: 3, backlog_issues: 2 } });
-    const cycle = await getCycle(client, "acme", UUID2, UUID);
-    expect(cycle.progress_snapshot).toEqual({ total_issues: 3, backlog_issues: 2 });
-  });
-
-  it("accepts a null snapshot and an absent status", async () => {
-    const { client } = stubClient({ ...CYCLE_ROW, status: undefined, progress_snapshot: null });
-    const cycle = await getCycle(client, "acme", UUID2, UUID);
-    expect(cycle.progress_snapshot).toBeNull();
-    expect(cycle.status).toBeUndefined();
+  it("rejects a payload without the transferable counts", async () => {
+    const { client } = stubClient({ total_issues: 3 });
+    await expect(getCycleProgress(client, "acme", UUID2, UUID)).rejects.toThrow();
   });
 });
 

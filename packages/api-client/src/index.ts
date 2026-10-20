@@ -748,10 +748,10 @@ export type {
 export {
   CycleList,
   CycleListItem,
-  CycleDetail,
+  CycleProgress,
   CycleTransferResult,
   CycleUpdate,
-  getCycle,
+  getCycleProgress,
   listCycles,
   transferCycleIssues,
   updateCycle,

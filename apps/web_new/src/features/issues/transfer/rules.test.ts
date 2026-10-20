@@ -43,13 +43,11 @@ describe("canTransferCycleIssues", () => {
     expect(canTransferCycleIssues(null)).toBe(false);
   });
 
-  it("keeps offering the move after a transfer froze the source counts", () => {
+  it("keeps offering the move when the progress read still reports work", () => {
     // The oracle shows the source keeping its pre-move counts and the
-    // action staying up; the snapshot is not part of the gate.
-    const frozen: TransferableCycleFields & { progress_snapshot: Record<string, unknown> } = {
-      ...COMPLETED,
-      progress_snapshot: { total_issues: 1, backlog_issues: 1 },
-    };
+    // action staying up; the progress read is the gate, so it keeps
+    // offering the move while it reports unfinished work.
+    const frozen: TransferableCycleFields = { status: "COMPLETED", backlog_issues: 1 };
     expect(canTransferCycleIssues(frozen)).toBe(true);
   });
 });

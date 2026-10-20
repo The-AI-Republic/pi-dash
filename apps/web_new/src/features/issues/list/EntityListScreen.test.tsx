@@ -179,19 +179,23 @@ function setup(overrides: Partial<EntityListScreenProps> = {}, projects: Array<R
   };
 }
 
-/** Seed the cycle detail the prompt reads, then repaint the screen. */
-function setCycleDetail(
+/**
+ * Seed the picker row's status and the progress counts the prompt reads,
+ * then repaint the screen.
+ */
+function setCycleTransferState(
   harness: { props: EntityListScreenProps; view: ReturnType<typeof render> },
-  detail: Record<string, unknown>
+  status: string,
+  counts: { backlog_issues?: number; unstarted_issues?: number; started_issues?: number } = {}
 ): void {
   const client = (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient as QueryClient;
-  client.setQueryData(transferKeys.cycle("acme", PROJECT, CYCLE), {
-    id: CYCLE,
-    project_id: PROJECT,
-    name: "Sprint 1",
-    start_date: null,
-    end_date: null,
-    ...detail,
+  client.setQueryData(CYCLES_KEY, [{ id: CYCLE, name: "Sprint 1", status }]);
+  client.setQueryData(transferKeys.progress("acme", PROJECT, CYCLE), {
+    total_issues: 2,
+    backlog_issues: 0,
+    unstarted_issues: 0,
+    started_issues: 0,
+    ...counts,
   });
   harness.view.rerender(
     <QueryClientProvider client={client}>
@@ -359,34 +363,39 @@ describe("EntityListScreen", () => {
 
   it("shows the finished-cycle move prompt while work can move (ISS-224)", () => {
     const harness = setup({}, [project()]);
-    setCycleDetail(harness, { status: "COMPLETED", backlog_issues: 2 });
+    setCycleTransferState(harness, "COMPLETED", { backlog_issues: 2 });
     expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Move unfinished work" })).toBeInTheDocument();
   });
 
-  it("still offers the move after a transfer froze the source's snapshot", () => {
-    // The oracle observes the source keeping its frozen counts and the
-    // button staying up, so a refetched snapshot changes nothing here.
+  it("reads the counts from the progress endpoint, not the cycle row", () => {
+    // The cycle list carries no per-group breakdown; a completed row with
+    // a zero progress read offers no move, whatever else the row holds.
     const harness = setup({}, [project()]);
-    setCycleDetail(harness, {
-      status: "COMPLETED",
-      backlog_issues: 2,
-      progress_snapshot: { total_issues: 2, backlog_issues: 2 },
-    });
+    setCycleTransferState(harness, "COMPLETED");
+    expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
+  });
+
+  it("still offers the move after a transfer froze the source's counts", () => {
+    // The oracle observes the source keeping its frozen counts and the
+    // button staying up, so a frozen progress read changes nothing here.
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "COMPLETED", { backlog_issues: 2 });
     expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Move unfinished work" })).toBeInTheDocument();
   });
 
   it("keeps the note but drops the move when no unfinished work remains", () => {
     const harness = setup({}, [project()]);
-    setCycleDetail(harness, { status: "COMPLETED", backlog_issues: 0 });
+    setCycleTransferState(harness, "COMPLETED");
     expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
   });
 
   it("renders no prompt for a cycle that is still active", () => {
     const harness = setup({}, [project()]);
-    setCycleDetail(harness, { status: "ACTIVE", backlog_issues: 2 });
+    setCycleTransferState(harness, "ACTIVE", { backlog_issues: 2 });
     expect(screen.queryByText(COMPLETED_CYCLE_NOTE)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
   });
@@ -394,7 +403,7 @@ describe("EntityListScreen", () => {
   it("opens the move dialog from the prompt and closes it again (ISS-224)", async () => {
     const user = userEvent.setup();
     const harness = setup({}, [project()]);
-    setCycleDetail(harness, { status: "COMPLETED", backlog_issues: 2 });
+    setCycleTransferState(harness, "COMPLETED", { backlog_issues: 2 });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Move unfinished work" }));
