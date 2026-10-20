@@ -393,6 +393,8 @@ describe("ListLayout", () => {
     );
     expect(screen.getAllByTestId("quick-add-probe")[0]).toHaveAttribute("data-group", STATE);
     expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(mocks.pages.mock.results.at(-1)?.value.loadMoreSection).toHaveBeenCalledWith(sections[0]);
   });
 
   it("hides rows and quick-add for a collapsed section", () => {
@@ -489,6 +491,50 @@ describe("ListLayout", () => {
       expect(mocks.addToModule).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE, ["one"])
     );
     expect(mocks.notifySuccess).toHaveBeenCalledWith("Work item added");
+  });
+
+  it("carries a label section's membership and assignee value into the create form", async () => {
+    const user = userEvent.setup();
+    const sections = groupedSections(
+      { results: { "label-1": { results: [row()], total_results: 1 } } },
+      new Map([["label-1", "Bug"]]),
+      { showEmptyGroups: true, dimension: "labels" }
+    );
+    const assignment = groupedSections(
+      { results: { "member-1": { results: [row()], total_results: 1 } } },
+      new Map([["member-1", "Ada"]]),
+      { showEmptyGroups: true, dimension: "assignees" }
+    );
+    mocks.pages.mockReturnValue(pageState({ sections, grouped: true }));
+    const labelRun = renderLayout({ prefs: prefs({ groupBy: "labels", showEmptyGroups: true }) });
+    await user.click(screen.getByRole("button", { name: "Add to Bug" }));
+    expect(JSON.parse((await screen.findByTestId("create-dialog")).getAttribute("data-values") ?? "{}")).toEqual({
+      labelIds: ["label-1"],
+    });
+    labelRun.view.unmount();
+    mocks.pages.mockReturnValue(pageState({ sections: assignment, grouped: true }));
+    const assigneeRun = renderLayout({ prefs: prefs({ groupBy: "assignees", showEmptyGroups: true }) });
+    await user.click(screen.getByRole("button", { name: "Add to Ada" }));
+    expect(JSON.parse((await screen.findByTestId("create-dialog")).getAttribute("data-values") ?? "{}")).toEqual({
+      assigneeIds: ["member-1"],
+    });
+    assigneeRun.view.unmount();
+  });
+
+  it("carries a state or priority section's value into the shared create form", async () => {
+    const user = userEvent.setup();
+    const stateSections = groupedSections(
+      { results: { [STATE]: { results: [row()], total_results: 1 } } },
+      new Map([[STATE, "In Progress"]]),
+      { showEmptyGroups: true, dimension: "state" }
+    );
+    mocks.pages.mockReturnValue(pageState({ sections: stateSections, grouped: true }));
+    renderLayout({ prefs: prefs({ groupBy: "state", showEmptyGroups: true }) });
+    await user.click(screen.getByRole("button", { name: "Add to In Progress" }));
+    const dialog = await screen.findByTestId("create-dialog");
+    expect(JSON.parse(dialog.getAttribute("data-values") ?? "{}")).toEqual({ stateId: STATE });
+    await user.click(screen.getByRole("button", { name: "create" }));
+    await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
   });
 
   it("opens create directly for a plain-project cycle or module bucket", async () => {

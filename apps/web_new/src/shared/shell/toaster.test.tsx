@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { ToastHost } from "@pidash/kit";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { getToastManager, notifyError, notifyInfo, notifySuccess } from "./toaster.js";
+import { getToastManager, notifyError, notifyInfo, notifySuccess, notifySuccessWithAction } from "./toaster.js";
 
 describe("toaster", () => {
   it("delivers success, info, and error notices to the shared stack", async () => {
@@ -31,5 +32,23 @@ describe("toaster", () => {
     ]) {
       expect(await screen.findByText(line)).toBeInTheDocument();
     }
+  });
+
+  it("offers a follow-up action on a success toast, with and without a description", async () => {
+    const user = userEvent.setup();
+    const onAction = vi.fn();
+    render(<ToastHost manager={getToastManager()} />);
+    notifySuccessWithAction("Work item created successfully", undefined, {
+      actionLabel: "View work item",
+      onAction,
+    });
+    notifySuccessWithAction("Saved the view", "Every section now loads.", {
+      actionLabel: "Undo",
+      onAction,
+    });
+    expect(await screen.findByText("Work item created successfully")).toBeInTheDocument();
+    expect(await screen.findByText("Every section now loads.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Undo" }));
+    expect(onAction).toHaveBeenCalledTimes(1);
   });
 });

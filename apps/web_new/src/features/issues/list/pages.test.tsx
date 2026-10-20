@@ -16,6 +16,7 @@ import type { IssueGroupSection } from "./grouping.js";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
 const MODULE = "423e4567-e89b-12d3-a456-426614174003";
+const STATE = "523e4567-e89b-12d3-a456-426614174004";
 
 function uuidFrom(value: string): string {
   let hash = 0;
@@ -297,6 +298,46 @@ describe("useListPages", () => {
     );
     await waitFor(() => expect(shown.result.current.isPending).toBe(false));
     expect(shown.result.current.sections.map((section) => section.key)).toEqual(["todo", "empty"]);
+  });
+
+  it("starts paging over when the grouping changes", async () => {
+    // Cursors belong to one grouping: switching the group dimension must
+    // drop the old one's pages instead of appending unrelated buckets
+    // (ISS-010/ISS-007).
+    const seen: string[] = [];
+    const client = hookClient((url) => {
+      seen.push(url.searchParams.get("group_by") ?? "flat");
+      if (url.searchParams.get("group_by") === "state_id") {
+        return groupedEnvelope({ [STATE]: { rows: [row("one", 1)], total: 51 } });
+      }
+      return url.searchParams.get("cursor") === "100:1:0"
+        ? envelope([row("two", 2)])
+        : envelope([row("one", 1)], "100:1:0");
+    });
+    const queryClient = client;
+    const { result, rerender } = renderHook(
+      ({ groupBy }: { groupBy: string | null }) =>
+        useListPages("acme", { scope: "project", projectId: PROJECT }, groupBy, "sort_order", new Map(), false, true),
+      { wrapper: wrapper(queryClient), initialProps: { groupBy: null as string | null } }
+    );
+    await waitFor(() => expect(result.current.isPending).toBe(false));
+    act(() => result.current.loadMore());
+    await waitFor(() =>
+      expect(result.current.sections[0]?.rows.map((entry) => entry.id)).toEqual([uuidFrom("one"), uuidFrom("two")])
+    );
+    rerender({ groupBy: "state" });
+    await waitFor(() => expect(result.current.sections.map((section) => section.key)).toEqual([STATE]));
+    // The flat cursor chain is gone: switching back shows the first page
+    // only and offers that section's next page again, instead of keeping
+    // the pages read under the other grouping.
+    rerender({ groupBy: null });
+    await waitFor(() => expect(result.current.grouped).toBe(false));
+    expect(result.current.sections[0]?.rows.map((entry) => entry.id)).toEqual([uuidFrom("one")]);
+    expect(result.current.hasMore).toBe(true);
+    act(() => result.current.loadMore());
+    await waitFor(() =>
+      expect(result.current.sections[0]?.rows.map((entry) => entry.id)).toEqual([uuidFrom("one"), uuidFrom("two")])
+    );
   });
 
   it("sends the sub-issue preference with every list read", async () => {

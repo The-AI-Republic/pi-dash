@@ -27,7 +27,7 @@ import {
   type IssueTypeExtensionProps,
 } from "../create/issueTypeSeam.js";
 import { loadWorkItemDraft } from "../lib/createDraft.js";
-import { WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
+import { CREATE_DIALOG_TITLE, WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
 // These cases drive the whole strip through real menus, calendars and a
 // debounced editor; each interaction is a full popover round trip. Under a
@@ -1436,7 +1436,7 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
       },
       { initialValues: { priority: "high", cycleId: PARENT_ID } }
     );
-    await waitFor(() => expect(screen.getByText("Cycle")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: CREATE_DIALOG_TITLE })).toBeInTheDocument());
     await user.type(titleField(), "From the section");
     save();
     await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
@@ -1903,6 +1903,36 @@ describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
     const modules = h.calls.find((call) => call.url.includes(`/issues/${CREATED_ID}/modules/`));
     expect(modules?.body).toEqual({ modules: [MODULE_ID] });
     expect(h.calls.some((call) => call.url.includes("/cycle-issues/"))).toBe(false);
+  });
+
+  it("lets the route context win over a section prefill of the same membership", async () => {
+    // A grouping section pre-fills its own cycle; opening from a cycle
+    // page must still land the item on the page's cycle (ISS-011 vs
+    // ISS-124), so context overwrites the listing value.
+    const user = userEvent.setup();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true }) } },
+      { context: { cycleId: CYCLE_ID }, initialValues: { priority: "high", cycleId: PARENT_ID } }
+    );
+    await user.type(titleField(), "Route wins");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "Route wins", priority: "high" });
+    await waitFor(() =>
+      expect(h.calls.some((call) => call.url.includes(`/cycles/${CYCLE_ID}/cycle-issues/`))).toBe(true)
+    );
+    expect(h.calls.some((call) => call.url.includes(`/cycles/${PARENT_ID}/cycle-issues/`))).toBe(false);
+  });
+
+  it("ignores a listing prefill when an existing row is edited", async () => {
+    // The section prefill belongs to new items only: an edit visit starts
+    // from the stored row, so Save must not carry the section's values.
+    const { props } = editProps();
+    const h = setup({}, { ...props, initialValues: { priority: "urgent", stateId: STATE_ID } });
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(patches(h.calls)).toEqual([]);
   });
 
   it("reopens the project form without context", async () => {

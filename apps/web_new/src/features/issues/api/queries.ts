@@ -10,7 +10,6 @@ import {
   getDescriptionVersion,
   getIssue,
   listDescriptionVersions,
-  listGroupedIssues,
   listIssues,
   listSubIssues,
   type ApiClient,
@@ -102,52 +101,6 @@ export function descriptionVersionQueryOptions(
 export const FLAT_PAGE_SIZE = 100;
 /** Grouped page size (fifty per group). */
 export const GROUPED_PAGE_SIZE = 50;
-
-/** Query params for one list read; grouping decides which endpoint shape. */
-export interface IssueListReadQuery {
-  groupBy: string | null;
-  orderBy: string;
-  cursor?: string;
-}
-
-/** Flat list read used by the ungrouped list and its next pages. */
-export function issuePageQueryOptions(
-  client: ApiClient,
-  workspaceSlug: string,
-  projectId: string,
-  query: IssueListReadQuery
-) {
-  return queryOptions({
-    queryKey: [...issueKeys.lists(workspaceSlug, projectId), "page", query] as const,
-    queryFn: () =>
-      listIssues(client, workspaceSlug, projectId, {
-        perPage: FLAT_PAGE_SIZE,
-        orderBy: query.orderBy,
-        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-      }),
-    staleTime: LIST_STALE_TIME_MS,
-  });
-}
-
-/** Grouped list read used by the sectioned list and its next pages. */
-export function groupedIssuesQueryOptions(
-  client: ApiClient,
-  workspaceSlug: string,
-  projectId: string,
-  query: IssueListReadQuery & { groupBy: string }
-) {
-  return queryOptions({
-    queryKey: [...issueKeys.lists(workspaceSlug, projectId), "grouped", query] as const,
-    queryFn: () =>
-      listGroupedIssues(client, workspaceSlug, projectId, {
-        groupBy: query.groupBy,
-        perPage: GROUPED_PAGE_SIZE,
-        orderBy: query.orderBy,
-        ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
-      }),
-    staleTime: LIST_STALE_TIME_MS,
-  });
-}
 
 /** Children of one work item, loaded lazily by the row expander. */
 export function subIssuesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string, issueId: string) {

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import type { IssueListItem, State } from "@pidash/api-client";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -389,5 +389,54 @@ describe("InlinePropertyStrip", () => {
     expect(screen.getByRole("button", { name: "Priority: high" })).toBeDisabled();
     expect(screen.getByTestId("estimate-picker")).toBeDisabled();
     expect(screen.getByRole("button", { name: "Pick member" })).toBeDisabled();
+  });
+});
+
+describe("InlinePropertyStrip deferred pickers", () => {
+  // The flat list mounts a picker only on first interaction so 2,000
+  // virtualized rows do not each hold a popover (Quality gates: perf).
+  function chip(container: HTMLElement): HTMLElement {
+    const found = container.querySelector<HTMLElement>('[title^="State:"] button');
+    if (found === null) throw new Error("state chip missing");
+    return found;
+  }
+
+  it("mounts the state picker on hover and opens it on click", () => {
+    const { container } = render(<InlinePropertyStrip {...props({ deferPickers: true })} />);
+    expect(screen.queryByTestId("state-picker")).not.toBeInTheDocument();
+    fireEvent.pointerEnter(chip(container));
+    expect(screen.getByTestId("state-picker")).toBeInTheDocument();
+    expect(screen.getByTestId("state-picker")).toHaveAttribute("data-disabled", "false");
+  });
+
+  it("opens the picker from the keyboard and from a touch press", () => {
+    const keyboard = render(<InlinePropertyStrip {...props({ deferPickers: true })} />);
+    fireEvent.keyDown(chip(keyboard.container), { key: "Enter" });
+    expect(screen.getByTestId("state-picker")).toBeInTheDocument();
+    keyboard.unmount();
+    cleanup();
+    const touch = render(<InlinePropertyStrip {...props({ deferPickers: true })} />);
+    // jsdom ships no PointerEvent, so hand the cloned handler a native
+    // event that carries the touch pointer type.
+    const touchEvent = new MouseEvent("pointerdown", { bubbles: true });
+    Object.defineProperty(touchEvent, "pointerType", { value: "touch" });
+    fireEvent(chip(touch.container), touchEvent);
+    expect(screen.getByTestId("state-picker")).toBeInTheDocument();
+    touch.unmount();
+    cleanup();
+    const mouse = render(<InlinePropertyStrip {...props({ deferPickers: true })} />);
+    const mouseEvent = new MouseEvent("pointerdown", { bubbles: true });
+    Object.defineProperty(mouseEvent, "pointerType", { value: "mouse" });
+    fireEvent(chip(mouse.container), mouseEvent);
+    expect(screen.queryByTestId("state-picker")).not.toBeInTheDocument();
+  });
+
+  it("ignores a disabled chip's hint, press and keys", () => {
+    const { container } = render(<InlinePropertyStrip {...props({ deferPickers: true, readOnly: true })} />);
+    fireEvent.pointerEnter(chip(container));
+    fireEvent.pointerDown(chip(container), { pointerType: "touch" });
+    fireEvent.click(chip(container));
+    expect(screen.queryByTestId("state-picker")).not.toBeInTheDocument();
+    expect(chip(container)).toBeDisabled();
   });
 });
