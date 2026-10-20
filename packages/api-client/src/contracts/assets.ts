@@ -153,14 +153,17 @@ export async function uploadWorkspaceLogo(
 }
 
 /**
- * Upload one project-owned image and resolve to its public URL. The grant
- * rides the project's own asset route
- * (`POST /api/assets/v2/workspaces/<slug>/projects/<project_id>/`), so the
- * asset row belongs to the project rather than to the signed-in account.
- * The byte leg posts the signed fields plus the file, and the confirm leg
- * (`PATCH .../projects/<project_id>/<asset_id>/`) marks it uploaded. The
- * caller stores the returned URL on the owning row; nothing here rewires a
- * profile cover. Any failed leg rejects with ApiError.
+ * Upload one project-owned image and resolve to its public URL.
+ *
+ * The grant and confirm legs ride the workspace asset route
+ * (`POST /api/assets/v2/workspaces/<slug>/`) with the project id as
+ * `entity_identifier`, which is the shape the server's workspace handler
+ * accepts: it assigns `project_id` once from that identifier and its
+ * confirm leg wires the asset onto the project's cover slot. The
+ * project-scoped route is deliberately not used: its handler passes
+ * `project_id` both explicitly and through the entity-id lookup, which
+ * raises before the grant is answered. Nothing here rewires the signed-in
+ * account's profile. Any failed leg rejects with ApiError.
  */
 export async function uploadProjectAsset(
   client: ApiClient,
@@ -170,7 +173,7 @@ export async function uploadProjectAsset(
   file: File,
   uploadBytes: ByteUpload = defaultByteUpload
 ): Promise<string> {
-  const grantPath = `/api/assets/v2/workspaces/${slug}/projects/${projectId}/`;
+  const grantPath = `/api/assets/v2/workspaces/${slug}/`;
   const envelope = await client.sendJson<unknown>("POST", grantPath, {
     json: {
       entity_identifier: projectId,
@@ -196,7 +199,7 @@ export async function uploadProjectAsset(
     });
   }
 
-  await client.patch(`/api/assets/v2/workspaces/${slug}/projects/${projectId}/${encodeURIComponent(grant.asset_id)}/`);
+  await client.patch(`/api/assets/v2/workspaces/${slug}/${encodeURIComponent(grant.asset_id)}/`);
   return grant.asset_url;
 }
 

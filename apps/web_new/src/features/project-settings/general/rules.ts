@@ -293,19 +293,31 @@ export function saveFailureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** The canonical web URL a binding row states, whichever shape carried it. */
-export function canonicalRepositoryUrl(
-  status: { repo_url?: string; repository?: { web_url?: string } } | undefined
-): string | undefined {
+/** The URL shapes a binding answer can carry (spec §PSET-008). */
+interface RepositoryStatusUrls {
+  repo_url?: string;
+  repository?: { web_url?: string; clone_url_http?: string };
+}
+
+/**
+ * The canonical URL the project stores, whichever answer shape carried it.
+ * The bind answer's `repo_url` is the canonical clone URL the server writes
+ * onto the project; the status GET has no top-level `repo_url`, so it is
+ * built from `repository.clone_url_http` (not `web_url`, which drops the
+ * `.git` suffix the stored value keeps).
+ */
+export function canonicalRepositoryUrl(status: RepositoryStatusUrls | undefined): string | undefined {
   if (status === undefined) return undefined;
-  if (typeof status.repo_url === "string") return status.repo_url;
+  if (typeof status.repo_url === "string" && status.repo_url.trim() !== "") return status.repo_url;
+  const cloneUrl = status.repository?.clone_url_http;
+  if (typeof cloneUrl === "string" && cloneUrl.trim() !== "") return cloneUrl;
   const webUrl = status.repository?.web_url;
   return typeof webUrl === "string" ? webUrl : undefined;
 }
 
 /** Repository bind control state: a bound pill only on an exact URL match. */
 export function repositoryBoundState(
-  status: { bound: boolean; repo_url?: string; repository?: { web_url?: string } } | undefined,
+  status: (RepositoryStatusUrls & { bound: boolean }) | undefined,
   typed: string
 ): "bound" | "bind" {
   if (status?.bound !== true) return "bind";

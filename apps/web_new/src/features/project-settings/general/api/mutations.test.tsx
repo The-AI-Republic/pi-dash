@@ -40,6 +40,7 @@ const PROJECT_PATH = `/api/workspaces/acme/projects/${UUID}/`;
 const REPOSITORY_PATH = `/api/workspaces/acme/projects/${UUID}/repository/`;
 const BIND_PATH = `/api/workspaces/acme/projects/${UUID}/repository/bind/`;
 const ASSET_PATH = `/api/assets/v2/workspaces/acme/projects/${UUID}/`;
+const WORKSPACE_ASSET_PATH = "/api/assets/v2/workspaces/acme/";
 
 function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
   return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) } as TransportResponse;
@@ -170,9 +171,9 @@ function stubApi(options: StubOptions = {}) {
     if (url === `https://api.test${BIND_PATH}` && method === "POST") {
       const status = options.bindStatus ?? 201;
       if (status !== 201) return jsonResponse(url, status, { detail: "no provider account" });
-      return jsonResponse(url, 201, { ...binding(), repo_url: "https://github.com/acme/site" });
+      return jsonResponse(url, 201, { ...binding(), repo_url: "https://github.com/acme/site.git" });
     }
-    if (url === `https://api.test${ASSET_PATH}` && method === "POST") {
+    if (url === `https://api.test${WORKSPACE_ASSET_PATH}` && method === "POST") {
       const status = options.grantStatus ?? 200;
       if (status !== 200) return jsonResponse(url, status, { detail: "no" });
       return jsonResponse(url, 200, {
@@ -181,7 +182,7 @@ function stubApi(options: StubOptions = {}) {
         upload_data: { url: "https://uploads.test/signed", fields: { key: "emblems/asset-1.png" } },
       });
     }
-    if (url === `https://api.test${ASSET_PATH}asset-1/` && method === "PATCH") {
+    if (url === `https://api.test${WORKSPACE_ASSET_PATH}asset-1/` && method === "PATCH") {
       return jsonResponse(url, 204, {});
     }
     throw new Error(`unexpected fetch ${method} ${url}`);
@@ -239,7 +240,7 @@ describe("useSaveProjectGeneral", () => {
 describe("useBindRepository", () => {
   it("binds, writes the canonical URL onto the project and refreshes status", async () => {
     const { calls } = stubApi({
-      patchRows: [projectRow({ repo_url: "https://github.com/acme/site" })],
+      patchRows: [projectRow({ repo_url: "https://github.com/acme/site.git" })],
     });
     const queryClient = testClient();
     queryClient.setQueryData(generalKeys.detail("acme", UUID), projectRow());
@@ -255,14 +256,14 @@ describe("useBindRepository", () => {
       repo_url: "github.com/acme/site",
     });
     expect(calls.find((call) => call.url === `https://api.test${PROJECT_PATH}`)?.body).toEqual({
-      repo_url: "https://github.com/acme/site",
+      repo_url: "https://github.com/acme/site.git",
     });
     expect(queryClient.getQueryData(generalKeys.detail("acme", UUID))).toMatchObject({
-      repo_url: "https://github.com/acme/site",
+      repo_url: "https://github.com/acme/site.git",
     });
     expect(queryClient.getQueryData(generalKeys.repository("acme", UUID))).toMatchObject({
       bound: true,
-      repo_url: "https://github.com/acme/site",
+      repo_url: "https://github.com/acme/site.git",
     });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: generalKeys.repository("acme", UUID) });
     expect(notifySuccess).toHaveBeenCalledWith(REPO_BOUND_TITLE, REPO_BOUND_MESSAGE);
@@ -313,14 +314,19 @@ describe("useUploadEmblem", () => {
     });
     await waitFor(() => expect(hook.result.current.isSuccess).toBe(true));
     expect(hook.result.current.data).toBe("/api/assets/v2/static/asset-1/");
-    expect(calls.find((call) => call.url === `https://api.test${ASSET_PATH}`)?.body).toMatchObject({
+    // The workspace route assigns project_id once from entity_identifier;
+    // the project-scoped route is not a shape the server accepts.
+    expect(calls.find((call) => call.url === `https://api.test${WORKSPACE_ASSET_PATH}`)?.body).toMatchObject({
       entity_type: "PROJECT_COVER",
       entity_identifier: UUID,
       name: "emblem.png",
       type: "image/png",
     });
+    expect(calls.some((call) => call.url === `https://api.test${ASSET_PATH}` && call.method === "POST")).toBe(false);
     expect(uploads).toEqual(["https://uploads.test/signed"]);
-    expect(calls.some((call) => call.method === "PATCH" && call.url.endsWith("/asset-1/"))).toBe(true);
+    expect(
+      calls.some((call) => call.method === "PATCH" && call.url === `https://api.test${WORKSPACE_ASSET_PATH}asset-1/`)
+    ).toBe(true);
     expect(calls.some((call) => call.url === "https://api.test/api/assets/v2/user-assets/")).toBe(false);
   });
 

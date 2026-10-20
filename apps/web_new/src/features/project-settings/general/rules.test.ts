@@ -356,13 +356,38 @@ describe("repositoryBoundState", () => {
     expect(repositoryBoundState({ bound: true, repo_url: "" } as never, "https://github.com/acme/site")).toBe("bind");
   });
 
-  it("reads the canonical URL from a full binding row", () => {
-    const status = { bound: true as const, repository: { web_url: "https://github.com/acme/site" } };
-    expect(canonicalRepositoryUrl(status)).toBe("https://github.com/acme/site");
-    expect(repositoryBoundState(status, "https://github.com/acme/site")).toBe("bound");
+  it("compares a status row against the stored clone URL, not the web URL", () => {
+    // The real status GET carries no top-level repo_url; the project stores
+    // the canonical clone URL, which keeps the `.git` suffix the web URL drops.
+    const status = {
+      bound: true as const,
+      repository: {
+        web_url: "https://github.com/acme/site",
+        clone_url_http: "https://github.com/acme/site.git",
+      },
+    };
+    expect(canonicalRepositoryUrl(status)).toBe("https://github.com/acme/site.git");
+    expect(repositoryBoundState(status, "https://github.com/acme/site.git")).toBe("bound");
+    expect(repositoryBoundState(status, " https://github.com/acme/site.git ")).toBe("bound");
+    expect(repositoryBoundState(status, "https://github.com/acme/site")).toBe("bind");
     expect(repositoryBoundState(status, "https://github.com/acme/other")).toBe("bind");
     expect(canonicalRepositoryUrl(undefined)).toBeUndefined();
     expect(canonicalRepositoryUrl({ repository: {} })).toBeUndefined();
+  });
+
+  it("falls back to the web URL only when neither canonical shape is present", () => {
+    expect(canonicalRepositoryUrl({ repository: { web_url: "https://github.com/acme/site" } })).toBe(
+      "https://github.com/acme/site"
+    );
+    expect(
+      canonicalRepositoryUrl({ repo_url: "  ", repository: { clone_url_http: "https://git.test/acme/site.git" } })
+    ).toBe("https://git.test/acme/site.git");
+    expect(
+      canonicalRepositoryUrl({
+        repo_url: "https://github.com/acme/site.git",
+        repository: { clone_url_http: "https://git.test/acme/site.git" },
+      })
+    ).toBe("https://github.com/acme/site.git");
   });
 });
 

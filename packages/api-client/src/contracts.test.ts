@@ -5373,7 +5373,7 @@ describe("project asset contracts", () => {
     });
   }
 
-  it("grants, posts bytes and confirms against the project route", async () => {
+  it("grants, posts bytes and confirms on the workspace route the handler accepts", async () => {
     const transport = grantTransport();
     const client = createClient({ baseUrl: "https://api.test", transport });
     const file = new File(["bytes"], "emblem.png", { type: "image/png" });
@@ -5383,8 +5383,11 @@ describe("project asset contracts", () => {
       return { ok: true, status: 204 };
     });
     expect(url).toBe("/api/assets/v2/static/asset-9/");
+    // WorkspaceFileAssetEndpoint.post reads `entity_identifier` and assigns
+    // project_id once from the PROJECT_COVER lookup; the project-scoped
+    // ProjectAssetEndpoint passes project_id twice and cannot answer.
     const grantCall = transport.calls.find((call) => call.init.method === "POST");
-    expect(grantCall?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/`);
+    expect(grantCall?.url).toBe("https://api.test/api/assets/v2/workspaces/acme/");
     expect(grantCall?.init.body).toBe(
       JSON.stringify({
         entity_identifier: UUID2,
@@ -5397,7 +5400,7 @@ describe("project asset contracts", () => {
     expect(uploads[0]?.url).toBe("https://uploads.test/signed");
     expect(uploads[0]?.body.get("file")).toBe(file);
     const confirmCall = transport.calls.find((call) => call.init.method === "PATCH");
-    expect(confirmCall?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/projects/${UUID2}/asset-9/`);
+    expect(confirmCall?.url).toBe("https://api.test/api/assets/v2/workspaces/acme/asset-9/");
   });
 
   it("rejects when the signed upload refuses the bytes", async () => {

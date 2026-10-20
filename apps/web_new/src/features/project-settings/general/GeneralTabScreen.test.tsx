@@ -63,6 +63,7 @@ const REPOSITORY_PATH = `/api/workspaces/acme/projects/${UUID}/repository/`;
 const BIND_PATH = `/api/workspaces/acme/projects/${UUID}/repository/bind/`;
 const IDENTIFIER_PATH = "/api/workspaces/acme/project-identifiers/";
 const ASSET_PATH = `/api/assets/v2/workspaces/acme/projects/${UUID}/`;
+const WORKSPACE_ASSET_PATH = "/api/assets/v2/workspaces/acme/";
 const USER_ASSET_PATH = "/api/assets/v2/user-assets/";
 
 function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
@@ -156,6 +157,36 @@ interface StubOptions {
   uploadFailures?: number;
 }
 
+/** A live binding row shaped like the status GET (no top-level repo_url). */
+function bindingRow(): Record<string, unknown> {
+  return {
+    bound: true,
+    id: "323e4567-e89b-12d3-a456-426614174002",
+    provider: "github",
+    provider_account_id: null,
+    host_url: "https://github.com",
+    repository: {
+      id: "repo-1",
+      provider: "github",
+      host_url: "https://github.com",
+      namespace: "acme",
+      name: "site",
+      full_name: "acme/site",
+      web_url: "https://github.com/acme/site",
+      clone_url_http: "https://github.com/acme/site.git",
+      clone_url_ssh: "git@github.com:acme/site.git",
+      default_branch: "main",
+      private: true,
+    },
+    is_sync_enabled: false,
+    clone_auth_mode: "runner_managed",
+    last_synced_at: null,
+    last_sync_error: "",
+    degraded: false,
+    degraded_reason: null,
+  };
+}
+
 function stubApi(options: StubOptions = {}) {
   const calls: Call[] = [];
   const patchRows = [...(options.patchRows ?? [])];
@@ -198,34 +229,12 @@ function stubApi(options: StubOptions = {}) {
     if (url === `https://api.test${BIND_PATH}` && method === "POST") {
       const status = options.bindStatus ?? 201;
       if (status !== 201) return jsonResponse(url, status, { detail: "no provider account" });
-      bound = {
-        bound: true,
-        id: "323e4567-e89b-12d3-a456-426614174002",
-        provider: "github",
-        provider_account_id: null,
-        host_url: "https://github.com",
-        repository: {
-          id: "repo-1",
-          provider: "github",
-          host_url: "https://github.com",
-          namespace: "acme",
-          name: "site",
-          full_name: "acme/site",
-          web_url: "https://github.com/acme/site",
-          clone_url_http: "https://github.com/acme/site.git",
-          clone_url_ssh: "git@github.com:acme/site.git",
-          default_branch: "main",
-          private: true,
-        },
-        is_sync_enabled: false,
-        clone_auth_mode: "runner_managed",
-        last_synced_at: null,
-        last_sync_error: "",
-        degraded: false,
-        degraded_reason: null,
-        repo_url: "https://github.com/acme/site",
-      };
-      return jsonResponse(url, 201, bound);
+      const answer = bindingRow();
+      // The bind answer adds the canonical clone URL it writes onto the
+      // project; the status GET that follows carries the binding only.
+      const { repo_url: _written, ...statusRow } = answer;
+      bound = statusRow;
+      return jsonResponse(url, 201, { ...answer, repo_url: "https://github.com/acme/site.git" });
     }
     if (url.startsWith(`https://api.test${IDENTIFIER_PATH}`) && method === "GET")
       return reserved(options.identifierExists ?? 0);
@@ -234,7 +243,7 @@ function stubApi(options: StubOptions = {}) {
         timezones: [{ value: "Europe/Lisbon", label: "Lisbon", gmt_offset: "GMT+0", utc_offset: "+00:00" }],
       });
     }
-    if (url === `https://api.test${ASSET_PATH}` && method === "POST") {
+    if (url === `https://api.test${WORKSPACE_ASSET_PATH}` && method === "POST") {
       if (options.uploadOk === false) return jsonResponse(url, 500, { detail: "no" });
       if (uploadFailures > 0) {
         uploadFailures -= 1;
@@ -246,7 +255,7 @@ function stubApi(options: StubOptions = {}) {
         upload_data: { url: "https://uploads.test/signed", fields: { key: "emblems/asset-1.png" } },
       });
     }
-    if (url === `https://api.test${ASSET_PATH}asset-1/` && method === "PATCH") {
+    if (url === `https://api.test${WORKSPACE_ASSET_PATH}asset-1/` && method === "PATCH") {
       return jsonResponse(url, 204, {});
     }
     throw new Error(`unexpected fetch ${method} ${url}`);
@@ -538,14 +547,20 @@ describe("PSET-007 emblem", () => {
     save();
     await waitFor(() => expect(patchCalls(calls)).toHaveLength(1));
     expect(patchBodyAt(calls).logo_props).toEqual({ in_use: "upload", url: "/api/assets/v2/static/emblem/" });
-    expect(calls.find((call) => call.url === `https://api.test${ASSET_PATH}`)?.body).toMatchObject({
+    // The grant and confirm use the workspace asset route: the project-scoped
+    // route refuses the shape the server's handler builds.
+    expect(calls.find((call) => call.url === `https://api.test${WORKSPACE_ASSET_PATH}`)?.body).toMatchObject({
       entity_type: "PROJECT_COVER",
       entity_identifier: UUID,
     });
-    expect(calls.some((call) => call.url === `https://api.test${USER_ASSET_PATH}`)).toBe(false);
-    expect(calls.some((call) => call.url === `https://api.test${ASSET_PATH}asset-1/` && call.method === "PATCH")).toBe(
+    expect(calls.some((call) => call.url === `https://api.test${WORKSPACE_ASSET_PATH}` && call.method === "POST")).toBe(
       true
     );
+    expect(calls.some((call) => call.url === `https://api.test${ASSET_PATH}` && call.method === "POST")).toBe(false);
+    expect(calls.some((call) => call.url === `https://api.test${USER_ASSET_PATH}`)).toBe(false);
+    expect(
+      calls.some((call) => call.url === `https://api.test${WORKSPACE_ASSET_PATH}asset-1/` && call.method === "PATCH")
+    ).toBe(true);
   });
 
   it("refuses a non-image file and uploads nothing", async () => {
@@ -554,7 +569,7 @@ describe("PSET-007 emblem", () => {
     const file = new File(["<svg/>"], "emblem.svg", { type: "image/svg+xml" });
     fireEvent.change(screen.getByTestId("general-emblem-file"), { target: { files: [file] } });
     expect(await screen.findByRole("alert")).toHaveTextContent("Choose a PNG, JPEG, WebP or GIF image.");
-    expect(calls.some((call) => call.url === `https://api.test${ASSET_PATH}`)).toBe(false);
+    expect(calls.some((call) => call.url === `https://api.test${WORKSPACE_ASSET_PATH}`)).toBe(false);
   });
 
   it("aborts the whole save when the upload fails, even with a valid form", async () => {
@@ -630,7 +645,7 @@ describe("PSET-008 repository bind", () => {
     expect(calls.some((call) => call.url === `https://api.test${BIND_PATH}`)).toBe(false);
   });
 
-  it("binds, writes the canonical URL back and reads as bound", async () => {
+  it("binds, writes the canonical clone URL back and reads as bound after the refetch", async () => {
     const { calls } = await renderLoaded();
     fireEvent.change(field("Repository URL"), { target: { value: " github.com/acme/site " } });
     fireEvent.click(screen.getByTestId("general-repo-bind"));
@@ -638,45 +653,26 @@ describe("PSET-008 repository bind", () => {
     expect(calls.find((call) => call.url === `https://api.test${BIND_PATH}`)?.body).toEqual({
       repo_url: "github.com/acme/site",
     });
-    expect(patchBodyAt(calls)).toEqual({ repo_url: "https://github.com/acme/site" });
-    expect(field("Repository URL")).toHaveValue("https://github.com/acme/site");
+    // The server stores the clone URL (`…/site.git`), so the written-back
+    // value keeps the suffix even though the web URL drops it.
+    expect(patchBodyAt(calls)).toEqual({ repo_url: "https://github.com/acme/site.git" });
+    expect(field("Repository URL")).toHaveValue("https://github.com/acme/site.git");
+    expect(screen.getByTestId("general-repo-bound")).toBeDisabled();
     expect(notify.success).toHaveBeenCalledWith(REPO_BOUND_TITLE, expect.any(String));
   });
 
-  it("shows the bound pill only on an exact canonical match", async () => {
+  it("shows the bound pill only on an exact match with the stored clone URL", async () => {
     await renderLoaded({
-      bound: {
-        bound: true,
-        id: "323e4567-e89b-12d3-a456-426614174002",
-        provider: "github",
-        provider_account_id: null,
-        host_url: "https://github.com",
-        repository: {
-          id: "repo-1",
-          provider: "github",
-          host_url: "https://github.com",
-          namespace: "acme",
-          name: "site",
-          full_name: "acme/site",
-          web_url: "https://github.com/acme/site",
-          clone_url_http: "https://github.com/acme/site.git",
-          clone_url_ssh: "git@github.com:acme/site.git",
-          default_branch: "main",
-          private: true,
-        },
-        is_sync_enabled: false,
-        clone_auth_mode: "runner_managed",
-        last_synced_at: null,
-        last_sync_error: "",
-        degraded: false,
-        degraded_reason: null,
-        repo_url: "https://github.com/acme/site",
-      },
-      row: () => projectRow({ repo_url: "https://github.com/acme/site" }),
+      bound: bindingRow(),
+      row: () => projectRow({ repo_url: "https://github.com/acme/site.git" }),
     });
+    expect(screen.getByTestId("general-repo-bound")).toBeDisabled();
     fireEvent.change(field("Repository URL"), { target: { value: "https://github.com/acme/other" } });
     expect(screen.getByTestId("general-repo-bind")).toBeInTheDocument();
+    // The web URL without the suffix is not the stored value.
     fireEvent.change(field("Repository URL"), { target: { value: "https://github.com/acme/site" } });
+    expect(screen.getByTestId("general-repo-bind")).toBeInTheDocument();
+    fireEvent.change(field("Repository URL"), { target: { value: "https://github.com/acme/site.git" } });
     expect(screen.getByTestId("general-repo-bound")).toBeDisabled();
   });
 
