@@ -24,8 +24,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::ipc::client::Client;
-use crate::ipc::protocol::{Request, Response};
+use crate::ipc::probe::{legacy_daemon, status_at, unreachable_detail};
 use crate::util::paths::Paths;
 
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -145,9 +144,10 @@ where
             "waiting up to {}s for daemon IPC",
             IPC_TIMEOUT.as_secs()
         ));
-        if let Some(s) = wait_for_ipc(paths, IPC_TIMEOUT, &mut progress).await {
-            break s;
-        }
+        let ipc_error = match wait_for_ipc(paths, IPC_TIMEOUT, &mut progress).await {
+            Ok(s) => break s,
+            Err(e) => e,
+        };
 
         // IPC never answered. If the daemon was SIGKILL'd on exec (the macOS
         // AMFI race) and attempts remain, re-kick and try again — the next
@@ -166,15 +166,20 @@ where
         // than "the IPC didn't answer."
         let diagnosis = svc.diagnose_recent_exit().await;
         let journal = capture_service_detail(&svc).await;
+        // Name the socket and the last IPC error, and check the legacy
+        // socket, so a path mismatch reads differently from a dead daemon
+        // (PDASHOSS01-311).
+        let legacy = legacy_daemon(paths).await.map(|(path, _)| path);
+        let ipc = unreachable_detail(&paths.ipc_socket_path(), &ipc_error, legacy.as_deref());
         let detail = match diagnosis {
             Some(diag) => format!(
-                "Daemon did not answer IPC within {}s after restart.\n\n\
+                "Daemon did not answer IPC within {}s after restart.\n{ipc}\n\n\
                  Diagnosis: {diag}\n\n\
                  Service state: {state}\n\n{journal}",
                 IPC_TIMEOUT.as_secs()
             ),
             None => format!(
-                "Daemon did not answer IPC within {}s after restart.\n\
+                "Daemon did not answer IPC within {}s after restart.\n{ipc}\n\
                  Service state: {state}\n\n{journal}",
                 IPC_TIMEOUT.as_secs()
             ),
@@ -238,22 +243,24 @@ where
     }
 }
 
+/// Poll until the daemon answers `StatusGet`, or return the last IPC error
+/// at the deadline so the failure report can say *why* it never answered.
 async fn wait_for_ipc(
     paths: &Paths,
     timeout: Duration,
     progress: &mut impl FnMut(String),
-) -> Option<crate::ipc::protocol::StatusSnapshot> {
+) -> Result<crate::ipc::protocol::StatusSnapshot, anyhow::Error> {
     let start = Instant::now();
     let deadline = start + timeout;
     let mut next_progress = start + PROGRESS_INTERVAL;
+    let socket = paths.ipc_socket_path();
     loop {
-        if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
-            && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
-        {
-            return Some(s);
-        }
+        let err = match status_at(&socket).await {
+            Ok(s) => return Ok(s),
+            Err(e) => e,
+        };
         if Instant::now() >= deadline {
-            return None;
+            return Err(err);
         }
         maybe_emit_wait_progress("daemon IPC", start, timeout, &mut next_progress, progress);
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -269,8 +276,7 @@ async fn wait_for_cloud_connected(
     let deadline = start + timeout;
     let mut next_progress = start + PROGRESS_INTERVAL;
     loop {
-        if let Ok(mut c) = Client::connect(paths.ipc_socket_path()).await
-            && let Ok(Response::Status(s)) = c.call(Request::StatusGet).await
+        if let Ok(s) = status_at(&paths.ipc_socket_path()).await
             && s.daemon.connected
         {
             return Some(s);

@@ -114,6 +114,16 @@ impl Paths {
         self.runtime_dir.join("pidash.sock")
     }
 
+    /// The `<data_dir>/runtime` socket a pre-PDASHOSS01-230 daemon used when
+    /// its service unit exported the default data dir, or `None` when that
+    /// is already `ipc_socket_path()` (isolated installs, hosts without an
+    /// XDG runtime dir). Only for diagnosing a daemon not yet restarted onto
+    /// the current binary.
+    pub fn legacy_ipc_socket_path(&self) -> Option<PathBuf> {
+        let legacy = self.data_dir.join("runtime").join("pidash.sock");
+        (legacy != self.ipc_socket_path()).then_some(legacy)
+    }
+
     pub fn default_working_dir(&self) -> PathBuf {
         let base = std::env::var("TMPDIR")
             .map(PathBuf::from)
@@ -262,6 +272,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let isolated = Paths::resolve(None, Some(tmp.path().join("app-data"))).unwrap();
         assert!(!isolated.data_dir_is_default());
+    }
+
+    #[test]
+    fn legacy_socket_is_only_reported_when_it_differs() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Isolated install: the legacy location *is* the live socket.
+        let isolated = Paths::resolve(None, Some(tmp.path().join("app-data"))).unwrap();
+        assert_eq!(isolated.legacy_ipc_socket_path(), None);
+        // Shared install with an XDG runtime dir: point at <data>/runtime.
+        let shared = paths_at(tmp.path());
+        assert_eq!(
+            shared.legacy_ipc_socket_path(),
+            Some(tmp.path().join("data/runtime/pidash.sock"))
+        );
     }
 
     #[test]
