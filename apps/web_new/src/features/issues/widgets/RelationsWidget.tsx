@@ -11,7 +11,7 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
 import { Link } from "@tanstack/react-router";
-import { deleteEpic, deleteIssue, type RelatedIssue } from "@pidash/api-client";
+import { deleteEpic, deleteIssue, removeIssueRelation, type RelatedIssue } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { notifyError, notifySuccess, PeekPanel } from "../../../shared/shell/index.js";
@@ -58,16 +58,22 @@ export function RelationsWidget({
   const shared = useWidgetActions();
   const addKind = shared.relationKind;
   const setAddKind = shared.setRelationKind;
-  const [pendingDelete, setPendingDelete] = React.useState<RelatedIssue | null>(null);
+  const [pendingDelete, setPendingDelete] = React.useState<{ row: RelatedIssue; kind: RelationKind } | null>(null);
   const [collapsed, setCollapsed] = React.useState<ReadonlySet<RelationKind>>(() => new Set());
   const [peek, setPeek] = React.useState<{ row: RelatedIssue; identifier: string } | null>(null);
   const [editing, setEditing] = React.useState<RelatedIssue | null>(null);
 
   // The slim relation row carries no epic flag; the detail read decides
-  // which collection the destroy belongs to (ISS-182).
+  // which collection the destroy belongs to (ISS-182). The edge is
+  // detached first, as the old flow does, so a failed destroy cannot
+  // leave the pair silently related on the server.
   const destroy = useMutation({
-    mutationFn: async (row: RelatedIssue) => {
+    mutationFn: async ({ row, kind }: { row: RelatedIssue; kind: RelationKind }) => {
       const client = getAppClient();
+      await removeIssueRelation(client, workspaceSlug, projectId, issueId, {
+        relationType: kind,
+        relatedIssue: row.id,
+      });
       const detail = await queryClient.fetchQuery(
         issueDetailQueryOptions(client, workspaceSlug, row.project_id, row.id)
       );
@@ -180,7 +186,7 @@ export function RelationsWidget({
                           onOpen={open}
                           onEdit={edit}
                           onRemove={(target) => removeRelation(target, spec.kind)}
-                          onDelete={setPendingDelete}
+                          onDelete={(target) => setPendingDelete({ row: target, kind: spec.kind })}
                         />
                       ))}
                     </div>
@@ -234,7 +240,7 @@ export function RelationsWidget({
           if (!open) setPendingDelete(null);
         }}
         noun="Work item"
-        title={pendingDelete?.name ?? ""}
+        title={pendingDelete?.row.name ?? ""}
         deleting={destroy.isPending}
         onConfirm={confirmDelete}
       />

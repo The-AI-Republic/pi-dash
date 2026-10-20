@@ -338,9 +338,28 @@ describe("relations widget", () => {
     const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Work item deleted"));
+    const unrelate = calls.find((call) => call.url.includes("/remove-relation/"));
+    expect(unrelate?.body).toContain('"related_issue":"' + PEER + '"');
+    expect(unrelate?.body).toContain('"relation_type":"blocked_by"');
     const destroy = calls.find((call) => call.method === "DELETE");
     expect(destroy?.url).toContain(`/epics/${PEER}/`);
     expect(destroy?.url).not.toContain(`/issues/${PEER}/`);
+    expect(calls.indexOf(unrelate!)).toBeLessThan(calls.indexOf(destroy!));
+  });
+
+  it("keeps the relation when the detach before a delete fails", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderWidget({
+      relations: { ...emptyRelations(), relates_to: [relatedRow()] },
+      writeStatus: 500,
+    });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't delete the work item", expect.anything()));
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/remove-relation/"))).toBe(true);
   });
 
   it("reports a failed add and keeps the dialog open", async () => {
