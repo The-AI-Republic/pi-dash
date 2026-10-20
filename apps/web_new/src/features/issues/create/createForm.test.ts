@@ -263,6 +263,9 @@ describe("hasDraftWorthKeeping", () => {
     expect(hasDraftWorthKeeping(form({ moduleIds: ["other"] }), engaged)).toBe(true);
     expect(hasDraftWorthKeeping(form({ cycleId: "cycle" }))).toBe(true);
     expect(hasDraftWorthKeeping(form({ moduleIds: ["module"] }))).toBe(true);
+    // Same size, different member: the user swapped one module for another.
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["other"] }), engaged)).toBe(true);
+    expect(hasDraftWorthKeeping(form({ moduleIds: [] }), { cycleId: null, moduleIds: ["a"] })).toBe(true);
   });
 
   it("counts an image-only or mention-only description", () => {

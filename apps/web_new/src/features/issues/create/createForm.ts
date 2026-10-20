@@ -227,6 +227,11 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
  * from its context in nothing (ISS-124/ISS-125). Empty values and a
  * description without content do not count either.
  */
+/** Whether two id lists match element for element, in order. */
+function sameIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 /** Nothing seeded from the route: a caller with no context. */
 const NO_MEMBERSHIP: CreateMembership = { cycleId: null, moduleIds: [] };
 
@@ -239,8 +244,7 @@ export function hasDraftWorthKeeping(form: CreateFormState, context: CreateMembe
   if (form.labelIds.length > 0) return true;
   if (form.startDate !== null || form.targetDate !== null) return true;
   if (form.cycleId !== context.cycleId) return true;
-  if (form.moduleIds.length !== context.moduleIds.length) return true;
-  if (form.moduleIds.some((id, index) => id !== context.moduleIds[index])) return true;
+  if (!sameIds(form.moduleIds, context.moduleIds)) return true;
   if (form.estimatePoint !== null) return true;
   if (form.execution !== null) return true;
   if (form.parentId !== null) return true;
