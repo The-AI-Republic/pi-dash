@@ -29,8 +29,11 @@ interface ToastActionData {
 export interface ToastAction {
   /** Visible label, e.g. "View work item" or "Copy link". */
   label: string;
-  /** Runs when the action is chosen (for a link, when it is followed). */
-  run?: (() => void) | undefined;
+  /**
+   * Runs when the action is chosen. A copy action may answer false when
+   * the write failed, so the confirmation is only claimed on success.
+   */
+  run?: (() => void | boolean | Promise<void | boolean>) | undefined;
   /** Render as an anchor opened in a new tab at this address. */
   href?: string | undefined;
 }
@@ -103,14 +106,16 @@ function ToastActionItem({ action, onChosen }: { action: ToastAction; onChosen: 
       type="button"
       className={actionClasses}
       onClick={() => {
-        action.run?.();
-        if (action.run !== undefined) {
+        if (action.run === undefined) {
+          onChosen();
+          return;
+        }
+        void Promise.resolve(action.run()).then((ok) => {
+          if (ok === false) return;
           setCopied(true);
           if (timer.current !== null) clearTimeout(timer.current);
           timer.current = setTimeout(() => setCopied(false), TOAST_COPIED_RESET_MS);
-        } else {
-          onChosen();
-        }
+        });
       }}
     >
       {copied ? "Copied!" : action.label}

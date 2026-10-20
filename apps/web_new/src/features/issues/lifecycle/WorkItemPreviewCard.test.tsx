@@ -106,6 +106,18 @@ describe("WorkItemPreviewCard", () => {
     expect(screen.getByTestId("preview-card-dates")).toHaveAttribute("data-overdue", "true");
   });
 
+  it("uses the local calendar day when the caller passes none", () => {
+    render(
+      <WorkItemPreviewCard
+        issue={{ ...ISSUE, target_date: "2999-01-01" }}
+        projectIdentifier="WEB"
+        state={{ name: "Doing", group: "started" }}
+      />
+    );
+    expect(screen.getByTestId("preview-card-dates")).toHaveTextContent("Jan 01, 2999");
+    expect(screen.getByTestId("preview-card-dates")).not.toHaveAttribute("data-overdue");
+  });
+
   it("falls back to a neutral glyph for an unknown state group or priority", () => {
     render(
       <WorkItemPreviewCard

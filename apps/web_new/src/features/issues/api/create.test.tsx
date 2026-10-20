@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -141,6 +142,32 @@ describe("useCreateWorkItem", () => {
     expect(view).toHaveAttribute("href", "/acme/browse/WEB-7/");
     expect(view).toHaveAttribute("target", "_blank");
     expect(screen.getByRole("button", { name: CREATE_TOAST_COPY_LABEL })).toBeInTheDocument();
+  });
+
+  it("shows Copied! only after the clipboard write lands", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(globalThis.navigator, "clipboard", { configurable: true, value: { writeText } });
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, projectIdentifier: "WEB", payload: { name: "Fresh report" } });
+    await user.click(await screen.findByRole("button", { name: CREATE_TOAST_COPY_LABEL }));
+    expect(await screen.findByRole("button", { name: "Copied!" })).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/acme/browse/WEB-7/"));
+    // The toast's own confirmation is the only feedback, so no second notice.
+    expect(notifySuccess).not.toHaveBeenCalled();
+  });
+
+  it("keeps the copy label when the clipboard refuses the write", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error("denied"))) },
+    });
+    const h = renderHandle(201);
+    h.save({ projectId: PROJECT_ID, projectIdentifier: "WEB", payload: { name: "Fresh report" } });
+    await user.click(await screen.findByRole("button", { name: CREATE_TOAST_COPY_LABEL }));
+    await waitFor(() => expect(screen.getByRole("button", { name: CREATE_TOAST_COPY_LABEL })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Copied!" })).not.toBeInTheDocument();
   });
 
   it("keeps the plain notice when the project code is unknown", async () => {
@@ -349,7 +376,7 @@ describe("useCreateWorkItem temp rows", () => {
       payload: { name: "Grouped create", state_id: PROJECT_ID, priority: "high", label_ids: ["label-1"] },
       tempGroupKey: "state",
     });
-    await waitFor(() => expect(notifySuccess).toHaveBeenCalled());
+    await waitFor(() => expect(calls.some((call) => call.method === "POST")).toBe(true));
     const post = calls.find((call) => call.method === "POST");
     expect(JSON.parse(post?.body ?? "{}")).toEqual({
       name: "Grouped create",

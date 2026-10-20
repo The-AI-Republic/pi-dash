@@ -93,6 +93,29 @@ describe("Toast inline actions", () => {
     }
   });
 
+  it("keeps the label when a copy action reports a failed write", async () => {
+    const user = userEvent.setup();
+    const manager = setup();
+    showToast(manager, { title: "Saved", timeout: 0, actions: [{ label: "Copy link", run: () => false }] });
+    await screen.findByText("Saved");
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copied!" })).not.toBeInTheDocument();
+  });
+
+  it("waits for an async copy action before confirming", async () => {
+    const user = userEvent.setup();
+    const manager = setup();
+    showToast(manager, {
+      title: "Saved",
+      timeout: 0,
+      actions: [{ label: "Copy link", run: async () => true }],
+    });
+    await screen.findByText("Saved");
+    await user.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(await screen.findByRole("button", { name: "Copied!" })).toBeInTheDocument();
+  });
+
   it("dismisses when a plain action without a run is chosen", async () => {
     const user = userEvent.setup();
     const manager = setup();

@@ -21,6 +21,7 @@ import {
   STATE_GROUP_ICONS,
   type PriorityLevel,
 } from "../../../shared/pickers/index.js";
+import { todayIsoDay } from "../dropdowns/calendar.js";
 import { previewDateLine, type PreviewDateLine } from "./preview.js";
 
 export interface WorkItemPreviewCardProps {
@@ -78,7 +79,7 @@ export function WorkItemPreviewCard({
     issue.start_date ?? null,
     issue.target_date ?? null,
     state?.group ?? null,
-    today ?? new Date().toISOString().slice(0, 10)
+    today ?? todayIsoDay()
   );
   return (
     <div data-testid="work-item-preview" className="flex flex-col gap-(--space-2)">

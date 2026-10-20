@@ -15,7 +15,7 @@ import { showToast } from "@pidash/kit";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { getToastManager, notifyError } from "../../../shared/shell/index.js";
-import { copyWorkItemLink, workItemPath } from "../../../shared/shell/shareLink.js";
+import { copyShareAddress, workItemPath } from "../../../shared/shell/shareLink.js";
 import { createTempId } from "../freshness/fresh.js";
 import { insertTempRow, removeTempRow, tempIssueRow } from "../freshness/tempRows.js";
 import { issueKeys } from "./keys.js";
@@ -64,15 +64,22 @@ export function announceCreatedWorkItem(
     title: WORK_ITEM_CREATED_TITLE,
     actions: [
       { label: CREATE_TOAST_VIEW_LABEL, href: path },
-      { label: CREATE_TOAST_COPY_LABEL, run: () => void copyWorkItemLink(path, COPY_MESSAGES) },
+      // The toast's own "Copied!" is the feedback; a failed write must not
+      // claim success, so the copy resolves false and the label stays.
+      {
+        label: CREATE_TOAST_COPY_LABEL,
+        run: async () => {
+          try {
+            await copyShareAddress(path);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      },
     ],
   });
 }
-
-const COPY_MESSAGES = {
-  copied: "Copied the work item link.",
-  failed: "Couldn't copy the work item link.",
-} as const;
 
 /** Post one work item, refreshing the workspace lists after. */
 export function useCreateWorkItem(workspaceSlug: string) {
