@@ -42,6 +42,22 @@ export const COMMENT_ATTACH_FAILED_TITLE = "Couldn't finish the comment upload";
 export const COMMENT_IMAGE_UPLOAD_FAILED_TITLE = "Couldn't upload the image";
 export const COMMENT_FAILURE_FALLBACK = "Check your connection and try again.";
 
+/**
+ * Drop every read that shows the issue's comments. The activity feed
+ * keeps its own list of comment rows (ISS-194), so a comment write has to
+ * refetch both or the timeline shows a stale set.
+ */
+function invalidateCommentViews(queryClient: QueryClient, scope: CommentScope): Promise<void> {
+  return Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: issueKeys.activity(scope.workspaceSlug, scope.projectId, scope.issueId),
+    }),
+  ]).then(() => undefined);
+}
+
 /** Server detail for a comment failure notice, falling back when empty. */
 export function commentFailureDetail(error: unknown): string {
   if (isApiError(error) && error.message !== "") return error.message;
@@ -140,10 +156,7 @@ export function useUpdateComment(scope: CommentScope, failureTitle: string, succ
       if (snapshots !== undefined) rollbackSnapshots(queryClient, snapshots);
       notifyError(failureTitle, commentFailureDetail(error));
     },
-    onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),
-      }),
+    onSettled: () => invalidateCommentViews(queryClient, scope),
   });
 }
 
@@ -160,10 +173,7 @@ export function useDeleteComment(scope: CommentScope) {
       if (snapshots !== undefined) rollbackSnapshots(queryClient, snapshots);
       notifyError(COMMENT_REMOVE_FAILED_TITLE, commentFailureDetail(error));
     },
-    onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),
-      }),
+    onSettled: () => invalidateCommentViews(queryClient, scope),
   });
 }
 
@@ -204,10 +214,7 @@ export function useCreateComment(scope: CommentScope) {
       );
     },
     onError: (error: Error) => notifyError(COMMENT_CREATE_FAILED_TITLE, commentFailureDetail(error)),
-    onSettled: () =>
-      queryClient.invalidateQueries({
-        queryKey: issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),
-      }),
+    onSettled: () => invalidateCommentViews(queryClient, scope),
   });
 }
 

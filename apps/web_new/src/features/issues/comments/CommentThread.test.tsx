@@ -38,9 +38,13 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
   return { ...original, RichTextEditor: FakeEditor, CommentRichTextEditor: FakeEditor };
 });
 
+const session = vi.hoisted(() => ({
+  viewer: { data: { id: "523e4567-e89b-12d3-a456-426614174004" } } as { data?: { id: string } | undefined },
+}));
+
 vi.mock("../../../core/session/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../core/session/index.js")>();
-  return { ...original, useMe: () => ({ data: { id: "523e4567-e89b-12d3-a456-426614174004" } }) };
+  return { ...original, useMe: () => session.viewer };
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -108,7 +112,13 @@ function stubTransport(handler: (call: Recorded) => { status: number; body: unkn
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify({ csrf_token: "x" }) };
     }
-    const answer = handler(call);
+    // The thread now shares its endpoint family with the activity feed
+    // and the reaction clusters; those reads answer empty unless a test
+    // cares about them.
+    const answer =
+      url.includes("activity_type=issue-property") || url.includes("/reactions/")
+        ? { status: 200, body: [] }
+        : handler(call);
     return {
       status: answer.status,
       url,
@@ -184,7 +194,7 @@ describe("CommentThread", () => {
   it("shows the composer, heading and cards once the history arrives", async () => {
     stubTransport(() => ({ status: 200, body: [comment()] }));
     renderThread();
-    expect(screen.getByRole("heading", { name: "Comments" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Activity" })).toBeInTheDocument();
     expect(await screen.findByText("Thread words", undefined, { timeout: 5000 })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
     expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
@@ -200,6 +210,11 @@ describe("CommentThread", () => {
           headers: { get: () => null },
           text: async () => JSON.stringify({ csrf_token: "x" }),
         };
+      }
+      // Only the comment history is held open; the feed's other reads
+      // answer at once so the skeleton belongs to one source.
+      if (!url.includes("activity_type=issue-comment")) {
+        return { status: 200, url, headers: { get: () => null }, text: async () => "[]" };
       }
       const result = await new Promise<{ status: number; body: unknown }>((resolve) => {
         answer = resolve;
@@ -220,7 +235,7 @@ describe("CommentThread", () => {
   it("shows the read failure copy when the history is refused", async () => {
     stubTransport(() => ({ status: 500, body: { error: "boom" } }));
     renderThread();
-    expect(await screen.findByText("Couldn't load the comments.")).toBeInTheDocument();
+    expect(await screen.findByText("Couldn't load the activity.")).toBeInTheDocument();
   });
 
   it("keeps cards but drops the composer and menus on an archived issue", async () => {
@@ -237,6 +252,28 @@ describe("CommentThread", () => {
     expect(screen.getByRole("radiogroup", { name: "Comment visibility" })).toBeInTheDocument();
     expect(await screen.findByLabelText("Private comment", undefined, { timeout: 5000 })).toBeInTheDocument();
   });
+
+  it("falls back to the signed-in viewer when no override is passed", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    expect(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 })).toBeInTheDocument();
+  }, 20000);
+
+  it("falls back to a guest when the session has no user yet", async () => {
+    session.viewer = { data: undefined };
+    try {
+      stubTransport(() => ({ status: 200, body: [comment()] }));
+      renderThread();
+      await screen.findByText("Thread words", undefined, { timeout: 5000 });
+      fireEvent.click(await screen.findByRole("button", { name: "Comment actions" }, { timeout: 5000 }));
+      const menu = await screen.findByRole("menu", undefined, { timeout: 5000 });
+      expect(within(menu).queryByRole("menuitem", { name: "Edit" })).not.toBeInTheDocument();
+      expect(within(menu).queryByRole("menuitem", { name: "Delete" })).not.toBeInTheDocument();
+    } finally {
+      session.viewer = { data: { id: "523e4567-e89b-12d3-a456-426614174004" } };
+    }
+  }, 20000);
 
   it("copies the absolute deep link for a comment", async () => {
     const writeText = stubClipboard(async () => undefined);

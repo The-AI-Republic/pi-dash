@@ -2346,7 +2346,7 @@ export class WebNewDriver implements ParityDriver {
         throw new Error(`[parity] detail for ${issueId} never reached the browse view (current: ${this.page.url()}).`);
       });
     }
-    await this.page.getByRole("heading", { name: "Comments", exact: true }).waitFor({
+    await this.page.getByRole("heading", { name: "Activity", exact: true }).waitFor({
       timeout: WebNewDriver.WAIT_MS,
     });
   }
@@ -2875,39 +2875,48 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityEntryTexts(): Promise<string[]> {
-    return todo("activityEntryTexts");
+    const rows = this.activityFeedRows();
+    const texts = await rows.evaluateAll((nodes) =>
+      nodes.map((node) => ((node as HTMLElement).textContent ?? "").trim().replace(/\s+/g, " "))
+    );
+    return texts.filter((text) => text.length > 0);
   }
 
   async activityToggleSort(): Promise<void> {
-    return todo("activityToggleSort");
+    await this.activitySortButton().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async activityOpenFilterMenu(): Promise<void> {
-    return todo("activityOpenFilterMenu");
+    await this.openActivityFilterMenu();
   }
 
   async activityFilterOptionLabels(): Promise<string[]> {
-    return todo("activityFilterOptionLabels");
+    return (await this.activityFilterOptions()).map((option) => option.label);
   }
 
-  async activityToggleFilterOption(_label: string): Promise<void> {
-    return todo("activityToggleFilterOption");
+  async activityToggleFilterOption(label: string): Promise<void> {
+    await this.activityToggleFilter(label);
   }
 
   async activityFilterNarrowed(): Promise<boolean> {
-    return todo("activityFilterNarrowed");
+    return this.activityFilterDotVisible();
   }
 
   async activityComposerPosition(): Promise<"above" | "below" | "hidden"> {
-    return todo("activityComposerPosition");
+    if ((await this.composerBox().count()) === 0) return "hidden";
+    return (await this.activityComposerIsAboveFeed()) ? "above" : "below";
   }
 
-  async activityComposerType(_text: string): Promise<void> {
-    return todo("activityComposerType");
+  async activityComposerType(text: string): Promise<void> {
+    const editor = this.composerEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(text, { delay: 10, timeout: WebNewDriver.WAIT_MS });
   }
 
   async activityComposerSubmit(): Promise<void> {
-    return todo("activityComposerSubmit");
+    await this.composerBox()
+      .getByRole("button", { name: "Comment", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async activityRenameTitle(_title: string): Promise<void> {
@@ -2915,15 +2924,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async activityLoadingVisible(): Promise<boolean> {
-    return todo("activityLoadingVisible");
+    return (await this.activitySection().getByRole("status").count()) > 0;
   }
 
   async activityStoredSort(): Promise<string | null> {
-    return todo("activityStoredSort");
+    return this.page.evaluate(() => window.localStorage.getItem("activity_sort_order"));
   }
 
   async activityStoredFilters(): Promise<string | null> {
-    return todo("activityStoredFilters");
+    return this.page.evaluate(() => window.localStorage.getItem("issue_activity_filters"));
   }
 
   async activityOpenFirstEntryLink(): Promise<string> {
@@ -2957,32 +2966,80 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  /** The activity section: heading, header controls and the timeline. */
+  private activitySection(): Locator {
+    return this.page.getByRole("region", { name: "Activity" }).first();
+  }
+
+  private activityHeader(): Locator {
+    return this.activitySection().locator(":scope > div").first();
+  }
+
+  /** The one plain (non-popover) button in the header: sort. */
+  private activitySortButton(): Locator {
+    return this.activityHeader().locator("button:not([aria-expanded])").first();
+  }
+
+  /** The popover trigger in the header: filter. */
+  private activityFilterButton(): Locator {
+    return this.activityHeader().locator("button[aria-expanded]").first();
+  }
+
+  /** Rows of the merged timeline: entries plus comment cards. */
+  private activityFeedRows(): Locator {
+    return this.activitySection().locator('[data-feed-row="true"]');
+  }
+
   async activityCommentTexts(): Promise<string[]> {
     return this.page.locator('[id^="comment-"]').allInnerTexts();
   }
 
   async activityHasCreationEntry(): Promise<boolean> {
-    return todo("activityHasCreationEntry");
+    return (
+      (await this.activitySection()
+        .getByText(/created the work item/i)
+        .count()) > 0
+    );
+  }
+
+  private async openActivityFilterMenu(): Promise<void> {
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    const panel = this.page.getByRole("group", { name: "Activity categories" });
+    if ((await panel.count()) > 0 && (await panel.first().isVisible())) return;
+    await this.activityFilterButton().click({ timeout: WebNewDriver.WAIT_MS });
+    await panel.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async activityFilterOptions(): Promise<{ label: string; selected: boolean }[]> {
-    return todo("activityFilterOptions");
+    await this.openActivityFilterMenu();
+    const panel = this.page.getByRole("group", { name: "Activity categories" }).first();
+    const options = await panel.locator('[role="checkbox"]').evaluateAll((rows) =>
+      rows.map((row) => ({
+        label: (row as HTMLElement).innerText.trim().replace(/\s+/g, " "),
+        selected: row.getAttribute("aria-checked") === "true",
+      }))
+    );
+    await this.page.keyboard.press("Escape");
+    return options;
   }
 
-  async activityToggleFilter(_label: string): Promise<void> {
-    return todo("activityToggleFilter");
+  async activityToggleFilter(label: string): Promise<void> {
+    await this.openActivityFilterMenu();
+    const panel = this.page.getByRole("group", { name: "Activity categories" }).first();
+    await panel.getByRole("checkbox", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.keyboard.press("Escape");
   }
 
   async activityFilterDotVisible(): Promise<boolean> {
-    return todo("activityFilterDotVisible");
+    return (await this.activityFilterButton().locator('span[aria-hidden="true"]').count()) > 0;
   }
 
   async activityComposerIsAboveFeed(): Promise<boolean> {
     const composerBox = await this.composerBox().boundingBox();
-    const firstCardBox = await this.page.locator('[id^="comment-"]').first().boundingBox();
-    if (composerBox === null || firstCardBox === null)
-      throw new Error("[parity] composer or feed card has no layout box.");
-    return composerBox.y < firstCardBox.y;
+    const firstRowBox = await this.activityFeedRows().first().boundingBox();
+    if (composerBox === null || firstRowBox === null)
+      throw new Error("[parity] composer or feed row has no layout box.");
+    return composerBox.y < firstRowBox.y;
   }
 
   async activityComposerText(): Promise<string> {
@@ -3098,28 +3155,94 @@ export class WebNewDriver implements ParityDriver {
     return this.page.evaluate(() => navigator.clipboard.readText());
   }
 
-  async activityAddCommentReaction(_cardText: string): Promise<{ emoji: string; code: string }> {
-    return todo("activityAddCommentReaction");
+  /** Decimal code-point key the API stores for one emoji character. */
+  private static emojiCode(emoji: string): string {
+    return Array.from(emoji)
+      .map((character) => character.codePointAt(0))
+      .join("-");
   }
 
-  async activityCommentReactionChips(_cardText: string): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
-    return todo("activityCommentReactionChips");
+  private async pickFirstEmoji(trigger: Locator): Promise<{ emoji: string; code: string }> {
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    const entry = this.page.locator('button[data-slot="emoji-picker-list-emoji"]').first();
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const emoji = ((await entry.textContent()) ?? "").trim();
+    if (emoji === "") throw new Error("[parity] first picker entry carried no character.");
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    return { emoji, code: WebNewDriver.emojiCode(emoji) };
   }
 
-  async activityClickCommentReactionChip(_cardText: string, _emoji: string): Promise<void> {
-    return todo("activityClickCommentReactionChip");
+  /** Chips under a container, parsed from their text and highlight class. */
+  private static parseChips(entries: { text: string; cls: string; popup: string | null }[]): {
+    emoji: string;
+    count: number;
+    reacted: boolean;
+  }[] {
+    const chips: { emoji: string; count: number; reacted: boolean }[] = [];
+    for (const entry of entries) {
+      // The picker trigger wraps its panel and name-matches the chips too.
+      if (entry.popup === "dialog") continue;
+      const text = entry.text.trim();
+      if (text === "" || /^Folded comment/.test(text)) continue;
+      const match = /^(.*?)(\d+)$/.exec(text.replace(/\s+/g, ""));
+      if (match)
+        chips.push({
+          emoji: match[1] ?? "",
+          count: Number(match[2]),
+          reacted: entry.cls.includes("border-accent-strong"),
+        });
+    }
+    return chips;
+  }
+
+  private async chipsUnder(root: Locator): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
+    const entries = await root.evaluate((el) =>
+      Array.from(el.querySelectorAll("button")).map((button) => ({
+        text: (button as HTMLElement).innerText,
+        cls: button.className,
+        popup: button.getAttribute("aria-haspopup"),
+      }))
+    );
+    return WebNewDriver.parseChips(entries);
+  }
+
+  async activityAddCommentReaction(cardText: string): Promise<{ emoji: string; code: string }> {
+    return this.pickFirstEmoji(this.commentCard(cardText).locator('button[aria-haspopup="dialog"]').first());
+  }
+
+  async activityCommentReactionChips(cardText: string): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
+    return this.chipsUnder(this.commentCard(cardText).first());
+  }
+
+  async activityClickCommentReactionChip(cardText: string, emoji: string): Promise<void> {
+    // The card header's picker trigger also contains the emoji after a
+    // pick, so only chips (not dialog triggers) are matched.
+    await this.commentCard(cardText)
+      .first()
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The issue reaction row, which sits above the Activity heading. */
+  private issueReactionRow(): Locator {
+    return this.page.getByRole("region", { name: "Reactions on this work item" }).first();
   }
 
   async issueAddReaction(): Promise<{ emoji: string; code: string }> {
-    return todo("issueAddReaction");
+    return this.pickFirstEmoji(this.issueReactionRow().locator('button[aria-haspopup="dialog"]').first());
   }
 
   async issueReactionChips(): Promise<{ emoji: string; count: number; reacted: boolean }[]> {
-    return todo("issueReactionChips");
+    return this.chipsUnder(this.issueReactionRow());
   }
 
-  async issueClickReactionChip(_emoji: string): Promise<void> {
-    return todo("issueClickReactionChip");
+  async issueClickReactionChip(emoji: string): Promise<void> {
+    await this.issueReactionRow()
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async codeReviewsVisible(): Promise<boolean> {
@@ -16111,20 +16234,47 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Reactions oracle (NEWFRONT-116, CMT-022/023/024). Throwing stubs per
   // --- the shared driver contract; the new app implements them later.
-  async reactionsIssueChipTooltipText(_emoji: string, _expectedName: string): Promise<string> {
-    return todo("reactionsIssueChipTooltipText");
+  async reactionsIssueChipTooltipText(emoji: string, expectedName: string): Promise<string> {
+    await this.issueReactionRow()
+      .locator("button:not([aria-haspopup])", { hasText: emoji })
+      .first()
+      .hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction((name) => document.body.innerText.includes(name), expectedName, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    return this.page.evaluate((name) => {
+      const candidates = Array.from(document.querySelectorAll("body *")).filter((el) =>
+        (el as HTMLElement).innerText?.includes(name)
+      );
+      candidates.sort((a, b) => a.innerHTML.length - b.innerHTML.length);
+      return ((candidates[0] as HTMLElement | undefined)?.innerText ?? "").slice(0, 200);
+    }, expectedName);
   }
-  async reactionsIssueAddEmoji(_emoji: string): Promise<void> {
-    return todo("reactionsIssueAddEmoji");
+  async reactionsIssueAddEmoji(emoji: string): Promise<void> {
+    await this.pickEmoji(this.issueReactionRow().locator('button[aria-haspopup="dialog"]').first(), emoji);
   }
   async reactionsIssuePickerReady(): Promise<boolean> {
-    return todo("reactionsIssuePickerReady");
+    const trigger = this.issueReactionRow().locator('button[aria-haspopup="dialog"]').first();
+    if ((await trigger.count()) === 0) return false;
+    return trigger.isEnabled();
   }
-  async reactionsCommentAddEmoji(_cardText: string, _emoji: string): Promise<void> {
-    return todo("reactionsCommentAddEmoji");
+  async reactionsCommentAddEmoji(cardText: string, emoji: string): Promise<void> {
+    await this.pickEmoji(this.commentCard(cardText).locator('button[aria-haspopup="dialog"]').first(), emoji);
   }
-  async reactionsArchivedCommentClusterVisible(_cardText: string): Promise<boolean> {
-    return todo("reactionsArchivedCommentClusterVisible");
+  async reactionsArchivedCommentClusterVisible(cardText: string): Promise<boolean> {
+    const card = this.commentCard(cardText);
+    if ((await card.count()) === 0) return false;
+    return (await card.locator('button[aria-haspopup="dialog"]').count()) > 0;
+  }
+
+  /** Pick one named emoji from the open picker. */
+  private async pickEmoji(trigger: Locator, emoji: string): Promise<void> {
+    await this.page.keyboard.press("Escape").catch(() => undefined);
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('button[data-slot="emoji-picker-list-emoji"]', { hasText: emoji })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017). Throwing

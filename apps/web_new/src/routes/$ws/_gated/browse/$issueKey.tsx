@@ -170,7 +170,7 @@ function BrowseIssueDetail({
             <CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={issueKey} />
           </div>
         }
-        belowDescription={
+        activity={
           <CommentThread
             workspaceSlug={workspaceSlug}
             projectId={projectId}

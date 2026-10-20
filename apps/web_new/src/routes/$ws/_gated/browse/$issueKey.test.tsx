@@ -271,46 +271,54 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
       status = 200;
       body = JSON.stringify([projectRow()]);
     } else if (url.includes("/history/")) {
-      status = 200;
-      body = JSON.stringify([
-        {
-          id: "423e4567-e89b-12d3-a456-426614174003",
-          issue: ISSUE_ID,
-          project: PROJECT_ID,
-          workspace: UUID,
-          actor: UUID,
-          actor_detail: {
-            id: UUID,
-            first_name: "Ada",
-            last_name: "L",
-            avatar: "",
-            avatar_url: null,
-            display_name: "Ada L",
-            is_bot: false,
+      if (url.includes("activity_type=issue-property")) {
+        body = JSON.stringify([]);
+        status = 200;
+      } else {
+        status = 200;
+        body = JSON.stringify([
+          {
+            id: "423e4567-e89b-12d3-a456-426614174003",
+            issue: ISSUE_ID,
+            project: PROJECT_ID,
+            workspace: UUID,
+            actor: UUID,
+            actor_detail: {
+              id: UUID,
+              first_name: "Ada",
+              last_name: "L",
+              avatar: "",
+              avatar_url: null,
+              display_name: "Ada L",
+              is_bot: false,
+            },
+            comment_html: "<p>Detail thread</p>",
+            comment_stripped: "Detail thread",
+            comment_json: {},
+            attachments: [],
+            labels: [],
+            access: "INTERNAL",
+            edited_at: null,
+            comment_reactions: [],
+            speaker_type: "human",
+            speaker_label: "",
+            speaker_agent_run_id: null,
+            parent: null,
+            external_source: null,
+            external_id: null,
+            is_synced: false,
+            description: null,
+            created_at: "2024-02-03T04:05:06Z",
+            updated_at: "2024-02-03T04:05:06Z",
+            created_by: UUID,
+            updated_by: null,
+            deleted_at: null,
           },
-          comment_html: "<p>Detail thread</p>",
-          comment_stripped: "Detail thread",
-          comment_json: {},
-          attachments: [],
-          labels: [],
-          access: "INTERNAL",
-          edited_at: null,
-          comment_reactions: [],
-          speaker_type: "human",
-          speaker_label: "",
-          speaker_agent_run_id: null,
-          parent: null,
-          external_source: null,
-          external_id: null,
-          is_synced: false,
-          description: null,
-          created_at: "2024-02-03T04:05:06Z",
-          updated_at: "2024-02-03T04:05:06Z",
-          created_by: UUID,
-          updated_by: null,
-          deleted_at: null,
-        },
-      ]);
+        ]);
+      }
+    } else if (url.includes("/reactions/")) {
+      status = 200;
+      body = JSON.stringify([]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
@@ -413,10 +421,21 @@ describe("browse route", () => {
 
   it("mounts the comment thread under the description with the composer", async () => {
     renderBrowse(true, undefined, { details: "member", me: true });
-    expect(await screen.findByRole("heading", { name: "Comments" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Activity" })).toBeInTheDocument();
     expect(await screen.findByText("Detail thread")).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
     expect(screen.queryByRole("radiogroup", { name: "Comment visibility" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the issue reaction row on the description-meta row above the activity block", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const reactions = await screen.findByRole("region", { name: "Reactions on this work item" });
+    const meta = reactions.closest('[data-slot="description-meta"]');
+    expect(meta).not.toBeNull();
+    const activity = await screen.findByRole("heading", { name: "Activity" });
+    expect(meta).not.toContainElement(activity);
+    expect(meta?.compareDocumentPosition(activity) ?? 0).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(meta).toContainElement(await screen.findByRole("button", { name: /Edited by/ }));
   });
 
   it("shows the comment access switch on a published project", async () => {

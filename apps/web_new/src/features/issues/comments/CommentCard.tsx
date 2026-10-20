@@ -15,6 +15,7 @@ import { Copy, Globe, Lock, MoreHorizontal, Pencil, Trash2, UnfoldVertical, Fold
 import * as React from "react";
 
 import { RichTextView } from "../../../shared/editor/index.js";
+import { CommentReactionPicker, CommentReactions } from "../reactions/CommentReactions.js";
 import { timeAgo } from "../../../shared/lib/timeAgo.js";
 import {
   commentAuthorAvatar,
@@ -55,7 +56,7 @@ export interface CommentCardProps {
   comment: IssueComment;
   /** Signed-in user, for authorship and nothing else. */
   viewerId: string | null;
-  /** True while the thread is archived: no menu, no edit. */
+  /** True while the thread is archived: no menu, no edit, no reactions. */
   readOnly: boolean;
   access: CommentAccessFlags;
   onEdit: (commentId: string, html: string) => Promise<unknown>;
@@ -174,6 +175,14 @@ export function CommentCard({
             </Tooltip>
           </span>
         ) : null}
+        {readOnly ? null : (
+          <CommentReactionPicker
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            issueId={comment.issue}
+            commentId={comment.id}
+          />
+        )}
         {readOnly || items.length === 0 ? null : (
           <Menu
             trigger={
@@ -197,11 +206,23 @@ export function CommentCard({
           onCancel={() => setEditing(false)}
         />
       ) : showBody ? (
-        empty ? (
-          <p className="text-body text-(--text-muted)">This comment has no text.</p>
-        ) : (
-          <RichTextView html={comment.comment_html} label={`Comment by ${name}`} className="pl-(--space-8)" />
-        )
+        <>
+          {empty ? (
+            <p className="text-body text-(--text-muted)">This comment has no text.</p>
+          ) : (
+            <RichTextView html={comment.comment_html} label={`Comment by ${name}`} className="pl-(--space-8)" />
+          )}
+          {/* Folded cards and archived issues hide the whole cluster (ISS-203). */}
+          {readOnly ? null : (
+            <CommentReactions
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={comment.issue}
+              commentId={comment.id}
+              className="pl-(--space-8)"
+            />
+          )}
+        </>
       ) : null}
     </article>
   );

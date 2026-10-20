@@ -89,6 +89,14 @@ function comment(overrides: Partial<IssueComment> = {}): IssueComment {
 }
 
 function renderCard(props: Partial<React.ComponentProps<typeof CommentCard>> = {}) {
+  // The card now mounts the reaction cluster in its header and footer;
+  // both read through the app client, so give them an empty answer.
+  createAppClient("https://api.test", async (url: string) => ({
+    status: 200,
+    url,
+    headers: { get: () => null },
+    text: async () => (url.endsWith("/auth/get-csrf-token/") ? JSON.stringify({ csrf_token: "x" }) : "[]"),
+  }));
   const handlers = {
     onEdit: vi.fn(async () => undefined),
     onDelete: vi.fn(),

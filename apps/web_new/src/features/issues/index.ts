@@ -110,6 +110,74 @@ export {
   withFold,
 } from "./comments/model.js";
 export type { CommentMenuEntry, CommentMenuFlags } from "./comments/model.js";
+export { ACTIVITY_HEADING, FeedHeader } from "./activity/FeedHeader.js";
+export type { FeedHeaderProps } from "./activity/FeedHeader.js";
+export { ActivityEntryRow } from "./activity/ActivityEntryRow.js";
+export type { ActivityEntryRowProps } from "./activity/ActivityEntryRow.js";
+export { ActivityFeed, FEED_LOAD_FAILED, FeedSkeleton } from "./activity/ActivityFeed.js";
+export type { ActivityFeedProps } from "./activity/ActivityFeed.js";
+export { activitiesQueryOptions, useIssueActivities } from "./activity/api.js";
+export type { ActivityScope } from "./activity/api.js";
+export {
+  DEFAULT_FILTERS,
+  DEFAULT_SORT,
+  FEED_FILTERS,
+  FEED_FILTER_LABELS,
+  FILTERS_STORAGE_KEY,
+  SORT_STORAGE_KEY,
+  activityActorName,
+  activityFilterOf,
+  activitySentence,
+  buildFeed,
+  composeFeed,
+  feedEntryVisible,
+  filterFeed,
+  flipSort,
+  isFilterNarrowed,
+  parseStoredFilters,
+  parseStoredSort,
+  serializeFilters,
+  serializeSort,
+  sortFeed,
+  toggleFeedFilter,
+} from "./activity/model.js";
+export type { FeedEntry, FeedFilter, FeedSortOrder } from "./activity/model.js";
+export { useFeedPrefs } from "./activity/prefs.js";
+export type { FeedPrefs } from "./activity/prefs.js";
+export { EMOJI_PICKER_LABEL, EmojiPicker } from "./reactions/EmojiPicker.js";
+export type { EmojiPickerProps } from "./reactions/EmojiPicker.js";
+export { REACTED_CHIP_CLASS, ReactionBar } from "./reactions/ReactionBar.js";
+export type { ReactionBarProps } from "./reactions/ReactionBar.js";
+export { ReactionPicker } from "./reactions/ReactionPicker.js";
+export type { ReactionPickerProps } from "./reactions/ReactionPicker.js";
+export { COMMENT_REACTIONS_LABEL, CommentReactionPicker, CommentReactions } from "./reactions/CommentReactions.js";
+export type { CommentReactionsProps } from "./reactions/CommentReactions.js";
+export { ISSUE_REACTIONS_LABEL, IssueReactions } from "./reactions/IssueReactions.js";
+export type { IssueReactionsProps } from "./reactions/IssueReactions.js";
+export {
+  REACTION_CHOICES,
+  chipTooltip,
+  commentReactionRows,
+  emojiToReaction,
+  groupReactions,
+  issueReactionRows,
+  reactionAction,
+  reactionToEmoji,
+  viewerHasReaction,
+} from "./reactions/model.js";
+export type { ReactionChip, ReactionRow } from "./reactions/model.js";
+export {
+  REACTION_CREATED_TITLE,
+  REACTION_REMOVED_TITLE,
+  commentReactionsQueryOptions,
+  issueReactionsQueryOptions,
+  reactionFailureDetail,
+  useCommentReactions,
+  useIssueReactions,
+  useToggleCommentReaction,
+  useToggleIssueReaction,
+} from "./reactions/api.js";
+export type { ReactionScope } from "./reactions/api.js";
 
 export type { LiteResolution } from "./api/browse.js";
 export {

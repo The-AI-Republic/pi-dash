@@ -1,18 +1,22 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Comments block on the issue detail (parity/specs/issues.md §16,
-// ISS-197–202): the composer, then the comment cards in creation order.
-// Archived issues keep the cards and drop the composer and menu. The
-// block also owns the deep-link behaviour: an address carrying
-// `#comment-<id>` scrolls that card into view on arrival and keeps a
-// highlight on it for a few seconds.
+// Activity block on the issue detail (parity/specs/issues.md §16,
+// ISS-194–204): one timeline of property changes and comments, the
+// filter and sort controls, and the composer placed by the sort order.
+// The comment card wiring (edit, delete, access, fold, deep links) lives
+// here too; the feed only decides where each card appears. Archived
+// issues keep the timeline and drop the composer, the card menus and
+// every reaction surface. An address carrying `#comment-<id>` scrolls
+// that card into view on arrival and keeps a highlight on it for a few
+// seconds.
 
-import { Skeleton, cn } from "@pidash/kit";
+import { cn } from "@pidash/kit";
 import type { IssueComment } from "@pidash/api-client";
 import * as React from "react";
 
 import { useMe } from "../../../core/session/index.js";
+import { ActivityFeed } from "../activity/ActivityFeed.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import {
   COMMENT_LINK_COPIED_TITLE,
@@ -28,7 +32,7 @@ import { CommentCard, COMMENT_HIGHLIGHT_MS, commentDomId } from "./CommentCard.j
 import { CommentComposer } from "./CommentComposer.js";
 import { commentDeepLink, isCommentFolded, type CommentMenuFlags } from "./model.js";
 
-export const COMMENTS_HEADING = "Comments";
+export const COMMENTS_HEADING = "Activity";
 export const COMMENT_LINK_COPY_FAILED_DETAIL = "The browser refused the clipboard write.";
 export const HASH_PREFIX = "#comment-";
 
@@ -124,54 +128,47 @@ export function CommentThread({
     }
   };
 
+  const renderComment = (comment: IssueComment): React.ReactNode => (
+    <div
+      className={cn(
+        "rounded-(--radius-control) p-(--space-2) transition-colors duration-500",
+        highlighted === comment.id ? "bg-(--accent-subtle) ring-1 ring-(--accent)" : ""
+      )}
+    >
+      <CommentCard
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        comment={comment}
+        viewerId={viewerId}
+        readOnly={archived}
+        access={{ toggle: flags.accessToggle, copyLink: flags.copyLink }}
+        onEdit={(commentId, html) => update.mutateAsync({ commentId, patch: { comment_html: html } })}
+        onDelete={(commentId) => remove.mutate(commentId)}
+        onToggleAccess={(row) => update.mutate({ commentId: row.id, patch: accessPatch(row) })}
+        onToggleFold={(row) => update.mutate({ commentId: row.id, patch: foldPatch(row, !isCommentFolded(row)) })}
+        onCopyLink={(row) => void copyLink(row)}
+      />
+    </div>
+  );
+
   return (
-    <section aria-label={COMMENTS_HEADING} className="flex flex-col gap-(--space-4)">
-      <h2 className="text-h4 text-(--text)">{COMMENTS_HEADING}</h2>
-      {archived ? null : (
+    <ActivityFeed
+      workspaceSlug={workspaceSlug}
+      projectId={projectId}
+      issueId={issueId}
+      comments={comments.data ?? []}
+      commentsPending={comments.isPending}
+      commentsError={comments.isError}
+      archived={archived}
+      composer={
         <CommentComposer
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           showAccess={published}
           onCreate={(input) => create.mutateAsync(input)}
         />
-      )}
-      {comments.isPending ? (
-        <div className="flex flex-col gap-(--space-4)" aria-busy="true">
-          <Skeleton className="h-16 w-full" />
-          <Skeleton className="h-16 w-full" />
-          <Skeleton className="h-16 w-full" />
-        </div>
-      ) : comments.isError ? (
-        <p className="text-body text-(--danger)">Couldn&apos;t load the comments.</p>
-      ) : (
-        <div className="flex flex-col gap-(--space-6)">
-          {comments.data.map((comment) => (
-            <div
-              key={comment.id}
-              className={cn(
-                "rounded-(--radius-control) p-(--space-2) transition-colors duration-500",
-                highlighted === comment.id ? "bg-(--accent-subtle) ring-1 ring-(--accent)" : ""
-              )}
-            >
-              <CommentCard
-                workspaceSlug={workspaceSlug}
-                projectId={projectId}
-                comment={comment}
-                viewerId={viewerId}
-                readOnly={archived}
-                access={{ toggle: flags.accessToggle, copyLink: flags.copyLink }}
-                onEdit={(commentId, html) => update.mutateAsync({ commentId, patch: { comment_html: html } })}
-                onDelete={(commentId) => remove.mutate(commentId)}
-                onToggleAccess={(row) => update.mutate({ commentId: row.id, patch: accessPatch(row) })}
-                onToggleFold={(row) =>
-                  update.mutate({ commentId: row.id, patch: foldPatch(row, !isCommentFolded(row)) })
-                }
-                onCopyLink={(row) => void copyLink(row)}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
+      }
+      renderComment={renderComment}
+    />
   );
 }

@@ -28,8 +28,8 @@ export interface IssueDetailRootProps {
   sidebar?: React.ReactNode;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
-  /** Row under the description, left of the history line. */
-  belowDescription?: React.ReactNode;
+  /** Block under the description-meta row (the activity feed). */
+  activity?: React.ReactNode;
 }
 
 export function IssueDetailRoot({
@@ -39,7 +39,7 @@ export function IssueDetailRoot({
   editable,
   sidebar,
   topSlot,
-  belowDescription,
+  activity,
 }: IssueDetailRootProps): React.ReactElement {
   const collapsed = useDetailUiStore((state) => state.sidebarCollapsed);
   const setCollapsed = useDetailUiStore((state) => state.setSidebarCollapsed);
@@ -66,7 +66,7 @@ export function IssueDetailRoot({
           issue={issue}
           editable={editable}
           topSlot={topSlot}
-          belowDescription={belowDescription}
+          activity={activity}
         />
       </div>
       {sidebar === undefined ? null : (
