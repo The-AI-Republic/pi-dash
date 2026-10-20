@@ -106,14 +106,20 @@ contextual extras for its state:
   undetermined ring rather than a full or empty one. Finished cycles use
   the frozen progress snapshot so the ring cannot drift after transfer.
 - The date span is rendered with the project timezone rules of §17.
-  Missing dates render as a dash, not an empty gap.
+  An undated cycle (a draft with neither date) renders the ring, marker
+  and counts but **no date span and no date placeholder**: the row has
+  no date element at all, which is what the CYC-002 oracle reads
+  (`dateText === null` for the undated draft). A one-sided range (one
+  date set) still renders the single date. Do not render a dash or a
+  "No dates" string in the row; the empty state for dates belongs to the
+  detail sidebar and hero cards (§15), not the row.
 - Draft and upcoming rows show a work-item count. The current row, shown
   in the hero, additionally shows the creator's avatar. Every other row
   shows its assignees' avatars, with a stable fallback for members
   without images.
 - A favorite star renders on non-archived rows for members and admins
-  (§11). Guests see the marker only as read-only state, never the
-  toggle (CYC-047).
+  only (§11). Guests and the read-only role get no star at all, not a
+  disabled one (CYC-047); the server refuses favorite writes from them.
 - The row menu trigger is described in §10.
 
 **Opening a row** (CYC-003). Clicking the name or the row body navigates
@@ -272,12 +278,17 @@ shortcut, and from the cycle context of the work-item create modal
   a half-filled range is invalid. The past is not selectable for the
   start date (today is allowed); the end date cannot precede the start
   date;
-- a project, only when the dialog was opened above project level (from
-  a workspace-level creation surface). It defaults to the current
-  project and lists only projects the user may create cycles in; the
-  target project receives the cycle and the dialog re-evaluates that
-  project's feature flag and overlap universe. Inside a project page the
-  picker is not shown.
+- a project picker on **every create** (CYC-014), whether the dialog
+  was opened from a project page (list header, zero-state shortcut) or
+  from a workspace-level creation surface. It defaults to the current
+  project (the one in the address) and lists only projects where the
+  user may create cycles; the selected project receives the cycle and
+  the dialog re-evaluates that project's feature flag and overlap
+  universe. The picker is the dialog's first dropdown, ahead of the
+  date controls, and is not hidden on a project page: the CYC-014
+  oracle opens creation from project A's cycles list, picks project B
+  and requires the cycle to land in B only. The picker is absent on
+  **edit** (§7) — a cycle cannot move project.
 
 Submission is `POST BASE/cycles/` for the target project with
 `{ name, description, start_date, end_date }` (dates as ISO instants or
@@ -377,11 +388,12 @@ cycles only. The row menu's archive entry is present for draft, current
 and upcoming cycles but disabled, with an explanation that only finished
 cycles can be archived; a finished row's entry is enabled. Archiving
 asks for confirmation in a dialog that names the cycle. Confirming calls
-`POST BASE/cycles/{cid}/archive/` with the archive instant
-(`{ archived_at }`) and shows a confirmation toast that also points to
-the project archives. The cycle leaves the live list and groups; its
-completion ring and counts stay frozen. Archiving never deletes work
-items.
+`POST BASE/cycles/{cid}/archive/` with **no request body** and shows a
+confirmation toast that also points to the project archives. The server
+stamps `archived_at` itself (the serializer lists it as read-only) and
+answers `{ archived_at }`; the client must not send an `archived_at`
+field. The cycle leaves the live list and groups; its completion ring
+and counts stay frozen. Archiving never deletes work items.
 
 **Restore** (CYC-026). An archived row's menu offers restore, which asks
 for confirmation and calls `DELETE BASE/cycles/{cid}/archive/`. On
@@ -405,7 +417,20 @@ chips behave as in §4 without the lifecycle dimension; its zero state
 says there are no archived cycles yet and does not offer creation; its
 no-match state splits search from filters as in §5. Rows open a peek
 panel on the same `peekCycle` key and offer only the archived actions
-(open, copy, restore). The list reads archived cycles from
+(open, copy, restore). Activating an archived row (name or body, not a
+menu entry) opens that peek, exactly as the CYC-004 quick look does;
+"Open in new tab" is the separate menu entry and goes to the canonical
+detail address, which renders the gone-away view for an archived cycle
+on a live detail route (§5). The row menu never navigates by itself.
+Archived rows carry no favorite toggle (archiving removes the favorite).
+
+**Who can read archives.** Archived reads are member+ only: the
+archived-cycles endpoint (`CycleArchiveUnarchiveEndpoint.get`) and the
+archive/restore writes allow admin and member, so a guest cannot list
+them and sees the archives tab's own permission/zero state rather than
+rows. That server gate is the first reason guests have no archived
+list; the incomplete archived-row payload tracked by NEWFRONT-240 is
+the second (see §25). The list reads archived cycles from
 `GET BASE/archived-cycles/` (and `GET BASE/archived-cycles/{cid}/` for
 one row's detail). It never refetches on window focus (§18).
 
@@ -442,9 +467,12 @@ reachable on hover; guests see only link actions).
 
 ## 11. Favorites and palette commands
 
-**Favorites** (CYC-029). Any project member, including a viewer with a
-personal account, can favorite a non-archived cycle; the favorite is per
-user. The row star toggles optimistically and issues
+**Favorites** (CYC-029). Favorites are for project members and admins
+only — the same set that may edit — not for guests or the read-only
+role. The star is rendered only where editing is allowed and the cycle
+is not archived (the server's favorite endpoints allow admin and member
+and refuse others), so a guest sees no star rather than a disabled one.
+The favorite is per user. The row star toggles optimistically and issues
 `POST BASE/user-favorite-cycles/` with `{ cycle }` to add and
 `DELETE BASE/user-favorite-cycles/{cid}/` to remove. While the request
 settles the UI shows progress feedback, then an outcome message that
@@ -469,15 +497,30 @@ while the archived tab offers no cycle commands).
 
 ## 12. Transferring remaining work
 
-A finished cycle's detail offers transfer when the cycle still has work
-items to move and its progress snapshot is empty; the banner carries the
-read-only notice of §8 and the transfer entry (CYC-031). Transfer opens
-a dialog with a searchable picker of destination cycles. The picker
-offers only cycles in the same project that are still open — draft,
-current, upcoming — never the source cycle, never a finished or archived
-cycle; the search narrows by name. With no eligible destination the
-dialog explains that another open cycle must be created first and offers
-no submit.
+A finished cycle offers transfer from **two entry points**, and both are
+gated by the same rule (CYC-031):
+
+1. **Detail banner.** The finished cycle's detail banner carries the
+   read-only notice of §8 and a transfer action.
+2. **List row.** A completed row on the project cycles list carries an
+   inline "Transfer {n} work items" action alongside its other extras
+   (revealed with the row's hover area on desktop, inline on
+   touch/narrow).
+
+The gate for both is: the cycle's status is completed, the transferable
+count (`backlog + unstarted + started` work items) is greater than zero,
+**and** `progress_snapshot` is empty. A cycle with a snapshot was already
+closed out and its numbers are frozen; a cycle with nothing left to move
+offers no transfer. The detail banner carries the read-only notice of
+§8 whenever the cycle is completed, independently of whether transfer is
+offered. Both entry points open the **same** transfer dialog — one
+dialog and one eligibility computation, not two implementations.
+Transfer opens a dialog with a searchable picker of destination cycles.
+The picker offers only cycles in the same project that are still open —
+draft, current, upcoming — never the source cycle, never a finished or
+archived cycle; the search narrows by name. With no eligible
+destination the dialog explains that another open cycle must be created
+first and offers no submit.
 
 Confirming calls `POST BASE/cycles/{cid}/transfer-issues/` with
 `{ new_cycle_id }`; the response carries a message. On success the UI
@@ -485,9 +528,12 @@ shows a confirmation toast, closes the dialog, and refreshes **both**
 cycles: the destination gains the items and its counts and ring update,
 and the source's banner, counts and ring update as well, without a
 reload (the source-side refresh is the intended behavior of NEWFRONT-267,
-§26). The source stays finished with an empty snapshot afterwards, so
-the transfer entry disappears on its own. A failure keeps the dialog
-open, reports the error, and moves nothing.
+§26, and applies whether transfer started from the detail banner or the
+list row — the source row and its ring refresh too). The source stays
+finished with an empty snapshot afterwards, so
+the transfer entry disappears on its own, on the detail banner and on
+the list row alike. A failure keeps the dialog open, reports the error,
+and moves nothing. Transfer is member+ only, like every other mutation.
 
 Oracle: `archive-menu-transfer.spec.ts` (only open cycles offered,
 search narrows, confirming moves items with both-sides refresh; no-open-
@@ -523,8 +569,20 @@ marker, a cycle switcher, a work-item count badge, and actions:
   is zero. It is shown to every role that can read items; the intended
   guest behavior is in §26.
 - Analytics is a member+ action on desktop; on the narrow bar every role
-  gets it. It opens the shared Analytics scoped dialog (NEWFRONT-738)
-  with the cycle scope, whose heading names the project and cycle.
+  gets it. It opens the **scoped analytics dialog** owned by
+  NEWFRONT-738 with the cycle scope (see the reuse map, §22): the
+  dialog is project-scoped and takes an optional cycle scope so its
+  heading reads `Analytics for {project} in {cycle}` and its requests
+  carry `project_ids=<projectId>&cycle_id=<cycleId>`. The cycle header
+  must not mount the Issues surface's `AnalyticsEntry` component: that
+  component is the issues-list header entry, it is member+ on every
+  width, it takes `rows`/`totalCount`/`isEpics` and reads "Work items in
+  {project}", and it has no cycle scope. NEWFRONT-738 supplies the
+  dialog and the cycle-scope props it needs; slice F (NEWFRONT-712)
+  supplies the two triggers (wide header button, narrow-bar item) and
+  passes the cycle. If 738 has not added cycle scope by the time slice F
+  runs, slice F blocks on it and records the gap; it never forks a
+  dialog.
 - Add work item is a member+ action and is hidden for a finished cycle
   (read-only, §8). It opens the shared create modal pre-filled with this
   cycle (NEWFRONT-630).
@@ -689,9 +747,14 @@ not in the current year. When the project timezone differs from the
 browser's, the span carries a small offset chip (`UTC -04:00`, `UTC
 -05:00`) and a tooltip explaining that the dates are shown in the
 project's timezone; the chip also exposes the viewer's equivalent day
-when it differs. When the project timezone is UTC no chip renders. A
-missing start or end renders a one-sided or dashed range rather than an
-empty string.
+when it differs. The chip's suppression rule is the **project offset**,
+not the timezone label: when the project timezone's offset from UTC is
+zero (whether the project is configured as `UTC` or as any other name
+with a zero offset) no chip renders. The chip reads the project's UTC
+offset; it must not key on the string `"UTC"`. A missing start or end
+renders a one-sided range (the single date); a cycle with neither date
+renders no date text (§2, CYC-002), while the sidebar and hero show
+their own "no dates" placeholder.
 
 Day boundaries are computed with the shared timezone/date helper so the
 list, hero, dates in the create dialog, the date-check request and the
@@ -702,7 +765,8 @@ instants.
 
 Oracle: `hero-crosscutting.spec.ts` (cycle dates carry the project
 offset and user-timezone equivalents; no offset chip when the project
-timezone is UTC).
+timezone is UTC — the oracle's UTC case exercises the zero-offset rule
+above).
 
 ## 18. Freshness and refresh behavior
 
@@ -851,9 +915,21 @@ slice that owns it. Nothing here is an import from the old frontend.
   frame; the cycle peek body is cycles-owned and reads the cycle
   summary. Bulk selection is NEWFRONT-633 and is not used by the cycle
   rows.
-- Analytics: NEWFRONT-738, `src/features/issues/analytics/AnalyticsEntry.tsx`
-  and its scoped dialog. Detail header analytics opens it with the cycle
-  scope; the heading names project and cycle.
+- Analytics: NEWFRONT-738, the **scoped analytics dialog** (the
+  destination the issues header entry opens; where 619 has landed it is
+  the `AnalyticsDialog` leaf under `src/features/issues/analytics/`,
+  otherwise it is the dialog body inside the existing
+  `AnalyticsEntry.tsx` refactored into its own leaf). NEWFRONT-738 must
+  give it the cycle scope: an optional cycle (`id`, `name`) and the
+  `cycle_id` query parameter on its project-scoped requests, with the
+  heading `Analytics for {project} in {cycle}` and every role (including
+  guests) allowed to open it. The cycle area consumes the dialog, never
+  the issues-header entry: `AnalyticsEntry.tsx` stays the Issues surface
+  entry (member+, `rows`/`totalCount`/`isEpics`, "Work items in
+  {project}") and is not mounted on a cycle page. The cycle header's
+  wide trigger (NEWFRONT-712, member+ on desktop) and narrow-bar trigger
+  (every role) live in the cycles slice; 738 owns the dialog content, not
+  these triggers.
 
 **Shared plumbing cycles reuses**
 
@@ -876,19 +952,19 @@ slice that owns it. Nothing here is an import from the old frontend.
 
 **Ownership summary**
 
-| Screen or piece                                                             | Built by                 |
-| --------------------------------------------------------------------------- | ------------------------ |
-| Route shell, feature-off, zero, skeleton, gone-away, date helper, freshness | NEWFRONT-707 (slice A)   |
-| List groups, rows, detail link, peek, search, no-match, copy                | NEWFRONT-708 (slice B)   |
-| Lifecycle/date filters, chips                                               | NEWFRONT-709 (slice C)   |
-| Create/edit dialog, validation, overlap, tab order, permissions             | NEWFRONT-710 (slice D)   |
-| Row menu, delete, read-only finished, archive/restore, archived list        | NEWFRONT-711 (slice E)   |
-| Detail host, shared layouts, header, breadcrumbs                            | NEWFRONT-712 (slice F)   |
-| Sidebar toggle, dates, description, lead, progress, breakdowns              | NEWFRONT-713 (slice G)   |
-| Favorites, palette, transfer, hero, workspace actives, guest read           | NEWFRONT-714 (slice H)   |
-| Touch/narrow plus the intended bug fixes                                    | NEWFRONT-715 (slice I)   |
-| Contracts                                                                   | NEWFRONT-706             |
-| Parity proof                                                                | NEWFRONT-716 (area gate) |
+| Screen or piece                                                                                                       | Built by                 |
+| --------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| Route shell, feature-off, zero, skeleton, gone-away, date helper, freshness                                           | NEWFRONT-707 (slice A)   |
+| List groups, rows, detail link, peek, search, no-match, copy                                                          | NEWFRONT-708 (slice B)   |
+| Lifecycle/date filters, chips                                                                                         | NEWFRONT-709 (slice C)   |
+| Create/edit dialog, validation, overlap, tab order, permissions                                                       | NEWFRONT-710 (slice D)   |
+| Row menu, delete, read-only finished, archive/restore, archived list                                                  | NEWFRONT-711 (slice E)   |
+| Detail host, shared layouts, header, breadcrumbs                                                                      | NEWFRONT-712 (slice F)   |
+| Sidebar toggle, dates, description, lead, progress, breakdowns                                                        | NEWFRONT-713 (slice G)   |
+| Favorites, palette, transfer (both entry points, one dialog, both-sided refresh), hero, workspace actives, guest read | NEWFRONT-714 (slice H)   |
+| Touch/narrow plus the intended bug fixes                                                                              | NEWFRONT-715 (slice I)   |
+| Contracts                                                                                                             | NEWFRONT-706             |
+| Parity proof                                                                                                          | NEWFRONT-716 (area gate) |
 
 ## 23. Data shapes and API calls
 
@@ -929,7 +1005,7 @@ date-check collision is a refusal with guidance, not a generic error.
 | `POST BASE/cycles/date-check/`                                                | overlap check `{start_date, end_date, cycle_id?}` → `{status}` | 016, 017, 036                     |
 | `POST BASE/cycles/{cid}/transfer-issues/`                                     | `{new_cycle_id}` → `{message}`                                 | 031                               |
 | `POST BASE/user-favorite-cycles/` / `DELETE BASE/user-favorite-cycles/{cid}/` | favorite toggle                                                | 029, 030                          |
-| `POST BASE/cycles/{cid}/archive/`                                             | archive `{archived_at}`                                        | 024, 025                          |
+| `POST BASE/cycles/{cid}/archive/`                                             | archive (no body) → `{archived_at}`                            | 024, 025                          |
 | `DELETE BASE/cycles/{cid}/archive/`                                           | restore                                                        | 026                               |
 | `GET BASE/archived-cycles/` and `GET BASE/archived-cycles/{cid}/`             | archived list and row                                          | 004, 027                          |
 | `GET WS/cycles/`                                                              | workspace-wide cycles for switchers and pickers                | 030, 033                          |
@@ -975,8 +1051,10 @@ payload.
   eligibility rule (open cycles except the source) on top of the shared
   picker.
 - **Analytics**: NEWFRONT-738's scoped dialog is the only analytics
-  surface; the detail header and the narrow bar open it with the cycle
-  scope.
+  surface; the cycle detail's wide header (member+) and narrow bar
+  (every role) open it with the cycle scope, and its heading names the
+  project and the cycle. It is not the issues-header `AnalyticsEntry`,
+  which stays on the Issues surface.
 - **Archives**: NEWFRONT-698's shell is the frame for the archived
   cycles list; the cycles slice supplies the rows, search, filters and
   restore.
@@ -1019,6 +1097,21 @@ its workpad rather than weakening the assertion.
 | CYC-041          | NEWFRONT-266 | The first hero breakdown click does nothing because the user-properties row does not exist yet.                                                                 | The first breakdown click on a fresh cycle works: the write path creates the record, applies the filter, and shows it, with no second click needed. Same for the sidebar entries.                                                                                         |
 | CYC-045          | NEWFRONT-267 | Transfer refreshes the destination but the source banner and ring stay stale.                                                                                   | Transfer refreshes both sides: the source's banner, counts and ring update without a reload (§12).                                                                                                                                                                        |
 | CYC-047          | NEWFRONT-268 | Guests lose the list search and filter controls behind the create gate.                                                                                         | Guests keep search, filters, chips, clear-all, peek and copy; only creation and mutation affordances are gated (§20).                                                                                                                                                     |
+
+### Rules settled by the spec review
+
+These are not old bugs; they are points the first draft stated loosely
+or wrongly. Slices must build exactly these:
+
+| Row     | Rule to build                                                                                                                                                                                                                         |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CYC-014 | The project picker is shown on **every create**, including from a project page, and retargets the create to the picked project; it is hidden only on edit. §6.                                                                        |
+| CYC-002 | An undated row renders **no date element** (not a dash); a one-sided range renders the single date. §2, §17.                                                                                                                          |
+| CYC-027 | Archived reads are **member+**; activating an archived row opens its peek, while "Open in new tab" goes to the canonical detail address (gone-away for an archived cycle). §9.                                                        |
+| CYC-029 | Favorites are **member+ only**; guests get no star, not a disabled one. §11.                                                                                                                                                          |
+| CYC-031 | Transfer has **two entry points** — the finished detail banner and an inline action on a completed list row — gated by `backlog + unstarted + started > 0` **and** an empty `progress_snapshot`, both opening one shared dialog. §12. |
+| CYC-033 | The analytics trigger opens NEWFRONT-738's **cycle-scoped** dialog (`Analytics for {project} in {cycle}`), not the issues-header `AnalyticsEntry`. §13, §22.                                                                          |
+| CYC-044 | The offset chip is suppressed by a **zero project offset**, not by the `"UTC"` label. §17.                                                                                                                                            |
 
 ## 27. Row coverage index
 
