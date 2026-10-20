@@ -15,4 +15,5 @@ export const chatKeys = {
     [...chatKeys.all(workspaceSlug), "sessions", runnerId] as const,
   messages: (workspaceSlug: string, sessionId: string) =>
     [...chatKeys.all(workspaceSlug), "messages", sessionId] as const,
+  workingDir: (runnerId: string) => ["runners", "chat", "working-dir", runnerId] as const,
 };

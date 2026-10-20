@@ -25,6 +25,12 @@ export const DEFAULT_APPROVAL_MODE = "full_access";
 /** Error a second concurrent turn gets, before the daemon is even asked. */
 export const TURN_BUSY_MESSAGE = "A reply is still streaming. Wait for it to finish or stop it first.";
 
+/** A conversation title is what says which chat this is; blank is refused. */
+export const CHAT_TITLE_REQUIRED_MESSAGE = "Give the conversation a name first.";
+
+/** A rename or working-copy request for something this store does not carry. */
+export const CHAT_SESSION_GONE_MESSAGE = "This conversation is no longer on this machine.";
+
 /** The store counts unix milliseconds; the contract wants ISO-8601. */
 function isoFromMillis(millis: number): string {
   return new Date(millis).toISOString();
@@ -128,10 +134,18 @@ export function createFrameFolder(sessionId: string): (frame: LocalChatFrame) =>
   };
 }
 
+/**
+ * A conversation row with the store's own title (DESK-009). The server
+ * contract names conversations by time, so the local title rides beside it
+ * as an optional field the history column prefers when present.
+ */
+export type LocalChatSessionView = ChatSession & { local_title?: string };
+
 /** A stored conversation, seen as the chat page's session row. */
 export function localSessionRow(
   record: {
     id: string;
+    title: string;
     workspace: string;
     project: string;
     working_dir: string;
@@ -141,9 +155,10 @@ export function localSessionRow(
   },
   account: string,
   activeMessageId: string | null
-): ChatSession {
+): LocalChatSessionView {
   return {
     id: record.id,
+    local_title: record.title,
     workspace: record.workspace,
     runner: record.project,
     runner_detail: { id: record.project, name: "", status: "online" },
@@ -245,6 +260,14 @@ export interface LocalChatTransport extends ChatTransport {
   getApprovalMode(sessionId: string): string;
   setRunnerApprovalMode(runnerId: string, mode: string): void;
   decideChatApproval(sessionId: string, localApprovalId: string, decision: string): Promise<void>;
+  /** Rename a stored conversation; refuses one this store does not carry. */
+  renameChatSession(sessionId: string, title: string): Promise<void>;
+  /** Delete a stored conversation and its messages; idempotent. */
+  deleteChatSession(sessionId: string): Promise<void>;
+  /** Wipe the signed-in account's whole on-machine history. */
+  clearChatHistory(): Promise<void>;
+  /** The working copy the bundled engine runs a chat in. */
+  chatWorkingDir(runnerId: string): Promise<string>;
   /** The bundled engine's row; every other contact belongs to the server. */
   chatRunner(runnerId: string): Promise<Runner | null>;
   ownsChatSession(sessionId: string): Promise<boolean>;
@@ -409,6 +432,41 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
         localApprovalId,
         decision: decision as LocalChatDecision,
       });
+    },
+
+    renameChatSession: async (sessionId, title) => {
+      const owner = account();
+      const trimmed = title.trim();
+      if (trimmed === "") throw new Error(CHAT_TITLE_REQUIRED_MESSAGE);
+      // A conversation this store does not own is a server row; renaming
+      // it through the local store would fail with a store-level error
+      // that says nothing useful to the person who clicked.
+      if (!(await isLocalSession(sessionId))) throw new Error(CHAT_SESSION_GONE_MESSAGE);
+      await api.renameSession(owner, sessionId, trimmed);
+    },
+
+    deleteChatSession: async (sessionId) => {
+      const owner = account();
+      await api.deleteSession(owner, sessionId);
+      // The turn, if any, was cut off with the row; no terminal frame will
+      // arrive for a conversation that no longer exists.
+      activeTurns.delete(sessionId);
+      subscribers.delete(sessionId);
+      errorSubscribers.delete(sessionId);
+    },
+
+    clearChatHistory: async () => {
+      await api.clearHistory(account());
+      // Every conversation went with the history, so nothing is in flight.
+      activeTurns.clear();
+    },
+
+    chatWorkingDir: async (runnerId) => {
+      if (runnerId !== BUILTIN_CHAT_ID) throw new Error(CHAT_SESSION_GONE_MESSAGE);
+      const owner = account();
+      const workspace = deps.workspaceSlug();
+      if (workspace === "") throw new Error("Open a workspace to see the built-in agent's working copy.");
+      return api.workingDir(owner, workspace, runnerId);
     },
 
     subscribeChatEvents: (sessionId, _after, handlers: ChatSubscriptionHandlers) => {

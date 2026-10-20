@@ -110,6 +110,10 @@ function localApi(): LocalChatApi {
     cancel: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
     decide: vi.fn(async () => undefined),
+    renameSession: vi.fn(async () => undefined),
+    deleteSession: vi.fn(async () => undefined),
+    clearHistory: vi.fn(async () => undefined),
+    workingDir: vi.fn(async () => "/repo"),
     subscribe: vi.fn((handlers) => {
       emit = handlers.onFrame;
       failStream = handlers.onError;

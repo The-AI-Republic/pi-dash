@@ -22,6 +22,8 @@ import {
   frameSession,
   localMessageRow,
   localSessionRow,
+  CHAT_SESSION_GONE_MESSAGE,
+  CHAT_TITLE_REQUIRED_MESSAGE,
   TURN_BUSY_MESSAGE,
 } from "./localTransport.js";
 
@@ -84,6 +86,10 @@ function harness(overrides: Partial<LocalChatApi> = {}): Harness {
     cancel: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
     decide: vi.fn(async () => undefined),
+    renameSession: vi.fn(async () => undefined),
+    deleteSession: vi.fn(async () => undefined),
+    clearHistory: vi.fn(async () => undefined),
+    workingDir: vi.fn(async () => "/repo"),
     subscribe: (handlers) => {
       onFrame = handlers.onFrame;
       onError = handlers.onError;
@@ -485,6 +491,76 @@ describe("local transport", () => {
       localApprovalId: "a-1",
       decision: "accept_for_session",
     });
+  });
+
+  it("renames a stored conversation with the trimmed name", async () => {
+    const h = harness({ getSession: vi.fn(async () => record({ project: BUILTIN_CHAT_ID })) });
+    const transport = transportFor(h);
+    await transport.renameChatSession("s-1", "  Planning  ");
+    expect(h.api.renameSession).toHaveBeenCalledWith("u-1", "s-1", "Planning");
+  });
+
+  it("refuses a blank name without asking the store", async () => {
+    const h = harness({ getSession: vi.fn(async () => record({ project: BUILTIN_CHAT_ID })) });
+    await expect(transportFor(h).renameChatSession("s-1", "   ")).rejects.toThrow(CHAT_TITLE_REQUIRED_MESSAGE);
+    expect(h.api.renameSession).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rename a conversation this store does not carry", async () => {
+    const h = harness({ getSession: vi.fn(async () => record({ project: "r-1" })) });
+    await expect(transportFor(h).renameChatSession("s-1", "Planning")).rejects.toThrow(CHAT_SESSION_GONE_MESSAGE);
+    expect(h.api.renameSession).not.toHaveBeenCalled();
+  });
+
+  it("deletes a conversation, its messages and its live listeners", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    const next = handlers();
+    transport.subscribeChatEvents("s-1", 0, next);
+    h.fire(started());
+    await transport.deleteChatSession("s-1");
+    expect(h.api.deleteSession).toHaveBeenCalledWith("u-1", "s-1");
+    // Nothing is delivered for a conversation that no longer exists.
+    h.fire({ result: "chat_message_completed", data: { chat_session_id: "s-1", message_id: "m-1", status: "done" } });
+    expect(next.onEvent).toHaveBeenCalledTimes(1);
+    // A second delete is the store's own idempotent no-op and resolves.
+    await expect(transport.deleteChatSession("s-1")).resolves.toBeUndefined();
+  });
+
+  it("clears the account's history and forgets every in-flight turn", async () => {
+    const h = harness();
+    const transport = transportFor(h);
+    await transport.clearChatHistory();
+    expect(h.api.clearHistory).toHaveBeenCalledWith("u-1");
+    // With the in-flight turn forgotten, the same conversation takes a send.
+    await transport.sendChatMessage("s-1", "again");
+    expect(h.api.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("clearing requires the same signed-in account as every other store verb", async () => {
+    const h = harness();
+    await expect(transportFor(h, "").clearChatHistory()).rejects.toThrow(/Sign in/);
+    expect(h.api.clearHistory).not.toHaveBeenCalled();
+  });
+
+  it("asks for the working copy with the account, workspace and engine id", async () => {
+    const h = harness();
+    await expect(transportFor(h).chatWorkingDir(BUILTIN_CHAT_ID)).resolves.toBe("/repo");
+    expect(h.api.workingDir).toHaveBeenCalledWith("u-1", "acme", BUILTIN_CHAT_ID);
+    await expect(transportFor(h).chatWorkingDir("r-other")).rejects.toThrow(CHAT_SESSION_GONE_MESSAGE);
+  });
+
+  it("refuses a working copy without a workspace in the address", async () => {
+    const h = harness();
+    const transport = createLocalChatTransport({
+      api: h.api,
+      account: () => "u-1",
+      workspaceSlug: () => "",
+      ensureRuntime: h.ensureRuntime,
+      storedMode: () => "full_access",
+    });
+    await expect(transport.chatWorkingDir(BUILTIN_CHAT_ID)).rejects.toThrow(/Open a workspace/);
+    expect(h.api.workingDir).not.toHaveBeenCalled();
   });
 
   it("closes, releases the session and answers the stored row", async () => {

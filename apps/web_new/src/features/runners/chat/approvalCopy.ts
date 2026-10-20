@@ -81,23 +81,6 @@ export function rememberApprovalMode(
   }
 }
 
-/** Sentences for the server's refusal codes on the bundled engine. */
-const UNAVAILABLE_REASONS: Record<string, string> = {
-  managed_runner_disabled: "The built-in agent is turned off on this server.",
-  byok_not_supported_on_desktop: "This computer's built-in agent cannot use your own model key yet.",
-  llm_config_missing: "This server has no model the built-in agent can use. Set one up in the workspace settings.",
-  desktop_not_connected: "The built-in agent is not connected. Open the desktop app and sign in.",
-  desktop_session_required: "Sign out and sign back in through the desktop app to use the built-in agent.",
-  gateway_scopes_missing: "Sign out and sign in again so the built-in agent can reach the model gateway.",
-  gateway_session_revoked: "Sign in again to reconnect the built-in agent.",
-  gateway_unavailable: "The model gateway is briefly unavailable. The built-in agent retries by itself.",
-};
-
-/** Human copy for a refusal code; unknown codes surface verbatim. */
-export function unavailableReasonText(code: string): string {
-  return UNAVAILABLE_REASONS[code] ?? code;
-}
-
 /** The activity sentence for one kind of approval request. */
 export const APPROVAL_KIND_TEXT: Record<ChatApprovalKind, string> = {
   command_execution: "wants to run a command",

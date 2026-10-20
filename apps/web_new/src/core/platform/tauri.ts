@@ -831,6 +831,10 @@ const desktopLocalChat: LocalChatApi = {
     }),
   setThreadId: (account, sessionId, engineThreadId) =>
     invokeNative("chat_set_thread_id", { account, sessionId, engineThreadId }),
+  renameSession: (account, sessionId, title) => invokeNative("chat_rename_session", { account, sessionId, title }),
+  deleteSession: (account, sessionId) => invokeNative("chat_delete_session", { account, sessionId }),
+  clearHistory: (account) => invokeNative("chat_clear_history", { account }),
+  workingDir: (account, workspace, project) => invokeNative("chat_working_dir", { account, workspace, project }),
   warm: (input) =>
     invokeNative("chat_warm", {
       workspace: input.workspaceSlug,

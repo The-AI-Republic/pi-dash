@@ -6,7 +6,7 @@
 // comes from props, history is listed and selectable, selection reaches
 // the address, warm-up runs for the resolving conversation, and the
 // header/composer follow the live state.
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -15,12 +15,17 @@ const hooks = vi.hoisted(() => ({
   useChatRunner: vi.fn(),
   useChatSessions: vi.fn(),
   useChatMessages: vi.fn(),
+  useChatWorkingDir: vi.fn(),
   useNewChat: vi.fn(),
   useWarmUp: vi.fn(),
   useDocumentHead: vi.fn(),
   useChatStream: vi.fn(),
   useChatActions: vi.fn(),
   useDictationConfig: vi.fn(),
+  useRenameChat: vi.fn(),
+  useDeleteChat: vi.fn(),
+  useClearHistory: vi.fn(),
+  supportsLocalHistory: vi.fn(),
 }));
 const area = vi.hoisted(() => ({ value: { workspaceId: "ws-id", allowed: true, access: "allowed" } }));
 
@@ -30,11 +35,18 @@ vi.mock("./queries.js", () => ({
   useChatRunner: hooks.useChatRunner,
   useChatSessions: hooks.useChatSessions,
   useChatMessages: hooks.useChatMessages,
+  useChatWorkingDir: hooks.useChatWorkingDir,
 }));
 vi.mock("./useWarmUp.js", () => ({ useWarmUp: hooks.useWarmUp }));
 vi.mock("./useNewChat.js", () => ({ useNewChat: hooks.useNewChat }));
 vi.mock("./useChatStream.js", () => ({ useChatStream: hooks.useChatStream }));
 vi.mock("./useChatActions.js", () => ({ useChatActions: hooks.useChatActions }));
+vi.mock("./historyQueries.js", () => ({
+  useRenameChat: hooks.useRenameChat,
+  useDeleteChat: hooks.useDeleteChat,
+  useClearHistory: hooks.useClearHistory,
+  supportsLocalHistory: hooks.supportsLocalHistory,
+}));
 vi.mock("../../../shared/dictation/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/dictation/index.js")>();
   return { ...original, useDictationConfig: hooks.useDictationConfig };
@@ -54,6 +66,9 @@ const stop = vi.fn(async () => undefined);
 const close = vi.fn(async () => undefined);
 const dismissSendError = vi.fn();
 const dismissStreamError = vi.fn();
+const renameMutate = vi.fn();
+const deleteMutate = vi.fn();
+const clearMutate = vi.fn();
 const refetchSessions = vi.fn(async () => undefined);
 const refetchMessages = vi.fn(async () => undefined);
 const stream = {
@@ -128,6 +143,14 @@ beforeEach(() => {
     isPending: false,
     refetch: refetchSessions,
   });
+  hooks.useChatWorkingDir.mockReturnValue({ data: null, isPending: false });
+  hooks.supportsLocalHistory.mockReturnValue(false);
+  hooks.useRenameChat.mockReturnValue({ mutate: renameMutate, isPending: false });
+  hooks.useDeleteChat.mockReturnValue({ mutate: deleteMutate, isPending: false });
+  hooks.useClearHistory.mockReturnValue({ mutate: clearMutate, isPending: false });
+  renameMutate.mockClear();
+  deleteMutate.mockClear();
+  clearMutate.mockClear();
   hooks.useWarmUp.mockReturnValue(false);
   hooks.useNewChat.mockReturnValue({ busy: false, start: newChatStart });
   newChatStart.mockClear();
@@ -763,5 +786,184 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     } finally {
       setItem.mockRestore();
     }
+  });
+});
+
+describe("RunnerChatPage on-machine history (DESK-009)", () => {
+  const history = () => screen.getByTestId("runner-chat-history");
+  const localHistoryTransport = (): ChatTransport => ({
+    subscribeChatEvents: vi.fn(() => () => undefined),
+    sendChatMessage: vi.fn(),
+    cancelChat: vi.fn(async () => ({ ok: true })),
+    closeChat: vi.fn(async () => openSession),
+    renameChatSession: vi.fn(async () => undefined),
+    deleteChatSession: vi.fn(async () => undefined),
+    clearChatHistory: vi.fn(async () => undefined),
+    chatWorkingDir: vi.fn(async () => "/home/me/chat/acme/PROJ"),
+    ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+  });
+
+  beforeEach(() => {
+    hooks.supportsLocalHistory.mockReturnValue(true);
+    setChatTransport(localHistoryTransport());
+  });
+
+  it("reads the machine's working copy and shows it in the header", () => {
+    hooks.useChatWorkingDir.mockReturnValue({ data: "/home/me/chat/acme/PROJ", isPending: false });
+    renderPage();
+    expect(hooks.useChatWorkingDir).toHaveBeenCalledWith("r-1", true);
+    expect(screen.getByTestId("runner-chat-secondary")).toHaveTextContent("/home/me/chat/acme/PROJ");
+  });
+
+  it("keeps the session's own directory until the working copy answers", () => {
+    hooks.useChatWorkingDir.mockReturnValue({ data: undefined, isPending: true });
+    renderPage();
+    // No machine directory and no session directory (makeSession's is
+    // blank), so the header falls through to the runner's pod name.
+    expect(screen.getByTestId("runner-chat-secondary")).toHaveTextContent("Default");
+  });
+
+  it("asks the machine for nothing when the viewer is not admitted", () => {
+    area.value = { workspaceId: "ws-id", allowed: false, access: "denied" };
+    renderPage();
+    expect(hooks.useChatWorkingDir).toHaveBeenCalledWith("r-1", false);
+  });
+
+  it("renames the chosen entry and closes the dialog once the write lands", async () => {
+    renameMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => options.onSuccess?.());
+    renderPage();
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    const field = await screen.findByRole("textbox", { name: "Name" });
+    await userEvent.clear(field);
+    await userEvent.type(field, "Release plan");
+    await userEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(renameMutate.mock.calls[0]?.[0]).toEqual({ sessionId: "closed", title: "Release plan" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename conversation" })).toBeNull());
+  });
+
+  it("keeps the rename dialog open while the write is still running", async () => {
+    hooks.useRenameChat.mockReturnValue({ mutate: renameMutate, isPending: true });
+    renderPage();
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    expect(await screen.findByRole("dialog", { name: "Rename conversation" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save name" })).toBeDisabled();
+  });
+
+  it("does nothing when a rename is submitted with no target left", async () => {
+    renderPage();
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Rename" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename conversation" })).toBeNull());
+    expect(renameMutate).not.toHaveBeenCalled();
+  });
+
+  it("deletes the entry and selects the most recent survivor", async () => {
+    const onSelectSession = vi.fn();
+    deleteMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => options.onSuccess?.());
+    renderPage({ requestedSessionId: "closed", onSelectSession });
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete this chat?" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    expect(deleteMutate.mock.calls[0]?.[0]).toEqual({ sessionId: "closed" });
+    expect(onSelectSession).toHaveBeenCalledWith("open");
+  });
+
+  it("leaves nothing selected after deleting the last conversation", async () => {
+    const onSelectSession = vi.fn();
+    hooks.useChatSessions.mockReturnValue({ data: [openSession], isPending: false, refetch: refetchSessions });
+    deleteMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => options.onSuccess?.());
+    renderPage({ onSelectSession });
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    expect(onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it("resolves a deletion against an empty list when the history never answered", async () => {
+    hooks.useChatSessions.mockReturnValue({ data: undefined, isPending: true, refetch: refetchSessions });
+    hooks.useChatMessages.mockReturnValue({ data: [], isPending: false, refetch: refetchMessages });
+    const onSelectSession = vi.fn();
+    deleteMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => options.onSuccess?.());
+    renderPage({ onSelectSession });
+    // No sessions are on screen, so nothing is selected and nothing can be
+    // repointed; the write still goes out for the entry that was offered.
+    expect(within(history()).queryAllByTestId("runner-chat-row-menu")).toHaveLength(0);
+    expect(deleteMutate).not.toHaveBeenCalled();
+    expect(onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it("deletes with nothing selected, leaving the pick empty", async () => {
+    const onSelectSession = vi.fn();
+    deleteMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => options.onSuccess?.());
+    renderPage({ requestedSessionId: null, onSelectSession });
+    // The auto-selected conversation is the only one on screen; removing it
+    // through the row menu with no explicit pick leaves the address alone.
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    expect(deleteMutate).toHaveBeenCalledWith({ sessionId: "closed" }, expect.anything());
+    expect(onSelectSession).toHaveBeenCalledWith("open");
+  });
+
+  it("leaves the pick empty when a deletion has no conversation to fall back to", async () => {
+    const onSelectSession = vi.fn();
+    const onlyClosed = makeSession({ id: "closed", status: "closed", last_message_at: "2026-10-18T12:00:00Z" });
+    hooks.useChatSessions.mockReturnValue({ data: [onlyClosed], isPending: false, refetch: refetchSessions });
+    deleteMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => options.onSuccess?.());
+    renderPage({ onSelectSession });
+    expect(within(history()).queryAllByTestId("runner-chat-row-menu")).toHaveLength(1);
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete chat" }));
+    expect(deleteMutate).toHaveBeenCalledWith({ sessionId: "closed" }, expect.anything());
+    expect(onSelectSession).not.toHaveBeenCalled();
+  });
+
+  it("cancels a clear without writing anything", async () => {
+    renderPage();
+    await userEvent.click(within(history()).getByRole("button", { name: "Clear history" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(clearMutate).not.toHaveBeenCalled();
+  });
+
+  it("clears the account's history through its confirmation", async () => {
+    const onSelectSession = vi.fn();
+    let settled = false;
+    clearMutate.mockImplementationOnce((_input, options: { onSuccess?: () => void }) => {
+      settled = true;
+      options.onSuccess?.();
+    });
+    renderPage({ onSelectSession });
+    await userEvent.click(within(history()).getByRole("button", { name: "Clear history" }));
+    expect(screen.getByRole("dialog", { name: "Clear the on-machine history?" })).toHaveTextContent("All 2");
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Clear history" }));
+    expect(clearMutate).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(true);
+    // A clear wipes the account's history, not one conversation, so the
+    // selection is left to the list re-read rather than being repointed.
+    expect(onSelectSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("cancels a deletion without writing anything", async () => {
+    renderPage();
+    await userEvent.click(within(history()).getAllByTestId("runner-chat-row-menu")[0] as HTMLElement);
+    await userEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete this chat?" })).toBeNull());
+    expect(deleteMutate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the removal dialog inert while a write is running", async () => {
+    hooks.useDeleteChat.mockReturnValue({ mutate: deleteMutate, isPending: true });
+    renderPage();
+    await userEvent.click(within(history()).getByRole("button", { name: "Clear history" }));
+    const dialog = screen.getByRole("dialog", { name: "Clear the on-machine history?" });
+    for (const button of within(dialog).getAllByRole("button")) expect(button).toBeDisabled();
   });
 });

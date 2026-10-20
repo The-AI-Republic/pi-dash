@@ -12,7 +12,8 @@ import { getChatSession, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { chatKeys } from "./keys.js";
-import { fetchChatMessages, fetchChatRunner, fetchChatSessions } from "./transport.js";
+import { supportsLocalHistory } from "./historyQueries.js";
+import { fetchChatMessages, fetchChatRunner, fetchChatSessions, fetchChatWorkingDir } from "./transport.js";
 
 /** Status changes appear live; the detail read re-polls on the list cadence. */
 export const CHAT_RUNNER_POLL_INTERVAL_MS = 5_000;
@@ -68,6 +69,24 @@ export function useChatSessions(workspaceSlug: string, workspaceId: string, runn
   return useQuery({
     ...chatSessionsQueryOptions(getAppClient(), workspaceSlug, workspaceId, runnerId),
     enabled,
+  });
+}
+
+/** How long a resolved working copy is trusted before it is read again. */
+export const CHAT_WORKING_DIR_STALE_MS = 5 * 60_000;
+
+/**
+ * The working copy a local conversation runs in (DESK-009), read once per
+ * contact. Only a transport that keeps history on this machine has one; a
+ * failure stays quiet and the header keeps the session row's directory.
+ */
+export function useChatWorkingDir(runnerId: string, enabled = true) {
+  return useQuery({
+    queryKey: chatKeys.workingDir(runnerId),
+    queryFn: () => fetchChatWorkingDir(runnerId),
+    enabled: enabled && supportsLocalHistory(runnerId),
+    staleTime: CHAT_WORKING_DIR_STALE_MS,
+    retry: false,
   });
 }
 

@@ -73,8 +73,18 @@ const STAMP_FORMAT = new Intl.DateTimeFormat("en-US", {
   minute: "2-digit",
 });
 
-/** Primary history label: when the conversation last moved. */
-export function sessionTitle(session: Pick<ChatSession, "last_message_at" | "created_at">): string {
+/** Why a history row cannot be managed yet: one turn is mid-flight. */
+export const HISTORY_BUSY_REASON = "Wait for the current reply to finish before changing this chat.";
+
+/**
+ * The name a history entry shows. A local chat the person renamed keeps
+ * that name; every other conversation is labelled by when it last moved.
+ */
+export function sessionTitle(
+  session: Pick<ChatSession, "last_message_at" | "created_at"> & { local_title?: string | undefined }
+): string {
+  const renamed = session.local_title?.trim();
+  if (renamed !== undefined && renamed !== "") return renamed;
   const stamp = session.last_message_at ?? session.created_at;
   const parsed = Date.parse(stamp);
   if (!Number.isFinite(parsed)) return "Chat";
@@ -96,6 +106,8 @@ export interface ChatHistoryEntry {
   title: string;
   subtitle: string;
   active: boolean;
+  /** Why this row's actions are unavailable, or null when they are not. */
+  busyReason: string | null;
 }
 
 export function buildHistoryEntries(
@@ -108,6 +120,7 @@ export function buildHistoryEntries(
     title: sessionTitle(session),
     subtitle: sessionSubtitle(session, nowMs),
     active: session.id === activeId,
+    busyReason: isRunnerBusy(session) ? HISTORY_BUSY_REASON : null,
   }));
 }
 

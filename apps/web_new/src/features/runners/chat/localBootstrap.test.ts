@@ -40,6 +40,10 @@ function localApi(): LocalChatApi {
     cancel: vi.fn(),
     close: vi.fn(),
     decide: vi.fn(),
+    renameSession: vi.fn(),
+    deleteSession: vi.fn(),
+    clearHistory: vi.fn(),
+    workingDir: vi.fn(),
     subscribe: vi.fn(() => () => undefined),
   };
 }

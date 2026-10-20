@@ -20,7 +20,6 @@ import {
   readApprovalMode,
   rememberApprovalMode,
   storedApprovalMode,
-  unavailableReasonText,
   type PendingApproval,
 } from "./approvalCopy.js";
 
@@ -101,28 +100,6 @@ describe("storedApprovalMode and rememberApprovalMode", () => {
     expect(() => rememberApprovalMode("r-1", "workspace", refusing)).not.toThrow();
     expect(storedApprovalMode("r-1", undefined)).toBe("full_access");
     expect(() => rememberApprovalMode("r-1", "workspace", undefined)).not.toThrow();
-  });
-});
-
-describe("unavailableReasonText", () => {
-  it("translates every known refusal code into a sentence", () => {
-    for (const code of [
-      "managed_runner_disabled",
-      "byok_not_supported_on_desktop",
-      "llm_config_missing",
-      "desktop_not_connected",
-      "desktop_session_required",
-      "gateway_scopes_missing",
-      "gateway_session_revoked",
-      "gateway_unavailable",
-    ]) {
-      expect(unavailableReasonText(code)).not.toBe(code);
-      expect(unavailableReasonText(code)).not.toBe("");
-    }
-  });
-
-  it("surfaces an unknown code verbatim", () => {
-    expect(unavailableReasonText("something_new")).toBe("something_new");
   });
 });
 

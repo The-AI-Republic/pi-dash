@@ -23,10 +23,14 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
 });
 
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
+const { setChatTransport } = await import("./transport.js");
+type ChatTransport = import("./transport.js").ChatTransport;
 const { chatKeys } = await import("./keys.js");
 const {
   CHAT_RUNNER_POLL_INTERVAL_MS,
   CHAT_SESSIONS_POLL_INTERVAL_MS,
+  CHAT_WORKING_DIR_STALE_MS,
+  useChatWorkingDir,
   chatMessagesQueryOptions,
   chatRunnerQueryOptions,
   chatSessionQueryOptions,
@@ -41,6 +45,7 @@ const client = {} as ApiClient;
 afterEach(() => {
   Object.values(contracts).forEach((mock) => mock.mockReset());
   resetAppClient();
+  setChatTransport(null);
 });
 
 describe("chatKeys", () => {
@@ -49,6 +54,7 @@ describe("chatKeys", () => {
     expect(chatKeys.runner("acme", "r-1")).toEqual(["ws", "acme", "runners", "chat", "runner", "r-1"]);
     expect(chatKeys.sessions("acme", "r-1")).toEqual(["ws", "acme", "runners", "chat", "sessions", "r-1"]);
     expect(chatKeys.messages("acme", "s-1")).toEqual(["ws", "acme", "runners", "chat", "messages", "s-1"]);
+    expect(chatKeys.workingDir("r-1")).toEqual(["runners", "chat", "working-dir", "r-1"]);
   });
 });
 
@@ -138,5 +144,43 @@ describe("useChatMessages", () => {
     expect(none.result.current.fetchStatus).toBe("idle");
     expect(denied.result.current.fetchStatus).toBe("idle");
     expect(contracts.listChatMessages).not.toHaveBeenCalled();
+  });
+});
+
+describe("useChatWorkingDir", () => {
+  function localTransport(workingDir: () => Promise<string>): ChatTransport {
+    return {
+      subscribeChatEvents: vi.fn(() => () => undefined),
+      ownsRunner: (runnerId: string) => runnerId === "pidash-builtin",
+      deleteChatSession: vi.fn(async () => undefined),
+      chatWorkingDir: vi.fn(workingDir),
+    } as unknown as ChatTransport;
+  }
+
+  it("reads the machine's directory for a local contact and caches it for a while", async () => {
+    setChatTransport(localTransport(async () => "/home/me/chat/acme/PROJ"));
+    const wrapper = provider(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+    const { result } = renderHook(() => useChatWorkingDir("pidash-builtin"), { wrapper });
+    await waitFor(() => expect(result.current.data).toBe("/home/me/chat/acme/PROJ"));
+    expect(CHAT_WORKING_DIR_STALE_MS).toBeGreaterThan(0);
+  });
+
+  it("stays idle without the history capability or without access", async () => {
+    setChatTransport(null);
+    const wrapper = provider(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+    const none = renderHook(() => useChatWorkingDir("pidash-builtin"), { wrapper });
+    setChatTransport(localTransport(async () => "/repo"));
+    const denied = renderHook(() => useChatWorkingDir("pidash-builtin", false), { wrapper });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(none.result.current.fetchStatus).toBe("idle");
+    expect(denied.result.current.fetchStatus).toBe("idle");
+  });
+
+  it("stays quiet when the machine cannot answer, leaving the header its own value", async () => {
+    setChatTransport(localTransport(async () => Promise.reject(new Error("no store"))));
+    const wrapper = provider(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
+    const { result } = renderHook(() => useChatWorkingDir("pidash-builtin"), { wrapper });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
   });
 });

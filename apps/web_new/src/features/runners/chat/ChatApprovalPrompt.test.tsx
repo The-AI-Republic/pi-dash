@@ -12,8 +12,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ALWAYS_ALLOW_LABEL,
-  APPROVE_LABEL,
+  APPROVAL_NO_REASON,
   APPROVAL_PROMPT_LABEL,
+  APPROVE_LABEL,
   ChatApprovalPrompt,
   DENY_LABEL,
 } from "./ChatApprovalPrompt.js";
@@ -39,10 +40,10 @@ describe("ChatApprovalPrompt", () => {
     expect(screen.getByTestId("chat-approval-reason")).toHaveTextContent("tests the change");
   });
 
-  it("omits a missing target and reason", () => {
+  it("omits a missing target and says why no reason came with it", () => {
     render(<ChatApprovalPrompt request={request({ reason: "", payload: {} })} onDecide={vi.fn()} />);
     expect(screen.queryByTestId("chat-approval-target")).toBeNull();
-    expect(screen.queryByTestId("chat-approval-reason")).toBeNull();
+    expect(screen.getByTestId("chat-approval-reason")).toHaveTextContent(APPROVAL_NO_REASON);
   });
 
   it("answers with approve and deny", async () => {

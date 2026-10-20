@@ -64,7 +64,7 @@ describe("localContactAvailability", () => {
   it("translates an available answer and a refusal", () => {
     expect(localContactAvailability(profile(true))).toEqual({ unavailableReason: null });
     expect(localContactAvailability(profile(false, "managed_runner_disabled"))).toEqual({
-      unavailableReason: "The built-in agent is turned off on this server.",
+      unavailableReason: "The built-in agent is switched off on this server.",
     });
     expect(localContactAvailability(profile(false, "odd_code"))).toEqual({ unavailableReason: "odd_code" });
   });
@@ -106,7 +106,7 @@ describe("useLocalContact", () => {
     answer(profile(false, "llm_config_missing"));
     await waitFor(() =>
       expect(result.current[0]?.unavailableReason).toBe(
-        "This server has no model the built-in agent can use. Set one up in the workspace settings."
+        "No model is configured for AI runs yet. Set one up in the AI settings."
       )
     );
   });
