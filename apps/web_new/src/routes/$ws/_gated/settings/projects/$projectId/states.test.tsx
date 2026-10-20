@@ -39,6 +39,10 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
 }));
 
 import { renderInRouter } from "../../../../../../features/project-settings/testing.js";
+
+vi.mock("../../../../../../features/project-states/index.js", () => ({
+  StatesTab: () => <div data-testid="states-tab-stub" />,
+}));
 import { Route } from "./states.js";
 
 function renderRoute(): void {
@@ -67,7 +71,7 @@ describe("states settings route", () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByRole("heading", { level: 1, name: "States" })).toBeInTheDocument();
-    expect(screen.getByTestId("project-settings-tab-mount")).toHaveAttribute("data-slice", "NEWFRONT-598");
+    expect(screen.getByTestId("states-tab-stub")).toBeInTheDocument();
     expect(screen.getByTestId("project-settings-tab-states")).toHaveAttribute("data-active", "true");
   });
 
