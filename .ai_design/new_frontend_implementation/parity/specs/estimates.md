@@ -168,7 +168,9 @@ The screen has exactly these states, and they are mutually exclusive
    error half belongs to slice 740).
 3. **Empty (no systems at all).** An illustrated empty state with a
    short title, "No estimates yet" (_pinned_), a supporting sentence,
-   and a primary action, "Add estimate system" (_pinned_). Only a
+   and a primary action whose accessible name begins with "Add"
+   followed by estimate/system wording (the oracle matches
+   `/add estimate/i`; the old label reads "Add estimate system"). Only a
    project admin sees a working action; any other viewer who somehow
    reaches this state sees the illustration and text with no action.
    Pressing the action opens the creation dialog on step one (§3).
@@ -200,7 +202,10 @@ The archived section is not hidden by the empty state.
 When an active system exists, the top of the content is a boxed control
 with:
 
-- title, "Enable estimates for my project" (_pinned_);
+- a title naming project estimates (the old title reads "Enable
+  estimates for my project"; the oracle finds the control by role
+  (`switch`), not by that text, so slice 741 may write the title in the
+  product's voice as long as it is a title, not a button);
 - one supporting sentence saying estimates help communicate complexity
   and workload (paraphrase; not pinned);
 - a toggle switch at the trailing edge.
@@ -370,7 +375,7 @@ The rendered screen text must not mention these capabilities, so the
 oracle's word scan of the visible text (shortcut, export, import, bulk,
 filter, search) stays clean. The archived ordering and active selection
 described above are not "sorting controls". The command palette's
-work-item estimate page (§6.4) is a different surface and is not bound
+work-item estimate page (§6.5) is a different surface and is not bound
 by this row; this row is about the settings screen only.
 
 ## 3. Creation dialog (EST-008–EST-013)
@@ -419,9 +424,11 @@ system).
 
 ### 3.2 Family radio and edition availability (EST-009)
 
-Step one begins with a labelled radio group, "Choose an estimate
-system" (_pinned_), over the families. Each family is a radio with a
-label; the first available one is selected by default.
+Step one begins with a labelled radio group over the families (the old
+group label reads "Choose an estimate system"; the oracle reads the
+radios and their option labels, not the group legend). Each family is a
+radio whose option label is its display name — "Points", "Categories"
+(_pinned_) — and the first available one is selected by default.
 
 The set of families is built from a family catalogue filtered by an
 **edition capability**, not by ad-hoc environment checks:
@@ -440,12 +447,17 @@ render it enabled with a time input. The oracle asserts the radio values
 are exactly `["points","categories"]`, both enabled, points checked, and
 that `time` never appears.
 
-If a family is in the catalogue but unavailable in the current edition,
-the row rule is: render it disabled with an explanatory marker (a
-tooltip-style "not available in this edition" note), never selectable
-and never submitting. In practice OSS has no disabled row because its
-catalogue excludes time; the disabled path exists for editions between
-these two and for the API accepting a family the client cannot offer.
+The old app has **no disabled family row**: its family helper
+returns false for every family except points and categories, and the
+first step maps the unavailable ones to nothing and filters them out
+before rendering, so an OSS build simply shows two enabled radios. The
+disabled row described here is a **new-app fallback for future editions
+and catalogue states**, not a rendering of the old app: if a family is
+in the catalogue but unavailable in the current edition, render it
+disabled with an explanatory marker (a tooltip-style "not available in
+this edition" note), never selectable and never submitting. OSS must
+still omit time outright (the oracle counts exactly two radios), so the
+fallback must not be the mechanism OSS uses to hide time.
 
 Choosing a family replaces the starter card set (§3.3). Choosing a
 family never preserves a starter from the previous family.
@@ -518,9 +530,10 @@ in key order. Each row shows:
 - a remove control (trash), **hidden** when only two values remain;
 - an inline problem marker when the row is invalid (§3.6).
 
-At the bottom, an **add** control labelled for the family ("Add
-points"/"Add categories"/"Add time"; the old label is "Add <family>",
-_pinned_ to the add form). It is **hidden** when six values are present.
+At the bottom, an **add** control whose accessible name begins with
+"Add" and names the family (the old label is the family name after it,
+e.g. "Add points"; the oracle matches `/^add /i`, not the wording). It
+is **hidden** when six values are present.
 The count bounds are 2 (minimum) and 6 (maximum): removal cannot take
 the list below two and addition cannot take it above six.
 
@@ -531,11 +544,19 @@ open, with a confirm and a cancel. Enter or confirm commits the draft;
 cancel discards it. The **old editor has no Escape handler**: its
 inputs bind change/submit only, so Escape does nothing and the draft
 stays in the field. The new app makes Escape discard the draft like
-cancel; slice 742 records that as a divergence. Committing an empty
-draft leaves an empty row (which then fails validation) rather than
-silently removing it. While the editor is open the row's other
-controls may be subdued, but removing or reordering the row must close
-the editor.
+cancel; slice 742 records that as a divergence.
+
+Committing an **empty** draft does **not** create or blank a row. Both
+old editors (add and edit) branch on the draft being truthy: an empty
+commit reports the empty-value problem (§3.6), keeps the editor open,
+and never calls the row-update callback, so an existing row keeps its
+previous value and a new row is never added. An empty row therefore
+exists only as the untouched **add** placeholder (the empty input the
+add control opens); it is never produced by an edit. The new app must
+reproduce that shape: empty = a problem, not a mutation.
+
+While the editor is open the row's other controls may be subdued, but
+removing or reordering the row must close the editor.
 
 ### 3.5 Reordering (EST-011, D21)
 
@@ -559,28 +580,38 @@ Keys are invisible, so this cannot change what the user sees.
 
 ### 3.6 Per-value validation (EST-012)
 
-Validation is per row and runs against the trimmed value, for the
-chosen family:
+Validation is per row. The **old editors test the raw draft**, not a
+trimmed copy: their commit handler branches on the draft string being
+truthy and then runs the family check on that string as typed.
 
-- **Empty.** A blank/whitespace-only value is invalid and reports
-  "Estimate value cannot be empty." (_pinned_ meaning: value required).
+- **Empty.** Only a genuinely empty draft is refused. A
+  whitespace-only draft is truthy, so it is not treated as empty: for
+  numeric families it reaches the "greater than 0" branch (the numeric
+  conversion of a space is zero), and for categories it reports the
+  character-value problem. The message must contain the word "empty"
+  (_pinned_ fragment; the old sentence is "Estimate value cannot be
+  empty." — write the new app's own sentence around that fragment).
 - **points** (and time, where offered): the value must parse as a
-  number; a non-number reports "Estimate needs to be a numeric value."
-  (_pinned_); zero or a negative number reports "Estimate needs to be
-  greater than 0." (_pinned_). Accept decimals and leading/trailing
-  spaces around a number; store the trimmed text exactly as typed (the
-  server stores a string; do not re-format `1.0` to `1`).
+  number. The message for a non-number must contain "numeric"
+  (_pinned_ fragment); the message for zero or a negative number must
+  contain "greater than 0" (_pinned_ fragment). The old client uses
+  **two** sentences here and a whitespace-only draft falls into the
+  second. Accept decimals. The server stores a string and the old
+  create path sends the draft untrimmed, so nothing is normalised on
+  the way out. The new app commits a **trimmed** value once, on commit,
+  and validates and sends that (a §9.3 divergence); it must not
+  re-format a number (`1.0` stays `1.0`).
 - **categories**: the value must be non-numeric text; a numeric string
-  (including "0", "1.5", "-2") reports "Estimate needs to be a
-  character value." (_pinned_).
-- **Duplicates** within the set are refused, message "Estimate value
-  already exists." (_pinned_). Comparison is by the family's semantics:
-  for numeric families compare the numeric value (`1` and `1.0` are the
-  same, ` 1` and `1` are the same), for categories compare the trimmed
-  text exactly (case-sensitive: "Easy" and "easy" are different
-  categories — the old client compares exact strings). The 602 model
-  lowercases categories; slice 742 changes it to the exact comparison
-  the oracle pins.
+  (including "0", "1.5", "-2") reports a message containing
+  "character" (_pinned_ fragment).
+- **Duplicates** within the set are refused, message containing
+  "already exists" (_pinned_ fragment). Comparison is by the family's
+  semantics: for numeric families compare the numeric value (`1` and
+  `1.0` are the same, ` 1` and `1` are the same), for categories
+  compare the trimmed text exactly (case-sensitive: "Easy" and "easy"
+  are different categories — the old client compares exact strings).
+  The 602 model lowercases categories; slice 742 changes it to the
+  exact comparison the oracle pins.
 - **Length cap.** The cap is **20 characters** (the old input constant
   and the server serializer's check are both 20). The old client
   enforces it by **ignoring the whole edit**: its change handler
@@ -597,6 +628,11 @@ chosen family:
   long" message; that divergence is recorded as remaining work in §8
   and must be brought to 20 by slice 742.
 
+The pinned fragments above are exactly what the oracle matches
+(`/numeric/i`, `/greater than 0/i`, `/character/i`, `/already exists/i`,
+`/empty/i`). They are a floor, not a script: slices write their own
+sentences containing those words and must not lift the old strings.
+
 Presentation: an invalid row shows an inline marker (an information
 icon with a tooltip, or an equivalent inline error), and the message is
 available as accessible text on the row. A row that has never been
@@ -607,10 +643,16 @@ and dirty; they recompute on commit.
 Submit gating: pressing the primary action with any unresolved problem
 must **not** call the API. It reveals the markers, keeps the dialog
 open on step two and focuses/labels the first problem. The old dialog
-shows a prompt for empty fields on submit; the equivalent new behaviour
-is: mark every outstanding row and refuse the submit. There is no
-dialog-level "some values are invalid" banner required, but problems
-must be visible.
+has no row list to walk: its gate iterates the **problem map** (entries
+recorded by the open add/edit form and by committed edits), so an empty
+row reaches submit through the **open add form** — the one place an
+empty value lives. Submitting while the add form is open and still
+empty must surface the empty-value problem on that form and refuse. The
+old gate also blocks any entry whose draft differs from its committed
+value (an unsaved edit), independent of its message; the new app's
+equivalent is to line up its pending edits with the problem set before
+deciding. There is no dialog-level "some values are invalid" banner
+required, but problems must be visible.
 
 Server-side length validation also exists (§4.4); the client cap is the
 first line, not a substitute.
@@ -621,8 +663,8 @@ Submit is enabled on step two (not disabled merely because a starter was
 never chosen — every starter path seeds values; the scratch path is a
 starter). On submit:
 
-1. Trim each value, run the full validation pass; if anything is
-   invalid, stop as in §3.6.
+1. Run the full validation pass over the committed row values (trimmed
+   on commit, §3.6); if anything is invalid, stop as in §3.6.
 2. Send one create request (§7.1) carrying the estimate object and the
    full point list:
    - name = the family's display name (the old client sends "Points",
@@ -631,8 +673,8 @@ starter). On submit:
      are predictable);
    - type = family key (`points` | `categories` | `time`);
    - in-use flag = true;
-   - points = one entry per row, key = position (1..n), value = trimmed
-     text (time: raw minutes as a string).
+   - points = one entry per row, key = position (1..n), value = the
+     row's committed (trimmed) text, time as raw minutes in a string.
 3. While pending: the dialog stays open, the primary button shows a
    busy/disabled state, dismissal is blocked, and the rows are not
    editable.
@@ -712,16 +754,23 @@ active row's edit control:
      create endpoint (POST under the system) with its key and value;
      the server returns the created point with an id. New rows are sent
      after the PATCH, in display order.
-  3. **Removes**: a value present before and absent now goes through the
-     single-value delete endpoint (§4.2), with no replacement; the
-     server renumbers the remaining keys.
+  3. **Removes**: a value present before and absent now opens the §4.2
+     confirmation for that value — the admin chooses to move the
+     affected work items to another value of the system (send
+     `new_estimate_id`) or to clear them (send nothing) — and only then
+     is the single-value delete endpoint called. A removal saved with no
+     confirmation silently clearing every affected item would lose data
+     the user never agreed to lose; §4.2 is the removal path, not a
+     separate feature. The server renumbers the remaining keys.
 
-  After the writes, re-read the system so the dialog and the row show
-  the server's ids/keys, and keep the final order the user arranged
-  (renumber once at the end; do not let the server's delete
-  renumbering fight the PATCH). If a step fails, report the failure,
-  keep the dialog open with the arrangement, and do not claim success;
-  never silently drop a row that failed to add or remove.
+  Order of operations: PATCH existing ids first (it writes the final
+  keys), then the point deletes (the server renumbers after each), then
+  the adds, then re-read the system and renumber once so the dialog and
+  the row show the server's ids and the user's final order. If a
+  removal is cancelled in its confirmation, that row stays and the rest
+  of the save may proceed; if a step fails, report the failure, keep the
+  dialog open with the arrangement, and do not claim success; never
+  silently drop a row that failed to add or remove.
 
 - The full PATCH shape requires a non-empty point list: an update with
   an empty value set is refused with 400 `{"error": "Estimate points
@@ -761,7 +810,7 @@ explain the consequence and offer the choice:
 The request is the single-value delete endpoint with an optional
 `new_estimate_id` (§7.1): present for reassignment, absent for clearing.
 The server moves or clears every work item carrying that value, records
-one history entry per affected item on the reassignment path (§6.5), and
+one history entry per affected item on the reassignment path (§6.7), and
 renumbers remaining keys without gaps. On success re-read the system so
 the dialog reflects the new keys; the deleted value disappears from
 pickers and from any item that had it (moved or cleared).
@@ -1000,11 +1049,12 @@ Issues owns the generic property row and the dropdown family
   typing `90` finds the row whose label never shows "90". The `${value}`
   filter is built from the stored text, and the clear row is indexed by
   its "No estimate" label. This is a pinned quirk, **bug:
-  NEWFRONT-820**, not intended behaviour; slice 744 (picker) and the
-  palette page (EST-021, §6.5) must decide explicitly: match the
-  displayed label (the natural behaviour) and record the divergence,
-  or keep matching the stored value. Do not describe the old app as
-  filtering labels.
+  NEWFRONT-820**, not intended behaviour. The palette page (EST-021,
+  §6.5) behaves differently — it filters rendered text — so there is
+  no single rule to inherit. Slice 744 must decide explicitly for the
+  picker: match the displayed label (the natural behaviour) and record
+  the divergence, or keep matching the stored value. Do not describe
+  the old app as filtering labels.
 - **Write.** One issue update carrying `estimate_point` = the chosen
   point id, or `null` for the clear row. It answers **204 with no
   body** (§7.2) — there is no updated issue to read back, so the client
@@ -1016,7 +1066,7 @@ Issues owns the generic property row and the dropdown family
   others; an outsider has no item access (§5). The control therefore
   uses the item surface's own write capability and never hard-codes
   "guest cannot estimate".
-- **History.** The write is what generates the activity entry (§6.5);
+- **History.** The write is what generates the activity entry (§6.7);
   the picker itself does not write history.
 - **Placement.** Detail sidebar, list/inbox row property menus,
   spreadsheet cells (when the column is shown), create/edit modal
@@ -1295,7 +1345,7 @@ the difference. The spec above is binding where it differs.
 | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | EST-001 | Admin gate comes from the settings shell; screen renders under it; heading and content                                                                                                                                            | Slice 740 proves the member/guest denial carries no estimate controls (the shell gate is shared) and keeps the screen's own `canManage` branch                                                                                                          |
 | EST-002 | Four-skeleton loader while the list is pending                                                                                                                                                                                    | Slice 740: a failed read must show an error + retry **instead of** the empty/content below it (602 renders an error paragraph and then falls through to the empty state, which reads as "no systems"; the error branch must return early)               |
-| EST-003 | Empty state with title and add action for admins; no action otherwise. Creation is reachable only from the empty state: 602 head `7afa61f34` removed the extra populated-screen button and asserts its absence in a test                                                                                                                                                             | mainly proven by existing tests; slice 740 confirms                                                                                                                                                                                                     |
+| EST-003 | Empty state with title and add action for admins; no action otherwise. Creation is reachable only from the empty state: 602 removed the extra populated-screen button (review pass on `fb0b02f16`) and asserts its absence in a test                                                                                                                                                             | mainly proven by existing tests; slice 740 confirms                                                                                                                                                                                                     |
 | EST-004 | Switch reads `project.estimate`; toggles by writing the active id/null; success notices name the direction; disabled while pending (the deliberate divergence in §2.3/§9.3 — the old switch is role-disabled only) and without manage rights | Slice 741: the **error title must contain "Error"** (§2.3) — 602's "Couldn’t change estimates" has neither that word nor a direction, so the EST-004 oracle scenario fails on it as-is; keep the snap-back and add the direction-correct body (bug 341) |
 | EST-005 | Active row with name and values joined; time humanized by the shared formatter                                                                                                                                                    | nothing structural; slice 741 covers the time-format branch                                                                                                                                                                                             |
 | EST-006 | Archived section with heading, explainer containing "older versions", newest-first ordering, zero controls, **and** an outbound `https://` link in a new tab (added by 602's review fix `35c290cb7`, asserted in its screen test) | nothing structural (603/602 review fix)                                                                                                                                                                                                                 |
@@ -1304,7 +1354,7 @@ the difference. The spec above is binding where it differs.
 | EST-009 | Points/categories radios only                                                                                                                                                                                                     | Slice 742: build the family catalogue with an edition capability so time can be added by the cloud edition; keep time absent in OSS                                                                                                                     |
 | EST-010 | Custom + Fibonacci/Linear/Squares; T-Shirt Sizes; previews                                                                                                                                                                        | Slice 742: add the missing categories "Easy to hard" starter and time starters for cloud; previews must humanize time                                                                                                                                   |
 | EST-011 | Rows with edit (pencil + double-click), remove hidden at 2, add hidden at 6, renumber on remove                                                                                                                                   | Slice 742: **real drag reorder** (602 lists rows without a drag source); keyboard move actions; add allocates max+1                                                                                                                                     |
-| EST-012 | Per-row problems; submit blocked; submitted gate                                                                                                                                                                                  | Slice 742: cap **20** (602 uses 40 and a "40 characters" message); exact category duplicate comparison (602 lowercases); pinned messages; over-long edits resolve to 20 characters (old app ignores the edit; new app truncates — a recorded divergence, §3.6) |
+| EST-012 | Per-row problems; submit blocked; submitted gate                                                                                                                                                                                  | Slice 742: cap **20** (602 uses 40 and a "40 characters" message); exact category duplicate comparison (602 lowercases); oracle's pinned message fragments; over-long edits resolve to 20 characters (old app ignores the edit; new app truncates — a recorded divergence, §3.6). 602 already trims on validate and submit, matching the §9.3 trim divergence |
 | EST-013 | Create with family name/type/last_used and keys 1..n; success closes + refetch; failure keeps dialog open; no project write                                                                                                       | Slice 742: prove the flag is set and the project link is untouched (§3.8); time never submitted in OSS                                                                                                                                                  |
 | EST-014 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): update dialog, PATCH existing ids + point add/delete routing, empty-set failure, persistence across refetch                                                                                                                          |
 | EST-015 | — (not built)                                                                                                                                                                                                                     | Slice 743 (cloud): single-value delete confirmation, reassignment/clear, renumber, history caveat                                                                                                                                                       |
@@ -1323,7 +1373,8 @@ the difference. The spec above is binding where it differs.
 | EST-028 | No extra controls                                                                                                                                                                                                                 | Slice 740: prove the absences and the screen-text word scan                                                                                                                                                                                             |
 | EST-029 | OSS only today                                                                                                                                                                                                                    | Slice 743: edition capability for time/edit/value-delete; desktop same as edition                                                                                                                                                                       |
 
-Re-read at 602's head `be6a51ee7` (after review fix `35c290cb7`).
+Re-read at 602's head `fb0b02f16` (the branch was rebased onto
+`web-new-dev`; the estimates files are unchanged from `be6a51ee7`).
 Divergences in the 602 code to correct (do not keep):
 `ESTIMATE_VALUE_MAX_LENGTH = 40` (must be 20);
 duplicate comparison lowercased for categories (must be exact);
@@ -1340,7 +1391,7 @@ in a new tab (`35c290cb7`, covered by its screen test), and the honest
 delete-failure notice that no longer promises the system still exists.
 
 The 40-character cap, lowercased duplicate check, missing starter and
-missing drag source were still present at `be6a51ee7`, so those bullets
+missing drag source are still present at `fb0b02f16`, so those bullets
 stand.
 
 ## 9. Decisions and known bugs
@@ -1439,6 +1490,7 @@ oracle scenario, so none can fail the gate on its own.
 | Dialog dismissal | Create and delete dialogs mount without a close handler: Escape/backdrop do nothing | Escape/backdrop cancel when idle; ignored while a write is pending (§3.1, §4.3) | 742, 743 |
 | Inline editor Escape | No Escape handler; the draft stays | Escape discards the draft like cancel (§3.4) | 742 |
 | Over-long edits | The whole change is ignored when it exceeds 20 characters | The change is truncated to its first 20 characters (§3.6) | 742 |
+| Value trimming | Raw drafts are validated and sent untrimmed; whitespace-only reads as zero (numeric) or as text (categories), not as empty | A value is trimmed once on commit and that trimmed value is what validation and submit see, so whitespace-only reads as empty (§3.6, §3.7) | 742 |
 | Time starter (cloud) | No starter block for cloud families: choosing time is a dead end | Hours template plus a two-value scratch set, stored as minutes (§3.3) | 743 |
 | Key allocation on add | `length + 1`, which can reuse a key | `max + 1`, keys contiguous 1..n (D21, §9.1) | 742, 743 |
 
