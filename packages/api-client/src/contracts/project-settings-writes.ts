@@ -9,7 +9,7 @@ import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { ApiError } from "../errors.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { ProjectLite } from "./projects.js";
+import { ProjectLite } from "./project-lite.js";
 import { State } from "./reference.js";
 import { UserLite } from "./users.js";
 import { WorkspaceLite } from "./workspaces.js";

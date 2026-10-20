@@ -1077,14 +1077,6 @@ describe("project contracts", () => {
     expect(parsed[0]?.member_role).toBe(20);
   });
 
-  it("carries the default assignee when the row has one and tolerates its absence", async () => {
-    const withAssignee = { ...project, default_assignee: UUID2 };
-    const client = createClient({ baseUrl: "https://api.test", transport: json([withAssignee, project]) });
-    const parsed = await listProjects(client, "acme");
-    expect(parsed[0]?.default_assignee).toBe(UUID2);
-    expect(parsed[1]?.default_assignee).toBeUndefined();
-  });
-
   it("hits the workspace-scoped URL", async () => {
     const transport = recordingTransport(() => fakeResponse({ body: "[]" }));
     const client = createClient({ baseUrl: "https://api.test", transport });

@@ -130,7 +130,8 @@ export type {
   WorkspaceInviteRoleInput,
   WorkspaceInvitee,
 } from "./contracts/invitations.js";
-export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";
+export { Project, ProjectList, listProjects } from "./contracts/projects.js";
+export { ProjectLite } from "./contracts/project-lite.js";
 export {
   AgentExecutorOption,
   ProjectDetail,

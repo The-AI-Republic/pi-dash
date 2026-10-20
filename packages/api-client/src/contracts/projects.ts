@@ -10,14 +10,6 @@ import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 
-/** Small project projection embedded in members and activity. */
-export const ProjectLite = z.object({
-  id: uuid(),
-  name: z.string(),
-  identifier: z.string(),
-});
-export type ProjectLite = z.infer<typeof ProjectLite>;
-
 /**
  * Project list row. The endpoint answers a fixed `.values()` projection —
  * not the full serializer — with the caller's membership role, the pending
@@ -46,9 +38,6 @@ export const Project = z.object({
   /** Whether project members may edit workflow states (PSET-034). */
   members_can_edit_states: z.optional(z.boolean()),
   project_lead: nullableUuid(),
-  // The retrieve serializer carries the default assignee; the list
-  // `.values()` projection omits it, so older list fixtures predate it.
-  default_assignee: z.optional(nullableUuid()),
   network: z.number(),
   created_at: dateTime(),
   updated_at: dateTime(),

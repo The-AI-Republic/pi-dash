@@ -11,8 +11,7 @@
 import { Button, Combobox, Skeleton, Switch, cn, type ComboboxOption } from "@pidash/kit";
 import * as React from "react";
 
-import type { ProjectDetail } from "@pidash/api-client";
-
+import type { ProjectDefaultsFields } from "./api.js";
 import { DEFAULTS_NONE_LABEL, defaultSlotLabel, type DefaultMemberOption } from "./writes.js";
 
 export const LEAD_FIELD_LABEL = "Project lead";
@@ -20,7 +19,7 @@ export const ASSIGNEE_FIELD_LABEL = "Default assignee";
 export const GUEST_VISIBILITY_LABEL = "Guests can view all work items";
 
 export interface MemberDefaultsProps {
-  project: ProjectDetail | undefined;
+  project: ProjectDefaultsFields | undefined;
   members: readonly DefaultMemberOption[];
   /** Admin standing: everyone else gets the same controls, disabled. */
   canEdit: boolean;

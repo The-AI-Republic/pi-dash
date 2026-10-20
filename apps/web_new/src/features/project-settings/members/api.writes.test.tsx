@@ -20,7 +20,7 @@ const { contractMocks } = vi.hoisted(() => ({
     removeProjectMember: vi.fn(),
     leaveProject: vi.fn(),
     updateProject: vi.fn(),
-    getProject: vi.fn(),
+    listProjectDetails: vi.fn(),
   },
 }));
 
@@ -55,6 +55,10 @@ vi.mock("../../auth/index.js", async (importOriginal) => ({
 vi.mock("../../projects/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   projectKeys: { details: () => ["ws", "acme", "projects", "details"] },
+  projectDetailsQueryOptions: () => ({
+    queryKey: ["ws", "acme", "projects", "details"],
+    queryFn: async () => contractMocks.listProjectDetails(),
+  }),
 }));
 
 vi.mock("../../../core/session/index.js", async (importOriginal) => ({
@@ -299,11 +303,27 @@ describe("useSaveProjectDefaults", () => {
 });
 
 describe("useProjectDefaults and useMemberEditor", () => {
-  it("reads the project row the defaults section needs", async () => {
-    contractMocks.getProject.mockResolvedValue(projectRow);
+  it("picks this project's defaults out of the workspace detail rows", async () => {
+    contractMocks.listProjectDetails.mockResolvedValue([
+      {
+        ...projectRow,
+        id: "other-project",
+        project_lead: null,
+        default_assignee: null,
+        guest_view_all_features: false,
+      },
+      projectRow,
+    ]);
     const { result } = renderHook(() => useProjectDefaults(SLUG, PROJECT), { wrapper: wrapper(newClient()) });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data).toEqual(projectRow);
+  });
+
+  it("answers undefined while the detail rows are pending or miss the project", async () => {
+    contractMocks.listProjectDetails.mockResolvedValue([{ ...projectRow, id: "other-project" }]);
+    const { result } = renderHook(() => useProjectDefaults(SLUG, PROJECT), { wrapper: wrapper(newClient()) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeUndefined();
   });
 
   it("resolves the editor's id, workspace role and project role", () => {

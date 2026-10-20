@@ -9,10 +9,10 @@
 // stand in until the project row arrives.
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ProjectDetail } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { ProjectDefaultsFields } from "./api.js";
 import { ASSIGNEE_FIELD_LABEL, GUEST_VISIBILITY_LABEL, LEAD_FIELD_LABEL, MemberDefaults } from "./MemberDefaults.js";
 import { DEFAULTS_NONE_LABEL, type DefaultMemberOption } from "./writes.js";
 
@@ -24,14 +24,13 @@ const MEMBERS: DefaultMemberOption[] = [
   { userId: ADA, label: "ada" },
 ];
 
-function project(overrides: Partial<ProjectDetail> = {}): ProjectDetail {
+function project(overrides: Partial<ProjectDefaultsFields> = {}): ProjectDefaultsFields {
   return {
-    id: "223e4567-e89b-12d3-a456-426614174001",
     project_lead: ADA,
     default_assignee: null,
     guest_view_all_features: false,
     ...overrides,
-  } as ProjectDetail;
+  };
 }
 
 afterEach(() => {
@@ -107,6 +106,19 @@ describe("MemberDefaults", () => {
     render(<MemberDefaults project={project()} members={MEMBERS} canEdit pending onSave={vi.fn()} />);
     expect(screen.getByRole("button", { name: LEAD_FIELD_LABEL })).toBeDisabled();
     expect(screen.getByRole("switch", { name: GUEST_VISIBILITY_LABEL })).toHaveAttribute("data-disabled");
+  });
+
+  it("reads an assignee that is not among the offered members as None", () => {
+    render(
+      <MemberDefaults
+        project={project({ default_assignee: "123e4567-e89b-12d3-a456-4266141740ff" })}
+        members={MEMBERS}
+        canEdit
+        pending={false}
+        onSave={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("button", { name: ASSIGNEE_FIELD_LABEL })).toHaveTextContent(DEFAULTS_NONE_LABEL);
   });
 
   it("paints a label-less picker when no member is offered", async () => {

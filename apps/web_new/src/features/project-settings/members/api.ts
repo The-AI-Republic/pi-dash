@@ -9,6 +9,7 @@
 // here so the page and the toasts agree.
 
 import { queryOptions, useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
+import * as React from "react";
 import {
   addProjectMembers,
   isApiError,
@@ -33,7 +34,7 @@ import { getAppClient } from "../../../core/api/client.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 import { authKeys, projectQueryOptions, useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { useMe } from "../../../core/session/index.js";
-import { projectKeys } from "../../projects/index.js";
+import { projectDetailsQueryOptions, projectKeys } from "../../projects/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
 
 /** Failure title when the two roster reads cannot load. */
@@ -109,9 +110,28 @@ function writeFailureDetail(error: unknown): string {
   return WRITE_FAILED_FALLBACK;
 }
 
-/** The project row the defaults section reads; null before it resolves. */
-export function useProjectDefaults(workspaceSlug: string, projectId: string): UseQueryResult<ProjectDetail> {
-  return useQuery(projectQueryOptions(getAppClient(), workspaceSlug, projectId));
+export interface ProjectDefaultsFields {
+  project_lead: string | null;
+  default_assignee: string | null;
+  guest_view_all_features: boolean;
+}
+
+/**
+ * The defaults the section edits, read from the workspace's rich project
+ * rows (the detail read carries the default assignee; the list row does
+ * not, and widening that row would grow the eager shell chunk). Undefined
+ * until the read answers, so the section shows its loaders.
+ */
+export function useProjectDefaults(workspaceSlug: string, projectId: string): UseQueryResult<ProjectDefaultsFields> {
+  const client = getAppClient();
+  const rows = useQuery(projectDetailsQueryOptions(client, workspaceSlug));
+  return React.useMemo(
+    () => ({
+      ...rows,
+      data: rows.data?.find((row) => row.id === projectId) as ProjectDefaultsFields | undefined,
+    }),
+    [rows, projectId]
+  ) as UseQueryResult<ProjectDefaultsFields>;
 }
 
 export interface AddMembersInput {
