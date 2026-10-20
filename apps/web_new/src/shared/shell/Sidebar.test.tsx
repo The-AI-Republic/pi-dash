@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -133,6 +133,18 @@ describe("Sidebar", () => {
   it("renders the update control beside the account row when provided", () => {
     render(sidebar({ updateControl: <span>update ready</span> }));
     expect(screen.getByText("update ready")).toBeInTheDocument();
+  });
+
+  it("mounts no plan badge unless the edition slot is filled (CLOUD-038)", () => {
+    render(sidebar());
+    expect(screen.queryByTestId("sidebar-plan-badge")).not.toBeInTheDocument();
+  });
+
+  it("mounts the plan badge above the account row (CLOUD-038)", () => {
+    render(sidebar({ planBadge: <button type="button">Upgrade</button> }));
+    expect(
+      within(screen.getByTestId("sidebar-plan-badge")).getByRole("button", { name: "Upgrade" })
+    ).toBeInTheDocument();
   });
 
   it("routes the switcher and user-menu callbacks through", async () => {

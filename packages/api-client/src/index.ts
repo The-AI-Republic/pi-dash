@@ -663,6 +663,7 @@ export {
   getAgentProfile,
   postAgentToken,
 } from "./contracts/assistant-desktop.js";
+export type { PostAgentTokenOptions } from "./contracts/assistant-desktop.js";
 export {
   EditorTaskProjectDetail,
   EditorTaskResponse,

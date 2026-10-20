@@ -71,3 +71,18 @@ describe("SettingsTabOutlet", () => {
     expect(screen.getByRole("button", { name: "preferences 0" })).toBeInTheDocument();
   });
 });
+
+describe("instance-withheld tabs", () => {
+  it("does not mount a cloud-withheld body even when it is registered", () => {
+    registerProfileSettingsPage("security", () => <p>password body</p>);
+    render(<SettingsTabOutlet tab="security" selfManaged={false} />);
+    expect(screen.queryByText("password body")).not.toBeInTheDocument();
+    expect(screen.getByTestId("profile-settings-tab-loading")).toHaveAttribute("aria-busy", "true");
+  });
+
+  it("mounts the body on a self-managed instance", () => {
+    registerProfileSettingsPage("security", () => <p>password body</p>);
+    render(<SettingsTabOutlet tab="security" selfManaged />);
+    expect(screen.getByText("password body")).toBeInTheDocument();
+  });
+});

@@ -89,6 +89,12 @@ export interface SidebarProps {
    * shell owns only the mount point beside the account area.
    */
   updateControl?: React.ReactNode;
+  /**
+   * Workspace plan badge (CLOUD-038). The gated route mounts it only on
+   * editions that publish a plan snapshot; it sits above the account row,
+   * where the old app kept its edition entry.
+   */
+  planBadge?: React.ReactNode;
   /** Personal entries above projects, already filtered and ordered. */
   personalEntries?: SidebarPersonalEntry[];
   /**
@@ -134,6 +140,7 @@ export function Sidebar({
   onSignOut,
   onDeactivateAccount,
   updateControl,
+  planBadge,
   personalEntries = [],
   editionEntries = [],
   currentPath = null,
@@ -164,6 +171,7 @@ export function Sidebar({
       quickActions={quickActions}
       account={
         <>
+          {planBadge === undefined ? null : <div data-testid="sidebar-plan-badge">{planBadge}</div>}
           <div className="min-w-0 flex-1">
             <UserMenu
               displayName={userLabel}

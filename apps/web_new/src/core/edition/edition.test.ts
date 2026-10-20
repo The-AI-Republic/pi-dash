@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { isAppRailEnabled, isSidebarToggleEnabled, edition } from "./index.js";
+import { isAppRailEnabled, isPlanBadgeEnabled, isSidebarToggleEnabled, usesCloudCsrfPath, edition } from "./index.js";
 import { edition as ossEdition } from "./oss.js";
 import type { Edition } from "./types.js";
 
@@ -44,6 +44,19 @@ describe("shell edition gates", () => {
     expect(isAppRailEnabled(flags({ "app-rail": false }))).toBe(false);
     expect(isAppRailEnabled(flags({ "app-rail": true }))).toBe(true);
     expect(isAppRailEnabled(edition)).toBe(false);
+  });
+
+  it("mounts the plan badge only where the edition publishes one", () => {
+    expect(isPlanBadgeEnabled(flags({}))).toBe(false);
+    expect(isPlanBadgeEnabled(flags({ "plan-badge": true }))).toBe(true);
+    expect(isPlanBadgeEnabled(edition)).toBe(false);
+  });
+
+  it("keeps the default CSRF path unless the edition declares the cloud one", () => {
+    expect(usesCloudCsrfPath(flags({}))).toBe(false);
+    expect(usesCloudCsrfPath(flags({ "cloud-csrf": false }))).toBe(false);
+    expect(usesCloudCsrfPath(flags({ "cloud-csrf": true }))).toBe(true);
+    expect(usesCloudCsrfPath(edition)).toBe(false);
   });
 
   it("mounts the sidebar toggle unless the edition opts out", () => {

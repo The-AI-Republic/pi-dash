@@ -71,6 +71,7 @@ const harness = vi.hoisted(() => ({
     onUserSettings: () => void;
   },
   updateControl: undefined as React.ReactNode,
+  planBadge: undefined as React.ReactNode,
   createEntry: null as null | {
     workspaceSlug: string;
     projects: Array<{ id: string; name: string; memberRole: number | null; archived: boolean }>;
@@ -260,6 +261,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
       onYourWork: () => void;
       onUserSettings: () => void;
       updateControl: React.ReactNode;
+      planBadge?: React.ReactNode;
     }) => {
       harness.sidebar = {
         personalEntries: props.personalEntries,
@@ -282,6 +284,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
         onYourWork: props.onYourWork,
         onUserSettings: props.onUserSettings,
       };
+      harness.planBadge = props.planBadge;
       harness.updateControl = props.updateControl;
       return React.createElement(
         React.Fragment,
@@ -308,6 +311,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 
 import { createAppClient } from "../../../core/api/index.js";
 import { edition } from "../../../core/edition/index.js";
+import { PlanBadge } from "../../../features/cloud-billing/index.js";
 import { selectCreatableProjects } from "../../../features/issues/create/createForm.js";
 import { platform } from "../../../core/platform/index.js";
 import { DOCS_URL, useRailState, useShellChrome, useShortcutsDialog } from "../../../shared/shell/index.js";
@@ -643,6 +647,19 @@ describe("gated layout shell wiring", () => {
             }),
         };
       }
+      if (url.endsWith("/api/billing/me/plan/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () =>
+            JSON.stringify({
+              is_paid: false,
+              migration_required: false,
+              user_center_url: "https://home.test/account",
+            }),
+        };
+      }
       // The members read 404s: the create dialog renders with no lead list.
       return { status: 404, url, headers: { get: () => null }, text: async () => "{}" };
     }) as never);
@@ -676,6 +693,7 @@ describe("gated layout shell wiring", () => {
     globalThis.localStorage.clear();
     delete edition.flags["app-rail"];
     delete edition.flags["sidebar-toggle"];
+    delete edition.flags["plan-badge"];
     delete edition.rail;
     delete edition.sidebar;
     harness.topBar = null;
@@ -1217,6 +1235,21 @@ describe("gated layout shell wiring", () => {
   it("passes no edition entries on the OSS edition (CLOUD-021 flag-off)", () => {
     renderShell();
     expect(harness.sidebar?.editionEntries).toEqual([]);
+  });
+
+  it("mounts no plan badge on the OSS edition (CLOUD-038 flag-off)", () => {
+    renderShell();
+    expect(harness.planBadge).toBeUndefined();
+  });
+
+  it("mounts the plan badge once the edition publishes one (CLOUD-038)", () => {
+    edition.flags["plan-badge"] = true;
+    renderShell();
+    const badge = harness.planBadge;
+    expect(React.isValidElement(badge)).toBe(true);
+    // The slot carries the badge itself; the feature's own suites prove the
+    // plan read, labels and focus refresh.
+    expect((badge as React.ReactElement<{ onOpenExternal?: unknown }>).type).toBe(PlanBadge);
   });
 
   it("fills the shell's sidebar slot with the desktop update control (SHELL-102)", () => {

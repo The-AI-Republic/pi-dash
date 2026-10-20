@@ -288,6 +288,33 @@ describe("AppsCatalog", () => {
     expect(filtered[0]?.get("cursor")).toBeNull();
   });
 
+  it("drives the catalog and its pager from the keyboard alone (CLOUD-039)", async () => {
+    const user = userEvent.setup();
+    const { transport } = catalogTransport({
+      marketplace: (params) =>
+        params.get("cursor") === "cursor-2"
+          ? { status: 200, body: pageJson([appJson("app-c", "Window Two")]) }
+          : {
+              status: 200,
+              body: pageJson([appJson("app-a", "Window One")], "cursor-2"),
+            },
+    });
+    renderCatalog(transport);
+    expect(await screen.findByText("Window One")).toBeInTheDocument();
+    // The pager is a pair of ordinary buttons: focus and Enter page it.
+    const next = screen.getByRole("button", { name: "Next" });
+    next.focus();
+    expect(next).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("Window Two")).toBeInTheDocument();
+    expect(screen.getByTestId("apps-page-indicator")).toHaveTextContent("Page 2");
+    const previous = screen.getByRole("button", { name: "Previous" });
+    previous.focus();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("Window One")).toBeInTheDocument();
+    expect(screen.getByTestId("apps-page-indicator")).toHaveTextContent("Page 1");
+  });
+
   it("holds stale content and disables the pager while a window loads (CLOUD-023)", async () => {
     let resolveWindowTwo!: (answer: { status: number; body: unknown }) => void;
     const { transport } = catalogTransport({

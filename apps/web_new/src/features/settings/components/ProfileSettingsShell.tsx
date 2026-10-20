@@ -17,10 +17,16 @@ import { useDocumentHead } from "../../../shared/shell/document.js";
 import "../pageEntries.js";
 import type { Workspace } from "@pidash/api-client";
 import { profileSettingsHref, type ProfileSettingsTabId } from "../lib/tabNavigation.js";
+import { isProfileSettingsTabServed } from "../lib/visibility.js";
 import { profileSettingsGroups, profileSettingsTitle } from "../lib/tabs.js";
 
 export interface ProfileSettingsShellProps {
   activeTab: ProfileSettingsTabId;
+  /**
+   * The instance's self-managed marker (CLOUD-035). A hosted instance
+   * hides the password tab; unknown keeps the full list.
+   */
+  selfManaged?: boolean | undefined;
   /** Workspaces the shortcuts list offers, in the caller's order. */
   workspaces: readonly Pick<Workspace, "id" | "slug" | "name">[];
   /** Client-side navigation to a plain href. */
@@ -35,12 +41,13 @@ export const SETTINGS_TITLE = "Profile settings";
 
 export function ProfileSettingsShell({
   activeTab,
+  selfManaged,
   workspaces,
   onNavigate,
   children,
 }: ProfileSettingsShellProps): React.ReactElement {
   useDocumentHead({ title: profileSettingsTitle(activeTab), robots: "noindex, nofollow" });
-  const groups = profileSettingsGroups();
+  const groups = profileSettingsGroups((tab) => isProfileSettingsTabServed(tab, selfManaged));
 
   const follow = (event: React.MouseEvent<HTMLAnchorElement>, href: string, external = false): void => {
     // Modified clicks keep their browser meaning (new tab, download, …).

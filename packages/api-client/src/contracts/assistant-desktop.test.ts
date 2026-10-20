@@ -44,17 +44,34 @@ describe("desktop profile and token", () => {
   });
 
   it("mints the token with an empty-body post", async () => {
-    const calls: { url?: string; json?: unknown }[] = [];
+    const calls: { url?: string; json?: unknown; headers: Record<string, string> | undefined }[] = [];
     const client = stubClient({
-      sendJson: (async (_method: string, url: string, options?: { json?: unknown }) => {
-        calls.push({ url, json: options?.json });
+      sendJson: (async (
+        _method: string,
+        url: string,
+        options?: { json?: unknown; headers?: Record<string, string> }
+      ) => {
+        calls.push({ url, json: options?.json, headers: options?.headers });
         return { data: { token: "tok", expires_at: "2026-10-16T15:32:05+00:00" }, status: 200, url };
       }) as ApiClient["sendJson"],
     });
     const token = await postAgentToken(client);
     expect(calls[0]?.url).toBe("/api/users/me/ai-assistant/agent-token/");
-    expect(calls[0]?.json).toBeUndefined();
+    expect(calls[0]?.json).toEqual({});
+    expect(calls[0]?.headers).toBeUndefined();
     expect(token.token).toBe("tok");
+  });
+
+  it("sends a supplied CSRF token instead of reading the default path", async () => {
+    const calls: { headers: Record<string, string> | undefined }[] = [];
+    const client = stubClient({
+      sendJson: (async (_method: string, url: string, options?: { headers?: Record<string, string> }) => {
+        calls.push({ headers: options?.headers });
+        return { data: { token: "tok", expires_at: "2026-10-16T15:32:05+00:00" }, status: 200, url };
+      }) as ApiClient["sendJson"],
+    });
+    await postAgentToken(client, { csrfToken: "cloud-csrf" });
+    expect(calls[0]?.headers).toEqual({ "X-CSRFTOKEN": "cloud-csrf" });
   });
 });
 

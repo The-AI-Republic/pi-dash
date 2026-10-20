@@ -10,17 +10,25 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type { ApiClient, Workspace } from "@pidash/api-client";
 
-import { workspacesQueryOptions } from "../../core/session/index.js";
+import { instanceConfigQueryOptions, workspacesQueryOptions } from "../../core/session/index.js";
 import { enforceProfileSettingsGate } from "./guard.js";
 
-/** The layout's loader data: the workspace shortcuts it renders. */
+/**
+ * The layout's loader data: the workspace shortcuts it renders and the
+ * instance's self-managed marker (CLOUD-035). The marker rides along so
+ * the sidebar never paints the password tab on a cloud-managed instance
+ * and then withdraws it.
+ */
 export interface ProfileSettingsLayoutData {
   workspaces: Workspace[];
+  /** Undefined while the instance answer is unavailable. */
+  selfManaged: boolean | undefined;
 }
 
 /**
- * Gate the page, then warm the shortcut list. A failed warm leaves the
- * sidebar's workspace section empty; it never blocks the settings page.
+ * Gate the page, then warm the shortcut list and the instance marker. A
+ * failed warm leaves the sidebar's workspace section empty and the marker
+ * unknown; it never blocks the settings page.
  */
 export async function loadProfileSettingsLayout(args: {
   queryClient: QueryClient;
@@ -28,8 +36,12 @@ export async function loadProfileSettingsLayout(args: {
   href: string;
 }): Promise<ProfileSettingsLayoutData> {
   await enforceProfileSettingsGate(args);
-  const workspaces = await args.queryClient
-    .ensureQueryData(workspacesQueryOptions(args.apiClient))
-    .catch(() => [] as Workspace[]);
-  return { workspaces };
+  const [workspaces, selfManaged] = await Promise.all([
+    args.queryClient.ensureQueryData(workspacesQueryOptions(args.apiClient)).catch(() => [] as Workspace[]),
+    args.queryClient
+      .ensureQueryData(instanceConfigQueryOptions(args.apiClient))
+      .then((config) => config.is_self_managed)
+      .catch(() => undefined),
+  ]);
+  return { workspaces, selfManaged };
 }

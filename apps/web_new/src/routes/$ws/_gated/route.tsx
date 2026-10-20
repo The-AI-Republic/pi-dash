@@ -19,9 +19,11 @@ import * as React from "react";
 import {
   edition,
   isAppRailEnabled,
+  isPlanBadgeEnabled,
   isSidebarToggleEnabled,
   resolveEditionSidebarHref,
 } from "../../../core/edition/index.js";
+import { PlanBadge } from "../../../features/cloud-billing/index.js";
 import { platform } from "../../../core/platform/index.js";
 import {
   CREATE_WORKSPACE_PATH,
@@ -509,6 +511,11 @@ function WorkspaceShell({
               <React.Suspense fallback={null}>
                 <LazyUpdateControl />
               </React.Suspense>
+            }
+            planBadge={
+              isPlanBadgeEnabled(edition) ? (
+                <PlanBadge onOpenExternal={(url: string) => void platform.openExternal(url)} />
+              ) : undefined
             }
             onNavigateHref={handleNavigateHref}
             {...switcherShortcuts}

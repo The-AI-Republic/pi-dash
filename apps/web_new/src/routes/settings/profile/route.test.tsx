@@ -68,6 +68,29 @@ function transport(): Parameters<typeof renderProfileSettingsRoute>[0]["transpor
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers, text: async () => JSON.stringify({ csrf_token: "csrf" }) };
     }
+    if (url.endsWith("/api/instances/")) {
+      return {
+        status: 200,
+        url,
+        headers,
+        text: async () =>
+          JSON.stringify({
+            config: {
+              enable_signup: true,
+              is_workspace_creation_disabled: false,
+              is_google_enabled: false,
+              is_github_enabled: false,
+              is_gitlab_enabled: false,
+              is_gitea_enabled: false,
+              is_magic_login_enabled: false,
+              is_email_password_enabled: true,
+              is_smtp_configured: false,
+              is_self_managed: true,
+              instance_changelog_url: "",
+            },
+          }),
+      };
+    }
     if (url.endsWith("/api/users/api-tokens/")) {
       return { status: 200, url, headers, text: async () => JSON.stringify([]) };
     }
@@ -172,7 +195,7 @@ describe("profile settings layout", () => {
     });
     await expect(
       loadProfileSettingsLayout({ queryClient, apiClient, href: "/settings/profile/general/" })
-    ).resolves.toEqual({ workspaces: [] });
+    ).resolves.toEqual({ workspaces: [], selfManaged: true });
   });
 
   it("gates the layout for visitors before warming the list", async () => {
