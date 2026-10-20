@@ -14,7 +14,9 @@
 // - Top-level routes carry `scope: "top-level"` and the address without the
 //   leading slash: { path: "home", scope: "top-level" } mounts at /home,
 //   { path: "/", scope: "top-level" } declares the signed-out root
-//   behavior, and isEditionPublicRouteEnabled answers for both.
+//   behavior, { path: "login", scope: "top-level" } serves the sign-in page
+//   in place instead of forwarding it (CLOUD-002, NEWFRONT-645), and
+//   isEditionPublicRouteEnabled answers for all of them.
 // - Every top-level marketing address is also listed by PUBLIC_MARKETING_PATHS
 //   so the prerender build, the sitemap and the shell's provider skip share
 //   one source of truth. A new public page is added to that list and
