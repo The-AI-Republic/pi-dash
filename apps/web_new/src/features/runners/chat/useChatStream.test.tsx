@@ -116,10 +116,14 @@ describe("transport installs", () => {
     const firstUnsubscribe = vi.fn();
     const secondUnsubscribe = vi.fn();
     const cloud = {
-      subscribeChatEvents: vi.fn(() => firstUnsubscribe),
+      subscribeChatEvents: vi.fn(
+        (_sessionId: string, _after: number, _handlers: ChatSubscriptionHandlers) => firstUnsubscribe
+      ),
     };
     const local = {
-      subscribeChatEvents: vi.fn(() => secondUnsubscribe),
+      subscribeChatEvents: vi.fn(
+        (_sessionId: string, _after: number, _handlers: ChatSubscriptionHandlers) => secondUnsubscribe
+      ),
     };
     transportState.transport = cloud;
     const { result } = renderHook(() => useChatStream("s-1", [], callbacks(), "r-1"));
