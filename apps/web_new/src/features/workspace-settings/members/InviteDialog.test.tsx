@@ -31,6 +31,16 @@ function field(index: number): HTMLInputElement {
   return input;
 }
 
+/**
+ * Type into a row the way a person does: click the field first. A dialog
+ * that has just mounted may still be moving focus to its first control,
+ * and typing into an unfocused node drops the keystrokes.
+ */
+async function typeRow(index: number, text: string): Promise<void> {
+  await userEvent.click(field(index));
+  await userEvent.type(field(index), text);
+}
+
 async function pickRowRole(label: string): Promise<void> {
   const trigger = screen.getAllByRole("button", { name: "Invitee role" })[0]!;
   await userEvent.click(trigger);
@@ -69,7 +79,7 @@ describe("InviteDialog", () => {
 
   it("paints the invalid message under its row and sends nothing", async () => {
     const { onSubmit } = setup();
-    await userEvent.type(field(0), "not-an-email");
+    await typeRow(0, "not-an-email");
     await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Email is invalid");
     expect(onSubmit).not.toHaveBeenCalled();
@@ -80,7 +90,7 @@ describe("InviteDialog", () => {
     const { onSubmit } = setup();
     await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
     expect(await screen.findByText("Email is required")).toBeInTheDocument();
-    await userEvent.type(field(0), "ada@example.com");
+    await typeRow(0, "ada@example.com");
     expect(screen.queryByText("Email is required")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalledWith([{ email: "ada@example.com", role: 15 }]));
@@ -88,10 +98,10 @@ describe("InviteDialog", () => {
 
   it("sends each row with its own chosen role", async () => {
     const { onSubmit } = setup();
-    await userEvent.type(field(0), "ada@example.com");
+    await typeRow(0, "ada@example.com");
     await pickRowRole("Guest");
     await userEvent.click(screen.getByRole("button", { name: "Add more" }));
-    await userEvent.type(field(1), "grace@example.com");
+    await typeRow(1, "grace@example.com");
     const trigs = screen.getAllByRole("button", { name: "Invitee role" });
     await userEvent.click(trigs[1]!);
     await userEvent.click(await screen.findByRole("option", { name: "Admin" }));
@@ -106,9 +116,9 @@ describe("InviteDialog", () => {
 
   it("reports a second malformed row alongside the first row's message", async () => {
     setup();
-    await userEvent.type(field(0), "ada@example.com");
+    await typeRow(0, "ada@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Add more" }));
-    await userEvent.type(field(1), "broken@");
+    await typeRow(1, "broken@");
     await userEvent.click(screen.getByRole("button", { name: "Send invitations" }));
     expect(await screen.findAllByRole("alert")).toHaveLength(1);
     expect(screen.getAllByRole("alert")[0]).toHaveTextContent("Email is invalid");
@@ -139,7 +149,7 @@ describe("InviteDialog", () => {
 
   it("starts fresh on every open", async () => {
     const { rerender } = setup();
-    await userEvent.type(field(0), "ada@example.com");
+    await typeRow(0, "ada@example.com");
     rerender(
       <InviteDialog
         open={false}
