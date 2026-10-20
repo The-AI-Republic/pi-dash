@@ -143,9 +143,8 @@ export function RelationsWidget({
     detach.mutate({ kind, relatedIssue: row.id });
   }
 
-  function confirmDelete(): void {
-    if (pendingDelete === null) return;
-    destroy.mutate(pendingDelete);
+  function confirmDelete(target: { row: RelatedIssue; kind: RelationKind }): void {
+    destroy.mutate(target);
     setPendingDelete(null);
   }
 
@@ -234,16 +233,20 @@ export function RelationsWidget({
       {editing === null ? null : (
         <RelationEditor workspaceSlug={workspaceSlug} row={editing} onClose={() => setEditing(null)} />
       )}
-      <DeleteWorkItemDialog
-        open={pendingDelete !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingDelete(null);
-        }}
-        noun="Work item"
-        title={pendingDelete?.row.name ?? ""}
-        deleting={destroy.isPending}
-        onConfirm={confirmDelete}
-      />
+      {pendingDelete === null ? null : (
+        <DeleteWorkItemDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setPendingDelete(null);
+          }}
+          noun="Work item"
+          title={pendingDelete.row.name}
+          deleting={destroy.isPending}
+          onConfirm={() => {
+            confirmDelete(pendingDelete);
+          }}
+        />
+      )}
     </>
   );
 }

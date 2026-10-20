@@ -118,6 +118,47 @@ describe("add relation dialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load work items. Try again.");
   });
 
+  it("leaves the state column blank when the candidate has no state name", async () => {
+    renderDialog({ candidates: [{ ...candidate, state__name: null }] });
+    expect(await screen.findByRole("option", { name: /Candidate one/ })).toBeInTheDocument();
+  });
+
+  it("clears the search, toggle and picks when the dialog closes in place and reopens", async () => {
+    const user = userEvent.setup();
+    const { calls, transport } = stubTransport({ candidates: [candidate] });
+    createAppClient("https://api.test", transport as never);
+    const queryClient = newQueryClient();
+    function DialogHost({ open }: { open: boolean }): React.ReactElement {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <AddRelationDialog
+            open={open}
+            onOpenChange={vi.fn()}
+            workspaceSlug={WS}
+            projectId={PROJECT}
+            issueId={ISSUE}
+            kind="blocking"
+            pending={false}
+            onSubmit={vi.fn()}
+            onEmptySelection={vi.fn()}
+          />
+        </QueryClientProvider>
+      );
+    }
+    const view = render(<DialogHost open />);
+    await user.click(await screen.findByRole("option", { name: /Candidate one/ }));
+    await user.type(screen.getByLabelText("Search work items"), "cand");
+    await user.click(screen.getByRole("switch", { name: "Search the whole workspace" }));
+    await waitFor(() => expect(calls.some((call) => call.url.includes("workspace_search=true"))).toBe(true));
+    view.rerender(<DialogHost open={false} />);
+    await waitFor(() => expect(screen.queryByLabelText("Search work items")).not.toBeInTheDocument());
+    view.rerender(<DialogHost open />);
+    expect(await screen.findByLabelText("Search work items")).toHaveValue("");
+    expect(screen.getByRole("switch", { name: "Search the whole workspace" })).not.toBeChecked();
+    const option = await screen.findByRole("option", { name: /Candidate one/ });
+    expect(option).toHaveAttribute("aria-selected", "false");
+  });
+
   it("dismisses through cancel", async () => {
     const user = userEvent.setup();
     const { onOpenChange } = renderDialog({ candidates: [] });

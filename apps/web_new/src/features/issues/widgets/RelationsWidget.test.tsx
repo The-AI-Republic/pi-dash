@@ -36,11 +36,23 @@ vi.mock("@tanstack/react-router", () => ({
     children,
     to,
     params,
+    onClick,
   }: {
     children: React.ReactNode;
     to: string;
     params: { ws: string; issueKey: string };
-  }) => <a href={to.replace("$ws", params.ws).replace("$issueKey", params.issueKey)}>{children}</a>,
+    onClick?: () => void;
+  }) => (
+    <a
+      href={to.replace("$ws", params.ws).replace("$issueKey", params.issueKey)}
+      onClick={(event) => {
+        event.preventDefault();
+        onClick?.();
+      }}
+    >
+      {children}
+    </a>
+  ),
 }));
 
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
@@ -283,6 +295,35 @@ describe("relations widget", () => {
     expect(screen.queryByRole("dialog", { name: /Delete work item/i })).not.toBeInTheDocument();
   });
 
+  it("badges a row whose project is not in the project list with the parent identifier", async () => {
+    const unknownProject = "323e4567-e89b-12d3-a456-4266141740bb";
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow({ project_id: unknownProject })] } });
+    expect(await screen.findByText("WEB-42")).toBeInTheDocument();
+  });
+
+  it("ignores a second delete confirmation after the first resolved", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Work item deleted"));
+    const deletes = () => calls.filter((call) => call.method === "DELETE").length;
+    expect(deletes()).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(deletes()).toBe(1);
+  });
+
+  it("seeds the row editor from the parent identifier when the project is missing", async () => {
+    const user = userEvent.setup();
+    const unknownProject = "323e4567-e89b-12d3-a456-4266141740cc";
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow({ project_id: unknownProject })] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 })).toBeInTheDocument();
+  });
+
   it("renders no section for an editor with no relations", async () => {
     const { view } = renderWidget({ relations: emptyRelations() });
     expect(await screen.findByRole("button", { name: "Add relation" })).toBeInTheDocument();
@@ -389,6 +430,57 @@ describe("relations widget", () => {
     await user.click(screen.getByRole("button", { name: "Add selected work items" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't add the relations", expect.anything()));
     expect(screen.getByRole("dialog", { name: /Add relates to/i })).toBeInTheDocument();
+  });
+
+  it("closes the add-relation dialog from the action row's entry and forgets the kind", async () => {
+    const user = userEvent.setup();
+    renderWidget({ relations: emptyRelations(), candidates: [] });
+    await user.click(await screen.findByRole("button", { name: "Add relation" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Duplicate of" }));
+    expect(await screen.findByRole("dialog", { name: /Add duplicate of/i })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Add duplicate of/i })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Add relation" }));
+    expect(await screen.findByRole("menuitem", { name: "Relates to" })).toBeInTheDocument();
+  });
+
+  it("cancels the delete confirmation without touching the related item", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog", { name: /Delete work item/i });
+    await user.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Delete work item/i })).not.toBeInTheDocument());
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(calls.some((call) => call.url.includes("/remove-relation/"))).toBe(false);
+    expect(screen.getByText("Peer work item")).toBeInTheDocument();
+  });
+
+  it("closes the peek panel from its close control and its full-item link", async () => {
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByText("Peer work item"));
+    let panel = await screen.findByTestId("issue-preview");
+    await user.click(within(panel).getByRole("button", { name: "Close preview" }));
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument());
+
+    await user.click(screen.getByText("Peer work item"));
+    panel = await screen.findByTestId("issue-preview");
+    await user.click(await within(panel).findByText("Open the full work item"));
+    await waitFor(() => expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument());
+  });
+
+  it("closes the row editor when the update modal reports it closed", async () => {
+    const user = userEvent.setup();
+    renderWidget({ relations: { ...emptyRelations(), blocked_by: [relatedRow()] } });
+    await user.click(await screen.findByRole("button", { name: "Actions for Peer work item" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    const dialog = await screen.findByRole("dialog", { name: /Update work item/i }, { timeout: 10_000 });
+    await user.click(within(dialog).getByRole("button", { name: "Close dialog" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: /Update work item/i })).not.toBeInTheDocument(), {
+      timeout: 10_000,
+    });
   });
 
   it("refreshes the activity feed after removing a relation", async () => {
