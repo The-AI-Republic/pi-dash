@@ -171,6 +171,19 @@ def test_create_search_mismatch_404s_but_row_exists(user_client, world, db):
     assert count == 1
 
 
+def test_search_nul_rejected_on_list_and_retrieve(user_client, world):
+    # DRF validates the raw ?search= value with CharField before splitting;
+    # ProhibitNullCharactersValidator answers 400 with the bare message list
+    # (PIDASHCONV-1227). Both list and retrieve run filter_queryset, so both
+    # reject instead of passing the NUL into the name__icontains bind.
+    expected = b'["Null characters are not allowed."]'
+    for url in (page_url(world), page_url(world, world["page"]["id"])):
+        response = user_client.get(url, params={"search": "a\x00b"})
+        assert response.status_code == 400, (url, response.status_code, response.text)
+        assert response.content == expected, (url, response.content)
+        assert len(response.content) == 36
+
+
 def test_retrieve_shape(user_client, world):
     response = user_client.get(page_url(world, world["page"]["id"]))
     assert response.status_code == 200
