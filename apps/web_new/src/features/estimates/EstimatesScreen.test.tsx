@@ -338,11 +338,9 @@ describe("EstimatesScreen", () => {
     });
     renderScreen();
     await screen.findByText("Active system");
-    // The populated screen keeps a creation entry above the rows.
-    await user.click(screen.getByRole("button", { name: ESTIMATES_ADD_LABEL }));
-    expect(await screen.findByRole("dialog")).toHaveTextContent("New estimate system");
-    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Creation belongs to the empty state alone; a populated screen has
+    // no add control beside its rows.
+    expect(screen.queryByRole("button", { name: ESTIMATES_ADD_LABEL })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Delete Active system" }));
     const dialog = await screen.findByRole("dialog");

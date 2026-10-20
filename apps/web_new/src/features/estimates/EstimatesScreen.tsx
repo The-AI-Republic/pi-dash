@@ -158,14 +158,6 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
         </div>
       )}
 
-      {canManage && active !== undefined ? (
-        <div>
-          <Button variant="secondary" onClick={() => setCreating(true)}>
-            {ESTIMATES_ADD_LABEL}
-          </Button>
-        </div>
-      ) : null}
-
       {superseded.length > 0 ? (
         <div className="flex flex-col gap-(--space-4)" data-testid="estimates-archived-section">
           <div className="flex flex-col gap-(--space-1)">

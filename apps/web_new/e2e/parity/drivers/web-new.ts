@@ -14102,12 +14102,8 @@ export class WebNewDriver implements ParityDriver {
     const dialog = this.appDialogs().first();
     if ((await dialog.count()) === 0) return "";
     const raw = (await dialog.innerText().catch(() => "")) ?? "";
-    return (
-      raw
-        .split("\n")
-        .map((line) => line.trim())
-        .find((line) => line !== "") ?? ""
-    );
+    const lines = raw.split("\n").map((line) => line.trim());
+    return lines.find((line) => line !== "") ?? "";
   }
 
   async estimatesEditDeleteConfirmDialogBody(): Promise<string> {
@@ -14904,15 +14900,13 @@ export class WebNewDriver implements ParityDriver {
   async estimatesActiveSystemValues(): Promise<string> {
     const row = this.estimatesActiveRowLocator();
     if (!(await this.isShown(row))) return "";
-    return (
+    const values =
       (await row
         .locator("p")
         .first()
         .innerText()
-        .catch(() => "")) ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim();
+        .catch(() => "")) ?? "";
+    return values.replace(/\s+/g, " ").trim();
   }
 
   async estimatesArchivedSectionVisible(): Promise<boolean> {
@@ -17451,31 +17445,29 @@ export class WebNewDriver implements ParityDriver {
   async projectGithubCadenceText(): Promise<string | null> {
     const line = this.projectGithubBoundCard().getByText("Sync issues every 4 hours", { exact: false });
     if ((await line.count()) === 0) return null;
-    return (
-      (
-        (await line
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      )
-        .replace(/\s+/g, " ")
-        .trim() || null
-    );
+    const text = (
+      (await line
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text || null;
   }
 
   async projectGithubLastError(): Promise<string | null> {
     const line = this.projectGithubBoundCard().getByText("Last error:", { exact: false });
     if ((await line.count()) === 0) return null;
-    return (
-      (
-        (await line
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      )
-        .replace(/\s+/g, " ")
-        .trim() || null
-    );
+    const text = (
+      (await line
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text || null;
   }
 
   async projectGithubSyncOn(): Promise<boolean> {
@@ -17541,14 +17533,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async projectGithubTabText(): Promise<string> {
-    return (
+    const text =
       (await this.page
         .locator("body")
         .innerText()
-        .catch(() => "")) ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim();
+        .catch(() => "")) ?? "";
+    return text.replace(/\s+/g, " ").trim();
   }
 
   // --- Workspace-settings members roster (NEWFRONT-537, WSET-008/011/014).

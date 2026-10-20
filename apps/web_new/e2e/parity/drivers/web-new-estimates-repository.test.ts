@@ -180,6 +180,16 @@ describe("estimates entry driver", () => {
     expect(await driver.estimatesEmptyVisible()).toBe(true);
     expect(await driver.estimatesEmptyTitle()).toBe("No estimates yet");
     expect(await new WebNewDriver(pageOf()).estimatesEmptyTitle()).toBe("");
+    const short = pageOf({
+      getByText: () =>
+        locator({
+          count: async () => 1,
+          innerText: async () => {
+            throw new Error("detached");
+          },
+        }),
+    });
+    expect(await new WebNewDriver(short).estimatesEmptyTitle()).toBe("");
     await driver.estimatesEmptyAddClick();
     expect(click).toHaveBeenCalled();
   });
@@ -213,6 +223,66 @@ describe("estimates active, switch and archived driver", () => {
     const driver = new WebNewDriver(page);
     expect(await driver.estimatesActiveSystemName()).toBe("Points");
     expect(await driver.estimatesEditDeleteActiveRowEditControlVisible()).toBe(false);
+
+    const unreadable = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-active-section"] [data-testid="estimate-system-row"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: () =>
+                locator({
+                  innerText: async () => {
+                    throw new Error("detached");
+                  },
+                }),
+            })
+          : locator(),
+    });
+    expect(await new WebNewDriver(unreadable).estimatesActiveSystemName()).toBe("");
+  });
+
+  it("reads the active row's value line and treats a missing row as empty", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-active-section"] [data-testid="estimate-system-row"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: () => locator({ innerText: async () => "  1, 2, 3  " }),
+            })
+          : locator(),
+    });
+    expect(await new WebNewDriver(page).estimatesActiveSystemValues()).toBe("1, 2, 3");
+
+    const unreadable = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-active-section"] [data-testid="estimate-system-row"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: () =>
+                locator({
+                  innerText: async () => {
+                    throw new Error("detached");
+                  },
+                }),
+            })
+          : locator(),
+    });
+    expect(await new WebNewDriver(unreadable).estimatesActiveSystemValues()).toBe("");
+    expect(await new WebNewDriver(pageOf()).estimatesActiveSystemValues()).toBe("");
+  });
+
+  it("counts the active row's controls and none when the row is absent", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-active-section"] [data-testid="estimate-system-row"]'
+          ? locator({ count: async () => 1, getByRole: () => locator({ count: async () => 1 }) })
+          : locator(),
+    });
+    expect(await new WebNewDriver(page).estimatesActiveRowButtonCount()).toBe(1);
+    expect(await new WebNewDriver(pageOf()).estimatesActiveRowButtonCount()).toBe(0);
   });
 
   it("opens the create dialog and detects its step two", async () => {
@@ -298,6 +368,26 @@ describe("estimates active, switch and archived driver", () => {
     expect(click).toHaveBeenCalled();
   });
 
+  it("settles the enable toggle on the project write or its notice", async () => {
+    const waitForResponse = vi.fn(async () => ({}));
+    const page = pageOf({
+      getByRole: (role: string) =>
+        role === "switch" ? locator({ count: async () => 1, isVisible: async () => true }) : locator(),
+      waitForResponse,
+    });
+    await new WebNewDriver(page).estimatesEnableSwitchToggle();
+    const predicate = waitForResponse.mock.calls[0]?.[0] as unknown as (response: {
+      url: () => string;
+      request: () => { method: () => string };
+    }) => boolean;
+    const answer = (url: string, method: string) =>
+      predicate({ url: () => url, request: () => ({ method: () => method }) });
+    expect(answer("https://app.test/api/workspaces/acme/projects/p1/", "PATCH")).toBe(true);
+    expect(answer("https://app.test/api/workspaces/acme/projects/p1/", "PUT")).toBe(true);
+    expect(answer("https://app.test/api/workspaces/acme/projects/p1/", "GET")).toBe(false);
+    expect(answer("https://app.test/api/workspaces/acme/projects/p1/estimates/", "PATCH")).toBe(false);
+  });
+
   it("refuses project writes while letting reads through", async () => {
     const route = vi.fn(async () => undefined);
     const driver = new WebNewDriver(pageOf({ route }));
@@ -347,6 +437,34 @@ describe("estimates active, switch and archived driver", () => {
     expect(await driver.estimatesArchivedLinkTarget()).toBe("_blank");
     expect(await new WebNewDriver(pageOf()).estimatesArchivedLinkHref()).toBe("");
     expect(await new WebNewDriver(pageOf()).estimatesArchivedLinkTarget()).toBe("");
+  });
+
+  it("counts an archived row's controls, or none when the section or the row is absent", async () => {
+    expect(await new WebNewDriver(pageOf()).estimatesArchivedRowButtonCount("A")).toBe(0);
+    const noControls = locator({ count: async () => 0 });
+    const row = locator({ count: async () => 1, getByRole: () => noControls });
+    const present = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-archived-section"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: () => locator({ filter: () => locator({ first: () => row }) }),
+            })
+          : locator(),
+    });
+    expect(await new WebNewDriver(present).estimatesArchivedRowButtonCount("A")).toBe(0);
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-archived-section"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: () => locator({ filter: () => locator({ first: () => locator({ count: async () => 0 }) }) }),
+            })
+          : locator(),
+    });
+    expect(await new WebNewDriver(page).estimatesArchivedRowButtonCount("A")).toBe(0);
   });
 
   it("reads a blank or unreadable link attribute as absent", async () => {
@@ -491,9 +609,37 @@ describe("repository tab driver", () => {
     expect(await driver.projectGithubRepoLinkText()).toBe("parity/parity-seed");
     expect(await driver.projectGithubContractVisible()).toBe(true);
     expect(await driver.projectGithubCadenceText()).toBe("Sync issues every 4 hours — last sync Oct 1");
+    const cadence = pageOf({
+      locator: () =>
+        locator({
+          count: async () => 1,
+          isVisible: async () => true,
+          getByText: () => locator({ count: async () => 1, innerText: async () => "   " }),
+        }),
+    });
+    expect(await new WebNewDriver(cadence).projectGithubCadenceText()).toBeNull();
+    const unreadable = pageOf({
+      locator: () =>
+        locator({
+          count: async () => 1,
+          isVisible: async () => true,
+          getByText: () =>
+            locator({
+              count: async () => 1,
+              innerText: async () => {
+                throw new Error("detached");
+              },
+            }),
+        }),
+    });
+    expect(await new WebNewDriver(unreadable).projectGithubCadenceText()).toBeNull();
     expect(await driver.projectGithubLastError()).toBe("Last error: boom");
     expect(await driver.projectGithubSyncOn()).toBe(true);
     expect(await driver.projectGithubSyncDisabled()).toBe(true);
+  });
+
+  it("reports no provider label when the card names none", async () => {
+    expect(await new WebNewDriver(pageOf()).projectGithubProviderLabel()).toBeNull();
   });
 
   it("toggles sync and unbinds without a confirmation", async () => {
@@ -506,6 +652,34 @@ describe("repository tab driver", () => {
     await driver.projectGithubToggleSync();
     await driver.projectGithubUnbind();
     expect(click).toHaveBeenCalled();
+  });
+
+  it("settles sync and unbind on their own binding writes", async () => {
+    const waitForResponse = vi.fn(async () => ({}));
+    const page = pageOf({
+      getByRole: () => locator({ count: async () => 1, isVisible: async () => true }),
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.projectGithubToggleSync();
+    await driver.projectGithubUnbind();
+    expect(waitForResponse).toHaveBeenCalledTimes(2);
+    const [syncPredicate, unbindPredicate] = waitForResponse.mock.calls.map(
+      (call) =>
+        call[0] as unknown as (response: { url: () => string; request: () => { method: () => string } }) => boolean
+    );
+    const answer = (
+      predicate: (response: { url: () => string; request: () => { method: () => string } }) => boolean,
+      url: string,
+      method: string
+    ) => predicate({ url: () => url, request: () => ({ method: () => method }) });
+    const binding = "https://app.test/api/workspaces/acme/projects/p1/repository/";
+    expect(answer(syncPredicate!, binding, "PATCH")).toBe(true);
+    expect(answer(syncPredicate!, binding, "PUT")).toBe(true);
+    expect(answer(syncPredicate!, binding, "DELETE")).toBe(false);
+    expect(answer(syncPredicate!, "https://app.test/api/workspaces/acme/projects/p1/", "PATCH")).toBe(false);
+    expect(answer(unbindPredicate!, binding, "DELETE")).toBe(true);
+    expect(answer(unbindPredicate!, binding, "PATCH")).toBe(false);
   });
 
   it("reads unbind visibility and reads the guidance card text", async () => {
