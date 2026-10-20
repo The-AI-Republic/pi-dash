@@ -76,6 +76,31 @@ def test_create_defaults(org):
     assert row == (False, True)
 
 
+def test_millisecond_dtstart_renders_six_digits(org):
+    # JSON has no datetime type, so an explicit ``dtstart`` reaches the
+    # model as a string and the create response follows the ported
+    # commit-then-500 path (``str.isoformat`` is missing). The committed
+    # row still proves Python's rendering rule: microseconds are always
+    # emitted in full, even when they came from millisecond precision.
+    slug = f"msd-{org.tag}"
+    r = org.adm(
+        "POST", JOBS, "admin",
+        json=valid_payload(slug, dtstart="2026-11-01T03:00:00.500Z"),
+    )
+    assert r.status_code == 500
+    assert r.json() == {"error": "Something went wrong please try again later"}
+
+    row = org.conn.execute(
+        "SELECT id FROM loop_jobs WHERE slug=%s AND deleted_at IS NULL", (slug,)
+    ).fetchone()
+    assert row is not None
+    expected = "2026-11-01T03:00:00.500000+00:00"
+    body = org.adm("GET", detail(row[0]), "admin").json()
+    assert body["dtstart"] == expected
+    rows = {job["slug"]: job for job in org.adm("GET", JOBS, "admin").json()}
+    assert rows[slug]["dtstart"] == expected
+
+
 def test_create_rejects_subhourly_rrule(org):
     r = org.adm(
         "POST", JOBS, "admin",
