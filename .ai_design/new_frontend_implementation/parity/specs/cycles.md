@@ -73,10 +73,12 @@ route mounts with the real area, add the archived-cycles route under the
 archives shell, and add the workspace route; nothing else in the shell
 moves.
 
-`@pidash/api-client` today carries only a thin cycle contract (list,
-patch, transfer for the palette and the issues picker). It does not yet
-model the full cycle row, the date check, archive/restore, favorites,
-progress or workspace actives; NEWFRONT-706 adds those.
+`@pidash/api-client` today carries only a thin cycle contract: the
+picker row (`listCycles` → `CycleListItem`: id, project, name,
+favorite, status), `updateCycle` and `transferCycleIssues`, used by the
+palette and the issues surfaces. It does not yet model the full cycle
+row, the date check, archive/restore, favorites, progress or workspace
+actives; NEWFRONT-706 adds those.
 
 Oracle: `list-search-filters.spec.ts` (rows open a shareable detail
 address), `detail-sidebar.spec.ts` (detail host).
@@ -1258,10 +1260,12 @@ slice that owns it. Nothing here is an import from the old frontend.
   (localStorage helpers for the sidebar flag and the remembered tab).
 - Project tab model: `src/features/projects/tabs.ts` (`cycle_view`
   flag, `memberPlus`).
-- Contracts: `@pidash/api-client` — `contracts/cycles.ts` today (list,
-  patch, transfer); NEWFRONT-706 adds the full row, date-check,
-  archive/restore, favorites, progress/analytics, workspace actives and
-  cycle user-properties schemas and their contract tests.
+- Contracts: `@pidash/api-client` — `contracts/cycles.ts` today
+  (`CycleListItem`/`listCycles` for the picker, `CycleUpdate`/
+  `updateCycle`, `transferCycleIssues`); NEWFRONT-706 adds the full
+  row, date-check, archive/restore, favorites, progress/analytics,
+  workspace actives and cycle user-properties schemas and their
+  contract tests.
 
 **Ownership summary**
 
