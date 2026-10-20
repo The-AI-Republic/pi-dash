@@ -125,7 +125,7 @@ spellings.
 | `workspaceSlug`, `projectId` (path) | `/spaces/:workspaceSlug/:projectId/` | Legacy identify of the project | Resolved server-side to the anchor |
 | `board` | board address | Active layout | Values `list`, `kanban` only (the two renderable ones). Unknown or missing settles on the first publisher-enabled layout |
 | `peekId` | board address | The open issue's UUID | Present = overlay open; absent = closed. Invalid values are dropped |
-| `priority` | board address | Comma-joined priority values | `urgent`, `high`, `medium`, `low`, `none` |
+| `priority` | board address | Comma-joined priority values; five values total | `urgent`, `high`, `medium`, `low`, `none` (the fifth, `none`, is the unset level) |
 | `state` | board address | Comma-joined state UUIDs | One key, comma-separated values |
 | `labels` | board address | Comma-joined label UUIDs | Address-only facet (§3, SPC-036/037) |
 | `next_path` | landing address and every sign-in/sign-out link/form | Return address | Validated (§3, SPC-006); survives valid round trips |
@@ -276,12 +276,13 @@ cite it where the link region is defined.
 A published board opens at `/spaces/issues/:anchor/` for a visitor with no
 account. The page renders: the board chrome (navbar with project identity and
 controls), the published issues for the board's layout, and — when anonymous —
-a sign-in control that carries the exact board position (§3.3, SPC-013).
+a sign-in control that carries the exact board position (§3.1, SPC-013).
 Nothing on load redirects toward sign-in, shows a workspace sign-in form, or
 gates content behind the workspace session. The load sequence is: instance
-probe (§3.3, SPC-018) → board settings → layout + issues. The board is
+probe (§3.1, SPC-018) → board settings → layout + issues. The board is
 reachable in a fresh browser context with no cookies at all. Reads:
-`settings` (row 1 of §5). Empty shop window: see SPC-025 for zero issues.
+`settings` (row 1 of §5). A published board with zero issues renders the
+empty-board notice (SPC-025), not an empty layout.
 
 **SPC-002 — Legacy workspace/project link.**
 `/spaces/:workspaceSlug/:projectId/` resolves the project's published board
@@ -331,11 +332,16 @@ content:
 1. *Instance boot*: while the instance probe is in flight, a full-viewport
    product spinner. Nothing else.
 2. *Legacy resolution*: the product spinner until the forward happens.
-3. *Board resolution*: the navbar renders immediately in its placeholder form
-   (generic project mark, placeholder name, disabled/empty controls) over an
-   empty content area while settings resolve — the old app showed no spinner
-   here and did not flash wrong content. Keep that: placeholder chrome, empty
-   body.
+3. *Board resolution*: while board settings are loading or held, the navbar
+   renders immediately in its placeholder form (generic project mark, a
+   placeholder project name, empty/disabled controls) over an empty content
+   area; this stage shows **no** full-viewport spinner and no flash of wrong
+   content. Evidence: the old layout's spinner branch requires a falsy
+   settings value, but its settings hook returns an empty object for an
+   unresolved anchor, so that branch is unreachable; the green oracle pins
+   the placeholder navbar with empty content (`placeholderWhileHeld` true and
+   `sawSpinner` false for the settings stage). Keep that behavior:
+   placeholder chrome, empty body.
 4. *First issues fetch*: a centered product spinner under the loaded navbar.
 Content (groups, cards, counts) appears only after its own data is present,
 never as an empty-group flash followed by data. Once each stage settles it
@@ -603,7 +609,9 @@ sideways **board (kanban)** — and (b) the layouts the publisher enabled in
 `calendar`, `gantt`, `spreadsheet`, which the public board never renders and
 the switcher never shows). A board with one enabled layout shows a
 one-button switcher (no effective choice) but still renders it; a board with
-none enabled (malformed settings) falls back to list so the board is usable.
+none enabled (malformed settings) falls back to list so the board is usable —
+**this fallback is a new-app choice**, the old app selects nothing in that
+configuration, and the oracle pins only publisher-enabled subsets.
 The old app builds the acceptable list from all five flags and then picks the
 first, which can settle on a layout it cannot render; the new app restricts
 the candidate set to the two renderable ones **before** settling (see
@@ -628,6 +636,15 @@ loop. That is a new-app choice, not old behavior; the oracle pins that the
 settled address names the layout, not the entry count. The rewrite keeps
 every other parameter that was present. The settled address is what the
 share and sign-in links carry.
+
+History model, stated once for the whole board: **settling or correcting an
+address replaces** the current entry (a fallback or a dropped invalid value
+adds no entry); **opening the overlay pushes** exactly one entry (SPC-030);
+**closing the overlay replaces** that entry with the board address, dropping
+only `peekId` (SPC-042). So Back from an open overlay returns to the pre-open
+board, and Back after a close leaves the board as if the overlay had never
+been opened. This is the single model; SPC-030 and SPC-042 cite it rather
+than picking their own.
 
 **SPC-023 — List layout.**
 Issues group under one collapsible section per workflow state, in the
@@ -702,8 +719,10 @@ A Filters control in the navbar opens a dropdown panel (kit `Popover`) with:
 - a search box at the top that narrows the option rows below (see SPC-039);
 - one collapsible section per facet the active layout supports — for both
   public layouts that is exactly **priority** and **state**;
-- priority: five options highest to lowest plus the unset/none option, each a
-  checkbox row with the priority marker and its name; state: one row per
+- priority: exactly five options highest to lowest — `urgent`, `high`,
+  `medium`, `low`, `none` — where `none` **is** the unset level (there is no
+  sixth "unset" entry); each is a checkbox row with the priority marker and
+  its name; state: one row per
   workflow state (`GET .../states/`), initially showing five with an expand
   control past that, each a checkbox row with the state marker and name;
 - applied options show checked; each section header counts its applied
@@ -797,8 +816,8 @@ unset level, which has its own marker. Omitted when absent: labels (no
 chips), due date (no marker). The start date is never shown on
 cards. Cycles and modules are **not** shown anywhere on cards or groups, even
 when the issue carries them (inventory confirmation 1 — no visible cycle or
-module surface was found in the old board; the fetches existed for other
-consumers). The new app displays exactly key, title, state, priority, labels
+module surface was found in the old board; its cycle/module fetchers are
+never called by a public-board component). The new app displays exactly key, title, state, priority, labels
 and due date.
 
 **SPC-029 — Card footers.**
@@ -817,20 +836,42 @@ Exactly one card/row is highlighted and it is the one whose id equals
 `peekId` opens with that highlight even if no click happened; closing the
 overlay clears the highlight. A `peekId` that is not in the loaded groups
 still opens the overlay (it is fetched by id, SPC-040) and highlights nothing
-until it appears in a group after a fetch. The highlight is a visual ring/bar
-plus an accessible current state (`aria-current="true"` or equivalent), not
-colour alone.
+until it appears in a group after a fetch. **Parity rule:** the highlighted
+card/row carries a visible emphasis (a border/ring treatment, not colour
+alone). The old app changed only a border class and exposed no current-state
+attribute; adding an accessible current state (`aria-current="true"` or
+equivalent) is a **new-app accessibility addition**, not old behavior and not
+part of the parity contract — the oracle does not pin it. The slice adds it
+if the kit supports it without changing the visual outcome, and no gate
+scenario may depend on it.
 
 **SPC-032 — Read-only board.**
-No card or row is draggable (`draggable` false/absent), there is no drag
-handle, no drop target, no reorder animation, no inline editable field
-anywhere in the two layouts. No mutation endpoint is ever called from the
-board (only detail reads, filters, vote/reaction from the controls and
-comment endpoints from the overlay). Attempting a drag selects text or
-scrolls but never moves a card. There is no create/new issue affordance, no
-bulk selection UI and no context menu that offers edit. Visitor actions are
-limited to: view, switch layout, filter, open an issue, vote, react, copy a
-link, comment (when enabled).
+The board is read-only with respect to issue data, not in the sense that
+it makes no writes at all. Two rules, stated separately so neither is
+over-read:
+
+*No issue-structure mutation.* No card or row is draggable (`draggable`
+false/absent), there is no drag handle, no drop target, no reorder animation
+and no inline editable field anywhere in the two layouts. No call that edits
+an issue changes its state, priority, labels, assignee or dates, and nothing
+creates, deletes, reorders, bulk-edits or moves an issue between groups.
+There is no create/new-issue affordance, no bulk selection UI and no context
+menu that offers edit. Attempting a drag selects text or scrolls but never
+moves a card.
+
+*Engagement writes are allowed and expected.* Vote, issue reaction,
+comment, comment edit/delete and comment reaction write to the server, but
+only through the controls defined in SPC-047 (votes), SPC-048 (issue
+reactions), SPC-053–057 (comments and comment reactions) and only when their
+publisher flag allows it. Where those controls mount is fixed: the overlay
+mounts both vote and emoji controls (SPC-047/048), and board (kanban) cards
+carry a footer with the same controls (SPC-029; list rows carry none).
+Reactions are therefore reachable from a board card as well as from the
+overlay; an anonymous attempt is a sign-in redirect, not a write.
+
+Visitor actions are exactly: view, switch layout, filter, open an issue,
+vote, react, copy a link, and — when comments are enabled — comment, edit
+their own comment, delete their own comment and react to comments.
 
 **SPC-033 — No live refresh.**
 The public board does not refetch on window focus and does not open a
@@ -852,8 +893,8 @@ Clicking a card (or pressing Enter on a focused card) opens the issue overlay
 and writes `peekId` into the address **keeping `board` and every filter
 parameter**. The oracle pins the address contents (board + filters + peekId)
 and that the board is behind the open overlay; it does not pin history
-semantics, so the slice picks one entry per open (a push) and the close row
-(SPC-042) governs how back/forward resolves. The old app dropped the filter
+semantics. History follows the one model in SPC-022: opening pushes exactly
+one entry; closing replaces it (SPC-042). The old app dropped the filter
 keys from the address on a card click while the store kept filtering (so a
 reload of an open issue lost the filter) — that is a defect and the new app
 does not rebuild it; the position-preserving rule above is what the gate
@@ -903,8 +944,11 @@ Close drops only `peekId` from the address and preserves `board` and every
 filter key. The board underneath is exactly what it was (same rows, same
 scroll, same filter state); the overlay remembers nothing between openings.
 Close paths: the header close control in side view, the backdrop in modal,
-Escape in every view, and the browser back gesture (which lands on the
-pre-open address if the slice opened with a push). The highlight clears (SPC-031).
+Escape in every view, and the browser back gesture. Back returns to the
+pre-open board because opening pushed one entry and closing replaces it
+(the single history model in SPC-022); it is not a second, competing rule.
+Closing by any path performs the same address rewrite. The highlight clears
+(SPC-031).
 
 **SPC-043 — Overlay content.**
 Detail block order: the public key line (project identifier + sequence) and
@@ -1023,10 +1067,13 @@ a stable colour), display name, the age line — a **relative age** of the
 comment's creation/edited time ("3 hours ago" shape, from the shared
 `timeAgo` helper, updating without a refetch on a coarse timer) (old bug
 NEWFRONT-459 rendered no age; the target matches the workspace rows),
-bot-marked authors (an explicit bot suffix/badge next to the name, not a
-different row shape), the formatted rich body (`RichTextView`, asset links
+bot-marked authors, the formatted rich body (`RichTextView`, asset links
 resolved through the public asset URL), and the reaction row (SPC-057).
-Edits show an edited marker. Author and body come from `actor_detail`,
+Bot marking is part of the **author line itself**, not a second badge node:
+when `actor_detail.is_bot` is true, the author name is rendered as the account
+first name followed by " Bot" (the oracle asserts the author text ends in
+" Bot"); the rest of the row shape is identical to a human row. Edits show an
+edited marker. Author and body come from `actor_detail`,
 `comment_html` (fallback `comment_stripped`), `created_at`/`updated_at`.
 
 **SPC-051 — Folded comments.**
@@ -1038,9 +1085,11 @@ persisted). Folded state comes only from the server marker (never inferred
 from the body or speaker). Selecting the toggle is keyboard operable.
 
 **SPC-052 — Machine-authored speaker labels.**
-Only `speaker_type === "agent"` produces a speaker label; every other value
-(human, and any system/integration value the payload might carry) renders no
-speaker line at all. For an agent comment whose `speaker_label` is non-empty
+The comment serializer accepts any string for `speaker_type` (the store does
+not constrain it). Only the exact value `agent` produces a speaker label;
+every other value (human, a missing value, and any system/integration value
+the payload might carry) renders no speaker line at all. A human row whose
+`speaker_label` is present is still a human row: no line. For an agent comment whose `speaker_label` is non-empty
 after trimming, the row shows that label as **its own line between the
 header and the body**, ending with a colon, above the rendered comment body
 (not folded into the author name and not on the header line). An agent
@@ -1160,12 +1209,15 @@ continue action. Rules:
   on submit).
 - The email-check endpoint is anonymously rate limited (per minute, per
   client) and answers 429 with `{error_code: "RATE_LIMIT_EXCEEDED",
-  error_message: "RATE_LIMIT_EXCEEDED"}`. The card shows this as the same
-  dismissible banner as every other known code, with a translated
-  try-again-later wording, and stays on the email step with the address
-  preserved. This is the **one** rate-limit behavior in the spec: SPC-063
-  lists `RATE_LIMIT_EXCEEDED` among the modelled codes (see §5.4's catalog),
-  so it is not in the "no banner" branch.
+  error_message: "RATE_LIMIT_EXCEEDED"}` (server code 5900). **Parity
+  behavior: no banner.** The old card's catalog has no 5900 entry, so the
+  response lands in the unknown-code branch: the email step stays as it was,
+  the address is preserved, no request is retried, and nothing explains the
+  delay. The oracle pins this (`banner: null` for 5900), so the new app keeps
+  it and SPC-063 and §5.4 list 5900 as **not modelled** (unknown branch). The
+  no-explanation outcome is a known old defect, filed as **NEWFRONT-822**;
+  when that issue is fixed, the banner becomes a new-app behavior with its
+  own re-tagged scenario — this spec does not pre-empt it.
 
 **SPC-059 — Known vs new routing and method selection.**
 Known address → sign-in mode; new → sign-up mode. Method selection:
@@ -1249,9 +1301,14 @@ card shows no buttons and no leftover divider or slot. Off the password step
 each button carries a full, translated invitation naming the provider and
 following the mode (a provider-continue phrase; the design owns the words);
 beside the password step the same buttons render compact (icon-only, with an
-accessible name). Activating a button starts the provider flow at
-`/auth/spaces/<provider>/` (not the workspace `/auth/<provider>/`), carrying
-the encoded `next_path`. Completing a provider flow is unprovable on the
+accessible name). Activating a button starts the provider flow at the
+**workspace provider path** `/auth/<provider>/` (`google`, `github`, `gitlab`,
+`gitea`), carrying the encoded `next_path` — this is parity: the old card
+navigates there (`apps/space/hooks/oauth/core.tsx`) and the green oracle
+asserts `/auth/google/`. The server also exposes spaces-specific initiate
+endpoints under `/auth/spaces/<provider>/`; the space card does **not** call
+them, and no slice switches to them without a new decision and a re-tagged
+scenario. Callback URLs are the server's own redirects. Completing a provider flow is unprovable on the
 seeded stack (no credentials): the oracle proves presence, compact shape and
 flow start, and the gate extends only if a provider is configured. Provider
 errors that arrive as codes (`*_NOT_CONFIGURED`, `*_OAUTH_PROVIDER_ERROR`,
@@ -1272,15 +1329,19 @@ the fixing step:
   the email step with the banner; the banner's wording points the visitor at
   the right mode (the other mode's step is not force-switched, matching the
   old card and the oracle);
-- unknown numbers → no banner, email step untouched. The rate-limit code is
-  modelled (see next item) and the OAuth configuration codes the card knows
-  render through the banner as described in SPC-062.
+- unknown numbers → no banner, email step untouched. The OAuth configuration
+  codes the card knows render through the banner as described in SPC-062;
+  `GITEA_NOT_CONFIGURED` (5112) is **not** among them, so a Gitea
+  configuration failure renders no banner (old behavior, kept; no issue
+  filed — the Gitea button only appears when the instance enables it).
 - `RATE_LIMIT_EXCEEDED` (5900, the server's answer to any throttled auth
-  call, including `email-check`) is a modelled code: it renders the banner
-  with try-again-later wording on the step that made the call (email step for
-  a throttled check, code step for a throttled generate) and keeps the
-  address/mode. This supersedes any earlier wording in this spec that put it
-  in the no-banner branch.
+  call, including `email-check` and a throttled generate) is **not modelled**
+  in parity: it falls into the unknown-code branch — no banner, the step that
+  made the call stays as it was (email step with the address, or the code
+  step), and no automatic retry. This is exactly what the green oracle
+  asserts. The silent outcome is the old defect NEWFRONT-822; a fix adds a
+  banner later, under that issue and a new scenario, and is not present
+  behavior.
 The banner text is written from the code's meaning and translated (one
 catalog entry per known code); the code itself is never shown, and the
 server's raw message/address fields are not echoed into the banner. Codes the
@@ -1317,11 +1378,15 @@ contract the slices cite:
 All five were resolved by the oracle runs (rows are `oracle green`); this is
 the behavior to build.
 
-1. **Cycles and modules visible surface.** None. The old board fetches
-   `/cycles/` and `/modules/` into stores but no card, group or overlay
-   renders them, even when an issue belongs to both. The new app displays
-   key, title, state, priority, labels and due date only (SPC-028), and does
-   **not** fetch cycles/modules for the board at all.
+1. **Cycles and modules visible surface.** None. The old board does **not**
+   fetch cycles or modules: the page requests only states and labels, and the
+   cycle/module stores exist with fetchers no public-board component calls.
+   The issue payload does carry `cycle_id` and `module_ids`, but no card,
+   group or overlay renders them, even when an issue belongs to both — the
+   public board's display-property set is key, state, labels, priority and
+   due only. The new app behaves the same: displays key, title, state,
+   priority, labels and due date only (SPC-028), treats the ids in the
+   payload as unused data, and issues **no** cycles or modules request.
 2. **Label pill from a URL-supplied label.** The strip renders the labels
    facet as its name plus the facet-level clear control, with **zero value
    pills and no label names** (SPC-037). Labels still appear on cards from
@@ -1353,7 +1418,7 @@ the payloads carry more.
 | --- | --- | --- | --- | --- |
 | Board settings | `GET /api/public/anchor/:anchor/settings/` | — | `anchor`, `entity_name` (= `project`), `is_comments_enabled`, `is_reactions_enabled`, `is_votes_enabled`, `is_activity_enabled`, `view_props.{list,kanban}`, `project_details.{id, identifier, name, logo_props, cover_image, description}`, `workspace_detail.{slug}` | 001, 003, 004, 010, 020, 029, 041, 047, 048, 049, 057 |
 | Legacy resolve | `GET /api/public/workspaces/:slug/projects/:id/anchor/` | path `slug`, `project_id` | `anchor`, `entity_name` | 002 |
-| Board metadata | `GET /api/public/anchor/:anchor/meta/` | — | `name`, `description` (only; `cover_image` is read and ignored) | 007 |
+| Board metadata | `GET /api/public/anchor/:anchor/meta/` | — | `name`, `description` (only; the payload also carries `id`, `identifier`, `cover_image`, `icon_prop`, `emoji`, which the UI reads but deliberately does not display — `cover_image` never becomes an image tag) | 007 |
 | Issues (grouped) | `GET /api/public/anchor/:anchor/issues/` | `group_by=state_id`, `sub_group_by` (unused), `per_page` (50), `cursor` (opaque, from a prior response), `order_by=-created_at`, filters `state`, `priority`, `labels` (comma-joined), unknown filter keys ignored | envelope: `grouped_by`, `total_count`, `next_cursor`, `next_page_results`, `results` keyed by state UUID → `{results: [...], total_results}`; each issue is a flat dict with exactly `id`, `name`, `state_id`, `sort_order`, `estimate_point`, `priority`, `start_date`, `target_date`, `sequence_id`, `project_id`, `parent_id`, `cycle_id`, `created_by`, `state__group`, `label_ids`, `assignee_ids`, `module_ids`, `vote_items`, `reaction_items` — the card reads `id`, `name`, `state_id`, `priority`, `target_date`, `label_ids`, `sequence_id` and the embedded `vote_items`/`reaction_items`; there is **no** nested `state`, `project`, `votes` or `reactions` key | 023, 024, 026, 027, 028, 033, 036, 037 |
 | Issue detail | `GET /api/public/anchor/:anchor/issues/:id/` | — | the same flat `.values()` dict as the list rows, plus `description_json`, `description_html`, `description_stripped`, `description_binary`: `id`, `name`, `state_id`, `sort_order`, `estimate_point`, `priority`, `start_date`, `target_date`, `sequence_id`, `project_id`, `parent_id`, `cycle_id`, `created_by`, `state__group`, `label_ids`, `assignee_ids`, `module_ids`, `vote_items`, `reaction_items`; each vote item is `{vote, actor_details.{id, display_name, first_name, last_name, avatar, avatar_url}}`, each reaction item is `{reaction, actor_details.{…same…}}`. There is no nested `state`, `project`, `votes` or `reactions` and no `votes` key at all — the old app reads `vote_items`/`reaction_items` and so does the new app | 030, 040, 043, 044, 047, 048 |
 | States | `GET /api/public/anchor/:anchor/states/` | — | `id`, `name`, `color`, `group`, `sequence` | 023, 024, 034, 044 |
@@ -1413,6 +1478,26 @@ failed write (notice + refetch), not as a silent success.
 | Asset bulk link | `POST /api/public/assets/v2/anchor/:anchor/:entityId/bulk/` | `{asset_ids: string[]}` where `:entityId` is the new comment's id | 204; the assets become comment attachments (`comment_id` set) | 053 |
 | Asset restore | `POST /api/public/assets/v2/anchor/:anchor/restore/:assetId/` | — | editor lifecycle | 053 (editor lifecycle only) |
 
+Upload validation, checked **before** any network call, per file:
+- allowed MIME types are exactly `image/jpeg`, `image/jpg`, `image/png`,
+  `image/webp`, `image/gif` (the editor's image extension ships this list);
+  the file input's `accept` uses it too, but a dropped/renamed file is still
+  checked by type;
+- maximum size is **5 MB** (`MAX_FILE_SIZE`, the editor's file-handler
+  `validation.maxFileSize`); a larger file is rejected client-side;
+- a rejected file leaves the draft untouched, inserts no node, fires no
+  request, and raises a notice naming the rule that failed (type or size) —
+  the notice is written from this spec, translated, and never the old app's
+  wording.
+If a file passes the client check but the server refuses the metadata POST,
+the response is a 400 with `{error: <message>, status: false}`; the composer
+treats it exactly like a pre-check rejection (notice, no node, draft kept).
+The server applies the same type list plus the entity-type allowlist
+(`entity_type` must be a known `FileAsset.EntityTypeContext` value, so the
+composer sends `COMMENT_DESCRIPTION`). There is no separate size error from
+the server for a DMZ-upload flow; the storage service enforces its own limit
+on the signed post, and a failed byte post is the upload-failure branch.
+
 Attachment flow, per file, in this order: (1) `POST .../anchor/:anchor/` with
 the file's metadata and `entity_type` for comment descriptions, receiving
 `asset_id`/`asset_url`/`upload_data`; (2) form-post the bytes to the S3 URL
@@ -1453,7 +1538,7 @@ create/confirm/link calls above stay exactly as described.
 | Code submit | native `POST /auth/spaces/magic-sign-in/` \| `.../magic-sign-up/` | form: `csrfmiddlewaretoken`, `code`, `email`, `next_path` | redirect to validated return path, or to the spaces base with `error_code` | 060 |
 | Password submit | native `POST /auth/spaces/sign-in/` \| `.../sign-up/` | form: `csrfmiddlewaretoken`, `email`, `password` (+ confirmation), `next_path` | redirect as above | 061 |
 | Session end (sign-out) | native `POST /auth/spaces/sign-out/` | form: `csrfmiddlewaretoken`, `next_path` | redirect to return path; session destroyed | 014 |
-| Providers | `GET /auth/spaces/{google,github,gitlab,gitea}/` (flow start; callbacks at `.../callback/`) | `next_path` | redirect to provider | 062 |
+| Providers | `GET /auth/{google,github,gitlab,gitea}/` (the workspace flow start the old space card uses; server callbacks at `.../callback/`). The spaces-specific `GET /auth/spaces/{provider}/` endpoints exist but are **not called** by this area (parity: oracle asserts `/auth/google/`) | `next_path` | redirect to provider | 062 |
 
 Auth error codes the card models (from the server's catalog; the card maps
 the number to a step and a translated banner, never shows the number):
@@ -1463,10 +1548,19 @@ the number to a step and a translated banner, never shows the number):
 `MAGIC_SIGN_UP_EMAIL_CODE_REQUIRED`, `INVALID_MAGIC_CODE_SIGN_IN/UP`,
 `EXPIRED_MAGIC_CODE_SIGN_IN/UP`, `EMAIL_CODE_ATTEMPT_EXHAUSTED_SIGN_IN/UP`,
 `USER_DOES_NOT_EXIST`, `USER_ALREADY_EXIST`, `INSTANCE_NOT_CONFIGURED`,
-`SMTP_NOT_CONFIGURED`, `RATE_LIMIT_EXCEEDED` (5900), `*_NOT_CONFIGURED` for
-the four providers, and the provider error codes. Unknown numbers: no banner.
-The catalog is the one list: SPC-058 and SPC-063 read from it, so the
-rate-limit code renders a banner everywhere it can arrive.
+`SMTP_NOT_CONFIGURED`, `USER_ACCOUNT_DEACTIVATED` (5019),
+`OAUTH_NOT_CONFIGURED`, and the `GOOGLE_`/`GITHUB_`/`GITLAB_` configuration
+and provider-error codes. Deliberate exclusions, both proven by the old card
+and the oracle:
+- `RATE_LIMIT_EXCEEDED` (5900) is **not modelled**; it takes the unknown-code
+  branch (no banner). The defect is NEWFRONT-822; the catalog gains it only
+  when that issue is implemented with a new scenario.
+- `GITEA_NOT_CONFIGURED` (5112) exists on the server but the old banner set
+  lists only `OAUTH_NOT_CONFIGURED` plus the Google/GitHub/GitLab codes, so a
+  Gitea configuration failure renders **no banner**. The new app keeps that;
+  a slice must not add a Gitea banner.
+Unknown numbers: no banner. The catalog is the one list: SPC-058 and SPC-063
+read from it, with these exclusions stated there too.
 
 ### 5.5 Response shapes the contracts must declare
 
@@ -1555,7 +1649,7 @@ written from this spec**, not adapted from `apps/space`.
 
 | Slice | Borrows (read-only) | Must add / rework |
 | --- | --- | --- |
-| **A** shell, routing, failures | kit primitives; `useDocumentHead`; `NotFoundPage`; `PeekPanel` (not yet); `notify*` | `features/spaces` feature skeleton; `/spaces/*` route tree with lazy boundaries; space query client + public API client instance; space `errorComponent`/`notFoundComponent`; settings/instance queries; spinners; SPC-003/004/018/019 illustrations (kit `EmptyState` art + kit illustrations, not old assets); board-error and anchor-not-found states; generic-not-found wiring |
+| **A** shell, routing, failures | kit primitives; `useDocumentHead`; `NotFoundPage`; `notify*` | `features/spaces` feature skeleton; `/spaces/*` route tree with lazy boundaries; space query client + public API client instance; space `errorComponent`/`notFoundComponent`; settings/instance queries; the four loading stages of SPC-016 (full-viewport spinner for instance boot and legacy resolution, placeholder navbar with empty content while settings load, centered spinner under the navbar for the first issues fetch); SPC-003/004/018/019 illustrations (kit `EmptyState` art + kit illustrations, not old assets); board-error and anchor-not-found states; generic-not-found wiring |
 | **B** landing + metadata | kit form primitives; `useDocumentHead`; `notify*` | `/spaces/` route; current-user + instance queries; auth gate; signed-in guidance view; metadata function (title/description/OG/Twitter, no cover); robots claim at the subtree root + host rule; return-path plumbing into the card |
 | **C** auth card | kit `Input`/`Button`/`Avatar`/banner pattern; i18n | The whole card: email step, method routing, code step (native form + CSRF), password step (strength + toggles), provider buttons, error catalog → step mapping, dismissible banner, headings/consent; spaces-auth contract module in `@pidash/api-client` (**NEWFRONT-752** owns the contracts; C consumes them) |
 | **D** navbar/theme/account/notices | `LayoutIcon`; kit `Menu`/`Popover`/`Tooltip`/`Avatar`; `notify*`; `ToastHost`; kit theme helpers | Space navbar (identity + fallbacks), layout switcher (own), filter trigger slot (slice F), theme toggle with space storage key and flip semantics, account popover, iframe hook, progress bar, space toast host |
@@ -1596,15 +1690,19 @@ pins the old behavior). The new app implements the intent in this column.
 | NEWFRONT-466 | SPC-057 | Comment reaction pills name their reactors and mark the visitor's own from server-loaded rows (read the flat actor shape). |
 | NEWFRONT-467 | SPC-056 | A failed edit reconciles the row to the stored text. |
 | NEWFRONT-469 | SPC-015, SPC-029 | The frame gate hides the card-footer reaction add control too; the old card kept a working add control while the overlay hid it. |
+| NEWFRONT-822 | SPC-058, SPC-063 | **Parity: no banner.** The old card has no 5900 entry, so a throttled auth call lands in the unknown-code branch (step unchanged, address kept, no retry, no explanation) and the green oracle pins `banner: null`. The new app builds that parity behavior, so the row is flippable now; the filed issue tracks the *defect* (a visitor gets no explanation) and, if it is implemented, adds a translated try-again-later banner on the step that made the call, with a new intent scenario. Until then the catalog keeps 5900 unmodelled (§5.4). |
 | gate-only, no issue (addendum to NEWFRONT-463) | SPC-030/042 | Clicking a card from a filtered board keeps the filter keys in the address; the old app dropped them while the store kept filtering. Folded into SPC-030/042 and proven by the gate; NEWFRONT-463 covers the same address-loss family for the initial fetch. No separate issue: the gate scenario is the evidence and no user-visible divergence survives the intent. |
+| gate-only, no issue | SPC-022/030/042 | The one history model (settle replaces, open pushes, close replaces) is a new-app choice; the old app pushed on both layout settle and overlay open. It is folded into SPC-022 and pinned by the gate's address/history scenario, so no issue is filed — a Back that lands on a self-correcting malformed address is not a user-visible divergence once the address is already settled. |
 | gate-only, no issue (addendum to NEWFRONT-454) | SPC-020 | Settle only on layouts the board can render (list/kanban), instead of accepting any `view_props` flag the server says is enabled. The intent is folded into SPC-020; no issue because the deviation is only reachable in a configuration the publisher UI never produces. |
 | gate-only, no issue (addendum to NEWFRONT-467/459) | SPC-017/053 | A post whose image is still uploading is blocked until the upload settles; the old app stored a node without its file. Intent lives in SPC-053; no separate issue — the gate pins it and the upload-guard unit test covers the branch. |
 
 No row is left with an unowned old bug: NEWFRONT-469 carries the frame
-footer, and the three gate-only items are explicitly addenda to filed bugs
-(463, 454, 467) that are proven by the gate's intent scenarios. If a slice
-finds a user-visible divergence in a configuration the gate cannot produce,
-it files an issue and links it here rather than widening a gate-only note.
+footer, NEWFRONT-822 carries the silent rate limit (built as parity, i.e.
+silent, until it is fixed), and the four gate-only items are either addenda
+to filed bugs (463, 454, 467/459) or explicit new-app choices (the history
+model) proven by the gate's intent scenarios. If a slice finds a
+user-visible divergence in a configuration the gate cannot produce, it files
+an issue and links it here rather than widening a gate-only note.
 
 ## 8. Proof plan and gate
 
@@ -1612,9 +1710,11 @@ it files an issue and links it here rather than widening a gate-only note.
 
 - Unit tests cover every changed line and branch (the binding run rule), using
   the space query modules with a stubbed transport: address parsing and
-  rewriting, filter parameter building, paging cursors, gating flags, the
-  frame hook, the path validator, the auth step reducer and error catalog,
-  the upload guard, the edit reconcile and the copy permission.
+  rewriting (including the replace/push/replace history model of SPC-022),
+  filter parameter building, paging cursors, gating flags, the frame hook,
+  the path validator, the auth step reducer and error catalog (3900/5900
+  both in the unknown-code branch), the upload pre-checks (type, 5 MB) and
+  upload guard, the edit reconcile and the copy permission.
 - Local checks: `pnpm --filter web_new typecheck|lint|test`, plus
   `check:boundaries`, `check:headers`, `check:deps`, `check:coexistence`, the
   similarity check and the paths gate. Slices append `built` to their rows.
@@ -1638,6 +1738,11 @@ it files an issue and links it here rather than widening a gate-only note.
   new app's behavior, tagged with the same row id and titled without `bug:`.
   Writing those scenarios is part of the gate's fix list (a small scenario
   issue), never a silently skipped row and never a re-tag of the old ones.
+- Rows whose parity is the old *behavior* stay flippable without an intent
+  scenario: SPC-058/063 keep the unknown-code branch for 5900 (no banner,
+  oracle green) and the defect is tracked by NEWFRONT-822, which would add a
+  new scenario when it is implemented; SPC-016 keeps the placeholder navbar
+  in the settings stage (oracle green) rather than a full-viewport spinner.
 - Configuration variants for the config-driven rows:
   - mail + magic login **on** and **off** (SPC-059/060/061);
   - email/password enabled and disabled (SPC-059/061);
