@@ -16,6 +16,7 @@ drain disarms / pause assertions fail.
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -76,6 +77,25 @@ def _set_runner_online(seeder, runner_id):
         "UPDATE runner SET status = 'online', last_heartbeat_at = now() WHERE id = %s",
         (runner_id,),
     )
+
+
+def _make_online_runner(seeder, owner_id, workspace_id, pod_id):
+    runner_id = str(uuid.uuid4())
+    seeder.db.execute(
+        """INSERT INTO runner
+           (id, name, capabilities, status, os, arch, runner_version,
+            protocol_version, last_heartbeat_at, created_at, updated_at,
+            owner_id, workspace_id, pod_id, host_label,
+            refresh_token_hash, refresh_token_fingerprint,
+            refresh_token_generation, previous_refresh_token_hash,
+            access_token_signing_key_version, enrollment_token_hash,
+            enrollment_token_fingerprint, revoked_reason, visibility,
+            dev_metadata, provisioning)
+           VALUES (%s,%s,'[]','online','','','',1,now(),now(),now(),%s,%s,%s,'',
+                   '','',0,'',1,'','','',0,'{}','manual')""",
+        (runner_id, f"handoff-{uuid.uuid4().hex[:8]}", owner_id, workspace_id, pod_id),
+    )
+    return runner_id
 
 
 def _complete(machine_client, run_id, done_payload):
@@ -210,3 +230,57 @@ def test_complete_applies_deferred_cap_hit_pause(
         str(seeder.db.fetchval("SELECT state_id FROM issues WHERE id = %s", (issue_world["id"],)))
         == str(paused_state)
     )
+
+
+def test_complete_move_handoff_drains_target_pod(
+    machine_client, seeder, daemon_world, machine_flow, issue_world, run_with_issue
+):
+    """A terminal source run's move handoff assigns the replacement now.
+
+    ``complete_project_move_handoff`` creates the replacement in the target
+    project's pod and dispatches it; for a local-runner run dispatch leaves a
+    ``PodDrain`` decision to the caller, which must drain that pod so the
+    replacement does not sit QUEUED until an unrelated poll.
+    """
+    _set_runner_online(seeder, machine_flow["runner_id"])
+    workspace_id = daemon_world["workspace"]["id"]
+    target_project = seeder.create_project(workspace_id)
+    target_state = seeder.create_state(
+        workspace_id, target_project["id"], name="In Progress", group="started"
+    )
+    target_pod = seeder.create_pod(
+        workspace_id, target_project["id"], name="handoff target", is_default=True
+    )
+    target_runner = _make_online_runner(
+        seeder, daemon_world["owner"]["id"], workspace_id, target_pod["id"]
+    )
+    seeder.db.execute(
+        "UPDATE issues SET project_id = %s, state_id = %s WHERE id = %s",
+        (target_project["id"], target_state["id"], issue_world["id"]),
+    )
+    seeder.db.execute(
+        "UPDATE agent_run SET run_config = %s::jsonb WHERE id = %s",
+        (
+            json.dumps(
+                {
+                    "_project_move_handoff": {
+                        "target_project_id": target_project["id"],
+                        "target_pod_id": target_pod["id"],
+                    }
+                }
+            ),
+            run_with_issue["id"],
+        ),
+    )
+
+    _complete(machine_client, run_with_issue["id"], {"summary": "done"})
+
+    replacement = seeder.db.fetchone(
+        "SELECT status, runner_id, pod_id FROM agent_run"
+        " WHERE parent_run_id = %s",
+        (run_with_issue["id"],),
+    )
+    assert replacement is not None, "no replacement run created by the handoff"
+    assert str(replacement["pod_id"]) == target_pod["id"], replacement
+    assert replacement["status"] == "assigned", replacement
+    assert str(replacement["runner_id"]) == target_runner, replacement

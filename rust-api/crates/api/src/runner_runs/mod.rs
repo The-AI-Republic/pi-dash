@@ -1490,7 +1490,7 @@ impl RunnerPorts for LivePorts {
         let settings = self.state.settings();
         let cloud = settings.cloud_agent.clone();
         let managed = settings.managed_runner.clone();
-        pidash_jobs::orchestration::complete_project_move_handoff_live(
+        let replacement = pidash_jobs::orchestration::complete_project_move_handoff_live(
             &self.pool,
             &cloud,
             &managed,
@@ -1499,8 +1499,39 @@ impl RunnerPorts for LivePorts {
             self.state.assistant_seam().clone(),
         )
         .await
-        .map(|_| ())
-        .map_err(|error| PortError::Transport(error.to_string()))
+        .map_err(|error| PortError::Transport(error.to_string()))?;
+        let Some(replacement_id) = replacement else {
+            return Ok(());
+        };
+        // `dispatch_after_commit` -> `dispatch_agent_run` -> for a
+        // runner-plane run `drain_pod_by_id(run.pod_id)`
+        // (`cloud_agent/dispatch.py:61-70`). The jobs executor runs the
+        // dispatch but returns only the run id, so re-read the decision's
+        // inputs: a replacement still QUEUED on a non-cloud executor is
+        // the `PodDrain` arm and must be matched now, not on a later poll.
+        let pending: Option<(String, String, Option<uuid::Uuid>)> = sqlx::query_as(
+            r#"SELECT "status", "executor_kind", "pod_id"
+               FROM "agent_run" WHERE "id" = $1"#,
+        )
+        .bind(replacement_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| PortError::Transport(error.to_string()))?;
+        let Some((status, executor_kind, pod_id)) = pending else {
+            return Ok(());
+        };
+        if status == "queued"
+            && executor_kind != pidash_types::dispatch::AgentExecutorKind::CloudAgent.value()
+        {
+            if let Some(pod_id) = pod_id {
+                crate::runner_enroll::teardown::drain_pod_by_id(&self.pool, &self.state, pod_id)
+                    .await
+                    .map_err(|()| {
+                        PortError::Transport("project move handoff pod drain failed".to_owned())
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     async fn agent_system_user_id(&self) -> Result<uuid::Uuid, PortError> {
