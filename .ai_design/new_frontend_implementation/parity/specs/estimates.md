@@ -174,19 +174,26 @@ The screen has exactly these states, and they are mutually exclusive
    Pressing the action opens the creation dialog on step one (§3).
 4. **Populated.** An active (flagged) system exists. The content
    contains, in order: the enable box (§2.3), the active-system section
-   (§2.4), an add action for admins (a secondary button labelled "Add
-   estimate system"; it opens the creation dialog and is separate from
-   the leading indicator's text), and the archived section when there
-   are unflagged systems (§2.5). A populated screen never shows the
-   empty state. The primary action is labelled with an imperative
-   create phrase, not an export/import/filter word (§2.8).
+   (§2.4), and the archived section when there are unflagged systems
+   (§2.5). A populated screen never shows the empty state. There is no
+   create trigger on a populated screen: the old screen offers creation
+   only inside the empty state's action, and the archived section adds
+   no action of its own. To replace the active system an admin deletes
+   it first (which returns the screen to the empty state) and then
+   creates a new one. The new app must not add a second create entry
+   point: a populated screen's only buttons are the switch, the active
+   row's edit (cloud) and delete, and the read-only archived rows. The
+   empty state's action is the only place the create label appears
+   (§2.8).
 
 Archive-only edge: if every system is archived (no flagged system), the
 screen keeps the empty state for the active slot (the old screen does
 this — the active row is chosen by the flag) while still listing the
-archived section below it, and the add action remains. The new app must
-reproduce this: the empty state is about "no active system", not "no
-systems". The archived section is not hidden by the empty state.
+archived section below it, and the empty state's add action is present
+(since there is no active system, this is the empty state, not the
+populated one, so creation is reachable). The new app must reproduce
+this: the empty state is about "no active system", not "no systems".
+The archived section is not hidden by the empty state.
 
 ### 2.3 Enable box (EST-004)
 
@@ -283,9 +290,8 @@ Rendered only when at least one system is not flagged in-use. Contains:
   section (descending).
 
 Archived systems with a system still flagged: the archived section sits
-below the active section and the add action. Archived systems are never
-reachable from the enable switch (the switch only ever links the active
-system id).
+below the active section. Archived systems are never reachable from the
+enable switch (the switch only ever links the active system id).
 
 ### 2.6 Addresses and titles (EST-026)
 
@@ -361,9 +367,11 @@ by this row; this row is about the settings screen only.
 
 ## 3. Creation dialog (EST-008–EST-013)
 
-The creation dialog is opened from the empty state's primary action or
-from the add action on a populated screen, by a project admin. It is a
-modal over the settings screen; closing it never navigates.
+The creation dialog is opened from the empty state's primary action, by
+a project admin. That is its only entry point: a populated screen has no
+create trigger, so an admin who wants a different system deletes the
+active one first (§2.2 item 4). It is a modal over the settings screen;
+closing it never navigates.
 
 It has two steps with a visible counter, "Step 1 of 2"/"Step 2 of 2"
 (_pinned_ form). Title and description are the dialog's own (old title:
@@ -618,8 +626,10 @@ The create response includes the system with its points. After success:
   that older system while the new one is the active row — an observable
   inconsistency in the old app. The new app must not silently relink;
   it shows the truth (switch state from the project reference, active
-  row from the flag), and the admin turns estimates on/off or creates
-  a replacement as the next explicit action.
+  row from the flag), and the admin turns estimates on/off as the next
+  explicit action. Creating a replacement is a separate, later step:
+  the active system must be deleted first, which returns the screen to
+  its empty state where creation is offered (§2.2 item 4).
 
 This means a create slice must **not** add a project update after the
 create, and the oracle's EST-013 scenario must not expect the project
@@ -813,7 +823,7 @@ client must handle, not behaviours it may assume away.
 | Project-points read needs admin or member; guest refused  | `GET project-estimates/`                                   | 200 with the active system's values, or `[]` when unlinked; 403 guest/outsider                                                                                                                                                                                       | pickers use the list, not this endpoint                                                                                                         |
 | Create needs admin or member                              | `POST estimates/`                                          | 200 with the created system + points; 403 guest/outsider; 400 invalid points                                                                                                                                                                                         | creation dialog; guest never sees the screen                                                                                                    |
 | No point list at all (field absent or not a list)         | `POST estimates/`                                          | 400 (serializer list error)                                                                                                                                                                                                                                          | client always sends a list of ≥2                                                                                                                |
-| Empty point object `{}` in the list                       | `POST estimates/`                                          | 400 as a **nested serializer error**, not the flat form: the many-serializer reports one entry per list item, so the first is `[{"non_field_errors": ["Estimate points are required"]}]`; the system row is written before validation and can remain empty (bug 346) | client never sends empty entries; report the failure and refresh                                                                                |
+| Empty point object `{}` in the list                       | `POST estimates/`                                          | 400 as a **nested field error**, not the flat form: `value` is a required field on the point serializer, so DRF rejects the object before `validate()` runs and the response is `[{"value": ["This field is required."]}]` (`key` carries a model default, so it is not flagged); the `non_field_errors: "Estimate points are required"` sentence is reachable only on the partial point-update path. The system row is written before validation and can remain empty (bug 346) | client never sends empty entries; report the failure and refresh                                                                                |
 | Explicitly empty point list `[]`                          | `POST estimates/`                                          | **accepted** (200) and stores a system with zero values — a server gap the oracle does not pin; the client always sends ≥2                                                                                                                                           | client always sends ≥2                                                                                                                          |
 | Value longer than 20 characters, bulk create              | `POST estimates/`                                          | 400 with a field error naming the 20-character cap; the point rows are not stored (an empty system row can remain, bug 346)                                                                                                                                          | client caps at 20 (§3.6)                                                                                                                        |
 | Value longer than 20 characters, point update             | `PATCH .../estimate-points/{ptid}/`                        | 400 with a field error; nothing stored                                                                                                                                                                                                                               | client caps at 20                                                                                                                               |
@@ -1157,7 +1167,7 @@ bodies are DRF shapes: a field map for serializer errors, or
 | -------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
 | `GET`    | `/estimates/`                              | —                                                                                                                                                                              | 200, array of systems, each with nested `points` (nested values arrive in the model's default `value` ordering — sort by `key` client-side) | 401 anon, 403 non-member                                                                                                                                                                                                                                                                                                                                                                                                      | 001, 003, 005, 006, 024 |
 | `GET`    | `/estimates/{eid}/`                        | —                                                                                                                                                                              | 200, one system with `points`                                                                                                               | 404 `{"error": "The required object does not exist."}` for an id outside this project; 403/401                                                                                                                                                                                                                                                                                                                                | 024, 026                |
-| `POST`   | `/estimates/`                              | `{"estimate": {"name"?, "type"?, "last_used"?}, "estimate_points": [{"key", "value", "description"?}]}` (the `estimate` object itself is required; the client always sends it) | 200, created system with `points`                                                                                                           | 400 absent/non-list points (DRF list error under `non_field_errors`); 400 for an empty point object as a nested list error `[{"non_field_errors": ["Estimate points are required"]}]` (not the flat `{"error": …}` form); 400 over-long value (field error); 400 duplicate name (`{"error": "The payload is not valid"}`); a request without the `estimate` object is malformed (server error, never sent by the client); 403 | 013, 024, 025           |
+| `POST`   | `/estimates/`                              | `{"estimate": {"name"?, "type"?, "last_used"?}, "estimate_points": [{"key", "value", "description"?}]}` (the `estimate` object itself is required; the client always sends it) | 200, created system with `points`                                                                                                           | 400 absent/non-list points (DRF list error under `non_field_errors`); 400 for an empty point object as a nested field error `[{"value": ["This field is required."]}]` (not the flat `{"error": …}` form and not the `non_field_errors` sentence, which belongs to the partial point update); 400 over-long value (field error); 400 duplicate name (`{"error": "The payload is not valid"}`); a request without the `estimate` object is malformed (server error, never sent by the client); 403 | 013, 024, 025           |
 | `PATCH`  | `/estimates/{eid}/`                        | `{"estimate"?: {"name"?, "type"?}, "estimate_points": [{"id", "key", "value"}]}`                                                                                               | 200, system with `points`                                                                                                                   | 400 empty/absent list (`{"error": "Estimate points are required"}`), 403; **no length or content validation** (see the matrix below)                                                                                                                                                                                                                                                                                          | 014, 025                |
 | `DELETE` | `/estimates/{eid}/`                        | —                                                                                                                                                                              | 204                                                                                                                                         | 403, 404                                                                                                                                                                                                                                                                                                                                                                                                                      | 016, 024                |
 | `GET`    | `/project-estimates/`                      | —                                                                                                                                                                              | 200, array of values of the project's linked system; `[]` when unlinked                                                                     | 403 guest/outsider, 401                                                                                                                                                                                                                                                                                                                                                                                                       | 017, 024                |
@@ -1220,7 +1230,7 @@ the difference. The spec above is binding where it differs.
 | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | EST-001 | Admin gate comes from the settings shell; screen renders under it; heading and content                                                                                                                                            | Slice 740 proves the member/guest denial carries no estimate controls (the shell gate is shared) and keeps the screen's own `canManage` branch                                                                                                          |
 | EST-002 | Four-skeleton loader while the list is pending                                                                                                                                                                                    | Slice 740: a failed read must show an error + retry **instead of** the empty/content below it (602 renders an error paragraph and then falls through to the empty state, which reads as "no systems"; the error branch must return early)               |
-| EST-003 | Empty state with title and add action for admins; no action otherwise                                                                                                                                                             | mainly proven by existing tests; slice 740 confirms                                                                                                                                                                                                     |
+| EST-003 | Empty state with title and add action for admins; no action otherwise. Creation is reachable only from the empty state: 602 head `7afa61f34` removed the extra populated-screen button and asserts its absence in a test                                                                                                                                                             | mainly proven by existing tests; slice 740 confirms                                                                                                                                                                                                     |
 | EST-004 | Switch reads `project.estimate`; toggles by writing the active id/null; success notices name the direction; disabled while pending and without manage rights                                                                      | Slice 741: the **error title must contain "Error"** (§2.3) — 602's "Couldn’t change estimates" has neither that word nor a direction, so the EST-004 oracle scenario fails on it as-is; keep the snap-back and add the direction-correct body (bug 341) |
 | EST-005 | Active row with name and values joined; time humanized by the shared formatter                                                                                                                                                    | nothing structural; slice 741 covers the time-format branch                                                                                                                                                                                             |
 | EST-006 | Archived section with heading, explainer containing "older versions", newest-first ordering, zero controls, **and** an outbound `https://` link in a new tab (added by 602's review fix `35c290cb7`, asserted in its screen test) | nothing structural (603/602 review fix)                                                                                                                                                                                                                 |
