@@ -34,6 +34,10 @@ describe("edition", () => {
   it("leaves the cloud god-mode entry absent (ADM-074: OSS renders the bootstrap gate)", () => {
     expect(edition.slots?.godModeCloudEntry).toBeUndefined();
   });
+
+  it("leaves the cloud login card absent (CLOUD-002: OSS keeps /login's redirect)", () => {
+    expect(edition.slots?.cloudLoginCard).toBeUndefined();
+  });
 });
 
 describe("shell edition gates", () => {

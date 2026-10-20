@@ -15,10 +15,20 @@ import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-q
 import { signOut as postSignOut, type ApiClient } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
+import { markExplicitLogout } from "./cloudLogin.js";
 import { platform, type SessionTeardownApi } from "../../core/platform/index.js";
 import { getRuntimeSignOutHooks } from "../../core/session/index.js";
 import { signOut as clearSession } from "../../core/session/store.js";
 import { notifyError } from "../../shared/shell/index.js";
+
+/** Session storage for the tab marker, or null where the runtime has none. */
+function tabSessionStorage(): Pick<Storage, "setItem"> | null {
+  try {
+    return globalThis.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
 
 export const SIGN_OUT_FAILED_TITLE = "Could not sign out";
 // The failure message is pinned by the shell oracle (SHELL-058): the
@@ -84,6 +94,11 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
       // strand the user on a dead session.
     }
   }
+  // CLOUD-014: this tab signed out on purpose, so a later /login visit
+  // shows the card instead of resuming silently. Written after the desktop
+  // webview wipe, which clears sessionStorage; tab-scoped and best-effort,
+  // so other tabs keep their own state.
+  markExplicitLogout(tabSessionStorage());
   return signOutLandingTarget(platform.kind);
 }
 

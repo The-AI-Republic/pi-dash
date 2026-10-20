@@ -24,6 +24,14 @@ const UNSAFE_TARGETS = [
   "workspace/issues/1",
 ];
 
+/**
+ * Encoded spellings the old app does not reject (bug NEWFRONT-777): the
+ * parser normalizes them to protocol-relative or encoded paths and the old
+ * guard never looks again. The new app rejects them; the oracle pins the
+ * old behavior so the row records the defect instead of failing on it.
+ */
+const OLD_APP_ACCEPTS = ["/%2e%2e//evil.example/x", "/a/%2e%2e/%2f/evil.example", "/%5c%5cevil.example/steal"];
+
 test(
   specTitle(["CLOUD-013"], "deep target with query survives the round trip"),
   { tag: specTags(["CLOUD-013"]) },
@@ -46,6 +54,20 @@ for (const unsafe of UNSAFE_TARGETS) {
       const card = await driver.cloudLoginCardFacts();
       expect(card.continueActions).toBe(1);
       expect(await driver.cloudSignInRequests()).toHaveLength(0);
+    }
+  );
+}
+
+for (const accepted of OLD_APP_ACCEPTS) {
+  test(
+    specTitle(["CLOUD-013"], `bug: NEWFRONT-777 old app accepts an encoded target: ${accepted}`),
+    { tag: specTags(["CLOUD-013"]) },
+    async ({ driver }) => {
+      await driver.cloudArmSignInCapture();
+      await driver.openPath(`/login?next_path=${encodeURIComponent(accepted)}`);
+      // Observed old behavior: the handoff leaves with the normalized value.
+      const handoff = new URL(await driver.cloudAwaitSignInRequest(0));
+      expect(handoff.searchParams.get("return_to")).not.toBe("/");
     }
   );
 }

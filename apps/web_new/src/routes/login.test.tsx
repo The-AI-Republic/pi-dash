@@ -30,8 +30,9 @@ vi.mock("../core/platform/index.js", () => ({
   },
 }));
 
+import { edition } from "../core/edition/index.js";
 import { meQueryOptions, profileQueryOptions, sessionKeys } from "../core/session/queries.js";
-import { redirectRetiredSignIn, Route } from "./login.js";
+import { redirectRetiredSignIn, rendersLoginInPlace, Route } from "./login.js";
 
 interface ThrownRedirect extends Response {
   options: { to?: unknown; href?: unknown; search?: unknown };
@@ -91,6 +92,7 @@ describe("redirectRetiredSignIn", () => {
 describe("login guard", () => {
   afterEach(() => {
     platformHarness.kind = "web";
+    delete edition.slots;
   });
 
   it("redirects bare to the entry on web builds", async () => {
@@ -104,6 +106,28 @@ describe("login guard", () => {
     expect((outcome as { thrown: ThrownRedirect }).thrown.options.search).toBeUndefined();
   });
 
+  it("renders in place when the edition fills the cloud login card (CLOUD-011)", () => {
+    const Card = () => <div data-testid="cloud-card" />;
+    edition.slots = { cloudLoginCard: Card };
+    expect(rendersLoginInPlace(edition)).toBe(true);
+  });
+
+  it("keeps the redirect when the edition leaves the card unfilled", () => {
+    edition.slots = {};
+    expect(rendersLoginInPlace(edition)).toBe(false);
+  });
+
+  it("keeps the redirect on desktop even with a filled card", () => {
+    platformHarness.kind = "desktop";
+    edition.slots = { cloudLoginCard: () => <div /> };
+    expect(rendersLoginInPlace(edition)).toBe(false);
+  });
+
+  it("serves cloud /login in place and keeps the query string", async () => {
+    edition.slots = { cloudLoginCard: () => <div data-testid="cloud-card" /> };
+    await expect(load(queryClient(), unauthorizedClient(), { next_path: "/docs" })).resolves.toEqual({ ok: {} });
+  });
+
   it("renders the desktop screen for signed-out visitors on desktop", async () => {
     platformHarness.kind = "desktop";
     await expect(load(queryClient(), unauthorizedClient(), {})).resolves.toEqual({ ok: {} });
@@ -114,7 +138,7 @@ describe("login guard", () => {
     const client = queryClient();
     const apiClient = unauthorizedClient();
     seedSession(client, apiClient, true);
-    const outcome = await load(client, apiClient, { nextPath: "/acme" });
+    const outcome = await load(client, apiClient, { next_path: "/acme" });
     expect("thrown" in outcome && isRedirect(outcome.thrown)).toBe(true);
     expect((outcome as { thrown: ThrownRedirect }).thrown.options).toMatchObject({ href: "/acme" });
   });
@@ -156,6 +180,7 @@ describe("login guard", () => {
 describe("DesktopLoginScreen", () => {
   afterEach(() => {
     platformHarness.kind = "web";
+    delete edition.slots;
     vi.restoreAllMocks();
   });
 
@@ -172,6 +197,20 @@ describe("DesktopLoginScreen", () => {
     const screen_ = screen.getByTestId("desktop-sign-in");
     expect(screen_).toHaveAttribute("data-error", "access_denied");
     expect(screen_).toHaveAttribute("data-error-description", "The provider refused.");
+  });
+
+  it("renders the edition's cloud login card in place (CLOUD-011)", () => {
+    edition.slots = { cloudLoginCard: () => <div data-testid="cloud-card">cloud sign-in</div> };
+    render(
+      (() => {
+        vi.spyOn(Route, "useSearch").mockReturnValue({});
+        const Component = Route.options.component;
+        if (!Component) throw new Error("login route has no component");
+        return <Component />;
+      })()
+    );
+    expect(screen.getByTestId("cloud-card")).toBeVisible();
+    expect(screen.getByTestId("cloud-card")).toHaveTextContent("cloud sign-in");
   });
 
   it("renders nothing on web builds", () => {

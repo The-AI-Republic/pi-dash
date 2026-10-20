@@ -1,9 +1,13 @@
+// @vitest-environment jsdom
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { QueryClient } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderHook } from "@testing-library/react";
+import * as React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { registerRuntimeSignOutHooks } from "../../core/session/index.js";
 import { registerStoreReset, useSessionStore } from "../../core/session/store.js";
 
@@ -13,11 +17,23 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => {
 });
 
 import { notifyError } from "../../shared/shell/index.js";
-import { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
+import { EXPLICIT_LOGOUT_KEY } from "./cloudLogin.js";
+import {
+  performSignOut,
+  SIGN_OUT_FAILED_MESSAGE,
+  SIGN_OUT_FAILED_TITLE,
+  signOutLandingTarget,
+  useSignOut,
+} from "./signOut.js";
 
 beforeEach(() => {
   useSessionStore.setState({ status: "authenticated", returnUrl: null });
   vi.mocked(notifyError).mockClear();
+});
+
+afterEach(() => {
+  resetAppClient();
+  vi.unstubAllGlobals();
 });
 
 function stubClient(post: () => Promise<unknown>) {
@@ -84,6 +100,71 @@ describe("performSignOut", () => {
     const wipeOrder = clearLocalSession.mock.invocationCallOrder[0] ?? 0;
     expect(postOrder).toBeLessThan(wipeOrder);
     expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("records the tab-scoped explicit-logout marker after a successful POST", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).resolves.toBe("/");
+    expect(entries.get(EXPLICIT_LOGOUT_KEY)).toBe("1");
+  });
+
+  it("writes the marker after the desktop teardown wipes the same storage", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+    const clearLocalSession = vi.fn(async () => {
+      entries.clear();
+    });
+
+    await expect(
+      performSignOut({ client: client as never, queryClient: new QueryClient(), teardown: { clearLocalSession } })
+    ).resolves.toBe("/");
+
+    expect(clearLocalSession).toHaveBeenCalledTimes(1);
+    expect(entries.get(EXPLICIT_LOGOUT_KEY)).toBe("1");
+  });
+
+  it("leaves no marker when the POST failed", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const client = stubClient(async () => {
+      throw new Error("boom");
+    });
+
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).rejects.toThrow("boom");
+    expect(entries.has(EXPLICIT_LOGOUT_KEY)).toBe(false);
+  });
+
+  it("signs out when storage access throws", async () => {
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      get() {
+        throw new Error("denied");
+      },
+    });
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).resolves.toBe("/");
+  });
+
+  it("signs out when the runtime has no session storage", async () => {
+    vi.stubGlobal("sessionStorage", undefined);
+    const client = stubClient(async () => ({ url: "https://app.test/" }));
+    await expect(performSignOut({ client: client as never, queryClient: new QueryClient() })).resolves.toBe("/");
   });
 
   it("swallows a failed local teardown and still lands", async () => {
@@ -161,5 +242,21 @@ describe("performSignOut", () => {
     expect(confirmRuntimeSignOut).not.toHaveBeenCalled();
     expect(disposeRuntimeForSignOut).toHaveBeenCalledWith({ deleteChatHistory: false });
     expect(client.post).toHaveBeenCalledWith("/auth/sign-out/", {});
+  });
+
+  it("exposes the sign-out through the app client and platform teardown", async () => {
+    createAppClient("https://app.test", async (url) => ({
+      status: 200,
+      url,
+      headers: { get: () => null },
+      text: async () => (url.endsWith("/auth/get-csrf-token/") ? JSON.stringify({ csrf_token: "csrf" }) : "{}"),
+    }));
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      React.createElement(QueryClientProvider, { client: new QueryClient() }, children);
+    const { result } = renderHook(() => useSignOut(), { wrapper });
+
+    await expect(result.current.mutateAsync()).resolves.toBe("/");
+    expect(useSessionStore.getState().status).toBe("signed-out");
+    expect(notifyError).not.toHaveBeenCalled();
   });
 });

@@ -331,6 +331,28 @@ describe("billing driver", () => {
     expect(pill.click).toHaveBeenCalledTimes(1);
   });
 
+  it("signs out from the real sidebar account trigger and lands on the card", async () => {
+    const openTrigger = vi.fn(async () => undefined);
+    const activateItem = vi.fn(async () => undefined);
+    const trigger = locator({ count: async () => 1, evaluate: openTrigger });
+    const item = locator({ waitFor: vi.fn(async () => undefined), evaluate: activateItem });
+    const card = locator({ waitFor: vi.fn(async () => undefined) });
+    const page = pageOf({
+      getByText: vi.fn(() => locator()),
+      locator: vi.fn((selector: string) =>
+        selector.includes("sidebar-user-menu") ? trigger : selector.includes("Cloud sign-in") ? card : locator()
+      ),
+      getByRole: vi.fn((role: string) => (role === "menuitem" ? item : locator())),
+    });
+    const driver = new WebNewDriver(page);
+
+    await driver.cloudSignOutViaAccountMenu();
+
+    expect(openTrigger).toHaveBeenCalledTimes(1);
+    expect(activateItem).toHaveBeenCalledTimes(1);
+    expect(card.waitFor).toHaveBeenCalledTimes(1);
+  });
+
   it("reports no popular plan when the marker read fails", async () => {
     const marker = locator({
       count: async () => 1,
