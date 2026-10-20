@@ -10992,14 +10992,19 @@ export class WebNewDriver implements ParityDriver {
   };
 
   async notificationsOpenEmailPreferences(): Promise<void> {
+    const firstSwitch = this.page.getByTestId("email-prefs-form").first().getByRole("switch").first();
     await this.page.goto("/settings/profile/notifications", { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
-    await this.page
-      .getByTestId("email-prefs-form")
-      .first()
-      .getByRole("switch")
-      .first()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    try {
+      await firstSwitch.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      // The first visit compiles the settings shell and the lazily loaded
+      // preference body together; under load that can outlast the wait, or
+      // hand the page a module graph that never runs. One reload is the
+      // same recovery the inbox uses; a real failure reproduces.
+      await this.page.reload({ timeout: 60_000 });
+      await firstSwitch.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
 
   async notificationsEmailPreferencesLoaderShown(): Promise<boolean> {

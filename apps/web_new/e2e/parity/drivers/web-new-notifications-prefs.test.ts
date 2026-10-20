@@ -37,12 +37,13 @@ function formSwitch(getAttribute: (name: string) => Promise<string | null>) {
 }
 
 describe("notificationsOpenEmailPreferences", () => {
-  it("opens the settings page and waits for the toggles", async () => {
+  function prefsPage(switchWaitFor: (options: unknown) => Promise<void>) {
     const goto = vi.fn(async (_url: unknown, _options: unknown) => undefined);
+    const reload = vi.fn(async (_options: unknown) => undefined);
     const waitForLoadState = vi.fn(async (_state: unknown) => undefined);
-    const switchWaitFor = vi.fn(async (_options: unknown) => undefined);
     const page = {
       goto,
+      reload,
       waitForLoadState,
       getByTestId: (id: string) => {
         expect(id).toBe("email-prefs-form");
@@ -51,13 +52,35 @@ describe("notificationsOpenEmailPreferences", () => {
         };
       },
     };
-    const driver = new WebNewDriver(page as unknown as Page);
+    return { page: page as unknown as Page, goto, reload, waitForLoadState };
+  }
+
+  it("opens the settings page and waits for the toggles", async () => {
+    const switchWaitFor = vi.fn(async (_options: unknown) => undefined);
+    const stub = prefsPage(switchWaitFor);
+    const driver = new WebNewDriver(stub.page);
 
     await driver.notificationsOpenEmailPreferences();
 
-    expect(goto).toHaveBeenCalledWith("/settings/profile/notifications", { timeout: 60_000 });
-    expect(waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+    expect(stub.goto).toHaveBeenCalledWith("/settings/profile/notifications", { timeout: 60_000 });
+    expect(stub.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
     expect(switchWaitFor).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(stub.reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once and waits again when the first visit never paints the toggles", async () => {
+    let calls = 0;
+    const switchWaitFor = vi.fn(async (_options: unknown) => {
+      calls += 1;
+      if (calls === 1) throw new Error("not painted");
+    });
+    const stub = prefsPage(switchWaitFor);
+    const driver = new WebNewDriver(stub.page);
+
+    await driver.notificationsOpenEmailPreferences();
+
+    expect(stub.reload).toHaveBeenCalledWith({ timeout: 60_000 });
+    expect(switchWaitFor).toHaveBeenCalledTimes(2);
   });
 });
 
