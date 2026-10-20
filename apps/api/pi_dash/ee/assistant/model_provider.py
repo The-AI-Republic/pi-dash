@@ -34,6 +34,10 @@ class AgentModelProfile:
 
     ``reason_code`` is a :class:`pi_dash.managed_runner.errors.ManagedRunnerReason`
     value and is empty exactly when ``available`` is true.
+
+    ``top_up_url`` is where a user adds credit for this lane, when it bills by
+    credit. The desktop links to it when the gateway answers ``402``; empty
+    means there is nowhere to send them.
     """
 
     available: bool
@@ -41,6 +45,7 @@ class AgentModelProfile:
     base_url: str = ""
     model: str = ""
     reason_code: str = ""
+    top_up_url: str = ""
 
 
 def has_usable_llm_config(user) -> bool:
