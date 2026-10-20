@@ -70,12 +70,15 @@ creation closes the dialog and invalidates the project list so the analytics
 page leaves the empty state and renders the normal tabs. Cancelling leaves the
 empty view unchanged.
 
-Guests have read-only analytics access. They can open either tab, use the
-picker, search and export tables. They are not offered project creation, and
-the server refuses a guest project-create request. Other workspace analytics
-endpoints also return 403 to guests; the UI falls back as described in §4,
-§6, §7 and §9. The only analytics-area mutation affordance is project creation
-from this empty view.
+Guests can open either tab and use the picker, and the guest shell still
+renders the tab strips, headings and tables. They are not offered project
+creation, and the server refuses a guest project-create request. Other
+workspace analytics endpoints also return 403 to guests; the UI falls back as
+described in §4, §6, §7 and §9. Because the workspace chart and stats reads are
+refused, a guest's analytics tables have no rows: export and search are not
+exercised for guests, and the oracle only pins tabs, breadcrumb, title and
+picker for them (ANL-018). The only analytics-area mutation affordance is
+project creation from this empty view.
 
 ## 4. Project picker and scoping (ANL-004, ANL-014)
 
@@ -99,15 +102,23 @@ supports keyboard navigation through the kit combobox, shows the project mark
 and name per option, and keeps the popover open across multiple toggles so a
 multi-selection does not require reopening.
 
-Selection scopes every analytics read on both tabs: headline totals, overview
-graphs, active-project stats, created-vs-resolved, custom insights, the
-created-vs-resolved table, and the state-breakdown table. The selection is
+Selection scopes every section on both tabs: headline totals, the overview
+graph, the active-projects list, created-vs-resolved, custom insights, the
+chart table, and the state-breakdown table. The selection is
 serialized as a comma-separated `project_ids` query parameter; omit the
 parameter entirely for the all-projects state. Selection survives tab
-switching and is shareable. Keep it in a route search parameter
-(`project_ids`) rather than component state so a tab switch or reload preserves
-it. Normalize the value by dropping duplicates and preserving the picker's
-order before it enters a request or query key.
+switching and scoping the dialog does not clear it.
+
+The legacy app kept the selection in an in-memory store; it was not part of
+the address and did not survive a reload. The oracle proves only that it
+survives a tab switch (twice, back and forth). The new build deliberately
+upgrades this to a route search parameter (`project_ids`) so a reload and a
+shared link keep the scope; that is a minor additive divergence, not a parity
+requirement, and no oracle scenario asserts it. Accept the parameter on both
+tab addresses, validate it as a list of project ids, ignore ids the caller
+cannot resolve, and normalize by dropping duplicates while preserving order
+before it enters a request or query key. `project_ids` never appears inside the
+path, so it does not change the tab segment rules in §1.
 
 The picker only offers projects the caller has joined. When a selection
 contains a project the caller can no longer resolve, drop it from the picker
@@ -198,9 +209,19 @@ exceeds its section height.
 While the stats read is pending, show five placeholder rows. A successful
 empty response shows the section header with an empty scroll area rather than
 the analytics guidance panel. A failed request likewise shows no resolved
-rows; do not crash or synthesize percentages. The picker's `project_ids` scope
-must be applied to this read as well, so choosing a project removes unrelated
-rows.
+rows; do not crash or synthesize percentages.
+
+Intentional difference from the observation: the legacy active-projects
+request sends only `fields` (with the invalid legacy field names), so its list
+never followed the picker. The oracle's picker scenario asserts that every
+later `advance-analytics*` capture carries `project_ids`, but it does not
+observe `project-stats`; its active-projects scenario runs with no picker
+selection, so it only pins that unresolvable ids are skipped and that a guest
+with one joined project sees that one row. ANL-004's row requires the picker to
+scope every section, so the new build adds `project_ids` to this read (and to
+its query key, §16.6). With no selection the list is unchanged, which is all
+the oracle exercises. This is a declared additive divergence, not new
+behavior attributed to the old app.
 
 The legacy request asked for two invalid field names and consequently received
 the backend's full default set. The new build must request the valid fields it
@@ -351,9 +372,11 @@ display values used on the chart, including capitalization and date
 formatting. Counts equal the row's total `count`; split columns equal their
 segment values.
 
-The row-count label combines the current row count and the x-axis label:
-`3 Priority`, `1 Project`, and so on, with singular/plural chosen from the
-current count. The label updates when search filters rows.
+The row-count label reads the loaded row count followed by the current x-axis
+display label: `3 Priority`, `2 Priority`, and so on. The legacy label uses the
+loaded dataset length and a fixed noun (it does not inflect for one row and
+does not follow the search filter); the new build preserves that, while the
+export still writes only the currently filtered rows (§15).
 
 The table has an expanding search control in its toolbar and an `Export as csv`
 action. Search filters only the first column, case-insensitively, and operates
@@ -372,14 +395,21 @@ workspace scope its first column is `Project`, followed by `Backlog`,
 `Started`, `Unstarted`, `Completed`, `Cancelled`. Each row is one project with
 the five group counts from the stats response.
 
-The first cell shows the project mark and project name when the id resolves.
-If the name is present but the project id no longer resolves, still show the
-server name without a mark. The count columns are right-aligned numbers.
+The first cell shows the project mark and the name of the project the id
+resolves to. If the id no longer resolves, the live cell renders a mark and no
+name (the legacy cell reads only the resolved project); it does not fall back
+to the server's `project__name`. The export path does fall back to the server
+name, because the legacy export value reads `project__name` directly. The new
+build mirrors both: resolved id → mark plus resolved name; unresolved id →
+mark with no visible name on screen, server name in the CSV. The count columns
+are right-aligned numbers.
 
-The row-count label reads `2 Projects`, `1 Project`, or `0 Projects`, using
-the current visible row count. The search control expands in place, filters
-the first column by project name, and clears when closed. The export action
-exports the currently filtered rows, not the full dataset.
+The row-count label reads `2 Projects` or `0 Projects`, using the loaded
+dataset length and the fixed noun `Projects` (the legacy label does not inflect
+for a single row and does not change while search narrows the rows). The search
+control expands in place, filters the first column by project name, and clears
+when closed. The export action exports the currently filtered rows, not the
+full dataset.
 
 While loading, render five skeleton rows with the six real headers. A
 successful empty response or a failed read renders the guidance panel plus a
@@ -434,7 +464,9 @@ scope.
 Guest visibility of the dialog is governed by each trigger's owner. On desktop
 issues, cycles and modules surfaces the old trigger is gated on
 issue-creation rights, so guests see no trigger. Analytics does not add a
-guest trigger. The content endpoints themselves are admin/member only.
+guest trigger. Scoped totals and stats reject guests (admin/member only),
+while the scoped chart endpoint accepts guests at the API; the new build keeps
+the trigger absent, so analytics adds no guest entry point (see §16.5).
 
 ## 14. Scoped dialog — assignee table (ANL-015)
 
@@ -452,8 +484,9 @@ rows by `display_name`; preserve that order and place the null-name row where
 the server puts it.
 
 The dialog table has the same `Export as csv` action, expanding first-column
-search, and row-count label as the tab table; the label's noun is `Assignee`
-or `Assignees`. While loading, show skeleton rows; on failure or emptiness,
+search, and row-count label as the tab table; the label's fixed noun is
+`Assignee` (the legacy label does not inflect, so a row count of three reads
+`3 Assignee`). While loading, show skeleton rows; on failure or emptiness,
 show the guidance panel with a zero-count label.
 
 Epic scope is unreachable from shipped surfaces and the scoped table has no
@@ -494,14 +527,24 @@ and must have unit coverage. Do not substitute an empty string for an
 unreadable cell.
 
 If the filtered row set is empty, produce no download at all; the builder
-should reject or return before creating a Blob. Do not emit a headers-only
-file. The export control may remain visible, but activating it with zero rows
-must not fire a browser download event.
+must reject or return before creating a Blob. Do not emit a headers-only file.
+The export control may remain visible, but activating it with zero rows must
+not fire a browser download event. No oracle scenario activates an export with
+zero visible rows, so this is an intended rule rather than a pinned
+observation; slice D owns making the builder reject before it creates a Blob and
+unit-testing it.
 
-The table row-count label reads the current visible row count and updates as
-search changes. Search targets the first column only, matches case-insensitively,
-collapses the input on close, and clears the filter at the same time. Opening
-the search does not change the count until text is entered.
+A cell writes `-` only when a column's export value function yields
+undefined/null. The legacy cell functions coerce an absent field to the empty
+string (a null project name exports as an empty cell, not a dash), so the new
+build must resolve values per column the same way; do not blanket-convert every
+null source field to a dash.
+
+The table row-count label reports the loaded dataset length, not the filtered
+length, and does not change while the search narrows rows. Search targets the
+first column only, matches case-insensitively, collapses the input on close,
+and clears the filter at the same time. Opening the search does not change the
+count, and neither does typing.
 
 ## 16. API and data layer
 
@@ -562,7 +605,9 @@ admin or member; guests receive 403.
 
 `GET WS/project-stats/?fields=total_issues,completed_issues[&project_ids=...]`
 
-Returns an array of rows shaped `{ id, total_issues, completed_issues }` (the
+The endpoint accepts `project_ids`; the legacy list never sent it, while the
+new build does whenever the picker has a selection (§7). Returns an array of
+rows shaped `{ id, total_issues, completed_issues }` (the
 server may include more fields if requested; its valid set also includes
 `total_members`, `total_cycles`, `total_modules`). Invalid requested fields
 are ignored and the server falls back to the full valid set. Permission:
@@ -628,8 +673,9 @@ Summary of the reuse decision:
   `Combobox`, `Button`, `IconButton`, `Input`, `Tooltip`, `Skeleton`,
   `Spinner`, `EmptyState` and `Avatar`, and the existing Issues
   `AnalyticsEntry` trigger shell.
-- Extended, never forked: `ProjectPicker` with a caller-supplied analytics
-  trigger (its default multi-select summary does not implement `3+ projects`);
+- Extended, never forked: `ProjectPicker`'s existing `trigger` prop is reused;
+  the analytics caller supplies a trigger whose multi-select summary implements
+  `3+ projects` (the default summary reads a true count and must not be used);
   kit `Dialog` with a right-panel/wide presentation, or a new kit `Sheet`
   primitive if that variant would distort `Dialog`; the existing token-backup
   download pattern extracted into a shared CSV download helper.
@@ -815,21 +861,21 @@ The contracts slice owns zod request/response schemas and contract tests in
 | ANL-001 | Two tabs, `overview` first; bare address redirects; unknown id retained with no selected panel.                                                                                                                   | Same. Path-segment tab ids, `overview` default, unknown id preserved.                                                                  |
 | ANL-002 | Breadcrumb `Analytics`; title `{workspace} - Analytics`.                                                                                                                                                          | Same exact wording.                                                                                                                    |
 | ANL-003 | No-project empty view; creation enabled for admin/member, disabled for guest; create leaves empty view.                                                                                                           | Same, reusing the shared project-create dialog.                                                                                        |
-| ANL-004 | Default `All projects`; name+identifier search; four picks show literal `3+ projects`; one pick scopes every read and survives tab change.                                                                        | Same literal `3+ projects`, as settled above. Add picker selection to `project-stats` too, preserving the "scopes every section" rule. |
+| ANL-004 | Default `All projects`; name+identifier search; four picks show literal `3+ projects`; one pick scopes every read and survives tab change.                                                                        | Same literal `3+ projects`, as settled above. Picker also scopes `project-stats` (§7; additive divergence, not observed). Picker lives in a validated `project_ids` search param (additive divergence: reload/share persistence). |
 | ANL-005 | 11 cards with correct keys/order and zeros on failure; labels render raw i18n keys (bug NEWFRONT-468).                                                                                                            | 11 cards with intended human labels in §5; values unchanged. Declared corrected divergence.                                            |
 | ANL-006 | Radar and summary agree on seven dimensions; skeleton; zero dimensions for empty member; failed guest read has headers only, no guidance.                                                                         | Same; keep zero dimensions and headers-only failure.                                                                                   |
-| ANL-007 | Percentage `round(completed/total*100)`, success only `>50`; long name truncates with tooltip; unresolved project rows skipped; five loading rows.                                                                | Same. Request and consume `total_issues,completed_issues` rather than legacy invalid fields. Scope this read by the picker.            |
+| ANL-007 | Percentage `round(completed/total*100)`, success only `>50`; long name truncates with tooltip; unresolved project rows skipped; five loading rows.                                                                | Same. Request and consume `total_issues,completed_issues` rather than legacy invalid fields. Picker scope added (declared divergence). |
 | ANL-008 | Five work-items cards with exact labels/order; dialog keeps same labels; epic branch unreachable.                                                                                                                 | Same; no epic wording branch.                                                                                                          |
 | ANL-009 | Two smoothed areas, legend `Resolved`,`Created`, `MMM DD, YYYY` labels, loader, guidance on failed read.                                                                                                          | Same. Monthly workspace buckets and daily scoped buckets.                                                                              |
 | ANL-010 | Metric only `Work item` even with points estimation; fixed x list; split excludes x; every re-pick re-queries.                                                                                                    | Same. Settled as intended, not a bug.                                                                                                  |
 | ANL-011 | Priority and state colors; date labels current-year `MMM D`, other-year `MMM D, YYYY`, missing `None`; no legend; stacked schema order; only extreme ends rounded; first ten palette slots fixed; 11th generated. | Same. Slice B adds the fixed ten-slot chart palette to kit tokens; day-only grouping.                                                  |
-| ANL-012 | `Priority`,`Count`; label `3 Priority`; rows repeat chart values; search and filtered export.                                                                                                                     | Same, generalized to the current x-axis label and optional split columns.                                                              |
-| ANL-013 | `Project`,`Backlog`,`Started`,`Unstarted`,`Completed`,`Cancelled`; `2 Projects`; five skeleton rows; guidance with zero count on failed read.                                                                     | Same.                                                                                                                                  |
+| ANL-012 | `Priority`,`Count`; label `3 Priority`; rows repeat chart values; search and filtered export.                                                                                                                     | Same, generalized to the current x-axis label and optional split columns. Label uses loaded length, fixed noun.                         |
+| ANL-013 | `Project`,`Backlog`,`Started`,`Unstarted`,`Completed`,`Cancelled`; `2 Projects`; five skeleton rows; guidance with zero count on failed read.                                                                     | Same. Unresolved project id shows mark without a name on screen; CSV falls back to the server name. Fixed noun, loaded length.           |
 | ANL-014 | Project/cycle titles; module oracle has double space; spinner; wide toggle md+; scoped requests; close restores `All projects`; guest has no trigger.                                                             | Same, except the module title uses one space (declared corrected divergence). Scope is dialog-local; workspace picker unchanged.       |
-| ANL-015 | `Assignee` table with avatar/initial/unassigned; scoped counts; epic reword unreachable.                                                                                                                          | Same; no epic reword branch.                                                                                                           |
-| ANL-016 | All four exports use `{ws}-analytics.csv`, display headers and no dash cells.                                                                                                                                     | Same filename and headers; implement and unit-test dash fallback for unreadable values. No download for zero filtered rows.            |
-| ANL-017 | Count label plus expanding first-column search; close clears filter and collapses.                                                                                                                                | Same.                                                                                                                                  |
-| ANL-018 | Guests browse tabs/picker/export; no creation; server refuses guest create and workspace analytics reads; UI zeros/guidance.                                                                                      | Same. Only creation is gated; all reads are available to members and degrade to the documented fallbacks for guests.                   |
+| ANL-015 | `Assignee` table with avatar/initial/unassigned; scoped counts; epic reword unreachable.                                                                                                                          | Same; no epic reword branch; fixed `Assignee` noun in the count label.                                                                 |
+| ANL-016 | All four exports use `{ws}-analytics.csv`, display headers and no dash cells.                                                                                                                                     | Same filename and headers; dash only for an undefined/null column value (legacy coerces null fields to empty); no download for zero filtered rows. |
+| ANL-017 | Count label plus expanding first-column search; close clears filter and collapses.                                                                                                                                | Same. Label is the loaded length with a fixed noun and does not follow search.                                                         |
+| ANL-018 | Guests browse tabs and picker; no creation; server refuses guest create and workspace analytics reads; UI zeros/guidance.                                                                                         | Same. Guest tables have no rows, so export/search are not exercised; only creation is gated.                                          |
 
 ## 19. Permissions and editions
 
@@ -844,9 +890,11 @@ silently branching in this area.
 Workspace role rules:
 
 - admin and member: full analytics read access on both tabs and in the dialog;
-- guest: read-only workspace analytics UI, picker, search and export; workspace
-  advance reads return 403 and settle to zero/guidance; project-stats is
-  permitted; no project creation;
+- guest: read-only workspace analytics UI and picker; workspace advance reads
+  return 403 and settle to zero/guidance, the guest's tables therefore have no
+  rows (no search/export to exercise); project-stats is permitted, so the
+  active-projects list shows the guest's resolvable joined projects; no project
+  creation;
 - analytics does not offer issue editing, comments or any other mutation.
 
 Project creation from the no-project view uses the permission helpers in
