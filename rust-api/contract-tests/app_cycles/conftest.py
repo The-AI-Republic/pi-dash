@@ -174,3 +174,21 @@ def cycle_urls(tenant: dict) -> dict:
         "analytics": lambda pk: f"{cycles}{pk}/analytics/",
         "workspace_cycles": f"/api/workspaces/{tenant['workspace']['slug']}/cycles/",
     }
+
+
+def set_project_timezone(tenant: dict, tz: str) -> None:
+    """Point the tenant's project at `tz` (date-check reads it per request)."""
+    with tenant["seed"].conn.cursor() as cur:
+        cur.execute(
+            "update projects set timezone=%s where id=%s",
+            (tz, tenant["project"]["id"]),
+        )
+
+
+def create_cycle_between(tenant: dict, start, end, name: str = "Planted") -> dict:
+    """Seed a cycle with explicit (aware) start/end instants."""
+    return _create_cycle(
+        tenant["seed"], workspace_id=tenant["workspace"]["id"],
+        project_id=tenant["project"]["id"], owner_id=tenant["user"]["id"],
+        name=name, start_date=start, end_date=end,
+    )
