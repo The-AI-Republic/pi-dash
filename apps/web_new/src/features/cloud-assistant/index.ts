@@ -13,14 +13,6 @@ export {
   useCloudAssistantConfig,
   useCloudConnections,
 } from "./api/queries.js";
-export {
-  toolServerKeys,
-  toolServersQueryOptions,
-  useAddToolServer,
-  useRemoveToolServer,
-  useToolServers,
-  useUpdateToolServer,
-} from "./api/toolServers.js";
 export { AppsPointer } from "./components/AppsPointer.js";
 export { CloudAssistantTab } from "./components/CloudAssistantTab.js";
 export { useProviderSignIn } from "./components/useProviderSignIn.js";

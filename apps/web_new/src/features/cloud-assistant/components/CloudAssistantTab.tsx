@@ -40,7 +40,7 @@ import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/in
 import { AddConnectionView } from "./AddConnectionView.js";
 import { AppsPointer } from "./AppsPointer.js";
 import { ConnectionsList } from "./ConnectionsList.js";
-import { ToolServerSection } from "./ToolServerSection.js";
+import { ToolServersSection } from "../../profile-assistant/index.js";
 import { useProviderSignIn } from "./useProviderSignIn.js";
 
 type View = "list" | "add";
@@ -202,7 +202,7 @@ export function CloudAssistantTab(): React.ReactElement {
       {view === "list" ? (
         <>
           <hr className="border-(--border)" />
-          <ToolServerSection />
+          <ToolServersSection />
           <AppsPointer />
         </>
       ) : null}

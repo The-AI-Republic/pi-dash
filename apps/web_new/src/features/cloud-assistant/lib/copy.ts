@@ -90,26 +90,4 @@ export const SIGN_IN_TIMEOUT_BODY = "No answer arrived from OpenAI before the fi
 export const TOOL_SERVERS_HEADING = "Tool servers (MCP)";
 export const TOOL_SERVERS_INTRO =
   "Servers listed here are offered to the assistant as tools. Give each one a name and the address it answers on.";
-export const TOOL_SERVER_NAME_PLACEHOLDER = "Team tools";
-export const TOOL_SERVER_URL_PLACEHOLDER = "https://tools.example/mcp";
-export const TOOL_SERVER_AUTH_PLACEHOLDER = "Paste the server's access token";
-export const TOOL_SERVER_NAME_LABEL = "Name";
-export const TOOL_SERVER_URL_LABEL = "Server address";
-export const TOOL_SERVER_AUTH_LABEL = "Access credential (optional)";
-export const TOOL_SERVER_ADD_ACTION = "Add server";
-export const TOOL_SERVER_EMPTY = "No tool servers registered yet.";
-export const TOOL_SERVER_ADDED_TITLE = "Added";
-export const TOOL_SERVER_ADDED_BODY = "Tool server added.";
-export const TOOL_SERVER_ADD_FAILED_TITLE = "Could not add server";
-export const TOOL_SERVER_ADD_FAILED_BODY = "Invalid tool server.";
-export const TOOL_SERVER_UPDATE_FAILED_TITLE = "Update failed";
-export const TOOL_SERVER_UPDATE_FAILED_BODY = "Could not update the tool server.";
-export const TOOL_SERVER_REMOVE_FAILED_TITLE = "Remove failed";
-export const TOOL_SERVER_REMOVE_FAILED_BODY = "Could not remove the tool server.";
-export const TOOL_SERVER_REMOVED_TITLE = "Removed";
-export const TOOL_SERVER_DISABLED_MARKER = "(disabled)";
-export const TOOL_SERVER_LOCKED_MARKER = "Locked";
-export const TOOL_SERVER_ENABLE_ACTION = "Enable";
-export const TOOL_SERVER_DISABLE_ACTION = "Disable";
-
 export const APPS_POINTER = "Looking for apps? Open Apps in the sidebar to browse, install and connect them.";
