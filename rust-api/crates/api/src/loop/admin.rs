@@ -814,8 +814,17 @@ async fn detail_job(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, Denial> {
-    let Ok(job_id) = pk.parse::<Uuid>() else {
-        return proxy_pass(state, method, uri, headers, &[]).await;
+    // Django routes this segment through `<uuid:pk>`
+    // (`loop/admin_urls.py:16-17`), whose converter regex is
+    // lowercase-hyphenated only and compiled case-sensitively. Every other
+    // spelling resolver-404s before auth or the view. `Uuid::parse_str`
+    // accepts uppercase, simple, braced and URN spellings, so gate on the raw
+    // segment first and proxy the rest — parseable-but-non-canonical and
+    // garbage alike — to Django for its own resolver 404
+    // (PIDASHCONV-1095 / -1132 / -1225 precedent).
+    let job_id = match pk.parse::<Uuid>() {
+        Ok(job_id) if is_canonical_uuid(&pk) => job_id,
+        _ => return proxy_pass(state, method, uri, headers, &[]).await,
     };
     let pool = pools(&state)?;
     let actor = authed_user(&state, pool, extension).await?;
@@ -849,8 +858,11 @@ async fn patch_job(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, Denial> {
-    let Ok(job_id) = pk.parse::<Uuid>() else {
-        return proxy_pass(state, method, uri, headers, &body).await;
+    // Same resolver gate as GET detail: non-canonical spellings never
+    // reach the view, so proxy before auth or any write.
+    let job_id = match pk.parse::<Uuid>() {
+        Ok(job_id) if is_canonical_uuid(&pk) => job_id,
+        _ => return proxy_pass(state, method, uri, headers, &body).await,
     };
     let pool = pools(&state)?;
     let actor = authed_user(&state, pool, extension).await?;
@@ -974,8 +986,17 @@ async fn delete_job(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, Denial> {
-    let Ok(job_id) = pk.parse::<Uuid>() else {
-        return proxy_pass(state, method, uri, headers, &[]).await;
+    // Django routes this segment through `<uuid:pk>`
+    // (`loop/admin_urls.py:16-17`), whose converter regex is
+    // lowercase-hyphenated only and compiled case-sensitively. Every other
+    // spelling resolver-404s before auth or the view. `Uuid::parse_str`
+    // accepts uppercase, simple, braced and URN spellings, so gate on the raw
+    // segment first and proxy the rest — parseable-but-non-canonical and
+    // garbage alike — to Django for its own resolver 404
+    // (PIDASHCONV-1095 / -1132 / -1225 precedent).
+    let job_id = match pk.parse::<Uuid>() {
+        Ok(job_id) if is_canonical_uuid(&pk) => job_id,
+        _ => return proxy_pass(state, method, uri, headers, &[]).await,
     };
     let pool = pools(&state)?;
     let actor = authed_user(&state, pool, extension).await?;
@@ -1022,8 +1043,17 @@ async fn job_targets(
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Response, Denial> {
-    let Ok(job_id) = pk.parse::<Uuid>() else {
-        return proxy_pass(state, method, uri, headers, &[]).await;
+    // Django routes this segment through `<uuid:pk>`
+    // (`loop/admin_urls.py:16-17`), whose converter regex is
+    // lowercase-hyphenated only and compiled case-sensitively. Every other
+    // spelling resolver-404s before auth or the view. `Uuid::parse_str`
+    // accepts uppercase, simple, braced and URN spellings, so gate on the raw
+    // segment first and proxy the rest — parseable-but-non-canonical and
+    // garbage alike — to Django for its own resolver 404
+    // (PIDASHCONV-1095 / -1132 / -1225 precedent).
+    let job_id = match pk.parse::<Uuid>() {
+        Ok(job_id) if is_canonical_uuid(&pk) => job_id,
+        _ => return proxy_pass(state, method, uri, headers, &[]).await,
     };
     let pool = pools(&state)?;
     let actor = authed_user(&state, pool, extension).await?;
@@ -1090,6 +1120,23 @@ async fn job_targets(
         "results": rows.iter().map(render_target_row).collect::<Vec<_>>(),
     });
     Ok(json_response(StatusCode::OK, body))
+}
+
+/// Whether a path segment is spelled the way Django's `UUIDConverter`
+/// routes it: lowercase hex, hyphenated, exactly 36 characters
+/// (`django/urls/converters.py`; the `v1_cli_auth` PIDASHCONV-1095 and
+/// `license` PIDASHCONV-1132 precedents).
+fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
 }
 
 /// A non-UUID `pk` never reaches a Django view (the `<uuid:pk>`
@@ -1484,6 +1531,22 @@ mod tests {
             .collect();
         assert_eq!(order.last(), Some(&"stats"));
         assert_eq!(order.len(), 15);
+    }
+
+    #[test]
+    fn canonical_uuid_accepts_lowercase_hyphenated_only() {
+        assert!(is_canonical_uuid("12345678-1234-1234-1234-1234567890ab"));
+        let canonical = "12345678-1234-1234-1234-1234567890ab";
+        for raw in [
+            canonical.to_uppercase(),
+            canonical.replace('-', ""),
+            format!("{{{canonical}}}"),
+            format!("urn:uuid:{canonical}"),
+            "not-a-uuid".to_owned(),
+            format!("{canonical}0"),
+        ] {
+            assert!(!is_canonical_uuid(&raw), "{raw}");
+        }
     }
 
     #[test]
