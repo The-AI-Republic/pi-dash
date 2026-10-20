@@ -146,7 +146,7 @@ not through a single effect keyed on the pathname's last segment only.
 ### 1.5 Loading and settling on entry (ARCH-030, ARCH-028)
 
 The shell owns the skeleton *slot*; each tab owns its own
-skeleton→content/empty/no-match switch (§2.7, §5.6). What the shell
+skeleton→content/empty/no-match switch (§2.4, §5.3). What the shell
 guarantees, and what every slice must not regress, is the cold-entry
 behavior called out by bugs NEWFRONT-228, 231 and 239: a direct load,
 reload, shared link or hard navigation to any of the three tab addresses
@@ -157,12 +157,17 @@ behavior (archived selectors gated on a live fetch having set a "fetched"
 flag) is not reproduced. The oracle's primed helpers
 (`archivesPrimeAndEnter`, `archivesTabClick`, `archivesCyclesOpenTabViaLive`)
 exist because the old app needs them; new-web must also pass direct-address
-loads, and the area gate keeps the bug scenarios plus the direct-load
-scenarios green.
+loads. The only archives scenario that asserts direct-load rendering today
+is `archivesDirectLoadRenders` (a modules assertion in
+`archives/modules.spec.ts`); for issues and cycles the direct load is
+proven inside the primed-entry scenarios (the address, reload and
+shared-link steps of ARCH-011/014/029). The area gate keeps the bug
+scenarios and `archivesDirectLoadRenders` green and adds no substitute
+scenario of its own.
 
 Traffic: entering a tab issues exactly one first-page read for that tab.
 Returning to the tab (client-side) refreshes it: a new read is sent. Idle
-time sends no reads and no writes (no polling; see §13).
+time sends no reads and no writes (no polling; see §12).
 
 ### 1.6 Shell driver ownership (NEWFRONT-698)
 
@@ -172,12 +177,16 @@ for the full table): `archivesOpenIssuesList`, `archivesOpenList`,
 `archivesActiveTab`, `archivesActiveTabKey`, `archivesClickBack`,
 `archivesBackPresent`, `archivesClientNavigate`, `archivesCountBadge`,
 `archivesCountBadgeTooltip`, `archivesPageTitle`,
-`archivesDirectLoadRenders`, `archivesReload` (and the
-`archivesCyclesReload` alias), `archivesArmSkeletonObserver`,
+`archivesDirectLoadRenders`, `archivesCyclesReload`,
+`archivesArmSkeletonObserver`,
 `archivesSkeletonVisible`, `archivesSkeletonWasSeen`,
 `archivesDelayNextListReads`, `archivesBeginTrafficSpy`,
 `archivesTrafficCounts`, `archivesPrimeAndEnter`, and the tab-address
-helpers. All other slices call these read-only and never re-implement them.
+helpers (the three unused ones in §17 included). `archivesCyclesReload`
+does a full page reload and is owned here, exactly once, because the
+cycles scenario calls it and 701/703 must share a single implementation;
+the Cycles slice does not declare it again. All other slices call these
+read-only and never re-implement them.
 
 ---
 
@@ -208,13 +217,16 @@ read-only:
   that write, no "edit" affordance in hover actions;
 - row menus exist (see §3.2) but only carry read/restore/delete entries.
 
-Restore/delete entries are editor-only (§12); viewers and guests still see
+Restore/delete entries are editor-only (§11); viewers and guests still see
 rows and may peek, copy links and open detail.
 
 Data: `GET BASE/archived-issues/` with the list query (§2.2). The server
-defaults `order_by=-created_at` when none is sent; the app's display
-default is manual order (`sort_order`, the Display panel's "Manual"), which
-the read carries once a preference exists. Grouping defaults to none, and
+defaults `order_by=-created_at` when none is sent (newest created first) and
+passes it through `order_issue_queryset`, so a read without a stored
+preference is newest-first. The app's display default is manual order
+(`sort_order`, the Display panel's "Manual"), which the read carries once a
+preference exists; before one does, the screen shows the server's
+newest-first order. Grouping defaults to none, and
 the display choices persist locally per project (see §2.3).
 Each row links to its detail address `DETAIL`.
 
@@ -244,8 +256,10 @@ it. What differs from the live list:
   project id as `viewId`, and `userId` undefined — and read once on entry.
   The entry's `filters.richFilters` member holds the expression (the
   camel-case read the oracle's `archivesSeedStoredExpression` driver
-  seeds). A seeded expression must render its pills and narrow the very
-  first list read. This is the NEWFRONT-242 fix: the old entry was inert
+  seeds). **The new app must read and write exactly this old shape** — the
+  driver seeds it directly, and nothing in the oracle goes through a new
+  app writer first. A seeded expression must render its pills and narrow the
+  very first list read. This is the NEWFRONT-242 fix: the old entry was inert
   and seeded expressions never re-applied because the store read a
   different key/casing than the writers write.
 - The archived filters live **only** in that local record; the archived
@@ -283,14 +297,23 @@ restricted to the options the archived layout can honor:
   last updated (`-updated_at`), start date (`start_date`), priority
   (`-priority`) — the `archived_issues` catalogue's exact list. Manual
   ordering on this tab is the archived rows' stored order — reordering is
-  not offered (no drag; §13), only the ordering key.
+  not offered (no drag; §12), only the ordering key.
 - Display properties: the live list's column toggles (identifier, priority,
   state, assignees, start/target dates, labels, cycle, module, etc.).
   Toggling a column re-renders rows and changes their text (the oracle
   toggles one column and expects the row text to change).
 - Empty groups: the live show/hide-empty-groups toggle applies to the
   grouped view.
-- Layout, type (sub-issues etc.) and calendar/board filters are not shown.
+- Layout and calendar/board filters are not shown. **Item type / sub-issue
+  filters are not shown either:** the ARCH-006 row's "item type" wording has
+  no counterpart on the old archived display panel
+  (`ISSUE_DISPLAY_FILTERS_BY_PAGE.archived_issues` exposes display
+  properties, group by, order by and the show-empty-groups extra only). The
+  row text is satisfied by the archived-display contract in this section:
+  the panel offers grouping, ordering and display properties and no type
+  control. The new app must not invent a work-item-type picker on this tab;
+  if a type filter is ever offered, the row gets its own inventory entry and
+  oracle scenario first.
 
 Persistence: display filters and properties are stored in the same local
 storage record as §2.2, per project, and applied on entry. Ordering changes
@@ -308,15 +331,25 @@ First load shows the list skeleton until the archived read settles. Then:
 - rows and no active filters/search → list.
 - rows present but the filter row hides everything → the shared
   filtered-empty state whose primary action clears the filters (restores
-  the unfiltered list).
+  the unfiltered list). Clearing filters is a local read-state reset with no
+  server permission behind it, so the action is enabled for every role that
+  can apply a filter. The old app additionally disabled it for guests; the
+  new app enables it — an additive difference that removes no capability.
 - zero archived rows and no filters → the archived "nothing archived yet"
-  state: an explanation plus a control that navigates to the project's
-  automations settings
-  (`/{ws}/projects/{projectId}/automations`, the Settings route's project
-  automations page that hosts the auto-archive row, NEWFRONT-600). This
-  control is *not* a create-work-item action. It renders only for members
-  and admins; guests/viewers do not get the control (they may not open
-  automations settings; AGT-037).
+  state: an explanation plus a control that opens the project's automations
+  settings. The canonical address is
+  `/{ws}/settings/projects/{projectId}/automations` (the project-settings
+  route that hosts the auto-archive row, NEWFRONT-600); there is **no**
+  `/{ws}/projects/{projectId}/automations` alias in the new router — that
+  address is named nowhere in this spec. This control is *not* a
+  create-work-item action.
+  Role: the control is **present but disabled for roles that cannot open
+  the automations page** (guests and plain members; the page itself is
+  admin-gated, AGT-037, and refuses them). The old empty state renders the
+  same affordance with a disabled action for non-editors, so keeping it
+  present-but-disabled preserves the observable affordance without
+  producing a navigation that lands on the not-authorized view. Admins get
+  an enabled control. The explanation text renders for every role.
 
 This empty state is inventory gap G-1; see §14 for the row decision and
 owner.
@@ -349,7 +382,7 @@ different row replaces the param. Escape closes the peek and clears the
 param.
 
 The peek body is read from the archived list row plus the single-item
-read (§10).
+read (§18).
 
 ### 2.6 Reuse and ownership (issues tab)
 
@@ -527,8 +560,10 @@ CYC component is extended there through the edge.
 ### 4.1 List and peek (ARCH-014)
 
 Data: `GET BASE/archived-cycles/` returns the archived cycles for the
-project as a flat JSON array (no pagination envelope; server order is
-favorites first, then creation). The row fields the list and peek draw
+project as a flat JSON array (no pagination envelope). Server order is
+`-is_favorite, -created_at`: favorites first, and within each group newest
+created first. The list must not promise "creation order"; it is newest
+first, and the order is the server's, not a client sort. The row fields the list and peek draw
 from are pinned in §18: `id`, `project_id`, `name`, `description`,
 `start_date`, `end_date`, `owned_by_id`, `status` (`CURRENT`, `UPCOMING`,
 `COMPLETED`, `DRAFT`), `archived_at`, `is_favorite`, `total_issues`,
@@ -539,11 +574,11 @@ The tab renders a plain flat list of cycle rows — unlike the live screen,
 there is no "Upcoming/Completed" grouping and no group headings; the
 oracle asserts group headings are empty on this tab while the live screen
 groups. Each row shows cycle name, the dates, and progress. Rows are not
-draggable (§13).
+draggable (§12).
 
 Selecting a row opens the cycle side peek with the archived cycle record
 read from `GET BASE/archived-cycles/{cycleId}/`; the panel is read-only
-(§9). The peeked cycle is carried as `peekCycle={cycleId}` on the tab
+(§5.6). The peeked cycle is carried as `peekCycle={cycleId}` on the tab
 address; reload or a shared link reopens it, and closing removes the
 param. The oracle:
 - opens the tab, sees only the archived cycle in the list, and that the
@@ -604,9 +639,11 @@ skeleton forever (bugs 231/239).
 
 ### 4.5 Archive a live cycle (ARCH-018)
 
-Entry point: the live cycle row menu (Cycles list rows, NEWFRONT-709/711)
-— this is the Cycles area's surface. The Archives slice proves the dialog
-and its gating; it does not place a second entry anywhere.
+Entry point: the live cycle row menu on the live cycles screen. The single
+owner is **NEWFRONT-711** (Cycles slice E, rows CYC-024 archive and CYC-028
+row menus), built on the rows from NEWFRONT-708 (CYC-001..005). The
+Archives slice (NEWFRONT-701) proves the dialog and its gating; it does not
+place a second entry anywhere, and no other Archives slice may add one.
 
 - Entry renders only for editors and only on non-archived cycles; it is
   disabled with an explanation until the cycle has finished (the cycle
@@ -632,15 +669,20 @@ and Open in new tab; Edit and Delete are not offered for archived cycles.
 Restore sends `DELETE BASE/cycles/{cycleId}/archive/` (204; the probed
 live path — the `archived-cycles/{cycleId}/unarchive/` alias 404s on
 `/api` and must not be contracted), toasts success and keeps the user on
-the archived cycles tab (the row disappears, the list re-renders). On
+the archived cycles tab (the row disappears, the list re-renders).
+**CYC-026's wording "sends the user to the archives list" is superseded
+here by the oracle:** `archives/cycles.spec.ts` asserts the address stays
+on `/archives/cycles` after a restore, and the new app stays on the tab.
+The Cycles slice must not "fix" this toward a navigation. On
 failure: error toast, the row stays archived, the user stays put (bug
 NEWFRONT-244's intended behavior). Guests see no entry and the server
 refuses.
 
 ### 4.7 Cycles driver ownership
 
-NEWFRONT-701 implements the whole `archivesCycles*` family, plus
-`archivesOpenCyclesTab` and the cycle-peek family
+NEWFRONT-701 implements the whole `archivesCycles*` family — except
+`archivesCyclesReload`, which is the shell's single full-reload helper
+(§1.6, §16) — plus `archivesOpenCyclesTab` and the cycle-peek family
 (`archivesOpenCyclePeek`, `archivesCycleRowNames`, `archivesCyclePeekReadOnly`,
 `archivesCloseCyclePeek`) reused read-only by NEWFRONT-702. It reuses the
 shell (698) and shared peek-entry (699) methods read-only. CYC rows
@@ -653,21 +695,28 @@ stay in the cycles family.
 
 Owned by **NEWFRONT-702**.
 
-Seam with the Modules epic (NEWFRONT-82): MOD-026/027/028 own the live
-module archive entry, the archived-modules screen from the Modules area and
-the restore. NEWFRONT-82 currently has no child slices; the Archives slice
-must therefore compose the tab inside the NEWFRONT-698 shell itself and
-extend a Modules-owned component (through the epic edge) if one exists by
-then — never fork one. NEWFRONT-702 owns the Archives-tab composition and
-closes the parity gaps listed below.
+Seam with the Modules epic (NEWFRONT-82): MOD-026 (archive), MOD-027
+(archived-modules screen from the Modules area) and MOD-028 (restore) are
+owned by **NEWFRONT-799** ("Modules slice G: archive/restore conversations
+and archived-modules screen (MOD-026-028)"), the single owner of the live
+module archive entry, the Modules-area archived screen and the restore.
+NEWFRONT-702 is a **consumer**: it composes the archived-modules content
+inside the NEWFRONT-698 shell (the project Archives tab), reuses
+NEWFRONT-799's live entry/menus read-only, and extends a NEWFRONT-799
+component only through the edge — it never forks one and never adds a
+second live entry or a second archived list. The edge is
+`NEWFRONT-702 --blocked-by NEWFRONT-799`. NEWFRONT-702 closes the parity
+gaps listed below.
 
 ### 5.1 List, sort and peek (ARCH-020)
 
-Data: `GET BASE/archived-modules/` (flat array; server order favorites
-first, then creation) with `id`, `workspace_id`, `project_id`, `name`,
+Data: `GET BASE/archived-modules/` (flat array; server order
+`-is_favorite, -created_at`, i.e. favorites first and newest created first
+within each group) with `id`, `workspace_id`, `project_id`, `name`,
 `description`, `description_text`, `description_html`, `start_date`,
 `target_date`, `status` (`backlog`, `planned`, `in-progress`, `paused`,
-`completed`, `cancelled`), `lead_id`, `member_ids`, `total_issues`,
+`completed`, `cancelled`; archiving is offered only when the status is
+`completed` or `cancelled`), `lead_id`, `member_ids`, `total_issues`,
 `completed_issues`, `started_issues`, `unstarted_issues`,
 `cancelled_issues`, `backlog_issues`, `created_at`, `updated_at`,
 `archived_at` (pinned by contracts NEWFRONT-697). The peek body reads
@@ -684,7 +733,7 @@ creation order for a deliberately non-alphabetical creation sequence;
 descending reverses. Sorting is display-only (local preference, per
 project), never a server write, and rows do not reorder by dragging.
 
-Selecting a row opens the module side peek (read-only, §9), with
+Selecting a row opens the module side peek (read-only, §5.6), with
 `peekModule={moduleId}` on the tab address; reload reopens; close clears.
 Cold entry settles (bug NEWFRONT-228).
 
@@ -716,8 +765,10 @@ differ. Failure settles on an error state.
 
 ### 5.4 Archive a live module (ARCH-023)
 
-Entry point: the live module row menu (Modules area, MOD-026..028 /
-NEWFRONT-82). Behavior mirrors §4.5 with module specifics:
+Entry point: the live module row menu on the live modules screen, owned by
+**NEWFRONT-799** (MOD-026 archive; MOD-027 archived screen; MOD-028
+restore). Behavior mirrors §4.5 with module specifics; NEWFRONT-702 proves
+it and adds no entry of its own:
 
 - editor-only, hidden on archived modules;
 - disabled with an explanation until the module status is `completed` or
@@ -737,7 +788,11 @@ From the archived-module row menu, editors see Restore with Copy link and
 Open in new tab; Edit and Delete are absent. Restore sends
 `DELETE BASE/modules/{moduleId}/archive/` (204, the probed live path — do
 not contract the `unarchive/` alias), toasts success, and keeps the user on
-the archives modules tab with the module live. Failure: error toast, row
+the archives modules tab with the module live. As with cycles (§4.6), the
+oracle (`archives/modules.spec.ts`, ARCH-024) asserts the user stays on the
+tab after restore; that is the intended behavior and it overrides any
+wording in MOD-028 that implies navigation back to the live modules
+screen. Failure: error toast, row
 stays (bug NEWFRONT-233). Guests see no entry and the server refuses.
 
 ### 5.6 Read-only cycle and module panels (ARCH-025)
@@ -760,7 +815,11 @@ family and the live-module helpers (`archivesOpenModulesTab`,
 `archivesChooseLiveModuleMenuEntry`, `archivesArchivedModuleMenuEntries`,
 `archivesChooseArchivedModuleMenuEntry`, `archivesAwaitModuleRow`,
 `archivesFailNextModuleWrite`), and reuses the cycle-peek family (701),
-shell (698) and shared peek entry (699) read-only.
+shell (698) and shared peek entry (699) read-only. **NEWFRONT-799 does not
+implement any `archives*` driver method:** its live-module rows are proven
+by the Modules area's own drivers, and every archived-modules driver belongs
+to 702 exactly once. Likewise CYC-027 (NEWFRONT-711) adds no `archives*`
+method; the archived-cycles tab's drivers are 701's.
 
 ---
 
@@ -772,16 +831,28 @@ mutations already exist in new code and are **not rebuilt**:
 - `features/projects/api/mutations.ts` exports `useArchiveProject` /
   `useRestoreProject` (NEWFRONT-284), invalidating the workspace subtree and
   removing the project's favorites row;
-- `features/projects/components/ProjectArchiveDialog.tsx` (SHELL-037) owns
-  the dialog, direction copy (`selectArchiveBody`), busy confirm and
-  failure handling; it is mounted from the project card/quick actions and
-  will be mounted from the settings danger zone.
+- `features/projects/components/ProjectArchiveDialog.tsx` owns the dialog,
+  direction copy (`selectArchiveBody`), busy confirm and failure handling.
+  It is shipped by **NEWFRONT-284** (SHELL-037, "Shell slice:
+  archive/restore/delete + project create (SHELL-037-042)") and mounted from
+  the **projects-list card menu**.
 
-Entry points (all owned elsewhere; Archives proves them read-only):
+Entry points (all owned elsewhere; Archives proves them read-only and adds
+none):
 
-- project card row menu / project quick actions in the projects list and
-  the sidebar project row (SHELL-037..039);
-- the project settings danger zone (shell/project-settings slice).
+- **NEWFRONT-284**: the projects-list card menu (`cardMenu.tsx`), archive
+  for a project admin on an active card, restore/delete for a project admin
+  on an archived card (SHELL-037..039). Those are rows of NEWFRONT-284;
+  there is no separate "SHELL-037 slice".
+- **NEWFRONT-572** (Project-settings slice: General tab, PSET-005–009): the
+  settings danger zone, which mounts the same dialog. In new code this slot
+  is still a placeholder in `ProjectSettingsGeneralMount.tsx`, so the
+  settings entry is not live yet; NEWFRONT-703 depends on NEWFRONT-572 for
+  it and must not build it.
+- The project quick actions (`ProjectQuickActions.tsx`) and the sidebar
+  project row (`SidebarProjectRow.tsx`) carry **no** project archive/restore
+  action in new code; their "Archives" entry is the project's work-items
+  archive tab. Neither is an ARCH-026 entry point.
 
 What the archives slice must prove and close:
 
@@ -789,9 +860,14 @@ What the archives slice must prove and close:
   cycles, modules and pages — is archived, that it leaves the projects
   list and its work items leave search, and that a project admin can
   restore it later. The warning must name work items, cycles, modules,
-  and pages (the current string names work items and search; the slice
-  extends it to name the rest — a SHELL component change made through the
-  edge if the shell owns it).
+  and pages. The current `selectArchiveBody("archive", …)` string names
+  only work items and search, so this is a required **cross-slice change to
+  NEWFRONT-284's `ProjectArchiveDialog`**. Owner: NEWFRONT-284 edits
+  `selectArchiveBody` (and its unit test); NEWFRONT-703 proves the oracle
+  sentence. Record the edge `NEWFRONT-703 --relates-to NEWFRONT-284` (the
+  shell slice is already merged, so this is a follow-up change, not a
+  blocker) and comment on NEWFRONT-284 that ARCH-026 needs the widened
+  warning. NEWFRONT-703 must not fork the dialog to carry different copy.
 - Confirm: `POST BASE/archive/` (200 `{archived_at}`), the confirm control
   shows a busy/progress state while the write is in flight, on success a
   success toast whose body states the project was archived (the oracle
@@ -804,17 +880,20 @@ What the archives slice must prove and close:
   list and becomes visible to its project members again. Restore is
   **project-admin only**; non-admins never get an enabled restore action
   (the card/row entry for archived projects is admin-gated). Confirm
-  `DELETE BASE/archive/` (204), success toast, project back in the list.
+  `DELETE BASE/archive/` (204), success toast, project back in the list. The
+  restore success toast body the oracle asserts is "in your projects"
+  (`archives/project-crosscutting.spec.ts`, "confirming restores"), already
+  shipped by the shell mutation in NEWFRONT-284; keep it.
 - Failures (either direction): error toast, dialog stays open with prior
   state intact, project state unchanged on the server.
 - Closing the dialog after a failure or a cancel resets it: reopening shows
   the idle confirm with no busy spinner (the oracle checks this).
 
 Cross-epic note (also §15): NEWFRONT-284 already implements the write path
-and SHELL-037 the dialog. NEWFRONT-703 must not create a second dialog or a
-second pair of mutations; it extends the existing component/copy where the
-archive-parity wording is missing, and otherwise proves it from the
-archives side.
+and the dialog (SHELL-037). NEWFRONT-703 must not create a second dialog or
+a second pair of mutations; the only code change it may request is the
+widened warning copy in `selectArchiveBody`, owned by NEWFRONT-284 through
+the edge above. Everything else is proof from the archives side.
 
 ---
 
@@ -823,9 +902,10 @@ archives side.
 Owned by **NEWFRONT-703** for the archives-side proof; the surface is
 Project-settings/Agents owned and already exists:
 
-- route `/{ws}/settings/projects/{projectId}/automations` (also linked as
-  `/{ws}/projects/{projectId}/automations` through the settings tab), page
-  `AutomationsSettings` / `AutomationRows` in `features/automations`,
+- route `/{ws}/settings/projects/{projectId}/automations` (the only
+  canonical address; no `/{ws}/projects/{projectId}/automations` alias
+  exists), page `AutomationsSettings` / `AutomationRows` in
+  `features/automations`,
   owned by NEWFRONT-600 / NEWFRONT-582 (AGT-034..037);
 - the archive row is `ArchiveRow` in `AutomationRows.tsx` with the delay
   picker (`DelayPicker`) and `CustomMonthDialog`; `archiveTogglePatch`
@@ -920,11 +1000,13 @@ swallowed-error success path.
 
 ## 11. Permissions matrix (ARCH-028)
 
-Roles in new code: `ROLE_ADMIN` (project admin, 20), `ROLE_MEMBER`
-(15), `ROLE_GUEST` (5) — `apps/web_new/src/core/session/permissions.ts`.
-Workspace-level admins count as project admins where the project read says
-so. Editions: oss, cloud, desktop — the archives area has no edition
-split (§13); the matrix below applies identically.
+Roles in new code are read from the **project** membership:
+`ROLE_ADMIN` (project admin, 20), `ROLE_MEMBER` (15), `ROLE_GUEST` (5) —
+`apps/web_new/src/core/session/permissions.ts` and `canEditInProject`. The
+matrix is per project `member_role`; a workspace-level admin who is not a
+project admin is **not** treated as one by the gate (the project read is the
+only source). Editions: oss, cloud, desktop — the archives area has no
+edition split (§11); the matrix below applies identically.
 
 | Capability | Guest | Member (viewer of archived data, editor of live) | Admin |
 |---|---|---|---|
@@ -935,12 +1017,19 @@ split (§13); the matrix below applies identically.
 | Restore/delete archived work item (row + detail) | no | yes | yes |
 | Restore archived cycle / module | no | yes | yes |
 | Archive a live work item/cycle/module | no | yes | yes |
-| Archive/restore the whole project | no | no | restore: yes; archive: admin surfaces only |
+| Archive/restore the whole project | no | no | yes (admin only: archive on active projects, restore on archived ones) |
 | Auto-archive setting (view/edit) | no | no | yes (non-admins are refused the automations page, AGT-037) |
-| Empty-state "set automation" control | no | yes | yes |
+| Empty-state "set automation" control | disabled | disabled | enabled |
 
 Rendering rule: mutation entries are absent, not disabled, for roles that
-cannot use them. Guests and viewers can use every read affordance.
+cannot use them. Guests and viewers can use every read affordance. The one
+exception is the empty-state automation control, which is **present but
+disabled** for guests and plain members (§2.4, ARCH-033): it is an
+affordance, not a mutation entry, and the page it opens is admin-gated, so
+the control must not navigate a refused user. The project archive/restore
+action in new code is admin-only on every surface (the projects-list card
+menu gates both directions on project admin), so it is absent for members
+and guests.
 
 Guest-403 backend gap (NEWFRONT-240, in the PDASHOSS01 project): the old
 server refuses guest reads of
@@ -1010,7 +1099,8 @@ where shared components could add chrome:
 
 The cross-cutting rows are not a screen: they are invariants every slice
 must satisfy, proven by NEWFRONT-703 from the archives side on top of the
-surfaces built by 698–702. The owning per-row map is in §16.
+surfaces built by 698–702. The owning per-row map is in §21; the
+driver-method partition is in §16–§17.
 
 ---
 
@@ -1030,23 +1120,37 @@ Proposed row, appended — **do not renumber existing rows**:
 > automations settings (auto-archive); when items exist but filters hide
 > them all, a clear-filters action instead.
 >
-> - Who: any project member (the automations control only for members and
->   admins; guests see the explanation without it). Edition: all.
+> - Who: any project role sees the explanation. The automations control is
+>   **enabled for project admins and present-but-disabled for members and
+>   guests** (the automations page is admin-gated, AGT-037); the
+>   clear-filters action on the filtered-empty branch is enabled for every
+>   role. Edition: all.
 > - Old entry point: archived work-items tab with zero visible rows.
 > - API: `GET BASE/archived-issues/` (zero results); no write; the control
 >   navigates to `/{ws}/settings/projects/{projectId}/automations`.
-> - Acceptance: zero-archived → "nothing archived yet" explanation with a
->   control to the project's automations settings (not a create action);
->   filtered-empty → clear-filters action that restores the rows; the two
->   states never render together; the state appears after the skeleton
->   settles, never behind it.
-> - Parity test: to be written as an ARCH-tagged oracle scenario by the
->   gate's fix sub-issue (the ISS-071 scenario is Issues-row tagged and
->   cannot join the ARCH tag set without a new scenario).
+> - Acceptance: zero-archived → the "nothing archived yet" explanation
+>   plus a control to the project's automations settings (the canonical
+>   route, not a create action); the control is enabled only for project
+>   admins and is rendered disabled for members and guests.
+>   Filtered-empty → when archived rows exist and one or more applied
+>   conditions hide them all, a "no matching results" state offering a
+>   clear-filters action that restores the rows (enabled for every role
+>   that can filter; the old app disabled it for guests, an additive
+>   difference only). The two branches are mutually exclusive (no
+>   explanation when a filter is active; no clear-filters action when
+>   nothing is archived) and appear only after the skeleton settles.
+> - Parity test: to be written as an ARCH-tagged oracle scenario under
+>   `apps/web_new/e2e/parity/archives/` (the ISS-071 scenario is
+>   Issues-row tagged and cannot join the ARCH tag set without a new
+>   scenario). NEWFRONT-703 owns writing it; the area gate's fix sub-issue
+>   is the fallback if 703 lands before the row exists in the inventory.
 
 Owner: **NEWFRONT-700** (its description already says it composes the
 empty state and owns the automations route constant). NEWFRONT-703 proves
-it from the archives side together with ARCH-030. Before NEWFRONT-700
+it from the archives side together with ARCH-030. The two slices split the
+behavior cleanly: 700 builds both branches and the control's role state;
+703 owns the parity proof (the ARCH-tagged scenario) and the inventory row
+follow-through, and never renders the empty state itself. Before NEWFRONT-700
 starts, the row must be added to
 `parity/inventory/archives.md` (append after ARCH-032, Status
 `not started`) and an ARCH-tagged oracle scenario added under
@@ -1064,14 +1168,15 @@ the archives slices must reuse, not rebuild.
 
 ### ARCH-026 — project archive/restore
 Already implemented: `features/projects/api/mutations.ts`
-(`archiveProject`/`unarchiveProject`, favorites cleanup client refresh) —
+(`useArchiveProject`/`useRestoreProject`, favorites cleanup client refresh) —
 NEWFRONT-284; `ProjectArchiveDialog.tsx` + `selectArchiveBody` and its
-busy/failure handling — SHELL-037. Remaining for parity: the dialog warning
-must name cycles, modules and pages in addition to work items and search;
-prove success → projects list, favorites removal, restore wording and both
-failure paths from the archives side. NEWFRONT-703 does this by extending
-the shell component through the shell edge if needed. **Do not rebuild**
-the dialog or the mutations.
+busy/failure handling — NEWFRONT-284 (SHELL-037). Remaining for parity: the
+dialog warning must name cycles, modules and pages in addition to work
+items and search (a change NEWFRONT-284 makes to `selectArchiveBody`); prove
+success → projects list, favorites removal, the "in your projects" restore
+toast and both failure paths from the archives side. The settings danger
+zone entry is NEWFRONT-572's; NEWFRONT-284's card menu covers the list
+entry. **Do not rebuild** the dialog, the card menu or the mutations.
 
 ### ARCH-027 — auto-archive
 Already implemented: `features/automations` (`AutomationRows`,
@@ -1080,7 +1185,8 @@ PATCH `archive_in`) — NEWFRONT-600 / NEWFRONT-582, AGT-034..037; route
 `settings/projects/{projectId}/automations`. Remaining: nothing to build;
 NEWFRONT-703 proves toggle default/preset/custom/zero persistence, the
 non-admin refusal, and links the ARCH-033 empty-state control to this
-route. **Do not rebuild** the row or the settings page.
+route (`/{ws}/settings/projects/{projectId}/automations`). **Do not
+rebuild** the row or the settings page.
 
 ### Live-surface entry ownership (ARCH-013, 018, 023, 026, 027)
 
@@ -1092,10 +1198,10 @@ second entry, dialog or write path.
 
 | Row | Entry screen (live surface) | Owning rows | Owning slice | Archives slice |
 |---|---|---|---|---|
-| ARCH-013 archive a work item | live work-items list row/layout quick actions and the live work-item detail header actions, in the Issues area | ISS-061 (layout quick actions), ISS-134 (archive modal), ISS-142..147 (detail core/header) | NEWFRONT-636 (row menu, ISS-061), NEWFRONT-632 (modal, ISS-134), NEWFRONT-644 (detail actions) | NEWFRONT-700 consumes; extends copy/gating only through those edges |
+| ARCH-013 archive a work item | live work-items list row/layout quick actions and the live work-item detail header actions, in the Issues area | ISS-061 (layout quick actions), ISS-134 (archive modal), ISS-162 (detail "…" quick actions) | NEWFRONT-636 (row menu, ISS-061), NEWFRONT-632 (modal, ISS-134), NEWFRONT-644 (detail actions, ISS-162) | NEWFRONT-700 consumes; extends copy/gating only through those edges |
 | ARCH-018 archive a cycle | live cycles list row menu (`/{ws}/projects/{id}/cycles`) | CYC-024 (archive), CYC-028 (row menus), CYC-001..005 (rows) | NEWFRONT-711 (CYC-024/028), NEWFRONT-708 (rows) | NEWFRONT-701 proves dialog, gating, error handling; does not add an entry |
-| ARCH-023 archive a module | live modules list row menu (`/{ws}/projects/{id}/modules`) | MOD-026 (archive entry), MOD-027 (archived-modules screen), MOD-028 (restore) | NEWFRONT-82's MOD-026 slice when it exists; until then no entry may be added outside NEWFRONT-702 | NEWFRONT-702 composes the archived tab and proves the dialog; extends the live Modules component through the NEWFRONT-82 edge |
-| ARCH-026 archive/restore a project | projects list card/row menu and project quick actions; project settings danger zone | SHELL-037..039 (archive/restore dialog and list entries), project-settings danger zone (PSET) | NEWFRONT-284 (mutations), SHELL-037 slice; project-settings slice for the danger zone | NEWFRONT-703 extends the dialog warning copy and proves the flow; no second dialog |
+| ARCH-023 archive a module | live modules list row menu (`/{ws}/projects/{id}/modules`) | MOD-026 (archive entry), MOD-027 (archived-modules screen), MOD-028 (restore) | NEWFRONT-799 (Modules slice G, MOD-026-028) | NEWFRONT-702 is a consumer: composes the archived tab and proves the dialog; extends the NEWFRONT-799 component through the edge (`NEWFRONT-702 --blocked-by NEWFRONT-799`) |
+| ARCH-026 archive/restore a project | projects-list card menu; project settings danger zone (not yet mounted in new code) | SHELL-037..039 (archive/restore dialog and list entries; rows of NEWFRONT-284), PSET-005..009 (settings General tab) | NEWFRONT-284 (mutations + dialog + card menu); NEWFRONT-572 (settings danger zone) | NEWFRONT-703 requests the widened warning copy from NEWFRONT-284 (`--relates-to`) and proves the flow; waits on NEWFRONT-572 for the settings entry; no second dialog |
 | ARCH-027 auto-archive | project automations settings (`/{ws}/settings/projects/{id}/automations`) | AGT-034..036 (archive/close rows, delay picker, custom month); AGT-037 (admin gate) | NEWFRONT-600 (agents automations), NEWFRONT-582 (project-settings automations tab) | NEWFRONT-703 proves persistence and the admin refusal; links the ARCH-033 empty-state control; no second row |
 
 ### ARCH-028 — permissions
@@ -1181,14 +1287,25 @@ non-archives slice owns the entry point.
   edge to NEWFRONT-81.
 
 ### Modules epic (NEWFRONT-82)
-- MOD-026..028 own the live module archive entry, the archived-modules
-  screen from the Modules area, and the restore. The epic NEWFRONT-82 has
-  no child slices yet (checked at `cf72f6a06`): NEWFRONT-702 composes the
-  tab itself and, if a Modules-owned component lands first, extends it
-  through an edge to that specific slice instead of forking.
-  Archives tree consequence: when NEWFRONT-82 splits, relate NEWFRONT-702
-  to the MOD slices that own the live archive entry and restore
-  (MOD-026/027) and to any MOD row it reuses read-only.
+- MOD-026 (archive entry), MOD-027 (archived-modules screen from the
+  Modules area) and MOD-028 (restore) are owned by **NEWFRONT-799**
+  ("Modules slice G: archive/restore conversations and archived-modules
+  screen (MOD-026-028)"). NEWFRONT-799 is a single slice for all three
+  rows, so the live entry, the Modules-area archived screen and the restore
+  each have exactly one owner.
+- NEWFRONT-702 is a **consumer** of 799: it composes the archived-modules
+  content of the project's Archives tab, reuses 799's live entry/rows
+  read-only, and extends a 799 component only through the edge.
+- Specific entry owners (each exactly one slice):
+  live module archive entry → MOD-026, NEWFRONT-799;
+  live module restore → MOD-028, NEWFRONT-799;
+  archived-module row in the *Modules* area → MOD-027, NEWFRONT-799;
+  archived-modules content of the project Archives tab → NEWFRONT-702.
+- Archives tree consequence: relate **NEWFRONT-702 --blocked-by
+  NEWFRONT-799** (a specific slice edge). The epic-level edge to NEWFRONT-82
+  is not enough.
+- NEWFRONT-799 implements no `archives*` driver method (§16): the
+  Modules-area rows are proven by that area's own drivers.
 
 ### Project settings / Agents
 - Auto-archive row and automations page: NEWFRONT-600 (AGT-034..037) and
@@ -1207,14 +1324,17 @@ ownership is by **family** with one owner and one implementation each:
 | Shell | 698 | 26 / 23 | 699–703 |
 | Issues list, filters, display, peek entry | 699 | 20 / 20 | 700, 703 |
 | Issues row menus, mutations, detail, dialogs | 700 | 26 / 26 | 703 |
-| Cycles (incl. the cycle-peek family) | 701 | 46 / 44 | 702, 703 |
+| Cycles (incl. the cycle-peek family) | 701 | 45 / 43 | 702, 703 |
 | Modules | 702 | 32 / 32 | 703 |
 | Cross-cutting | 703 | 8 / 8 | — |
 | **Total** | | **157 / 152** | |
 
-Every method below appears in exactly one family. CYC and MOD slices do not
-add `archives*` methods for the archived tab; their own drivers stay in
-their areas' families. The gate proves only this surface.
+Every method below appears in exactly one family, and the six lists sum to
+**157** — the declared total. CYC-027 (NEWFRONT-711) and the Modules slices
+(NEWFRONT-799) do not add `archives*` methods for the archived tab; their
+own drivers stay in their areas' families. Relate the edges as the spec
+says so a CYC or MOD slice is not tempted to build a second archived tab
+against a second driver set. The gate proves only this surface.
 
 **Shell — NEWFRONT-698.** Tab strip and navigation, addresses, titles,
 badge, back control, skeleton slot, traffic spy, priming, and the three
@@ -1229,12 +1349,13 @@ interface methods reserved for riding slices:
   `archivesSelectArchivesTab`, `archivesSkeletonVisible`, `archivesSkeletonWasSeen`,
   `archivesTabClick`, `archivesTabNames`, `archivesTabOpen`, `archivesTrafficCounts`
 
-`archivesGoToProjectArchives`, `archivesPageTextPresent` and
-`archivesSelectArchivesTab` are declared and currently unused by the five
-archives specs; they stay in the interface for the shell/riding slices and
-must not be deleted. `archivesCyclesReload` is the cycles-page reload
-helper but is family-owned here so 701 and 703 share one implementation
-(the cycles spec calls it; 703's address scenario uses `reloadPage`).
+Declared but unused by the five archives specs, exactly matching §17's
+list — these three stay in the interface for shell/riding slices and must
+not be deleted: `archivesGoToProjectArchives`, `archivesPageTextPresent`,
+`archivesSelectArchivesTab`. `archivesCyclesReload` is the reload helper the
+cycles spec calls (`archives/cycles.spec.ts`); it is family-owned here so
+701 and 703 share one implementation, and it is counted in this family, not
+in Cycles. 703's address scenario uses the generic `reloadPage`.
 
 **Issues list, filters, display, peek entry — NEWFRONT-699.** The archived
 work-items list surface and the shared peek entry that 701/702/703 reuse:
@@ -1262,8 +1383,9 @@ dialog and delete confirmation:
   `archivesRowMenuClick`, `archivesRowMenuEntries`, `archivesRowMenuEntryTitles`,
   `archivesRowMenuOpenFirst`
 
-**Cycles — NEWFRONT-701.** The whole `archivesCycles*` family plus the
-cycle-peek family reused by 702:
+**Cycles — NEWFRONT-701.** The `archivesCycles*` family (minus the
+shell-owned `archivesCyclesReload`) plus the cycle-peek family reused by
+702:
 
   `archivesCloseCyclePeek`, `archivesCyclePeekName`, `archivesCyclePeekReadOnly`,
   `archivesCycleRowNames`, `archivesCyclesArchiveDialogCancel`,
@@ -1276,16 +1398,18 @@ cycle-peek family reused by 702:
   `archivesCyclesMenuEntries`, `archivesCyclesMenuPick`, `archivesCyclesNoMatchHint`,
   `archivesCyclesOpenLive`, `archivesCyclesOpenPeek`, `archivesCyclesOpenPeekLink`,
   `archivesCyclesOpenRowMenu`, `archivesCyclesOpenTabRaw`, `archivesCyclesOpenTabViaLive`,
-  `archivesCyclesPeekName`, `archivesCyclesPeekParam`, `archivesCyclesReload`,
+  `archivesCyclesPeekName`, `archivesCyclesPeekParam`,
   `archivesCyclesSearchClear`, `archivesCyclesSearchEscape`, `archivesCyclesSearchExpanded`,
   `archivesCyclesSearchFill`, `archivesCyclesSearchFocused`, `archivesCyclesSearchOpen`,
   `archivesCyclesSearchText`, `archivesCyclesSkeletonShownOnSlowFetchViaLive`,
   `archivesCyclesSkeletonVisible`, `archivesCyclesVisibleNames`, `archivesOpenCyclePeek`,
   `archivesOpenCyclesTab`, `archivesOpenLiveCycles`
 
-`archivesOpenLiveCycles` and `archivesCyclePeekName` are declared and
-currently unused; keep them (live-cycle navigation and peek-name helpers
-for the Cycles epic and 702's shared peek checks).
+Two methods in this family are declared and unused by the archives specs —
+matching §17's list — and are kept: `archivesCyclePeekName` (peek-name
+helper for 702's shared peek checks) and `archivesOpenLiveCycles` (live-cycle
+navigation helper for the Cycles area). They are not "reserved for the
+Cycles epic" as a second driver set; they live here, one implementation.
 
 **Modules — NEWFRONT-702.** Modules list, sort, search, filters, peek,
 live module menus, archive/restore dialog and lead filtering:
@@ -1320,15 +1444,16 @@ specs:
 
 - **157** `archives*` methods are declared in the interface;
 - **152** are exercised by at least one archives spec;
-- **5** are declared but unused: `archivesCyclePeekName`,
-  `archivesGoToProjectArchives`, `archivesOpenLiveCycles`,
-  `archivesPageTextPresent`, `archivesSelectArchivesTab`.
+- **5** are declared but unused, and this is the authoritative list:
+  `archivesCyclePeekName`, `archivesGoToProjectArchives`,
+  `archivesOpenLiveCycles`, `archivesPageTextPresent`,
+  `archivesSelectArchivesTab`. Where §16 mentions unused methods it names a
+  subset of these five; there is no other unused list.
 
 This corrects the issue text's "157 today": it is 157 declared / 152
-exercised. All declarations are `todo()` in `drivers/web-new.ts` (156 hit
-the `todo()` helper directly; `archivesDetailPendingStateOnHeldFetch`
-returns `todo(...)` from its body), so no archived driver behavior exists
-yet and every family above is built by its owner.
+exercised. All 157 declarations are `todo()` in `drivers/web-new.ts` (every
+one calls `todo(...)` directly from its body), so no archived driver
+behavior exists yet and every family above is built by its owner.
 
 Per spec file, the exercised method counts are: `work-items-list` 24,
 `work-items-mutations` 16, `cycles` 39, `modules` 43,
