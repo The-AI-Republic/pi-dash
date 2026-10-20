@@ -69,6 +69,7 @@ interface StubOptions {
   deleteStatus?: number;
   bytesOk?: boolean;
   limit?: number | undefined;
+  avatarUrl?: string | null;
   hangList?: boolean;
 }
 
@@ -111,7 +112,7 @@ function stubTransport(options: StubOptions = {}) {
             first_name: "Ada",
             last_name: "L",
             avatar: "",
-            avatar_url: null,
+            avatar_url: options.avatarUrl === undefined ? "https://api.test/avatar/ada.png" : options.avatarUrl,
             display_name: "Ada L",
             is_bot: false,
           },
@@ -348,5 +349,96 @@ describe("AttachmentsWidget delete", () => {
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't remove the attachment"));
+  });
+});
+
+describe("AttachmentsWidget drag surface", () => {
+  it("highlights the section while a file hovers and clears it on leave", async () => {
+    setup({ rows: [attachmentRow()] });
+    const section = await screen.findByRole("region", { name: "Attachments" });
+    fireEvent.dragEnter(section);
+    expect(section.className).toContain("outline-dashed");
+    fireEvent.dragOver(section);
+    expect(section.className).toContain("outline-dashed");
+    fireEvent.dragLeave(section);
+    expect(section.className).not.toContain("outline-dashed");
+  });
+
+  it("keeps the highlight when the leave event comes from a child", async () => {
+    setup({ rows: [attachmentRow()] });
+    const section = await screen.findByRole("region", { name: "Attachments" });
+    fireEvent.dragEnter(section);
+    const link = await screen.findByRole("link", { name: /plan\.png/ });
+    fireEvent.dragLeave(link);
+    expect(section.className).toContain("outline-dashed");
+    fireEvent.drop(section, { dataTransfer: { files: [] } });
+    expect(section.className).not.toContain("outline-dashed");
+  });
+
+  it("accepts a single dropped file", async () => {
+    const { byteCalls } = stubTransport();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    const section = await screen.findByRole("region", { name: "Attachments" });
+    fireEvent.drop(section, {
+      dataTransfer: { files: [new File([new Uint8Array(4)], "drop.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
+    expect(byteCalls).toEqual(["https://storage.test/upload"]);
+  });
+
+  it("takes no drag handlers for a read-only viewer", async () => {
+    setup({ rows: [attachmentRow()] }, { editable: false });
+    const section = await screen.findByRole("region", { name: "Attachments" });
+    fireEvent.dragEnter(section);
+    expect(section.className).not.toContain("outline-dashed");
+  });
+});
+
+describe("AttachmentsWidget fallbacks", () => {
+  it("renders a row without a link when it has no servable asset", async () => {
+    setup({ rows: [attachmentRow({ asset_url: null, asset: "" })] });
+    expect(await screen.findByText("plan.png")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /plan\.png/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Actions for plan\.png/ })).toBeInTheDocument();
+  });
+
+  it("draws initials when the uploader has no avatar image", async () => {
+    stubTransport({ rows: [attachmentRow()], avatarUrl: null });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    await screen.findByRole("link", { name: /plan\.png/ });
+    await waitFor(() => expect(screen.getByText("AL")).toBeInTheDocument());
+  });
+
+  it("drops the uploader avatar when the row records no user", async () => {
+    setup({ rows: [attachmentRow({ user: null })] });
+    expect(await screen.findByRole("link", { name: /plan\.png/ })).toBeInTheDocument();
+    expect(screen.queryByText("Ada L")).not.toBeInTheDocument();
+  });
+
+  it("closes the delete dialog without an action when it is dismissed", async () => {
+    const user = userEvent.setup();
+    const { calls } = stubTransport({ rows: [attachmentRow()] });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    await user.click(await screen.findByRole("button", { name: /Actions for plan\.png/ }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    await screen.findByRole("dialog", { name: "Delete attachment" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Delete attachment" })).not.toBeInTheDocument());
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
   });
 });

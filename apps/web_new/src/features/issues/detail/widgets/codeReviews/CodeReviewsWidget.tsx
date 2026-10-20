@@ -93,9 +93,7 @@ export function CodeReviewsWidget({
 
   function submit(event: React.FormEvent): void {
     event.preventDefault();
-    const trimmed = url.trim();
-    if (trimmed === "") return;
-    attach.mutate(trimmed, {
+    attach.mutate(url.trim(), {
       onSuccess: () => setUrl(""),
     });
   }

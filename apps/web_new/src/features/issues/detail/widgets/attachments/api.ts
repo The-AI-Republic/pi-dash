@@ -13,7 +13,6 @@ import {
   listIssueAttachments,
   uploadIssueAttachment,
   type ApiClient,
-  type AttachmentByteUpload,
   type IssueAttachment,
 } from "@pidash/api-client";
 
@@ -51,23 +50,13 @@ export function useIssueAttachments(workspaceSlug: string, projectId: string, is
 
 export interface UploadAttachmentInput {
   file: File;
-  /** Injectable byte leg; the app uses the contract default. */
-  uploadBytes?: AttachmentByteUpload;
 }
 
 /** Upload one file end to end, then refresh the list and the item. */
 export function useUploadAttachment(workspaceSlug: string, projectId: string, issueId: string) {
   const queryClient = useQueryClient();
   return useMutation<IssueAttachment, Error, UploadAttachmentInput>({
-    mutationFn: (input) =>
-      uploadIssueAttachment(
-        getAppClient(),
-        workspaceSlug,
-        projectId,
-        issueId,
-        input.file,
-        ...(input.uploadBytes === undefined ? [] : [input.uploadBytes])
-      ),
+    mutationFn: (input) => uploadIssueAttachment(getAppClient(), workspaceSlug, projectId, issueId, input.file),
     onSuccess: () => {
       notifySuccess(ATTACHMENT_UPLOADED_TITLE);
     },

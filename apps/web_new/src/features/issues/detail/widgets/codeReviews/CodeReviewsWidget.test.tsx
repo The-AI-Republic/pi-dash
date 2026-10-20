@@ -172,3 +172,60 @@ describe("CodeReviewsWidget", () => {
     expect(screen.queryByRole("link", { name: "octocat/hello#1" })).not.toBeInTheDocument();
   });
 });
+
+describe("CodeReviewsWidget detach outcomes", () => {
+  it("reports a successful detach and refreshes the list", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup({ rows: [reviewRow()] });
+    await user.click(await screen.findByRole("button", { name: "Detach octocat/hello#1" }));
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Code review detached"));
+    expect(calls.some((call) => call.method === "DELETE" && call.url.includes(`/code-reviews/${LINK_ONE}/`))).toBe(
+      true
+    );
+  });
+
+  it("leaves an all-whitespace link unsent", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup({ rows: [reviewRow()] });
+    const input = await screen.findByPlaceholderText("Paste a pull request or merge request URL");
+    await user.type(input, "   ");
+    expect(screen.getByRole("button", { name: "Attach" })).toBeDisabled();
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+  });
+});
+
+describe("CodeReviewsWidget detach in flight", () => {
+  it("disables the row control while its own detach is pending", async () => {
+    const user = userEvent.setup();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      const json = (status: number, body: unknown) => ({
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(body),
+      });
+      if (url.endsWith("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+      if (url.includes(`/issues/${ISSUE}/code-reviews/`)) {
+        if ((init.method ?? "GET") === "GET") return json(200, [reviewRow()]);
+        await gate;
+        return json(204, {});
+      }
+      throw new Error(`unexpected ${init.method ?? "GET"} ${url}`);
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CodeReviewsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    const detach = await screen.findByRole("button", { name: "Detach octocat/hello#1" });
+    await user.click(detach);
+    await waitFor(() => expect(detach).toBeDisabled());
+    release?.();
+    await waitFor(() => expect(detach).toBeEnabled());
+  });
+});

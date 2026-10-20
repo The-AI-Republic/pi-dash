@@ -29,6 +29,7 @@ import {
   exceedsSizeLimit,
   formatAttachmentSize,
   MULTI_FILE_NOTICE,
+  oneFileOf,
   oversizeNotice,
   type AttachmentKind,
 } from "./format.js";
@@ -61,6 +62,39 @@ function AttachmentIcon({ name }: { name: string }): React.ReactElement {
   return <Icon size={16} strokeWidth={1.5} aria-hidden="true" className="shrink-0 text-(--text-muted)" />;
 }
 
+/** Confirmation for the attachment the row menu selected. */
+function DeleteAttachmentDialog({
+  attachment,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  attachment: IssueAttachment;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: (attachment: IssueAttachment) => void;
+}): React.ReactElement {
+  return (
+    <Dialog
+      title="Delete attachment"
+      open
+      onOpenChange={onCancel}
+      actions={
+        <>
+          <Button onClick={onCancel}>Cancel</Button>
+          <Button variant="danger" loading={busy} onClick={() => onConfirm(attachment)}>
+            Delete
+          </Button>
+        </>
+      }
+    >
+      <p className="text-body text-(--text)">
+        {`The file ${attachmentBaseName(attachmentName(attachment))} will be permanently removed from this work item.`}
+      </p>
+    </Dialog>
+  );
+}
+
 export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, AttachmentsWidgetProps>(
   function AttachmentsWidget({ workspaceSlug, projectId, issueId, editable }, ref): React.ReactElement {
     const query = useIssueAttachments(workspaceSlug, projectId, issueId);
@@ -79,13 +113,11 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
     const members = new Map((directory.data ?? []).map((row) => [row.member.id, row.member]));
 
     function acceptFiles(files: readonly File[]): void {
-      if (files.length === 0) return;
-      if (files.length > 1) {
-        notifyError(MULTI_FILE_NOTICE);
+      const file = oneFileOf(files);
+      if (file === null) {
+        if (files.length > 0) notifyError(MULTI_FILE_NOTICE);
         return;
       }
-      const file = files[0];
-      if (file === undefined) return;
       if (exceedsSizeLimit(file.size, limit)) {
         notifyError(oversizeNotice(limit));
         return;
@@ -123,7 +155,7 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
           onDrop: (event: React.DragEvent) => {
             event.preventDefault();
             setDragging(false);
-            acceptFiles(Array.from(event.dataTransfer?.files ?? []));
+            acceptFiles(Array.from(event.dataTransfer.files));
           },
         }
       : {};
@@ -143,7 +175,7 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
           type="file"
           className="sr-only"
           aria-label="Choose an attachment"
-          onChange={(event) => acceptFiles(Array.from(event.target.files ?? []))}
+          onChange={(event) => acceptFiles(Array.from(event.target.files as FileList))}
         />
         {rows.length === 0 && pendingName === null ? null : (
           <>
@@ -256,36 +288,18 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
             ) : null}
           </>
         )}
-        <Dialog
-          title="Delete attachment"
-          open={confirming !== null}
-          onOpenChange={(open) => {
-            if (!open) setConfirming(null);
-          }}
-          actions={
-            <>
-              <Button onClick={() => setConfirming(null)}>Cancel</Button>
-              <Button
-                variant="danger"
-                loading={remove.isPending}
-                onClick={() => {
-                  if (confirming === null) return;
-                  remove.mutate(confirming.id, {
-                    onSettled: () => setConfirming(null),
-                  });
-                }}
-              >
-                Delete
-              </Button>
-            </>
-          }
-        >
-          <p className="text-body text-(--text)">
-            {confirming === null
-              ? ""
-              : `The file ${attachmentBaseName(attachmentName(confirming))} will be permanently removed from this work item.`}
-          </p>
-        </Dialog>
+        {confirming === null ? null : (
+          <DeleteAttachmentDialog
+            attachment={confirming}
+            busy={remove.isPending}
+            onCancel={() => setConfirming(null)}
+            onConfirm={(attachment) => {
+              remove.mutate(attachment.id, {
+                onSettled: () => setConfirming(null),
+              });
+            }}
+          />
+        )}
       </section>
     );
   }

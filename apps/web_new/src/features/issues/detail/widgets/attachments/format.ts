@@ -77,7 +77,7 @@ export function exceedsSizeLimit(size: number, limit: number): boolean {
 
 /** Files dropped or chosen beyond the first are never uploaded. */
 export function oneFileOf(files: readonly File[]): File | null {
-  return files.length === 1 ? (files[0] ?? null) : null;
+  return files.length === 1 ? (files[0] as File) : null;
 }
 
 /** Rejection notice for a multi-file drop. */
