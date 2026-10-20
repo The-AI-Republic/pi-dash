@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from pi_dash.assistant.runtime.llm import get_config, model_label, resolve_byok_model
 from pi_dash.assistant.runtime.mcp import build_toolsets
+from pi_dash.assistant.runtime.provider_errors import BYOK, classify_provider_error
 from pi_dash.assistant.runtime.title import generate_byok_title_for_user
 
 
@@ -61,6 +62,24 @@ def resolve_model_for_user(user):
     usable configuration.
     """
     return resolve_byok_model(user)
+
+
+def turn_error_for_user(user, exc: Exception):
+    """Return the error to show ``user`` for a failed model call, or ``None``.
+
+    Called by the turn runner for any failure that is not already a typed
+    :class:`~pi_dash.assistant.errors.AssistantError`. The returned
+    ``AssistantError`` supplies the stable ``code`` and the user-facing
+    ``detail``; ``None`` leaves the failure as a generic internal error.
+
+    CE: every connection is BYOK, so the wording assumes a key the user
+    supplied. The cloud overlay replaces this to choose by the user's selected
+    connection — typically ``classify_provider_error(exc, connection=GATEWAY,
+    model=...)`` for a gateway connection, swapping in its own codes and
+    details (a top-up link, a sign-in prompt) where it has better ones.
+    """
+    cfg = get_config(user)
+    return classify_provider_error(exc, connection=BYOK, model=cfg.model_name if cfg else "")
 
 
 def generate_title_for_user(user, description: str) -> str:
