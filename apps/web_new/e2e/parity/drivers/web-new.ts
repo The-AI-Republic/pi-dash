@@ -16418,7 +16418,19 @@ export class WebNewDriver implements ParityDriver {
   // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017). Throwing
   // --- stubs per the shared driver contract; the new app implements them later.
   async isCreateFeatureStepVisible(): Promise<boolean> {
-    return todo("isCreateFeatureStepVisible");
+    // Creation closes the dialog outright; the post-create feature step
+    // was removed upstream, so this read only has to prove its absence.
+    // An open dialog offering the step would carry its header and both
+    // exits; neither exists in this app.
+    const dialog = this.page.getByRole("dialog").filter({ has: this.page.getByPlaceholder("Project name") });
+    if ((await dialog.count()) === 0) return false;
+    if (!(await this.isShown(dialog.first()))) return false;
+    const step = dialog.first().getByRole("heading", { name: /create.*project/i });
+    if ((await step.count()) > 0 && (await this.isShown(step.first()))) return true;
+    const openProject = dialog.first().getByRole("link", { name: "Open project", exact: true });
+    if ((await openProject.count()) > 0 && (await this.isShown(openProject.first()))) return true;
+    const switches = dialog.first().getByRole("switch");
+    return (await switches.count()) > 0;
   }
   async isProjectRestrictionVisible(): Promise<boolean> {
     return todo("isProjectRestrictionVisible");
@@ -16773,91 +16785,323 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Project-settings feature flags oracle (NEWFRONT-393, PSET-043..047,
-  // --- PSET-061 slice). Throwing stubs per the shared driver contract; the
-  // --- new app implements them later.
+  // --- PSET-061 slice). The dedicated tabs mount the settings shell
+  // --- around one switch that reads the loaded project; the switch PATCHes
+  // --- one boolean and the answered row repaints the project navigation.
+  private static readonly projectFeaturesSwitchLabel = {
+    views: "Enable views",
+    cycles: "Enable cycles",
+    intake: "Enable intake",
+    modules: "Enable modules",
+    pages: "Enable pages",
+  } as const;
+
+  private projectFeatureSwitch(): Locator {
+    return this.page.getByRole("switch").first();
+  }
+
   async projectFeaturesOpenTab(
-    _workspaceSlug: string,
-    _projectId: string,
-    _tab: "views" | "cycles" | "intake" | "modules" | "pages"
+    workspaceSlug: string,
+    projectId: string,
+    tab: "views" | "cycles" | "intake" | "modules" | "pages"
   ): Promise<void> {
-    return todo("projectFeaturesOpenTab");
+    const label = WebNewDriver.projectFeaturesSwitchLabel[tab];
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/features/${tab}`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("switch", { name: label, exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByTestId("project-settings-denied")
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] project feature tab settled on neither the switch nor the denial view.");
   }
+
   async projectFeaturesSwitchOn(): Promise<boolean> {
-    return todo("projectFeaturesSwitchOn");
+    const control = this.projectFeatureSwitch();
+    if (!(await this.isShown(control))) return false;
+    return control.first().isChecked();
   }
+
   async projectFeaturesSwitchDisabled(): Promise<boolean> {
-    return todo("projectFeaturesSwitchDisabled");
+    const control = this.projectFeatureSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.first().isDisabled();
   }
+
   async projectFeaturesToggle(): Promise<void> {
-    return todo("projectFeaturesToggle");
+    // The answer is the project write itself, so wait for it instead of
+    // a fixed sleep. The waiter attaches before the click so a quick
+    // round-trip cannot slip past it.
+    const wrote = this.waitProjectPatch().then(
+      () => true,
+      () => false
+    );
+    await this.projectFeatureSwitch().first().click();
+    await wrote;
   }
+
   async projectFeaturesNotAuthorized(): Promise<boolean> {
-    return todo("projectFeaturesNotAuthorized");
+    return (await this.page.getByTestId("project-settings-denied").count()) > 0;
   }
+
   async projectFeaturesNavLinkVisible(
-    _workspaceSlug: string,
-    _projectId: string,
-    _area: "cycles" | "modules" | "views" | "pages" | "intake"
+    workspaceSlug: string,
+    projectId: string,
+    area: "cycles" | "modules" | "views" | "pages" | "intake"
   ): Promise<boolean> {
-    return todo("projectFeaturesNavLinkVisible");
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/issues`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // The rail may paint before the project collection fills its flags;
+    // poll until the link appears or the bounded wait runs out.
+    const link = this.page.locator(`a[href^="/${workspaceSlug}/projects/${projectId}/${area}"]`).first();
+    try {
+      await link.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // --- Project-settings automations oracle (NEWFRONT-393, PSET-053/054,
-  // --- PSET-061 slice). Throwing stubs per the shared driver contract; the
-  // --- new app implements them later.
-  async projectAutomationsOpenTab(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("projectAutomationsOpenTab");
+  // --- PSET-061 slice). The tab carries two rows: auto-archive then
+  // --- auto-close. Each switch writes the project; a switch on reveals a
+  // --- delay picker with presets plus a custom-months dialog, and the
+  // --- close row adds its cancelled-state picker.
+  private static readonly AUTOMATION_ARCHIVE_TITLE = "Auto-archive closed work items";
+  private static readonly AUTOMATION_CLOSE_TITLE = "Auto-close work items";
+  private static readonly DELAY_TRIGGER_NAME = /^(Archiving window|Closing window), \d+ months?$/;
+  private static readonly MONTH_RANGE_MESSAGE = "Select a month between 1 and 12.";
+
+  /** Resolves once a project PATCH answers (or the bounded wait lapses). */
+  private async waitProjectPatch(): Promise<void> {
+    await this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/.test(response.url()) &&
+          response.request().method() === "PATCH",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
   }
+
+  private automationSwitch(title: string): Locator {
+    return this.page.getByRole("switch", { name: title, exact: true }).first();
+  }
+
+  private delayTrigger(): Locator {
+    return this.page.getByRole("button", { name: WebNewDriver.DELAY_TRIGGER_NAME });
+  }
+
+  private closeStateTrigger(): Locator {
+    // The close row's last listbox trigger is its state picker; the delay
+    // picker before it and the archive row's controls stay out.
+    return this.page
+      .locator("[data-automation-row]")
+      .filter({ hasText: WebNewDriver.AUTOMATION_CLOSE_TITLE })
+      .locator('button[aria-haspopup="listbox"]')
+      .last();
+  }
+
+  async projectAutomationsOpenTab(workspaceSlug: string, projectId: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/automations`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.page
+          .getByRole("heading", { name: WebNewDriver.AUTOMATION_ARCHIVE_TITLE, exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByTestId("automations-not-authorized")
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] automations tab settled on neither the rows nor the denial view.");
+  }
+
   async projectAutomationsNotAuthorized(): Promise<boolean> {
-    return todo("projectAutomationsNotAuthorized");
+    return (await this.page.getByTestId("automations-not-authorized").count()) > 0;
   }
+
   async projectAutomationsArchiveOn(): Promise<boolean> {
-    return todo("projectAutomationsArchiveOn");
+    const control = this.automationSwitch(WebNewDriver.AUTOMATION_ARCHIVE_TITLE);
+    if (!(await this.isShown(control))) return false;
+    return control.isChecked();
   }
+
   async projectAutomationsCloseOn(): Promise<boolean> {
-    return todo("projectAutomationsCloseOn");
+    const control = this.automationSwitch(WebNewDriver.AUTOMATION_CLOSE_TITLE);
+    if (!(await this.isShown(control))) return false;
+    return control.isChecked();
   }
+
   async projectAutomationsToggleArchive(): Promise<void> {
-    return todo("projectAutomationsToggleArchive");
+    const wrote = this.waitProjectPatch();
+    await this.automationSwitch(WebNewDriver.AUTOMATION_ARCHIVE_TITLE).click();
+    await wrote;
   }
+
   async projectAutomationsToggleClose(): Promise<void> {
-    return todo("projectAutomationsToggleClose");
+    const wrote = this.waitProjectPatch();
+    await this.automationSwitch(WebNewDriver.AUTOMATION_CLOSE_TITLE).click();
+    await wrote;
   }
+
   async projectAutomationsLoaderVisible(): Promise<boolean> {
-    return todo("projectAutomationsLoaderVisible");
+    return (await this.page.locator('[role="status"]').count()) > 0;
   }
-  async projectAutomationsDelayDetailsFetch(_ms: number): Promise<void> {
-    return todo("projectAutomationsDelayDetailsFetch");
+
+  async projectAutomationsDelayDetailsFetch(ms: number): Promise<void> {
+    // Holds project reads so the NEWFRONT-397 probe can watch the loading
+    // window; writes pass straight through.
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/", hold);
   }
+
   async projectAutomationsDelayTriggerText(): Promise<string | null> {
-    return todo("projectAutomationsDelayTriggerText");
+    const trigger = this.delayTrigger();
+    if ((await trigger.count()) !== 1) return null;
+    const text = (
+      (await trigger
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
   }
+
   async projectAutomationsOpenDelayOptions(): Promise<void> {
-    return todo("projectAutomationsOpenDelayOptions");
+    await this.delayTrigger().first().click();
+    await this.page
+      .getByRole("button", { name: "Customize time range", exact: true })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async projectAutomationsDelayOptionLabels(): Promise<string[]> {
-    return todo("projectAutomationsDelayOptionLabels");
+    const options = this.page.getByRole("option");
+    const count = await options.count();
+    const labels: string[] = [];
+    for (let index = 0; index < count; index++) {
+      labels.push(
+        (
+          (await options
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    return labels;
   }
-  async projectAutomationsPickDelayOption(_label: string): Promise<void> {
-    return todo("projectAutomationsPickDelayOption");
+
+  async projectAutomationsPickDelayOption(label: string): Promise<void> {
+    const wrote = this.waitProjectPatch();
+    await this.page.getByRole("option", { name: label, exact: true }).click();
+    await wrote;
   }
+
   async projectAutomationsOpenCustomize(): Promise<void> {
-    return todo("projectAutomationsOpenCustomize");
+    await this.page.getByRole("button", { name: "Customize time range", exact: true }).first().click();
+    await this.page.getByPlaceholder("Enter Months").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async projectAutomationsMonthDialogOpen(): Promise<boolean> {
-    return todo("projectAutomationsMonthDialogOpen");
+    return this.isShown(this.page.getByPlaceholder("Enter Months"));
   }
-  async projectAutomationsMonthDialogSubmit(_months: string): Promise<void> {
-    return todo("projectAutomationsMonthDialogSubmit");
+
+  async projectAutomationsMonthDialogSubmit(months: string): Promise<void> {
+    const input = this.page.getByPlaceholder("Enter Months");
+    await input.fill(months);
+    // A refused value keeps the dialog open (native bounds stay silent);
+    // a valid one writes and closes. Race those outcomes so a silent
+    // refusal does not pay for a write that never comes.
+    const wrote = this.waitProjectPatch();
+    await this.page.getByRole("button", { name: "Submit", exact: true }).click();
+    await Promise.race([
+      wrote,
+      input.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).then(
+        () => true,
+        () => false
+      ),
+      this.page
+        .getByText(WebNewDriver.MONTH_RANGE_MESSAGE, { exact: true })
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
   }
+
   async projectAutomationsMonthDialogError(): Promise<string | null> {
-    return todo("projectAutomationsMonthDialogError");
+    const error = this.page.getByText(WebNewDriver.MONTH_RANGE_MESSAGE, { exact: true });
+    if ((await error.count()) === 0) return null;
+    const text = (
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text === "" ? null : text;
   }
+
   async projectAutomationsCloseStateText(): Promise<string | null> {
-    return todo("projectAutomationsCloseStateText");
+    if ((await this.automationSwitch(WebNewDriver.AUTOMATION_CLOSE_TITLE).count()) === 0) return null;
+    const trigger = this.closeStateTrigger();
+    if ((await trigger.count()) === 0) return null;
+    const text = ((await trigger.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
+
   async projectAutomationsCloseStateDisabled(): Promise<boolean> {
-    return todo("projectAutomationsCloseStateDisabled");
+    if ((await this.automationSwitch(WebNewDriver.AUTOMATION_CLOSE_TITLE).count()) === 0) return false;
+    const trigger = this.closeStateTrigger();
+    if ((await trigger.count()) === 0) return false;
+    return trigger.isDisabled();
   }
 
   // --- Project-settings github tab oracle (NEWFRONT-393, PSET-050..052,

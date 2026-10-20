@@ -39,13 +39,3 @@ export function parseDelayInput(raw: string): number | null {
   if (months < MIN_DELAY_MONTHS || months > MAX_DELAY_MONTHS) return null;
   return months;
 }
-
-/**
- * A numeric value with a fractional part is the only shape the dialog
- * refuses without a message, mirroring the number field's step check.
- * Everything else that parseDelayInput rejects gets the range message.
- */
-export function rejectsFractionOnly(raw: string): boolean {
-  const trimmed = raw.trim();
-  return trimmed !== "" && Number.isFinite(Number(trimmed)) && !Number.isInteger(Number(trimmed));
-}
