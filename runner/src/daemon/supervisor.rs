@@ -19,11 +19,12 @@ use crate::cloud::protocol::{
 use crate::config::schema::{
     AgentKind, Config, Credentials, DaemonConfig, RunnerConfig, canonical_for_compare,
 };
+use crate::daemon::activity_watchdog::{ActivityWatchdog, WatchdogAction, describe_threshold};
 use crate::daemon::drain_journal;
 use crate::daemon::run_event_mirror::RunEventMirror;
 use crate::daemon::runner_instance::RunnerInstance;
 use crate::daemon::runner_out::RunnerOut;
-use crate::daemon::state::StateHandle;
+use crate::daemon::state::{AgentHealthReport, StateHandle};
 use crate::history::index::{RunSummary, RunsIndex};
 use crate::history::jsonl::{HistoryEntry, HistoryWriter};
 use crate::ipc::protocol::{CurrentRunSummary, version_lt};
@@ -2926,6 +2927,11 @@ struct RunMetadata {
     model: Option<String>,
 }
 
+/// How often `pump_events` re-checks a pending approval. A run waiting on a
+/// human is never stalled, but the loop must notice the approval resolving even
+/// when no agent event follows it.
+const APPROVAL_WATCHDOG_RECHECK: Duration = Duration::from_secs(30);
+
 impl AssignWorker {
     async fn run_metadata(&self) -> RunMetadata {
         let snapshot = self.state.observability_snapshot().await;
@@ -3217,16 +3223,18 @@ impl AssignWorker {
         hist: &mut HistoryWriter,
         workspace_root: &std::path::Path,
     ) -> Result<Outcome> {
-        // Stall watchdog: if the agent emits no frames for this long AND
-        // no approval is in flight (a human-wait is legitimate silence),
-        // give up and fail the run. Without this, an unrecognised wait —
-        // e.g. a future codex protocol change — leaves the runner blocked
-        // on stdout and the cloud showing "running" indefinitely.
-        //
-        // Threshold is per-agent because Codex emits continuous token-
-        // count events while Claude can be silent for the full
-        // duration of a single tool call (see `AgentKind::stall_timeout`).
-        let stall_timeout = self.runner_config.agent.kind.stall_timeout();
+        // Passive-kill activity watchdog (see `daemon::activity_watchdog`).
+        // A quiet agent is never killed for being quiet a while: it may be
+        // inside a long tool call. Only after `unhealthy_after` with no agent
+        // event is the run reported unhealthy, and only after `kill_after` is
+        // it failed. Provable deaths (stdout closing, terminal agent errors,
+        // turn end) are handled in the event branch below, not here.
+        let mut watchdog = ActivityWatchdog::new(
+            self.state.agent_watchdog(),
+            tokio::time::Instant::now(),
+            Utc::now(),
+        );
+        self.publish_agent_health(&watchdog).await;
 
         let shutdown = self.state.shutdown_notified();
         let cancel = self.cancel.clone();
@@ -3234,13 +3242,26 @@ impl AssignWorker {
         let mut run_events = RunEventMirror::new(cursor.run_id());
         let mut token_meter = crate::daemon::observability::RunTokenMeter::default();
         loop {
-            // Re-evaluate at every loop entry: an approval that opened on
-            // the previous iteration disarms the watchdog; one that just
-            // resolved re-arms it.
-            let stall_deadline = if self.approvals.list_pending().await.is_empty() {
-                Some(tokio::time::Instant::now() + stall_timeout)
+            // Re-evaluate at every loop entry. A pending approval is a
+            // human-wait, which is legitimate silence: it keeps the activity
+            // clock fresh, so the clock restarts when the approval resolves.
+            // While one is pending the deadline is only a short re-check, so
+            // an approval answered with no agent event after it still re-arms
+            // the watchdog instead of leaving the loop without a deadline.
+            let awaiting_approval = !self.approvals.list_pending().await.is_empty();
+            let watchdog_deadline = if !awaiting_approval {
+                watchdog.next_deadline().0
             } else {
-                None
+                if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
+                    self.note_agent_health_change(
+                        &watchdog,
+                        cursor.run_id(),
+                        &mut run_events,
+                        hist,
+                    )
+                    .await;
+                }
+                tokio::time::Instant::now() + APPROVAL_WATCHDOG_RECHECK
             };
             let run_event_flush_deadline = run_events.flush_deadline();
             tokio::select! {
@@ -3298,6 +3319,12 @@ impl AssignWorker {
                         }).await?;
                         return Ok(Outcome { status_label: "failed".into() });
                     };
+                    if watchdog.on_activity(tokio::time::Instant::now(), Utc::now()) {
+                        self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
+                            .await;
+                    } else {
+                        self.publish_agent_health(&watchdog).await;
+                    }
                     for ev in events {
                         if let Some(out) = self
                             .handle_bridge_event(
@@ -3314,14 +3341,17 @@ impl AssignWorker {
                         }
                     }
                 }
-                _ = async {
-                    match stall_deadline {
-                        Some(d) => tokio::time::sleep_until(d).await,
-                        None => std::future::pending::<()>().await,
+                _ = tokio::time::sleep_until(watchdog_deadline) => {
+                    if awaiting_approval {
+                        continue;
                     }
-                } => {
-                    let mins = stall_timeout.as_secs() / 60;
-                    let base = format!("agent stalled for {mins} minutes without new agent events");
+                    if watchdog.on_deadline() == WatchdogAction::MarkUnhealthy {
+                        self.note_agent_health_change(&watchdog, cursor.run_id(), &mut run_events, hist)
+                            .await;
+                        continue;
+                    }
+                    let idle = describe_threshold(watchdog.kill_after());
+                    let base = format!("agent stalled: no agent events for {idle}");
                     let detail = self.build_failure_detail(&base, bridge).await;
                     run_events.flush_before_lifecycle(&self.out).await;
                     let metadata = self.run_metadata().await;
@@ -3343,6 +3373,59 @@ impl AssignWorker {
                 }
             }
         }
+    }
+
+    /// Stamp the watchdog's view of the run on the daemon state, which the
+    /// poll status reports to the cloud.
+    async fn publish_agent_health(&self, watchdog: &ActivityWatchdog) {
+        self.state
+            .set_agent_health(AgentHealthReport {
+                last_activity_at: Some(watchdog.last_activity_at()),
+                unhealthy: watchdog.is_unhealthy(),
+            })
+            .await;
+    }
+
+    /// Report a healthy ↔ unhealthy transition everywhere an operator looks:
+    /// the poll status (cloud health field), the run's event timeline, the
+    /// local run history and the daemon log. The run keeps going either way.
+    async fn note_agent_health_change(
+        &self,
+        watchdog: &ActivityWatchdog,
+        run_id: uuid::Uuid,
+        run_events: &mut RunEventMirror,
+        hist: &mut HistoryWriter,
+    ) {
+        self.publish_agent_health(watchdog).await;
+        let last_activity_at = watchdog.last_activity_at();
+        let (health, detail) = if watchdog.is_unhealthy() {
+            let idle = describe_threshold(watchdog.unhealthy_after());
+            tracing::warn!(
+                %run_id,
+                %last_activity_at,
+                "agent run unhealthy: no agent events for {idle}; leaving it running"
+            );
+            ("unhealthy", format!("no agent events for {idle}"))
+        } else {
+            tracing::info!(%run_id, "agent run healthy again: agent events resumed");
+            ("healthy", "agent events resumed".to_string())
+        };
+        run_events.push_content(
+            "runner/agent_health".to_string(),
+            serde_json::json!({
+                "schema": "runner_agent_health_v1",
+                "health": health,
+                "last_activity_at": last_activity_at.to_rfc3339(),
+            }),
+        );
+        run_events.flush(&self.out).await;
+        hist.append(&HistoryEntry::Lifecycle {
+            ts: Utc::now(),
+            state: health.into(),
+            detail: Some(detail),
+        })
+        .await
+        .ok();
     }
 
     /// Build a `RunFailed.detail` string that includes whatever local
