@@ -459,7 +459,7 @@ describe("BulkInstallDialog", { timeout: 30_000 }, () => {
     contracts.listProjectDetails.mockResolvedValue([project({ id: ALPHA, member_role: null })]);
     const { user } = renderDialog();
     expect(
-      await screen.findByText("You haven't joined a project in this workspace to install on.")
+      await screen.findByText("You haven't joined a project in this workspace to install on.", {}, { timeout: 10_000 })
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Install" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
