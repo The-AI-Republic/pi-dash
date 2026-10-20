@@ -832,6 +832,70 @@ def seed():
         defaults={"workspace": workspace, "project": project},
     )
     note("module-member", f"{archived_module.name}/{user.email}", membership_created)
+    # Analytics area (NEWFRONT-728): the created-vs-resolved read answers
+    # an empty series for a cycle or module with no usable start date, so
+    # the analytics contract suite needs both shapes. Dedicated January
+    # 2026 scopes give the daily buckets a known range; the shared undated
+    # cycle and module keep their shape for every other suite. The probe
+    # issue is filed in January so the workspace monthly series has a
+    # bucket of its own. All additive: get_or_create under contract names.
+    from datetime import date, datetime, timezone as dt_timezone  # noqa: E402
+
+    from pi_dash.db.models import CycleIssue, ModuleIssue  # noqa: E402
+
+    analytics_cycle, analytics_cycle_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract analytics cycle",
+        defaults={
+            "owned_by": user,
+            "start_date": datetime(2026, 1, 1, tzinfo=dt_timezone.utc),
+            "end_date": datetime(2026, 1, 31, tzinfo=dt_timezone.utc),
+        },
+    )
+    note("cycle", analytics_cycle.name, analytics_cycle_created)
+
+    analytics_module, analytics_module_created = Module.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract analytics module",
+        defaults={
+            "lead": user,
+            "start_date": date(2026, 1, 1),
+            "target_date": date(2026, 1, 31),
+        },
+    )
+    note("module", analytics_module.name, analytics_module_created)
+
+    analytics_issue, analytics_issue_created = Issue.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract analytics issue",
+        defaults={
+            "state": first_state,
+            "priority": "high",
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    Issue.objects.filter(pk=analytics_issue.pk).update(
+        created_by_id=user.id,
+        created_at=datetime(2026, 1, 15, 12, 0, tzinfo=dt_timezone.utc),
+    )
+    note("issue", analytics_issue.name, analytics_issue_created)
+
+    for scope_model, field, scope in (
+        (CycleIssue, "cycle", analytics_cycle),
+        (CycleIssue, "cycle", cycle),
+        (ModuleIssue, "module", analytics_module),
+        (ModuleIssue, "module", module),
+    ):
+        _, scope_created = scope_model.objects.get_or_create(
+            issue=analytics_issue,
+            **{field: scope},
+            defaults={"project": project, "workspace": workspace},
+        )
+        note(f"{field}-issue", f"{analytics_issue.name}/{scope.name}", scope_created)
 
     page, page_created = Page.objects.get_or_create(
         workspace=workspace,
