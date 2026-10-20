@@ -267,7 +267,21 @@ describe("EstimatesScreen", () => {
     expect(within(rows[0] as HTMLElement).getAllByRole("button")).toHaveLength(1);
     expect(within(rows[0] as HTMLElement).getByRole("button")).toHaveAccessibleName("Delete Active system");
     expect(screen.getByText(ESTIMATES_ARCHIVED_HEADING)).toBeInTheDocument();
+    const archived = screen.getByTestId("estimates-archived-section");
+    expect(within(archived).getByText(/older versions/)).toBeInTheDocument();
+    const reference = within(archived).getByRole("link", { name: "Learn more about estimates" });
+    expect(reference).toHaveAttribute("href", "https://github.com/The-AI-Republic/pi-dash#readme");
+    expect(reference).toHaveAttribute("target", "_blank");
+    expect(reference).toHaveAttribute("rel", "noreferrer");
     expect(within(rows[1] as HTMLElement).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("keeps the explainer and reference inside the archived section only", async () => {
+    stubApi({ systems: [systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true })] });
+    renderScreen();
+    await screen.findByText("Active system");
+    expect(screen.queryByTestId("estimates-archived-section")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Learn more about estimates" })).not.toBeInTheDocument();
   });
 
   it("writes the active id on enable and null on disable with notices", async () => {

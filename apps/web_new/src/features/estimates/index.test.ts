@@ -22,7 +22,9 @@ describe("estimates feature barrel", () => {
     expect(estimates.ESTIMATE_CREATED_TITLE).toBe("Estimate created");
     expect(estimates.ESTIMATE_ENABLED_TITLE).toBe("Estimates enabled");
     expect(estimates.ESTIMATE_TOGGLE_FAILED_BODY).toBe("The project’s estimate setting is unchanged.");
-    expect(estimates.ESTIMATE_DELETE_FAILED_BODY).toBe("The system is unchanged. Try again in a moment.");
+    expect(estimates.ESTIMATE_DELETE_FAILED_BODY).toBe(
+      "The delete did not finish. Reload the page to see whether the system is still listed."
+    );
     expect(estimates.ESTIMATE_DISABLED_BODY).toBe("Work items no longer offer estimate values.");
     expect(estimates.ESTIMATE_CREATE_FAILED_TITLE).toBe("Couldn’t create the estimate");
     expect(estimates.ESTIMATE_DELETED_BODY).toBe("The system and its values were removed.");

@@ -14846,6 +14846,10 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('[data-testid="estimates-archived-section"]').first();
   }
 
+  private estimatesArchivedLink(): Locator {
+    return this.estimatesArchivedSection().locator('[data-testid="estimates-archived-reference"]').first();
+  }
+
   async estimatesEnableSwitchOn(): Promise<boolean> {
     const control = this.estimatesToggleSwitch();
     if (!(await this.isShown(control))) return false;
@@ -14931,16 +14935,26 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesArchivedLinkHref(): Promise<string> {
-    // Superseded rows are read-only here: no destination is offered.
-    return "";
+    const link = this.estimatesArchivedLink();
+    if ((await link.count()) === 0) return "";
+    return (await link.getAttribute("href").catch(() => null)) ?? "";
   }
 
   async estimatesArchivedLinkTarget(): Promise<string> {
-    return "";
+    const link = this.estimatesArchivedLink();
+    if ((await link.count()) === 0) return "";
+    return (await link.getAttribute("target").catch(() => null)) ?? "";
   }
 
   async estimatesArchivedOpenLinkNewPage(): Promise<string> {
-    return "";
+    // The reference must leave the app: capture the page the link opens.
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: WebNewDriver.WAIT_MS }),
+      this.estimatesArchivedLink().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
   }
 
   async estimatesArchivedRowButtonCount(name: string): Promise<number> {

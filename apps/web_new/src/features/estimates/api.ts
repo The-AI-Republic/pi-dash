@@ -49,7 +49,11 @@ export const ESTIMATE_CREATE_FAILED_BODY = "The system was not saved. Check the 
 export const ESTIMATE_DELETED_TITLE = "Estimate deleted";
 export const ESTIMATE_DELETED_BODY = "The system and its values were removed.";
 export const ESTIMATE_DELETE_FAILED_TITLE = "Couldn’t delete the estimate";
-export const ESTIMATE_DELETE_FAILED_BODY = "The system is unchanged. Try again in a moment.";
+// An active system's delete is two writes: a failure can land after the
+// system is already gone, so the notice never promises the system is
+// still there.
+export const ESTIMATE_DELETE_FAILED_BODY =
+  "The delete did not finish. Reload the page to see whether the system is still listed.";
 export const ESTIMATE_ENABLED_TITLE = "Estimates enabled";
 export const ESTIMATE_ENABLED_BODY = "The project now offers its estimate values on work items.";
 export const ESTIMATE_DISABLED_TITLE = "Estimates disabled";

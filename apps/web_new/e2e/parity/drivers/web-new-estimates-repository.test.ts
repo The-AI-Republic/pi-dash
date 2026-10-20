@@ -17,6 +17,7 @@ interface StubLocator {
   isChecked?: () => Promise<boolean>;
   isDisabled?: () => Promise<boolean>;
   click?: (options?: unknown) => Promise<void>;
+  getAttribute?: (name: string) => Promise<string | null>;
   innerText?: () => Promise<string>;
   allInnerTexts?: () => Promise<string[]>;
   waitFor?: (options?: unknown) => Promise<unknown>;
@@ -311,6 +312,11 @@ describe("estimates active, switch and archived driver", () => {
   });
 
   it("lists archived systems read-only", async () => {
+    const reference = locator({
+      count: async () => 1,
+      getAttribute: async (name: string) =>
+        name === "href" ? "https://example.test/estimates" : name === "target" ? "_blank" : null,
+    });
     const page = pageOf({
       locator: (selector: string) => {
         if (selector === '[data-testid="estimates-archived-section"]') {
@@ -320,6 +326,7 @@ describe("estimates active, switch and archived driver", () => {
             locator: (inner: string) => {
               if (inner.endsWith("h4")) return locator({ allInnerTexts: async () => [" B ", "A"] });
               if (inner === "h3 + p") return locator({ count: async () => 1, innerText: async () => " Old systems " });
+              if (inner === '[data-testid="estimates-archived-reference"]') return reference;
               if (inner.includes("estimate-system-row"))
                 return locator({ getByRole: () => locator({ count: async () => 0 }) });
               return locator();
@@ -334,11 +341,62 @@ describe("estimates active, switch and archived driver", () => {
     expect(await driver.estimatesArchivedNames()).toEqual(["B", "A"]);
     expect(await driver.estimatesArchivedExplainerText()).toBe("Old systems");
     expect(await driver.estimatesArchivedRowButtonCount("A")).toBe(0);
-    expect(await driver.estimatesArchivedLinkHref()).toBe("");
+    expect(await driver.estimatesArchivedLinkHref()).toBe("https://example.test/estimates");
     expect(await new WebNewDriver(pageOf()).estimatesArchivedNames()).toEqual([]);
     expect(await new WebNewDriver(pageOf()).estimatesArchivedExplainerText()).toBe("");
+    expect(await driver.estimatesArchivedLinkTarget()).toBe("_blank");
+    expect(await new WebNewDriver(pageOf()).estimatesArchivedLinkHref()).toBe("");
+    expect(await new WebNewDriver(pageOf()).estimatesArchivedLinkTarget()).toBe("");
+  });
+
+  it("reads a blank or unreadable link attribute as absent", async () => {
+    const missingTarget = locator({
+      count: async () => 1,
+      getAttribute: async (name: string) => {
+        if (name === "href") throw new Error("detached");
+        return null;
+      },
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-archived-section"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: (inner: string) =>
+                inner === '[data-testid="estimates-archived-reference"]' ? missingTarget : locator(),
+            })
+          : locator(),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.estimatesArchivedLinkHref()).toBe("");
     expect(await driver.estimatesArchivedLinkTarget()).toBe("");
-    expect(await driver.estimatesArchivedOpenLinkNewPage()).toBe("");
+  });
+
+  it("clicks the archived reference and resolves the page it opens", async () => {
+    const click = vi.fn(async () => undefined);
+    const close = vi.fn(async () => undefined);
+    const waitForEvent = vi.fn(async () => ({ url: () => "https://example.test/estimates", close }));
+    const page = pageOf({
+      context: () => ({ waitForEvent }),
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-archived-section"]'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => true,
+              locator: (inner: string) =>
+                inner === '[data-testid="estimates-archived-reference"]'
+                  ? locator({ count: async () => 1, click })
+                  : locator(),
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).estimatesArchivedOpenLinkNewPage()).resolves.toBe(
+      "https://example.test/estimates"
+    );
+    expect(waitForEvent).toHaveBeenCalledWith("page", { timeout: 30_000 });
+    expect(click).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
   });
 });
 

@@ -162,9 +162,6 @@ describe("estimates data hooks", () => {
     const { calls } = stubApi();
     const { result } = renderHook(() => useCreateEstimate(WORKSPACE, PROJECT), { wrapper: wrapFn() });
     result.current.mutate({ name: "Points", type: "points", values: ["1", "2"] });
-    // eslint-disable-next-line no-console
-    console.log("AFTER", result.current.status, JSON.stringify(calls));
-    // eslint-disable-next-line no-console
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(calls.find((call) => call.method === "POST")?.body).toEqual({
       estimate: { name: "Points", type: "points", last_used: true },

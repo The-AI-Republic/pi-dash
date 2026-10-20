@@ -28,7 +28,10 @@ export const ESTIMATES_ENABLE_DESCRIPTION = "Work items can carry one value from
 export const ESTIMATES_ACTIVE_HEADING = "Estimates list";
 export const ESTIMATES_ARCHIVED_HEADING = "Archived estimates";
 export const ESTIMATES_ARCHIVED_DESCRIPTION =
-  "Systems you replaced. They stay readable so old values keep their meaning.";
+  "Estimates have gone through a change: these are the systems your older versions used. They stay readable so work items that carry their values keep their meaning.";
+/** Where the archived explainer points; it must leave the app. */
+export const ESTIMATES_ARCHIVED_REFERENCE_HREF = "https://github.com/The-AI-Republic/pi-dash#readme";
+export const ESTIMATES_ARCHIVED_REFERENCE_LABEL = "Learn more about estimates";
 export const ESTIMATES_EMPTY_TITLE = "No estimates yet";
 export const ESTIMATES_EMPTY_DESCRIPTION = "Create a measurement system to start tracking effort on work items.";
 export const ESTIMATES_ADD_LABEL = "Add estimate system";
@@ -175,7 +178,21 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
 
       {superseded.length > 0 ? (
         <div className="flex flex-col gap-(--space-4)" data-testid="estimates-archived-section">
-          <SectionHeading title={ESTIMATES_ARCHIVED_HEADING} description={ESTIMATES_ARCHIVED_DESCRIPTION} />
+          <div className="flex flex-col gap-(--space-1)">
+            <h3 className="text-h4 text-(--text)">{ESTIMATES_ARCHIVED_HEADING}</h3>
+            <p className="text-body text-(--text-muted)">
+              {ESTIMATES_ARCHIVED_DESCRIPTION}{" "}
+              <a
+                href={ESTIMATES_ARCHIVED_REFERENCE_HREF}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-(--accent) hover:underline"
+                data-testid="estimates-archived-reference"
+              >
+                {ESTIMATES_ARCHIVED_REFERENCE_LABEL}
+              </a>
+            </p>
+          </div>
           {superseded.map((system) => (
             <SystemRow key={system.id} system={system} manage={false} onDelete={undefined} />
           ))}
