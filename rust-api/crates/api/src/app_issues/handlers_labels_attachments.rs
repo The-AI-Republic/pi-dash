@@ -1452,7 +1452,7 @@ fn issue_activity_message(
     project_id: &Uuid,
     epoch: i64,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::with_capacity(9);
     kwargs.insert("type".to_owned(), Value::String(activity_type.to_owned()));
     kwargs.insert("requested_data".to_owned(), Value::Null);
@@ -1469,14 +1469,14 @@ fn issue_activity_message(
     kwargs.insert("epoch".to_owned(), Value::from(epoch));
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
 }
 
 /// `get_asset_object_metadata.delay(str(asset.id))` (`attachment.py:227`):
 /// one positional arg, no kwargs, fired only when `storage_metadata` is
 /// falsy (`None` or `{}`).
-fn asset_metadata_message(asset_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
-    pidash_jobs::celery::CeleryTaskMessage::new(
+fn asset_metadata_message(asset_id: &Uuid) -> pidash_jobs::TaskMessage {
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::space::GET_ASSET_OBJECT_METADATA_TASK,
         vec![Value::String(asset_id.to_string())],
         Map::new(),
@@ -1487,10 +1487,10 @@ fn asset_metadata_message(asset_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMes
 /// (`db/mixins.py:78`, via `Label.delete()`): three positional args,
 /// `using` stays a null kwarg — exactly as Python's
 /// `.delay(label, name, pk, using=using)` call sends it.
-fn label_soft_delete_message(pk: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn label_soft_delete_message(pk: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -1503,7 +1503,7 @@ fn label_soft_delete_message(pk: &Uuid) -> pidash_jobs::celery::CeleryTaskMessag
 
 /// Best-effort deferred publish (the space-intake precedent): without the
 /// queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

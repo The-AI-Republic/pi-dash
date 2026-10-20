@@ -2388,7 +2388,7 @@ mod tests {
         assert_eq!(route_for(&registry, ISSUE_ACTIVITY_TASK), Route::Local);
         assert_eq!(
             route_for(&registry, "pi_dash.bgtasks.issue_activities_task.nope"),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 }

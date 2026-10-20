@@ -160,8 +160,9 @@ use super::git_sync::{
     pidash_issue_url, retry_countdown_secs, safe_render, save_state_sql, strip_html_text,
     truncate_chars, GITHUB_API_BASE, PROVIDER_TIMEOUT_SECS,
 };
-use crate::celery::{format_eta, CeleryTaskMessage};
+use crate::pyformat::format_eta;
 use crate::queue::{enqueue, JobRow, NewJob};
+use crate::task_message::TaskMessage;
 use crate::worker::{HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -562,9 +563,9 @@ pub fn fanout_job(sync_id: &Uuid) -> NewJob {
 /// forward-path mapping arm for arm (that function is the runtime source
 /// of truth; this one exists so tests can assert the wire contract without
 /// a broker, following the `tasks_ticker::scan::fire_message` precedent).
-pub fn fanout_message(sync_id: &Uuid) -> CeleryTaskMessage {
+pub fn fanout_message(sync_id: &Uuid) -> TaskMessage {
     let (args, kwargs) = fanout_job(sync_id).into_message_parts();
-    CeleryTaskMessage::new(SYNC_ONE_REPO_TASK, args, kwargs)
+    TaskMessage::new(SYNC_ONE_REPO_TASK, args, kwargs)
 }
 
 /// One completion job (`post_completion_comment.delay(str(issue_sync.id))`,
@@ -2267,14 +2268,6 @@ mod tests {
             vec![json!("12345678-1234-5678-1234-567812345678")]
         );
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert!(message.eta.is_none());
-        let body = message.body();
-        assert_eq!(body[0], json!(["12345678-1234-5678-1234-567812345678"]));
-        assert_eq!(body[1], json!({}));
-        let headers = message.headers();
-        assert_eq!(headers["task"], SYNC_ONE_REPO_TASK);
-        assert_eq!(headers["lang"], "py");
 
         let comment = completion_job(&id);
         assert_eq!(comment.task, POST_COMPLETION_COMMENT_TASK);
@@ -2603,11 +2596,11 @@ mod tests {
     async fn registry_routes_owned_local_and_rest_to_python() {
         let mut registry = Registry::new();
         for task in TASK_NAMES {
-            assert_eq!(route_for(&registry, task), Route::PythonOwned);
+            assert_eq!(route_for(&registry, task), Route::Unknown);
         }
         assert_eq!(
             route_for(&registry, "pi_dash.bgtasks.other.task"),
-            Route::PythonOwned
+            Route::Unknown
         );
         let pool = PgPool::connect_lazy("postgres://localhost:1/unused")
             .expect("lazy pool builds without connecting");
@@ -2623,7 +2616,7 @@ mod tests {
         }
         assert_eq!(
             route_for(&registry, "pi_dash.bgtasks.other.task"),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 }

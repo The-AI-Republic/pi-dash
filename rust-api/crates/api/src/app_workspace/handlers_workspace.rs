@@ -540,7 +540,7 @@ pub(crate) async fn enqueue_task(
     args: Vec<Value>,
     kwargs: Map<String, Value>,
 ) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(task, args, kwargs);
+    let message = pidash_jobs::TaskMessage::new(task, args, kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

@@ -326,7 +326,6 @@ Every variable the image sets or the scripts and boot path consume:
 | `DATABASE_READ_REPLICA_URL` | (unset) | settings key only | read by Settings; pool wiring not yet connected |
 | `SECRET_KEY` | (ephemeral if unset) | serve, ops | session validation plus Fernet; keep stable across restarts |
 | `REDIS_URL` | (unset) | serve (degraded), clear_cache | throttle and signal cache; clear_cache full-clears |
-| `AMQP_URL` | (unset) | worker, register-instance | broker URL; worker requeues Python-owned jobs without it |
 | `AWS_REGION` | `AWS_DEFAULT_REGION`, then `us-east-1` | create and update bucket | region chain; set-wins even when empty |
 | `AWS_DEFAULT_REGION` | (unset) | create and update bucket | second in the region chain |
 | `AWS_ACCESS_KEY_ID` | (unset) | create and update bucket | S3 credentials |
@@ -342,8 +341,10 @@ Every variable the image sets or the scripts and boot path consume:
 
 Cutover flags (`PIDASH_DJANGO_UPSTREAM`, `PIDASH_RUST_*`) live in
 [Cutover edge](#cutover-edge-f-02); Django-side deploy vars
-(`RABBITMQ_*`, `CELERY_BROKER_URL`, `GUNICORN_WORKERS`) stay in
-`deployments/` (quarantine — see follow-ups).
+(`CELERY_BROKER_URL`, `GUNICORN_WORKERS`) stay in `deployments/`
+(quarantine — see follow-ups). The Rust worker holds no broker config:
+the job queue is Postgres (`rust_job_queue`) and there is no AMQP path
+(PIDASHCONV-1108).
 
 ### Replica wiring (F37-11)
 

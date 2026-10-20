@@ -135,9 +135,9 @@ pub fn run_turn_job(turn_id: &Uuid) -> NewJob {
 /// [`crate::worker::dispatch`]'s forward path arm for arm (that function
 /// is the runtime source of truth; this one exists so tests and the fire
 /// port can assert the wire contract broker-free).
-pub fn run_turn_message(turn_id: &Uuid) -> crate::celery::CeleryTaskMessage {
+pub fn run_turn_message(turn_id: &Uuid) -> crate::task_message::TaskMessage {
     let (args, kwargs) = run_turn_job(turn_id).into_message_parts();
-    crate::celery::CeleryTaskMessage::new(RUN_ASSISTANT_TURN_TASK, args, kwargs)
+    crate::task_message::TaskMessage::new(RUN_ASSISTANT_TURN_TASK, args, kwargs)
 }
 
 // ---------------------------------------------------------------------------
@@ -611,19 +611,6 @@ mod tests {
         assert_eq!(message.task, RUN_ASSISTANT_TURN_TASK);
         assert_eq!(message.args, vec![json!(turn.to_string())]);
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(
-            message.body(),
-            json!([
-                [turn.to_string()],
-                {},
-                {"callbacks": null, "errbacks": null, "chain": null, "chord": null}
-            ])
-        );
-        let headers = message.headers();
-        assert_eq!(headers["task"], RUN_ASSISTANT_TURN_TASK);
-        assert_eq!(headers["id"], message.id);
-        assert_eq!(headers["retries"], 0);
         assert_fire_contract();
     }
 

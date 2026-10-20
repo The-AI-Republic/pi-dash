@@ -785,7 +785,7 @@ mod tests {
         );
         assert_eq!(
             crate::worker::route_for(&registry, "pi_dash.bgtasks.logger_task.process_logs"),
-            crate::worker::Route::PythonOwned
+            crate::worker::Route::Unknown
         );
     }
 }

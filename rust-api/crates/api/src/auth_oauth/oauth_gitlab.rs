@@ -19,7 +19,7 @@
 //!   `pidash_db::auth_oauth::queries::account` (PIDASHCONV-327);
 //! - task emits: `user_activation_email` + `track_event` wire shapes in
 //!   `pidash_services::auth_session::tasks` (PIDASHCONV-405); the handlers
-//!   wrap them in `CeleryTaskMessage` + `queue::enqueue` exactly like
+//!   wrap them in `TaskMessage` + `queue::enqueue` exactly like
 //!   `api/src/space/intake.rs`.
 //!
 //! Vectors replay `rust-api/fixtures/auth_oauth/F10_initiate.golden.json`
@@ -1665,7 +1665,7 @@ async fn enqueue_activation_mail(
     current_site: &str,
     user_id: &str,
 ) -> Result<(), Denial> {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         pidash_services::auth_session::tasks::USER_ACTIVATION_EMAIL_TASK,
         vec![
             serde_json::Value::String(current_site.to_owned()),
@@ -1731,7 +1731,7 @@ async fn enqueue_track_event(
         "event_properties".to_owned(),
         serde_json::Value::Object(props),
     );
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
+    let message = pidash_jobs::TaskMessage::new(
         "pi_dash.bgtasks.event_tracking_task.track_event",
         Vec::new(),
         kwargs,

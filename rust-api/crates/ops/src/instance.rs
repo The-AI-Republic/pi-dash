@@ -154,7 +154,7 @@ async fn probe_latest_release() -> license_commands::LatestProbe {
 async fn register_instance(machine_signature: &str) -> Result<(), InstanceFailure> {
     use license_commands::ProcessEnv;
     let pool = connect_primary().await?;
-    let store = license_commands::PgInstanceStore::new(pool);
+    let store = license_commands::PgInstanceStore::new(pool.clone());
     let package = read_package_json();
     let latest = probe_latest_release().await;
     // Python prints the version lines as it resolves them, so they
@@ -188,18 +188,16 @@ async fn register_instance(machine_signature: &str) -> Result<(), InstanceFailur
     for line in &report.stdout {
         println!("{line}");
     }
-    // `instance_traces.delay()` always runs at the end (`:90`).
-    let config = pidash_jobs::AmqpConfig::from_env()
-        .map_err(|error| InstanceFailure::Fatal(error.to_string()))?;
-    let publisher = pidash_jobs::Publisher::connect(&config)
+    // `instance_traces.delay()` always runs at the end (`:90`); enqueue it
+    // onto the Postgres-backed queue.
+    let job = pidash_jobs::queue::NewJob::new(
+        report.delay.task.clone(),
+        serde_json::Value::Array(report.delay.args.clone()),
+        serde_json::Value::Object(report.delay.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(&pool, &job)
         .await
         .map_err(|error| InstanceFailure::Fatal(error.to_string()))?;
-    let published = publisher
-        .publish(&report.delay)
-        .await
-        .map_err(|error| InstanceFailure::Fatal(error.to_string()));
-    let _ = publisher.close().await;
-    published?;
     Ok(())
 }
 

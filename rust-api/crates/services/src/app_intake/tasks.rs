@@ -47,12 +47,12 @@
 //! (`task_routes` unset in `celery.py`).
 //!
 //! Crate-graph note: `pidash-jobs` depends on `pidash-services`, so this
-//! module cannot name `jobs::celery::CeleryTaskMessage` (that would be a
+//! module cannot name `jobs::celery::TaskMessage` (that would be a
 //! dependency cycle). It publishes the Celery-format body parts instead —
 //! [`IssueActivityEmit::task_name`] + [`IssueActivityEmit::kwargs`] (and
 //! the description-version twin) — and the handlers (PIDASHCONV-385/395,
 //! in the `api` crate which already depends on `pidash-jobs`) wrap them
-//! with `CeleryTaskMessage::new(task, vec![], kwargs)` plus
+//! with `TaskMessage::new(task, vec![], kwargs)` plus
 //! `queue::enqueue`, exactly like the space intake handlers do
 //! (`api/src/space/intake.rs:1260-1269`). The dump *text*
 //! (`requested_data`, `current_instance`, `updated_issue`, `origin`) is

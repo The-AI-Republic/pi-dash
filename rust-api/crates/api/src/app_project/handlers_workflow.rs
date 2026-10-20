@@ -3114,10 +3114,10 @@ async fn point_destroy(
 /// `.delay("db", model, pk, using=None)` for the soft-delete sweep (the
 /// sticky-handler precedent): three positionals, `using` as a null
 /// kwarg — matching the FX-APROJ-08 capture.
-fn soft_delete_message(model: &str, id: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(model: &str, id: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -3145,8 +3145,7 @@ async fn enqueue_soft_delete(pool: &sqlx::PgPool, model: &str, id: &uuid::Uuid) 
 /// Enqueue one `issue_activity.delay(…)` emit from point destroy (same
 /// best-effort shape: the emit never changes the response).
 async fn enqueue_issue_activity(pool: &sqlx::PgPool, emit: &t::IssueActivityEmit) {
-    let message =
-        pidash_jobs::celery::CeleryTaskMessage::new(emit.task_name(), vec![], emit.kwargs());
+    let message = pidash_jobs::TaskMessage::new(emit.task_name(), vec![], emit.kwargs());
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

@@ -5,9 +5,9 @@ name: rust-api-contract-tests-tasks-cleanup-rust
 # Django worker (and beat) stay STOPPED and the Rust worker
 # (`pidash-api worker`) serves rust_job_queue instead. The replay suite
 # (tasks_cleanup/test_rust_replay.py) seeds rust_job_queue rows with the
-# exact Celery v2 payloads and runs the same DB before/after assertions;
-# the 4 Python-owned export tasks assert observable AMQP forwarding while
-# the Django worker is stopped.
+# exact Celery v2 payloads and runs the same DB before/after assertions.
+# Every cleanup/export task is Rust-owned (PIDASHCONV-1108 removed the
+# AMQP hand-off), so no assertion observes broker forwarding.
 
 on:
   push:

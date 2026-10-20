@@ -82,7 +82,6 @@ pub struct Settings {
     pub assistant: AssistantSettings,
     pub loop_tuning: LoopSettings,
     pub storage: StorageSettings,
-    pub rabbitmq: RabbitSettings,
     pub runner: RunnerSettings,
     pub managed_runner: ManagedRunnerSettings,
     pub cloud_agent: CloudAgentSettings,
@@ -180,16 +179,6 @@ pub struct StorageSettings {
     pub region: String,
     pub endpoint_url: Option<String>,
     pub signed_url_expiration_secs: i64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct RabbitSettings {
-    pub host: String,
-    pub port: String,
-    pub user: String,
-    pub password: String,
-    pub vhost: String,
-    pub amqp_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1055,14 +1044,6 @@ impl Settings {
                 signed_url_expiration_secs: ctx
                     .req_int("SIGNED_URL_EXPIRATION", ConfigValue::from("3600"))?,
             },
-            rabbitmq: RabbitSettings {
-                host: ctx.req_string("RABBITMQ_HOST", "localhost")?,
-                port: ctx.req_string("RABBITMQ_PORT", "5672")?,
-                user: ctx.req_string("RABBITMQ_USER", "guest")?,
-                password: ctx.req_string("RABBITMQ_PASSWORD", "guest")?,
-                vhost: ctx.req_string("RABBITMQ_VHOST", "/")?,
-                amqp_url: ctx.opt_string("AMQP_URL")?,
-            },
             runner: RunnerSettings {
                 long_poll_interval_secs: {
                     let raw = ctx.req_int("LONG_POLL_INTERVAL_SECS", ConfigValue::from(25))?;
@@ -1323,12 +1304,6 @@ impl Settings {
             "MINIO_ENDPOINT_SSL",
             "SIGNED_URL_EXPIRATION",
             "WEB_URL",
-            "RABBITMQ_HOST",
-            "RABBITMQ_PORT",
-            "RABBITMQ_USER",
-            "RABBITMQ_PASSWORD",
-            "RABBITMQ_VHOST",
-            "AMQP_URL",
             "LONG_POLL_INTERVAL_SECS",
             "ACCESS_TOKEN_TTL_SECS",
             "RUNNER_OFFLINE_THRESHOLD_SECS",

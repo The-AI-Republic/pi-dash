@@ -517,7 +517,7 @@ fn request_origin(state: &AppState) -> Result<String, Denial> {
 
 /// Best-effort deferred publish (the space intake precedent): without
 /// the queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -1627,7 +1627,7 @@ fn model_activity_message(
     actor_id: &uuid::Uuid,
     slug: &str,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::with_capacity(7);
     kwargs.insert("model_name".to_owned(), Value::String("cycle".to_owned()));
     kwargs.insert("model_id".to_owned(), Value::String(model_id.to_string()));
@@ -1639,7 +1639,7 @@ fn model_activity_message(
     kwargs.insert("actor_id".to_owned(), Value::String(actor_id.to_string()));
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    pidash_jobs::celery::CeleryTaskMessage::new(MODEL_ACTIVITY_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(MODEL_ACTIVITY_TASK, vec![], kwargs)
 }
 
 /// One `recent_visited_task.delay(...)` enqueue (`base.py:468-474`).
@@ -1648,7 +1648,7 @@ fn recent_visited_message(
     user_id: &uuid::Uuid,
     project_id: &uuid::Uuid,
     slug: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::with_capacity(5);
     kwargs.insert("entity_name".to_owned(), Value::String("cycle".to_owned()));
     kwargs.insert(
@@ -1661,7 +1661,7 @@ fn recent_visited_message(
         Value::String(project_id.to_string()),
     );
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    pidash_jobs::celery::CeleryTaskMessage::new(RECENT_VISITED_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(RECENT_VISITED_TASK, vec![], kwargs)
 }
 
 /// One `issue_activity.delay(...)` enqueue (`base.py:483-499`): nine
@@ -1676,7 +1676,7 @@ fn issue_activity_message(
     project_id: &uuid::Uuid,
     epoch: i64,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let payload = serde_json::json!({
         "cycle_id": pk.to_string(),
         "cycle_name": cycle_name.to_owned(),
@@ -1701,17 +1701,17 @@ fn issue_activity_message(
     kwargs.insert("epoch".to_owned(), Value::from(epoch));
     kwargs.insert("notification".to_owned(), Value::Bool(true));
     kwargs.insert("origin".to_owned(), Value::String(origin.to_owned()));
-    pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
+    pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs)
 }
 
 /// `soft_delete_related_objects.delay("db", "cycle", pk, using=None)`
 /// (`db/mixins.py:78`): three positional args, `using` stays a null
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it.
-fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

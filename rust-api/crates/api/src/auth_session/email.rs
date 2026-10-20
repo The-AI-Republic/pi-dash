@@ -949,7 +949,7 @@ fn track_event_message(
     slug: &str,
     role: i16,
     joined_at: &str,
-) -> pidash_jobs::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     let call = queries_kernel::workspace_join_track_event_call(
         user_id,
         workspace_id,
@@ -957,24 +957,26 @@ fn track_event_message(
         i32::from(role),
         joined_at,
     );
-    pidash_jobs::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_webhooks::sinks::TRACK_EVENT_TASK,
         vec![],
         call.as_object().cloned().unwrap_or_default(),
     )
 }
 
-/// Publish one Celery message through the F-09 AMQP publisher.
-/// Broker errors propagate (500), like `.delay()` raising in Django
-/// (same pattern as the D-02 asset-metadata publish).
-async fn publish_message(message: &pidash_jobs::CeleryTaskMessage) -> Result<(), ()> {
-    let config = pidash_jobs::AmqpConfig::from_env().map_err(|_| ())?;
-    let publisher = pidash_jobs::Publisher::connect(&config)
-        .await
-        .map_err(|_| ())?;
-    let result = publisher.publish(message).await;
-    let _ = publisher.close().await;
-    result.map_err(|_| ())
+/// Enqueue one task message onto the Postgres-backed queue (`rust_job_queue`).
+/// Enqueue errors propagate (500), like `.delay()` raising in Django (the
+/// `auth_session::magic` precedent).
+async fn publish_message(
+    pool: &sqlx::PgPool,
+    message: &pidash_jobs::TaskMessage,
+) -> Result<(), sqlx::Error> {
+    let job = pidash_jobs::queue::NewJob::new(
+        message.task.clone(),
+        serde_json::Value::Array(message.args.clone()),
+        serde_json::Value::Object(message.kwargs.clone()),
+    );
+    pidash_jobs::queue::enqueue(pool, &job).await.map(|_| ())
 }
 
 /// `WorkspaceMember.objects.bulk_create(..., ignore_conflicts=True)`
@@ -1145,7 +1147,7 @@ async fn post_user_auth_workflow(
             *role,
             &chrono::Utc::now().to_rfc3339(),
         );
-        publish_message(&message)
+        publish_message(pool, &message)
             .await
             .map_err(|_| server_error())?;
     }
@@ -1373,12 +1375,16 @@ async fn issue_session(
 }
 
 /// `user_activation_email.delay(base_host, user.id)` on the inactive
-/// branch (`base.py:229-230`), through the F-09 publisher.
+/// branch (`base.py:229-230`), enqueued onto the Postgres-backed queue.
 // `Response` is axum's handle type, so boxing it buys no runtime win;
 // the crate-wide `Result<_, Response>` helper shape stays as-is.
 #[allow(clippy::result_large_err)]
-async fn publish_activation(current_site: &str, user_id: uuid::Uuid) -> Result<(), Response> {
-    let message = pidash_jobs::CeleryTaskMessage::new(
+async fn publish_activation(
+    pool: &sqlx::PgPool,
+    current_site: &str,
+    user_id: uuid::Uuid,
+) -> Result<(), Response> {
+    let message = pidash_jobs::TaskMessage::new(
         tasks_kernel::USER_ACTIVATION_EMAIL_TASK,
         vec![
             serde_json::Value::String(current_site.to_owned()),
@@ -1386,7 +1392,9 @@ async fn publish_activation(current_site: &str, user_id: uuid::Uuid) -> Result<(
         ],
         serde_json::Map::new(),
     );
-    publish_message(&message).await.map_err(|_| server_error())
+    publish_message(pool, &message)
+        .await
+        .map_err(|_| server_error())
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,7 +1612,7 @@ async fn run_authenticated(
     // before `:232-233`): a broker failure 500s with the user still
     // inactive, and the mail is re-sent on the next login.
     if !was_active {
-        publish_activation(activation_site, user_id).await?;
+        publish_activation(pool, activation_site, user_id).await?;
     }
     save_user_data(pool, user_id, user_agent, req.prov.ip.clone(), now)
         .await

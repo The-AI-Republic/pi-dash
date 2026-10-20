@@ -461,13 +461,10 @@ mod tests {
     #[test]
     fn dispatch_targets_route_through_registered_tasks() {
         let registry = Registry::new();
-        assert_eq!(
-            route_for(&registry, GIT_POST_COMMENT_TASK),
-            Route::PythonOwned
-        );
+        assert_eq!(route_for(&registry, GIT_POST_COMMENT_TASK), Route::Unknown);
         assert_eq!(
             route_for(&registry, GITHUB_POST_COMMENT_TASK),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 }

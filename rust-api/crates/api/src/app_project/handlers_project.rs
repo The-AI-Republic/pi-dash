@@ -4201,7 +4201,7 @@ async fn run_put_unique_validators(
 
 /// Best-effort deferred publish (the space intake precedent): without
 /// the queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -4219,7 +4219,7 @@ fn recent_visited_message(
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
     slug: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     use pidash_services::app_project::tasks::RecentVisitedEmit;
     let emit = RecentVisitedEmit {
         slug: slug.to_owned(),
@@ -4227,7 +4227,7 @@ fn recent_visited_message(
         user_id: user_id.to_string(),
     };
     let task = emit.task_name().to_owned();
-    pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], emit.kwargs())
+    pidash_jobs::TaskMessage::new(task, vec![], emit.kwargs())
 }
 
 /// One `model_activity.delay(...)` enqueue on create (`base.py:299-307`,
@@ -4239,7 +4239,7 @@ fn model_activity_create_message(
     actor_id: &uuid::Uuid,
     slug: &str,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     use pidash_services::app_project::tasks::model_activity_on_create;
     let emit = model_activity_on_create(
         project_id.to_string(),
@@ -4249,7 +4249,7 @@ fn model_activity_create_message(
         origin.to_owned(),
     );
     let task = emit.task_name().to_owned();
-    pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], emit.kwargs())
+    pidash_jobs::TaskMessage::new(task, vec![], emit.kwargs())
 }
 
 /// One `model_activity.delay(...)` enqueue on partial update
@@ -4263,7 +4263,7 @@ fn model_activity_update_message(
     actor_id: &uuid::Uuid,
     slug: &str,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     use pidash_services::app_project::tasks::model_activity_on_partial_update;
     let emit = model_activity_on_partial_update(
         project_id.to_string(),
@@ -4274,7 +4274,7 @@ fn model_activity_update_message(
         origin.to_owned(),
     );
     let task = emit.task_name().to_owned();
-    pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], emit.kwargs())
+    pidash_jobs::TaskMessage::new(task, vec![], emit.kwargs())
 }
 
 /// One `webhook_activity.delay(...)` enqueue on destroy (`base.py:407-415`,
@@ -4285,7 +4285,7 @@ fn webhook_destroy_message(
     actor_id: &uuid::Uuid,
     slug: &str,
     origin: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
+) -> pidash_jobs::TaskMessage {
     use pidash_services::app_project::tasks::WebhookActivityEmit;
     let emit = WebhookActivityEmit {
         actor_id: actor_id.to_string(),
@@ -4294,16 +4294,16 @@ fn webhook_destroy_message(
         event_id: project_id.to_string(),
     };
     let task = emit.task_name().to_owned();
-    pidash_jobs::celery::CeleryTaskMessage::new(task, vec![], emit.kwargs())
+    pidash_jobs::TaskMessage::new(task, vec![], emit.kwargs())
 }
 
 /// The `SoftDeleteModel.delete` emit (`db/mixins.py:72-76`):
 /// `.delay(app_label, model_name, pk, using=None)` — three string args,
 /// `{"using": null}` kwargs.
-fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::with_capacity(1);
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

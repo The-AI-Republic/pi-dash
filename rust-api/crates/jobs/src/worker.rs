@@ -2,16 +2,15 @@
 
 //! Worker loop: claim jobs, dispatch, settle.
 //!
-//! Dispatch is ownership-based (the coexistence rule from the inventory
-//! §7: per-task-group routing keeps rollback routing-only). A task name
-//! with a registered handler runs locally; any other name is still owned
-//! by the Python plane and is forwarded to RabbitMQ in Celery protocol v2
-//! ([`crate::amqp`]) so the existing workers execute it unchanged.
+//! Dispatch is ownership-based: a task name with a registered handler runs
+//! locally. The Rust worker owns every Pi Dash task (the standalone rule),
+//! so an unknown name is a loud error — the row parks as `failed` with
+//! `unknown task <name>` and a log line is emitted. Nothing is forwarded to
+//! a Python worker.
 //!
-//! Nothing is ever dropped: a failed forward or a handler failure
-//! requeues with [`DEFAULT_RETRY_DELAY_SECS`][crate::queue] unless the
-//! retry budget is spent, in which case the row parks as `failed` with
-//! its error text.
+//! A handler failure requeues with [`DEFAULT_RETRY_DELAY_SECS`][crate::queue]
+//! unless the retry budget is spent, in which case the row parks as `failed`
+//! with its error text.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -23,8 +22,6 @@ use chrono::Utc;
 use sqlx::postgres::PgListener;
 use tokio::sync::{watch, Semaphore};
 
-use crate::amqp::Publisher;
-use crate::celery::CeleryTaskMessage;
 use crate::queue::{self, JobRow, NewJob, DEFAULT_QUEUE, DEFAULT_RETRY_DELAY_SECS};
 
 /// What a handler decides for one claimed job.
@@ -39,6 +36,25 @@ pub enum Verdict {
     Fail { error: String },
 }
 
+/// How the worker resolves a task name. There is no Python plane any more
+/// (the standalone rule): a name is either owned by a local handler
+/// ([`Route::Local`]) or unknown ([`Route::Unknown`]), and an unknown name
+/// parks as failed — never forwarded to a broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Local,
+    Unknown,
+}
+
+/// Resolve `task` against `registry` (see [`Route`]).
+pub fn route_for(registry: &Registry, task: &str) -> Route {
+    if registry.owns(task) {
+        Route::Local
+    } else {
+        Route::Unknown
+    }
+}
+
 /// A handler error. Plain text: it becomes the row's `last_error`.
 pub type HandlerError = String;
 
@@ -49,9 +65,8 @@ pub type Handler = Arc<
         + Sync,
 >;
 
-/// The local handler table. Starts empty: at F-09 every task name is
-/// still Python-owned; the D-07…D-10 ports register handlers and flip
-/// ownership one task group at a time.
+/// The local handler table. Every Pi Dash task name has a registered
+/// handler; an unregistered name is a bug the worker parks loudly.
 #[derive(Clone, Default)]
 pub struct Registry {
     handlers: HashMap<String, Handler>,
@@ -73,24 +88,6 @@ impl Registry {
     /// True when a local handler owns `task`.
     pub fn owns(&self, task: &str) -> bool {
         self.handlers.contains_key(task)
-    }
-}
-
-/// Where one job goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-    /// A local handler owns the task name.
-    Local,
-    /// The Python plane still owns it: forward over AMQP.
-    PythonOwned,
-}
-
-/// Pure routing decision, unit-tested without a database.
-pub fn route_for(registry: &Registry, task: &str) -> Route {
-    if registry.owns(task) {
-        Route::Local
-    } else {
-        Route::PythonOwned
     }
 }
 
@@ -134,7 +131,6 @@ pub enum DispatchOutcome {
     Acked,
     Requeued,
     Parked,
-    Forwarded,
 }
 
 /// Worker tunables.
@@ -160,77 +156,26 @@ impl Default for WorkerConfig {
     }
 }
 
-/// Forward one Python-owned job to the broker. Without a publisher (no
-/// broker configured) the job requeues with the default delay: degraded
-/// coexistence, never a silent drop.
-async fn forward(
-    pool: &sqlx::PgPool,
-    publisher: Option<&Publisher>,
-    job: &JobRow,
-) -> Result<DispatchOutcome, sqlx::Error> {
-    let message = CeleryTaskMessage {
-        id: job.celery_id.clone(),
-        task: job.task.clone(),
-        args: match &job.args {
-            serde_json::Value::Array(items) => items.clone(),
-            other => vec![other.clone()],
-        },
-        kwargs: match &job.kwargs {
-            serde_json::Value::Object(map) => map.clone(),
-            _ => serde_json::Map::new(),
-        },
-        retries: 0,
-        eta: None,
-        expires: None,
-        timelimit: (None, None),
-        root_id: None,
-        parent_id: None,
-        origin: None,
-    };
-    match publisher {
-        None => {
-            queue::retry(
-                pool,
-                job.id,
-                Utc::now() + chrono::Duration::seconds(DEFAULT_RETRY_DELAY_SECS as i64),
-                "no AMQP publisher configured; requeued",
-            )
-            .await?;
-            Ok(DispatchOutcome::Requeued)
-        }
-        Some(publisher) => match publisher.publish(&message).await {
-            Ok(()) => {
-                queue::ack(pool, job.id).await?;
-                Ok(DispatchOutcome::Forwarded)
-            }
-            Err(error) => {
-                queue::retry(
-                    pool,
-                    job.id,
-                    Utc::now() + chrono::Duration::seconds(DEFAULT_RETRY_DELAY_SECS as i64),
-                    &format!("AMQP publish failed: {error}"),
-                )
-                .await?;
-                Ok(DispatchOutcome::Requeued)
-            }
-        },
-    }
-}
-
-/// Dispatch one claimed job: run the local handler or forward to Python,
-/// then settle the row.
+/// Dispatch one claimed job: run the local handler, then settle the row.
+///
+/// An unknown task name is a loud error: no handler owns it, so the row is
+/// parked as `failed` with `unknown task <name>` (and a log line). The Rust
+/// worker owns every Pi Dash task, so this only fires on a bug (an enqueue
+/// of a name with no registered handler).
 pub async fn dispatch(
     pool: &sqlx::PgPool,
     registry: &Registry,
-    publisher: Option<&Publisher>,
     job: JobRow,
 ) -> Result<DispatchOutcome, sqlx::Error> {
-    if route_for(registry, &job.task) == Route::PythonOwned {
-        return forward(pool, publisher, &job).await;
-    }
-    let handler = registry
-        .get(&job.task)
-        .expect("routed Local, so a handler exists");
+    let Some(handler) = registry.get(&job.task) else {
+        let error = format!("unknown task {}", job.task);
+        tracing::error!(
+            task = job.task.as_str(),
+            "unknown task; parking job as failed"
+        );
+        queue::fail(pool, job.id, &error).await?;
+        return Ok(DispatchOutcome::Parked);
+    };
     let verdict = handler(job.clone()).await;
     let (verdict, handler_error) = match verdict {
         Ok(verdict) => (verdict, None),
@@ -274,7 +219,6 @@ pub async fn dispatch(
 pub async fn run_worker(
     pool: sqlx::PgPool,
     registry: Registry,
-    publisher: Option<Publisher>,
     config: WorkerConfig,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -334,12 +278,9 @@ pub async fn run_worker(
                     .expect("semaphore never closes");
                 let pool = pool.clone();
                 let registry = registry.clone();
-                // One channel per publish (opened inside `publish`), shared
-                // connection: failure isolation without reconnecting.
-                let publisher = publisher.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    let outcome = dispatch(&pool, &registry, publisher.as_ref(), job).await;
+                    let outcome = dispatch(&pool, &registry, job).await;
                     if let Err(error) = outcome {
                         tracing::warn!(%error, "job settlement failed");
                     }
@@ -392,19 +333,10 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_tasks_route_to_python() {
-        let registry = Registry::new();
-        assert_eq!(
-            route_for(&registry, "pi_dash.bgtasks.loop.scan_due_targets"),
-            Route::PythonOwned
-        );
-    }
-
-    #[test]
-    fn registered_tasks_route_local() {
+    fn only_registered_tasks_are_owned() {
         let mut registry = Registry::new();
+        assert!(!registry.owns("pi_dash.bgtasks.loop.scan_due_targets"));
         registry.register("t", handler_for(Ok(Verdict::Ack)));
-        assert_eq!(route_for(&registry, "t"), Route::Local);
         assert!(registry.owns("t"));
         assert!(!registry.owns("other"));
     }
@@ -495,7 +427,6 @@ mod tests {
         let worker = tokio::spawn(run_worker(
             pool.clone(),
             registry,
-            None,
             WorkerConfig {
                 queue: queue.clone(),
                 owner: "notify-probe".to_owned(),

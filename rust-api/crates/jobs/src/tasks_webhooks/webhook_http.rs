@@ -31,7 +31,7 @@
 //!   `latin-1`/`iso-8859-1`, `windows-1252`; anything else falls back
 //!   like `LookupError`), `errors=replace`; no charset assumes UTF-8.
 //! * `str(response.headers)`: the `CaseInsensitiveDict` dict repr through
-//!   [`crate::celery::dict_repr`].
+//!   [`crate::pyformat::dict_repr`].
 //!
 //! Deliberate deviations (stack-specific, no byte-observable oracle
 //! input reaches them — see the contract tests):
@@ -563,7 +563,7 @@ pub fn headers_repr(headers: &[(String, String)]) -> String {
         .iter()
         .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
         .collect();
-    crate::celery::dict_repr(&map)
+    crate::pyformat::dict_repr(&map)
 }
 
 // ---------------------------------------------------------------------------

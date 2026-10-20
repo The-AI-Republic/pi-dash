@@ -65,8 +65,8 @@ use super::email_notification::{
     StackError, StackOutbox,
 };
 use super::mail_send::{self, OutgoingMail, SmtpSend};
-use crate::celery::CeleryTaskMessage;
 use crate::queue::{self, NewJob};
+use crate::task_message::TaskMessage;
 use pidash_db::config::ConfigValue;
 
 /// Run an async operation from a sync seam method. The worker runs on the
@@ -967,7 +967,7 @@ impl QueueStackOutbox {
 }
 
 /// `.delay()` as a queue row: task name plus wire args/kwargs verbatim.
-fn delay_job(message: &CeleryTaskMessage) -> NewJob {
+fn delay_job(message: &TaskMessage) -> NewJob {
     NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -976,7 +976,7 @@ fn delay_job(message: &CeleryTaskMessage) -> NewJob {
 }
 
 impl StackOutbox for QueueStackOutbox {
-    async fn delay_send(&self, message: CeleryTaskMessage) -> Result<(), StackError> {
+    async fn delay_send(&self, message: TaskMessage) -> Result<(), StackError> {
         queue::enqueue(&self.pool, &delay_job(&message))
             .await
             .map_err(|error| StackError::Outbox(error.to_string()))?;
@@ -1477,8 +1477,7 @@ mod tests {
     fn delay_job_carries_wire_parts_verbatim() {
         let mut kwargs = Map::new();
         kwargs.insert("issue_id".to_owned(), Value::Null);
-        let message =
-            CeleryTaskMessage::new("task.name", vec![Value::String("a".to_owned())], kwargs);
+        let message = TaskMessage::new("task.name", vec![Value::String("a".to_owned())], kwargs);
         let job = delay_job(&message);
         assert_eq!(job.task, "task.name");
         assert_eq!(job.args, json!(["a"]));

@@ -91,9 +91,10 @@ use pidash_types::integrations::{
 };
 
 use super::super::tasks_mail::mail_send::{django_escape, strip_tags};
-use crate::celery::{format_eta, CeleryTaskMessage};
+use crate::pyformat::format_eta;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
+use crate::task_message::TaskMessage;
 use crate::worker::{HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -754,9 +755,9 @@ pub fn fanout_job(binding_id: &Uuid) -> NewJob {
 /// forward-path mapping arm for arm (that function is the runtime source
 /// of truth; this one exists so tests can assert the wire contract without
 /// a broker, following the `tasks_ticker::scan::fire_message` precedent).
-pub fn fanout_message(binding_id: &Uuid) -> CeleryTaskMessage {
+pub fn fanout_message(binding_id: &Uuid) -> TaskMessage {
     let (args, kwargs) = fanout_job(binding_id).into_message_parts();
-    CeleryTaskMessage::new(SYNC_ONE_BINDING_TASK, args, kwargs)
+    TaskMessage::new(SYNC_ONE_BINDING_TASK, args, kwargs)
 }
 
 // ---------------------------------------------------------------------------
@@ -3034,15 +3035,6 @@ mod tests {
             vec![json!("12345678-1234-5678-1234-567812345678")]
         );
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert!(message.eta.is_none());
-        let body = message.body();
-        assert_eq!(body[0], json!(["12345678-1234-5678-1234-567812345678"]));
-        assert_eq!(body[1], json!({}));
-        // And the forward-path mapping the worker applies to such a row.
-        let headers = message.headers();
-        assert_eq!(headers["task"], SYNC_ONE_BINDING_TASK);
-        assert_eq!(headers["lang"], "py");
     }
 
     // Arity: exactly `args=[<id>]`, `kwargs={}`; anything else is a
@@ -3316,7 +3308,7 @@ mod tests {
         }
         assert_eq!(
             route_for(&registry, "pi_dash.bgtasks.github_sync_task.sync_one_repo"),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 }

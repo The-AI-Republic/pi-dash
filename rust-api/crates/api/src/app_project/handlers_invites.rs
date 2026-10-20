@@ -1502,10 +1502,10 @@ fn default_board_views_json() -> String {
 /// `soft_delete_related_objects.delay("db", <model>, pk, using=None)`
 /// (`db/mixins.py:77`): three positional args, `using` stays a null
 /// kwarg (FX-APROJ-08 live capture).
-fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -1518,7 +1518,7 @@ fn soft_delete_message(model: &str, pk: &uuid::Uuid) -> pidash_jobs::celery::Cel
 
 /// Best-effort deferred publish (the cycles precedent): without the
 /// queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -2069,8 +2069,8 @@ fn project_invitation_message(
     token: &str,
     current_site: &str,
     inviter: &str,
-) -> pidash_jobs::celery::CeleryTaskMessage {
-    pidash_jobs::celery::CeleryTaskMessage::new(
+) -> pidash_jobs::TaskMessage {
+    pidash_jobs::TaskMessage::new(
         PROJECT_INVITATION_TASK,
         vec![
             Value::String(email.to_owned()),

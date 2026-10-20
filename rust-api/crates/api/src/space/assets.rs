@@ -779,21 +779,15 @@ async fn patch_asset(
     // `is_uploaded = True` is set before the metadata check (`:145-148`).
     if !python_truthy(&asset.storage_metadata) {
         let message = pidash_jobs::space::asset_metadata_message(&asset.id.to_string());
-        let published = match pidash_jobs::AmqpConfig::from_env() {
-            Ok(config) => match pidash_jobs::Publisher::connect(&config).await {
-                Ok(publisher) => {
-                    let result = publisher.publish(&message).await;
-                    let _ = publisher.close().await;
-                    result
-                }
-                Err(error) => Err(error),
-            },
-            Err(error) => Err(error),
-        };
-        // `.delay()` raising on an unreachable broker answers the 500
-        // fallback in Django; same here.
-        if published.is_err() {
-            return server_error();
+        // Best-effort through the Postgres-backed queue (the space intake
+        // precedent): a failed enqueue warns and the response stands.
+        let job = pidash_jobs::queue::NewJob::new(
+            message.task.clone(),
+            Value::Array(message.args.clone()),
+            Value::Object(message.kwargs.clone()),
+        );
+        if let Err(error) = pidash_jobs::queue::enqueue(pool, &job).await {
+            tracing::warn!(%error, task = message.task.as_str(), "task enqueue failed; response stands");
         }
     }
     let Some(data) = parse_data(content_type(&headers).as_deref(), &body) else {

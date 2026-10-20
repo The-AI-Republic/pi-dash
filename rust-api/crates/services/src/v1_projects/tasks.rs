@@ -13,8 +13,8 @@
 //! `webhook_activity` names are pinned equal to D-33's
 //! `app_integrations::tasks` consts below). This crate cannot depend on
 //! `pidash-jobs`, so the handler side (PIDASHCONV-369) builds the
-//! `CeleryTaskMessage` / `NewJob` from these triples (the D-02
-//! `space::intake` precedent: `CeleryTaskMessage::new(task, vec![],
+//! `TaskMessage` / `NewJob` from these triples (the D-02
+//! `space::intake` precedent: `TaskMessage::new(task, vec![],
 //! kwargs)`, then `queue::NewJob::new(...)`, then
 //! `queue::enqueue_in(tx, ...)` inside the request transaction — the
 //! transactional-enqueue half of the Porting guide jobs-plane row).

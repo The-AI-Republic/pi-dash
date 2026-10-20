@@ -10,14 +10,17 @@ of ``DATABASE_URL``), asserting byte-identical stdout/stderr/exit codes
 plus matching DB rows. Outbound side effects go to local sinks: mail to
 ``_harness.sinks.SmtpSink``, the GitHub releases probe to
 ``FixedResponseStub`` (via ``PIDASH_RELEASES_URL``), and the
-``instance_traces`` Celery message to an exclusive AMQP tap queue bound
-to the ``celery`` exchange.
+``instance_traces`` side effect. That side effect differs by plane: the
+Django leg publishes a Celery message to an exclusive AMQP tap queue
+bound to the ``celery`` exchange, while the Rust leg (PIDASHCONV-1108
+removed its Celery/AMQP publisher) enqueues a row onto the Postgres
+``rust_job_queue``.
 
 Environment (CI provides all of these; see
 ``rust-api-contract-tests-ops-instance.yml``):
 
 - ``DATABASE_URL`` — migrated contract database (cloning template; never
-  written directly).
+  written directly by a test).
 - ``SECRET_KEY`` — Django secret (also used to decrypt seeded rows).
 - ``REDIS_URL`` — configured but never connected by these commands.
 - ``RABBITMQ_*``/``AMQP_URL`` — broker for the traces tap.
@@ -49,6 +52,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from _harness import db as dbh
+from _harness import rust_queue
 from _harness.sinks import FixedResponseStub, SmtpSink
 
 CONTRACT_ROOT = Path(__file__).resolve().parent.parent
@@ -180,6 +184,10 @@ def scratch_db():
     url = urllib.parse.urlunsplit(
         (parts.scheme, parts.netloc, f"/{name}", parts.query, parts.fragment)
     )
+    # No API/worker boot runs the Rust boot-time `ensure_schema` in this
+    # suite; `register-instance` enqueues onto `rust_job_queue`, so the
+    # clone needs the table (PIDASHCONV-1108 removed the AMQP publisher).
+    rust_queue.ensure_schema(url)
     yield url
     with dbh.connect(admin) as conn, conn.cursor() as cur:
         cur.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
@@ -194,12 +202,17 @@ def scratch_pair():
     with dbh.connect(admin) as conn, conn.cursor() as cur:
         for name in names:
             cur.execute(f'CREATE DATABASE "{name}" TEMPLATE "{template}"')
-    yield [
+    urls = [
         urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, f"/{name}", parts.query, parts.fragment)
         )
         for name in names
     ]
+    # `register-instance` enqueues onto `rust_job_queue` (no API/worker boot
+    # runs `ensure_schema` here): create it in each clone (PIDASHCONV-1108).
+    for url in urls:
+        rust_queue.ensure_schema(url)
+    yield urls
     with dbh.connect(admin) as conn, conn.cursor() as cur:
         for name in names:
             cur.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
@@ -550,6 +563,21 @@ def instance_row(db_url):
     )
 
 
+def rust_traces_rows(db_url):
+    """The Rust leg's observable enqueue: ``instance_traces`` on the queue.
+
+    PIDASHCONV-1108 removed the Celery/AMQP publisher, so
+    ``register-instance`` enqueues onto ``rust_job_queue`` (see
+    ``_harness/rust_queue.py``) instead of publishing to the broker.
+    """
+    return dbh.fetchall(
+        db_url,
+        "select task, args, kwargs from rust_job_queue where task = %s"
+        " order by id",
+        (TRACES_TASK,),
+    )
+
+
 def test_register_create_fallback_update_and_traces(scratch_pair):
     django_db, rust_db = scratch_pair
     # Same cwd on both legs: the package.json probe is cwd-relative.
@@ -587,12 +615,21 @@ def test_register_create_fallback_update_and_traces(scratch_pair):
             == rust2.stdout
             == b"Error checking for latest version\nInstance already registered\n"
         )
-        rust_msgs = drain()
-    assert len(django_msgs) >= 1 and len(rust_msgs) >= 1
-    for message in django_msgs + rust_msgs:
+        update_msgs = drain()
+    # The Django legs publish `instance_traces` to the broker; the Rust leg
+    # enqueues onto `rust_job_queue` instead (PIDASHCONV-1108 removed the
+    # Celery/AMQP publisher), so the tap sees only the Python-plane traffic.
+    assert len(django_msgs) >= 1 and len(update_msgs) >= 1
+    for message in django_msgs + update_msgs:
         assert message["args"] == []
         assert message["kwargs"] == {}
         assert message["content_type"] == "application/json"
+    rust_traces = rust_traces_rows(rust_db)
+    assert rust_traces, "register-instance enqueued no instance_traces row"
+    for row in rust_traces:
+        assert row["task"] == TRACES_TASK
+        assert row["args"] == []
+        assert row["kwargs"] == {}
     django_row, rust_row = instance_row(django_db), instance_row(rust_db)
     for key in (
         "instance_name",

@@ -53,15 +53,12 @@ Ownership split (mirrors the worker registry):
   object delete for truthy keys, PIDASHCONV-858), hard delete, ETA
   delay, redelivery, workspace_seed before/after. No skipped or
   weakened assertions.
-- One export task stays Python-owned: ``export_analytics_to_csv_email``
-  (dead — defined, never referenced; EXPECTED.md PROXIED row). The Rust
-  worker forwards it to AMQP, so its replay form asserts observable
-  forwarding — the ``rust_job_queue`` row is acked AND the broker
-  ``celery`` queue grows while the Django worker is stopped — instead
-  of local DB effects. ``issue_export_task`` and ``analytic_export_task``
-  flipped to Rust-owned in PIDASHCONV-1106 (``oss_worker::
-  register_oss_handlers``) and are replayed against captures by the
-  ``exports/`` suite, so they are not forwarding cases here.
+- Export tasks are Rust-owned: ``delete_old_s3_link`` (PIDASHCONV-858),
+  ``issue_export_task`` / ``analytic_export_task`` (PIDASHCONV-1106,
+  replayed against captures by the ``exports/`` suite).
+  ``export_analytics_to_csv_email`` is dead (defined, never referenced)
+  and was dropped from the parity inventory by PIDASHCONV-1108, so it
+  is no longer published or asserted on.
 """
 
 import json as _json
@@ -71,20 +68,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from psycopg.rows import dict_row
 
-from _harness import broker_probe, rust_queue, taskspec as _taskspec
+from _harness import rust_queue, taskspec as _taskspec
 from _harness import s3 as s3_helpers
 from _harness import seed as seed_helpers
 from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
-
-# The still-Python-owned export tasks (`delete_old_s3_link` flipped to
-# Rust in PIDASHCONV-858; `issue_export_task` / `analytic_export_task`
-# flipped to Rust in PIDASHCONV-1106 and replay locally in exports/).
-EXPORT_TASKS = [
-    f"{M}.analytic_plot_export.export_analytics_to_csv_email",
-]
-
 
 def test_rust_worker_liveness(db_conn, broker_url):
     """Rust inspect-equivalent: a no-op cleanup job is consumed from Postgres.
@@ -1518,45 +1507,6 @@ def test_rust_storage_aware_tasks_consumed_without_crash(db_conn, broker_url):
     rust_queue.wait_for_queue_drain(
         baseline=baseline, what="storage-aware D-09 tasks consumed by rust worker"
     )
-
-
-def test_rust_exports_forward_to_python(db_conn, broker_url):
-    """Export parity: the still-Python-owned export task forwards, observably.
-
-    ``export_analytics_to_csv_email`` is the only export name the Rust
-    worker does not own (``register_oss_handlers`` deliberately omits it;
-    it is dead Python — defined, never referenced — so it keeps the
-    EXPECTED.md PROXIED row). Its job's ``rust_job_queue`` row must be
-    acked via the forward path, AND its Celery v2 message must arrive on
-    the broker ``celery`` queue — which grows because the Django worker
-    is stopped.
-
-    ``issue_export_task`` and ``analytic_export_task`` are Rust-owned as
-    of PIDASHCONV-1106, so they are not forwarding cases: their local
-    execution is replayed against the committed captures by the
-    ``exports/`` suite, and their ``Route::Local`` ownership is pinned by
-    the ``oss_worker`` registry test.
-    """
-    probe_args = {
-        EXPORT_TASKS[0]: (([{}], ["H"], ["k"], "probe@example.com", "slug"), {}),
-    }
-    baseline = broker_probe.queue_depth()
-    celery_ids = []
-    for task_name in EXPORT_TASKS:
-        args, kwargs = probe_args[task_name]
-        celery_ids.append(rust_queue.publish(task_name, args=list(args), kwargs=kwargs))
-    for celery_id, task_name in zip(celery_ids, EXPORT_TASKS):
-        rust_queue.wait_for_settled(celery_id, what=f"{task_name} forwarded")
-
-    def _forwarded_depth():
-        depth = broker_probe.queue_depth()
-        return depth if depth >= baseline + len(EXPORT_TASKS) else None
-
-    arrived = wait_for(
-        _forwarded_depth,
-        what="export messages arrived on broker for python plane",
-    )
-    assert arrived >= baseline + len(EXPORT_TASKS)
 
 
 def _soft_deleted(conn, table: str, pk) -> bool:

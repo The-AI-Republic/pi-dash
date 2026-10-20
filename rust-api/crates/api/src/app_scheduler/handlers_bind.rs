@@ -2717,10 +2717,10 @@ async fn write_next_run_at(
 /// `.delay(label, name, pk, using=using)` call sends it with `using=None`.
 /// `SchedulerBinding` lives in the `db` app (`db/models/scheduler.py`),
 /// so the label is `"db"` and the model is `"schedulerbinding"`.
-fn soft_delete_message(binding_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(binding_id: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

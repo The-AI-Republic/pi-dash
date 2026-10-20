@@ -9,19 +9,22 @@ Executable F37-05 (``repair_sql.sql`` + ``repair.rows.json``) and F37-06
 with raw SQL (no Django imports), drives ``manage.py <command>`` (the
 Django oracle) and ``pidash-api ops <command>`` (the Rust port) as
 subprocesses, and asserts byte-identical stdout/stderr/exit plus
-equivalent DB and broker effects.
+equivalent effects (the Django leg publishes to the broker; since
+PIDASHCONV-1108 the Rust leg enqueues onto ``rust_job_queue``).
 
 Run from ``rust-api/contract-tests`` (the binary must be built)::
 
     export DATABASE_URL=postgresql://...  # your own scratch database
-    export CELERY_BROKER_URL=amqp://...   # broker for the sync_* tests
+    export CELERY_BROKER_URL=amqp://...   # broker for the Django sync_* leg
     export DJANGO_SETTINGS_MODULE=pi_dash.settings.local
     cargo build --bin pidash-api  # in rust-api/
     pytest -p no:django ops/test_repair.py -v
 
 ``PIDASH_MANAGE_PY`` / ``PIDASH_RUST_BIN`` override the driver paths.
 No worker may consume the broker ``celery`` queue while the sync tests
-run (the CI job starts none).
+run (the CI job starts none). The Rust leg needs no broker: it inserts
+into ``rust_job_queue``, which this suite ensures exists (no server
+boots to create it).
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from pathlib import Path
 import pytest
 from psycopg.types.json import Json
 
-from _harness import config, db
+from _harness import config, db, rust_queue
 from _harness.broker_probe import collect_matching
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -84,6 +87,17 @@ def run_rust(*args: str, stdin_text: str = "") -> subprocess.CompletedProcess:
 
 def database_url() -> str:
     return config.database_url()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _rust_job_queue_schema():
+    """Create ``rust_job_queue`` once (no API/worker boot runs it here).
+
+    The sync commands enqueue onto the Postgres queue (PIDASHCONV-1108
+    removed the AMQP publisher), so the table must exist before they run.
+    """
+    if os.environ.get(config.DATABASE_URL):
+        rust_queue.ensure_schema()
 
 
 def tag(prefix: str) -> str:
@@ -751,6 +765,22 @@ def discard_stale_constant_markers(values: set[str]) -> None:
             queue.close()
 
 
+def _latest_sync_row(marker: str) -> dict:
+    """The newest ``rust_job_queue`` row for this run's raw batch_size marker.
+
+    PIDASHCONV-1108 removed the Celery/AMQP publisher, so the Rust ``ops``
+    command enqueues straight onto the Postgres queue instead of publishing
+    a protocol-v2 message; this is the Rust leg's observable effect.
+    """
+    return db.fetchone(
+        database_url(),
+        """SELECT task, args, kwargs FROM rust_job_queue
+            WHERE kwargs ->> 'batch_size' = %s
+            ORDER BY id DESC LIMIT 1""",
+        (marker,),
+    )
+
+
 @pytest.mark.parametrize(
     ("command", "task", "done"),
     [
@@ -765,30 +795,46 @@ def discard_stale_constant_markers(values: set[str]) -> None:
 def test_sync_publishes_delay_payload(
     command: str, task: str, done: bytes
 ) -> None:
-    for run in (run_django, run_rust):
-        marker = f"ops-{uuid.uuid4().hex[:12]}"
-        proc = run(command, stdin_text=f"{marker}\n300\n")
-        assert proc.returncode == 0
-        assert proc.stdout == (
-            b"Enter the batch size: Enter the batch countdown: " + done
-        )
-        assert proc.stderr == b""
-        found = drain_marker(marker)
-        assert len(found) == 1
-        headers, payload = found[0]
-        assert headers["task"] == task
-        assert payload[0] == []
-        # Ported bug: batch_size stays the raw input string.
-        assert payload[1] == {"batch_size": marker, "countdown": 300}
-        assert list(payload[1].keys()) == ["batch_size", "countdown"]
-        assert isinstance(payload[1]["batch_size"], str)
-        assert isinstance(payload[1]["countdown"], int)
-        assert headers["eta"] is None
-        assert headers["retries"] == 0
-        assert headers["argsrepr"] == "()"
-        assert headers["kwargsrepr"] == (
-            "{'batch_size': '%s', 'countdown': 300}" % marker
-        )
+    # Django oracle: ``.delay(...)`` lands on the broker.
+    marker = f"ops-{uuid.uuid4().hex[:12]}"
+    proc = run_django(command, stdin_text=f"{marker}\n300\n")
+    assert proc.returncode == 0
+    assert proc.stdout == (
+        b"Enter the batch size: Enter the batch countdown: " + done
+    )
+    assert proc.stderr == b""
+    found = drain_marker(marker)
+    assert len(found) == 1
+    headers, payload = found[0]
+    assert headers["task"] == task
+    assert payload[0] == []
+    # Ported bug: batch_size stays the raw input string.
+    assert payload[1] == {"batch_size": marker, "countdown": 300}
+    assert list(payload[1].keys()) == ["batch_size", "countdown"]
+    assert isinstance(payload[1]["batch_size"], str)
+    assert isinstance(payload[1]["countdown"], int)
+    assert headers["eta"] is None
+    assert headers["retries"] == 0
+    assert headers["argsrepr"] == "()"
+    assert headers["kwargsrepr"] == (
+        "{'batch_size': '%s', 'countdown': 300}" % marker
+    )
+
+    # Rust port: the same call lands on ``rust_job_queue`` (no broker).
+    marker = f"ops-{uuid.uuid4().hex[:12]}"
+    proc = run_rust(command, stdin_text=f"{marker}\n300\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == (
+        b"Enter the batch size: Enter the batch countdown: " + done
+    )
+    assert proc.stderr == b""
+    row = _latest_sync_row(marker)
+    assert row is not None, f"{command} enqueued no rust_job_queue row"
+    assert row["task"] == task
+    assert row["args"] == []
+    assert row["kwargs"] == {"batch_size": marker, "countdown": 300}
+    assert isinstance(row["kwargs"]["batch_size"], str)
+    assert isinstance(row["kwargs"]["countdown"], int)
 
 
 @pytest.mark.parametrize(
@@ -805,28 +851,45 @@ def test_sync_publishes_delay_payload(
 def test_sync_countdown_keeps_py_int(
     command: str, task: str, raw: str, expected: int
 ) -> None:
-    for run in (run_django, run_rust):
-        marker = f"ops-{uuid.uuid4().hex[:12]}"
-        proc = run(command, stdin_text=f"{marker}\n{raw}\n")
-        assert proc.returncode == 0, proc.stderr
-        assert proc.stderr == b""
-        found = drain_marker(marker)
-        assert len(found) == 1
-        _headers, payload = found[0]
-        assert payload[1]["batch_size"] == marker
-        assert payload[1]["countdown"] == expected
+    marker = f"ops-{uuid.uuid4().hex[:12]}"
+    proc = run_django(command, stdin_text=f"{marker}\n{raw}\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == b""
+    found = drain_marker(marker)
+    assert len(found) == 1
+    _headers, payload = found[0]
+    assert payload[1]["batch_size"] == marker
+    assert payload[1]["countdown"] == expected
+
+    marker = f"ops-{uuid.uuid4().hex[:12]}"
+    proc = run_rust(command, stdin_text=f"{marker}\n{raw}\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == b""
+    row = _latest_sync_row(marker)
+    assert row is not None, f"{command} enqueued no rust_job_queue row"
+    assert row["task"] == task
+    assert row["kwargs"]["batch_size"] == marker
+    assert row["kwargs"]["countdown"] == expected
 
 
 @pytest.mark.parametrize("batch_size", ["", "007", "  padded  "])
 def test_sync_batch_size_passes_through_verbatim(batch_size: str) -> None:
     discard_stale_constant_markers({"", "007", "  padded  "})
-    for run in (run_django, run_rust):
-        proc = run("sync_issue_version", stdin_text=f"{batch_size}\n5\n")
-        assert proc.returncode == 0, proc.stderr
-        assert proc.stderr == b""
-        found = drain_marker(batch_size)
-        assert len(found) == 1
-        _headers, payload = found[0]
-        assert payload[1]["batch_size"] == batch_size
-        assert isinstance(payload[1]["batch_size"], str)
-        assert payload[1]["countdown"] == 5
+    proc = run_django("sync_issue_version", stdin_text=f"{batch_size}\n5\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == b""
+    found = drain_marker(batch_size)
+    assert len(found) == 1
+    _headers, payload = found[0]
+    assert payload[1]["batch_size"] == batch_size
+    assert isinstance(payload[1]["batch_size"], str)
+    assert payload[1]["countdown"] == 5
+
+    proc = run_rust("sync_issue_version", stdin_text=f"{batch_size}\n5\n")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stderr == b""
+    row = _latest_sync_row(batch_size)
+    assert row is not None, "sync_issue_version enqueued no rust_job_queue row"
+    assert row["kwargs"]["batch_size"] == batch_size
+    assert isinstance(row["kwargs"]["batch_size"], str)
+    assert row["kwargs"]["countdown"] == 5

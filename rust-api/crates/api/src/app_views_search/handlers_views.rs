@@ -1917,7 +1917,7 @@ fn json_response(status: StatusCode, body: String) -> Response {
 
 /// Best-effort deferred publish of a retrieve visit (the space intake
 /// precedent): without the queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),
@@ -1932,10 +1932,10 @@ async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::Cele
 /// (`db/mixins.py:78`): three positional args, `using` stays a null
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it with `using=None`.
-fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),
@@ -2149,7 +2149,7 @@ async fn workspace_retrieve(
     );
     enqueue_message(
         &pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(emit.task_name(), vec![], emit.kwargs()),
+        pidash_jobs::TaskMessage::new(emit.task_name(), vec![], emit.kwargs()),
     )
     .await;
     Ok(json_response(StatusCode::OK, rendered))
@@ -2545,7 +2545,7 @@ async fn project_retrieve(
     );
     enqueue_message(
         &pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(emit.task_name(), vec![], emit.kwargs()),
+        pidash_jobs::TaskMessage::new(emit.task_name(), vec![], emit.kwargs()),
     )
     .await;
     Ok(json_response(StatusCode::OK, rendered))

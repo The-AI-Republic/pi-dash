@@ -1676,7 +1676,7 @@ fn activity_origin(state: &AppState) -> Result<String, Denial> {
 /// Best-effort deferred publish of an `issue_activity.delay(...)` call:
 /// enqueue failures never change the response.
 async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: Map<String, Value>) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs);
+    let message = pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

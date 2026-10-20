@@ -27,12 +27,12 @@
 //! (`jobs/src/tasks_webhooks/visit_page.rs`, D-08) and is not repeated here.
 //!
 //! Crate-graph note: `pidash-jobs` depends on `pidash-services`, so this
-//! module cannot name `jobs::celery::CeleryTaskMessage` (that would be a
+//! module cannot name `jobs::celery::TaskMessage` (that would be a
 //! dependency cycle). It publishes the Celery-format body parts instead —
 //! [`RecentVisitedEmit::task_name`] + [`RecentVisitedEmit::kwargs`] — and
 //! the handlers (PIDASHCONV-275/276, in the `api` crate which already
 //! depends on `pidash-jobs`) wrap them with
-//! `CeleryTaskMessage::new(task, vec![], kwargs)` plus `queue::enqueue`,
+//! `TaskMessage::new(task, vec![], kwargs)` plus `queue::enqueue`,
 //! exactly like the space intake handlers do
 //! (`api/src/space/intake.rs`). `None` renders as JSON `null`, matching
 //! kombu's rendering of Django's `None`.
@@ -115,7 +115,7 @@ impl RecentVisitedEmit {
         ]
     }
 
-    /// `.delay()` kwargs as a JSON object for `CeleryTaskMessage::new`.
+    /// `.delay()` kwargs as a JSON object for `TaskMessage::new`.
     pub fn kwargs(&self) -> Map<String, Value> {
         self.kwargs_pairs()
             .into_iter()

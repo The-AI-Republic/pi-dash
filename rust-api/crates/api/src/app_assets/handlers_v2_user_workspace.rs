@@ -528,11 +528,7 @@ pub const TASK_GET_ASSET_OBJECT_METADATA: &str =
 async fn publish_metadata(pool: &sqlx::PgPool, asset_id: &Uuid) {
     let mut kwargs = Map::with_capacity(1);
     kwargs.insert("asset_id".to_owned(), Value::String(asset_id.to_string()));
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(
-        TASK_GET_ASSET_OBJECT_METADATA,
-        Vec::new(),
-        kwargs,
-    );
+    let message = pidash_jobs::TaskMessage::new(TASK_GET_ASSET_OBJECT_METADATA, Vec::new(), kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

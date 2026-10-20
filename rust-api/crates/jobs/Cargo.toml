@@ -42,7 +42,6 @@ rustls = { version = "0.23.45", default-features = false, features = ["ring", "s
 tokio-rustls = "0.26.5"
 webpki-roots = "1.0.9"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "uuid", "chrono", "json"] }
-amqprs = "2.1.5"
 # D-08 sinks: PostHog `/batch/` POST (same TLS stack as pidash-api: rustls
 # with bundled roots, no system TLS dependency in CI) + BSON document
 # build for the mongo log path (shares the locked bson via mongodb);

@@ -3,7 +3,7 @@
 //! [`ROUTES`] is the claimed router inventory: every path the Rust app
 //! registers, with the methods it owns and the methods it proxies, per
 //! route group. [`TASKS`] is the claimed worker registry: every task
-//! name the Rust worker owns or forwards. `routes --json` / `jobs
+//! name the Rust worker owns. `routes --json` / `jobs
 //! --json` print them; the parity checker
 //! (`rust-api/contract-tests/parity/`) diffs them against Django.
 //!
@@ -1137,383 +1137,251 @@ pub const ROUTES: &[RouteRow] = &[
         owned: &["GET", "HEAD"], proxied: &[] },
 ];
 
-/// Who executes a task name: the Rust worker (registered handler) or
-/// the Python plane (forwarded over AMQP in Celery protocol v2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Owner {
-    Rust,
-    Python,
-}
-
-impl Owner {
-    fn as_str(self) -> &'static str {
-        match self {
-            Owner::Rust => "rust",
-            Owner::Python => "python",
-        }
-    }
-}
-
-/// One task name with its owner. Covers every task Django defines
-/// (registered at worker boot or not) plus the Celery builtins.
+/// One task name the Rust worker owns. Covers every Pi Dash task Django
+/// defines (registered at worker boot or not); the Celery canvas builtins
+/// and dead code are not Pi Dash tasks and are excluded on both sides
+/// (PIDASHCONV-1108).
 pub struct TaskRow {
     pub name: &'static str,
-    pub owner: Owner,
 }
 
 /// The claimed worker registry, name-sorted.
 pub const TASKS: &[TaskRow] = &[
-    // Provenance: every name Django defines (worker-boot registered
-    // or statically defined, plus the Celery builtins); owners mirror
+    // Provenance: every Pi Dash task name Django defines (worker-boot
+    // registered or statically defined); the Celery canvas builtins and
+    // dead code are excluded (PIDASHCONV-1108). Ownership mirrors
     // `worker()`'s registrations, re-verified by
     // `mirror_registry_matches_tasks_table` on each `cargo test` run.
     TaskRow {
         name: "assistant.run_turn",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "assistant.sweep_stale_turns",
-        owner: Owner::Rust,
-    },
-    TaskRow {
-        name: "celery.accumulate",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.backend_cleanup",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.chain",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.chord",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.chord_unlock",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.chunks",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.group",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.map",
-        owner: Owner::Python,
-    },
-    TaskRow {
-        name: "celery.starmap",
-        owner: Owner::Python,
     },
     TaskRow {
         name: "cloud_agent.run_agent_run",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "cloud_agent.scan_queued_runs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "cloud_agent.sweep_stale_runs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "managed_runner.expire_waiting_runs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.agent_ticker.fire_tick",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.agent_ticker.scan_due_tickers",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.analytic_plot_export.analytic_export_task",
-        owner: Owner::Rust,
-    },
-    TaskRow {
-        name: "pi_dash.bgtasks.analytic_plot_export.export_analytics_to_csv_email",
-        owner: Owner::Python,
     },
     TaskRow {
         name: "pi_dash.bgtasks.cleanup_task.delete_api_logs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.cleanup_task.delete_email_notification_logs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.cleanup_task.delete_issue_description_versions",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.cleanup_task.delete_page_versions",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.cleanup_task.delete_webhook_logs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.copy_s3_object.copy_s3_objects_of_description_and_assets",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.deletion_task.hard_delete",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.deletion_task.soft_delete_related_objects",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.dummy_data_task.create_dummy_data",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.email_notification_task.send_email_notification",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.email_notification_task.stack_email_notification",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.event_tracking_task.track_event",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.export_task.issue_export_task",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.exporter_expired_task.delete_old_s3_link",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.file_asset_task.delete_unuploaded_file_asset",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.forgot_password_task.forgot_password",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.git_sync_task.post_completion_comment",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.git_sync_task.sync_all_bindings",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.git_sync_task.sync_one_binding",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.github_sync_task.post_completion_comment",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.github_sync_task.sync_all_repos",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.github_sync_task.sync_one_repo",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_activities_task.issue_activity",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_automation_task.archive_and_close_old_issues",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_description_version_sync.schedule_issue_description_version",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_description_version_sync.sync_issue_description_version",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_description_version_task.issue_description_version_task",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_version_sync.issue_task",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_version_sync.schedule_issue_version",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.issue_version_sync.sync_issue_version",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.logger_task.process_logs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.loop.fire_loop_target",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.loop.scan_due_targets",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.magic_link_code_task.magic_link",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.notification_task.notifications",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.page_transaction_task.page_transaction",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.page_version_task.track_page_version",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.project_add_user_email_task.project_add_user_email",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.project_invitation_task.project_invitation",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.recent_visited_task.recent_visited_task",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.scheduler.fire_scheduler_binding",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.scheduler.scan_due_bindings",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.storage_metadata_task.get_asset_object_metadata",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_activation_email_task.user_activation_email",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_deactivation_email_task.user_deactivation_email",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_email_update_task.send_email_update_confirmation",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.user_email_update_task.send_email_update_magic_code",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.model_activity",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.send_webhook_deactivation_email",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.webhook_activity",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.webhook_task.webhook_send_task",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.workspace_invitation_task.workspace_invitation",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.bgtasks.workspace_seed_task.workspace_seed",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "pi_dash.license.bgtasks.tracer.instance_traces",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.apply_agent_run_terminal_effects",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.expire_stale_approvals",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.fail_runs_on_offline_runners",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.mark_offline_runners",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.reconcile_agent_run_terminal_effects",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.reconcile_stalled_runs",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.release_pins_on_offline_runners",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_agent_chat_state",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_chat_message_dedupe",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_idle_sessions",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_old_streams",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_run_message_dedupe",
-        owner: Owner::Rust,
     },
     TaskRow {
         name: "runner.sweep_stale_runners",
-        owner: Owner::Rust,
     },
 ];
 
@@ -1588,16 +1456,15 @@ fn schedule_json(entry: &BeatEntry) -> serde_json::Value {
 /// scheduler table (env overrides applied, values recorded).
 pub fn jobs_json() -> serde_json::Value {
     let schedule = default_schedule();
-    let rust_owned = TASKS.iter().filter(|row| row.owner == Owner::Rust).count();
     serde_json::json!({
         "meta": {
             "task_count": TASKS.len(),
-            "rust_owned": rust_owned,
+            "rust_owned": TASKS.len(),
             "schedule_entries": schedule.len(),
         },
         "tasks": TASKS.iter().map(|row| serde_json::json!({
             "name": row.name,
-            "owner": row.owner.as_str(),
+            "owner": "rust",
         })).collect::<Vec<_>>(),
         "schedule": schedule.iter().map(schedule_json).collect::<Vec<_>>(),
     })
@@ -1605,11 +1472,10 @@ pub fn jobs_json() -> serde_json::Value {
 
 /// One-line human summary of the job inventory (bare `jobs`).
 pub fn jobs_text() -> String {
-    let rust_owned = TASKS.iter().filter(|row| row.owner == Owner::Rust).count();
     format!(
         "{} tasks ({} rust-owned), {} schedule entries\n",
         TASKS.len(),
-        rust_owned,
+        TASKS.len(),
         default_schedule().len(),
     )
 }
@@ -2157,17 +2023,13 @@ mod tests {
         );
         assert_eq!(expected_rust.len(), 77, "worker-owned count drifted");
 
-        let table_rust: std::collections::BTreeSet<&str> = TASKS
-            .iter()
-            .filter(|row| row.owner == Owner::Rust)
-            .map(|row| row.name)
-            .collect();
+        let table_rust: std::collections::BTreeSet<&str> =
+            TASKS.iter().map(|row| row.name).collect();
         assert_eq!(table_rust, expected_rust, "table rust set != const union");
 
         for row in TASKS {
-            assert_eq!(
+            assert!(
                 registry.owns(row.name),
-                row.owner == Owner::Rust,
                 "registry ownership of {}",
                 row.name
             );

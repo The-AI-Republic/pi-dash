@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use serde_json::Map;
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// Celery wire name, exactly as the beat schedule and `.delay()` call it.
@@ -327,8 +327,8 @@ async fn run_inner<D: TraceDb, S: SpanSink>(db: &D, sink: &mut S) -> Result<(), 
 /// The `.delay()` equivalent: a first-attempt Celery protocol v2 message
 /// for this task with no args, exactly what `instance_traces.delay()`
 /// publishes (`register_instance.py:90`, beat dispatch the same shape).
-pub fn delay_message() -> CeleryTaskMessage {
-    CeleryTaskMessage::new(TASK_NAME, Vec::new(), Map::new())
+pub fn delay_message() -> TaskMessage {
+    TaskMessage::new(TASK_NAME, Vec::new(), Map::new())
 }
 
 /// Install the worker handler owning [`TASK_NAME`]. A store failure
@@ -917,7 +917,5 @@ mod tests {
         assert_eq!(message.task, TASK_NAME);
         assert!(message.args.is_empty());
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(message.effective_root_id(), message.id);
     }
 }

@@ -531,10 +531,10 @@ enum DataValue<'a> {
 /// (`db/mixins.py:78`): three positional args, `using` stays a null
 /// kwarg — exactly as Python's `.delay(label, name, pk, using=using)`
 /// call sends it.
-fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(pk: &uuid::Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = serde_json::Map::new();
     kwargs.insert("using".to_owned(), serde_json::Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             serde_json::Value::String("db".to_owned()),

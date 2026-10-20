@@ -100,8 +100,8 @@ use pidash_services::dispatch::{
 use pidash_services::extensions::CloudAgentToolsetsSeam;
 use pidash_types::dispatch::{AgentExecutorKind, ManagedRunnerReason, ManagedRunnerUnavailable};
 
-use crate::celery::CeleryTaskMessage;
 use crate::queue::{enqueue_exec, NewJob};
+use crate::task_message::TaskMessage;
 
 // ---------------------------------------------------------------------------
 // Celery wire: `run_cloud_agent.delay(run_id)` (`tasks.py:75-82`)
@@ -117,8 +117,8 @@ pub const RUN_CLOUD_AGENT_TASK: &str = "cloud_agent.run_agent_run";
 /// hyphenated run id (`dispatch.py:45` appends `str(run.pk)`) — and no kwargs.
 /// The worker forward path rebuilds this exact v2 body from the queue row,
 /// whichever plane serves the task.
-pub fn run_cloud_agent_message(run_id: &str) -> CeleryTaskMessage {
-    CeleryTaskMessage::new(
+pub fn run_cloud_agent_message(run_id: &str) -> TaskMessage {
+    TaskMessage::new(
         RUN_CLOUD_AGENT_TASK,
         vec![Value::String(run_id.to_owned())],
         Map::new(),
@@ -1534,21 +1534,6 @@ mod tests {
         assert_eq!(message.task, "cloud_agent.run_agent_run");
         assert_eq!(message.args, vec![json!(run_id)]);
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        let headers = message.headers();
-        assert_eq!(headers["task"], "cloud_agent.run_agent_run");
-        assert_eq!(headers["argsrepr"], format!("('{run_id}',)"));
-        assert_eq!(headers["kwargsrepr"], "{}");
-        let mut embed = Map::new();
-        embed.insert("callbacks".to_owned(), Value::Null);
-        embed.insert("errbacks".to_owned(), Value::Null);
-        embed.insert("chain".to_owned(), Value::Null);
-        embed.insert("chord".to_owned(), Value::Null);
-        assert_eq!(
-            message.body(),
-            json!([[run_id], {}, embed]),
-            "protocol v2 [args, kwargs, embed]"
-        );
     }
 
     #[test]

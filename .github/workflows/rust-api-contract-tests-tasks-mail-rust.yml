@@ -9,8 +9,8 @@ name: rust-api-contract-tests-tasks-mail-rust
 # `stack`/`send_email_notification` (PIDASHCONV-865), the five
 # membership mail tasks (PIDASHCONV-1104) and the four auth
 # mail tasks (PIDASHCONV-1103) execute locally (settle + flat
-# broker + SMTP sink receipts), while the remaining Python-owned D-07
-# task names assert observable AMQP forwarding.
+# broker + SMTP sink receipts). Every mail task is Rust-owned: the D-07
+# hand-off is gone (PIDASHCONV-1108), so no assertion observes forwarding.
 
 on:
   push:

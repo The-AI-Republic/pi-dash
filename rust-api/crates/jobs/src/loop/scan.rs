@@ -46,9 +46,9 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::celery::CeleryTaskMessage;
 use crate::queue::{enqueue, JobRow, NewJob};
 use crate::schedule::{beat_schedule, BeatEntry};
+use crate::task_message::TaskMessage;
 use crate::tasks_ticker::rrule::next_fire_from_rrule;
 use crate::worker::{HandlerError, Registry, Verdict};
 use crate::Error;
@@ -274,9 +274,9 @@ fn fire_job(id: &Uuid) -> NewJob {
 /// [`crate::worker::dispatch`]'s forward path arm for arm (that function
 /// is the runtime source of truth; this one exists so tests and the
 /// PIDASHCONV-157 fire port can assert the wire contract broker-free).
-pub fn fire_message(id: &Uuid) -> CeleryTaskMessage {
+pub fn fire_message(id: &Uuid) -> TaskMessage {
     let (args, kwargs) = fire_job(id).into_message_parts();
-    CeleryTaskMessage::new(FIRE_LOOP_TARGET_TASK, args, kwargs)
+    TaskMessage::new(FIRE_LOOP_TARGET_TASK, args, kwargs)
 }
 
 /// Cap the dispatch slice in Python (`bgtasks/loop.py:166`, `ids =
@@ -840,19 +840,6 @@ mod tests {
         assert_eq!(message.task, FIRE_LOOP_TARGET_TASK);
         assert_eq!(message.args, vec![json!(id.to_string())]);
         assert!(message.kwargs.is_empty());
-        assert_eq!(message.retries, 0);
-        assert_eq!(
-            message.body(),
-            json!([
-                [id.to_string()],
-                {},
-                {"callbacks": null, "errbacks": null, "chain": null, "chord": null}
-            ])
-        );
-        let headers = message.headers();
-        assert_eq!(headers["task"], FIRE_LOOP_TARGET_TASK);
-        assert_eq!(headers["id"], message.id);
-        assert_eq!(headers["retries"], 0);
         assert_eq!(
             FIRE_LOOP_TARGET_TASK,
             "pi_dash.bgtasks.loop.fire_loop_target"
@@ -874,16 +861,13 @@ mod tests {
             .expect("lazy pool needs no server");
         let mut registry = Registry::new();
         for name in TASK_NAMES {
-            assert_eq!(route_for(&registry, name), Route::PythonOwned);
+            assert_eq!(route_for(&registry, name), Route::Unknown);
         }
         register_scanner(&mut registry, pool);
         assert!(registry.owns(SCAN_DUE_TARGETS_TASK));
         assert_eq!(route_for(&registry, SCAN_DUE_TARGETS_TASK), Route::Local);
         assert!(!registry.owns(FIRE_LOOP_TARGET_TASK));
-        assert_eq!(
-            route_for(&registry, FIRE_LOOP_TARGET_TASK),
-            Route::PythonOwned
-        );
+        assert_eq!(route_for(&registry, FIRE_LOOP_TARGET_TASK), Route::Unknown);
     }
 
     // The kill switch short-circuits before any database touch: with the

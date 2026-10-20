@@ -2026,7 +2026,7 @@ async fn check_email_throttle(cache: Option<&Cache>, user_id: &uuid::Uuid) -> bo
 // ---------------------------------------------------------------------------
 
 async fn enqueue_emit(pool: &PgPool, task: &str, args: Vec<Value>) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(task, args, Map::new());
+    let message = pidash_jobs::TaskMessage::new(task, args, Map::new());
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),

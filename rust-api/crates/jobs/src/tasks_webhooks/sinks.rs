@@ -760,7 +760,7 @@ mod tests {
         assert_eq!(route_for(&registry, TRACK_EVENT_TASK), Route::Local);
         assert_eq!(
             route_for(&registry, "pi_dash.bgtasks.logger_task.nope"),
-            Route::PythonOwned
+            Route::Unknown
         );
     }
 

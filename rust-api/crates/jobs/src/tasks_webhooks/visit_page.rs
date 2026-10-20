@@ -71,7 +71,7 @@ use pidash_services::tasks_webhooks::page_extract::{
     self, EntityDetails, ImageAttrs, MentionAttrs,
 };
 
-use crate::celery::CeleryTaskMessage;
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, Registry, Verdict};
 
 /// `recent_visited_task` (`recent_visited_task.py:17`).
@@ -91,7 +91,7 @@ pub fn recent_visited_task_message(
     user_id: &str,
     project_id: Option<&str>,
     slug: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert(
         "entity_name".to_owned(),
@@ -107,7 +107,7 @@ pub fn recent_visited_task_message(
         project_id.map_or(Value::Null, |v| Value::String(v.to_owned())),
     );
     kwargs.insert("slug".to_owned(), Value::String(slug.to_owned()));
-    CeleryTaskMessage::new(RECENT_VISITED_TASK_NAME, Vec::new(), kwargs)
+    TaskMessage::new(RECENT_VISITED_TASK_NAME, Vec::new(), kwargs)
 }
 
 /// `page_transaction.delay(new_description_html, old_description_html,
@@ -116,7 +116,7 @@ pub fn page_transaction_message(
     new_description_html: Option<&str>,
     old_description_html: Option<&str>,
     page_id: &str,
-) -> CeleryTaskMessage {
+) -> TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert(
         "new_description_html".to_owned(),
@@ -127,7 +127,7 @@ pub fn page_transaction_message(
         old_description_html.map_or(Value::Null, |v| Value::String(v.to_owned())),
     );
     kwargs.insert("page_id".to_owned(), Value::String(page_id.to_owned()));
-    CeleryTaskMessage::new(PAGE_TRANSACTION_TASK_NAME, Vec::new(), kwargs)
+    TaskMessage::new(PAGE_TRANSACTION_TASK_NAME, Vec::new(), kwargs)
 }
 
 struct RecentVisitedArgs {
@@ -902,7 +902,7 @@ mod tests {
         }
         assert_eq!(
             crate::worker::route_for(&registry, "pi_dash.bgtasks.logger_task.process_logs"),
-            crate::worker::Route::PythonOwned
+            crate::worker::Route::Unknown
         );
     }
 }

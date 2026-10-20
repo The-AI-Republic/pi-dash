@@ -98,8 +98,8 @@ use pidash_services::runner_runs::finalization::{
 use pidash_types::dispatch::AgentExecutorKind;
 use pidash_types::runner_runs::{AgentRunStatus, ApprovalStatus, TERMINAL_RUN_STATUSES};
 
-use crate::celery::CeleryTaskMessage;
 use crate::queue::{self, JobRow, NewJob};
+use crate::task_message::TaskMessage;
 use crate::worker::{Handler, HandlerError, Registry, Verdict};
 
 // ---------------------------------------------------------------------------
@@ -371,9 +371,9 @@ pub fn terminal_effects_job(run_id: &Uuid) -> NewJob {
 /// [`crate::worker::dispatch`]'s forward path arm for arm (that function
 /// is the runtime source of truth; this one exists so tests can assert
 /// the wire contract broker-free).
-pub fn terminal_effects_message(run_id: &Uuid) -> CeleryTaskMessage {
+pub fn terminal_effects_message(run_id: &Uuid) -> TaskMessage {
     let (args, kwargs) = terminal_effects_job(run_id).into_message_parts();
-    CeleryTaskMessage::new(TERMINAL_EFFECTS_TASK, args, kwargs)
+    TaskMessage::new(TERMINAL_EFFECTS_TASK, args, kwargs)
 }
 
 // ---------------------------------------------------------------------------

@@ -219,27 +219,15 @@ async fn worker(concurrency: u32) -> MainResult {
     let pools = pidash_db::Pools::connect(&db, None).await?;
     tracing::info!(target = %db.redacted_url(), "connected postgres");
     pidash_jobs::queue::ensure_schema(pools.primary()).await?;
-    // No broker in some environments (local dev without RabbitMQ): the
-    // worker still runs, and Python-owned jobs requeue with a delay
-    // instead of dropping. See `worker::forward`.
-    let publisher = match pidash_jobs::AmqpConfig::from_env() {
-        Ok(config) => match pidash_jobs::Publisher::connect(&config).await {
-            Ok(publisher) => Some(publisher),
-            Err(error) => {
-                tracing::warn!(%error, "broker unreachable; Python-owned jobs will requeue");
-                None
-            }
-        },
-        Err(error) => {
-            tracing::warn!(%error, "no broker configured; Python-owned jobs will requeue");
-            None
-        }
-    };
+    // No broker: the job queue is Postgres and every task name has a
+    // registered handler; an unknown name parks as failed
+    // (`unknown task <name>`), never forwarded to Python (PIDASHCONV-1108,
+    // the standalone rule).
     // Task handlers register through the shared OSS composition
-    // (`pidash_jobs::register_oss_handlers`, PIDASHCONV-918); any
-    // still-unregistered name forwards to Python. The async input —
-    // the Mongo sink — loads here, exactly as before; registration
-    // itself is a pure function of the context.
+    // (`pidash_jobs::register_oss_handlers`, PIDASHCONV-918). The async inputs —
+    // the Mongo sink and the boot-loaded fire-tick states — load here,
+    // exactly as before; registration itself is a pure function of
+    // the context.
     let mut registry = pidash_jobs::Registry::new();
     let settings = settings_from_env()?;
     let mongo = pidash_db::tasks_cleanup::cleanup_queries::MongoSink::from_env().await;
@@ -289,8 +277,8 @@ async fn worker(concurrency: u32) -> MainResult {
     )?;
     // The turn handler (PIDASHCONV-863): `worker()` now owns
     // `assistant.run_turn` (the sweep above is registered by
-    // `register_oss_handlers`). Registering flips the name from
-    // Python-forwarded to locally executed (`worker::route_for`).
+    // `register_oss_handlers`). Registering makes the name locally
+    // executed.
     pidash_jobs::assistant::register_turn_handler(
         &mut registry,
         pools.primary().clone(),
@@ -305,7 +293,6 @@ async fn worker(concurrency: u32) -> MainResult {
     let worker_fut = pidash_jobs::worker::run_worker(
         pools.primary().clone(),
         registry,
-        publisher,
         worker_config,
         shutdown_rx.clone(),
     );
@@ -630,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn worker_registry_owns_all_d09_local_tasks() {
         use pidash_jobs::tasks_cleanup;
-        use pidash_jobs::worker::{route_for, Handler, Registry, Route, Verdict};
+        use pidash_jobs::worker::{Handler, Registry, Verdict};
 
         // `connect_lazy` never touches the network (it needs a Tokio
         // context to build the pool, hence `tokio::test`): registration
@@ -689,7 +676,6 @@ mod tests {
         assert_eq!(local.len(), 20, "D-09 local task count drifted");
         for name in local {
             assert!(registry.owns(name), "{name} must be worker-owned");
-            assert_eq!(route_for(&registry, name), Route::Local);
             if name != tasks_cleanup::TASK_DELETE_OLD_S3_LINK {
                 assert!(
                     !tasks_cleanup::is_export_task(name),
@@ -702,10 +688,6 @@ mod tests {
         // export name. `delete_old_s3_link` (PIDASHCONV-858) and the two
         // live exports (PIDASHCONV-1106) are worker-owned now.
         assert!(!registry.owns(tasks_cleanup::RESTORE_TASK_NAME));
-        assert_eq!(
-            route_for(&registry, tasks_cleanup::RESTORE_TASK_NAME),
-            Route::PythonOwned
-        );
         assert_eq!(tasks_cleanup::EXPORT_TASK_NAMES.len(), 4);
         for name in tasks_cleanup::EXPORT_TASK_NAMES {
             assert!(tasks_cleanup::is_export_task(name));
@@ -714,10 +696,8 @@ mod tests {
                 || name == pidash_jobs::tasks_export::ANALYTIC_EXPORT_TASK
             {
                 assert!(registry.owns(name), "{name} must be worker-owned");
-                assert_eq!(route_for(&registry, name), Route::Local);
             } else {
                 assert!(!registry.owns(name), "{name} must stay Python-owned");
-                assert_eq!(route_for(&registry, name), Route::PythonOwned);
             }
         }
     }
@@ -731,7 +711,7 @@ mod tests {
     #[tokio::test]
     async fn worker_registry_owns_all_d05_local_tasks() {
         use pidash_jobs::integrations::{git_sync, github_sync};
-        use pidash_jobs::worker::{route_for, Registry, Route};
+        use pidash_jobs::worker::Registry;
 
         // `connect_lazy` never touches the network (it needs a Tokio
         // context to build the pool, hence `tokio::test`): registration
@@ -756,7 +736,6 @@ mod tests {
         assert_eq!(local.len(), 6, "D-05 local task count drifted");
         for name in local {
             assert!(registry.owns(name), "{name} must be worker-owned");
-            assert_eq!(route_for(&registry, name), Route::Local);
         }
     }
 
@@ -775,7 +754,7 @@ mod tests {
     #[test]
     fn worker_registry_owns_sink_tasks() {
         use pidash_jobs::tasks_webhooks::{PROCESS_LOGS_TASK, TRACK_EVENT_TASK};
-        use pidash_jobs::worker::{route_for, Handler, Registry, Route, Verdict};
+        use pidash_jobs::worker::{Handler, Registry, Verdict};
 
         let mut registry = Registry::new();
         // Same names + same handler constructors `worker()` uses (the
@@ -796,7 +775,6 @@ mod tests {
         );
         for name in [PROCESS_LOGS_TASK, TRACK_EVENT_TASK] {
             assert!(registry.owns(name), "{name} must be worker-owned");
-            assert_eq!(route_for(&registry, name), Route::Local);
         }
     }
 }

@@ -330,7 +330,7 @@ pub(crate) fn pool_of(state: &AppState) -> Result<sqlx::PgPool, Denial> {
 /// Best-effort deferred publish of an `issue_activity.delay(...)` call
 /// (handlers_views precedent): enqueue failures never change the response.
 pub(crate) async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: serde_json::Map<String, Value>) {
-    let message = pidash_jobs::celery::CeleryTaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs);
+    let message = pidash_jobs::TaskMessage::new(ISSUE_ACTIVITY_TASK, vec![], kwargs);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         serde_json::Value::Array(message.args.clone()),

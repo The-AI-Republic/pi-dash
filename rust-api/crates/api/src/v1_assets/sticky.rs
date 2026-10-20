@@ -2096,10 +2096,10 @@ async fn detail_inner(
 /// (`db/mixins.py:78`): `soft_delete_related_objects.delay("db",
 /// "sticky", pk, using=None)` — three positional args, `using` as a null
 /// kwarg (the view calls `.delete()` with no `using`).
-fn soft_delete_message(sticky_id: &Uuid) -> pidash_jobs::celery::CeleryTaskMessage {
+fn soft_delete_message(sticky_id: &Uuid) -> pidash_jobs::TaskMessage {
     let mut kwargs = Map::new();
     kwargs.insert("using".to_owned(), Value::Null);
-    pidash_jobs::celery::CeleryTaskMessage::new(
+    pidash_jobs::TaskMessage::new(
         pidash_jobs::tasks_cleanup::deletion::SOFT_DELETE_TASK,
         vec![
             Value::String("db".to_owned()),

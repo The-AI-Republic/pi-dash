@@ -3275,7 +3275,7 @@ const ANALYTIC_EXPORT_TASK: &str = "pi_dash.bgtasks.analytic_plot_export.analyti
 
 /// Best-effort deferred publish (the space-intake / views-search
 /// precedent): without the queue the response still stands.
-async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::celery::CeleryTaskMessage) {
+async fn enqueue_message(pool: &sqlx::PgPool, message: pidash_jobs::TaskMessage) {
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
         Value::Array(message.args.clone()),
@@ -3333,7 +3333,7 @@ async fn post_export_analytics(
     kwargs.insert("slug".to_owned(), Value::from(slug));
     enqueue_message(
         &pool,
-        pidash_jobs::celery::CeleryTaskMessage::new(ANALYTIC_EXPORT_TASK, vec![], kwargs),
+        pidash_jobs::TaskMessage::new(ANALYTIC_EXPORT_TASK, vec![], kwargs),
     )
     .await;
     Ok(json_value_response(
