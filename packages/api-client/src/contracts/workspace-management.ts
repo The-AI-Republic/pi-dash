@@ -67,16 +67,27 @@ export async function createWorkspace(client: ApiClient, input: WorkspaceCreateI
 }
 
 /**
+ * The member projection the directory answers for workspace members and
+ * admins: the shared user-lite fields plus the account email. The thin
+ * lens a workspace guest receives omits the extras, so `email` stays
+ * optional and readers render a blank cell rather than rejecting the
+ * whole list.
+ */
+export const DirectoryMember = z.extend(UserLite, {
+  email: z.optional(z.string()),
+});
+export type DirectoryMember = z.infer<typeof DirectoryMember>;
+
+/**
  * One workspace membership with the nested member projection. The list
  * also carries deactivated memberships; the member picker renders those
- * suspended (parity/specs/issues.md §17, ISS-208). The backend answers
- * the admin projection for privileged callers (extra email and
- * last-login fields); the shared UserLite subset below is what readers
- * need, so extras are ignored.
+ * suspended (parity/specs/issues.md §17, ISS-208). The directory also
+ * carries the admin lens' extra fields (last login); only the fields the
+ * readers use are parsed.
  */
 export const WorkspaceMember = z.object({
   id: uuid(),
-  member: UserLite,
+  member: DirectoryMember,
   role: z.number(),
   /** False on deactivated memberships. Absent where the lens omits it. */
   is_active: z.optional(z.boolean()),

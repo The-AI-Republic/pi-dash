@@ -423,3 +423,355 @@ describe("members roster driver", () => {
     expect(await driver.wsSettingsMembersBillingVisible()).toBe(false);
   });
 });
+
+describe("project settings members read driver", () => {
+  it("opens the members address and leaves the roster to the caller", async () => {
+    const goto = vi.fn(async () => null);
+    // The settle loop reads the denial/shell state through evaluate; report
+    // the settled shell right away.
+    const page = pageOf({ goto, evaluate: async () => "shell" });
+    const driver = new WebNewDriver(page);
+    await driver.settingsMembersOpen("acme", "project-1");
+    expect(goto).toHaveBeenCalledWith("/acme/settings/projects/project-1/members/");
+    expect(page.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+  });
+
+  it("reads the denial view and the no-match note through their test ids", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="project-settings-denied"]' || selector === '[data-testid="members-no-match"]'
+          ? locator({ count: async () => 1, isVisible: async () => true })
+          : locator(),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsMembersDenied()).toBe(true);
+    expect(await driver.settingsMembersNoMatchVisible()).toBe(true);
+  });
+
+  it("fills the search box by its accessible name", async () => {
+    const fill = vi.fn(async () => undefined);
+    const textbox = locator({ fill });
+    const page = pageOf({ getByRole: vi.fn(() => textbox) });
+    const driver = new WebNewDriver(page);
+    await driver.settingsMembersSearchFill("mEnTiOn");
+    expect(page.getByRole).toHaveBeenCalledWith("textbox", { name: "Search members" });
+    expect(fill).toHaveBeenCalledWith("mEnTiOn");
+  });
+
+  it("reads each row's five cells and the profile link", async () => {
+    const rows = [
+      {
+        innerText: "Ada Lovelace",
+        querySelector: (selector: string) =>
+          selector.includes("/profile/") ? { innerText: "AL", getAttribute: () => "/acme/profile/ada" } : null,
+        querySelectorAll: () => [
+          { innerText: "Ada Lovelace" },
+          { innerText: "ada" },
+          { innerText: "ada@example.test" },
+          { innerText: "Admin" },
+          { innerText: "Jan 10, 2025" },
+        ],
+      },
+    ];
+    const evaluateAll = vi.fn(async (fn: (nodes: unknown[]) => unknown) => fn(rows as unknown[]));
+    const rowNode = {
+      querySelectorAll: (selector: string) =>
+        selector === "td"
+          ? [
+              {
+                innerText: "Ada Lovelace",
+                querySelector: () => ({ innerText: "AL", getAttribute: () => "/acme/profile/ada" }),
+              },
+              { innerText: "ada" },
+              { innerText: "ada@example.test" },
+              { innerText: "Admin" },
+              { innerText: "Jan 10, 2025" },
+            ]
+          : [],
+    };
+    rows.splice(0, rows.length, rowNode as unknown as (typeof rows)[number]);
+    const table = locator({ count: async () => 1 });
+    const page = pageOf({
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role === "table" && options?.name === "Members") {
+          return locator({
+            count: async () => 1,
+            locator: () => locator({ evaluateAll }),
+          });
+        }
+        return locator();
+      }),
+    });
+    void table;
+    const driver = new WebNewDriver(page);
+    const read = await driver.settingsMembersRows();
+    expect(read).toEqual([
+      {
+        fullName: "Ada Lovelace",
+        displayName: "ada",
+        email: "ada@example.test",
+        roleLabel: "Admin",
+        joinedText: "Jan 10, 2025",
+        profileHref: "/acme/profile/ada",
+      },
+    ]);
+  });
+
+  it("tolerates rows without cells or a profile link", async () => {
+    const rows = [
+      { querySelectorAll: () => [], querySelector: () => null },
+      {
+        querySelectorAll: () => [{ innerText: " Ada \n Lovelace ", querySelector: () => null }],
+        querySelector: () => null,
+      },
+      {
+        querySelectorAll: () => [
+          {
+            innerText: "A Lovelace",
+            querySelector: () => ({ innerText: "A", getAttribute: () => null }),
+          },
+        ],
+        querySelector: () => null,
+      },
+    ];
+    const evaluateAll = vi.fn(async (fn: (nodes: unknown[]) => unknown) => fn(rows as unknown[]));
+    const page = pageOf({
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role === "table" && options?.name === "Members") {
+          return locator({ count: async () => 1, locator: () => locator({ evaluateAll }) });
+        }
+        return locator();
+      }),
+    });
+    const read = await new WebNewDriver(page).settingsMembersRows();
+    expect(read).toEqual([
+      { fullName: "", displayName: "", email: "", roleLabel: "", joinedText: "", profileHref: null },
+      {
+        fullName: "Ada Lovelace",
+        displayName: "",
+        email: "",
+        roleLabel: "",
+        joinedText: "",
+        profileHref: null,
+      },
+      {
+        fullName: "Lovelace",
+        displayName: "",
+        email: "",
+        roleLabel: "",
+        joinedText: "",
+        profileHref: null,
+      },
+    ]);
+  });
+
+  it("skips filter boxes that are not wrapped in a labelled element", async () => {
+    const panel = locator({
+      waitFor: async () => undefined,
+      getByRole: () =>
+        locator({
+          evaluateAll: async (fn: (nodes: unknown[]) => unknown) =>
+            fn([
+              { closest: () => null },
+              { closest: () => ({ innerText: "  " }) },
+              { closest: () => ({ innerText: "Guest" }) },
+            ]),
+        }),
+    });
+    const page = pageOf({
+      locator: (selector: string) => (selector === '[data-testid="member-filters-panel"]' ? panel : locator()),
+    });
+    expect(await new WebNewDriver(page).settingsMembersFilterOptions()).toEqual(["Guest"]);
+  });
+
+  it("reports an unchecked role when its box is absent", async () => {
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => (role === "checkbox" ? locator({ count: async () => 0 }) : locator())),
+    });
+    expect(await new WebNewDriver(page).settingsMembersFilterChecked("Guest")).toBe(false);
+  });
+
+  it("reads an ascending marker and reports none when the column is absent", async () => {
+    const markers = new Map([["Sort by Full name", "Ascending"]]);
+    const page = pageOf({
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role !== "button") return locator();
+        const present = markers.has(options?.name ?? "");
+        return locator({
+          count: async () => (present ? 1 : 0),
+          getAttribute: async () => markers.get(options?.name ?? "") ?? null,
+        });
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsMembersSortMarker("Full name")).toBe("ascending");
+    expect(await driver.settingsMembersSortMarker("Account type")).toBe("none");
+  });
+
+  it("reports no rows before the table paints", async () => {
+    const driver = new WebNewDriver(pageOf());
+    expect(await driver.settingsMembersRows()).toEqual([]);
+  });
+
+  it("opens the role filter, lists checkbox labels and reads a checked one", async () => {
+    const panel = locator({
+      waitFor: async () => undefined,
+      getByRole: () =>
+        locator({
+          evaluateAll: async (fn: (nodes: unknown[]) => unknown) => fn([{ closest: () => ({ innerText: "Admin" }) }]),
+        }),
+    });
+    const checkedBoxes = new Map([
+      ["Admin", true],
+      ["Member", false],
+    ]);
+    const page = pageOf({
+      locator: (selector: string) => (selector === '[data-testid="member-filters-panel"]' ? panel : locator()),
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role === "checkbox") {
+          return locator({
+            count: async () => 1,
+            isChecked: async () => checkedBoxes.get(options?.name ?? "") ?? false,
+          });
+        }
+        return locator();
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsMembersFiltersOpen();
+    expect(await driver.settingsMembersFilterOptions()).toEqual(["Admin"]);
+    expect(await driver.settingsMembersFilterChecked("Admin")).toBe(true);
+    expect(await driver.settingsMembersFilterChecked("Member")).toBe(false);
+    expect(await driver.settingsMembersFilterChecked("Guest")).toBe(false);
+  });
+
+  it("reports the active-filter dot", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="member-filter-active"]'
+          ? locator({ count: async () => 1, isVisible: async () => true })
+          : locator(),
+    });
+    expect(await new WebNewDriver(page).settingsMembersFilterActive()).toBe(true);
+  });
+
+  it("opens a sort menu and lists its items", async () => {
+    const click = vi.fn(async () => undefined);
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => {
+        if (role === "button") return locator({ click });
+        if (role === "menuitem") {
+          return locator({
+            first: () => locator({ waitFor: async () => undefined }),
+            allInnerTexts: async () => ["A to Z", "Z to A", "Clear sorting"],
+          });
+        }
+        return locator();
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsMembersSortOpen("Display name");
+    expect(page.getByRole).toHaveBeenCalledWith("button", { name: "Sort by Display name", exact: true });
+    expect(click).toHaveBeenCalled();
+    expect(await driver.settingsMembersSortItems()).toEqual(["A to Z", "Z to A", "Clear sorting"]);
+  });
+
+  it("picks a sort entry by its menu label", async () => {
+    const click = vi.fn(async () => undefined);
+    const menuItem = locator({ first: () => locator({ click }) });
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => {
+        if (role === "menuitem") return menuItem;
+        return locator();
+      }),
+    });
+    await new WebNewDriver(page).settingsMembersSortPick("Clear sorting");
+    expect(page.getByRole).toHaveBeenCalledWith("menuitem", { name: "Clear sorting" });
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles a role checkbox by its accessible name", async () => {
+    const click = vi.fn(async () => undefined);
+    const checkbox = locator({ click });
+    const page = pageOf({
+      getByRole: vi.fn((role: string) => (role === "checkbox" ? checkbox : locator())),
+    });
+    await new WebNewDriver(page).settingsMembersFilterToggle("Member");
+    expect(page.getByRole).toHaveBeenCalledWith("checkbox", { name: "Member", exact: true });
+    expect(click).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("closes the filter panel with Escape and waits for it to hide", async () => {
+    const press = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const panel = locator({ waitFor });
+    const page = pageOf({
+      keyboard: { press },
+      locator: (selector: string) => (selector === '[data-testid="member-filters-panel"]' ? panel : locator()),
+    });
+    await new WebNewDriver(page).settingsMembersFiltersClose();
+    expect(press).toHaveBeenCalledWith("Escape");
+    expect(waitFor).toHaveBeenCalledWith({ state: "hidden", timeout: 30_000 });
+  });
+
+  it("reads the direction marker only from the active column", async () => {
+    const markers = new Map([
+      ["Sort by Display name", "Descending"],
+      ["Sort by Email", "Not sorted"],
+    ]);
+    const page = pageOf({
+      getByRole: vi.fn((role: string, options?: { name?: string }) => {
+        if (role !== "button") return locator();
+        return locator({
+          count: async () => 1,
+          getAttribute: async () => markers.get(options?.name ?? "") ?? null,
+        });
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsMembersSortMarker("Display name")).toBe("descending");
+    expect(await driver.settingsMembersSortMarker("Email")).toBe("none");
+    expect(await driver.settingsMembersSortMarker("Missing")).toBe("none");
+  });
+
+  it("reports the skeleton while the roster is held", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="members-skeleton"]'
+          ? locator({ count: async () => 1, isVisible: async () => true })
+          : locator(),
+    });
+    expect(await new WebNewDriver(page).settingsMembersSkeletonVisible()).toBe(true);
+  });
+
+  it("holds the first membership and directory reads when delaying", async () => {
+    const route = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route }));
+    await driver.settingsMembersDelayLoad(10);
+    const memberHandler = handlerFor(route, "**/api/workspaces/*/projects/*/members/");
+    const directoryHandler = handlerFor(route, "**/api/workspaces/*/members/");
+    const memberRoute = stubRoute("GET");
+    const directoryRoute = stubRoute("GET");
+    await memberHandler(memberRoute);
+    await directoryHandler(directoryRoute);
+    expect(memberRoute.continue).toHaveBeenCalled();
+    expect(directoryRoute.continue).toHaveBeenCalled();
+    // A second call on the same hold passes straight through.
+    const again = stubRoute("GET");
+    await memberHandler(again);
+    expect(again.continue).toHaveBeenCalled();
+  });
+
+  it("moves between settings tabs by their sidebar link", async () => {
+    const click = vi.fn(async () => undefined);
+    const page = pageOf({
+      locator: () =>
+        locator({
+          filter: () => locator({ first: () => locator({ click }) }),
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsMembersGotoTab("General");
+    expect(click).toHaveBeenCalled();
+  });
+});

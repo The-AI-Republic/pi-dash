@@ -17240,13 +17240,25 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.locator('[data-testid="members-billing"]'));
   }
 
-  // --- Project members tab (NEWFRONT-391, PSET-018–027). Throwing stubs per
-  // --- the shared driver contract; the new app implements them later.
-  async settingsMembersOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("settingsMembersOpen");
+  // --- Project members tab (NEWFRONT-391, PSET-018–027). The read side
+  // --- (NEWFRONT-574: table, search, role filter, sort, skeleton,
+  // --- no-match, read failures) is implemented here; the write side
+  // --- (invite dialog, role editor, remove/leave, defaults) stays stubbed
+  // --- for NEWFRONT-579.
+  private settingsMembersTable(): Locator {
+    return this.page.getByRole("table", { name: "Members" });
   }
+
+  async settingsMembersOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    // Leaves the roster to the caller: several scenarios arm a held read
+    // first and assert the skeleton, so opening must not wait for rows.
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/members/`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsWaitSettled(60_000);
+  }
+
   async settingsMembersDenied(): Promise<boolean> {
-    return todo("settingsMembersDenied");
+    return this.isShown(this.page.locator('[data-testid="project-settings-denied"]'));
   }
   async settingsMembersRows(): Promise<
     {
@@ -17258,43 +17270,91 @@ export class WebNewDriver implements ParityDriver {
       profileHref: string | null;
     }[]
   > {
-    return todo("settingsMembersRows");
+    const table = this.settingsMembersTable();
+    if ((await table.count()) === 0) return [];
+    return table.locator("tbody tr").evaluateAll((rows) =>
+      rows.map((row) => {
+        const cells = row.querySelectorAll("td");
+        const nameCell = cells[0];
+        const link = nameCell?.querySelector("a[href*='/profile/']") ?? null;
+        const avatarText = ((link as HTMLElement | null)?.innerText ?? "").replace(/\s+/g, " ").trim();
+        const cellText = ((nameCell as HTMLElement | undefined)?.innerText ?? "").replace(/\s+/g, " ").trim();
+        return {
+          fullName:
+            avatarText !== "" && cellText.startsWith(avatarText) ? cellText.slice(avatarText.length).trim() : cellText,
+          displayName: ((cells[1] as HTMLElement | undefined)?.innerText ?? "").replace(/\s+/g, " ").trim(),
+          email: ((cells[2] as HTMLElement | undefined)?.innerText ?? "").replace(/\s+/g, " ").trim(),
+          roleLabel: ((cells[3] as HTMLElement | undefined)?.innerText ?? "").replace(/\s+/g, " ").trim(),
+          joinedText: ((cells[4] as HTMLElement | undefined)?.innerText ?? "").replace(/\s+/g, " ").trim(),
+          profileHref: link?.getAttribute("href") ?? null,
+        };
+      })
+    );
   }
-  async settingsMembersSearchFill(_query: string): Promise<void> {
-    return todo("settingsMembersSearchFill");
+  async settingsMembersSearchFill(query: string): Promise<void> {
+    await this.page.getByRole("textbox", { name: "Search members" }).fill(query);
   }
   async settingsMembersNoMatchVisible(): Promise<boolean> {
-    return todo("settingsMembersNoMatchVisible");
+    return this.isShown(this.page.locator('[data-testid="members-no-match"]'));
   }
   async settingsMembersFiltersOpen(): Promise<void> {
-    return todo("settingsMembersFiltersOpen");
+    await this.page.getByRole("button", { name: "Filters", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersFilterPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private settingsMembersFilterPanel(): Locator {
+    return this.page.locator('[data-testid="member-filters-panel"]');
+  }
+
   async settingsMembersFilterOptions(): Promise<string[]> {
-    return todo("settingsMembersFilterOptions");
+    await this.settingsMembersFilterPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return this.settingsMembersFilterPanel()
+      .getByRole("checkbox")
+      .evaluateAll((boxes) => {
+        const labels: string[] = [];
+        for (const box of boxes) {
+          const label = box.closest("label");
+          const text = ((label as HTMLElement | null)?.innerText ?? "").trim();
+          if (text !== "") labels.push(text);
+        }
+        return labels;
+      });
   }
-  async settingsMembersFilterChecked(_label: string): Promise<boolean> {
-    return todo("settingsMembersFilterChecked");
+  async settingsMembersFilterChecked(label: string): Promise<boolean> {
+    const checkbox = this.page.getByRole("checkbox", { name: label, exact: true });
+    if ((await checkbox.count()) === 0) return false;
+    return checkbox.first().isChecked();
   }
-  async settingsMembersFilterToggle(_label: string): Promise<void> {
-    return todo("settingsMembersFilterToggle");
+  async settingsMembersFilterToggle(label: string): Promise<void> {
+    await this.page.getByRole("checkbox", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersFiltersClose(): Promise<void> {
-    return todo("settingsMembersFiltersClose");
+    await this.page.keyboard.press("Escape");
+    await this.settingsMembersFilterPanel().waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersFilterActive(): Promise<boolean> {
-    return todo("settingsMembersFilterActive");
+    return this.isShown(this.page.locator('[data-testid="member-filter-active"]'));
   }
-  async settingsMembersSortOpen(_column: string): Promise<void> {
-    return todo("settingsMembersSortOpen");
+  async settingsMembersSortOpen(column: string): Promise<void> {
+    await this.page
+      .getByRole("button", { name: `Sort by ${column}`, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersSortItems(): Promise<string[]> {
-    return todo("settingsMembersSortItems");
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.trim().replace(/\s+/g, " ")).filter((text) => text !== "");
   }
-  async settingsMembersSortPick(_text: string): Promise<void> {
-    return todo("settingsMembersSortPick");
+  async settingsMembersSortPick(text: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: text }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsMembersGotoTab(_tab: string): Promise<void> {
-    return todo("settingsMembersGotoTab");
+  async settingsMembersGotoTab(tab: string): Promise<void> {
+    await this.page
+      .locator('a[href*="/settings/projects/"]')
+      .filter({ hasText: new RegExp(`^\\s*${tab}\\s*$`) })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded");
   }
   async settingsMembersAddVisible(): Promise<boolean> {
     return todo("settingsMembersAddVisible");
@@ -17375,10 +17435,27 @@ export class WebNewDriver implements ParityDriver {
     return todo("settingsMembersConfirmCancel");
   }
   async settingsMembersSkeletonVisible(): Promise<boolean> {
-    return todo("settingsMembersSkeletonVisible");
+    return this.isShown(this.page.locator('[data-testid="members-skeleton"]'));
   }
-  async settingsMembersDelayLoad(_ms: number): Promise<void> {
-    return todo("settingsMembersDelayLoad");
+  async settingsMembersDelayLoad(ms: number): Promise<void> {
+    // Hold the first members and directory reads so the skeleton is
+    // observable; later reads pass straight through.
+    let heldMembers = false;
+    let heldDirectory = false;
+    await this.page.route(`**/api/workspaces/*/projects/*/members/`, async (route) => {
+      if (!heldMembers && route.request().method() === "GET") {
+        heldMembers = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+    await this.page.route("**/api/workspaces/*/members/", async (route) => {
+      if (!heldDirectory && route.request().method() === "GET") {
+        heldDirectory = true;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
   }
   async settingsMembersDefaultsVisible(): Promise<boolean> {
     return todo("settingsMembersDefaultsVisible");
@@ -17410,8 +17487,13 @@ export class WebNewDriver implements ParityDriver {
   async settingsMembersInviteCloseMemberPicker(_index: number): Promise<void> {
     return todo("settingsMembersInviteCloseMemberPicker");
   }
-  async settingsMembersSortMarker(_column: string): Promise<"ascending" | "descending" | "none"> {
-    return todo("settingsMembersSortMarker");
+  async settingsMembersSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
+    const header = this.page.getByRole("button", { name: `Sort by ${column}`, exact: true });
+    if ((await header.count()) === 0) return "none";
+    const marker = await header.first().getAttribute("data-sort-marker");
+    if (marker === "Ascending") return "ascending";
+    if (marker === "Descending") return "descending";
+    return "none";
   }
 
   // --- Project settings workflow states (NEWFRONT-392, PSET-028–035).
