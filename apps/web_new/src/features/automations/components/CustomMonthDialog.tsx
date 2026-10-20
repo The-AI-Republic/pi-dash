@@ -58,7 +58,7 @@ export function CustomMonthDialog({ open, onOpenChange, onSubmit }: CustomMonthD
   }
 
   return (
-    <Dialog open={open} onOpenChange={(next) => onOpenChange(next)} title={CUSTOM_MONTH_TITLE}>
+    <Dialog open={open} onOpenChange={onOpenChange} title={CUSTOM_MONTH_TITLE}>
       <form onSubmit={submit}>
         <Input
           label="Months"

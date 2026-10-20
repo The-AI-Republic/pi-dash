@@ -8,7 +8,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectFeatureSettings, findProjectFeature } from "../../../../../../../features/project-features/index.js";
+import { ProjectFeatureSettings, requireProjectFeature } from "../../../../../../../features/project-features/index.js";
 import { ProjectSettingsScreen } from "../../../../../../../features/project-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/features/intake")({
@@ -17,8 +17,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/f
 
 function SettingsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
-  const feature = findProjectFeature("intake");
-  if (feature === undefined) throw new Error("Unknown project feature: intake");
+  const feature = requireProjectFeature("intake");
   return (
     <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="intake">
       <ProjectFeatureSettings feature={feature} />

@@ -9,6 +9,7 @@ import {
   nextFeatureValue,
   PROJECT_FEATURES,
   PROJECT_FEATURE_KEYS,
+  requireProjectFeature,
 } from "./registry.js";
 
 describe("project feature registry", () => {
@@ -30,6 +31,12 @@ describe("project feature registry", () => {
   it("returns undefined for anything outside the five", () => {
     expect(findProjectFeature("estimates")).toBeUndefined();
     expect(findProjectFeature("")).toBeUndefined();
+  });
+
+  it("resolves every route key to its own definition", () => {
+    for (const feature of PROJECT_FEATURES) {
+      expect(requireProjectFeature(feature.key)).toBe(feature);
+    }
   });
 
   it("reads only a true flag as on", () => {

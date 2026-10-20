@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import type { ProjectDetails, State } from "@pidash/api-client";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { ARCHIVE_ROW_TITLE, AutomationRows, CLOSE_ROW_TITLE } from "./AutomationRows.js";
@@ -42,5 +43,28 @@ describe("AutomationRows", () => {
       />
     );
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("opens the custom dialog from the archive picker and forwards a month", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<AutomationRows project={{ ...row(), archive_in: 2 } as ProjectDetails} states={[]} onChange={onChange} />);
+    await user.click(screen.getByRole("button", { name: /^Archiving window, 2 months$/ }));
+    await user.click(screen.getByRole("button", { name: "Customize time range" }));
+    const dialog = screen.getByRole("dialog", { name: "Customize time range" });
+    await user.click(within(dialog).getByRole("button", { name: "Submit" }));
+    expect(onChange).toHaveBeenCalledWith({ archive_in: 1 });
+    expect(screen.queryByRole("dialog", { name: "Customize time range" })).toBeNull();
+  });
+
+  it("opens the custom dialog from the close picker and forwards a month", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<AutomationRows project={{ ...row(), close_in: 4 } as ProjectDetails} states={[]} onChange={onChange} />);
+    await user.click(screen.getByRole("button", { name: /^Closing window, 4 months$/ }));
+    await user.click(screen.getByRole("button", { name: "Customize time range" }));
+    const dialog = screen.getByRole("dialog", { name: "Customize time range" });
+    await user.click(within(dialog).getByRole("button", { name: "Submit" }));
+    expect(onChange).toHaveBeenCalledWith({ close_in: 1 });
   });
 });

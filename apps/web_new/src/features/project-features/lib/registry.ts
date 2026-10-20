@@ -83,6 +83,17 @@ export function findProjectFeature(key: string): ProjectFeatureDef | undefined {
   return PROJECT_FEATURES.find((feature) => feature.key === key);
 }
 
+/** Index of the same five definitions by key; a registry test proves it whole. */
+const PROJECT_FEATURE_INDEX = PROJECT_FEATURES.reduce<Record<ProjectFeatureKey, ProjectFeatureDef>>(
+  (index, feature) => ({ ...index, [feature.key]: feature }),
+  {} as Record<ProjectFeatureKey, ProjectFeatureDef>
+);
+
+/** The switch definition a route leaf mounts. Every key resolves. */
+export function requireProjectFeature(key: ProjectFeatureKey): ProjectFeatureDef {
+  return PROJECT_FEATURE_INDEX[key];
+}
+
 /** Whether the project row carries the flag switched on. */
 export function isFeatureEnabled(
   project: Partial<Record<ProjectFeatureFlag, boolean>> | undefined,

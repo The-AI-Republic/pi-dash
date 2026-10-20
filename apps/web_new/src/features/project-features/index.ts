@@ -23,6 +23,7 @@ export {
   nextFeatureValue,
   PROJECT_FEATURES,
   PROJECT_FEATURE_KEYS,
+  requireProjectFeature,
 } from "./lib/registry.js";
 export type { ProjectFeatureDef, ProjectFeatureFlag, ProjectFeatureKey } from "./lib/registry.js";
 export { ProjectFeatureSettings } from "./components/ProjectFeatureSettings.js";

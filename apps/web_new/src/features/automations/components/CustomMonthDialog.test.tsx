@@ -7,7 +7,7 @@
 // field's native bounds silently stop zero, over-range and fractional
 // counts, an empty field is the only value the app explains, cancel
 // resets, and a valid month forwards and closes.
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -84,6 +84,22 @@ describe("CustomMonthDialog", () => {
     await user.type(field, "{Enter}");
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("refuses a submit dispatched past native validation while the value is out of range", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onOpenChange } = setup();
+    const field = within(dialog()).getByPlaceholderText("Enter Months");
+    await user.clear(field);
+    await user.type(field, "13");
+    const form = field.closest("form");
+    if (form === null) throw new Error("month field is outside its form");
+    // A direct submit skips the browser's own check; the handler's guard
+    // still keeps the dialog open without writing or explaining.
+    fireEvent.submit(form);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
   });
 
   it("forwards a whole month and asks to close", async () => {
