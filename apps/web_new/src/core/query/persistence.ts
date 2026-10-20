@@ -52,6 +52,16 @@ export interface CachePersistor {
   stop(): void;
 }
 
+/**
+ * Whether a stored entry carries a settled payload. Pending entries cannot
+ * be restored from JSON (their in-flight promise loses its methods), and
+ * restoring them would abort the rest of the payload.
+ */
+function restorableQuery(entry: DehydratedState["queries"][number]): boolean {
+  const status: unknown = entry.state?.status;
+  return (status === "success" || status === "error") && entry.promise === undefined;
+}
+
 export function createCachePersistor(
   client: QueryClient,
   storage: KeyValueStore,
@@ -77,8 +87,11 @@ export function createCachePersistor(
   }
 
   async function save(): Promise<void> {
+    // Only settled data can be painted on launch. A pending query has no
+    // rows yet, and `dehydrate` would attach its in-flight promise, which
+    // JSON turns into `{}` and which then breaks the whole restore below.
     const full = dehydrate(client, {
-      shouldDehydrateQuery: (query) => shouldPersist(query.queryKey),
+      shouldDehydrateQuery: (query) => query.state.status === "success" && shouldPersist(query.queryKey),
     });
     const payload: StoredPayload = { version, state: full };
     try {
@@ -107,7 +120,15 @@ export function createCachePersistor(
       await storage.remove(storageKey).catch(() => undefined);
       return;
     }
-    hydrate(client, payload.state);
+    // A payload written before the save-side guard can still carry pending
+    // entries whose promise did not survive JSON. `hydrate` resolves those
+    // promises synchronously and throws, which abandons every remaining
+    // entry, so drop them here and restore the rest.
+    const state: DehydratedState = {
+      ...payload.state,
+      queries: (payload.state.queries ?? []).filter(restorableQuery),
+    };
+    hydrate(client, state);
   }
 
   const unsubscribe = client.getQueryCache().subscribe(scheduleSave);
