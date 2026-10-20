@@ -9,6 +9,8 @@
 All behavior below was learned from reading the old frontend sources and is
 described in fresh prose. Nothing here is copied from the old codebase.
 
+Build behavior for every row is specified in `parity/specs/analytics.md` (NEWFRONT-727).
+
 ## Rows
 
 | ID      | Capability                                                                                                                                                                                                                                                                                                                                            | Who                                                   | Edition | Old entry point                                                                               | API                                                             | Acceptance                                                                                                                                                                                                                                                                                                                        | Parity test                        | Status       |
