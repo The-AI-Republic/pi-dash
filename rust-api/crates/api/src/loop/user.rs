@@ -45,12 +45,13 @@
 use std::collections::HashSet;
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use serde_json::Value;
 
 use crate::state::AppState;
+use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
 
 use pidash_db::r#loop::models::loop_job::LoopJob;
 use pidash_services::r#loop::shape::{public_job_payload, PublicJobRow};
@@ -109,6 +110,8 @@ enum Denial {
     Unauthorized,
     /// 400, DRF `ParseError` (unparseable body).
     BadDetail(String),
+    /// 415, DRF `UnsupportedMediaType` (`{"detail": …}`).
+    UnsupportedMediaType(String),
     /// 400, `{"error": …}` (view-inline guard bodies).
     BadError(String),
     /// 500, generic branch.
@@ -124,6 +127,10 @@ impl Denial {
             ),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
@@ -183,19 +190,30 @@ async fn actor(
     }
 }
 
-/// Parse a toggle body: JSON first (a parse failure is DRF's `ParseError`
-/// 400), then the toggle-only guard (anything but exactly one boolean
-/// `enabled` key is 400 `{"error":"invalid_payload"}`).
+/// Parse a toggle body through DRF's `Request._parse` pipeline: an empty
+/// body is `{}`, a missing/unsupported Content-Type is the 415 detail,
+/// form input arrives as its text map, and JSON keeps the `ParseError` 400.
+/// The toggle-only guard then rejects anything but exactly one boolean
+/// `enabled` key with 400 `{"error":"invalid_payload"}`.
 ///
 /// Python (`views.py:52-61`) folds a non-dict body into `{}` before the
 /// key check; [`crate::r#loop::guards::read_enabled`] answers the same
 /// `invalid_payload` for non-objects, so lists and scalars land identically.
-fn parse_enabled(body: &[u8]) -> Result<bool, Denial> {
-    let data: Value = match serde_json::from_slice(body) {
-        Ok(data) => data,
-        Err(err) => {
-            return Err(Denial::BadDetail(format!("JSON parse error - {err}")));
+fn parse_enabled(headers: &HeaderMap, body: &[u8]) -> Result<bool, Denial> {
+    let data: Value = match negotiate_body(headers, body, &super::LOOP_BODY_SPEC) {
+        Ok(NegotiatedBody::Empty) => Value::Object(serde_json::Map::new()),
+        Ok(NegotiatedBody::JsonText { text, .. }) => match serde_json::from_str(&text) {
+            Ok(data) => data,
+            Err(err) => {
+                return Err(Denial::BadDetail(format!("JSON parse error - {err}")));
+            }
+        },
+        Ok(NegotiatedBody::Form { map, .. }) => Value::Object(map),
+        Err(BodyError::UnsupportedMediaType(message)) => {
+            return Err(Denial::UnsupportedMediaType(message));
         }
+        Err(BodyError::ParseDetail(message)) => return Err(Denial::BadDetail(message)),
+        Err(BodyError::ServerError) => return Err(Denial::ServerError),
     };
     // The guard's `invalid_payload` body renders through [`Denial::BadError`]
     // (`{"error":"invalid_payload"}`, byte-identical to the guards
@@ -357,6 +375,7 @@ async fn get_settings(
 async fn patch_settings(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let pool = match pool_of(&state) {
@@ -367,7 +386,7 @@ async fn patch_settings(
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
     };
-    let enabled = match parse_enabled(&body) {
+    let enabled = match parse_enabled(&headers, &body) {
         Ok(enabled) => enabled,
         Err(denial) => return denial.into_response(),
     };
@@ -389,6 +408,7 @@ async fn patch_job(
     State(state): State<AppState>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
     Path(slug): Path<String>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
     let pool = match pool_of(&state) {
@@ -424,7 +444,7 @@ async fn patch_job(
             return error_response(StatusCode::NOT_FOUND, &body);
         }
     };
-    let enabled = match parse_enabled(&body) {
+    let enabled = match parse_enabled(&headers, &body) {
         Ok(enabled) => enabled,
         Err(denial) => return denial.into_response(),
     };

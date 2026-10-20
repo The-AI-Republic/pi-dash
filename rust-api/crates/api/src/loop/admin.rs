@@ -75,6 +75,7 @@ use crate::edge;
 use crate::middleware::SessionHandle;
 use crate::permissions::DEFAULT_DENIED_BODY;
 use crate::state::AppState;
+use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
 
 use super::guards::{self, ValidateFail};
 
@@ -275,25 +276,42 @@ fn pools(state: &AppState) -> Result<&PgPool, Denial> {
 // request parsing (DRF shapes)
 // ---------------------------------------------------------------------------
 
-/// Parse a POST/PATCH body the way DRF's `JSONParser` does: the body must
-/// be UTF-8 (a decode error escapes the parser into the generic 500);
-/// unparsable JSON is `ParseError` 400 with the `{"detail"}` shape. Unlike
-/// the license console (where a non-object body 500s), the loop admin
-/// views run `request.data if isinstance(request.data, dict) else {}`,
-/// so any well-formed non-object JSON counts as `{}`.
-fn parse_json_body(body: &[u8]) -> Result<Value, Denial> {
-    let text = std::str::from_utf8(body).map_err(|_| Denial::ServerError)?;
-    match serde_json::from_str::<Value>(text) {
-        Ok(data) => Ok(data),
-        Err(_) if text.trim().is_empty() => {
-            let len = text.len();
-            Err(Denial::BadDetail(format!(
-                "JSON parse error - Expecting value: line 1 column {} (char {})",
-                len + 1,
-                len
-            )))
-        }
-        Err(_) => Err(Denial::BadDetail("JSON parse error.".to_owned())),
+/// Map a body-layer failure onto this module's denials.
+fn map_body_error(error: BodyError) -> Denial {
+    match error {
+        BodyError::UnsupportedMediaType(message) => Denial::Guard(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            json!({ "detail": message }),
+        ),
+        BodyError::ParseDetail(message) => Denial::BadDetail(message),
+        BodyError::ServerError => Denial::ServerError,
+    }
+}
+
+/// Read a POST/PATCH body through DRF's `Request._parse` pipeline
+/// (`negotiate_body`): Content-Length 0 is `{}` without parsing, a missing
+/// or unsupported Content-Type is the 415 `UnsupportedMediaType` detail,
+/// form/multipart input arrives as its text map, and JSON is decoded for
+/// the existing `JSONParser`-shaped error path. Unlike the license console
+/// (where a non-object body 500s), the loop admin views run
+/// `request.data if isinstance(request.data, dict) else {}`, so any
+/// well-formed non-object JSON counts as `{}`.
+fn parse_json_body(headers: &HeaderMap, body: &[u8]) -> Result<Value, Denial> {
+    match negotiate_body(headers, body, &super::LOOP_BODY_SPEC).map_err(map_body_error)? {
+        NegotiatedBody::Empty => Ok(Value::Object(Map::new())),
+        NegotiatedBody::JsonText { text, .. } => match serde_json::from_str::<Value>(&text) {
+            Ok(data) => Ok(data),
+            Err(_) if text.trim().is_empty() => {
+                let len = text.len();
+                Err(Denial::BadDetail(format!(
+                    "JSON parse error - Expecting value: line 1 column {} (char {})",
+                    len + 1,
+                    len
+                )))
+            }
+            Err(_) => Err(Denial::BadDetail("JSON parse error.".to_owned())),
+        },
+        NegotiatedBody::Form { map, .. } => Ok(Value::Object(map)),
     }
 }
 
@@ -737,13 +755,14 @@ async fn list_jobs(
 async fn create_job(
     State(state): State<AppState>,
     extension: Option<Extension<SessionHandle>>,
+    headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, Denial> {
     let pool = pools(&state)?;
     let actor = authed_user(&state, pool, extension).await?;
     require_instance_admin(pool, &actor).await?;
 
-    let data = parse_json_body(&body)?;
+    let data = parse_json_body(&headers, &body)?;
     let cleaned = guards::validate_writes(&data, false).map_err(Denial::from)?;
 
     let slug = cleaned
@@ -871,7 +890,7 @@ async fn patch_job(
     let Some(current) = fetch_job(pool, &job_id).await? else {
         return Err(Denial::NotFound);
     };
-    let data = parse_json_body(&body)?;
+    let data = parse_json_body(&headers, &body)?;
     let cleaned = guards::validate_writes(&data, true).map_err(Denial::from)?;
 
     if let Some(raw_slug) = cleaned.get("slug").and_then(guards::python_str) {
