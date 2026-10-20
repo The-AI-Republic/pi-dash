@@ -11,7 +11,14 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { ApiTokensTab } from "./ApiTokensTab.js";
+
+// The tab suspends on a lazy chunk, so the first paint pays for the module
+// import. Wait with the suite's measured load allowance instead of
+// testing-library's fixed one-second default, which the global testTimeout
+// does not relax.
+const CHUNK_WAIT = { timeout: FULL_RUN_TEST_TIMEOUT_MS };
 
 beforeEach(() => {
   createAppClient("https://api.test", (async (url: string) => ({
@@ -43,7 +50,7 @@ describe("ApiTokensTab", () => {
 
   it("mounts the workspace-built token page once loaded", async () => {
     renderTab();
-    expect(await screen.findByRole("heading", { name: "Personal Access Tokens" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Personal Access Tokens" }, CHUNK_WAIT)).toBeInTheDocument();
     expect(screen.queryByTestId("api-tokens-tab-fallback")).not.toBeInTheDocument();
   });
 });
