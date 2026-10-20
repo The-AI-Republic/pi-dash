@@ -161,7 +161,7 @@ describe("PodPicker", () => {
     const desktop = screen.getByRole("option", { name: "Pi Dash Agent (desktop)" });
     expect(cloud).toBeDisabled();
     expect(desktop).toBeDisabled();
-    expect(cloud.textContent).toContain("AI provider");
+    expect(cloud.textContent).toContain("No model is configured");
     fireEvent.click(cloud);
     expect(onChange).not.toHaveBeenCalled();
   });
