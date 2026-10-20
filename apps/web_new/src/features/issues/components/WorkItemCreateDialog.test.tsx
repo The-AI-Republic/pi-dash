@@ -1878,6 +1878,86 @@ describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
   });
 });
 
+describe("WorkItemCreateDialog context close and Create more (ISS-124/125)", () => {
+  it("closes an untouched cycle-context form without offering a draft", async () => {
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { cycleId: CYCLE_ID } }
+    );
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    // The cycle came from the route, not the user: nothing to keep.
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
+  it("closes an untouched module-context form without offering a draft", async () => {
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { moduleId: MODULE_ID } }
+    );
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toBeInTheDocument());
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+    expect(screen.queryByText("Save this draft?")).not.toBeInTheDocument();
+  });
+
+  it("still asks once the user types inside a cycle-context form", async () => {
+    const user = userEvent.setup();
+    setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { cycleId: CYCLE_ID } }
+    );
+    await user.type(titleField(), "Keep me");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
+  });
+
+  it("keeps the route cycle for the second item under Create more", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { cycleId: CYCLE_ID } }
+    );
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "First in cycle");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    await user.type(titleField(), "Second in cycle");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+    await waitFor(() =>
+      expect(h.calls.filter((call) => call.url.includes(`/cycles/${CYCLE_ID}/cycle-issues/`))).toHaveLength(2)
+    );
+  });
+
+  it("keeps the route module for the second item under Create more", async () => {
+    const user = userEvent.setup();
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }) } },
+      { context: { moduleId: MODULE_ID } }
+    );
+    await user.click(screen.getByRole("switch", { name: "Create more" }));
+    await user.type(titleField(), "First in module");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    await waitFor(() => expect(titleField()).toHaveValue(""));
+    await user.type(titleField(), "Second in module");
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(2));
+    await waitFor(() =>
+      expect(
+        h.calls.filter(
+          (call) =>
+            call.url.includes(`/issues/${CREATED_ID}/modules/`) &&
+            (call.body as { modules?: string[] }).modules?.[0] === MODULE_ID
+        )
+      ).toHaveLength(2)
+    );
+  });
+});
+
 describe("WorkItemCreateDialog advanced git branch (ISS-128)", () => {
   it("starts collapsed and opens on request", async () => {
     const user = userEvent.setup();

@@ -749,8 +749,6 @@ export function WorkItemCreateDialog({
           }
           // Keep the project and the route's cycle/module context, then
           // re-focus the title; everything else is a new item (ISS-119).
-          // Keep the project and the route's cycle/module context, then
-          // re-focus the title; everything else is a new item (ISS-119).
           // A seeded parent stays attached to the next item (ISS-175).
           setForm(
             seededParent === null

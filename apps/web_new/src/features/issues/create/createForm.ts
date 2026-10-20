@@ -64,9 +64,17 @@ export function emptyCreateForm(projectId: string | null, descriptionHtml = ""):
   };
 }
 
-/** The form after a successful create while Create more is on (ISS-119). */
+/**
+ * The form after a successful create while Create more is on (ISS-119).
+ * The project and the route's cycle/module context stay, so the next
+ * item lands where the modal opened; everything else is a new item. The
+ * old modal merges its route data into the same reset.
+ */
 export function resetForCreateMore(form: CreateFormState, descriptionDefault = ""): CreateFormState {
-  return emptyCreateForm(form.projectId, descriptionDefault);
+  const state = emptyCreateForm(form.projectId, descriptionDefault);
+  state.cycleId = form.cycleId;
+  state.moduleIds = [...form.moduleIds];
+  return state;
 }
 
 /** Whether the dialog may file under a project id (ISS-123). */
@@ -214,8 +222,10 @@ export function buildDraftInput(form: CreateFormState): DraftIssueCreateInput {
 
 /**
  * Whether the discard guard has anything worth keeping (ISS-120). The
- * project is context, not content, so it never counts; empty values and
- * a description without visible text do not either.
+ * project and the cycle/module memberships are context, not content, so
+ * they never count (ISS-124: a form opened from a cycle or module page
+ * is untouched until the user types); empty values and a description
+ * without content do not either.
  */
 export function hasDraftWorthKeeping(form: CreateFormState): boolean {
   if (normalizeTitle(form.name) !== "") return true;
@@ -225,8 +235,6 @@ export function hasDraftWorthKeeping(form: CreateFormState): boolean {
   if (form.assigneeIds.length > 0) return true;
   if (form.labelIds.length > 0) return true;
   if (form.startDate !== null || form.targetDate !== null) return true;
-  if (form.cycleId !== null) return true;
-  if (form.moduleIds.length > 0) return true;
   if (form.estimatePoint !== null) return true;
   if (form.execution !== null) return true;
   if (form.parentId !== null) return true;

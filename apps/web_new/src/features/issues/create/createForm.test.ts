@@ -256,6 +256,11 @@ describe("hasDraftWorthKeeping", () => {
     expect(hasDraftWorthKeeping(form({ projectId: PROJECT, descriptionHtml: "<p></p>" }))).toBe(false);
   });
 
+  it("does not count membership context seeded from a route", () => {
+    expect(hasDraftWorthKeeping(form({ cycleId: "cycle" }))).toBe(false);
+    expect(hasDraftWorthKeeping(form({ moduleIds: ["module"] }))).toBe(false);
+  });
+
   it("counts an image-only or mention-only description", () => {
     expect(hasDraftWorthKeeping(form({ descriptionHtml: '<p><img src="x"></p>' }))).toBe(true);
     expect(
@@ -272,8 +277,6 @@ describe("hasDraftWorthKeeping", () => {
     ["labels", { labelIds: ["label"] }],
     ["start date", { startDate: "2026-01-02" }],
     ["due date", { targetDate: "2026-01-02" }],
-    ["cycle", { cycleId: "cycle" }],
-    ["modules", { moduleIds: ["module"] }],
     ["estimate", { estimatePoint: "point" }],
     ["execution target", { execution: { type: "pod", podId: "pod" } }],
     ["parent", { parentId: "parent" }],
@@ -337,5 +340,12 @@ describe("resetForCreateMore", () => {
 
   it("keeps a null project", () => {
     expect(resetForCreateMore(form({ projectId: null, name: "x" })).projectId).toBeNull();
+  });
+
+  it("keeps the route's cycle and modules so a second item lands there too", () => {
+    const next = resetForCreateMore(form({ name: "First", cycleId: "cycle", moduleIds: ["module"] }));
+    expect(next.cycleId).toBe("cycle");
+    expect(next.moduleIds).toEqual(["module"]);
+    expect(next.name).toBe("");
   });
 });
