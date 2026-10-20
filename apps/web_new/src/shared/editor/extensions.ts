@@ -105,6 +105,12 @@ export async function loadIssueDescriptionExtensions() {
         width: { default: null },
         height: { default: null },
         alignment: { default: null },
+        // The old editor records the picture's measured ratio when it
+        // resizes an image. HTML attribute names are case-insensitive, so
+        // the stored `aspectRatio` and this spelling are the same
+        // attribute; keeping its value through a save is what matters
+        // (ISS-127).
+        aspectratio: { default: null },
         "data-stored-src": {
           default: null,
           parseHTML: (element: HTMLElement) => element.getAttribute("data-stored-src"),
@@ -139,7 +145,7 @@ export async function loadIssueDescriptionExtensions() {
         }
         const image = document.createElement("img");
         image.setAttribute("src", typeof attrs["src"] === "string" ? attrs["src"] : "");
-        for (const name of ["alt", "title", "width", "height"]) {
+        for (const name of ["alt", "title", "width", "height", "aspectratio"]) {
           const value = attrs[name];
           if (typeof value === "string" && value !== "") image.setAttribute(name, value);
         }

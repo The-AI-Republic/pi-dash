@@ -377,4 +377,22 @@ describe("buildPublishInput", () => {
     form.name = "Only a name";
     expect(buildPublishInput(form)).toEqual({ name: "Only a name" });
   });
+
+  it("keeps the draft's cycle, modules and estimate (ISS-130)", () => {
+    // The promote endpoint files the issue in the named cycle and
+    // modules and stores its estimate; leaving them out loses the
+    // draft's placement (ISS-130).
+    const form = emptyCreateForm(PROJECT);
+    form.name = "Placed";
+    form.cycleId = "c-1";
+    form.moduleIds = ["m-1", "m-2"];
+    form.estimatePoint = "e-1";
+    expect(buildPublishInput(form)).toEqual({
+      name: "Placed",
+      project_id: PROJECT,
+      cycle_id: "c-1",
+      module_ids: ["m-1", "m-2"],
+      estimate_point: "e-1",
+    });
+  });
 });

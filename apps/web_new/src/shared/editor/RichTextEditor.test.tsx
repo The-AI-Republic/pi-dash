@@ -283,7 +283,7 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     const user = userEvent.setup();
     const onChange = vi.fn();
     const stored =
-      '<p>hi</p><image-component src="35e8b958-6ee5-43ce-ae56-fb0e776f421e" status="uploaded" width="200"></image-component><p>there</p>';
+      '<p>hi</p><image-component src="35e8b958-6ee5-43ce-ae56-fb0e776f421e" status="uploaded" width="200" height="auto" aspectRatio="2" aspectratio="2" alignment="left"></image-component><p>there</p>';
     render(
       <React.Suspense fallback={<p>loading</p>}>
         <IssueDescriptionEditor
@@ -310,6 +310,14 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(last).toContain('src="35e8b958-6ee5-43ce-ae56-fb0e776f421e"');
     expect(last).toContain('status="uploaded"');
     expect(last).toContain('width="200"');
+    // The old editor's measured ratio and the remaining stored
+    // attributes survive too: a save must not narrow the element
+    // (ISS-127).
+    // HTML attribute names are case-insensitive, so the stored
+    // `aspectRatio` comes back spelled in lowercase with its value kept.
+    expect(last).toContain('aspectratio="2"');
+    expect(last).toContain('height="auto"');
+    expect(last).toContain('alignment="left"');
     expect(last).not.toContain("data-stored-src");
     expect(last).not.toContain("<img");
   });

@@ -299,5 +299,11 @@ export function buildPublishInput(form: CreateFormState): DraftIssueCreateInput 
   if (form.startDate !== null) input.start_date = form.startDate;
   if (form.targetDate !== null) input.target_date = form.targetDate;
   if (form.parentId !== null) input.parent_id = form.parentId;
+  // The promote endpoint files the new issue under whatever cycle and
+  // modules the body names and stores its estimate; leaving them out
+  // silently drops a draft's placement and size (ISS-130).
+  if (form.cycleId !== null) input.cycle_id = form.cycleId;
+  if (form.moduleIds.length > 0) input.module_ids = [...form.moduleIds];
+  if (form.estimatePoint !== null) input.estimate_point = form.estimatePoint;
   return input;
 }

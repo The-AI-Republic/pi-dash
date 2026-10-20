@@ -2009,6 +2009,10 @@ describe("WorkItemCreateDialog publish (ISS-130)", () => {
     expect(notifySuccess).toHaveBeenCalledWith("Draft published to project.", expect.any(String));
     const promote = h.calls.find((call) => call.url.includes("/draft-to-issue/draft-1/"));
     expect(promote?.body).toMatchObject({ name: "Draft to publish", project_id: PROJECT_ATLAS });
+    // The draft's cycle and modules travel with the promote; the endpoint
+    // files the new issue in them rather than dropping the placement
+    // (ISS-130).
+    expect(promote?.body).toMatchObject({ cycle_id: PARENT_ID, module_ids: [PARENT_ID] });
   });
 
   it("refuses to publish a draft with no project", async () => {
