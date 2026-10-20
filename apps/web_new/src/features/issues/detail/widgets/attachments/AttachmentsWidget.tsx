@@ -21,6 +21,7 @@ import { usePickerWorkspaceMembers } from "../../../../../shared/pickers/index.j
 import { notifyError, resolveFileUrl } from "../../../../../shared/shell/index.js";
 import { timeAgo } from "../../../../../shared/lib/timeAgo.js";
 import { useDeleteAttachment, useIssueAttachments, useUploadAttachment } from "./api.js";
+import { uploadAttachmentBytes } from "./uploadBytes.js";
 import {
   attachmentBaseName,
   attachmentName,
@@ -55,6 +56,9 @@ const KIND_ICONS: Record<AttachmentKind, typeof File> = {
   archive: FileArchive,
   file: File,
 };
+
+/** Progress re-renders at most this often, so a fast upload stays readable. */
+export const UPLOAD_PROGRESS_THROTTLE_MS = 200;
 
 /** Icon for one attachment's extension family. */
 function AttachmentIcon({ name }: { name: string }): React.ReactElement {
@@ -106,13 +110,16 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
     const [expanded, setExpanded] = React.useState(true);
     const [dragging, setDragging] = React.useState(false);
     const [pendingName, setPendingName] = React.useState<string | null>(null);
+    const [percent, setPercent] = React.useState(0);
     const [confirming, setConfirming] = React.useState<IssueAttachment | null>(null);
     const inputRef = React.useRef<HTMLInputElement | null>(null);
+    const progressClock = React.useRef(0);
 
     const rows = query.data ?? [];
     const members = new Map((directory.data ?? []).map((row) => [row.member.id, row.member]));
 
     function acceptFiles(files: readonly File[]): void {
+      if (pendingName !== null) return;
       const file = oneFileOf(files);
       if (file === null) {
         if (files.length > 0) notifyError(MULTI_FILE_NOTICE);
@@ -122,9 +129,19 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
         notifyError(oversizeNotice(limit));
         return;
       }
+      progressClock.current = 0;
+      setPercent(0);
       setPendingName(file.name);
       upload.mutate(
-        { file },
+        {
+          file,
+          uploadBytes: uploadAttachmentBytes((percent) => {
+            const now = Date.now();
+            if (percent < 100 && now - progressClock.current < UPLOAD_PROGRESS_THROTTLE_MS) return;
+            progressClock.current = now;
+            setPercent(percent);
+          }),
+        },
         {
           onSettled: () => {
             setPendingName(null);
@@ -135,30 +152,32 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
     }
 
     function openPicker(): void {
+      if (pendingName !== null) return;
       inputRef.current?.click();
     }
 
-    React.useImperativeHandle(ref, () => ({ openPicker }), []);
+    React.useImperativeHandle(ref, () => ({ openPicker }));
 
-    const dragHandlers = editable
-      ? {
-          onDragEnter: (event: React.DragEvent) => {
-            event.preventDefault();
-            setDragging(true);
-          },
-          onDragOver: (event: React.DragEvent) => {
-            event.preventDefault();
-          },
-          onDragLeave: (event: React.DragEvent) => {
-            if (event.currentTarget === event.target) setDragging(false);
-          },
-          onDrop: (event: React.DragEvent) => {
-            event.preventDefault();
-            setDragging(false);
-            acceptFiles(Array.from(event.dataTransfer.files));
-          },
-        }
-      : {};
+    const dragHandlers =
+      editable && pendingName === null
+        ? {
+            onDragEnter: (event: React.DragEvent) => {
+              event.preventDefault();
+              setDragging(true);
+            },
+            onDragOver: (event: React.DragEvent) => {
+              event.preventDefault();
+            },
+            onDragLeave: (event: React.DragEvent) => {
+              if (event.currentTarget === event.target) setDragging(false);
+            },
+            onDrop: (event: React.DragEvent) => {
+              event.preventDefault();
+              setDragging(false);
+              acceptFiles(Array.from(event.dataTransfer.files));
+            },
+          }
+        : {};
 
     return (
       <section
@@ -170,13 +189,15 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
         }`}
         {...dragHandlers}
       >
-        <input
-          ref={inputRef}
-          type="file"
-          className="sr-only"
-          aria-label="Choose an attachment"
-          onChange={(event) => acceptFiles(Array.from(event.target.files as FileList))}
-        />
+        {editable ? (
+          <input
+            ref={inputRef}
+            type="file"
+            className="sr-only"
+            aria-label="Choose an attachment"
+            onChange={(event) => acceptFiles(Array.from(event.target.files as FileList))}
+          />
+        ) : null}
         {rows.length === 0 && pendingName === null ? null : (
           <>
             <button
@@ -198,6 +219,7 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
                 variant="ghost"
                 onClick={openPicker}
                 loading={pendingName !== null}
+                disabled={pendingName !== null}
                 className="absolute top-0 right-0"
               >
                 <Upload size={14} strokeWidth={1.5} aria-hidden="true" />
@@ -213,6 +235,9 @@ export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, Attac
                   >
                     <AttachmentIcon name={pendingName} />
                     <span className="text-body min-w-0 flex-1 truncate text-(--text)">{pendingName}</span>
+                    <span data-widget-progress className="text-meta shrink-0 text-(--text-muted)">
+                      {`${percent}%`}
+                    </span>
                     <Spinner size="small" label="Uploading attachment" />
                   </div>
                 )}

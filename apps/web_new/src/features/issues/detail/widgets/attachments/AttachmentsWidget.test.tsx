@@ -68,14 +68,58 @@ interface StubOptions {
   patchStatus?: number;
   deleteStatus?: number;
   bytesOk?: boolean;
+  holdBytes?: boolean;
   limit?: number | undefined;
   avatarUrl?: string | null;
   hangList?: boolean;
 }
 
+interface FakeXhrInstance {
+  url: string;
+  emitProgress: (loaded: number, total: number) => void;
+  finish: (ok?: boolean) => void;
+}
+
+/** Minimal XHR so the widget's progress-aware byte leg is exercised. */
+function installFakeXhr(options: StubOptions): FakeXhrInstance[] {
+  const instances: FakeXhrInstance[] = [];
+  class FakeXhr {
+    upload = {
+      addEventListener: (_type: string, listener: (event: ProgressEvent) => void) => {
+        this.progressListener = listener;
+      },
+    };
+    status = 0;
+    private progressListener: ((event: ProgressEvent) => void) | null = null;
+    private listeners: Record<string, () => void> = {};
+    open(_method: string, _url: string): void {
+      this.url = _url;
+    }
+    url = "";
+    addEventListener(type: string, listener: () => void): void {
+      this.listeners[type] = listener;
+    }
+    send(): void {
+      const instance: FakeXhrInstance = {
+        url: this.url,
+        emitProgress: (loaded, total) => {
+          this.progressListener?.({ lengthComputable: true, loaded, total } as ProgressEvent);
+        },
+        finish: (ok = options.bytesOk ?? true) => {
+          this.status = ok ? 204 : 500;
+          this.listeners.load?.();
+        },
+      };
+      instances.push(instance);
+      if (!options.holdBytes) instance.finish();
+    }
+  }
+  vi.stubGlobal("XMLHttpRequest", FakeXhr as never);
+  return instances;
+}
+
 function stubTransport(options: StubOptions = {}) {
   const calls: { url: string; method: string; body: string }[] = [];
-  const byteCalls: string[] = [];
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     calls.push({ url, method: init.method ?? "GET", body: init.body ?? "" });
     const json = (status: number, body: unknown) => ({
@@ -149,11 +193,9 @@ function stubTransport(options: StubOptions = {}) {
     }
     throw new Error(`unexpected ${init.method ?? "GET"} ${url}`);
   }) as never);
-  vi.stubGlobal("fetch", async (url: string) => {
-    byteCalls.push(url);
-    return { ok: options.bytesOk ?? true, status: options.bytesOk === false ? 500 : 204 };
-  });
-  return { calls, byteCalls };
+  const xhrs = installFakeXhr(options);
+  const byteCalls = () => xhrs.map((instance) => instance.url);
+  return { calls, byteCalls, xhrs };
 }
 
 function setup(options: StubOptions = {}, overrides: Partial<React.ComponentProps<typeof AttachmentsWidget>> = {}) {
@@ -243,7 +285,106 @@ describe("AttachmentsWidget upload", () => {
     const file = new File([new Uint8Array(512)], "new.png", { type: "image/png" });
     fireEvent.change(input, { target: { files: [file] } });
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
-    expect(byteCalls).toEqual(["https://storage.test/upload"]);
+    expect(byteCalls()).toEqual(["https://storage.test/upload"]);
+  });
+
+  it("refreshes the activity feed key after an upload", async () => {
+    stubTransport();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    const input = await screen.findByLabelText("Choose an attachment");
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array(64)], "new.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["ws", SLUG, "issues", "activity", PROJECT, ISSUE],
+    });
+  });
+
+  it("shows the live percentage in the in-flight row", async () => {
+    const { xhrs } = stubTransport({ holdBytes: true });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    const input = await screen.findByLabelText("Choose an attachment");
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array(100)], "big.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(xhrs).toHaveLength(1));
+    await waitFor(() => expect(screen.getByText("big.png")).toBeInTheDocument());
+    expect(document.querySelector("[data-widget-progress]")).toHaveTextContent("0%");
+    xhrs[0]?.emitProgress(40, 100);
+    await waitFor(() => expect(document.querySelector("[data-widget-progress]")).toHaveTextContent("40%"));
+    xhrs[0]?.emitProgress(60, 100);
+    expect(document.querySelector("[data-widget-progress]")).toHaveTextContent("40%");
+    xhrs[0]?.emitProgress(100, 100);
+    await waitFor(() => expect(document.querySelector("[data-widget-progress]")).toHaveTextContent("100%"));
+    xhrs[0]?.finish();
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
+    expect(document.querySelector("[data-widget-progress]")).toBeNull();
+  });
+
+  it("ignores the picker handle while an upload is in flight", async () => {
+    const ref = React.createRef<import("./AttachmentsWidget.js").AttachmentsWidgetHandle>();
+    const { xhrs } = stubTransport({ holdBytes: true });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable ref={ref} />
+      </QueryClientProvider>
+    );
+    const input = await screen.findByLabelText("Choose an attachment");
+    const click = vi.spyOn(input, "click");
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array(8)], "one.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(xhrs).toHaveLength(1));
+    click.mockClear();
+    ref.current?.openPicker();
+    expect(click).not.toHaveBeenCalled();
+    xhrs[0]?.finish();
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
+  });
+
+  it("ignores a second pick and drop while one file is in flight", async () => {
+    const { xhrs } = stubTransport({ holdBytes: true });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
+      </QueryClientProvider>
+    );
+    const input = await screen.findByLabelText("Choose an attachment");
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array(8)], "one.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(xhrs).toHaveLength(1));
+    const section = screen.getByRole("region", { name: "Attachments" });
+    fireEvent.drop(section, {
+      dataTransfer: { files: [new File([new Uint8Array(8)], "two.png", { type: "image/png" })] },
+    });
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array(8)], "three.png", { type: "image/png" })] },
+    });
+    expect(xhrs).toHaveLength(1);
+    expect(screen.queryByText("two.png")).not.toBeInTheDocument();
+    xhrs[0]?.finish();
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
+  });
+
+  it("mounts no file input for a read-only viewer", async () => {
+    setup({ rows: [attachmentRow()] }, { editable: false });
+    await screen.findByRole("link", { name: /plan\.png/ });
+    expect(screen.queryByLabelText("Choose an attachment")).not.toBeInTheDocument();
   });
 
   it("rejects a multi-file drop with the single-file notice", async () => {
@@ -304,6 +445,7 @@ describe("AttachmentsWidget delete", () => {
     const user = userEvent.setup();
     const { calls } = stubTransport({ rows: [attachmentRow()] });
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     const mounted = render(
       <QueryClientProvider client={queryClient}>
         <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable />
@@ -317,6 +459,9 @@ describe("AttachmentsWidget delete", () => {
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment removed"));
     expect(calls.some((call) => call.method === "DELETE" && call.url.includes(`/attachments/${ASSET}/`))).toBe(true);
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: ["ws", SLUG, "issues", "activity", PROJECT, ISSUE],
+    });
     mounted.unmount();
   });
 
@@ -388,7 +533,7 @@ describe("AttachmentsWidget drag surface", () => {
       dataTransfer: { files: [new File([new Uint8Array(4)], "drop.png", { type: "image/png" })] },
     });
     await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Attachment uploaded"));
-    expect(byteCalls).toEqual(["https://storage.test/upload"]);
+    expect(byteCalls()).toEqual(["https://storage.test/upload"]);
   });
 
   it("takes no drag handlers for a read-only viewer", async () => {

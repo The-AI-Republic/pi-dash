@@ -13,6 +13,7 @@ import {
   listIssueAttachments,
   uploadIssueAttachment,
   type ApiClient,
+  type AttachmentByteUpload,
   type IssueAttachment,
 } from "@pidash/api-client";
 
@@ -50,13 +51,20 @@ export function useIssueAttachments(workspaceSlug: string, projectId: string, is
 
 export interface UploadAttachmentInput {
   file: File;
+  /** Bytes leg; the widget injects an XHR uploader so the row can show live progress. */
+  uploadBytes?: AttachmentByteUpload | undefined;
 }
 
-/** Upload one file end to end, then refresh the list and the item. */
+/**
+ * Upload one file end to end, then refresh the list, the item and the
+ * activity feed: the server records an attachment activity that the feed
+ * reads through its own key.
+ */
 export function useUploadAttachment(workspaceSlug: string, projectId: string, issueId: string) {
   const queryClient = useQueryClient();
   return useMutation<IssueAttachment, Error, UploadAttachmentInput>({
-    mutationFn: (input) => uploadIssueAttachment(getAppClient(), workspaceSlug, projectId, issueId, input.file),
+    mutationFn: (input) =>
+      uploadIssueAttachment(getAppClient(), workspaceSlug, projectId, issueId, input.file, input.uploadBytes),
     onSuccess: () => {
       notifySuccess(ATTACHMENT_UPLOADED_TITLE);
     },
@@ -66,6 +74,7 @@ export function useUploadAttachment(workspaceSlug: string, projectId: string, is
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: attachmentKeys.all(workspaceSlug, issueId) });
       void queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) });
+      void queryClient.invalidateQueries({ queryKey: issueKeys.activity(workspaceSlug, projectId, issueId) });
     },
   });
 }
@@ -84,6 +93,7 @@ export function useDeleteAttachment(workspaceSlug: string, projectId: string, is
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: attachmentKeys.all(workspaceSlug, issueId) });
       void queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) });
+      void queryClient.invalidateQueries({ queryKey: issueKeys.activity(workspaceSlug, projectId, issueId) });
     },
   });
 }
