@@ -68,3 +68,32 @@ export { ProjectSettingsGuidance } from "./components/ProjectSettingsGuidance.js
 export { ProjectSettingsScreen } from "./components/ProjectSettingsScreen.js";
 export type { ProjectSettingsScreenProps } from "./components/ProjectSettingsScreen.js";
 export * from "./members/index.js";
+export { EstimatesTab } from "./estimates/EstimatesTab.js";
+export { RepositoryTab } from "./repository/RepositoryTab.js";
+export {
+  cadenceLine,
+  providerLabel,
+  REPOSITORY_BOUND_PREFIX,
+  REPOSITORY_CADENCE,
+  REPOSITORY_CARD_HEADING,
+  REPOSITORY_CONTRACT,
+  REPOSITORY_GUIDANCE_BODY,
+  REPOSITORY_LAST_ERROR_PREFIX,
+  REPOSITORY_SYNC_LABEL,
+  REPOSITORY_UNBIND_LABEL,
+  RepositorySyncCard,
+} from "./repository/RepositorySyncCard.js";
+export type { RepositorySyncCardProps } from "./repository/RepositorySyncCard.js";
+export {
+  repositoryKeys,
+  repositoryQueryOptions,
+  SYNC_FAILED_BODY,
+  SYNC_FAILED_TITLE,
+  SYNC_UPDATED_BODY,
+  SYNC_UPDATED_TITLE,
+  UNBOUND_BODY,
+  UNBOUND_TITLE,
+  useRepositoryStatus,
+  useToggleRepositorySync,
+  useUnbindRepository,
+} from "./repository/api.js";

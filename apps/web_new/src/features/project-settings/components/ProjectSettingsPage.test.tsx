@@ -42,9 +42,9 @@ describe("ProjectSettingsPage", () => {
 
 describe("ProjectSettingsTabMount", () => {
   it("names the tab and its owning slice without a second page header", () => {
-    render(wrap(BASE, <ProjectSettingsTabMount title="Estimates" owner="NEWFRONT-602" />));
+    render(wrap(BASE, <ProjectSettingsTabMount title="Members" owner="NEWFRONT-999" />));
     expect(screen.queryByRole("heading")).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Estimates settings" })).toHaveAttribute("data-slice", "NEWFRONT-602");
+    expect(screen.getByRole("region", { name: "Members settings" })).toHaveAttribute("data-slice", "NEWFRONT-999");
     expect(screen.getByText("This tab’s screen arrives with its own slice.")).toBeInTheDocument();
   });
 });
