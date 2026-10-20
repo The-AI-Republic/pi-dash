@@ -190,6 +190,11 @@ export default defineConfig(({ mode }) => {
           // lazy-only as well: its schemas' module-scope initializers
           // otherwise pin the unused contract into the initial chunk
           // through the api-client barrel (NEWFRONT-870, size gate).
+          // no state to reset. The scheduler calendar modules are pure
+          // views and helpers reached only through the schedulers barrel;
+          // the calendar route loads its body lazily, so without the
+          // listing the barrel pins the grids, rail and panel into the
+          // initial chunk (NEWFRONT-593, size gate).
           // Every other module keeps the default: a blanket false reshapes
           // the TanStack route splits the size gate keys on.
           moduleSideEffects: (id) =>
@@ -208,7 +213,16 @@ export default defineConfig(({ mode }) => {
             id.includes("features/issues/subIssues/AddExistingDialog.") ||
             id.includes("features/issues/layouts/ViewLayoutBody.") ||
             id.includes("features/issues/detail/widgets/attachments/AttachmentsWidget.") ||
-            id.includes("packages/api-client/src/contracts/modules.")
+            id.includes("packages/api-client/src/contracts/modules.") ||
+            id.includes("features/schedulers/FiringCalendar.") ||
+            id.includes("features/schedulers/CalendarWeekView.") ||
+            id.includes("features/schedulers/CalendarMonthView.") ||
+            id.includes("features/schedulers/VisibilityRail.") ||
+            id.includes("features/schedulers/OccurrencePanel.") ||
+            id.includes("features/schedulers/calendarModel.") ||
+            id.includes("features/schedulers/calendarText.") ||
+            id.includes("features/schedulers/occurrences.") ||
+            id.includes("features/schedulers/visibility.")
               ? false
               : true,
         },

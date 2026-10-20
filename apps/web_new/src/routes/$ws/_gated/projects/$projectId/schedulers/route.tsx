@@ -62,7 +62,7 @@ export function ProjectSchedulersSectionComponent(): React.ReactElement {
             aria-current={tab.active ? "page" : undefined}
             className={
               tab.active
-                ? "text-body flex items-center gap-(--space-2) border-b-2 border-(--accent) px-(--space-3) py-(--space-2) font-medium text-(--text)"
+                ? "text-body flex items-center gap-(--space-2) border-b-2 border-accent-strong px-(--space-3) py-(--space-2) font-medium text-(--text)"
                 : "text-body flex items-center gap-(--space-2) border-b-2 border-transparent px-(--space-3) py-(--space-2) text-(--text-muted) hover:text-(--text)"
             }
           >

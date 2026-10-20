@@ -10,6 +10,13 @@
 @import "tailwindcss";
 @import "@pidash/kit/tokens.css";
 
+/* Section tabs mark the current view with the accent underline. The
+   utility keeps the token indirection in one place (the parity driver
+   reads this class name as the "current tab" signal). */
+@utility border-accent-strong {
+  border-color: var(--accent);
+}
+
 /* Stored rich-text content (shared/editor): the view surface and the
    editing surface share one class so descriptions read the same
    everywhere. Preflight strips element styles; these restore the
