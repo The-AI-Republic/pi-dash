@@ -258,6 +258,7 @@ import type {
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
+  CommentActivityTraffic,
 } from "./parity-driver";
 
 /** Whether the billing address settled on its page or the denial view. */
@@ -23983,5 +23984,21 @@ export class WebNewDriver implements ParityDriver {
   }
   async cyclesFiltersActive(): Promise<boolean> {
     return todo("cyclesFiltersActive");
+  }
+
+  async activityBeginTrafficSpy(_options: { reload?: boolean } = {}): Promise<void> {
+    return todo("activityBeginTrafficSpy");
+  }
+
+  async activityTrafficCounts(): Promise<CommentActivityTraffic> {
+    return todo("activityTrafficCounts");
+  }
+
+  async activityCommentReactionControlVisible(_cardText: string): Promise<boolean> {
+    return todo("activityCommentReactionControlVisible");
+  }
+
+  async issueReactionControlVisible(): Promise<boolean> {
+    return todo("issueReactionControlVisible");
   }
 }
