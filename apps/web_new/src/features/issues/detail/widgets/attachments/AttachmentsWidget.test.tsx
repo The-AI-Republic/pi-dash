@@ -185,11 +185,27 @@ describe("AttachmentsWidget list", () => {
     expect(screen.getByRole("button", { name: /Actions for plan\.png/ })).toBeInTheDocument();
   });
 
-  it("renders an empty strip with one Attach control and no header", async () => {
+  it("renders no section chrome on an empty issue", async () => {
     setup();
-    expect(await screen.findByRole("button", { name: "Attach" })).toBeInTheDocument();
+    expect(await screen.findByLabelText("Choose an attachment")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Attach" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Attachments/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/Drop one file here/)).toBeInTheDocument();
+    expect(screen.queryByText(/Drop one file here/)).not.toBeInTheDocument();
+  });
+
+  it("opens the picker through the shared handle", async () => {
+    const ref = React.createRef<import("./AttachmentsWidget.js").AttachmentsWidgetHandle>();
+    stubTransport();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AttachmentsWidget workspaceSlug={SLUG} projectId={PROJECT} issueId={ISSUE} editable ref={ref} />
+      </QueryClientProvider>
+    );
+    const input = await screen.findByLabelText("Choose an attachment");
+    const click = vi.spyOn(input, "click");
+    ref.current?.openPicker();
+    expect(click).toHaveBeenCalled();
   });
 
   it("reads only without attach, menu or delete", async () => {

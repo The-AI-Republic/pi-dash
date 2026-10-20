@@ -80,6 +80,18 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
   } as unknown as Page;
 }
 
+describe("widget titles", () => {
+  it("returns the section titles the page reports", async () => {
+    const page = pageOf({ evaluate: async () => ["Sub-work items", "Attachments"] });
+    await expect(new WebNewDriver(page).widgetTitles()).resolves.toEqual(["Sub-work items", "Attachments"]);
+  });
+
+  it("returns no titles when the widget root is absent", async () => {
+    const page = pageOf({ evaluate: async () => [] });
+    await expect(new WebNewDriver(page).widgetTitles()).resolves.toEqual([]);
+  });
+});
+
 describe("widget rows", () => {
   it("reads each panel row's collapsed text", async () => {
     const rowText = [" plan.png 1 KB ", "", "notes.pdf\n2 MB"];

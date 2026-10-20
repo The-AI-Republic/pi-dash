@@ -7,8 +7,8 @@
 // browser opens in a new tab. Members upload from a hidden picker or by
 // dropping one file anywhere over the section; the instance ceiling is
 // enforced before the grant is requested. Deletes confirm first. The
-// section header appears only once a row exists, while the attach strip
-// stays available on an empty issue.
+// section renders only once a row exists; an empty issue is attached
+// from the widget root's action row, which opens this picker.
 
 import { Avatar, Button, Dialog, IconButton, Menu, Spinner, Tooltip } from "@pidash/kit";
 import type { IssueAttachment } from "@pidash/api-client";
@@ -63,236 +63,230 @@ function AttachmentIcon({ name }: { name: string }): React.ReactElement {
 
 export const AttachmentsWidget = React.forwardRef<AttachmentsWidgetHandle, AttachmentsWidgetProps>(
   function AttachmentsWidget({ workspaceSlug, projectId, issueId, editable }, ref): React.ReactElement {
-  const query = useIssueAttachments(workspaceSlug, projectId, issueId);
-  const upload = useUploadAttachment(workspaceSlug, projectId, issueId);
-  const remove = useDeleteAttachment(workspaceSlug, projectId, issueId);
-  const instanceConfig = useInstanceConfig();
-  const directory = usePickerWorkspaceMembers(workspaceSlug, true);
-  const limit = attachmentSizeLimit(instanceConfig.data?.file_size_limit);
-  const [expanded, setExpanded] = React.useState(true);
-  const [dragging, setDragging] = React.useState(false);
-  const [pendingName, setPendingName] = React.useState<string | null>(null);
-  const [confirming, setConfirming] = React.useState<IssueAttachment | null>(null);
-  const inputRef = React.useRef<HTMLInputElement | null>(null);
+    const query = useIssueAttachments(workspaceSlug, projectId, issueId);
+    const upload = useUploadAttachment(workspaceSlug, projectId, issueId);
+    const remove = useDeleteAttachment(workspaceSlug, projectId, issueId);
+    const instanceConfig = useInstanceConfig();
+    const directory = usePickerWorkspaceMembers(workspaceSlug, true);
+    const limit = attachmentSizeLimit(instanceConfig.data?.file_size_limit);
+    const [expanded, setExpanded] = React.useState(true);
+    const [dragging, setDragging] = React.useState(false);
+    const [pendingName, setPendingName] = React.useState<string | null>(null);
+    const [confirming, setConfirming] = React.useState<IssueAttachment | null>(null);
+    const inputRef = React.useRef<HTMLInputElement | null>(null);
 
-  const rows = query.data ?? [];
-  const members = new Map((directory.data ?? []).map((row) => [row.member.id, row.member]));
+    const rows = query.data ?? [];
+    const members = new Map((directory.data ?? []).map((row) => [row.member.id, row.member]));
 
-  function acceptFiles(files: readonly File[]): void {
-    if (files.length === 0) return;
-    if (files.length > 1) {
-      notifyError(MULTI_FILE_NOTICE);
-      return;
-    }
-    const file = files[0];
-    if (file === undefined) return;
-    if (exceedsSizeLimit(file.size, limit)) {
-      notifyError(oversizeNotice(limit));
-      return;
-    }
-    setPendingName(file.name);
-    upload.mutate(
-      { file },
-      {
-        onSettled: () => {
-          setPendingName(null);
-          if (inputRef.current !== null) inputRef.current.value = "";
-        },
+    function acceptFiles(files: readonly File[]): void {
+      if (files.length === 0) return;
+      if (files.length > 1) {
+        notifyError(MULTI_FILE_NOTICE);
+        return;
       }
-    );
-  }
-
-  function openPicker(): void {
-    inputRef.current?.click();
-  }
-
-  React.useImperativeHandle(ref, () => ({ openPicker }), []);
-
-  const dragHandlers = editable
-    ? {
-        onDragEnter: (event: React.DragEvent) => {
-          event.preventDefault();
-          setDragging(true);
-        },
-        onDragOver: (event: React.DragEvent) => {
-          event.preventDefault();
-        },
-        onDragLeave: (event: React.DragEvent) => {
-          if (event.currentTarget === event.target) setDragging(false);
-        },
-        onDrop: (event: React.DragEvent) => {
-          event.preventDefault();
-          setDragging(false);
-          acceptFiles(Array.from(event.dataTransfer?.files ?? []));
-        },
+      const file = files[0];
+      if (file === undefined) return;
+      if (exceedsSizeLimit(file.size, limit)) {
+        notifyError(oversizeNotice(limit));
+        return;
       }
-    : {};
+      setPendingName(file.name);
+      upload.mutate(
+        { file },
+        {
+          onSettled: () => {
+            setPendingName(null);
+            if (inputRef.current !== null) inputRef.current.value = "";
+          },
+        }
+      );
+    }
 
-  return (
-    <section
-      data-widget-root="Attachments"
-      data-file-size-limit={limit}
-      aria-label="Attachments"
-      className={`relative flex flex-col gap-(--space-2) rounded-(--radius-control) ${
-        dragging ? "bg-(--subtle) outline-2 outline-(--accent) outline-dashed" : ""
-      }`}
-      {...dragHandlers}
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        className="sr-only"
-        aria-label="Choose an attachment"
-        onChange={(event) => acceptFiles(Array.from(event.target.files ?? []))}
-      />
-      {rows.length > 0 ? (
-        <>
-          <button
-            type="button"
-            data-widget-header="Attachments"
-            aria-expanded={expanded}
-            onClick={() => setExpanded(!expanded)}
-            className="text-body flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) pr-24 text-left font-medium text-(--text) hover:bg-(--subtle)"
-          >
-            <Paperclip size={14} strokeWidth={1.5} aria-hidden="true" className="text-(--text-muted)" />
-            <span className="truncate">Attachments</span>
-            <span className="text-meta text-(--text-muted)">{rows.length}</span>
-          </button>
-          {editable ? (
-            <Button
-              size="small"
-              variant="ghost"
-              onClick={openPicker}
-              loading={pendingName !== null}
-              className="absolute top-0 right-0"
+    function openPicker(): void {
+      inputRef.current?.click();
+    }
+
+    React.useImperativeHandle(ref, () => ({ openPicker }), []);
+
+    const dragHandlers = editable
+      ? {
+          onDragEnter: (event: React.DragEvent) => {
+            event.preventDefault();
+            setDragging(true);
+          },
+          onDragOver: (event: React.DragEvent) => {
+            event.preventDefault();
+          },
+          onDragLeave: (event: React.DragEvent) => {
+            if (event.currentTarget === event.target) setDragging(false);
+          },
+          onDrop: (event: React.DragEvent) => {
+            event.preventDefault();
+            setDragging(false);
+            acceptFiles(Array.from(event.dataTransfer?.files ?? []));
+          },
+        }
+      : {};
+
+    return (
+      <section
+        data-widget-root="Attachments"
+        data-file-size-limit={limit}
+        aria-label="Attachments"
+        className={`relative flex flex-col gap-(--space-2) rounded-(--radius-control) ${
+          dragging ? "bg-(--subtle) outline-2 outline-(--accent) outline-dashed" : ""
+        }`}
+        {...dragHandlers}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          className="sr-only"
+          aria-label="Choose an attachment"
+          onChange={(event) => acceptFiles(Array.from(event.target.files ?? []))}
+        />
+        {rows.length === 0 && pendingName === null ? null : (
+          <>
+            <button
+              type="button"
+              data-widget-header="Attachments"
+              aria-expanded={expanded}
+              onClick={() => setExpanded(!expanded)}
+              className="text-body flex w-full cursor-pointer items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) pr-24 text-left font-medium text-(--text) hover:bg-(--subtle)"
             >
-              <Upload size={14} strokeWidth={1.5} aria-hidden="true" />
-              Attach
-            </Button>
-          ) : null}
-          {expanded ? (
-            <div className="grid overflow-hidden" data-widget-rows="Attachments">
-              {pendingName === null ? null : (
-                <div
-                  data-widget-row="Attachments"
-                  className="flex items-center gap-(--space-3) px-(--space-2) py-(--space-2)"
-                >
-                  <AttachmentIcon name={pendingName} />
-                  <span className="text-body min-w-0 flex-1 truncate text-(--text)">{pendingName}</span>
-                  <Spinner size="small" label="Uploading attachment" />
-                </div>
-              )}
-              {rows.map((row) => {
-                const name = attachmentName(row);
-                const url = resolveFileUrl(row.asset_url ?? row.asset, getAppClient().baseUrl);
-                const uploader = row.user === null ? undefined : members.get(row.user);
-                return (
+              <Paperclip size={14} strokeWidth={1.5} aria-hidden="true" className="text-(--text-muted)" />
+              <span className="truncate">Attachments</span>
+              <span data-widget-count className="text-meta text-(--text-muted)">
+                {rows.length}
+              </span>
+            </button>
+            {editable ? (
+              <Button
+                size="small"
+                variant="ghost"
+                onClick={openPicker}
+                loading={pendingName !== null}
+                className="absolute top-0 right-0"
+              >
+                <Upload size={14} strokeWidth={1.5} aria-hidden="true" />
+                Attach
+              </Button>
+            ) : null}
+            {expanded ? (
+              <div className="grid overflow-hidden" data-widget-rows="Attachments">
+                {pendingName === null ? null : (
                   <div
-                    key={row.id}
                     data-widget-row="Attachments"
-                    className="group/row flex items-center gap-(--space-3) rounded-(--radius-control) px-(--space-2) py-(--space-2) hover:bg-(--subtle)"
+                    className="flex items-center gap-(--space-3) px-(--space-2) py-(--space-2)"
                   >
-                    {url === null ? (
-                      <div className="flex min-w-0 flex-1 items-center gap-(--space-3)">
-                        <AttachmentIcon name={name} />
-                        <span className="text-body min-w-0 flex-1 truncate text-(--text)">{name}</span>
-                        <span className="text-meta shrink-0 text-(--text-muted)">{formatAttachmentSize(row.size)}</span>
-                      </div>
-                    ) : (
-                      <a
-                        href={url}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="flex min-w-0 flex-1 items-center gap-(--space-3) text-(--text) hover:underline"
-                      >
-                        <AttachmentIcon name={name} />
-                        <span className="text-body min-w-0 flex-1 truncate">{name}</span>
-                        <span className="text-meta shrink-0 text-(--text-muted)">{formatAttachmentSize(row.size)}</span>
-                      </a>
-                    )}
-                    {uploader === undefined ? null : (
-                      <Tooltip content={`Uploaded ${timeAgo(row.created_at)}`}>
+                    <AttachmentIcon name={pendingName} />
+                    <span className="text-body min-w-0 flex-1 truncate text-(--text)">{pendingName}</span>
+                    <Spinner size="small" label="Uploading attachment" />
+                  </div>
+                )}
+                {rows.map((row) => {
+                  const name = attachmentName(row);
+                  const url = resolveFileUrl(row.asset_url ?? row.asset, getAppClient().baseUrl);
+                  const uploader = row.user === null ? undefined : members.get(row.user);
+                  return (
+                    <div
+                      key={row.id}
+                      data-widget-row="Attachments"
+                      className="group/row flex items-center gap-(--space-3) rounded-(--radius-control) px-(--space-2) py-(--space-2) hover:bg-(--subtle)"
+                    >
+                      {url === null ? (
+                        <div className="flex min-w-0 flex-1 items-center gap-(--space-3)">
+                          <AttachmentIcon name={name} />
+                          <span className="text-body min-w-0 flex-1 truncate text-(--text)">{name}</span>
+                          <span className="text-meta shrink-0 text-(--text-muted)">
+                            {formatAttachmentSize(row.size)}
+                          </span>
+                        </div>
+                      ) : (
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          className="flex min-w-0 flex-1 items-center gap-(--space-3) text-(--text) hover:underline"
+                        >
+                          <AttachmentIcon name={name} />
+                          <span className="text-body min-w-0 flex-1 truncate">{name}</span>
+                          <span className="text-meta shrink-0 text-(--text-muted)">
+                            {formatAttachmentSize(row.size)}
+                          </span>
+                        </a>
+                      )}
+                      {uploader === undefined ? null : (
+                        <Tooltip content={`Uploaded ${timeAgo(row.created_at)}`}>
+                          <span className="shrink-0">
+                            <Avatar
+                              name={uploader.display_name}
+                              size="small"
+                              {...(uploader.avatar_url === null ? {} : { src: uploader.avatar_url })}
+                            />
+                          </span>
+                        </Tooltip>
+                      )}
+                      {editable ? (
                         <span className="shrink-0">
-                          <Avatar
-                            name={uploader.display_name}
-                            size="small"
-                            {...(uploader.avatar_url === null ? {} : { src: uploader.avatar_url })}
+                          <Menu
+                            trigger={
+                              <IconButton
+                                label={`Actions for ${name}`}
+                                data-widget-row-menu="Attachments"
+                                size="small"
+                                className="opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+                              >
+                                <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+                              </IconButton>
+                            }
+                            items={[
+                              {
+                                label: "Delete",
+                                onSelect: () => setConfirming(row),
+                              },
+                            ]}
                           />
                         </span>
-                      </Tooltip>
-                    )}
-                    {editable ? (
-                      <span className="shrink-0">
-                        <Menu
-                          trigger={
-                            <IconButton
-                              label={`Actions for ${name}`}
-                              data-widget-row-menu="Attachments"
-                              size="small"
-                              className="opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
-                            >
-                              <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
-                            </IconButton>
-                          }
-                          items={[
-                            {
-                              label: "Delete",
-                              onSelect: () => setConfirming(row),
-                            },
-                          ]}
-                        />
-                      </span>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          ) : null}
-        </>
-      ) : (
-        <div className="flex items-center justify-between gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1)">
-          <p className="text-meta text-(--text-muted)">
-            {editable ? "Drop one file here, or attach it from the picker." : "No attachments."}
-          </p>
-          {editable ? (
-            <Button size="small" variant="ghost" onClick={openPicker} loading={pendingName !== null}>
-              <Upload size={14} strokeWidth={1.5} aria-hidden="true" />
-              Attach
-            </Button>
-          ) : null}
-        </div>
-      )}
-      <Dialog
-        title="Delete attachment"
-        open={confirming !== null}
-        onOpenChange={(open) => {
-          if (!open) setConfirming(null);
-        }}
-        actions={
-          <>
-            <Button onClick={() => setConfirming(null)}>Cancel</Button>
-            <Button
-              variant="danger"
-              loading={remove.isPending}
-              onClick={() => {
-                if (confirming === null) return;
-                remove.mutate(confirming.id, {
-                  onSettled: () => setConfirming(null),
-                });
-              }}
-            >
-              Delete
-            </Button>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
           </>
-        }
-      >
-        <p className="text-body text-(--text)">
-          {confirming === null
-            ? ""
-            : `The file ${attachmentBaseName(attachmentName(confirming))} will be permanently removed from this work item.`}
-        </p>
-      </Dialog>
-    </section>
-  );
+        )}
+        <Dialog
+          title="Delete attachment"
+          open={confirming !== null}
+          onOpenChange={(open) => {
+            if (!open) setConfirming(null);
+          }}
+          actions={
+            <>
+              <Button onClick={() => setConfirming(null)}>Cancel</Button>
+              <Button
+                variant="danger"
+                loading={remove.isPending}
+                onClick={() => {
+                  if (confirming === null) return;
+                  remove.mutate(confirming.id, {
+                    onSettled: () => setConfirming(null),
+                  });
+                }}
+              >
+                Delete
+              </Button>
+            </>
+          }
+        >
+          <p className="text-body text-(--text)">
+            {confirming === null
+              ? ""
+              : `The file ${attachmentBaseName(attachmentName(confirming))} will be permanently removed from this work item.`}
+          </p>
+        </Dialog>
+      </section>
+    );
   }
 );

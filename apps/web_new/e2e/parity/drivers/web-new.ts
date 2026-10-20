@@ -2922,7 +2922,26 @@ export class WebNewDriver implements ParityDriver {
     return todo("peekErrorTitle");
   }
   async widgetTitles(): Promise<string[]> {
-    return todo("widgetTitles");
+    // Section titles are the headers this slice and the sub-issues root
+    // render; every loading or empty section contributes nothing.
+    return this.page.evaluate(() => {
+      const root = document.querySelector('[data-testid="issue-detail-widgets"]');
+      if (!root) return [];
+      const out: string[] = [];
+      const push = (text: string | null | undefined) => {
+        const value = (text ?? "").trim().replace(/\s+/g, " ");
+        if (value !== "" && !out.includes(value)) out.push(value);
+      };
+      for (const node of Array.from(root.querySelectorAll("[data-widget-header]"))) {
+        const clone = node.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll("[data-widget-count]").forEach((count) => count.remove());
+        push(clone.textContent);
+      }
+      for (const node of Array.from(root.querySelectorAll('[data-testid="sub-issues-collapsible"]'))) {
+        push(node.querySelector("span.text-14")?.textContent);
+      }
+      return out;
+    });
   }
   private widgetSection(widget: string): Locator {
     return this.page.locator(`[data-widget-root="${widget}"]`).first();

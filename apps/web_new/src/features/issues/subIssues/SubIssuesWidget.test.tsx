@@ -79,6 +79,7 @@ function renderWidget(
     editable?: boolean;
     canWrite?: boolean;
     extraSections?: React.ComponentProps<typeof SubIssuesWidget>["extraSections"];
+    onAttach?: React.ComponentProps<typeof SubIssuesWidget>["onAttach"];
   } = {}
 ) {
   return render(
@@ -92,6 +93,7 @@ function renderWidget(
       onOpen={vi.fn()}
       createProjects={[]}
       extraSections={options.extraSections}
+      onAttach={options.onAttach}
     />
   );
 }
@@ -128,6 +130,25 @@ describe("SubIssuesWidget", () => {
     for (const label of WIDGET_ACTION_LABELS) {
       expect(screen.getByRole("button", { name: label })).toBeDisabled();
     }
+  });
+
+  it("leaves the Attach entry shut without a picker", () => {
+    renderWidget();
+    expect(screen.getByRole("button", { name: "Attach" })).toBeDisabled();
+  });
+
+  it("opens the attachment picker from the Attach entry", async () => {
+    const onAttach = vi.fn();
+    renderWidget({ onAttach });
+    const attach = screen.getByRole("button", { name: "Attach" });
+    expect(attach).toBeEnabled();
+    await userEvent.setup().click(attach);
+    expect(onAttach).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the Attach entry shut for a guest even with a picker", () => {
+    renderWidget({ onAttach: vi.fn(), canWrite: false });
+    expect(screen.getByRole("button", { name: "Attach" })).toBeDisabled();
   });
 
   it("disables every entry when the detail is not editable", () => {

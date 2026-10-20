@@ -112,7 +112,9 @@ export function CodeReviewsWidget({
       >
         <GitPullRequest size={14} strokeWidth={1.5} aria-hidden="true" className="text-(--text-muted)" />
         <span className="truncate">{CODE_REVIEWS_TITLE}</span>
-        <span className="text-meta text-(--text-muted)">{rows.length}</span>
+        <span data-widget-count className="text-meta text-(--text-muted)">
+          {rows.length}
+        </span>
       </button>
       {open ? (
         <div className="grid gap-(--space-2) overflow-hidden" data-widget-rows="Code reviews">
