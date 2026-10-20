@@ -44,6 +44,17 @@
 //! * The PATCH before-image (`views/project.py:412`) serializes a plain
 //!   (annotation-less) instance; missing annotation attributes render null.
 //!
+//! Content negotiation (PIDASHCONV-1149): both write bodies route through
+//! `v1_cycles_modules::body::negotiate_body`. The project views spread
+//! `{**request.data}` into a plain dict, so a form/multipart body reaches
+//! the serializer as the raw `QueryDict` storage (`{key: [values]}`) and
+//! always fails field validation with type errors — status and body match
+//! Django. Unsupported or missing content types 415. Multipart *file* parts
+//! are dropped (no project field is a file field). The `model_activity`
+//! `requested_data` argument then project-form-last-wins scalarizes the form
+//! map (Django's `QueryDict` JSON rendering), while validation keeps the
+//! arrays.
+//!
 //! Fixture: `FX-H-PROJ`
 //! (`rust-api/fixtures/v1_projects/handlers/project.golden.json`).
 //!
@@ -103,6 +114,9 @@ pub enum Denial {
     ProjectNotFound,
     /// 400, `{"detail": ...}` (DRF `ParseError`: pagination, JSON).
     BadDetail(String),
+    /// 415, DRF `select_parser` (`{"detail": ...}`): reached only by the
+    /// write paths that read `request.data` (PIDASHCONV-1149).
+    UnsupportedMediaType(String),
     /// 400, `{"error": ...}` (view-inline).
     BadError(String),
     /// 400, serializer `errors` dict (pre-rendered bytes, field order).
@@ -128,6 +142,10 @@ impl Denial {
             Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadError(message) => (
@@ -1282,6 +1300,96 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
         }
         Err(error) => Err(Denial::BadDetail(format!("JSON parse error - {error}"))),
     }
+}
+
+/// Every writable project field (`ProjectCreateSerializer.Meta.fields` plus
+/// the update-only extras). The project views build the serializer input as
+/// `data={**request.data}` — a *plain* dict — so a form/multipart body
+/// arrives as the raw `QueryDict` storage: every key is its list of raw
+/// values, not DRF's per-field `get_value` shape the cycle/module views see
+/// (they pass `request.data` itself). Listing every writable field here
+/// makes the shared layer hand back those lists; unknown keys never reach
+/// `coerce_write`, which iterates the field order only.
+const PROJECT_LIST_FIELDS: &[&str] = &[
+    "name",
+    "description",
+    "project_lead",
+    "default_assignee",
+    "identifier",
+    "icon_prop",
+    "emoji",
+    "cover_image",
+    "module_view",
+    "cycle_view",
+    "issue_views_view",
+    "page_view",
+    "intake_view",
+    "guest_view_all_features",
+    "members_can_edit_states",
+    "archive_in",
+    "close_in",
+    "timezone",
+    "external_source",
+    "external_id",
+    "is_issue_type_enabled",
+    "is_time_tracking_enabled",
+    "is_default",
+    "repo_url",
+    "base_branch",
+    "default_agent_executor",
+    "default_state",
+    "estimate",
+];
+
+/// Project write-path body spec: all fields arrive as arrays (the
+/// `{**request.data}` spread), no blank-input skips.
+const PROJECT_BODY_SPEC: crate::v1_cycles_modules::body::BodySpec =
+    crate::v1_cycles_modules::body::BodySpec {
+        list_fields: PROJECT_LIST_FIELDS,
+        skip_blank_fields: &[],
+    };
+
+/// Content-negotiated project write body (PIDASHCONV-1149): empty bodies are
+/// `{}`, form/multipart arrives as the raw value map (`{key: [values]}`),
+/// JSON keeps the existing serde + `JSON parse error` mapping over the
+/// decoded text, and a media type no DRF parser accepts (or a missing
+/// `Content-Type` with a body) is the 415. The trailing flag reports HTML
+/// (form/multipart) input for the PATCH `intake_view` `.get` rule.
+///
+/// Multipart *file* parts are dropped: no project field is a file field, so
+/// a text-only multipart request is the whole named surface (see PR notes).
+fn parse_write_body(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(serde_json::Map<String, Value>, bool), Denial> {
+    use crate::v1_cycles_modules::body::{negotiate_body, BodyError, NegotiatedBody};
+    match negotiate_body(headers, body, &PROJECT_BODY_SPEC) {
+        Err(BodyError::UnsupportedMediaType(detail)) => Err(Denial::UnsupportedMediaType(detail)),
+        Err(BodyError::ParseDetail(detail)) => Err(Denial::BadDetail(detail)),
+        Err(BodyError::ServerError) => Err(Denial::ServerError),
+        Ok(NegotiatedBody::Empty) => Ok((serde_json::Map::new(), false)),
+        Ok(NegotiatedBody::JsonText { text, .. }) => Ok((parse_body(text.as_bytes())?, false)),
+        Ok(NegotiatedBody::Form { map, .. }) => Ok((map, true)),
+    }
+}
+
+/// The `model_activity.delay(...)` `requested_data` argument built from the
+/// negotiated write map (PIDASHCONV-1149).
+///
+/// Django passes `requested_data=request.data`, which is a `QueryDict` for a
+/// form body; Celery's JSON serializer renders that as one scalar per key
+/// (last value wins), while the negotiated map still holds the raw lists the
+/// serializer validated against. Form input therefore projects each project
+/// field to its final value here — after validation, which keeps the arrays.
+/// In place: the map can nest to the request cap and `Map::clone` recurses.
+fn activity_requested(mut map: serde_json::Map<String, Value>, from_form: bool) -> Value {
+    if from_form {
+        crate::v1_cycles_modules::body::project_list_scalars(
+            &mut map,
+            PROJECT_BODY_SPEC.list_fields,
+        );
+    }
+    Value::Object(map)
 }
 
 /// How a field failed coercion.
@@ -2620,7 +2728,7 @@ pub async fn create_project_inner(
     if !ws_exists {
         return Err(Denial::NotFoundError("Workspace does not exist".to_owned()));
     }
-    let input = parse_body(raw_body)?;
+    let (input, from_form) = parse_write_body(headers, raw_body)?;
     let data = coerce_write(&pre.pool, &input, false, false).await?;
     // `validate()` (`serializers/project.py:139-166`).
     let name = field_str(&data, "name");
@@ -2829,7 +2937,7 @@ pub async fn create_project_inner(
     let ann = detail_annotations(&row)?;
     // `model_activity.delay(...)` (`views/project.py:258-267`):
     // `requested_data` is the raw body, `current_instance` is null.
-    let requested = Value::Object(input);
+    let requested = activity_requested(input, from_form);
     let kwargs = pidash_services::v1_projects::tasks::create_kwargs(
         &project_id.to_string(),
         requested,
@@ -3014,8 +3122,19 @@ pub async fn patch_project_inner(
     // `intake_view` defaults to the stored value (`views/project.py:414`).
     // The merge only feeds the serializer: `requested_data` below stays the
     // raw body exactly as sent.
-    let input = parse_body(raw_body)?;
+    let (input, from_form) = parse_write_body(headers, raw_body)?;
     let mut merged = input.clone();
+    // Django `request.data.get("intake_view", project.intake_view)`: a
+    // QueryDict `.get` returns the last raw value, so for a form body the
+    // `**` spread's list is replaced by its final element (PIDASHCONV-1149).
+    if from_form {
+        if let Some(Value::Array(items)) = merged.get("intake_view") {
+            if let Some(last) = items.last() {
+                let last = last.clone();
+                merged.insert("intake_view".to_owned(), last);
+            }
+        }
+    }
     if !merged.contains_key("intake_view") {
         let current: bool = plain
             .try_get("intake_view")
@@ -3135,7 +3254,7 @@ pub async fn patch_project_inner(
         .await?
         .ok_or(Denial::ServerError)?;
     let ann = detail_annotations(&row)?;
-    let requested = Value::Object(input);
+    let requested = activity_requested(input, from_form);
     let kwargs = pidash_services::v1_projects::tasks::update_kwargs(
         &project_id.to_string(),
         requested,
@@ -3638,6 +3757,71 @@ mod tests {
         let Err(Denial::BadDetail(_)) = parse_body(b"{oops") else {
             panic!("malformed json is a parse error");
         };
+    }
+
+    #[test]
+    fn write_body_negotiates() {
+        let form = |body: &[u8], len: usize| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "content-type",
+                "application/x-www-form-urlencoded".parse().unwrap(),
+            );
+            headers.insert("content-length", len.to_string().parse().unwrap());
+            parse_write_body(&headers, body)
+        };
+        let body = b"name=F&identifier=F1";
+        let (map, from_form) = form(body, body.len()).expect("form");
+        assert!(from_form);
+        // `{**request.data}` spreads the QueryDict: every key is a list.
+        assert_eq!(
+            map.get("name"),
+            Some(&Value::Array(vec![Value::String("F".to_owned())]))
+        );
+        assert_eq!(
+            map.get("identifier"),
+            Some(&Value::Array(vec![Value::String("F1".to_owned())]))
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "text/plain".parse().unwrap());
+        headers.insert("content-length", "1".parse().unwrap());
+        let err = parse_write_body(&headers, b"x").expect_err("415");
+        assert!(matches!(err, Denial::UnsupportedMediaType(_)));
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        headers.insert("content-length", "22".parse().unwrap());
+        let (map, from_form) =
+            parse_write_body(&headers, br#"{"name":"N","identifier":"I"}"#).expect("json");
+        assert!(!from_form);
+        assert_eq!(map.get("name"), Some(&Value::String("N".to_owned())));
+    }
+
+    #[test]
+    fn activity_requested_scalarizes_form_lists() {
+        // Form bodies validate as `{key: [values]}` but the enqueued
+        // `model_activity` payload renders Django's `json.dumps(QueryDict)`:
+        // last value wins per key (PIDASHCONV-1149).
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "intake_view".to_owned(),
+            Value::Array(vec![Value::String("1".to_owned())]),
+        );
+        map.insert(
+            "name".to_owned(),
+            Value::Array(vec![
+                Value::String("a".to_owned()),
+                Value::String("b".to_owned()),
+            ]),
+        );
+        assert_eq!(
+            activity_requested(map.clone(), true),
+            serde_json::json!({"intake_view": "1", "name": "b"})
+        );
+        // JSON input is passed through untouched (no scalarization).
+        assert_eq!(
+            activity_requested(map, false),
+            serde_json::json!({"intake_view": ["1"], "name": ["a", "b"]})
+        );
     }
 
     #[test]
