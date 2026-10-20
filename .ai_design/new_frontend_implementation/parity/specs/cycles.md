@@ -102,9 +102,13 @@ circular completion ring; the lifecycle marker; the date span; and the
 contextual extras for its state:
 
 - The ring shows completed work items over all work items excluding
-  cancelled ones. A cycle with no countable work items shows an
-  undetermined ring rather than a full or empty one. Finished cycles use
-  the frozen progress snapshot so the ring cannot drift after transfer.
+  cancelled ones: `completed / (total - cancelled)`, rounded. When that
+  denominator is zero (no work items, or every item cancelled) the ring
+  reads `0%` — an empty ring with the `0%` label — matching the old
+  behavior; it is never drawn as full or as a check. Completed cycles
+  read `completed / total` from the frozen `progress_snapshot` so the
+  ring cannot drift after transfer, and the ring shows `100%`/a check
+  only when the percentage is exactly 100.
 - The date span is rendered with the project timezone rules of §17.
   An undated cycle (a draft with neither date) renders the ring, marker
   and counts but **no date span and no date placeholder**: the row has
@@ -139,11 +143,18 @@ ring and work-item counts — and links to the full detail. The panel
 opens on top of the current list state; search, filters and the peek
 key coexist in the address.
 
-The list reads cycles from `GET BASE/cycles/` with `cycle_view` set to
-the tab flag's value; the payload is the cycle row shape of §23. The
-hero additionally reads progress and analytics for the current cycle
-(§15). Rows use the row's own counters and `progress_snapshot`; the list
-does not make one request per row.
+The list reads cycles from `GET BASE/cycles/` with **no `cycle_view`
+query parameter** (the old list call sends none, and the backend treats
+an absent value as `all`), so the response holds every live cycle in
+the project; the payload is the cycle row shape of §23. Do not send the
+project feature flag or the remembered tab as `cycle_view`: the
+parameter is a separate server-side filter whose only values with
+meaning here are `current` (the hero's current-cycle read, §15) and the
+other status filters the backend also accepts. The project feature flag
+(`cycle_view`, a boolean on the project payload) decides whether the tab
+and area render at all (§5). The hero additionally reads progress and
+analytics for the current cycle (§15). Rows use the row's own counters
+and `progress_snapshot`; the list does not make one request per row.
 
 Oracle: `list-search-filters.spec.ts` (hero first with counted groups,
 collapsing hides rows; ring, date span, work-item counts, creator
@@ -166,9 +177,13 @@ an outside click) collapses the box. An outside click collapses the box
 only when the query is empty; with text in it the box stays open so the
 filtered state is not lost by accident. The query survives navigation
 away and back within the project cycles area and is restored into an
-open, unfocused box. The archived list (§9) deliberately differs: its
-search box is open and focused on arrival; that asymmetry is part of
-CYC-005 and CYC-027.
+open, unfocused box. The archived list (§9) starts the same way — the
+magnifier renders and the box is collapsed on a fresh visit — but it
+opens **focused**: its text input stays mounted inside the collapsed
+box, so the activation can move focus into it, whereas the live list
+swaps the input in only when it opens and the focus call lands before
+the element exists. That focus behavior, not an always-open box, is the
+CYC-005/CYC-027 difference; see §9.
 
 Oracle: `list-search-filters.spec.ts` (search expands, filters live,
 Escape clears then collapses, query survives navigation and returns
@@ -310,14 +325,16 @@ draft can be left undated, or its dates removed, to free the window. A
 free range saves. An undated (draft) cycle is always allowed and skips
 the check. The check is asked once per submission, not per keystroke.
 
-**Keyboard** (CYC-020). The dialog traps focus while open. Tab order is
-stable and starts in the title field, then the project picker when it is
-present, then the description, the date range, and finally cancel then
-submit; Shift+Tab reverses it, and the last control wraps to the first
-so focus stays trapped. The project picker is not skipped or made
-unreachable (see the defect note in §26). Escape closes without saving
-and returns focus to the control that opened the dialog; a second
-Escape does not submit anything.
+**Keyboard** (CYC-020). The dialog traps focus while open. Focus starts
+in the title field. Forward Tab from there visits the other controls in
+**DOM order**: description, the date range, cancel, submit, and then the
+project picker (which sits before the title in the markup), wrapping
+back to the title — so the forward stops after the title are exactly
+title, description, date range, cancel, submit, picker, title. Shift+Tab
+reverses that cycle. The picker is reachable and focus never leaves the
+dialog (§26, NEWFRONT-263): the picker is not second, and a design that
+inserts it there breaks the oracle trail that begins with the
+autofocused title.
 
 **Permissions** (CYC-021). Header creation, the zero-state shortcut, and
 the palette's create entry are available to members and admins only;
@@ -339,12 +356,14 @@ sidebar only edits dates (CYC-017). The project picker is never shown
 for an edit; a cycle cannot move project. The title keeps the same
 required/maximum rules as creation.
 
-The date range is checked for overlap only when the dates actually
-changed. An edit that leaves the dates untouched submits
-`PATCH BASE/cycles/{cid}/` without a date check; an edit that changes
-either date first calls `POST BASE/cycles/date-check/` with
+The date range is checked for overlap only when **both** new dates are
+present and the range actually changed. An edit that leaves the dates
+untouched, or that clears either date (converting the cycle back to a
+draft), saves without a date check: `PATCH BASE/cycles/{cid}/` carries
+the null dates and the server accepts it. An edit that sets both dates
+and changes one of them first calls `POST BASE/cycles/date-check/` with
 `{ start_date, end_date, cycle_id }` so the cycle does not collide with
-itself. A collision refuses the save with the same draft guidance as
+itself; the check is never sent with a null date. A collision refuses the save with the same draft guidance as
 creation. A successful save shows a confirmation toast and refreshes the
 cycle row, the group counts and, when the range now covers today, the
 hero; an edit that moves the range away from today removes the cycle
@@ -411,9 +430,12 @@ retry.
 
 **Archived list** (CYC-027). `/{ws}/projects/{pid}/archives/cycles`
 lists archived cycles with the same row anatomy as the live list (name,
-ring, marker, date span), without the hero and grouping. Its search box
-is open and focused on arrival and filters by name; its date filters and
-chips behave as in §4 without the lifecycle dimension; its zero state
+ring, marker, date span), without the hero and grouping. Its search
+control is the same collapsed magnifier on arrival (the CYC-027 oracle
+clicks it before typing), and activating it opens the field **focused**
+because the input stays mounted under the collapsed box (§3). Search
+filters by name only; its date filters and chips behave as in §4
+without the lifecycle dimension; its zero state
 says there are no archived cycles yet and does not offer creation; its
 no-match state splits search from filters as in §5. Rows open a peek
 panel on the same `peekCycle` key and offer only the archived actions
@@ -619,8 +641,9 @@ Sections, top to bottom:
 - **Header** (CYC-036): the cycle name and lifecycle marker. Members and
   admins edit the start and end dates inline here; guests and finished
   or archived cycles see them read-only. An inline date save goes
-  through the same overlap protection as the edit dialog: changing
-  either date asks `POST BASE/cycles/date-check/` with the cycle id, a
+  through the same overlap protection as the edit dialog: setting both
+  dates to a changed range asks `POST BASE/cycles/date-check/` with the
+  cycle id (clearing either date saves without a check, §7), a
   collision refuses the save with the same draft guidance, and a
   successful save confirms with a toast and refreshes the row, the
   groups and the hero (CYC-019). Two saves in quick succession must not
@@ -628,21 +651,27 @@ Sections, top to bottom:
   replaces or queues visibly, and an overlap rejection is always shown
   (§26, NEWFRONT-264).
 - **Dates and timezone** (CYC-044, see §17): the date span with the
-  project offset chip where the user's timezone differs.
+  project offset chip whenever the project offset is non-zero.
 - **Description** (CYC-037): the cycle's description, read-only, with
-  paragraph breaks preserved and a "no description" placeholder when
-  empty. Editing the description goes through the edit dialog.
+  paragraph breaks preserved. An empty description renders nothing — no
+  placeholder text — matching the old sidebar. Editing the description
+  goes through the edit dialog.
 - **Lead** (CYC-037): the responsible user's avatar and name; avatar
-  image with a fallback initial, and a "No lead" placeholder. A member
-  list follows when assignees exist, or "No assignee".
-- **Work items** (CYC-038): completed over total, excluding cancelled
-  work items from the denominator; finished cycles read the frozen
-  snapshot. A points row renders only when the project has point
-  estimates enabled.
+  image with a fallback initial. The row always renders; with no lead it
+  shows an empty avatar and no name text (no "No lead" string), which is
+  what the old sidebar does. A member list follows when assignees exist,
+  or "No assignee".
+- **Work items** (CYC-038): completed over raw total
+  (`completed_issues/total_issues`), using the server's counters as they
+  are; `total_issues` includes cancelled items, and only the ring (§2)
+  excludes them. When the total is zero the row reads `0 work items`.
+  Finished cycles read the frozen snapshot's counters. A points row
+  renders only when the project has point estimates enabled.
 - **Progress by state** (CYC-038): the cycle's work items grouped by
-  workflow state, with the count per state group, the closed count, and
-  a note that cancelled items are excluded. Each group card has its own
-  empty placeholder when it holds no items.
+  workflow state, with the count per state group and the closed count,
+  into a total that includes cancelled items. Each group card has its
+  own empty placeholder when it holds no items; the cancelled group
+  renders when it has items.
 - **Burn-up/burn-down chart** (CYC-038): a chart measured in work items
   by default, with a measure picker offering estimates only when
   estimates are enabled. The chart is hidden when the cycle has no valid
@@ -681,8 +710,10 @@ a heading that names it as the active cycle, the active row itself with
 its ring and dates, and three cards:
 
 1. **Progress** — work items by state group with counts, plus the
-   closed and cancelled summary; clicking a state group filters the
-   list's work-item view by that state group.
+   closed and cancelled summary; clicking a state group navigates to the
+   cycle detail with that state group as an applied filter (the same
+   persisted rich filter as the sidebar entries), and the detail shows
+   the filtered work items.
 2. **Burn-up/burn-down** — the pending series plus the chart and the
    same measure picker as the sidebar (items, estimates when enabled);
    an undated or future-start cycle shows the chart's empty
@@ -743,15 +774,18 @@ upsell with a pricing path).
 Cycle dates are stored as instants and displayed in the project's
 timezone (CYC-044). A date span renders as one range, e.g. a start day
 and an end day joined by a separator, with year shown when the range is
-not in the current year. When the project timezone differs from the
-browser's, the span carries a small offset chip (`UTC -04:00`, `UTC
+not in the current year. Whenever the project timezone's offset from UTC
+is non-zero, the span carries a small offset chip (`UTC -04:00`, `UTC
 -05:00`) and a tooltip explaining that the dates are shown in the
 project's timezone; the chip also exposes the viewer's equivalent day
-when it differs. The chip's suppression rule is the **project offset**,
-not the timezone label: when the project timezone's offset from UTC is
-zero (whether the project is configured as `UTC` or as any other name
-with a zero offset) no chip renders. The chip reads the project's UTC
-offset; it must not key on the string `"UTC"`. A missing start or end
+when it differs. The chip is **not** gated on comparing the project
+zone with the browser's: a viewer in the same zone as a non-UTC project
+still sees it, because it marks that the dates are project-zoned. The
+suppression rule is the **project offset** alone: when the offset from
+UTC is zero (whether the project is configured as `UTC` or as any other
+name with a zero offset) no chip renders. The chip reads the project's
+UTC offset; it must not key on the browser timezone or the string
+`"UTC"`. A missing start or end
 renders a one-sided range (the single date); a cycle with neither date
 renders no date text (§2, CYC-002), while the sidebar and hero show
 their own "no dates" placeholder.
@@ -994,26 +1028,26 @@ field. A permission failure on any mutation is shown as a permission
 message; a missing cycle on any read or write is the gone-away state; a
 date-check collision is a refusal with guidance, not a generic error.
 
-| Method and path                                                               | Purpose                                                        | Rows                              |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------------- | --------------------------------- |
-| `GET BASE/cycles/?cycle_view=`                                                | project cycles list; `cycle_view` mirrors the project feature  | 001, 002, 011, 012, 032, 033, 045 |
-| `POST BASE/cycles/`                                                           | create `{name, description, start_date, end_date}`             | 014, 016, 018, 019                |
-| `GET BASE/cycles/{cid}/`                                                      | cycle detail and peek body                                     | 003, 004, 013, 035, 037, 040      |
-| `PATCH BASE/cycles/{cid}/`                                                    | edit title/description/dates                                   | 017, 036                          |
-| `DELETE BASE/cycles/{cid}/`                                                   | delete                                                         | 022                               |
-| `GET BASE/cycles/{cid}/cycle-issues/`                                         | the cycle's work items for the hosted layouts                  | 032, 033, 039                     |
-| `POST BASE/cycles/date-check/`                                                | overlap check `{start_date, end_date, cycle_id?}` → `{status}` | 016, 017, 036                     |
-| `POST BASE/cycles/{cid}/transfer-issues/`                                     | `{new_cycle_id}` → `{message}`                                 | 031                               |
-| `POST BASE/user-favorite-cycles/` / `DELETE BASE/user-favorite-cycles/{cid}/` | favorite toggle                                                | 029, 030                          |
-| `POST BASE/cycles/{cid}/archive/`                                             | archive (no body) → `{archived_at}`                            | 024, 025                          |
-| `DELETE BASE/cycles/{cid}/archive/`                                           | restore                                                        | 026                               |
-| `GET BASE/archived-cycles/` and `GET BASE/archived-cycles/{cid}/`             | archived list and row                                          | 004, 027                          |
-| `GET WS/cycles/`                                                              | workspace-wide cycles for switchers and pickers                | 030, 033                          |
-| `GET WS/active-cycles/?per_page&cursor`                                       | workspace actives (cloud)                                      | 043                               |
-| `GET BASE/cycles/{cid}/progress/`, `GET BASE/cycles/{cid}/cycle-progress/`    | snapshot and series (cloud variant)                            | 038, 041, 045                     |
-| `GET BASE/cycles/{cid}/analytics?type=issues\|points`                         | breakdown distributions                                        | 038, 041                          |
-| `GET`/`PATCH BASE/cycles/{cid}/user-properties/`                              | per-cycle layout, filters, display, rich filters               | 032, 035, 039                     |
-| `GET BASE/` (project features)                                                | `cycle_view` flag, feature-off view                            | 010                               |
+| Method and path                                                               | Purpose                                                            | Rows                              |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------- |
+| `GET BASE/cycles/` (no `cycle_view`; `current` only for the hero read)        | project cycles list (all live cycles) and the hero's current cycle | 001, 002, 011, 012, 032, 033, 045 |
+| `POST BASE/cycles/`                                                           | create `{name, description, start_date, end_date}`                 | 014, 016, 018, 019                |
+| `GET BASE/cycles/{cid}/`                                                      | cycle detail and peek body                                         | 003, 004, 013, 035, 037, 040      |
+| `PATCH BASE/cycles/{cid}/`                                                    | edit title/description/dates                                       | 017, 036                          |
+| `DELETE BASE/cycles/{cid}/`                                                   | delete                                                             | 022                               |
+| `GET BASE/cycles/{cid}/cycle-issues/`                                         | the cycle's work items for the hosted layouts                      | 032, 033, 039                     |
+| `POST BASE/cycles/date-check/`                                                | overlap check `{start_date, end_date, cycle_id?}` → `{status}`     | 016, 017, 036                     |
+| `POST BASE/cycles/{cid}/transfer-issues/`                                     | `{new_cycle_id}` → `{message}`                                     | 031                               |
+| `POST BASE/user-favorite-cycles/` / `DELETE BASE/user-favorite-cycles/{cid}/` | favorite toggle                                                    | 029, 030                          |
+| `POST BASE/cycles/{cid}/archive/`                                             | archive (no body) → `{archived_at}`                                | 024, 025                          |
+| `DELETE BASE/cycles/{cid}/archive/`                                           | restore                                                            | 026                               |
+| `GET BASE/archived-cycles/` and `GET BASE/archived-cycles/{cid}/`             | archived list and row                                              | 004, 027                          |
+| `GET WS/cycles/`                                                              | workspace-wide cycles for switchers and pickers                    | 030, 033                          |
+| `GET WS/active-cycles/?per_page&cursor`                                       | workspace actives (cloud)                                          | 043                               |
+| `GET BASE/cycles/{cid}/progress/`, `GET BASE/cycles/{cid}/cycle-progress/`    | snapshot and series (cloud variant)                                | 038, 041, 045                     |
+| `GET BASE/cycles/{cid}/analytics?type=issues\|points`                         | breakdown distributions                                            | 038, 041                          |
+| `GET`/`PATCH BASE/cycles/{cid}/user-properties/`                              | per-cycle layout, filters, display, rich filters                   | 032, 035, 039                     |
+| `GET BASE/` (project features)                                                | `cycle_view` flag, feature-off view                                | 010                               |
 
 ## 24. Edition seams
 
@@ -1103,15 +1137,21 @@ its workpad rather than weakening the assertion.
 These are not old bugs; they are points the first draft stated loosely
 or wrongly. Slices must build exactly these:
 
-| Row     | Rule to build                                                                                                                                                                                                                         |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CYC-014 | The project picker is shown on **every create**, including from a project page, and retargets the create to the picked project; it is hidden only on edit. §6.                                                                        |
-| CYC-002 | An undated row renders **no date element** (not a dash); a one-sided range renders the single date. §2, §17.                                                                                                                          |
-| CYC-027 | Archived reads are **member+**; activating an archived row opens its peek, while "Open in new tab" goes to the canonical detail address (gone-away for an archived cycle). §9.                                                        |
-| CYC-029 | Favorites are **member+ only**; guests get no star, not a disabled one. §11.                                                                                                                                                          |
-| CYC-031 | Transfer has **two entry points** — the finished detail banner and an inline action on a completed list row — gated by `backlog + unstarted + started > 0` **and** an empty `progress_snapshot`, both opening one shared dialog. §12. |
-| CYC-033 | The analytics trigger opens NEWFRONT-738's **cycle-scoped** dialog (`Analytics for {project} in {cycle}`), not the issues-header `AnalyticsEntry`. §13, §22.                                                                          |
-| CYC-044 | The offset chip is suppressed by a **zero project offset**, not by the `"UTC"` label. §17.                                                                                                                                            |
+| Row     | Rule to build                                                                                                                                                                                                                                                                       |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CYC-014 | The project picker is shown on **every create**, including from a project page, and retargets the create to the picked project; it is hidden only on edit. §6.                                                                                                                      |
+| CYC-020 | The dialog's forward tab cycle after the autofocused title is description → dates → cancel → submit → project picker → title, wrapping inside the dialog; the picker is reachable and trapped, and is not second. §6.                                                               |
+| CYC-017 | The edit date check runs only when **both** dates are set and the range changed; clearing either date saves without a date check. §7, §14.                                                                                                                                          |
+| CYC-002 | An undated row renders **no date element** (not a dash); a one-sided range renders the single date; the ring for a zero denominator reads `0%`. §2, §17.                                                                                                                            |
+| CYC-027 | Archived reads are **member+**; activating an archived row opens its peek, while "Open in new tab" goes to the canonical detail address (gone-away for an archived cycle). The archived search box is collapsed on arrival and opens focused; the live box opens unfocused. §3, §9. |
+| CYC-029 | Favorites are **member+ only**; guests get no star, not a disabled one. §11.                                                                                                                                                                                                        |
+| CYC-031 | Transfer has **two entry points** — the finished detail banner and an inline action on a completed list row — gated by `backlog + unstarted + started > 0` **and** an empty `progress_snapshot`, both opening one shared dialog. §12.                                               |
+| CYC-033 | The analytics trigger opens NEWFRONT-738's **cycle-scoped** dialog (`Analytics for {project} in {cycle}`), not the issues-header `AnalyticsEntry`. §13, §22.                                                                                                                        |
+| CYC-044 | The offset chip renders for any **non-zero project offset** (no browser-zone comparison) and is suppressed by a zero offset, not by the `"UTC"` label. §17.                                                                                                                         |
+| CYC-037 | An empty description renders nothing and a missing lead renders an empty avatar with no name; no "No description"/"No lead" strings. §14.                                                                                                                                           |
+| CYC-038 | The sidebar Work items row and state-group total use the raw `completed_issues/total_issues` counters (cancelled included); only the ring excludes cancelled. §2, §14.                                                                                                              |
+| CYC-041 | A hero state-group click navigates to the cycle detail with that state group filtered (and persisted in rich filters). §15.                                                                                                                                                         |
+| CYC-001 | The list read sends **no `cycle_view`** (the backend treats it as `all`); `current` is the separate hero read, and the project feature flag is a separate boolean on the project payload. §2, §23.                                                                                  |
 
 ## 27. Row coverage index
 
