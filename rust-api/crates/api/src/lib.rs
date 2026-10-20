@@ -40,6 +40,7 @@ pub mod auth_session;
 pub mod desktop_gate;
 pub mod edge;
 pub mod edge_shadow;
+pub mod issue_transition;
 pub mod license;
 pub mod r#loop;
 pub mod middleware;
