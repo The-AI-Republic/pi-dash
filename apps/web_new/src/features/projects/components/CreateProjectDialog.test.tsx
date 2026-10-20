@@ -240,6 +240,24 @@ describe("CreateProjectDialog", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("closes on success with no feature step (PSET-048)", async () => {
+    const { calls } = succeed();
+    const { onOpenChange } = setup();
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula Craft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+
+    expect(notifySuccess).toHaveBeenCalledWith(CREATED_TITLE, "Project created successfully");
+    // The removed post-create sheet was the only home of the combined
+    // five-switch list; creation never grows a follow-up step or a
+    // second project write.
+    expect(screen.queryByRole("switch")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open project" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Projects and work items" })).toBeNull();
+    expect(calls.filter((call) => call.startsWith("POST") || call.startsWith("PATCH"))).toHaveLength(1);
+  });
+
   it("maps a reused name onto the name field and stays open", async () => {
     failWith(JSON.stringify({ name: ["PROJECT_NAME_ALREADY_EXIST"] }));
     const { onOpenChange } = setup();

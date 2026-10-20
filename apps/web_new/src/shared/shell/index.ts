@@ -51,7 +51,14 @@ export { isRailUndocked, useRailState } from "./railState.js";
 export type { RailDensity } from "./railState.js";
 export { isDockItemActive, isSettingsEntryActive, WorkspaceRail } from "./WorkspaceRail.js";
 export type { RailDockItem, WorkspaceRailProps } from "./WorkspaceRail.js";
-export { getToastManager, notifyError, notifyInfo, notifySuccess, notifySuccessWithAction } from "./toaster.js";
+export {
+  getToastManager,
+  notifyError,
+  notifyInfo,
+  notifyPending,
+  notifySuccess,
+  notifySuccessWithAction,
+} from "./toaster.js";
 export type { ToastFollowUp } from "./toaster.js";
 export { loadPreference, preferenceStorage, removePreference, storePreference } from "./preferenceStorage.js";
 export type { PreferenceStorage } from "./preferenceStorage.js";

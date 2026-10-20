@@ -2,8 +2,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Intake leaf (PSET-001/PSET-004): the route mounts the settings shell
-// around the tab body, gates it for the role and keeps its own address.
+// Intake leaf (PSET-001/PSET-004/PSET-045): the route mounts the settings
+// shell around the one-switch body, gates it for the role and keeps its
+// own address.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
@@ -24,7 +25,13 @@ vi.mock("../../../../../../../features/auth/index.js", async (importOriginal) =>
   ...(await importOriginal<Record<string, unknown>>()),
   useProjectRow: () => ({
     status: "success",
-    data: { id: harness.params.projectId, name: "Website relaunch", identifier: "WEB", logo_props: {} },
+    data: {
+      id: harness.params.projectId,
+      name: "Website relaunch",
+      identifier: "WEB",
+      logo_props: {},
+      inbox_view: true,
+    },
     isPending: false,
     isSuccess: true,
   }),
@@ -63,11 +70,12 @@ describe("intake settings route", () => {
     expect(Route.options.beforeLoad).toBeUndefined();
   });
 
-  it("mounts the tab inside the shell for an admin", async () => {
+  it("mounts the switch inside the shell for an admin", async () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByRole("heading", { level: 1, name: "Intake" })).toBeInTheDocument();
-    expect(screen.getByTestId("project-settings-tab-mount")).toHaveAttribute("data-slice", "NEWFRONT-582");
+    expect(screen.getByRole("switch", { name: "Enable intake" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("project-feature-settings")).toHaveAttribute("data-feature", "intake");
     expect(screen.getByTestId("project-settings-tab-intake")).toHaveAttribute("data-active", "true");
   });
 
@@ -77,5 +85,15 @@ describe("intake settings route", () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
     expect(screen.getByTestId("project-settings-sidebar")).toBeInTheDocument();
+    expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("admits a workspace admin whose project role reads member", async () => {
+    harness.role = 15;
+    harness.workspaceRole = 20;
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
+    expect(screen.getByRole("switch")).toBeInTheDocument();
+    expect(screen.queryByTestId("project-settings-denied")).toBeNull();
   });
 });

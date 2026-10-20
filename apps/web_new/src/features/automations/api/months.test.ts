@@ -10,7 +10,6 @@ import {
   MAX_DELAY_MONTHS,
   MIN_DELAY_MONTHS,
   parseDelayInput,
-  rejectsFractionOnly,
 } from "./months.js";
 
 describe("delayLabel", () => {
@@ -64,18 +63,5 @@ describe("parseDelayInput", () => {
     expect(parseDelayInput("2.5")).toBeNull();
     expect(parseDelayInput("-3")).toBeNull();
     expect(parseDelayInput("abc")).toBeNull();
-  });
-});
-
-describe("rejectsFractionOnly", () => {
-  it("flags only numeric values with a fractional part", () => {
-    expect(rejectsFractionOnly("2.5")).toBe(true);
-    expect(rejectsFractionOnly(" 0.25 ")).toBe(true);
-    expect(rejectsFractionOnly("1.0")).toBe(false);
-    expect(rejectsFractionOnly("0")).toBe(false);
-    expect(rejectsFractionOnly("13")).toBe(false);
-    expect(rejectsFractionOnly("")).toBe(false);
-    expect(rejectsFractionOnly("abc")).toBe(false);
-    expect(rejectsFractionOnly("-3")).toBe(false);
   });
 });

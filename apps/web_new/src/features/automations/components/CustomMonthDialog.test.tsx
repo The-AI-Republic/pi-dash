@@ -2,11 +2,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Custom-month dialog (parity/specs/agents.md §8, AGT-036): seeded and
-// error-free on open, in-range inserts refused inline, cancel resets,
-// submit forwards and closes, and fractional input is stopped by the
-// number field's native validation before any handler runs.
-import { render, screen, within } from "@testing-library/react";
+// Custom-month dialog (parity/specs/project-settings-part-f.md,
+// PSET-053/054; AGT-036): seeded and error-free on open, the number
+// field's native bounds silently stop zero, over-range and fractional
+// counts, an empty field is the only value the app explains, cancel
+// resets, and a valid month forwards and closes.
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -53,7 +54,7 @@ describe("CustomMonthDialog", () => {
     expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
   });
 
-  it("refuses zero and thirteen without forwarding or closing", async () => {
+  it("refuses zero and thirteen natively without forwarding, closing or explaining", async () => {
     const user = userEvent.setup();
     const { onSubmit, onOpenChange } = setup();
     const field = within(dialog()).getByPlaceholderText("Enter Months");
@@ -62,10 +63,43 @@ describe("CustomMonthDialog", () => {
       await user.type(field, value);
       await user.click(within(dialog()).getByRole("button", { name: "Submit" }));
       expect(within(dialog()).getByPlaceholderText("Enter Months")).toHaveValue(Number(value));
-      expect(within(dialog()).getByText(DELAY_RANGE_MESSAGE)).toBeInTheDocument();
+      expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
     }
     expect(onSubmit).not.toHaveBeenCalled();
     expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("leaves native constraint validation on for programmatic submits", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onOpenChange } = setup();
+    const field = within(dialog()).getByPlaceholderText("Enter Months");
+    await user.clear(field);
+    await user.type(field, "13");
+    expect(field).toHaveAttribute("type", "number");
+    expect(field).not.toHaveAttribute("required");
+    expect(field).toHaveAttribute("min", "1");
+    expect(field).toHaveAttribute("max", "12");
+    expect(field).toHaveAttribute("step", "1");
+    expect((field as HTMLInputElement).checkValidity()).toBe(false);
+    await user.type(field, "{Enter}");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("refuses a submit dispatched past native validation while the value is out of range", async () => {
+    const user = userEvent.setup();
+    const { onSubmit, onOpenChange } = setup();
+    const field = within(dialog()).getByPlaceholderText("Enter Months");
+    await user.clear(field);
+    await user.type(field, "13");
+    const form = field.closest("form");
+    if (form === null) throw new Error("month field is outside its form");
+    // A direct submit skips the browser's own check; the handler's guard
+    // still keeps the dialog open without writing or explaining.
+    fireEvent.submit(form);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(within(dialog()).queryByText(DELAY_RANGE_MESSAGE)).toBeNull();
   });
 
   it("forwards a whole month and asks to close", async () => {

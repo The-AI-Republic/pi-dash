@@ -57,6 +57,16 @@ export interface ProjectUpdateInput {
   emoji?: string | null;
   repo_url?: string;
   base_branch?: string;
+  /** Saved-views area switch (PSET-043). */
+  issue_views_view?: boolean;
+  /** Timeboxing-periods area switch (PSET-044). */
+  cycle_view?: boolean;
+  /** Triage-inbox area switch (PSET-045). */
+  inbox_view?: boolean;
+  /** Sub-project grouping area switch (PSET-046). */
+  module_view?: boolean;
+  /** Free-form documents area switch (PSET-047). */
+  page_view?: boolean;
   /** Idle-archive delay in months (0 disables); the automations page. */
   archive_in?: number;
   /** Idle-close delay in months (0 disables); the automations page. */

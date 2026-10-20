@@ -5,7 +5,9 @@
 // Thin composition: the automations feature owns the screen, its admin
 // gate and the extension slot; the settings shell owns the rail and the
 // active marker. The community build contributes no extensions, so the
-// slot renders empty.
+// slot renders empty. The automations screen owns its refusal
+// (automations-not-authorized, PSET-053/054), so the route asks the shell
+// for the body-owned gate rather than the generic tab denial.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
@@ -20,7 +22,7 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/a
 function AutomationsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   return (
-    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="automations">
+    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="automations" gate="body">
       <AutomationsSettings workspaceSlug={ws} projectId={projectId} />
     </ProjectSettingsScreen>
   );

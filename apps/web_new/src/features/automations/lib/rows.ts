@@ -41,6 +41,7 @@ export function selectCloseTarget(
 ): State | null {
   if (cancelled.length === 0) return null;
   const stored = project?.default_state ?? null;
+  // A stale stored target never wins; otherwise the first cancelled state.
   return cancelled.find((state) => state.id === stored) ?? cancelled[0] ?? null;
 }
 
