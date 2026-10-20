@@ -74,16 +74,6 @@ function SystemRow({
   );
 }
 
-/** Section heading with its supporting line. */
-function SectionHeading({ title, description }: { title: string; description?: string }): React.ReactElement {
-  return (
-    <div className="flex flex-col gap-(--space-1)">
-      <h3 className="text-h4 text-(--text)">{title}</h3>
-      {description === undefined ? null : <p className="text-body text-(--text-muted)">{description}</p>}
-    </div>
-  );
-}
-
 function EstimatesLoader(): React.ReactElement {
   return (
     <div role="status" aria-label="Loading estimates" className="flex flex-col gap-(--space-4)">
@@ -162,7 +152,7 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
           </div>
 
           <div className="flex flex-col gap-(--space-4)" data-testid="estimates-active-section">
-            <SectionHeading title={ESTIMATES_ACTIVE_HEADING} />
+            <h3 className="text-h4 text-(--text)">{ESTIMATES_ACTIVE_HEADING}</h3>
             <SystemRow system={active} manage={canManage} onDelete={(system) => setDeleting(system)} />
           </div>
         </div>
