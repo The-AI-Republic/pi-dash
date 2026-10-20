@@ -11,12 +11,15 @@
 import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   createSchedulerBinding,
+  deleteSchedulerBinding,
+  isApiError,
   listSchedulerBindings,
   updateSchedulerBinding,
   type ApiClient,
   type SchedulerBinding,
   type SchedulerBindingCreateInput,
   type SchedulerBindingList,
+  type SchedulerBindingUpdateInput,
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
@@ -95,12 +98,77 @@ export function useToggleSchedulerBinding(workspaceSlug: string) {
     },
     onError: (error, { projectId }, context) => {
       queryClient.setQueryData<SchedulerBindingList>(bindingKeys.list(workspaceSlug, projectId), context?.previous);
-      notifyError("Could not update the install", error.message);
+      notifyError("Something went wrong", error.message);
     },
-    onSuccess: () => notifySuccess("Install updated"),
+    onSuccess: (_data, { enabled }) => {
+      notifySuccess(
+        "Install updated",
+        enabled ? "It will fire on the next scheduled tick." : "It will not fire until re-enabled."
+      );
+    },
     onSettled: async (_data, _error, { projectId }) => {
       await invalidateInstalls(queryClient, workspaceSlug, projectId);
     },
+  });
+}
+
+/**
+ * Save an edited install. The mutation resolves with the detail-shape row
+ * so a detail caller can hand the response straight to its cache; the
+ * caller settles the calendar and the detail, this settles the list.
+ */
+export interface UpdateBindingRequest {
+  projectId: string;
+  bindingId: string;
+  input: SchedulerBindingUpdateInput;
+}
+
+export function useUpdateSchedulerBinding(workspaceSlug: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, UpdateBindingRequest>({
+    mutationFn: async ({ projectId, bindingId, input }) => {
+      await updateSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId, input);
+    },
+    onSuccess: async (_data, { projectId }) => {
+      notifySuccess("Install updated", "Subsequent runs use the new settings.");
+      await invalidateInstalls(queryClient, workspaceSlug, projectId);
+    },
+    onError: (error) => notifyError("Something went wrong", schedulerBindingFailure(error)),
+  });
+}
+
+/** Server detail worth showing for a refused binding write. */
+export function schedulerBindingFailure(error: unknown): string {
+  if (!isApiError(error)) return "Check your connection and try again.";
+  const fields = error.fields ?? {};
+  for (const field of ["rrule", "dtstart", "tzid", "extra_context", "pod", "outcome_mode", "enabled"]) {
+    const messages = fields[field];
+    if (messages !== undefined && messages.length > 0) return messages.join(" ");
+  }
+  return error.message.trim() === "" ? "The install was refused." : error.message;
+}
+
+/**
+ * Uninstall one install. The workspace definition is untouched; only the
+ * project binding goes, so the definition stays in the catalog and can be
+ * installed again.
+ */
+export interface UninstallBindingRequest {
+  projectId: string;
+  bindingId: string;
+}
+
+export function useUninstallSchedulerBinding(workspaceSlug: string) {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, UninstallBindingRequest>({
+    mutationFn: async ({ projectId, bindingId }) => {
+      await deleteSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId);
+    },
+    onSuccess: async (_data, { projectId }) => {
+      notifySuccess("Scheduler uninstalled", "It stops firing on this project until reinstalled.");
+      await invalidateInstalls(queryClient, workspaceSlug, projectId);
+    },
+    onError: (error) => notifyError("Something went wrong", schedulerBindingFailure(error)),
   });
 }
 

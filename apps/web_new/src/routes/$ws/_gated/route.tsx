@@ -13,7 +13,6 @@
 
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Outlet, redirect, useRouterState } from "@tanstack/react-router";
-import { LayoutGrid } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -393,12 +392,7 @@ function WorkspaceShell({
     label: entry.label,
     href: resolveEditionSidebarHref(workspaceSlug, entry.to),
   }));
-  const dockItems: RailDockItem[] = (edition.rail ?? []).map((entry) => ({
-    id: entry.id,
-    label: entry.label,
-    to: entry.to,
-    icon: <LayoutGrid size={20} strokeWidth={1.5} aria-hidden="true" />,
-  }));
+  const dockItems: RailDockItem[] = (edition.rail ?? []).map(({ id, label, to }) => ({ id, label, to }));
   const rail =
     isAppRailEnabled(edition) && !undocked ? (
       <WorkspaceRail workspaceSlug={workspaceSlug} currentPath={currentPath} dockItems={dockItems} />

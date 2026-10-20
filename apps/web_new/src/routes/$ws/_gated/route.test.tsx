@@ -1199,13 +1199,12 @@ describe("gated layout shell wiring", () => {
     const rail = harness.rail as React.ReactElement<{
       workspaceSlug: string;
       currentPath: string;
-      dockItems: Array<{ id: string; label: string; to: string; icon: React.ReactNode }>;
+      dockItems: Array<{ id: string; label: string; to: string }>;
     }>;
     expect(rail.props.workspaceSlug).toBe("acme");
     expect(rail.props.currentPath).toBe("/acme/projects/p1/issues");
     expect(rail.props.dockItems).toHaveLength(1);
     expect(rail.props.dockItems[0]).toMatchObject({ id: "projects", label: "Projects", to: "/acme/" });
-    expect(rail.props.dockItems[0]?.icon).toBeDefined();
   });
 
   it("drops the rail once the workspace undocks it", () => {
