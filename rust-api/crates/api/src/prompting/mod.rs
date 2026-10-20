@@ -63,7 +63,10 @@
 //! Auth order mirrors DRF: `IsAuthenticated` (Django-session authN via
 //! [`crate::license::resolve_actor`]) answers 401 before any gate or
 //! method logic; the workspace lookup 404s before the role gate, so an
-//! unknown slug is 404 even for outsiders.
+//! unknown slug is 404 even for outsiders. Every prompting view carries
+//! `throttle_classes = [UserRateThrottle]` (`views.py:153,184,326,364`);
+//! [`check_user_throttle`] runs after auth/CSRF and before the workspace
+//! and role gates, matching DRF's `APIView.initial()` order.
 //!
 //! Registration is the cutover granularity (same rule as the `app_issues`,
 //! `license`, `space` and `loop` families): the owned methods serve from
@@ -92,6 +95,7 @@
 //!   `relates_to` case).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -102,6 +106,7 @@ use serde_json::Value;
 
 use crate::state::AppState;
 
+use crate::assistant::throttles::{allow_request, cache_key, ThrottleSpec, RATE_LIMIT_BODY};
 use pidash_services::prompting::{composer, context, recipes, registry, validation};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
@@ -110,6 +115,15 @@ pub const WORKSPACE_ADMIN_ROLE: i32 = 20;
 pub const SCOPE_USER: &str = "user";
 /// `views.py:62`: workspace resolution scope.
 pub const SCOPE_WORKSPACE: &str = "workspace";
+
+/// `settings/common.py:96`: `DEFAULT_THROTTLE_RATES["user"] = "120/minute"`,
+/// the scope shared by every `UserRateThrottle` view. All four prompting
+/// views use the identical class, so they share one history.
+pub const USER_THROTTLE: ThrottleSpec = ThrottleSpec {
+    scope: "user",
+    requests: 120,
+    window_secs: 60,
+};
 
 /// `urls.py:18` (under the `api/` include).
 pub const SECTION_LIST_PATH: &str = "/api/workspaces/{slug}/prompt-sections";
@@ -217,6 +231,8 @@ enum Denial {
     /// 403, `{"detail":"CSRF Failed: …"}` (session-auth CSRF enforcement
     /// on unsafe methods).
     CsrfFailed(String),
+    /// 429, the `auth_exception_handler` rewrite of DRF's `Throttled`.
+    Throttled,
     /// 500, generic branch.
     ServerError,
 }
@@ -274,6 +290,7 @@ impl Denial {
                     json_string(&format!("CSRF Failed: {reason}"))
                 ),
             ),
+            Denial::Throttled => (StatusCode::TOO_MANY_REQUESTS, RATE_LIMIT_BODY.to_owned()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 crate::license::SERVER_ERROR_BODY.to_owned(),
@@ -295,6 +312,49 @@ impl IntoResponse for Denial {
 
 fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("json string")
+}
+
+/// DRF `UserRateThrottle` over the shared cache (`throttling.py:193-202`):
+/// key `throttle_user_<user pk>`, a 60 s sliding history, 120 allowed
+/// requests. `assistant::throttles::allow_request` owns the decision and
+/// `assistant::redis` owns the cache codec; a missing Redis client fails
+/// open exactly like the assistant throttles (the cutover cache is
+/// optional in this process).
+async fn check_user_throttle(state: &AppState, user_id: &uuid::Uuid) -> Result<(), Denial> {
+    let Some(redis) = state.redis() else {
+        return Ok(());
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0);
+    let key = cache_key(USER_THROTTLE.scope, &user_id.to_string());
+    let history = match redis.get_string(&key).await {
+        Ok(Some(raw)) => crate::assistant::redis::decode_throttle_history(&raw),
+        _ => Vec::new(),
+    };
+    if !allow_request(
+        &history,
+        now,
+        USER_THROTTLE.requests,
+        USER_THROTTLE.window_secs,
+    ) {
+        return Err(Denial::Throttled);
+    }
+    let window = USER_THROTTLE.window_secs as f64;
+    let mut live: Vec<f64> = history
+        .into_iter()
+        .filter(|stamp| *stamp > now - window)
+        .collect();
+    live.insert(0, now);
+    let recached = crate::assistant::redis::encode_throttle_history(&live);
+    if let Err(error) = redis
+        .set_ex(&key, &recached, USER_THROTTLE.window_secs)
+        .await
+    {
+        tracing::debug!(%error, key = key.as_str(), "prompting.throttle: re-cache failed; allowance stands");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -958,6 +1018,7 @@ async fn list_sections_inner(
 ) -> Result<Value, Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
+    check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     if !is_workspace_member(&pool, &actor.id, &workspace.id).await? {
         return Err(Denial::Forbidden);
@@ -1139,6 +1200,7 @@ async fn upsert_section_inner(
     let actor = actor(state, &pool, extension).await?;
     // DRF authenticates (including CSRF) before the view body runs.
     check_csrf(state, headers, "PUT", raw)?;
+    check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let data = parse_body(raw)?;
     let scope = put_scope(&data, query)?;
@@ -1433,6 +1495,7 @@ async fn delete_override_inner(
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
     check_csrf(state, headers, "DELETE", &[])?;
+    check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let scope = resolve_scope(query);
     if !check_write_permission(&pool, &actor.id, &workspace.id, scope).await? {
@@ -1513,6 +1576,7 @@ async fn compiled_template_inner(
 ) -> Result<Value, Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
+    check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     if !is_workspace_member(&pool, &actor.id, &workspace.id).await? {
         return Err(Denial::Forbidden);
@@ -1593,6 +1657,7 @@ async fn preview_prompt_inner(
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
     check_csrf(state, headers, "POST", raw)?;
+    check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let admin = is_workspace_admin(&pool, &actor.id, &workspace.id).await?;
     if !admin && !is_workspace_member(&pool, &actor.id, &workspace.id).await? {

@@ -24,3 +24,18 @@ def reset_throttle_counters() -> None:
     import redis
 
     redis.Redis.from_url(url, socket_timeout=5).flushdb()
+
+
+def reset_throttle_key(key: str) -> None:
+    """Delete one DRF throttle counter, leaving every other cache key alone.
+
+    Suites that exhaust a per-user throttle use this for the specific
+    ``throttle_<scope>_<ident>`` key so the 120-request burst cannot leak
+    into another test or a rerun inside the same window.
+    """
+    url = os.environ.get("REDIS_URL", "")
+    if not url:
+        return
+    import redis
+
+    redis.Redis.from_url(url, socket_timeout=5).delete(key)
