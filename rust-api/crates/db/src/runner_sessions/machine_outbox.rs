@@ -1635,16 +1635,20 @@ mod tests {
         // Transport failures log and return no entries; nil (block
         // timeout) reads as absent.
         let (client, _) = start_mock(vec![resp_ok(), resp_err("boom")]);
-        assert!(read_for_session(Some(&client), &mid, &sid, 0, 100, false, 5.0)
-            .await
-            .expect("read error")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &mid, &sid, 0, 100, false, 5.0)
+                .await
+                .expect("read error")
+                .is_empty()
+        );
         drop(client);
         let (client, _) = start_mock(vec![resp_ok(), b"$-1\r\n".to_vec()]);
-        assert!(read_for_session(Some(&client), &mid, &sid, 0, 100, false, 5.0)
-            .await
-            .expect("read nil")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &mid, &sid, 0, 100, false, 5.0)
+                .await
+                .expect("read nil")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1950,10 +1954,12 @@ mod tests {
         let mid = fresh_id();
         let sid = fresh_id();
         // A read creates the group (MKSTREAM) and finds nothing.
-        assert!(read_for_session(Some(&client), &mid, &sid, 1, 100, false, 5.0)
-            .await
-            .expect("read")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &mid, &sid, 1, 100, false, 5.0)
+                .await
+                .expect("read")
+                .is_empty()
+        );
         let mut conn = live_conn(&client).await;
         assert_eq!(raw_exists(&mut conn, &keys::stream_key(&mid)).await, 1);
         cleanup(&client, &mid, &[]).await;
@@ -2001,10 +2007,12 @@ mod tests {
             0
         );
         // PEL replay after the ack finds nothing (use_zero_n 0).
-        assert!(read_for_session(Some(&client), &mid, &sid, 1, 100, true, 5.0)
-            .await
-            .expect("read zero")
-            .is_empty());
+        assert!(
+            read_for_session(Some(&client), &mid, &sid, 1, 100, true, 5.0)
+                .await
+                .expect("read zero")
+                .is_empty()
+        );
         let fx = fixture();
         assert_eq!(fx["machine_read_for_session"]["use_zero_n"], json!(0));
         cleanup(&client, &mid, &[]).await;
