@@ -13,6 +13,11 @@ import uuid
 
 from _harness import seed
 
+# Sentinel: ``create_asset`` builds the canonical ``{name,type,size}`` object
+# unless the caller passes ``attributes`` explicitly (e.g. the JSON scalar
+# ``null`` for PIDASHCONV-1152).
+_UNSET = object()
+
 
 def create_asset(
     conn,
@@ -29,6 +34,7 @@ def create_asset(
     uploaded: bool = False,
     deleted: bool = False,
     with_deleted_at: bool = False,
+    attributes: object = _UNSET,
 ) -> dict:
     """Insert a ``file_assets`` row; return ``{id, key}``."""
     aid = seed.new_id()
@@ -37,7 +43,9 @@ def create_asset(
         key = f"{workspace_id}/{uuid.uuid4().hex}-{name}"
     else:
         key = f"user-{uuid.uuid4().hex}-{name}"
-    attributes = json.dumps({"name": name, "type": file_type, "size": size})
+    if attributes is _UNSET:
+        attributes = {"name": name, "type": file_type, "size": size}
+    attributes = json.dumps(attributes)
     deleted_at = now if (deleted and with_deleted_at) else None
     conn.execute(
         """INSERT INTO file_assets (id, attributes, asset, created_by_id,
