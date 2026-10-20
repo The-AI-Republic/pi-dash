@@ -139,7 +139,10 @@ export function replySettled(rows: readonly AssistantMessage[]): boolean {
   return last.status !== "streaming";
 }
 
-/** Text a bubble shows when its content is still empty. */
-export function streamingPlaceholder(status: AssistantMessage["status"]): string {
-  return status === "streaming" ? "…" : status;
-}
+/**
+ * Text a reply bubble shows while it has nothing to render. That covers a
+ * turn still streaming its first chunk and a turn that stopped before any
+ * text arrived; both read as a quiet typing mark rather than the raw status
+ * word (AGT-047).
+ */
+export const EMPTY_REPLY_PLACEHOLDER = "…";

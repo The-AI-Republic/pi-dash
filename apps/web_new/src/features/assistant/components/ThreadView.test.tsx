@@ -200,6 +200,16 @@ describe("ThreadView transcript", () => {
     expect(await screen.findByText("…")).toBeInTheDocument();
   });
 
+  it("shows the quiet mark, never the status word, for a row without any text", async () => {
+    // The renderer loads on demand, so a completed reply paints once before
+    // its markdown exists; a row that stopped before its first chunk never
+    // gets any. Both must stay on the typing mark, not print "completed".
+    renderThread({ messages: [row({ id: "b", content: "", status: "completed" })] });
+    const list = await screen.findByTestId("assistant-transcript");
+    expect(list.textContent).toBe("…");
+    expect(list).not.toHaveTextContent(/completed/);
+  });
+
   it("tints error rows", async () => {
     renderThread({
       messages: [row({ id: "e", role: "error", content: "Could not reach the model.", status: "failed" })],

@@ -11,7 +11,7 @@ import {
   mergeMessage,
   mergeTranscript,
   replySettled,
-  streamingPlaceholder,
+  EMPTY_REPLY_PLACEHOLDER,
   terminalRow,
   transcriptRows,
 } from "./turn.js";
@@ -269,9 +269,12 @@ describe("terminalRow", () => {
   });
 });
 
-describe("streamingPlaceholder", () => {
-  it("shows an ellipsis while streaming and the status otherwise", () => {
-    expect(streamingPlaceholder("streaming")).toBe("…");
-    expect(streamingPlaceholder("completed")).toBe("completed");
+describe("EMPTY_REPLY_PLACEHOLDER", () => {
+  it("is the quiet typing mark, never a status word", () => {
+    // A live row and one that stopped before its first chunk both read as
+    // the same mark; printing the status would put "completed" or
+    // "cancelled" in the transcript (AGT-047).
+    expect(EMPTY_REPLY_PLACEHOLDER).toBe("…");
+    expect(EMPTY_REPLY_PLACEHOLDER).not.toMatch(/completed|failed|cancelled|streaming/);
   });
 });

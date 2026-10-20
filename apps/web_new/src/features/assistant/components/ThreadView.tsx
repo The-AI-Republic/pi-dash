@@ -21,7 +21,7 @@ import { EMPTY_CONVERSATION_HINT, HANDOFF_FAILED_TITLE } from "../lib/copy.js";
 import { startFailureDetail } from "../api/mutations.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { readPendingMessage } from "../lib/navigation.js";
-import { streamingPlaceholder } from "../lib/turn.js";
+import { EMPTY_REPLY_PLACEHOLDER } from "../lib/turn.js";
 import { Composer } from "./Composer.js";
 import { SetupCard } from "./SetupCard.js";
 
@@ -206,7 +206,7 @@ function MessageBubble({ message }: { message: AssistantMessage }): React.ReactE
       className="text-body max-w-[80%] rounded-(--radius-popover) bg-(--subtle) px-(--space-3) py-(--space-2) text-(--text)"
     >
       {html === null ? (
-        <span className="text-(--text-muted)">{streamingPlaceholder(message.status)}</span>
+        <span className="text-(--text-muted)">{EMPTY_REPLY_PLACEHOLDER}</span>
       ) : (
         <div className="rich-text-content" dangerouslySetInnerHTML={{ __html: html }} />
       )}
