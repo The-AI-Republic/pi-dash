@@ -70,6 +70,7 @@ export function LinkDialog({ open, onOpenChange, link, pending, onSubmit }: Link
         <div className="flex flex-col gap-(--space-1)">
           <Input
             label="URL"
+            autoFocus
             aria-invalid={invalid}
             placeholder="Type or paste a URL"
             value={url}
