@@ -184,16 +184,18 @@ export interface WeekLane {
 }
 
 /**
- * Side-by-side columns for firings that start at the same instant. Blocks
- * with distinct starts keep one full-width column each, so a lane only
- * appears when two schedules would otherwise draw exactly on top of one
+ * Side-by-side columns for firings that start in the same local minute.
+ * Blocks at distinct minutes keep one full-width column each, so a lane
+ * only appears when two schedules would otherwise draw on top of one
  * another. Order follows the input order (the bucket is time-sorted).
  */
 export function assignWeekLanes(occurrences: readonly SchedulerOccurrence[]): WeekLane[] {
   const groups = new Map<string, SchedulerOccurrence[]>();
   for (const occurrence of occurrences) {
-    const group = groups.get(occurrence.dtstart);
-    if (group === undefined) groups.set(occurrence.dtstart, [occurrence]);
+    const at = new Date(occurrence.dtstart);
+    const key = `${dayKey(at)}:${at.getHours()}:${at.getMinutes()}`;
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [occurrence]);
     else group.push(occurrence);
   }
   const indexOf = new Map<SchedulerOccurrence, number>(occurrences.map((occurrence, index) => [occurrence, index]));

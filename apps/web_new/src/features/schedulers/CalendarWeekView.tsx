@@ -4,7 +4,7 @@
 // Week grid for the firing calendar (parity/specs/agents.md §5, AGT-015).
 // Seven Sunday-to-Saturday lanes of 24 hours; each firing sits at its
 // minute offset in its day, and a line marks the current time on today's
-// lane. Firings that start at the same instant split their lane side by
+// lane. Firings that start in the same minute split their lane side by
 // side so each stays visible and clickable. Blocks are buttons with a
 // title: click to inspect, nothing else.
 

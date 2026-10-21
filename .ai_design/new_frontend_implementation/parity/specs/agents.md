@@ -251,9 +251,11 @@ The calendar tab (the section's default landing) renders occurrences from
 24-hour week-grid views — opening on the week view — with period stepping,
 jump-to-today, a today mark and a locally ticking time line. Past and future
 blocks are visually distinct, overcrowded days collapse behind an overflow
-control that opens the day's first firing, and two schedules that fire at
-the same minute draw as side-by-side columns so each stays inspectable. The
-surface is read-only: no drag to create or reschedule.
+control that opens the day's first firing, and schedules that fire in the
+same minute draw as side-by-side columns so each stays inspectable. The
+surface is read-only: no drag to create or reschedule. Switching between
+the week and month views keeps the period the viewer has stepped to, while
+Today returns either view to the current period.
 Viewers read; edit-from-calendar reuses the edit dialog and needs project
 admin. Gaps carried: past occurrences need run rows the seeded stack never
 produces, so the past/future distinction is unprovable and every block is
@@ -273,8 +275,9 @@ follow each other live. No API. Oracle:
 Clicking a calendar block opens an occurrence side panel with timing,
 timezone and status plus recurrence and context for future firings or a run
 link for past ones; it always links the parent install, closes explicitly,
-and renders nothing with no selection. Same occurrences read; run links land
-in the runners area. Gap carried: the past-run halves need run rows the
+and renders nothing with no selection. A project switch in place closes the
+panel and any edit dialog before the next project's installs are read. Same
+occurrences read; run links land in the runners area. Gap carried: the past-run halves need run rows the
 seeded stack never produces, so the future halves carry the row. Oracle:
 `schedulers-project/occurrence-panel.spec.ts`. (AGT-017)
 

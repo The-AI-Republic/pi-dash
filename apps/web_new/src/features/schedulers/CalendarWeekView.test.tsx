@@ -65,11 +65,14 @@ describe("CalendarWeekView", () => {
     expect(onSelect).toHaveBeenCalledWith(firing);
   });
 
-  it("splits same-instant firings into side-by-side lanes that each open", async () => {
+  it("splits same-minute firings into side-by-side lanes that each open", async () => {
     const onSelect = vi.fn();
-    const at = new Date(2026, 9, 21, 9, 0).toISOString();
-    const first = occurrence(at);
-    const second = occurrence(at, { binding_id: "b2", scheduler_id: "s2", scheduler_name: "Beta" });
+    const first = occurrence(new Date(2026, 9, 21, 9, 0, 0).toISOString());
+    const second = occurrence(new Date(2026, 9, 21, 9, 0, 30).toISOString(), {
+      binding_id: "b2",
+      scheduler_id: "s2",
+      scheduler_name: "Beta",
+    });
     const byDay = new Map([["2026-10-21", [first, second]]]);
     render(<CalendarWeekView anchor={ANCHOR} now={TODAY} byDay={byDay} onSelect={onSelect} />);
     const [left, right] = screen.getAllByTitle(/Weekly|Beta/);

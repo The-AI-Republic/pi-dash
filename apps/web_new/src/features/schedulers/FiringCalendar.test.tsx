@@ -182,6 +182,25 @@ describe("FiringCalendar", () => {
     expect(screen.getByTestId("calendar-week-view")).toBeInTheDocument();
   });
 
+  it("keeps the period the user stepped to when switching views", async () => {
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    await userEvent.click(screen.getByRole("button", { name: "Month" }));
+    expect(screen.getByTestId("calendar-month-view")).toBeInTheDocument();
+    expect(screen.getByText("October 2026")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Week" }));
+    expect(new Date(hooks.windows.at(-1)?.from as string).getDate()).toBe(25);
+  });
+
+  it("returns the month view to the current month with Today", async () => {
+    setup();
+    await userEvent.click(screen.getByRole("button", { name: "Month" }));
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByText("November 2026")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Today" }));
+    expect(screen.getByText("October 2026")).toBeInTheDocument();
+  });
+
   it("shows the empty state when nothing is installed", () => {
     hooks.bindings.data = [];
     setup();
@@ -272,6 +291,28 @@ describe("FiringCalendar", () => {
     await userEvent.click(screen.getByTitle(/Alpha/));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Month" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("drops the selection when the project changes in place", async () => {
+    hooks.occurrences.data = {
+      occurrences: [occurrence(new Date(2026, 9, 22, 9, 0).toISOString())],
+      has_more: false,
+      next_window_start: null,
+    };
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <FiringCalendar workspaceSlug={SLUG} projectId="p1" canEdit={false} now={NOW} />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByTitle(/Alpha/));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <FiringCalendar workspaceSlug={SLUG} projectId="p2" canEdit={false} now={NOW} />
+      </QueryClientProvider>
+    );
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 

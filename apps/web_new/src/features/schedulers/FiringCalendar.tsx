@@ -85,6 +85,14 @@ export function FiringCalendar({
   const [selected, setSelected] = React.useState<SchedulerOccurrence | null>(null);
   const [editing, setEditing] = React.useState<SchedulerBinding | null>(null);
 
+  // The route can change project without remounting this component. Drop a
+  // panel or dialog that pointed at the previous project before reading the
+  // next project's installs.
+  React.useEffect(() => {
+    setSelected(null);
+    setEditing(null);
+  }, [workspaceSlug, projectId]);
+
   const bindings = useSchedulerBindings(workspaceSlug, projectId);
   const catalog = useSchedulers(workspaceSlug);
   const visibility = useSchedulerVisibility(workspaceSlug, projectId);
@@ -113,7 +121,6 @@ export function FiringCalendar({
   function switchView(next: CalendarView): void {
     setSelected(null);
     setView(next);
-    setAnchor(anchorFor(next, now));
   }
 
   function step(direction: "prev" | "next"): void {

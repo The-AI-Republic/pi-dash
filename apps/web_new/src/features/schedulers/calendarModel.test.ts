@@ -209,7 +209,7 @@ describe("week lanes", () => {
     ]);
   });
 
-  it("numbers same-instant firings across one group", () => {
+  it("numbers same-minute firings across one group", () => {
     const start = at(2026, 9, 21, 8, 0).toISOString();
     const lanes = assignWeekLanes([
       occurrence(start, "A"),
@@ -224,6 +224,19 @@ describe("week lanes", () => {
       { name: "B", lane: 0, width: 1 },
       { name: "C", lane: 1, width: 3 },
       { name: "D", lane: 2, width: 3 },
+    ]);
+  });
+
+  it("groups firings within one local minute even when their seconds differ", () => {
+    const lanes = assignWeekLanes([
+      occurrence(at(2026, 9, 21, 8, 0).toISOString(), "A"),
+      occurrence(new Date(2026, 9, 21, 8, 0, 30).toISOString(), "B"),
+    ]);
+    expect(
+      lanes.map(({ occurrence: firing, lane, lanes: width }) => ({ name: firing.scheduler_name, lane, width }))
+    ).toEqual([
+      { name: "A", lane: 0, width: 2 },
+      { name: "B", lane: 1, width: 2 },
     ]);
   });
 });
