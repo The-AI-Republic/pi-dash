@@ -1417,13 +1417,30 @@ impl<S: SessionStore> SessionStore for ReadOnlySessionStore<S> {
         Box::pin(async move { Ok(key) })
     }
 
-    fn user_exists(
+    fn load_user(
         &self,
         user_id: String,
     ) -> Pin<
-        Box<dyn std::future::Future<Output = Result<bool, crate::middleware::StoreError>> + Send>,
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Option<crate::middleware::SessionUser>,
+                        crate::middleware::StoreError,
+                    >,
+                > + Send,
+        >,
     > {
-        self.inner.user_exists(user_id)
+        self.inner.load_user(user_id)
+    }
+
+    fn delete(
+        &self,
+        _key: String,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), crate::middleware::StoreError>> + Send>>
+    {
+        // Shadow dispatch is read-only: a stale hash is rejected in memory,
+        // but the shared session row must not be deleted.
+        Box::pin(async move { Ok(()) })
     }
 }
 

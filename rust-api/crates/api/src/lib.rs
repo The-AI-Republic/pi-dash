@@ -76,7 +76,7 @@ pub use middleware::{
     stack, ApiTokenLogRecord, BodyLimitLayer, CorsConfig, CorsLayer, GzipLayer, LogSink,
     LoggerUserId, LoggingConfig, MemorySessionStore, PgSessionStore, QueueSink, RequestLogRecord,
     RequestLoggerLayer, RequestSession, SecurityConfig, SecurityLayer, SessionConfig,
-    SessionExpiry, SessionHandle, SessionLayer, SessionRow, SessionStore, StoreError,
+    SessionExpiry, SessionHandle, SessionLayer, SessionRow, SessionStore, SessionUser, StoreError,
     StoredSession, TokenLogLayer, TracingSink,
 };
 pub use overlay::{build_router_with_overlay, Overlay, RouteGroup};

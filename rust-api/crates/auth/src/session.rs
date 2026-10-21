@@ -55,9 +55,11 @@ pub struct SessionData {
     /// `request.user` id, from `_auth_user_id`. `None` means anonymous:
     /// Django's `login()` writes the key, so its absence is "not logged in".
     pub user_id: Option<String>,
-    /// Backend path from `_auth_user_backend` (informational only).
+    /// Backend path from `_auth_user_backend`. The request layer verifies
+    /// it against `AUTHENTICATION_BACKENDS` before any handler runs.
     pub backend: Option<String>,
-    /// Session-auth hash from `_auth_user_hash` (informational only).
+    /// Session-auth hash from `_auth_user_hash`. The request layer compares
+    /// it with the user's current password field, like Django `get_user`.
     pub session_hash: Option<String>,
     /// `device_info` dict written by `user_login()`. Django stores `None`
     /// unless the value is a dict; anything else decodes to `None` here too.
