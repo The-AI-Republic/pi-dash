@@ -168,6 +168,38 @@ describe("cache persistence", () => {
     expect(reader.getQueryData(["ws", "acme", "issues", "list", "page"])).toBeUndefined();
   });
 
+  it("keeps an errored query that still holds previously fetched rows", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    seed(writer);
+    const listKey = ["ws", "acme", "list"];
+    // A failed refetch keeps the last successful data (TanStack keeps the
+    // payload and flips the status to "error"). The list still paints those
+    // rows and the restore side accepts them, so the save must not drop them.
+    const list = writer.getQueryCache().find({ queryKey: listKey });
+    list?.setState({ status: "error", error: new Error("offline"), data: [{ id: "i1" }] });
+    expect(list?.state.data).toEqual([{ id: "i1" }]);
+
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const raw = (await storage.get("tanstack-query-cache")) ?? "";
+    const stored = JSON.parse(raw) as {
+      state: { queries: Array<{ queryKey: unknown[]; state: { status: string; data?: unknown } }> };
+    };
+    const savedList = stored.state.queries.find((entry) => entry.queryKey.join("/") === "ws/acme/list");
+    expect(savedList?.state.status).toBe("error");
+    expect(savedList?.state.data).toEqual([{ id: "i1" }]);
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+    expect(reader.getQueryData(listKey)).toEqual([{ id: "i1" }]);
+    expect(reader.getQueryState(listKey)?.status).toBe("error");
+  });
+
   it("restores the settled entries after a pending entry written by an older build", async () => {
     const storage = createMemoryStore();
     const writer = createQueryClient();

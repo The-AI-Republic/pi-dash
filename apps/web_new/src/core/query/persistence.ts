@@ -53,13 +53,18 @@ export interface CachePersistor {
 }
 
 /**
- * Whether a stored entry carries a settled payload. Pending entries cannot
- * be restored from JSON (their in-flight promise loses its methods), and
- * restoring them would abort the rest of the payload.
+ * A settled query is past its first read. Pending entries cannot be
+ * restored from JSON (their in-flight promise loses its methods), and
+ * restoring one would abort the rest of the payload. Error entries are
+ * settled on purpose: a failed refetch keeps the previously fetched data,
+ * which is exactly what a warm start paints.
  */
+function settledStatus(status: unknown): boolean {
+  return status === "success" || status === "error";
+}
+
 function restorableQuery(entry: DehydratedState["queries"][number]): boolean {
-  const status: unknown = entry.state?.status;
-  return (status === "success" || status === "error") && entry.promise === undefined;
+  return settledStatus(entry.state?.status) && entry.promise === undefined;
 }
 
 export function createCachePersistor(
@@ -91,7 +96,7 @@ export function createCachePersistor(
     // rows yet, and `dehydrate` would attach its in-flight promise, which
     // JSON turns into `{}` and which then breaks the whole restore below.
     const full = dehydrate(client, {
-      shouldDehydrateQuery: (query) => query.state.status === "success" && shouldPersist(query.queryKey),
+      shouldDehydrateQuery: (query) => settledStatus(query.state.status) && shouldPersist(query.queryKey),
     });
     const payload: StoredPayload = { version, state: full };
     try {
