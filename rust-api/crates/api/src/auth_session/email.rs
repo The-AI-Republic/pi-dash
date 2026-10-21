@@ -78,6 +78,7 @@ use pidash_services::auth_session::tasks as tasks_kernel;
 use crate::assistant::governor::throttle_check;
 use crate::assistant::throttles::ThrottleSpec;
 use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
 use crate::edge;
 use crate::license::handlers_auth_forms::client_ip;
 use crate::state::AppState;
@@ -2047,11 +2048,6 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         .extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip().to_string());
-    let forwarded = parts
-        .headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok());
-    let ip = client_ip(forwarded, peer.as_deref()).unwrap_or_default();
     // Throttle before the handler (`APIView.initial`: auth, then
     // permissions, then throttles); authenticated callers bypass the
     // anon scope. Histories live in the shared redis db under the DRF
@@ -2103,11 +2099,9 @@ async fn serve_email_check(state: &AppState, req: axum::extract::Request) -> Res
         }
     }
     if !authenticated {
-        let ident = if ip.is_empty() {
-            "127.0.0.1".to_owned()
-        } else {
-            ip.clone()
-        };
+        // DRF `get_ident`, not the first-entry `client_ip` stamp:
+        // the whole X-Forwarded-For chain is the bucket.
+        let ident = throttle_ident(&parts.headers, peer);
         if !check_email_throttle(state, &ident).await {
             return throttle_429();
         }

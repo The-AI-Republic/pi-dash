@@ -98,6 +98,7 @@ use pidash_services::auth_session::tasks::{
 };
 
 use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
+use crate::auth_session::throttle_ident;
 use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -580,19 +581,6 @@ impl Cache {
         }
         Ok(())
     }
-}
-
-/// DRF `AnonRateThrottle` ident (`throttling.py` `get_ident`): the
-/// `X-Forwarded-For` value with all whitespace stripped when present, else
-/// `REMOTE_ADDR` (which may itself be absent → the `"None"` ident Python's
-/// `%`-formatting produces).
-fn throttle_ident(headers: &axum::http::HeaderMap, peer: Option<String>) -> String {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if !xff.is_empty() {
-            return xff.split_whitespace().collect();
-        }
-    }
-    peer.unwrap_or_else(|| "None".to_owned())
 }
 
 /// Evaluate the generate throttle *before* the handler body (DRF

@@ -36,6 +36,22 @@ pub use render::{
     THROTTLE_429_STATUS, UNAUTHENTICATED_401_STATUS,
 };
 
+/// DRF `AnonRateThrottle` ident (`throttling.py` `get_ident`,
+/// `NUM_PROXIES` unset): the `X-Forwarded-For` value with all
+/// whitespace stripped when present, else `REMOTE_ADDR` (which may
+/// itself be absent → the `"None"` ident Python's `%`-formatting
+/// produces). Shared by the magic and email-check throttles; the
+/// first-entry `client_ip` helper stays reserved for the stamp
+/// columns (`utils/ip_address.py:get_client_ip`).
+pub(crate) fn throttle_ident(headers: &axum::http::HeaderMap, peer: Option<String>) -> String {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if !xff.is_empty() {
+            return xff.split_whitespace().collect();
+        }
+    }
+    peer.unwrap_or_else(|| "None".to_owned())
+}
+
 /// Owned D-16 auth routes (cutover granularity: registered paths
 /// serve Rust, sibling paths keep proxying through the fallback).
 /// Email sessions (PIDASHCONV-422) plus the magic-link family
