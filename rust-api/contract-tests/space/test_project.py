@@ -143,3 +143,28 @@ def test_issues_list_unknown_anchor_is_404(anon_client):
     response = anon_client.get(f"{BASE}/anchor/does-not-exist-123/issues/")
     assert response.status_code == 404
     assert response.json() == {"error": "Project is not published"}
+
+
+def test_issues_group_keys_exclude_soft_deleted_and_triage(anon_client, world, seeder, db):
+    workspace_id = world["workspace"]["id"]
+    project_id = world["project"]["id"]
+
+    deleted_state = seeder.create_state(workspace_id, project_id, name="Deleted state")
+    triage_state = seeder.create_state(workspace_id, project_id, name="Triage", group="triage")
+    deleted_cycle = seeder.create_cycle(workspace_id, project_id, world["owner"]["id"], name="Deleted cycle")
+
+    db.execute("UPDATE states SET deleted_at = now() WHERE id = %s", (deleted_state["id"],))
+    db.execute("UPDATE cycles SET deleted_at = now() WHERE id = %s", (deleted_cycle["id"],))
+
+    states = anon_client.get(f"{BASE}/anchor/{world['anchor']}/issues/?group_by=state_id")
+    assert states.status_code == 200
+    state_keys = set(states.json()["results"])
+    assert world["state"]["id"] in state_keys
+    assert deleted_state["id"] not in state_keys
+    assert triage_state["id"] not in state_keys
+
+    cycles = anon_client.get(f"{BASE}/anchor/{world['anchor']}/issues/?group_by=cycle_id")
+    assert cycles.status_code == 200
+    cycle_keys = set(cycles.json()["results"])
+    assert world["cycle"]["id"] in cycle_keys
+    assert deleted_cycle["id"] not in cycle_keys
