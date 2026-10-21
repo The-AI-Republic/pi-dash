@@ -22,6 +22,7 @@ import pytest
 
 from _harness.config import base_url
 from _harness.db import db_cursor
+from _harness.worlds import soft_delete_member
 
 from .conftest import threads_url
 
@@ -134,6 +135,21 @@ def test_sse_denies_guest_and_cross_user_threads(world, guest, member, admin):
 def test_sse_missing_thread_is_404(world, member):
     status, _, _ = _read_frames(
         member, f"{threads_url(world)}/threads/{uuid.uuid4()}/events/", max_frames=1
+    )
+    assert status == 404
+
+
+def test_sse_soft_deleted_active_member_is_404(world, member):
+    # Create the thread while the membership is live, then soft-delete it with
+    # is_active left true. If the role gate ignored deleted_at, this request
+    # would find the owned thread and stream 200; the member gate must turn it
+    # into a 404 like Django's _resolve.
+    base = threads_url(world)
+    tid = _new_thread(member, base)
+    assert soft_delete_member(world.ws, world.member) == 1
+
+    status, _, _ = _read_frames(
+        member, f"{base}/threads/{tid}/events/", max_frames=1
     )
     assert status == 404
 

@@ -1321,6 +1321,8 @@ pub async fn request_actor(
 /// (`core/permissions.py:48-56`): join over `workspace__slug`, `member`,
 /// `is_active=True`, `.values_list("role").first()` — the model's default
 /// ordering (`-created_at`) with `LIMIT 1` is what `.first()` compiles to.
+/// `WorkspaceMember` is a `BaseModel`, so its default `SoftDeletionManager`
+/// (`db/mixins.py:66`) also adds `deleted_at IS NULL`.
 /// `None` is "no active row" (also what anonymous callers resolve to).
 pub async fn role_for(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Option<i32>, Response> {
     // `role` is a `PositiveSmallIntegerField` (SMALLINT): decode as `i16
@@ -1330,7 +1332,8 @@ pub async fn role_for(pool: &PgPool, user_id: &Uuid, slug: &str) -> Result<Optio
         "SELECT \"workspace_members\".\"role\" FROM \"workspace_members\" \
          INNER JOIN \"workspaces\" ON (\"workspace_members\".\"workspace_id\" = \"workspaces\".\"id\") \
          WHERE (\"workspaces\".\"slug\" = $1 AND \"workspace_members\".\"member_id\" = $2 \
-         AND \"workspace_members\".\"is_active\") \
+         AND \"workspace_members\".\"is_active\" \
+         AND \"workspace_members\".\"deleted_at\" IS NULL) \
          ORDER BY \"workspace_members\".\"created_at\" DESC LIMIT 1",
     )
     .bind(slug)
