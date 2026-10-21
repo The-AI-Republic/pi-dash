@@ -14,7 +14,7 @@ import { projectMarkText, type ProjectMark } from "./projectIcon.js";
 
 type GlyphModule = typeof import("./projectIconGlyphs.js");
 
-export interface ProjectIconProps {
+export interface ProjectMarkIconProps {
   /** Decoded icon mark. */
   mark: Extract<ProjectMark, { kind: "icon" }>;
   /** Short code; its initial stands in until the glyph chunk arrives. */
@@ -24,7 +24,7 @@ export interface ProjectIconProps {
   testId?: string | undefined;
 }
 
-export function ProjectIcon({ mark, identifier, size, testId }: ProjectIconProps): React.ReactElement {
+export function ProjectMarkIcon({ mark, identifier, size, testId }: ProjectMarkIconProps): React.ReactElement {
   const [module, setModule] = React.useState<GlyphModule | null>(null);
   React.useEffect(() => {
     let live = true;

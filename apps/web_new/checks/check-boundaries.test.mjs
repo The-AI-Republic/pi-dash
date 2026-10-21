@@ -80,7 +80,7 @@ describe("entriesCatalogFailure", () => {
 
 describe("projectIconGlyphsFailure", () => {
   const MESSAGE =
-    "shared/pickers/projectIconGlyphs must stay out of eager closures (import it through ProjectIcon, or from the emblem picker)";
+    "shared/pickers/projectIconGlyphs must stay out of eager closures (import it through ProjectMarkIcon, or from the emblem picker)";
   const GLYPHS = "shared/pickers/projectIconGlyphs.tsx";
 
   it("fails eager marks and the shell importing the glyph map", () => {
@@ -93,7 +93,7 @@ describe("projectIconGlyphsFailure", () => {
   });
 
   it("passes the lazy wrapper, the glyph module itself and the emblem picker", () => {
-    expect(projectIconGlyphsFailure("shared/pickers/ProjectIcon.tsx", GLYPHS)).toBeNull();
+    expect(projectIconGlyphsFailure("shared/pickers/ProjectMarkIcon.tsx", GLYPHS)).toBeNull();
     expect(projectIconGlyphsFailure("shared/pickers/projectIconGlyphs.tsx", GLYPHS)).toBeNull();
     expect(projectIconGlyphsFailure("features/project-settings/general/emblemCatalog.ts", GLYPHS)).toBeNull();
     expect(

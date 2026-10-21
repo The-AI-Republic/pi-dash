@@ -9,7 +9,7 @@
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { ProjectIcon } from "../../../shared/pickers/ProjectIcon.js";
+import { ProjectMarkIcon } from "../../../shared/pickers/ProjectMarkIcon.js";
 import type { ProjectMark } from "../../../shared/pickers/projectIcon.js";
 
 export interface EmblemArtworkProps {
@@ -20,7 +20,7 @@ export interface EmblemArtworkProps {
 /** The uploaded image or chosen symbol inside a logo box. */
 export function EmblemArtwork({ mark, identifier }: EmblemArtworkProps): React.ReactElement {
   if (mark.kind === "icon") {
-    return <ProjectIcon mark={mark} identifier={identifier} size={22} testId="project-logo-icon" />;
+    return <ProjectMarkIcon mark={mark} identifier={identifier} size={22} testId="project-logo-icon" />;
   }
   const base = getAppClient().baseUrl.replace(/\/+$/, "");
   const src = /^[a-z][a-z\d+.-]*:/i.test(mark.url) ? mark.url : `${base}${mark.url}`;

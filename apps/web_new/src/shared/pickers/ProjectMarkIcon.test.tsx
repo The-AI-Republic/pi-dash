@@ -11,19 +11,19 @@ import type { ProjectMark } from "./projectIcon.js";
 const STAR: Extract<ProjectMark, { kind: "icon" }> = { kind: "icon", name: "star", color: null };
 
 /** A fresh wrapper instance, as on the first paint of a route. */
-async function freshWrapper(): Promise<typeof import("./ProjectIcon.js")> {
+async function freshWrapper(): Promise<typeof import("./ProjectMarkIcon.js")> {
   vi.resetModules();
-  return import("./ProjectIcon.js");
+  return import("./ProjectMarkIcon.js");
 }
 
 afterEach(() => {
   vi.resetModules();
 });
 
-describe("ProjectIcon", () => {
+describe("ProjectMarkIcon", () => {
   it("shows the short code's initial until the glyph chunk arrives", async () => {
-    const { ProjectIcon } = await freshWrapper();
-    render(<ProjectIcon mark={STAR} identifier="seed" size={20} testId="glyph" />);
+    const { ProjectMarkIcon } = await freshWrapper();
+    render(<ProjectMarkIcon mark={STAR} identifier="seed" size={20} testId="glyph" />);
     expect(screen.getByText("S")).toBeInTheDocument();
     expect(screen.queryByTestId("glyph")).not.toBeInTheDocument();
     const glyph = await screen.findByTestId("glyph");
@@ -33,9 +33,9 @@ describe("ProjectIcon", () => {
   });
 
   it("draws a coloured glyph after loading, with no fallback in the document", async () => {
-    const { ProjectIcon } = await freshWrapper();
+    const { ProjectMarkIcon } = await freshWrapper();
     render(
-      <ProjectIcon
+      <ProjectMarkIcon
         mark={{ kind: "icon", name: "rocket_launch", color: "#f97316" }}
         identifier="WEB"
         size={22}
@@ -47,17 +47,17 @@ describe("ProjectIcon", () => {
   });
 
   it("keeps the initial for a name this frontend cannot draw", async () => {
-    const { ProjectIcon } = await freshWrapper();
-    render(<ProjectIcon mark={{ kind: "icon", name: "no_such_symbol", color: null }} identifier="WEB" size={20} />);
+    const { ProjectMarkIcon } = await freshWrapper();
+    render(<ProjectMarkIcon mark={{ kind: "icon", name: "no_such_symbol", color: null }} identifier="WEB" size={20} />);
     expect(await screen.findByText("W")).toBeInTheDocument();
     await waitFor(() => expect(document.querySelector("svg")).toBeNull());
   });
 
   it("reuses one load across marks and renders a later mark without the initial", async () => {
-    const { ProjectIcon } = await freshWrapper();
-    const first = render(<ProjectIcon mark={STAR} identifier="SEED" size={20} testId="first" />);
+    const { ProjectMarkIcon } = await freshWrapper();
+    const first = render(<ProjectMarkIcon mark={STAR} identifier="SEED" size={20} testId="first" />);
     await screen.findByTestId("first");
-    first.rerender(<ProjectIcon mark={{ ...STAR, name: "anchor" }} identifier="SEED" size={20} testId="second" />);
+    first.rerender(<ProjectMarkIcon mark={{ ...STAR, name: "anchor" }} identifier="SEED" size={20} testId="second" />);
     expect(await screen.findByTestId("second")).toBeInTheDocument();
     expect(screen.queryByText("S")).not.toBeInTheDocument();
   });

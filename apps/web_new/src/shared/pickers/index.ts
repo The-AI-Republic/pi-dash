@@ -53,8 +53,8 @@ export { selectProjectMark, selectProjectOptions, toProjectOption } from "./proj
 export { ProjectMark, resolveMarkSource } from "./ProjectMark.js";
 export type { ProjectMarkProps } from "./ProjectMark.js";
 export { projectMark, projectMarkText } from "./projectIcon.js";
-export { ProjectIcon } from "./ProjectIcon.js";
-export type { ProjectIconProps } from "./ProjectIcon.js";
+export { ProjectMarkIcon } from "./ProjectMarkIcon.js";
+export type { ProjectMarkIconProps } from "./ProjectMarkIcon.js";
 export type { ProjectMark as ProjectMarkSpec } from "./projectIcon.js";
 export type { ProjectOption, ProjectOptionsInput } from "./projects.js";
 export { CyclePicker } from "./CyclePicker.js";

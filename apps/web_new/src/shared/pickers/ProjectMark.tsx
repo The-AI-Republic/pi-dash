@@ -8,7 +8,7 @@
 import * as React from "react";
 
 import { projectMark, projectMarkText } from "./projectIcon.js";
-import { ProjectIcon } from "./ProjectIcon.js";
+import { ProjectMarkIcon } from "./ProjectMarkIcon.js";
 
 /** Resolve a stored emblem path to something an <img> can load. */
 export function resolveMarkSource(url: string, apiBaseUrl: string | undefined): string {
@@ -55,7 +55,7 @@ export function ProjectMark({
           data-testid="project-mark-image"
         />
       ) : mark.kind === "icon" ? (
-        <ProjectIcon mark={mark} identifier={identifier} size={Math.round(size * 0.7)} />
+        <ProjectMarkIcon mark={mark} identifier={identifier} size={Math.round(size * 0.7)} />
       ) : (
         <span aria-hidden="true">{projectMarkText(mark, identifier)}</span>
       )}
