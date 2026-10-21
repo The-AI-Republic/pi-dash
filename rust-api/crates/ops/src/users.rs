@@ -153,15 +153,23 @@ pub fn ask(io: &mut OpsIo<'_>, prompt: &str) -> Result<String, ReadEnd> {
     read_py_line(io.stdin)?.ok_or(ReadEnd::Eof)
 }
 
-/// `getpass.getpass(prompt)` on a pipeless terminal: the
-/// `fallback_getpass` bytes — `Warning: Password input may be
-/// echoed.` plus the prompt on stderr, the line from stdin with one
-/// trailing `\n` stripped, then `\n` on stderr. (The
-/// `GetPassWarning` header is interpreter noise and is not ported;
-/// echo stays on — without `unsafe` there is no termios control.)
-/// EOF raises bare `EOFError` before the trailing `\n` is written.
+/// `getpass.getpass(prompt)`.
+///
+/// With a controlling terminal this matches CPython's `unix_getpass`:
+/// `rpassword::prompt_password` opens `/dev/tty`, writes the prompt
+/// there, turns echo off for the read, and writes the trailing `\n`.
+///
+/// Without one it emits the `fallback_getpass` bytes —
+/// `Warning: Password input may be echoed.` plus the prompt on stderr,
+/// the line from stdin with one trailing `\n` stripped, then `\n` on
+/// stderr. (The `GetPassWarning` header is interpreter noise and is
+/// not ported.) EOF raises bare `EOFError` before the trailing `\n`
+/// is written.
 pub fn getpass(io: &mut OpsIo<'_>, prompt: &str) -> Result<String, ReadEnd> {
     use pidash_services::ops::users as kernel;
+    if io.stdin_is_terminal {
+        return getpass_tty(prompt);
+    }
     io.stderr
         .write_all(kernel::GETPASS_ECHO_WARNING.as_bytes())
         .map_err(|e| ReadEnd::Io(format!("stderr write failed: {e}")))?;
@@ -179,6 +187,17 @@ pub fn getpass(io: &mut OpsIo<'_>, prompt: &str) -> Result<String, ReadEnd> {
         .write_all(b"\n")
         .map_err(|e| ReadEnd::Io(format!("stderr write failed: {e}")))?;
     Ok(line)
+}
+
+/// The `unix_getpass` path: prompt and read on `/dev/tty` with echo
+/// off. The termios calls live inside `rpassword`, so this crate keeps
+/// `#![forbid(unsafe_code)]`.
+fn getpass_tty(prompt: &str) -> Result<String, ReadEnd> {
+    match rpassword::prompt_password(prompt) {
+        Ok(password) => Ok(password),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Err(ReadEnd::Eof),
+        Err(error) => Err(ReadEnd::Io(error.to_string())),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,6 +1043,7 @@ mod tests {
             stdin: &mut stdin,
             stdout: &mut stdout,
             stderr: &mut stderr,
+            stdin_is_terminal: false,
         };
         assert_eq!(ask(&mut io, "Workspace Name: "), Ok("answer".to_owned()));
         assert_eq!(stdout, b"Workspace Name: ");
@@ -1037,6 +1057,7 @@ mod tests {
             stdin: &mut stdin,
             stdout: &mut stdout,
             stderr: &mut stderr,
+            stdin_is_terminal: false,
         };
         assert_eq!(ask(&mut io, "Workspace Name: "), Err(ReadEnd::Eof));
         assert_eq!(stdout, b"Workspace Name: ");
@@ -1049,6 +1070,7 @@ mod tests {
             stdin: &mut stdin,
             stdout: &mut stdout,
             stderr: &mut stderr,
+            stdin_is_terminal: false,
         };
         assert_eq!(getpass(&mut io, "Password: "), Ok("secret".to_owned()));
         assert!(stdout.is_empty());
@@ -1065,6 +1087,7 @@ mod tests {
             stdin: &mut stdin,
             stdout: &mut stdout,
             stderr: &mut stderr,
+            stdin_is_terminal: false,
         };
         // Universal newlines: `\r\n` terminates (the `\r` never
         // reaches the password, as under `sys.stdin.readline`).
@@ -1075,6 +1098,7 @@ mod tests {
             stdin: &mut stdin,
             stdout: &mut stdout,
             stderr: &mut stderr,
+            stdin_is_terminal: false,
         };
         assert_eq!(getpass(&mut io, "Password: "), Err(ReadEnd::Eof));
         // No trailing `\n`: `unix_getpass` raises before writing it.
