@@ -192,6 +192,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
+            "paused_at",
+            "paused_by",
             "created_at",
             "updated_at",
         ]
@@ -217,6 +219,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
+            "paused_at",
+            "paused_by",
             "created_at",
             "updated_at",
         ]

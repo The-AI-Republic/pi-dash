@@ -67,6 +67,7 @@ class MetricsEndpoint(APIView):
         online = status_counts.get(RunnerStatus.ONLINE, 0)
         busy = status_counts.get(RunnerStatus.BUSY, 0)
         offline = status_counts.get(RunnerStatus.OFFLINE, 0)
+        paused = Runner.objects.filter(paused_at__isnull=False, revoked_at__isnull=True).count()
 
         active_runs = AgentRun.objects.filter(
             status__in=ACTIVE_RUN_STATUSES
@@ -90,6 +91,11 @@ class MetricsEndpoint(APIView):
                 "pi_dash_runner_offline",
                 "Runners that have dropped their heartbeat (excludes revoked).",
                 offline,
+            ),
+            _gauge(
+                "pi_dash_runner_paused",
+                "Non-revoked runners paused by an operator (overlaps the status gauges).",
+                paused,
             ),
             _gauge(
                 "pi_dash_runs_active",

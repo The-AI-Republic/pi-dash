@@ -102,6 +102,8 @@ def select_runner_in_pod(pod: Pod) -> Optional[Runner]:
             pod=pod,
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=alive_threshold,
+            # Operator-paused runners keep heartbeating but take no new work.
+            paused_at__isnull=True,
         )
         # Desktop-bundled runners serve only work pinned to them. Handing them
         # unpinned pod work would make one person's laptop the team's build
@@ -214,6 +216,7 @@ def drain_pod(pod: Pod) -> int:
                 pod=pod,
                 status=RunnerStatus.ONLINE,
                 last_heartbeat_at__gte=alive_threshold,
+                paused_at__isnull=True,
             )
             .exclude(agent_runs__status__in=BUSY_STATUSES)
             # An active chat no longer excludes a runner from issue assignment:
@@ -270,6 +273,7 @@ def drain_for_runner(runner: Runner) -> bool:
                 pk=runner.pk,
                 status=RunnerStatus.ONLINE,
                 last_heartbeat_at__gte=alive_threshold,
+                paused_at__isnull=True,
             )
             .exclude(agent_runs__status__in=BUSY_STATUSES)
             # An active chat no longer excludes a runner from issue assignment:
@@ -350,6 +354,8 @@ def select_runner_for_run(run: AgentRun) -> Optional[Runner]:
             workspace=run.workspace,
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=alive_threshold,
+            # Operator-paused runners keep heartbeating but take no new work.
+            paused_at__isnull=True,
         )
         .exclude(agent_runs__status__in=BUSY_STATUSES)
         # An active chat no longer excludes a runner from issue assignment:
@@ -392,9 +398,9 @@ def pod_has_runner_for_issue_principal(pod, issue, run_creator_id) -> bool:
     dispatch gate it shadows (``filter_runs_usable_by_runner``) applies the
     same ``deleted_at`` condition, so preflight and dispatch stay consistent.
 
-    Transient status is **deliberately ignored** — OFFLINE / BUSY runners
-    still count as "registered" because the owner can flip them back on and
-    ``drain_pod`` re-fires on heartbeat. REVOKED runners, however, are
+    Transient status is **deliberately ignored** — OFFLINE / BUSY / paused
+    runners still count as "registered" because the owner can flip them back
+    on and ``drain_pod`` re-fires on heartbeat or resume. REVOKED runners, however, are
     **permanent** — a revoked runner can never be un-revoked and
     ``drain_pod`` only ever assigns ONLINE runners, so a REVOKED-only match
     would let the run be created and then jam in QUEUED forever (the exact
@@ -462,4 +468,4 @@ def count_active(user_id, workspace_id) -> int:
 
 def eligible_for_assignment(runner: Runner) -> Q:
     """Convenience predicate for assertions/tests."""
-    return Q(pk=runner.pk, status=RunnerStatus.ONLINE)
+    return Q(pk=runner.pk, status=RunnerStatus.ONLINE, paused_at__isnull=True)

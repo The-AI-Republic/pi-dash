@@ -490,3 +490,66 @@ class RunnerRevokeEndpoint(APIView):
             close_runner_session(runner_pk)
             runner.refresh_from_db()
         return Response(RunnerSerializer(runner).data)
+
+
+class RunnerPauseEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/pause/`` — stop dispatching new work.
+
+    Pausing is cloud-side only: the daemon keeps heartbeating and finishes
+    any in-flight run, but every matcher path skips the runner, so queued
+    runs (including ones pinned to it) wait or go to another runner in the
+    pod. Idempotent: pausing an already-paused runner keeps the original
+    ``paused_at`` / ``paused_by``.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        with transaction.atomic():
+            runner = Runner.objects.select_for_update().filter(pk=runner_id).first()
+            if runner is None or not can_view_runner(request.user, runner):
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+            if not can_manage_runner(request.user, runner):
+                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            if runner.revoked_at is not None:
+                return Response(
+                    {"error": "runner is revoked", "code": "runner_revoked"},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if runner.paused_at is None:
+                runner.paused_at = timezone.now()
+                runner.paused_by = request.user
+                runner.save(update_fields=["paused_at", "paused_by", "updated_at"])
+        runner = Runner.objects.select_related("pod__project", "dev_machine").get(pk=runner.pk)
+        return Response(RunnerSerializer(runner).data)
+
+
+class RunnerResumeEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/resume/`` — make a paused runner
+    eligible again and immediately try to hand it queued work.
+
+    The poll loop only drains on availability transitions, so without the
+    explicit drain here a resumed idle runner would sit unused until some
+    other trigger fired. Idempotent on a runner that is not paused.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        from pi_dash.runner.services.matcher import drain_for_runner_by_id
+
+        with transaction.atomic():
+            runner = Runner.objects.select_for_update().filter(pk=runner_id).first()
+            if runner is None or not can_view_runner(request.user, runner):
+                return Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+            if not can_manage_runner(request.user, runner):
+                return Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+            if runner.paused_at is not None:
+                runner.paused_at = None
+                runner.paused_by = None
+                runner.save(update_fields=["paused_at", "paused_by", "updated_at"])
+                transaction.on_commit(lambda rid=runner.pk: drain_for_runner_by_id(rid))
+        runner = Runner.objects.select_related("pod__project", "dev_machine").get(pk=runner.pk)
+        return Response(RunnerSerializer(runner).data)

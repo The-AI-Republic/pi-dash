@@ -67,6 +67,7 @@ def online_managed_runner(project, user):
         .filter(
             status=RunnerStatus.ONLINE,
             last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
+            paused_at__isnull=True,
         )
         .order_by("-last_heartbeat_at")
         .first()

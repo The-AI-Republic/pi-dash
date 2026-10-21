@@ -474,6 +474,18 @@ class Runner(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    # Operator pause. Orthogonal to ``status``: ``status`` is connectivity
+    # (rewritten by every poll), while a paused runner keeps heartbeating,
+    # finishes its in-flight run, and is skipped by every matcher path until
+    # resumed. NULL means not paused.
+    paused_at = models.DateTimeField(null=True, blank=True)
+    paused_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
 
     class Meta:
         db_table = "runner"

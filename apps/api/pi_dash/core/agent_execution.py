@@ -104,6 +104,8 @@ def agent_executor_options(project, user=None) -> list[dict[str, object]]:
             pod__project_id=project.id,
             workspace_id=project.workspace_id,
             status=RunnerStatus.ONLINE,
+            # A paused runner is connected but takes no new work.
+            paused_at__isnull=True,
         )
         .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
         .exists()

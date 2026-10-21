@@ -657,8 +657,10 @@ export default {
   "Failed to load pods": "Failed to load pods",
   "Failed to load runner": "Failed to load runner",
   "Failed to move favorite": "Failed to move favorite",
+  "Failed to pause runner": "Failed to pause runner",
   "Failed to record decision": "Failed to record decision",
   "Failed to reorder favorite": "Failed to reorder favorite",
+  "Failed to resume runner": "Failed to resume runner",
   "Failed to revoke runner": "Failed to revoke runner",
   "Failed to sign out. Please try again.": "Failed to sign out. Please try again.",
   "Failed to start agent run": "Failed to start agent run",
@@ -1165,7 +1167,10 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Paste an issue id and click Preview to render the template against a real issue.",
   "Paste the code sent to your email": "Paste the code sent to your email",
+  Pause: "Pause",
   Paused: "Paused",
+  "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.":
+    "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.",
   "paused awaiting input": "paused awaiting input",
   "Payload URL": "Payload URL",
   Pending: "Pending",
@@ -1315,6 +1320,7 @@ export default {
   "Resend in {seconds} seconds": "Resend in {seconds} seconds",
   Restore: "Restore",
   "Restore success": "Restore success",
+  Resume: "Resume",
   Retry: "Retry",
   "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.":
     "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.",

@@ -156,6 +156,26 @@ export class RunnerService extends APIService {
       });
   }
 
+  /** ``POST /api/runners/<id>/pause/`` — stop assigning new work. The
+   * daemon stays connected and finishes any in-flight run. Idempotent. */
+  async pauseRunner(runnerId: string): Promise<IRunner> {
+    return this.post(`/api/runners/${runnerId}/pause/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``POST /api/runners/<id>/resume/`` — clear the pause and immediately
+   * try to hand the runner queued work. Idempotent. */
+  async resumeRunner(runnerId: string): Promise<IRunner> {
+    return this.post(`/api/runners/${runnerId}/resume/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
   /** Move a runner to a different pod (same workspace). Owner or admin only. */
   async move(runnerId: string, podId: string, name?: string): Promise<IRunner> {
     const body: Record<string, unknown> = { pod: podId };

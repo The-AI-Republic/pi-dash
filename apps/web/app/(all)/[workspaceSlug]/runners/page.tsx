@@ -31,6 +31,10 @@ function isRevocable(r: IRunner): boolean {
   return r.status !== "revoked" && r.enrolled_at !== null;
 }
 
+function isPausable(r: IRunner): boolean {
+  return r.status !== "revoked";
+}
+
 const RunnersListPage = observer(function RunnersListPage() {
   const { currentWorkspace } = useWorkspace();
   const { t } = useTranslation();
@@ -75,6 +79,8 @@ const RunnersListPage = observer(function RunnersListPage() {
   const [deleting, setDeleting] = useState(false);
   const [revokeRunner, setRevokeRunner] = useState<IRunner | null>(null);
   const [revoking, setRevoking] = useState(false);
+  // Runner id whose pause/resume request is in flight; disables its button.
+  const [togglingPauseId, setTogglingPauseId] = useState<string | null>(null);
 
   async function confirmDeletePod() {
     if (!deletePod) return;
@@ -140,6 +146,24 @@ const RunnersListPage = observer(function RunnersListPage() {
       });
     } finally {
       setRevoking(false);
+    }
+  }
+
+  async function togglePause(r: IRunner) {
+    setTogglingPauseId(r.id);
+    try {
+      if (r.paused_at) await service.resumeRunner(r.id);
+      else await service.pauseRunner(r.id);
+      mutateRunners();
+    } catch (e: unknown) {
+      const err = e as { error?: string } | null;
+      setToast({
+        type: TOAST_TYPE.ERROR,
+        title: t("Error!"),
+        message: err?.error ?? (r.paused_at ? t("Failed to resume runner") : t("Failed to pause runner")),
+      });
+    } finally {
+      setTogglingPauseId(null);
     }
   }
 
@@ -308,9 +332,24 @@ const RunnersListPage = observer(function RunnersListPage() {
                   <td className="font-mono px-3 py-2 text-11">{r.name}</td>
                   <td className="px-3 py-2">{r.pod_detail ? r.pod_detail.name : "—"}</td>
                   <td className="px-3 py-2">
-                    <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
-                      {t(RUNNER_STATUS_I18N_LABELS[r.status])}
-                    </Badge>
+                    <div className="flex items-center gap-1.5">
+                      {r.paused_at && (
+                        <Tooltip
+                          tooltipContent={t(
+                            "Paused: this runner stays connected but takes no new work. Any in-flight run finishes."
+                          )}
+                        >
+                          <span>
+                            <Badge variant="outline-warning" size="sm">
+                              {t("Paused")}
+                            </Badge>
+                          </span>
+                        </Tooltip>
+                      )}
+                      <Badge variant={STATUS_BADGE_VARIANT[r.status]} size="sm">
+                        {t(RUNNER_STATUS_I18N_LABELS[r.status])}
+                      </Badge>
+                    </div>
                   </td>
                   <td className="px-3 py-2">{r.os ? `${r.os} / ${r.arch}` : "—"}</td>
                   <td className="px-3 py-2">{r.runner_version || "—"}</td>
@@ -322,6 +361,16 @@ const RunnersListPage = observer(function RunnersListPage() {
                       {workspaceSlug && (
                         <Button variant="neutral-primary" size="sm" onClick={() => navigate(`${base}/detail/${r.id}`)}>
                           {t("Details")}
+                        </Button>
+                      )}
+                      {isPausable(r) && (
+                        <Button
+                          variant="neutral-primary"
+                          size="sm"
+                          onClick={() => togglePause(r)}
+                          disabled={togglingPauseId === r.id}
+                        >
+                          {r.paused_at ? t("Resume") : t("Pause")}
                         </Button>
                       )}
                       {isRevocable(r) && (
