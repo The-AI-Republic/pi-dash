@@ -276,6 +276,7 @@ import type {
   WsSettingsApiTokenBackup,
   WsSettingsApiTokenRow,
   SettingsGeneralField,
+  CommentActivityTraffic,
 } from "./parity-driver";
 
 // Placeholder of the command-palette input at root (each sub-page swaps in
@@ -294,6 +295,25 @@ export class WebDriver implements ParityDriver {
   constructor(page: Page) {
     this.page = page;
   }
+
+  // --- Cross-edition comment/activity sameness (NEWFRONT-819, CMT-025).
+  // --- Per-page request counters behind the detail-screen spy.
+  private commentActivitySpyInstalled = false;
+  private readonly commentActivitySpyHandler = async (route: Route): Promise<void> => {
+    this.commentActivityCount(route.request());
+    await route.continue();
+  };
+  private commentActivityTraffic: CommentActivityTraffic = {
+    historyReads: 0,
+    commentReads: 0,
+    commentCreates: 0,
+    mentionSearches: 0,
+    commentReactionCreates: 0,
+    commentReactionDeletes: 0,
+    issueReactionCreates: 0,
+    issueReactionDeletes: 0,
+    unexpectedWrites: 0,
+  };
 
   // --- Runner-chat oracle state (NEWFRONT-181, RUN-025–032). Per-page
   // --- counters and stub slots backing the API spy, the one-shot
@@ -59154,5 +59174,74 @@ export class WebDriver implements ParityDriver {
       .locator("button", { hasText: /^Filters$/ })
       .locator("span.bg-accent-primary");
     return (await dot.count()) > 0;
+  }
+
+  async activityBeginTrafficSpy(options: { reload?: boolean } = {}): Promise<void> {
+    this.commentActivityTraffic = {
+      historyReads: 0,
+      commentReads: 0,
+      commentCreates: 0,
+      mentionSearches: 0,
+      commentReactionCreates: 0,
+      commentReactionDeletes: 0,
+      issueReactionCreates: 0,
+      issueReactionDeletes: 0,
+      unexpectedWrites: 0,
+    };
+    // Drop any spy from an earlier step so one request is never counted
+    // twice; a stale route would otherwise also outlive the scenario.
+    if (this.commentActivitySpyInstalled) await this.page.unroute("**/api/**", this.commentActivitySpyHandler);
+    this.commentActivitySpyInstalled = true;
+    await this.page.route("**/api/**", this.commentActivitySpyHandler);
+    if (options.reload === false) return;
+    // A reload guarantees every request the detail load makes goes through
+    // the spy, whatever the client cache already held from an earlier step.
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    await this.activityHeading().waitFor({ timeout: 120_000 });
+  }
+
+  /** Attribute one request to the capability that issued it. */
+  private commentActivityCount(request: Request): void {
+    const url = request.url();
+    const method = request.method();
+    const counts = this.commentActivityTraffic;
+    if (method === "GET" && /\/history\/(\?|$)/.test(url)) counts.historyReads += 1;
+    else if (method === "GET" && /\/issues\/[^/]+\/comments\/(\?|$)/.test(url)) counts.commentReads += 1;
+    else if (method === "POST" && /\/issues\/[^/]+\/comments\/(\?|$)/.test(url)) counts.commentCreates += 1;
+    else if (method === "GET" && /\/entity-search\/(\?|$)/.test(url)) counts.mentionSearches += 1;
+    else if (/\/comments\/[^/]+\/reactions\/(\?|$)/.test(url)) {
+      if (method === "POST") counts.commentReactionCreates += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (/\/comments\/[^/]+\/reactions\/[^/]+\/(\?|$)/.test(url)) {
+      if (method === "DELETE") counts.commentReactionDeletes += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (/\/issues\/[^/]+\/reactions\/(\?|$)/.test(url)) {
+      if (method === "POST") counts.issueReactionCreates += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (/\/issues\/[^/]+\/reactions\/[^/]+\/(\?|$)/.test(url)) {
+      if (method === "DELETE") counts.issueReactionDeletes += 1;
+      else if (method !== "GET") counts.unexpectedWrites += 1;
+    } else if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+      counts.unexpectedWrites += 1;
+    }
+  }
+
+  async activityTrafficCounts(): Promise<CommentActivityTraffic> {
+    return { ...this.commentActivityTraffic };
+  }
+
+  async activityCommentReactionControlVisible(cardText: string): Promise<boolean> {
+    const card = this.commentCard(cardText).first();
+    if ((await card.count()) === 0) return false;
+    return (await card.locator('button[aria-haspopup="dialog"]').count()) > 0;
+  }
+
+  async issueReactionControlVisible(): Promise<boolean> {
+    try {
+      const trigger = await this.issueReactionTrigger();
+      return (await trigger.count()) > 0;
+    } catch {
+      return false;
+    }
   }
 }

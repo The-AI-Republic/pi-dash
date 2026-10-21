@@ -1161,6 +1161,25 @@ export interface ParityDriver {
   issueReactionChips(): Promise<{ emoji: string; count: number; reacted: boolean }[]>;
   /** Toggle one reaction chip on the issue. */
   issueClickReactionChip(emoji: string): Promise<void>;
+  // --- Cross-edition comment/activity sameness (NEWFRONT-819, CMT-025).
+  // --- Appended; existing methods above are untouched per the shared
+  // --- driver contract. The sameness scenario compares the individual
+  // --- capabilities' own assertions with what the app actually sent, so it
+  // --- needs the requests the detail screen made and the presence of each
+  // --- capability's entry point without driving it.
+  /**
+   * Start recording the detail screen's API requests. By default the open
+   * detail is reloaded first, so the load's own traffic is captured; pass
+   * `{ reload: false }` to reset the counters in place before the next
+   * capability runs.
+   */
+  activityBeginTrafficSpy(options?: { reload?: boolean }): Promise<void>;
+  /** What the detail screen asked the server for since the spy started. */
+  activityTrafficCounts(): Promise<CommentActivityTraffic>;
+  /** Whether a comment card renders its per-card reaction control (picker trigger). */
+  activityCommentReactionControlVisible(cardText: string): Promise<boolean>;
+  /** Whether the issue-level reaction control renders above the feed. */
+  issueReactionControlVisible(): Promise<boolean>;
   /** Whether the "Code reviews" section renders above the activity feed. */
   codeReviewsVisible(): Promise<boolean>;
   /** Code-review links in display order: badge, title, href and target. */
@@ -13365,4 +13384,30 @@ export interface IntakeShellListQuery {
   url: string;
   /** Decoded query params (repeated keys joined with commas). */
   params: Record<string, string>;
+}
+
+/** Comment/activity requests observed on a detail screen (NEWFRONT-819, CMT-025). */
+export interface CommentActivityTraffic {
+  /** GETs to the issue history feed. */
+  historyReads: number;
+  /** GETs to the issue's comment list. */
+  commentReads: number;
+  /** POSTs that created a comment. */
+  commentCreates: number;
+  /** GETs to mention suggestions (entity-search). */
+  mentionSearches: number;
+  /** POSTs that added a comment reaction. */
+  commentReactionCreates: number;
+  /** DELETE requests against a comment reaction. */
+  commentReactionDeletes: number;
+  /** POSTs that added an issue reaction. */
+  issueReactionCreates: number;
+  /** DELETE requests against an issue reaction. */
+  issueReactionDeletes: number;
+  /**
+   * POST/PATCH/PUT/DELETE requests to any other endpoint. A plain detail load
+   * creates nothing, so any non-zero value means the build wrote somewhere the
+   * shared comment/activity capabilities do not.
+   */
+  unexpectedWrites: number;
 }

@@ -69,6 +69,11 @@ ENV VITE_LIVE_BASE_PATH="/live"
 # the catalog; the server-side twin (OPENHUB_APPS_ENABLED on api-cloud) is
 # flipped together with it.
 ENV VITE_OPENHUB_APPS_ENABLED="1"
+# The cloud bundle (overlay on top of the OSS sources) is larger than the
+# OSS one and dies at Node's default heap limit (about 2 GiB) inside the
+# stack's Docker VM, which has no room to grow the VM itself. CI builds the
+# same app with a 4 GiB heap; give the build an explicit ceiling.
+ENV NODE_OPTIONS="--max-old-space-size=3072"
 RUN pnpm --filter=web build
 
 FROM nginx:1.27-alpine
