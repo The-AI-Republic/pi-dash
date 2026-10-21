@@ -99,17 +99,21 @@ def agent_executor_options(project, user=None) -> list[dict[str, object]]:
     # Desktop-bundled runners are deliberately excluded: they serve only runs
     # pinned to them, so counting one here would advertise "a local runner is
     # available" for work it will never accept.
-    local_available = (
-        Runner.objects.filter(
-            pod__project_id=project.id,
-            workspace_id=project.workspace_id,
-            status=RunnerStatus.ONLINE,
-            # A paused runner is connected but takes no new work.
-            paused_at__isnull=True,
-        )
-        .exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
-        .exists()
-    )
+    online_local = Runner.objects.filter(
+        pod__project_id=project.id,
+        workspace_id=project.workspace_id,
+        status=RunnerStatus.ONLINE,
+    ).exclude(provisioning=RunnerProvisioning.DESKTOP_BUNDLED)
+    # A paused runner is connected but takes no new work. Runs still queue for
+    # it (the preflight counts it as registered), so report "paused" rather
+    # than "no runner" — the fix is to resume, not to add one.
+    local_available = online_local.filter(paused_at__isnull=True).exists()
+    if local_available:
+        local_reason = ""
+    elif online_local.exists():
+        local_reason = "local_runner_paused"
+    else:
+        local_reason = "no_local_runner"
     managed_available, managed_reason = managed_runner_availability(project, user)
     return [
         {
@@ -120,7 +124,7 @@ def agent_executor_options(project, user=None) -> list[dict[str, object]]:
         {
             "kind": AgentExecutorKind.LOCAL_RUNNER,
             "available": local_available,
-            "reason_code": "" if local_available else "no_local_runner",
+            "reason_code": local_reason,
         },
         {
             "kind": AgentExecutorKind.MANAGED_RUNNER,

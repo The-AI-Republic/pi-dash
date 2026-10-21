@@ -9,10 +9,13 @@ Exposes point-in-time gauges derived from DB queries. Scrape with
 ourselves so the endpoint works with any Prometheus-compatible scraper.
 
 Schema (all gauges):
-- ``pi_dash_runner_online``: count of runners in ``online`` state.
+- ``pi_dash_runner_online``: count of runners in ``online`` state that are
+  not paused, i.e. idle capacity that can take new work.
 - ``pi_dash_runner_busy``: count of runners in ``busy`` state.
 - ``pi_dash_runner_offline``: count of runners in ``offline`` state
   (excludes revoked; revoked runners are retired, not a health signal).
+- ``pi_dash_runner_paused``: count of non-revoked runners an operator has
+  paused, whatever their connectivity state.
 - ``pi_dash_runs_active``: count of AgentRuns in an in-flight status
   (assigned / running / cancel_requested / awaiting_approval /
   awaiting_reauth).
@@ -22,7 +25,7 @@ Schema (all gauges):
 
 from __future__ import annotations
 
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import HttpResponse
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
@@ -61,13 +64,18 @@ class MetricsEndpoint(APIView):
     # DRF rendering by returning ``HttpResponse`` directly.
 
     def get(self, request):
-        status_counts = dict(
-            Runner.objects.values_list("status").annotate(c=Count("id"))
+        # One grouped query: total and paused counts per status.
+        rows = Runner.objects.values("status").annotate(
+            c=Count("id"),
+            paused=Count("id", filter=Q(paused_at__isnull=False, revoked_at__isnull=True)),
         )
-        online = status_counts.get(RunnerStatus.ONLINE, 0)
+        status_counts = {row["status"]: row["c"] for row in rows}
+        paused_counts = {row["status"]: row["paused"] for row in rows}
+        # A paused online runner is connected but not capacity.
+        online = status_counts.get(RunnerStatus.ONLINE, 0) - paused_counts.get(RunnerStatus.ONLINE, 0)
         busy = status_counts.get(RunnerStatus.BUSY, 0)
         offline = status_counts.get(RunnerStatus.OFFLINE, 0)
-        paused = Runner.objects.filter(paused_at__isnull=False, revoked_at__isnull=True).count()
+        paused = sum(paused_counts.values())
 
         active_runs = AgentRun.objects.filter(
             status__in=ACTIVE_RUN_STATUSES
@@ -79,7 +87,7 @@ class MetricsEndpoint(APIView):
         body = "".join([
             _gauge(
                 "pi_dash_runner_online",
-                "Runners currently online.",
+                "Runners online and accepting work (excludes paused).",
                 online,
             ),
             _gauge(
@@ -94,7 +102,7 @@ class MetricsEndpoint(APIView):
             ),
             _gauge(
                 "pi_dash_runner_paused",
-                "Non-revoked runners paused by an operator (overlaps the status gauges).",
+                "Non-revoked runners paused by an operator, in any connectivity state.",
                 paused,
             ),
             _gauge(

@@ -155,6 +155,12 @@ export interface IRunner {
   updated_at: string;
 }
 
+/** ``POST /api/runners/<id>/pause/`` response: the runner plus the runs it
+ * already holds, which pausing does not stop. */
+export interface IRunnerPauseResult extends IRunner {
+  in_flight_runs: { id: string; status: TAgentRunStatus }[];
+}
+
 export type TAgentRunStatus =
   | "queued"
   | "assigned"

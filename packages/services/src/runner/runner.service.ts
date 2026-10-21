@@ -16,6 +16,7 @@ import type {
   ICreateRunnerOnMachineStatus,
   IDevMachine,
   IRunner,
+  IRunnerPauseResult,
   TApprovalDecision,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
@@ -157,8 +158,9 @@ export class RunnerService extends APIService {
   }
 
   /** ``POST /api/runners/<id>/pause/`` — stop assigning new work. The
-   * daemon stays connected and finishes any in-flight run. Idempotent. */
-  async pauseRunner(runnerId: string): Promise<IRunner> {
+   * daemon stays connected and finishes any in-flight run, which the
+   * response lists as ``in_flight_runs``. Idempotent. */
+  async pauseRunner(runnerId: string): Promise<IRunnerPauseResult> {
     return this.post(`/api/runners/${runnerId}/pause/`, {})
       .then((r) => r?.data)
       .catch((e) => {

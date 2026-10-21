@@ -31,8 +31,13 @@ function isRevocable(r: IRunner): boolean {
   return r.status !== "revoked" && r.enrolled_at !== null;
 }
 
+/** Mirrors the backend's ``Runner.is_revoked``: either marker counts. */
+function isRevoked(r: IRunner): boolean {
+  return r.status === "revoked" || r.revoked_at !== null;
+}
+
 function isPausable(r: IRunner): boolean {
-  return r.status !== "revoked";
+  return !isRevoked(r);
 }
 
 const RunnersListPage = observer(function RunnersListPage() {
@@ -152,8 +157,21 @@ const RunnersListPage = observer(function RunnersListPage() {
   async function togglePause(r: IRunner) {
     setTogglingPauseId(r.id);
     try {
-      if (r.paused_at) await service.resumeRunner(r.id);
-      else await service.pauseRunner(r.id);
+      if (r.paused_at) {
+        await service.resumeRunner(r.id);
+      } else {
+        const paused = await service.pauseRunner(r.id);
+        // Pausing never interrupts work the runner already holds — including
+        // an assigned run it has not started yet — so say so.
+        const inFlight = paused.in_flight_runs?.length ?? 0;
+        if (inFlight > 0) {
+          setToast({
+            type: TOAST_TYPE.WARNING,
+            title: t("Runner paused"),
+            message: t("{count} run(s) already on this runner will still finish.", { count: inFlight }),
+          });
+        }
+      }
       mutateRunners();
     } catch (e: unknown) {
       const err = e as { error?: string } | null;

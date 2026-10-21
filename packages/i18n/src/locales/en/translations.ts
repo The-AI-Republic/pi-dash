@@ -24,6 +24,8 @@ export default {
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Work item} other {Work items}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# member} other{# members}}",
   "{count} run is done": "{count} run is done",
+  "{count} run(s) already on this runner will still finish.":
+    "{count} run(s) already on this runner will still finish.",
   "{count} runner(s)": "{count} runner(s)",
   "{count} runs are done": "{count} runs are done",
   "{count}d": "{count}d",
@@ -1345,6 +1347,7 @@ export default {
   "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.":
     "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
   "Run this on the machine that will host the runner:": "Run this on the machine that will host the runner:",
+  "Runner paused": "Runner paused",
   "Runner {name}": "Runner {name}",
   "Runner detail": "Runner detail",
   "Runner ID": "Runner ID",
