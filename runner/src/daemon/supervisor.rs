@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 
-use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload};
+use crate::agent::{AgentBridge, AgentCursor, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::http::{
@@ -2232,7 +2232,7 @@ impl ChatWorker {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let warm_started = Instant::now();
-        let warmed_thread_id = bridge.warm(workspace_path).await?;
+        let warmed_thread_id = within_startup_deadline(bridge.warm(workspace_path)).await?;
         self.send_timing_event(
             chat_session_id,
             bridge_seq,
@@ -2278,6 +2278,7 @@ impl ChatWorker {
         bridge_seq: &mut u64,
         started_sent: &mut bool,
     ) -> Result<bool> {
+        let bridge_slot = bridge;
         let message_id = turn.message_id;
         self.send_timing_event(
             chat_session_id,
@@ -2301,8 +2302,8 @@ impl ChatWorker {
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("chat workspace missing"))?;
 
-        if bridge.as_ref().is_some_and(bridge_has_exited) {
-            if let Some(bridge) = bridge.take() {
+        if bridge_slot.as_ref().is_some_and(bridge_has_exited) {
+            if let Some(bridge) = bridge_slot.take() {
                 bridge.shutdown(Duration::from_secs(1)).await.ok();
             }
             *started_sent = false;
@@ -2312,9 +2313,9 @@ impl ChatWorker {
             turn.local_session_id.as_deref(),
             turn.local_thread_id.as_deref(),
         );
-        if bridge.is_none() {
+        if bridge_slot.is_none() {
             let spawn_started = Instant::now();
-            *bridge = Some(
+            *bridge_slot = Some(
                 AgentBridge::spawn_from_config_with_resume(
                     &self.runner_config,
                     workspace_path,
@@ -2348,7 +2349,7 @@ impl ChatWorker {
             )
             .await;
         }
-        let bridge = bridge
+        let bridge = bridge_slot
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("chat bridge missing"))?;
         let payload = RunPayload {
@@ -2357,7 +2358,69 @@ impl ChatWorker {
             model: turn.model,
         };
         let turn_started_at = Instant::now();
-        let mut cursor = bridge.run(&payload, workspace_path).await?;
+        // Keep reading commands while the engine starts up so a Cancel/Close
+        // is honoured mid-handshake instead of queueing behind it.
+        let interrupt = {
+            let command_rx = &mut self.command_rx;
+            async move {
+                loop {
+                    match command_rx.recv().await {
+                        Some(ChatCommand::Warm(_)) => {
+                            tracing::debug!(
+                                %chat_session_id,
+                                "chat warm ignored while turn is starting"
+                            );
+                        }
+                        Some(ChatCommand::Message(_)) => {
+                            tracing::warn!(
+                                %chat_session_id,
+                                "chat runtime received a second message while a turn is starting"
+                            );
+                        }
+                        other => return other,
+                    }
+                }
+            }
+        };
+        let started = tokio::select! {
+            biased;
+            command = interrupt => Err(command),
+            r = within_startup_deadline(bridge.run(&payload, workspace_path)) => Ok(r),
+        };
+        let mut cursor = match started {
+            Ok(r) => r?,
+            Err(command) => {
+                // The handshake was abandoned mid-flight, so the bridge is in
+                // an unknown state: discard it and let the next turn respawn.
+                let close_after_turn = matches!(command, Some(ChatCommand::Close { .. }));
+                tracing::info!(?command, %chat_session_id, "chat turn interrupted during engine startup");
+                if let Some(bridge) = bridge_slot.take() {
+                    bridge.shutdown(Duration::from_secs(5)).await.ok();
+                }
+                *started_sent = false;
+                self.out
+                    .send(ClientMsg::ChatMessageCompleted {
+                        chat_session_id,
+                        message_id: turn.message_id,
+                        turn_id: None,
+                        assistant_message: None,
+                        status: "cancelled".into(),
+                        completed_at: Utc::now(),
+                    })
+                    .await
+                    .ok();
+                if close_after_turn {
+                    let _ = self
+                        .out
+                        .send(ClientMsg::ChatClosed {
+                            chat_session_id,
+                            closed_at: Utc::now(),
+                        })
+                        .await;
+                }
+                return Ok(close_after_turn);
+            }
+        };
         let turn_id = cursor.thread_id().to_string();
         self.send_timing_event(
             chat_session_id,
@@ -3131,7 +3194,46 @@ impl AssignWorker {
             prompt,
             model: expected_codex_model,
         };
-        let mut cursor = match bridge.run_one_shot(&payload, &workspace_path).await {
+        // Race the startup handshake against cancel and shutdown: a cold
+        // engine may take up to `ENGINE_STARTUP_TIMEOUT` to answer, and a
+        // Cancel must not sit unobserved for that long. The `Notified` future
+        // is created before the race so a `notify_waiters()` that fires while
+        // startup is in flight is not missed.
+        let shutdown = self.state.shutdown_notified();
+        let shutdown_fut = shutdown.notified();
+        let started = tokio::select! {
+            biased;
+            _ = shutdown_fut => None,
+            _ = self.cancel.cancelled() => None,
+            r = within_startup_deadline(bridge.run_one_shot(&payload, &workspace_path)) => Some(r),
+        };
+        let Some(started) = started else {
+            // The handshake was abandoned mid-flight, so the bridge is
+            // discarded. On shutdown the daemon's drain reports the run as
+            // `DaemonRestart`; only an explicit cancel is reported here.
+            bridge.shutdown(Duration::from_secs(5)).await.ok();
+            let cancelled = self.cancel.is_cancelled();
+            hist.append(&HistoryEntry::Footer {
+                ts: Utc::now(),
+                final_status: "cancelled".to_string(),
+                done_payload: None,
+                error: None,
+            })
+            .await
+            .ok();
+            self.state.set_current_run(None).await;
+            if cancelled {
+                self.send(ClientMsg::RunCancelled {
+                    run_id,
+                    cancelled_at: Utc::now(),
+                    tokens: None,
+                    model: None,
+                })
+                .await;
+            }
+            return Ok(());
+        };
+        let mut cursor = match started {
             Ok(c) => c,
             Err(e) => {
                 let detail = self.build_failure_detail(&format!("{e:#}"), &bridge).await;

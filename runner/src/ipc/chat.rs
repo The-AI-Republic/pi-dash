@@ -44,7 +44,7 @@ use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use super::protocol::Response;
-use crate::agent::{AgentBridge, BridgeEvent, RunPayload};
+use crate::agent::{AgentBridge, BridgeEvent, RunPayload, within_startup_deadline};
 use crate::approval::policy::Policy;
 use crate::approval::router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource};
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, ApprovalMode};
@@ -257,7 +257,32 @@ pub(crate) async fn handle_warm<S: ChatSink>(
         .bridge
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("chat bridge missing after spawn"))?;
-    let warmed_thread_id = bridge.warm(&workspace).await?;
+    // Race the warm against ChatCancel/ChatClose so a hung engine does not
+    // hold the session's runtime lock for the whole startup budget.
+    let cancelled = session.cancel.notified();
+    let warmed = tokio::select! {
+        biased;
+        _ = cancelled => Err(anyhow::anyhow!("chat warm cancelled")),
+        r = within_startup_deadline(bridge.warm(&workspace)) => r,
+    };
+    let warmed_thread_id = match warmed {
+        Ok(id) => id,
+        Err(e) => {
+            // Mid-handshake bridge: discard it so the next warm/send respawns.
+            if let Some(bridge) = rt.bridge.take() {
+                bridge.shutdown(Duration::from_secs(5)).await.ok();
+            }
+            rt.started_sent = false;
+            sink.emit(Response::ChatEvent {
+                chat_session_id,
+                bridge_seq: rt.bridge_seq,
+                kind: "chat_warm_failed".into(),
+                payload: serde_json::json!({ "detail": format!("{e:#}") }),
+            })
+            .await?;
+            return Ok(Response::Ack);
+        }
+    };
     if let Some(thread_id) = warmed_thread_id.clone()
         && !rt.started_sent
     {
@@ -374,11 +399,22 @@ pub(crate) async fn handle_send<S: ChatSink>(
                 bridge.shutdown(Duration::from_secs(5)).await.ok();
             }
             rt.started_sent = false;
-            Response::ChatFailed {
-                chat_session_id,
-                code: "internal".into(),
-                detail: Some(format!("{e:#}")),
-                failed_at: Utc::now(),
+            if e.is::<StartupCancelled>() {
+                Response::ChatMessageCompleted {
+                    chat_session_id,
+                    message_id: args.message_id,
+                    turn_id: None,
+                    assistant_message: None,
+                    status: "cancelled".into(),
+                    completed_at: Utc::now(),
+                }
+            } else {
+                Response::ChatFailed {
+                    chat_session_id,
+                    code: "internal".into(),
+                    detail: Some(format!("{e:#}")),
+                    failed_at: Utc::now(),
+                }
             }
         }
     };
@@ -488,6 +524,20 @@ async fn ensure_bridge(
     Ok(workspace)
 }
 
+/// `drive_turn` was cancelled before the engine finished starting. The bridge
+/// is left mid-handshake, so the caller discards it like any failed turn but
+/// reports the turn as cancelled rather than failed.
+#[derive(Debug)]
+struct StartupCancelled;
+
+impl std::fmt::Display for StartupCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("chat turn cancelled during engine startup")
+    }
+}
+
+impl std::error::Error for StartupCancelled {}
+
 struct DriveCtx<'a> {
     chat_session_id: Uuid,
     message_id: Uuid,
@@ -530,7 +580,17 @@ async fn drive_turn<S: ChatSink>(
         prompt: content,
         model: model.clone(),
     };
-    let mut cursor = bridge.run(&payload, workspace).await?;
+    // A single pinned cancel future, created before startup: `notify_waiters()`
+    // stores no permit, so a cancel that lands while the engine is still
+    // starting (or mid-poll later) must already have a registered waiter.
+    let cancelled = cancel.notified();
+    tokio::pin!(cancelled);
+
+    let mut cursor = tokio::select! {
+        biased;
+        _ = cancelled.as_mut() => return Err(StartupCancelled.into()),
+        r = within_startup_deadline(bridge.run(&payload, workspace)) => r?,
+    };
     let turn_id = cursor.thread_id().to_string();
     if !*started_sent {
         sink.emit(Response::ChatStarted {
@@ -552,11 +612,6 @@ async fn drive_turn<S: ChatSink>(
 
     let mut final_status = "completed".to_string();
     let mut assistant_message: Option<String> = None;
-
-    // A single pinned cancel future: `notify_waiters()` stores no permit, so a
-    // fresh future per iteration would miss a cancel that landed mid-poll.
-    let cancelled = cancel.notified();
-    tokio::pin!(cancelled);
 
     'turn: loop {
         tokio::select! {
@@ -1063,6 +1118,49 @@ mod tests {
             printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"conclusion":"success","done":{"status":"ok","summary":"done"}}}'
             sleep 0.3
         "#
+    }
+
+    #[tokio::test]
+    async fn drive_turn_cancel_during_engine_startup_is_not_lost() {
+        // An engine that never answers its handshake. Before the startup race
+        // the cancel fired with no registered waiter and was dropped, so the
+        // turn sat out the whole startup budget.
+        let cfg = config();
+        let approvals = ApprovalRouter::new();
+        let cancel = Notify::new();
+        let mut bridge = fake_bridge("while read _; do :; done").await;
+        let mut sink = VecSink::default();
+        let (mut seq, mut started) = (0u64, false);
+        let begin = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            drive_turn(
+                DriveCtx {
+                    chat_session_id: Uuid::new_v4(),
+                    message_id: Uuid::new_v4(),
+                    content: "hi".into(),
+                    model: None,
+                    mode: ApprovalMode::Ask,
+                    runner_id: cfg.runner_id,
+                    config: &cfg,
+                    approvals: &approvals,
+                    workspace: &cfg.workspace.working_dir,
+                    cancel: &cancel,
+                },
+                &mut bridge,
+                &mut seq,
+                &mut started,
+                &mut sink,
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                cancel.notify_waiters();
+            },
+        );
+        let err = result.expect_err("cancelled startup must not produce a turn");
+        assert!(err.is::<StartupCancelled>(), "unexpected error: {err:#}");
+        assert!(begin.elapsed() < Duration::from_secs(5));
+        assert!(!started, "no ChatStarted before the engine came up");
+        bridge.shutdown(Duration::from_secs(1)).await.ok();
     }
 
     #[tokio::test]
