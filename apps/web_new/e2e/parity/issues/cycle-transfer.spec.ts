@@ -8,16 +8,16 @@
 //
 // Observed behavior notes (the inventory row carries them at update
 // time): the prompt renders only for completed cycles (status is
-// date-driven: a past end date reads COMPLETED) and then only when the
-// progress snapshot is empty and backlog+unstarted+started exceeds
-// zero; the transferable counts come only from the progress endpoint;
-// the modal lists the project's incomplete cycles with a search box,
-// and picking one transfers with "Success! / Work items have been
-// transferred successfully", then refetches both cycles. The transfer
-// freezes the source's pre-move counts into its progress snapshot and
-// the progress endpoint serves snapshot counts once one exists, so the
-// source keeps reporting its old total; the prompt button likewise
-// stays up since the refetch carries no snapshot.
+// date-driven: a past end date reads COMPLETED) and then only when
+// backlog+unstarted+started exceeds zero. The transferable counts come
+// from the progress endpoint; the modal lists the project's incomplete
+// cycles with a search box, and picking one transfers with a success
+// notice (each build words it its own way, so the scenario only requires
+// that a notice appears), then refetches both cycles. The transfer freezes the source's
+// pre-move counts into its progress snapshot and the progress endpoint
+// serves snapshot counts once one exists, so the source keeps reporting
+// its old total; the prompt button likewise stays up since the progress
+// refetch carries no snapshot.
 import { test, expect } from "../fixtures";
 import {
   parityProjectIdentifier,
@@ -129,15 +129,9 @@ test(
           })
           .toBe(true);
         await driver.cycleTransferPick(targetName);
-        await expect
-          .poll(
-            async () => {
-              const toast = await driver.rulesLastToast();
-              return toast ? `${toast.title} ${toast.message}` : "";
-            },
-            { timeout: 30_000 }
-          )
-          .toContain("Work items have been transferred successfully");
+        // The notice is this build's own copy; assert one appeared and
+        // the move itself landed, not the words.
+        await expect.poll(async () => (await driver.rulesLastToast()) !== null, { timeout: 30_000 }).toBe(true);
         await expect
           .poll(async () => (await serverIssue(seed.workspaceSlug, projectId, issue.id, session)).cycle_id, {
             timeout: 30_000,

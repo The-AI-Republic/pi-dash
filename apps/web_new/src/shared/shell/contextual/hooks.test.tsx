@@ -141,6 +141,7 @@ const WORK_ITEM_INPUT = {
   moduleView: true,
   meId: ME_ID,
   standing: { memberRole: 15, archived: false },
+  mayDelete: true,
 };
 
 function WorkItemHost({ onDeleted }: { onDeleted: () => void }): React.ReactElement {

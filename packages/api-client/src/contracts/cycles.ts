@@ -47,6 +47,35 @@ export async function listCycles(client: ApiClient, slug: string, projectId: str
   return client.parse(CycleList, body, `GET cycles ${projectId}`);
 }
 
+/**
+ * The progress counts the completed-cycle transfer prompt reads (ISS-224).
+ * The cycle list and detail rows carry no per-group breakdown, so the
+ * counts come from the progress endpoint. Once a transfer runs, the
+ * server freezes the pre-move counts into the cycle's progress snapshot
+ * and this endpoint serves the frozen numbers from then on, which is why
+ * the source keeps its counts and the prompt stays up.
+ */
+export const CycleProgress = z.object({
+  total_issues: z.number(),
+  backlog_issues: z.number(),
+  unstarted_issues: z.number(),
+  started_issues: z.number(),
+});
+export type CycleProgress = z.infer<typeof CycleProgress>;
+
+/** GET .../cycles/<id>/progress/: the cycle's per-group issue counts. */
+export async function getCycleProgress(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string
+): Promise<CycleProgress> {
+  const body = await client.getJson<unknown>(
+    `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/progress/`
+  );
+  return client.parse(CycleProgress, body, `GET cycle progress ${cycleId}`);
+}
+
 export interface CyclePatch {
   name?: string;
   description?: string;

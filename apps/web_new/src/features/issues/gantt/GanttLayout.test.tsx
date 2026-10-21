@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { sessionKeys } from "../../../core/session/queries.js";
 import { authKeys } from "../../auth/queries.js";
+import { projectKeys } from "../../projects/api/keys.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { issueKeys } from "../api/keys.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
@@ -90,6 +91,8 @@ function renderLayout(
     projectRole?: number | null;
     workspaceRole?: number;
     completedCycle?: boolean;
+    /** Seed the project list with an archived project (ISS-222). */
+    archived?: boolean;
     transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>;
   } = {}
 ) {
@@ -128,6 +131,14 @@ function renderLayout(
     authKeys.projectRoles(SLUG),
     options.projectRole === null ? {} : { [PROJECT]: options.projectRole ?? 15 }
   );
+  queryClient.setQueryData(projectKeys.list(SLUG), [
+    {
+      id: PROJECT,
+      name: "Website",
+      identifier: "WEB",
+      archived_at: options.archived === true ? "2026-10-01" : null,
+    },
+  ]);
   render(
     <QueryClientProvider client={queryClient}>
       <React.Suspense fallback={<p>suspended</p>}>
@@ -327,6 +338,18 @@ describe("GanttLayout edit standing (ISS-050–055)", () => {
   it("hides the quick-add in a completed cycle", () => {
     renderLayout({ projectRole: 15, completedCycle: true });
     expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+  });
+
+  it("hides every edit affordance in an archived project (ISS-222)", () => {
+    renderLayout({
+      projectRole: 15,
+      archived: true,
+      issues: [issue({ start_date: "2026-10-01", target_date: "2026-10-05" }), ...ISSUES.slice(1)],
+    });
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("gantt-resize-left")).toHaveLength(0);
+    expect(screen.queryAllByTestId("gantt-undated-lane")).toHaveLength(0);
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
   });
 });
 

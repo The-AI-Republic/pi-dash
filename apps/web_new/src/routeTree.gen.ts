@@ -62,6 +62,7 @@ import { Route as WsGatedRunnersRunsRouteImport } from './routes/$ws/_gated/runn
 import { Route as WsGatedSchedulersIndexRouteImport } from './routes/$ws/_gated/schedulers/index'
 import { Route as WsGatedSettingsWorkspaceRouteRouteImport } from './routes/$ws/_gated/settings/_workspace/route'
 import { Route as WsGatedSettingsApiTokensRouteImport } from './routes/$ws/_gated/settings/api-tokens'
+import { Route as WsGatedWorkspaceViewsAllIssuesRouteImport } from './routes/$ws/_gated/workspace-views/all-issues'
 import { Route as GodModeDashboardAuthenticationIndexRouteImport } from './routes/god-mode/_dashboard/authentication/index'
 import { Route as GodModeDashboardAuthenticationGiteaRouteImport } from './routes/god-mode/_dashboard/authentication/gitea'
 import { Route as GodModeDashboardAuthenticationGithubRouteImport } from './routes/god-mode/_dashboard/authentication/github'
@@ -389,6 +390,12 @@ const WsGatedSettingsApiTokensRoute =
   WsGatedSettingsApiTokensRouteImport.update({
     id: '/settings/api-tokens',
     path: '/settings/api-tokens',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
+const WsGatedWorkspaceViewsAllIssuesRoute =
+  WsGatedWorkspaceViewsAllIssuesRouteImport.update({
+    id: '/workspace-views/all-issues',
+    path: '/workspace-views/all-issues',
     getParentRoute: () => WsGatedRouteRoute,
   } as any)
 const GodModeDashboardAuthenticationIndexRoute =
@@ -770,6 +777,7 @@ export interface FileRoutesByFullPath {
   '/$ws/runners/approvals': typeof WsGatedRunnersApprovalsRoute
   '/$ws/runners/runs': typeof WsGatedRunnersRunsRoute
   '/$ws/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
+  '/$ws/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
   '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
   '/god-mode/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
   '/god-mode/authentication/gitlab': typeof GodModeDashboardAuthenticationGitlabRoute
@@ -869,6 +877,7 @@ export interface FileRoutesByTo {
   '/$ws/runners/approvals': typeof WsGatedRunnersApprovalsRoute
   '/$ws/runners/runs': typeof WsGatedRunnersRunsRoute
   '/$ws/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
+  '/$ws/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
   '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
   '/god-mode/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
   '/god-mode/authentication/gitlab': typeof GodModeDashboardAuthenticationGitlabRoute
@@ -979,6 +988,7 @@ export interface FileRoutesById {
   '/$ws/_gated/runners/approvals': typeof WsGatedRunnersApprovalsRoute
   '/$ws/_gated/runners/runs': typeof WsGatedRunnersRunsRoute
   '/$ws/_gated/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
+  '/$ws/_gated/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
   '/god-mode/_dashboard/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
   '/god-mode/_dashboard/authentication/github': typeof GodModeDashboardAuthenticationGithubRoute
   '/god-mode/_dashboard/authentication/gitlab': typeof GodModeDashboardAuthenticationGitlabRoute
@@ -1090,6 +1100,7 @@ export interface FileRouteTypes {
     | '/$ws/runners/approvals'
     | '/$ws/runners/runs'
     | '/$ws/settings/api-tokens'
+    | '/$ws/workspace-views/all-issues'
     | '/god-mode/authentication/gitea'
     | '/god-mode/authentication/github'
     | '/god-mode/authentication/gitlab'
@@ -1189,6 +1200,7 @@ export interface FileRouteTypes {
     | '/$ws/runners/approvals'
     | '/$ws/runners/runs'
     | '/$ws/settings/api-tokens'
+    | '/$ws/workspace-views/all-issues'
     | '/god-mode/authentication/gitea'
     | '/god-mode/authentication/github'
     | '/god-mode/authentication/gitlab'
@@ -1298,6 +1310,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/runners/approvals'
     | '/$ws/_gated/runners/runs'
     | '/$ws/_gated/settings/api-tokens'
+    | '/$ws/_gated/workspace-views/all-issues'
     | '/god-mode/_dashboard/authentication/gitea'
     | '/god-mode/_dashboard/authentication/github'
     | '/god-mode/_dashboard/authentication/gitlab'
@@ -1760,6 +1773,13 @@ declare module '@tanstack/react-router' {
       path: '/settings/api-tokens'
       fullPath: '/$ws/settings/api-tokens'
       preLoaderRoute: typeof WsGatedSettingsApiTokensRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/workspace-views/all-issues': {
+      id: '/$ws/_gated/workspace-views/all-issues'
+      path: '/workspace-views/all-issues'
+      fullPath: '/$ws/workspace-views/all-issues'
+      preLoaderRoute: typeof WsGatedWorkspaceViewsAllIssuesRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/god-mode/_dashboard/authentication/': {
@@ -2346,6 +2366,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedSettingsWorkspaceRouteRoute: typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
   WsGatedSettingsApiTokensRoute: typeof WsGatedSettingsApiTokensRoute
+  WsGatedWorkspaceViewsAllIssuesRoute: typeof WsGatedWorkspaceViewsAllIssuesRoute
   WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
   WsGatedAppsIndexRoute: typeof WsGatedAppsIndexRoute
   WsGatedDraftsIndexRoute: typeof WsGatedDraftsIndexRoute
@@ -2382,6 +2403,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
     WsGatedSettingsWorkspaceRouteRouteWithChildren,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
   WsGatedSettingsApiTokensRoute: WsGatedSettingsApiTokensRoute,
+  WsGatedWorkspaceViewsAllIssuesRoute: WsGatedWorkspaceViewsAllIssuesRoute,
   WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,
   WsGatedAppsIndexRoute: WsGatedAppsIndexRoute,
   WsGatedDraftsIndexRoute: WsGatedDraftsIndexRoute,

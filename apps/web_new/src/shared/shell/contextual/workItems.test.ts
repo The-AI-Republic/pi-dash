@@ -32,6 +32,7 @@ function input(overrides: Partial<WorkItemContextInput> = {}): WorkItemContextIn
     meId: ME_ID,
     subscribed: false,
     standing: { memberRole: 15, archived: false },
+    mayDelete: true,
     pickers: {
       states: [{ id: STATE_ID, name: "Triage" } as never],
       labels: [{ id: LABEL_ID, name: "Bug" } as never],
@@ -65,6 +66,12 @@ function input(overrides: Partial<WorkItemContextInput> = {}): WorkItemContextIn
 }
 
 describe("selectWorkItemContext", () => {
+  it("omits Delete for a viewer who is neither creator nor project admin", () => {
+    const { commands } = selectWorkItemContext(input({ mayDelete: false }));
+    expect(commands.map((command) => command.title)).not.toContain("Delete");
+    expect(commands.map((command) => command.title)).toContain("Copy ID");
+  });
+
   it("lists every editing entry plus the copy entries for editors", () => {
     const { commands, pages } = selectWorkItemContext(input());
     expect(commands.map((command) => command.title)).toEqual([

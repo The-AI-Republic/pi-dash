@@ -70,6 +70,8 @@ export interface WorkItemPaletteInput {
   moduleView: boolean;
   meId: string | null;
   standing: ProjectStanding;
+  /** Whether this viewer may delete the item (creator or project admin, ISS-222). */
+  mayDelete: boolean;
   /** Re-read the mounting screen after a mutation lands. */
   refresh: () => Promise<unknown>;
   /** Leave the detail view after a confirmed delete. */
@@ -178,6 +180,7 @@ export function useWorkItemPaletteContext(input: WorkItemPaletteInput): WorkItem
         meId: input.meId,
         subscribed: subscription.data?.subscribed ?? false,
         standing: input.standing,
+        mayDelete: input.mayDelete,
         pickers,
         actions: {
           updateFields,
@@ -210,6 +213,7 @@ export function useWorkItemPaletteContext(input: WorkItemPaletteInput): WorkItem
       input.meId,
       subscription.data?.subscribed,
       input.standing,
+      input.mayDelete,
       pickers,
       updateFields,
       addToCycle,

@@ -235,6 +235,8 @@ interface BrowseExtras {
   published?: boolean;
   child?: boolean;
   foreignChild?: boolean;
+  creator?: boolean;
+  memberRole?: number;
 }
 
 function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
@@ -367,7 +369,10 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
       body = JSON.stringify([]);
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
-      const row = isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic };
+      const row = {
+        ...(isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic }),
+        ...(extras.creator === true ? { created_by: UUID } : {}),
+      };
       const stamped = extras.archivedIssue === true ? { ...row, archived_at: "2024-03-04" } : row;
       body = JSON.stringify(extras.syncedIssue === true ? { ...stamped, is_synced: true } : stamped);
     } else if (url.endsWith("/projects/details/")) {
@@ -377,6 +382,7 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
           extras.details === "archived" ? { archived_at: "2024-03-04T05:06:07Z" } : {};
         if (extras.estimate !== undefined) overrides["estimate"] = extras.estimate;
         if (extras.published === true) overrides["anchor"] = "board";
+        if (extras.memberRole !== undefined) overrides["member_role"] = extras.memberRole;
         body = JSON.stringify([detailsRow(overrides)]);
       } else {
         body = "[]";
@@ -613,6 +619,15 @@ describe("browse route", () => {
     expect(titles).toContain("Copy ID");
     expect(titles).not.toContain("Change state");
     expect(titles).not.toContain("Delete");
+    clearCommands();
+    clearPalettePages();
+  });
+
+  it("lets a plain member delete the work item they created (ISS-222)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, creator: true, memberRole: 15 });
+    await findStrip();
+    await waitFor(() => expect(findCommand(`context.work-item.${ISSUE_ID}.state`)).toBeDefined());
+    expect(listCommands().map((command) => command.title)).toContain("Delete");
     clearCommands();
     clearPalettePages();
   });

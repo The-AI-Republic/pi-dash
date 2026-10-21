@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -33,7 +34,8 @@ vi.mock("../../../core/api/client.js", () => ({ getAppClient: () => ({ stub: tru
 vi.mock("../../projects/index.js", () => ({ projectsQueryOptions: mocks.projects }));
 vi.mock("./pages.js", () => ({ listPageQueryOptions: mocks.listPage }));
 vi.mock("../prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
-vi.mock("../../../shared/pickers/reference.js", () => ({
+vi.mock("../../../shared/pickers/reference.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../shared/pickers/reference.js")>()),
   pickerCyclesQueryOptions: mocks.pickerCycles,
   pickerModulesQueryOptions: mocks.pickerModules,
 }));
@@ -68,6 +70,7 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
     noMatchState: React.ReactNode;
     headerActions: React.ReactNode;
     displayControl: React.ReactNode;
+    filterRow?: React.ReactNode;
   }) => (
     <div
       data-testid="layout-root"
@@ -77,6 +80,7 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
       data-offered={props.offered.join(",")}
     >
       <div data-testid="header-actions">{props.headerActions}</div>
+      <div data-testid="banner">{props.filterRow}</div>
       <div data-testid="display-slot">{props.displayControl}</div>
       <div data-testid="empty-state">{props.emptyState}</div>
       <div data-testid="no-match-state">{props.noMatchState}</div>
@@ -115,7 +119,9 @@ vi.mock("./lazy.js", async (importOriginal) => {
 });
 
 import { EntityListScreen, type EntityListScreenProps } from "./EntityListScreen.js";
+import { COMPLETED_CYCLE_NOTE } from "../transfer/TransferIssuesPrompt.js";
 import type { IssuesEntity } from "../prefs/entities.js";
+import { transferKeys } from "../transfer/api.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
@@ -171,6 +177,31 @@ function setup(overrides: Partial<EntityListScreenProps> = {}, projects: Array<R
       </QueryClientProvider>
     ),
   };
+}
+
+/**
+ * Seed the picker row's status and the progress counts the prompt reads,
+ * then repaint the screen.
+ */
+function setCycleTransferState(
+  harness: { props: EntityListScreenProps; view: ReturnType<typeof render> },
+  status: string,
+  counts: { backlog_issues?: number; unstarted_issues?: number; started_issues?: number } = {}
+): void {
+  const client = (globalThis as { __entityQueryClient?: QueryClient }).__entityQueryClient as QueryClient;
+  client.setQueryData(CYCLES_KEY, [{ id: CYCLE, name: "Sprint 1", status }]);
+  client.setQueryData(transferKeys.progress("acme", PROJECT, CYCLE), {
+    total_issues: 2,
+    backlog_issues: 0,
+    unstarted_issues: 0,
+    started_issues: 0,
+    ...counts,
+  });
+  harness.view.rerender(
+    <QueryClientProvider client={client}>
+      <EntityListScreen {...harness.props} />
+    </QueryClientProvider>
+  );
 }
 
 beforeEach(() => {
@@ -328,6 +359,59 @@ describe("EntityListScreen", () => {
   it("passes project standing rather than the workspace role alone", () => {
     setup({}, [project({ archived_at: "2026-01-01T00:00:00Z", member_role: 20 })]);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-can-edit", "false");
+  });
+
+  it("shows the finished-cycle move prompt while work can move (ISS-224)", () => {
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "COMPLETED", { backlog_issues: 2 });
+    expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Move unfinished work" })).toBeInTheDocument();
+  });
+
+  it("reads the counts from the progress endpoint, not the cycle row", () => {
+    // The cycle list carries no per-group breakdown; a completed row with
+    // a zero progress read offers no move, whatever else the row holds.
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "COMPLETED");
+    expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
+  });
+
+  it("still offers the move after a transfer froze the source's counts", () => {
+    // The oracle observes the source keeping its frozen counts and the
+    // button staying up, so a frozen progress read changes nothing here.
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "COMPLETED", { backlog_issues: 2 });
+    expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Move unfinished work" })).toBeInTheDocument();
+  });
+
+  it("keeps the note but drops the move when no unfinished work remains", () => {
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "COMPLETED");
+    expect(screen.getByText(COMPLETED_CYCLE_NOTE)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
+  });
+
+  it("renders no prompt for a cycle that is still active", () => {
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "ACTIVE", { backlog_issues: 2 });
+    expect(screen.queryByText(COMPLETED_CYCLE_NOTE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Move unfinished work" })).not.toBeInTheDocument();
+  });
+
+  it("opens the move dialog from the prompt and closes it again (ISS-224)", async () => {
+    const user = userEvent.setup();
+    const harness = setup({}, [project()]);
+    setCycleTransferState(harness, "COMPLETED", { backlog_issues: 2 });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Move unfinished work" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Move unfinished work" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("falls back to a count envelope when results are not an array", () => {

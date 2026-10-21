@@ -75,6 +75,8 @@ export interface WorkItemContextInput {
   meId: string | null;
   subscribed: boolean;
   standing: ProjectStanding;
+  /** Whether this viewer may delete the item (creator or project admin, ISS-222). */
+  mayDelete: boolean;
   pickers: WorkItemPickerData;
   actions: WorkItemContextActions;
 }
@@ -325,7 +327,9 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
       )
     );
 
-    commands.push(actionCommand("Delete", "delete", () => input.actions.openDelete(), "mod+backspace"));
+    if (input.mayDelete) {
+      commands.push(actionCommand("Delete", "delete", () => input.actions.openDelete(), "mod+backspace"));
+    }
   }
 
   commands.push(actionCommand("Copy ID", "copy-id", () => input.actions.copyId(), "mod+."));
