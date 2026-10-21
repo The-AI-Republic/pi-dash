@@ -103,6 +103,19 @@ describe("InstanceAppGate", () => {
     await waitFor(() => expect(screen.getByText("workspace content")).toBeInTheDocument());
   });
 
+  it("shows the boot loader while the not-ready read settles, then the screen", async () => {
+    let release: (() => void) | undefined;
+    renderGate(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(response("https://api.test/api/instances/", envelope(false)));
+        })
+    );
+    expect(screen.getByTestId("instance-boot-loader")).toBeInTheDocument();
+    release?.();
+    await waitFor(() => expect(screen.getByTestId("instance-not-ready")).toBeInTheDocument());
+  });
+
   it("replaces every route with maintenance when the read fails", async () => {
     renderGate(() =>
       Promise.resolve({

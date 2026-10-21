@@ -13,11 +13,23 @@
 import { Spinner } from "@pidash/kit";
 import * as React from "react";
 
-import { MaintenanceScreen } from "./MaintenanceScreen.js";
-import { NotReadyScreen } from "./NotReadyScreen.js";
 import { useAppInstanceBootstrap } from "./queries.js";
 import { decideAppInstanceGate } from "./status.js";
 import { markInstanceBootScheme } from "./theme.js";
+
+// The settled screens are the largest part of this feature but render only
+// after the read reaches maintenance or unfinished setup. Loading them on
+// demand keeps their copy and artwork out of the initial chain (size gate);
+// the gate itself stays eager so the decision never waits on a chunk.
+const LazyMaintenanceScreen = React.lazy(async () => {
+  const module = await import("./MaintenanceScreen.js");
+  return { default: module.MaintenanceScreen };
+});
+
+const LazyNotReadyScreen = React.lazy(async () => {
+  const module = await import("./NotReadyScreen.js");
+  return { default: module.NotReadyScreen };
+});
 
 /** The administrator entry subtree, including setup and sign-in. */
 export function isAdminEntryPath(pathname: string): boolean {
@@ -53,7 +65,19 @@ export function InstanceAppGate({ children }: InstanceAppGateProps): React.React
     data: bootstrap.data,
   });
   if (branch === "loading") return <BootLoader />;
-  if (branch === "maintenance") return <MaintenanceScreen />;
-  if (branch === "not-ready") return <NotReadyScreen />;
+  if (branch === "maintenance") {
+    return (
+      <React.Suspense fallback={<BootLoader />}>
+        <LazyMaintenanceScreen />
+      </React.Suspense>
+    );
+  }
+  if (branch === "not-ready") {
+    return (
+      <React.Suspense fallback={<BootLoader />}>
+        <LazyNotReadyScreen />
+      </React.Suspense>
+    );
+  }
   return <>{children}</>;
 }
