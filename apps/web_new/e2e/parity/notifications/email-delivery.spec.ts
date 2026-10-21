@@ -130,7 +130,10 @@ test(
         { timeout: 90_000 }
       )
       .toBe(1);
-    // Intended: no queued email while the topic is off. Observed: it queues.
+    // Intended: no queued email while the topic is off. Observed: it queues
+    // (NEWFRONT-215). The mailer reads the stored flags server-side, so both
+    // frontends share this outcome; the client's job stops at persisting the
+    // toggle (spec 10, 12).
     await expect.poll(() => serverEmailLogCount(seed.email, issueId), { timeout: 90_000 }).toBeGreaterThanOrEqual(1);
 
     await test.step("restore the comment topic", async () => {

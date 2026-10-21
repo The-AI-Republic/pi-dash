@@ -7,8 +7,9 @@
 // fill these in method by method; the oracle driver stays untouched.
 import { readFileSync } from "node:fs";
 
-import { expect, type Locator, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
+import { calendarDayLabel, localTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -278,6 +279,8 @@ function todo(target: string): never {
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
+  /** When this driver was built: the fixture runs at the test's start. */
+  private readonly startedAt = Date.now();
 
   constructor(page: Page) {
     this.page = page;
@@ -337,15 +340,59 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator('section[aria-label="Sign in"], section[aria-label="Sign up"]').first();
   }
 
+  /**
+   * The card in a step a scenario can drive. While the instance config is
+   * in flight the card paints a loading skeleton under the same
+   * aria-label, with no form and no submit; a click aimed at it waits for
+   * a button that only appears later, so every settle waits for a painted
+   * control as well as the section.
+   */
+  private paintedCard() {
+    return this.page
+      .locator('section[aria-label="Sign in"], section[aria-label="Sign up"]')
+      .filter({ hasNotText: /Loading (sign-in|sign-up) options/ })
+      .first();
+  }
+
   /** Settle on the card in any step (or the no-methods notice), reloading once on a blank paint. */
   private async waitForCard(): Promise<void> {
-    const card = this.cardSection();
+    const card = this.paintedCard();
     try {
       await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
     } catch {
       await this.page.reload();
       await card.waitFor({ timeout: WebNewDriver.WAIT_MS });
     }
+  }
+
+  /**
+   * The app never mounted: the served document is up but its mount point is
+   * still empty. A dev server compiling under load can hand a page a module
+   * graph that never runs, and a reload picks up a fresh one; an entry that
+   * mounted always fills this node, card or not.
+   */
+  private async appMounted(): Promise<boolean> {
+    return (
+      (await this.page
+        .locator("#root")
+        .evaluate((root) => root.childElementCount > 0, undefined, { timeout: 2_000 })
+        .catch(() => true)) === true
+    );
+  }
+
+  /** The card's own "Could not load sign-in" state, told apart from a painted form. */
+  private async instanceConfigFailed(): Promise<boolean> {
+    const notice = this.page.getByText(/Could not load sign-in\.|Could not load sign-up\./);
+    return (await notice.count()) > 0;
+  }
+
+  /** Press the failure card's own retry and wait for the form to replace it. */
+  private async retryInstanceConfig(timeoutMs: number): Promise<void> {
+    const retry = this.page
+      .locator('section[aria-label="Sign in"], section[aria-label="Sign up"]')
+      .getByRole("button", { name: "Try again" });
+    await retry.click({ timeout: Math.min(timeoutMs, WebNewDriver.WAIT_MS) });
+    await this.paintedCard().waitFor({ timeout: timeoutMs });
   }
 
   /** True once the password or code step shows (the email check round-tripped). */
@@ -382,51 +429,108 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async signInWithPassword(email: string, password: string): Promise<void> {
-    // Shared-stack flake cover: a swallowed submit or a throttled minute
-    // fails one pass, so the whole flow retries with quiet backoff.
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // Shared-stack flake cover: a swallowed submit fails one pass, so the
+    // flow retries with a short backoff. Each pass is capped by what is
+    // left of the test's own budget, so a slow pass cannot burn the
+    // timeout before a retry runs.
+    const failures: string[] = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const budget = Math.min(110_000, this.remainingTestMs() - 40_000);
+      if (budget < 35_000) break;
       try {
-        await this.signInAttempt(email, password);
+        await this.signInAttempt(email, password, budget);
         return;
-      } catch {
-        if (attempt === 2) break;
-        await this.page.waitForTimeout(25_000);
+      } catch (error) {
+        failures.push(error instanceof Error ? error.message : String(error));
+        if (attempt === 3) break;
+        await this.page.waitForTimeout(8_000);
       }
     }
+    const lastChance = Math.min(70_000, this.remainingTestMs() - 15_000);
+    if (lastChance < 20_000) throw new Error("[parity] sign-in had no test budget left.");
     try {
-      await this.signInAttempt(email, password);
-    } catch {
-      throw new Error("[parity] sign-in never left the card.");
+      await this.signInAttempt(email, password, lastChance);
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+      throw new Error(`[parity] sign-in never left the card: ${failures.join(" | ")}`);
     }
   }
 
-  private async signInAttempt(email: string, password: string): Promise<void> {
+  /**
+   * Milliseconds left before Playwright ends this test, measured from the
+   * fixture's construction. `TestInfo.startTime` is not public and
+   * `test.info()` is undefined at construction, so only the public
+   * `timeout` is read; the estimate errs low, which is the safe side.
+   */
+  private remainingTestMs(): number {
+    return test.info().timeout - (Date.now() - this.startedAt);
+  }
+
+  private async signInAttempt(email: string, password: string, budgetMs: number): Promise<void> {
     const page = this.page;
+    const deadline = Date.now() + budgetMs;
+    const left = (cap: number): number => Math.max(5_000, Math.min(cap, deadline - Date.now()));
+    // One stage that does not paint inside this cap is a stalled pass, not
+    // a slow one: it fails there so the caller's retry starts from a clean
+    // card, instead of the pass spending everything left on one wait.
+    const stage = 45_000;
+    const at = async <T>(name: string, run: () => Promise<T>): Promise<T> => {
+      try {
+        return await run();
+      } catch (error) {
+        const detail = (error instanceof Error ? error.message : String(error)).split("\n")[0];
+        throw new Error(`${name}: ${detail ?? "no detail"}`);
+      }
+    };
     // Stay on the entry when already there: callers stage return paths and
     // prefill in the entry query, and a fresh navigation would wipe them.
     if (new URL(page.url()).pathname !== "/") await page.goto("/");
     // Settle for either entry state: a retry after a partial pass lands
     // already signed in (the session cookie survived), so the card never
     // renders; signed-in visitors are redirected away from / by the guard.
-    const deadline = Date.now() + 60_000;
+    // The painted card, not the loading skeleton, is the signal: the
+    // skeleton shares the section's aria-label and carries no form.
+    const settleBy = Date.now() + left(60_000);
     let settled: "signed-in" | "card" | null = null;
-    while (Date.now() < deadline) {
+    let remounted = false;
+    while (Date.now() < settleBy) {
       if (new URL(page.url()).pathname !== "/") {
         settled = "signed-in";
         break;
       }
-      if ((await this.cardSection().count()) > 0) {
+      if ((await this.paintedCard().count()) > 0) {
         settled = "card";
         break;
+      }
+      // A long run can land on a document whose app never mounted; that
+      // page never paints, however long the settle waits. One reload per
+      // pass gives it a fresh module graph, the same recovery the
+      // pre-step settle uses for a blank paint.
+      if (!remounted && !(await this.appMounted())) {
+        remounted = true;
+        await page.reload();
+        continue;
       }
       await page.waitForTimeout(1_000);
     }
     if (settled === "signed-in") return;
-    if (settled === null) throw new Error("[parity] sign-in card never rendered.");
-    await this.submitAuthEmail(email);
+    if (settled === null) {
+      // A cold or heavily loaded dev server can spend the whole settle
+      // window compiling the entry without painting the card. Treat it as
+      // a slow paint, not a failed card: one bounded wait, then give up.
+      await at("entry card", () => this.paintedCard().waitFor({ timeout: left(stage) }));
+    }
+    if (await this.instanceConfigFailed()) {
+      // The config fetch failed once; its card offers only a retry, and a
+      // pass that leaves it there would sit out its whole budget. Entries
+      // travel and data settles, so one bounded retry is the recovery.
+      await at("entry retry", () => this.retryInstanceConfig(left(stage)));
+      if (await this.instanceConfigFailed()) throw new Error("entry card: instance config stayed failed");
+    }
+    await at("email step", () => this.submitAuthEmail(email, left(stage)));
     const passwordField = page.getByPlaceholder("Enter password");
-    await passwordField.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    await passwordField.fill(password);
+    await at("password step", () => passwordField.waitFor({ timeout: left(stage) }));
+    await at("password fill", () => passwordField.fill(password, { timeout: left(stage) }));
     const passwordForm = page.locator("form", { has: passwordField });
     // Success navigates away (location.assign to the landing); the card
     // leaving is only half the story — on a slow API the mutation can
@@ -439,23 +543,27 @@ export class WebNewDriver implements ParityDriver {
     await page.evaluate(() => {
       (globalThis as { __paritySignInMark?: boolean }).__paritySignInMark = true;
     });
-    await Promise.all([
-      this.cardSection().waitFor({ state: "detached", timeout: 90_000 }),
-      this.cardSubmit(passwordForm).click(),
-    ]);
-    const assigned = Date.now() + 90_000;
+    await at("password submit", () =>
+      Promise.all([
+        this.cardSection().waitFor({ state: "detached", timeout: left(stage) }),
+        this.cardSubmit(passwordForm).click({ timeout: left(stage) }),
+      ])
+    );
+    const assigned = Date.now() + left(60_000);
     for (;;) {
       if (new URL(page.url()).pathname !== "/") return;
       const marked = await page
         .evaluate(() => (globalThis as { __paritySignInMark?: boolean }).__paritySignInMark === true)
         .catch(() => false);
       if (!marked) break;
-      if (Date.now() > assigned) throw new Error("[parity] sign-in submit never navigated.");
+      if (Date.now() > assigned) throw new Error("navigation: sign-in submit never navigated");
       await page.waitForTimeout(1_000);
     }
-    await page.waitForFunction(() => new URL(globalThis.location.href).pathname !== "/", null, {
-      timeout: 60_000,
-    });
+    await at("landing", () =>
+      page.waitForFunction(() => new URL(globalThis.location.href).pathname !== "/", null, {
+        timeout: left(60_000),
+      })
+    );
   }
 
   async openProjectIssues(workspaceSlug: string, projectId: string): Promise<void> {
@@ -856,21 +964,26 @@ export class WebNewDriver implements ParityDriver {
     await this.waitForCard();
   }
 
-  async submitAuthEmail(email: string): Promise<void> {
+  async submitAuthEmail(email: string, budgetMs: number = WebNewDriver.WAIT_MS): Promise<void> {
+    const deadline = Date.now() + budgetMs;
     const field = this.authEmailField();
     const form = this.page.locator("form", { has: field });
     // A saturated throttle minute answers the check with a rate-limit
-    // banner instead of advancing; wait out the window and resubmit.
+    // banner instead of advancing; the bucket refills on the minute, so a
+    // short wait past the boundary and a resubmit are enough — a full
+    // 60s sleep would eat most of this pass's budget.
     for (let attempt = 1; ; attempt += 1) {
-      await field.fill(email);
-      await this.cardSubmit(form).click();
-      if (await this.nextAuthStepShown(30_000)) return;
+      await field.fill(email, { timeout: Math.max(5_000, Math.min(WebNewDriver.WAIT_MS, deadline - Date.now())) });
+      await this.cardSubmit(form).click({
+        timeout: Math.max(5_000, Math.min(WebNewDriver.WAIT_MS, deadline - Date.now())),
+      });
+      if (await this.nextAuthStepShown(Math.max(5_000, Math.min(30_000, deadline - Date.now())))) return;
       const banner = await this.authBanner();
-      if (banner !== null && /rate limit/i.test(banner) && attempt < 3) {
-        await this.page.waitForTimeout(65_000);
+      if (banner !== null && /rate limit/i.test(banner) && attempt < 3 && deadline - Date.now() > 30_000) {
+        await this.page.waitForTimeout(15_000);
         continue;
       }
-      if (await this.nextAuthStepShown(60_000)) return;
+      if (await this.nextAuthStepShown(Math.max(5_000, Math.min(60_000, deadline - Date.now())))) return;
       throw new Error("[parity] email submit advanced to neither password nor code step.");
     }
   }
@@ -1100,22 +1213,32 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async rulesEnsureSignedIn(email: string, password: string, workspaceSlug: string): Promise<void> {
-    // Sign-in is a no-op for a live session: the entry bounces to the
-    // remembered workspace, which may be a different one, so the caller
-    // always ends on the workspace it asked for.
+    // Shared by the rules and intake scenarios, which need any role landed
+    // on one workspace before driving its surface. Sign-in is a no-op for a
+    // live session: the entry bounces to the remembered workspace, which may
+    // be a different one. Enter first — the bounce lands on the workspace
+    // shell, which is where the sign-out command lives; a settings page
+    // renders outside that shell, so signing out before navigating has no
+    // palette to press. Then sign out so the caller always ends on the
+    // workspace it asked for. A throttled shared stack can swallow a whole
+    // pass, so retry it a bounded number of times.
+    await this.openEntry();
     if (!(await this.isSignedOut().catch(() => false))) {
       await this.signOutViaCommandPalette();
     }
-    await this.openEntry();
-    await this.signInWithPassword(email, password);
-    const target = this.page
-      .waitForURL(new RegExp(`/${workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/|$)`), { timeout: 60_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!(await target)) {
-      await this.page.goto(`/${workspaceSlug}/`, { timeout: 60_000 });
-      await this.page.waitForLoadState("domcontentloaded");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (attempt > 0) await this.openEntry();
+      await this.signInWithPassword(email, password);
+      const landed = await this.page
+        .waitForURL(new RegExp(`/${workspaceSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(/|$)`), { timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        );
+      if (landed) return;
     }
+    await this.page.goto(`/${workspaceSlug}/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async rulesOpenIssueDetailRaw(_workspaceSlug: string, _projectId: string, _issueId: string): Promise<void> {
@@ -3847,7 +3970,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async reloadPage(): Promise<void> {
-    return todo("reloadPage");
+    // Same settle point as the driver's other navigations: parsed DOM, so a
+    // late sub-resource cannot stall the wait after the app is interactive.
+    await this.page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
+    // A reload can land on a document whose module graph never runs under
+    // load, leaving an empty mount point; one more reload gets a fresh
+    // graph. Anything that mounted is left alone, so a slow paint never
+    // turns into a reload.
+    if (await this.appMounted()) return;
+    await this.page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
   async projectQuickAddVisible(): Promise<boolean> {
@@ -3950,7 +4081,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async signOutViaCommandPalette(): Promise<void> {
+    // A slow paint can outlast the whole attempt even though the sign-out
+    // already happened, so every attempt ends by checking for the entry;
+    // an already signed-out page returns instead of retrying a palette that
+    // is no longer there.
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (await this.isSignedOut().catch(() => false)) return;
       await this.dismissTourIfShown();
       try {
         await this.page.getByRole("button", { name: "Open command palette" }).click({ timeout: 15_000 });
@@ -3961,14 +4097,10 @@ export class WebNewDriver implements ParityDriver {
         return;
       } catch {
         await this.page.keyboard.press("Escape").catch(() => {});
+        if (await this.isSignedOut().catch(() => false)) return;
       }
     }
-    await this.dismissTourIfShown();
-    await this.page.getByRole("button", { name: "Open command palette" }).click();
-    const filter = this.page.getByPlaceholder("Type a command…");
-    await filter.fill("Sign out");
-    await this.page.getByRole("option", { name: "Sign out" }).first().click();
-    await this.waitForSignedOut();
+    throw new Error("[parity] sign-out never reached the entry.");
   }
 
   async isSignedOut(): Promise<boolean> {
@@ -4904,8 +5036,14 @@ export class WebNewDriver implements ParityDriver {
 
   async goToPath(path: string): Promise<void> {
     // Settle on parsed DOM, not full load: late sub-resources can stall
-    // the load event while the app itself is already interactive.
+    // the load event while the app itself is already interactive. A dev
+    // server under load can also hand the page a module graph that never
+    // runs, leaving an empty mount point and no error; one reload picks up
+    // a fresh graph, and a mounted page is never reloaded.
     await this.page.goto(path, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    if (await this.appMounted()) return;
+    await this.page.reload({ waitUntil: "domcontentloaded", timeout: 120_000 });
   }
 
   // Palette locators (SHELL-080-085, NEWFRONT-292/293/294). DOM contract
@@ -10390,113 +10528,516 @@ export class WebNewDriver implements ParityDriver {
     return todo("pageEditorRephraseRequests");
   }
 
-  // --- Notifications inbox foundation (NEWFRONT-198, NTF-001..006).
-  // --- Throwing stubs per the shared driver contract; the notifications
-  // --- area fills these in when it lands in apps/web_new.
-  async notificationsOpenInbox(_workspaceSlug: string): Promise<void> {
-    return todo("notificationsOpenInbox");
-  }
-  async notificationsListPaneVisible(): Promise<boolean> {
-    return todo("notificationsListPaneVisible");
-  }
-  async notificationsDetailPaneVisible(): Promise<boolean> {
-    return todo("notificationsDetailPaneVisible");
-  }
-  async notificationsPaneWidths(): Promise<{ list: number; detail: number }> {
-    return todo("notificationsPaneWidths");
-  }
-  async notificationsSelectCard(_index: number): Promise<void> {
-    return todo("notificationsSelectCard");
-  }
-  async notificationsTabNames(): Promise<string[]> {
-    return todo("notificationsTabNames");
-  }
-  async notificationsActiveTab(): Promise<NotificationsTab> {
-    return todo("notificationsActiveTab");
-  }
-  async notificationsSelectTab(_tab: NotificationsTab): Promise<void> {
-    return todo("notificationsSelectTab");
-  }
-  async notificationsTabBadge(_tab: NotificationsTab): Promise<string | null> {
-    return todo("notificationsTabBadge");
-  }
-  async notificationsNavBadge(): Promise<string | null> {
-    return todo("notificationsNavBadge");
-  }
-  async notificationsProjectNavBadge(
-    _workspaceSlug: string,
-    _projectId: string,
-    _cookies: ParityBrowserCookie[]
-  ): Promise<string | null> {
-    return todo("notificationsProjectNavBadge");
-  }
-  async notificationsCards(): Promise<NotificationsCard[]> {
-    return todo("notificationsCards");
-  }
-  async notificationsCardBackgrounds(): Promise<string[]> {
-    return todo("notificationsCardBackgrounds");
-  }
-  async notificationsEntryFetches(_workspaceSlug: string): Promise<{ list: boolean; unread: boolean }> {
-    return todo("notificationsEntryFetches");
-  }
+  // --- Desktop agent-runtime web-observable sides (NEWFRONT-207, DESK-001–010,
+  // --- DESK-026). The desktop area gate reads these through this driver on
+  // --- web_new; a later area that rewrites a stub block must keep them.
 
+  /** Everything the page paints, trimmed, for absence scans. */
   async deskRuntimePageText(): Promise<string> {
-    return todo("deskRuntimePageText");
-  }
-  async deskRuntimeDispatchWindowFocus(): Promise<void> {
-    return todo("deskRuntimeDispatchWindowFocus");
-  }
-  async deskRuntimeIndexedDatabaseNames(): Promise<string[]> {
-    return todo("deskRuntimeIndexedDatabaseNames");
+    return (await this.page.locator("body").innerText()).trim();
   }
 
-  // --- Notifications snooze + email preferences (NEWFRONT-201, NTF-020..022,
-  // --- NTF-024..025). Throwing stubs per the shared driver contract.
-  async notificationsSnoozePresets(_index: number): Promise<string[]> {
-    return todo("notificationsSnoozePresets");
+  /** Deliver the focus signal the desktop shell emits when the user returns. */
+  async deskRuntimeDispatchWindowFocus(): Promise<void> {
+    await this.page.evaluate(() => window.dispatchEvent(new FocusEvent("focus")));
   }
-  async notificationsSnoozeWithPreset(_index: number, _preset: string): Promise<void> {
-    return todo("notificationsSnoozeWithPreset");
+
+  /** Every client-side database name the page currently holds. */
+  async deskRuntimeIndexedDatabaseNames(): Promise<string[]> {
+    return this.page.evaluate(async () => {
+      const factory = (globalThis as { indexedDB?: { databases?: () => Promise<{ name?: string | null }[]> } })
+        .indexedDB;
+      if (typeof factory?.databases !== "function") return [];
+      const infos = await factory.databases();
+      return infos.map((info) => info.name ?? "").filter((name) => name !== "");
+    });
   }
-  async notificationsSnoozeRemovalOffered(_index: number): Promise<boolean> {
-    return todo("notificationsSnoozeRemovalOffered");
+
+  // --- Notifications (NEWFRONT-564, NTF-001..032).
+  // --- Written for web_new from parity/specs/notifications.md and the web_new
+  // --- notifications components: every read below goes through a hook or a
+  // --- user-visible element that this app already renders, never through the
+  // --- old app's hooks (which stay oracle-side).
+
+  private static notificationsText(raw: string | null): string {
+    return (raw ?? "").replace(/\s+/g, " ").trim();
   }
-  async notificationsUnsnooze(_index: number): Promise<void> {
-    return todo("notificationsUnsnooze");
+
+  private static notificationsCountShape(token: string): boolean {
+    return token !== "" && /^[\d@+,.kKmM]+$/.test(token);
   }
-  async notificationsFailItemWrites(_status: number): Promise<void> {
-    return todo("notificationsFailItemWrites");
+
+  /** True for a mailbox-list read (never the unread totals or a per-item path). */
+  private static notificationsIsListRead(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return /\/users\/notifications\/?$/.test(parsed.pathname) && new URLSearchParams(parsed.search).has("per_page");
+    } catch {
+      return false;
+    }
   }
+
+  private static notificationsIsUnreadRead(url: string): boolean {
+    try {
+      return /\/users\/notifications\/unread\/?$/.test(new URL(url).pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  // Route predicates for the failure seams. Playwright removes a route only
+  // when the same predicate instance comes back to unroute (it compares
+  // function identity), so each predicate lives here once instead of being
+  // rebuilt at the call site.
+  private static readonly notificationsItemWriteRoute = (url: URL): boolean =>
+    /\/users\/notifications\/[^/]+\/?$/.test(url.pathname);
+  private static readonly notificationsListReadRoute = (url: URL): boolean =>
+    WebNewDriver.notificationsIsListRead(url.toString());
+
+  private static notificationsQuery(url: string): NotificationsListQuery {
+    const params = new URL(url).searchParams;
+    return {
+      type: params.get("type"),
+      read: params.get("read"),
+      archived: params.get("archived"),
+      snoozed: params.get("snoozed"),
+      mentioned: params.get("mentioned"),
+      cursor: params.get("cursor"),
+    };
+  }
+
+  private notificationsTabButton(tab: NotificationsTab): Locator {
+    return this.page.getByTestId(`inbox-tab-${tab}`);
+  }
+
+  private notificationsCardsLocator(): Locator {
+    return this.page.getByTestId("inbox-card");
+  }
+
+  private notificationsCard(index: number): Locator {
+    return this.notificationsCardsLocator().nth(index);
+  }
+
+  private notificationsDetailPane(): Locator {
+    return this.page.getByTestId("inbox-detail-pane");
+  }
+
+  private notificationsListPane(): Locator {
+    return this.page.getByTestId("inbox-list-pane");
+  }
+
+  /** Wait until the list branch has settled to cards or its empty state. */
+  private async notificationsListSettled(): Promise<void> {
+    await this.page.waitForFunction(
+      () =>
+        document.querySelectorAll('[data-testid="inbox-card"]').length > 0 ||
+        document.querySelector('[data-testid="notifications-empty-state"]') !== null,
+      undefined,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+
+  private notificationsNextListRead(timeoutMs: number = WebNewDriver.WAIT_MS): Promise<NotificationsListQuery> {
+    return this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          response.ok() &&
+          WebNewDriver.notificationsIsListRead(response.url()),
+        { timeout: timeoutMs }
+      )
+      .then((response) => WebNewDriver.notificationsQuery(response.url()));
+  }
+
+  async notificationsOpenInbox(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    try {
+      await this.notificationsTabButton("all").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      // A loaded dev server can miss the client boot on a cold navigation
+      // (the shell paints, the inbox tree never hydrates). One reload is
+      // the same recovery the sign-in card already uses; a real failure
+      // reproduces on the second wait.
+      await this.page.reload({ timeout: 60_000 });
+      await this.notificationsTabButton("all").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
+  }
+
+  async notificationsListPaneVisible(): Promise<boolean> {
+    return this.isShown(this.notificationsListPane());
+  }
+
+  async notificationsDetailPaneVisible(): Promise<boolean> {
+    return this.isShown(this.notificationsDetailPane());
+  }
+
+  async notificationsPaneWidths(): Promise<{ list: number; detail: number }> {
+    const listBox = await this.notificationsListPane()
+      .boundingBox()
+      .catch(() => null);
+    const detailBox = await this.notificationsDetailPane()
+      .boundingBox()
+      .catch(() => null);
+    return { list: listBox?.width ?? 0, detail: detailBox?.width ?? 0 };
+  }
+
+  async notificationsSelectCard(index: number): Promise<void> {
+    const card = this.notificationsCard(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.getByTestId("inbox-card-select").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.notificationsDetailSettled();
+  }
+
+  /**
+   * Wait until the detail pane leaves its placeholder/loading branches for
+   * the selected content (triage or peek). A selection first shows the
+   * access spinner, so "any change" would settle on "loading".
+   */
+  private async notificationsDetailSettled(): Promise<void> {
+    await expect
+      .poll(async () => this.notificationsDetailVariant().catch(() => "placeholder" as const), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe("loading");
+    await expect
+      .poll(async () => this.notificationsDetailVariant(), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("placeholder");
+  }
+
+  async notificationsTabNames(): Promise<string[]> {
+    const names: string[] = [];
+    for (const tab of ["all", "mentions"] as const) {
+      const root = this.notificationsTabButton(tab);
+      if ((await root.count()) === 0) continue;
+      // The badge, when present, is the last run of the button's text.
+      const tokens = WebNewDriver.notificationsText(await root.innerText().catch(() => "")).split(" ");
+      const last = tokens[tokens.length - 1] ?? "";
+      const labelTokens =
+        tokens.length > 1 && WebNewDriver.notificationsCountShape(last) ? tokens.slice(0, -1) : tokens;
+      names.push(labelTokens.join(" "));
+    }
+    return names;
+  }
+
+  async notificationsActiveTab(): Promise<NotificationsTab> {
+    for (const tab of ["all", "mentions"] as const) {
+      if (
+        (await this.notificationsTabButton(tab)
+          .getAttribute("aria-selected")
+          .catch(() => null)) === "true"
+      ) {
+        return tab;
+      }
+    }
+    throw new Error("[parity] no inbox tab reports itself active.");
+  }
+
+  async notificationsSelectTab(tab: NotificationsTab): Promise<void> {
+    const button = this.notificationsTabButton(tab);
+    await button.click({ timeout: WebNewDriver.WAIT_MS });
+    await expect(button).toHaveAttribute("aria-selected", "true", { timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async notificationsTabBadge(tab: NotificationsTab): Promise<string | null> {
+    const root = this.notificationsTabButton(tab);
+    if ((await root.count()) === 0) return null;
+    const full = WebNewDriver.notificationsText(await root.innerText().catch(() => ""));
+    const tokens = full.split(" ");
+    if (tokens.length < 2) return null;
+    const badge = tokens[tokens.length - 1] ?? "";
+    return WebNewDriver.notificationsCountShape(badge) ? badge : null;
+  }
+
+  /**
+   * The top-bar inbox entry carries a presence dot and no count text
+   * (spec §3, NEWFRONT-204: chrome shows the dot only; exact counts live
+   * on the tab badges). The contract's badge read is therefore always null,
+   * and the dot is proven through the shell's own `inboxDotPresent` read.
+   */
+  async notificationsNavBadge(): Promise<string | null> {
+    return null;
+  }
+
+  async notificationsProjectNavBadge(
+    workspaceSlug: string,
+    projectId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<string | null> {
+    // The gated layout prefetches the unread totals behind the dot; landing
+    // on a project screen and waiting for that read makes the dot a settled
+    // read rather than a loading artifact.
+    const unreadLanded = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          WebNewDriver.notificationsIsUnreadRead(response.url()) &&
+          response.ok(),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.openAuthenticated(`/${workspaceSlug}/projects/${projectId}/issues`, cookies);
+    await unreadLanded;
+    // The dot read answers "empty inbox" when the entry is absent, so the
+    // shell has to have painted before that answer means anything. A dev
+    // server under load can serve a document whose module graph never runs:
+    // no unread read arrives and no entry paints. One reload gets a fresh
+    // graph; a mounted page that is merely slow is left to finish painting.
+    if (!(await this.inboxEntryPainted(2_000))) {
+      if (!(await this.appMounted())) {
+        await this.page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        await this.page.waitForLoadState("domcontentloaded");
+      }
+      if (!(await this.inboxEntryPainted(WebNewDriver.WAIT_MS))) {
+        throw new Error(`[parity] the shell never painted the inbox entry at ${this.page.url()}.`);
+      }
+    }
+    return this.notificationsNavBadge();
+  }
+
+  /** The top bar's inbox link is the shell's own presence marker. */
+  private async inboxEntryPainted(timeoutMs: number): Promise<boolean> {
+    try {
+      await this.page.locator('a[aria-label="Inbox"]').first().waitFor({ state: "attached", timeout: timeoutMs });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The mailbox holds a page of up to 300 cards, and a per-card locator read
+   * costs a round trip per field, so specs that poll the list lost their
+   * window to the read itself. One evaluate walks the rendered cards in the
+   * page instead; the text normalisation moves with it.
+   */
+  async notificationsCards(): Promise<NotificationsCard[]> {
+    return this.page.evaluate(() => {
+      const text = (node: Element | null): string => (node?.textContent ?? "").replace(/\s+/g, " ").trim();
+      return Array.from(document.querySelectorAll('[data-testid="inbox-card"]')).map((card) => ({
+        actor: text(card.querySelector('[data-testid="inbox-card-actor"]')),
+        summary: text(card.querySelector('[data-testid="inbox-card-summary"]')),
+        reference: text(card.querySelector('[data-testid="inbox-card-reference"]')),
+        title: text(card.querySelector('[data-testid="inbox-card-title"]')),
+        age: text(card.querySelector('[data-testid="inbox-card-age"]')),
+        unread: card.querySelector('[data-testid="inbox-card-unread-dot"]') !== null,
+      }));
+    });
+  }
+
+  async notificationsCardBackgrounds(): Promise<string[]> {
+    return this.page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="inbox-card"]')).map(
+        (card) => window.getComputedStyle(card).backgroundColor
+      )
+    );
+  }
+
+  async notificationsEntryFetches(workspaceSlug: string): Promise<{ list: boolean; unread: boolean }> {
+    const listWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          WebNewDriver.notificationsIsListRead(response.url()) &&
+          response.ok(),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const unreadWait = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "GET" &&
+          WebNewDriver.notificationsIsUnreadRead(response.url()) &&
+          response.ok(),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.notificationsTabButton("all")
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    const [list, unread] = await Promise.all([listWait, unreadWait]);
+    return { list, unread };
+  }
+
+  private async notificationsPatchWait(): Promise<void> {
+    await this.page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        /\/users\/notifications\/[^/]+\/?$/.test(new URL(response.url()).pathname),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+
+  private async notificationsOpenSnooze(index: number): Promise<Locator> {
+    const card = this.notificationsCard(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.hover({ timeout: WebNewDriver.WAIT_MS });
+    await card.getByTestId("snooze-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    // The menu renders in a portal outside the card's subtree (the card is
+    // inside a scroll container, and the panel positions against the
+    // viewport), so it is looked up page-wide. Only one card menu is open
+    // at a time, and the trigger is the one that just flipped expanded.
+    const panel = this.page.getByTestId("snooze-panel").first();
+    await panel.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return panel;
+  }
+
+  private async notificationsDismissSnooze(panel: Locator): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    await panel.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
+  async notificationsSnoozePresets(index: number): Promise<string[]> {
+    const panel = await this.notificationsOpenSnooze(index);
+    // Preset delays only: the custom entry and the remove row are separate
+    // menu entries, read through their own contract methods.
+    const rows = panel.locator(
+      '[data-testid^="snooze-option-"]:not([data-testid="snooze-option-custom"]):not([data-testid="snooze-option-unsnooze"])'
+    );
+    const labels = (await rows.allInnerTexts()).map((text) => WebNewDriver.notificationsText(text));
+    await this.notificationsDismissSnooze(panel);
+    return labels;
+  }
+
+  async notificationsSnoozeWithPreset(index: number, preset: string): Promise<void> {
+    const panel = await this.notificationsOpenSnooze(index);
+    const write = this.notificationsPatchWait();
+    await panel.getByRole("button", { name: preset, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await write;
+  }
+
+  async notificationsSnoozeRemovalOffered(index: number): Promise<boolean> {
+    const panel = await this.notificationsOpenSnooze(index);
+    const offered = (await panel.getByTestId("snooze-option-unsnooze").count()) > 0;
+    await this.notificationsDismissSnooze(panel);
+    return offered;
+  }
+
+  async notificationsUnsnooze(index: number): Promise<void> {
+    const panel = await this.notificationsOpenSnooze(index);
+    const write = this.notificationsPatchWait();
+    await panel.getByTestId("snooze-option-unsnooze").click({ timeout: WebNewDriver.WAIT_MS });
+    await write;
+  }
+
+  async notificationsFailItemWrites(status: number): Promise<void> {
+    await this.page.route(WebNewDriver.notificationsItemWriteRoute, async (route) => {
+      if (route.request().method() === "PATCH") {
+        await route.fulfill({ status, body: JSON.stringify({ detail: "parity snooze failure" }) });
+        return;
+      }
+      await route.continue();
+    });
+  }
+
   async notificationsClearItemWriteFailure(): Promise<void> {
-    return todo("notificationsClearItemWriteFailure");
+    await this.page.unroute(WebNewDriver.notificationsItemWriteRoute);
   }
-  async notificationsOpenCustomSnooze(_index: number): Promise<void> {
-    return todo("notificationsOpenCustomSnooze");
+
+  async notificationsOpenCustomSnooze(index: number): Promise<void> {
+    const panel = await this.notificationsOpenSnooze(index);
+    await panel.getByTestId("snooze-option-custom").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("snooze-custom-dialog").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async notificationsCustomSnoozeVisible(): Promise<boolean> {
-    return todo("notificationsCustomSnoozeVisible");
+    return this.isShown(this.page.getByTestId("snooze-custom-dialog"));
   }
-  async notificationsCustomSnoozePickDay(_offsetDays: number): Promise<void> {
-    return todo("notificationsCustomSnoozePickDay");
+
+  async notificationsCustomSnoozePickDay(offsetDays: number): Promise<void> {
+    await this.page.getByTestId("snooze-date-picker").click({ timeout: WebNewDriver.WAIT_MS });
+    const calendar = this.page.getByTestId("snooze-date-calendar");
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Every tile is named by its long date, and the grid opens on the
+    // selected (or today's) month: a day spilling into the next month
+    // needs one "Next month" press before its tile exists.
+    const day = new Date();
+    day.setDate(day.getDate() + offsetDays);
+    const iso = localTodayISO(day);
+    const label = calendarDayLabel(iso);
+    const tile = calendar.getByRole("button", { name: label, exact: true });
+    if ((await tile.count()) === 0) {
+      await calendar.getByRole("button", { name: "Next month" }).click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await calendar.getByRole("button", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await calendar.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
-  async notificationsCustomSnoozeTimeSlots(_period: "AM" | "PM"): Promise<string[]> {
-    return todo("notificationsCustomSnoozeTimeSlots");
+
+  private async notificationsOpenTimePicker(): Promise<Locator> {
+    await this.page.getByTestId("snooze-time-picker").click({ timeout: WebNewDriver.WAIT_MS });
+    const listbox = this.page.getByRole("listbox", { name: "Pick a time" });
+    await listbox.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return listbox;
   }
-  async notificationsCustomSnoozePickTime(_period: "AM" | "PM", _slot: string): Promise<void> {
-    return todo("notificationsCustomSnoozePickTime");
+
+  async notificationsCustomSnoozeTimeSlots(period: "AM" | "PM"): Promise<string[]> {
+    const listbox = await this.notificationsOpenTimePicker();
+    await listbox.getByRole("button", { name: period, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    const slots = (await listbox.getByRole("option").allInnerTexts()).map((text) =>
+      WebNewDriver.notificationsText(text)
+    );
+    // Close by re-clicking the trigger: Escape would dismiss the whole dialog.
+    await this.page.getByTestId("snooze-time-picker").click({ timeout: WebNewDriver.WAIT_MS });
+    await listbox.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    return slots;
   }
+
+  async notificationsCustomSnoozePickTime(period: "AM" | "PM", slot: string): Promise<void> {
+    const listbox = await this.notificationsOpenTimePicker();
+    await listbox.getByRole("button", { name: period, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await listbox.getByRole("option", { name: slot, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await listbox.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+  }
+
   async notificationsCustomSnoozeSubmit(): Promise<void> {
-    return todo("notificationsCustomSnoozeSubmit");
+    const dialog = this.page.getByRole("dialog").filter({ has: this.page.getByTestId("snooze-custom-dialog") });
+    await dialog.getByRole("button", { name: "Submit", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async notificationsSetSnoozedMode(_on: boolean): Promise<void> {
-    return todo("notificationsSetSnoozedMode");
+
+  async notificationsSetSnoozedMode(on: boolean): Promise<void> {
+    await this.notificationsOpenOverflowMenu();
+    const option = this.page.getByTestId("inbox-mode-snoozed");
+    const checked = (await option.getAttribute("data-testid").catch(() => null)) !== null;
+    const active = (await option.locator('[data-checked="true"]').count()) > 0;
+    if (checked && active !== on) {
+      const read = this.notificationsNextListRead();
+      await option.click({ timeout: WebNewDriver.WAIT_MS });
+      await read;
+    }
+    await this.notificationsCloseMenus();
   }
+
   // --- Notifications email preferences (NEWFRONT-575, NTF-024/025/031).
-  // --- The settings page mounts one switch per topic behind a loader;
-  // --- switches carry their topic heading as the accessible name and the
-  // --- completed-only refinement sits in its own indented nest.
 
   /** Accessible names of the email toggles, keyed by preference. */
+  private emailPrefSwitch(pref: NotificationsEmailPref): Locator {
+    return this.page
+      .getByTestId("email-prefs-form")
+      .first()
+      .getByRole("switch", { name: WebNewDriver.emailPrefNames[pref], exact: true });
+  }
+
+  /** Close every visible toast through its own dismiss control. */
+  private async dismissToastStack(): Promise<void> {
+    const stack = this.page.getByTestId("toast-stack");
+    for (let guard = 0; guard < 5; guard += 1) {
+      const dismiss = stack.getByRole("button", { name: "Dismiss notification" }).first();
+      if ((await dismiss.count()) === 0) return;
+      await dismiss.click({ timeout: 2_000 }).catch(() => undefined);
+    }
+  }
+
   private static readonly emailPrefNames: Record<NotificationsEmailPref, string> = {
     property_change: "Property changes",
     state_change: "State changes",
@@ -10505,22 +11046,20 @@ export class WebNewDriver implements ParityDriver {
     mention: "Mentions",
   };
 
-  private emailPrefSwitch(pref: NotificationsEmailPref): Locator {
-    return this.page
-      .getByTestId("email-prefs-form")
-      .first()
-      .getByRole("switch", { name: WebNewDriver.emailPrefNames[pref], exact: true });
-  }
-
   async notificationsOpenEmailPreferences(): Promise<void> {
+    const firstSwitch = this.page.getByTestId("email-prefs-form").first().getByRole("switch").first();
     await this.page.goto("/settings/profile/notifications", { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
-    await this.page
-      .getByTestId("email-prefs-form")
-      .first()
-      .getByRole("switch")
-      .first()
-      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    try {
+      await firstSwitch.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      // The first visit compiles the settings shell and the lazily loaded
+      // preference body together; under load that can outlast the wait, or
+      // hand the page a module graph that never runs. One reload is the
+      // same recovery the inbox uses; a real failure reproduces.
+      await this.page.reload({ timeout: 60_000 });
+      await firstSwitch.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
 
   async notificationsEmailPreferencesLoaderShown(): Promise<boolean> {
@@ -10569,6 +11108,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async notificationsEmailPreferencesToggle(pref: NotificationsEmailPref): Promise<void> {
+    // Toasts stack over the page and take pointer events; a leftover toast
+    // from the previous step would swallow the click, so each visible card
+    // is dismissed through its own dismiss control first.
+    await this.dismissToastStack();
     const saveWait = this.page.waitForResponse(
       (response) =>
         response.request().method() === "PATCH" && response.url().includes("/users/me/notification-preferences/"),
@@ -10610,54 +11153,486 @@ export class WebNewDriver implements ParityDriver {
     await this.page.unroute("**/api/users/me/notification-preferences/");
   }
 
-  async notificationsEntryListQuery(_workspaceSlug: string): Promise<NotificationsListQuery> {
-    return todo("notificationsEntryListQuery");
+  // --- Notifications filters, modes, read/archive (NEWFRONT-564,
+  // --- NTF-015..019, NTF-023).
+
+  async notificationsEntryListQuery(workspaceSlug: string): Promise<NotificationsListQuery> {
+    const query = this.notificationsNextListRead(120_000);
+    await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.notificationsTabButton("all")
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return query;
   }
+
   async notificationsOpenFilterMenu(): Promise<void> {
-    return todo("notificationsOpenFilterMenu");
+    await this.page.getByTestId("inbox-filter-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId(/^inbox-filter-origin-/)
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async notificationsFilterOptions(): Promise<NotificationsFilterOption[]> {
-    return todo("notificationsFilterOptions");
+    const options = this.page.getByTestId(/^inbox-filter-origin-/);
+    const total = await options.count();
+    const out: NotificationsFilterOption[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const option = options.nth(index);
+      const origin = (await option.getAttribute("data-origin").catch(() => null)) as NotificationsOrigin | null;
+      if (origin === null) continue;
+      out.push({
+        value: origin,
+        label: WebNewDriver.notificationsText(await option.innerText().catch(() => "")),
+        checked: (await option.getAttribute("aria-checked").catch(() => null)) === "true",
+      });
+    }
+    return out;
   }
-  async notificationsToggleFilterOrigin(_origin: NotificationsOrigin): Promise<NotificationsListQuery> {
-    return todo("notificationsToggleFilterOrigin");
+
+  async notificationsToggleFilterOrigin(origin: NotificationsOrigin): Promise<NotificationsListQuery> {
+    const read = this.notificationsNextListRead();
+    await this.page.getByTestId(`inbox-filter-origin-${origin}`).click({ timeout: WebNewDriver.WAIT_MS });
+    return read;
   }
+
   async notificationsAppliedChips(): Promise<NotificationsAppliedChip[]> {
-    return todo("notificationsAppliedChips");
+    const chips = this.page.getByTestId("inbox-origin-chip");
+    const total = await chips.count();
+    const out: NotificationsAppliedChip[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const chip = chips.nth(index);
+      const origin = (await chip.getAttribute("data-origin").catch(() => null)) as NotificationsOrigin | null;
+      if (origin === null) continue;
+      const label = WebNewDriver.notificationsText(
+        await chip
+          .locator("span")
+          .first()
+          .innerText()
+          .catch(() => "")
+      );
+      out.push({ origin, label });
+    }
+    return out;
   }
-  async notificationsRemoveFilterChip(_origin: NotificationsOrigin): Promise<NotificationsListQuery> {
-    return todo("notificationsRemoveFilterChip");
+
+  async notificationsRemoveFilterChip(origin: NotificationsOrigin): Promise<NotificationsListQuery> {
+    const read = this.notificationsNextListRead();
+    await this.page.getByTestId(`inbox-origin-chip-remove-${origin}`).click({ timeout: WebNewDriver.WAIT_MS });
+    return read;
   }
+
   async notificationsClearFilters(): Promise<NotificationsListQuery> {
-    return todo("notificationsClearFilters");
+    const read = this.notificationsNextListRead();
+    await this.page.getByTestId("inbox-origin-clear-all").click({ timeout: WebNewDriver.WAIT_MS });
+    return read;
   }
+
   async notificationsCloseMenus(): Promise<void> {
-    return todo("notificationsCloseMenus");
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByTestId(/^inbox-filter-origin-/)
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page
+      .getByTestId(/^inbox-mode-/)
+      .first()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
+
   async notificationsOpenOverflowMenu(): Promise<void> {
-    return todo("notificationsOpenOverflowMenu");
+    await this.page.getByTestId("inbox-overflow-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId(/^inbox-mode-/)
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async notificationsOverflowOptions(): Promise<string[]> {
-    return todo("notificationsOverflowOptions");
+    const options = this.page.getByTestId(/^inbox-mode-/);
+    return (await options.allInnerTexts()).map((text) => WebNewDriver.notificationsText(text));
   }
-  async notificationsToggleMode(_mode: NotificationsMode): Promise<NotificationsListQuery> {
-    return todo("notificationsToggleMode");
+
+  async notificationsToggleMode(mode: NotificationsMode): Promise<NotificationsListQuery> {
+    const read = this.notificationsNextListRead();
+    await this.page.getByTestId(`inbox-mode-${mode}`).click({ timeout: WebNewDriver.WAIT_MS });
+    return read;
   }
-  async notificationsCardActionsVisible(_index: number): Promise<boolean> {
-    return todo("notificationsCardActionsVisible");
+
+  private notificationsCardActions(index: number): Locator {
+    return this.notificationsCard(index).getByTestId("inbox-card-actions");
   }
-  async notificationsHoverCard(_index: number): Promise<void> {
-    return todo("notificationsHoverCard");
+
+  async notificationsCardActionsVisible(index: number): Promise<boolean> {
+    // The row reserves its space at rest and fades out with opacity, so it
+    // still passes Playwright's display/visibility check when hidden. Read
+    // the resolved opacity: the row counts as shown only once it is opaque.
+    const actions = this.notificationsCardActions(index);
+    if ((await actions.count()) === 0) return false;
+    const state = await actions
+      .first()
+      .evaluate((element: Element) => {
+        const style = window.getComputedStyle(element);
+        return { display: style.display, visibility: style.visibility, opacity: Number(style.opacity) };
+      })
+      .catch(() => null);
+    if (state === null) return false;
+    return state.display !== "none" && state.visibility !== "hidden" && state.opacity > 0;
   }
-  async notificationsToggleCardRead(_index: number): Promise<void> {
-    return todo("notificationsToggleCardRead");
+
+  async notificationsHoverCard(index: number): Promise<void> {
+    const card = this.notificationsCard(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.hover({ timeout: WebNewDriver.WAIT_MS });
+    await this.notificationsCardActions(index).waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async notificationsToggleCardArchive(_index: number): Promise<void> {
-    return todo("notificationsToggleCardArchive");
+
+  async notificationsToggleCardRead(index: number): Promise<void> {
+    await this.notificationsHoverCard(index);
+    const action = this.notificationsCardActions(index).getByTestId("inbox-card-read-action");
+    // The toggle names its next state: marking unread is the DELETE half of
+    // the same read endpoint, so the wait follows whichever verb applies.
+    const method = (await action.getAttribute("aria-label")) === "Mark as unread" ? "DELETE" : "POST";
+    const posted = this.notificationsCardWriteSettled((url, verb) => {
+      return verb === method && /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(url).pathname);
+    });
+    await action.click({ timeout: WebNewDriver.WAIT_MS });
+    await posted;
   }
+
+  async notificationsToggleCardArchive(index: number): Promise<void> {
+    await this.notificationsHoverCard(index);
+    const action = this.notificationsCardActions(index).getByTestId("inbox-card-archive-action");
+    // Unarchiving is the DELETE half of the archive endpoint.
+    const method = (await action.getAttribute("aria-label")) === "Unarchive" ? "DELETE" : "POST";
+    const posted = this.notificationsCardWriteSettled((url, verb) => {
+      return verb === method && /\/users\/notifications\/[^/]+\/archive\/$/.test(new URL(url).pathname);
+    });
+    await action.click({ timeout: WebNewDriver.WAIT_MS });
+    await posted;
+  }
+
+  /**
+   * Resolve once the card write matching `matches` finishes either way.
+   * The failure scenario aborts the request, so waiting for a response
+   * alone would hang on a write that legitimately never got one.
+   */
+  private async notificationsCardWriteSettled(
+    matches: (url: string, method: string) => boolean
+  ): Promise<"answered" | "failed"> {
+    const answered = this.page
+      .waitForResponse((response) => matches(response.url(), response.request().method()), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .then(() => "answered" as const);
+    const failed = this.page
+      .waitForEvent("requestfailed", {
+        predicate: (request) => matches(request.url(), request.method()),
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .then(() => "failed" as const);
+    return Promise.race([answered, failed]);
+  }
+
   async notificationsFailNextCardWrite(): Promise<void> {
-    return todo("notificationsFailNextCardWrite");
+    await this.page.route(
+      (url) => /\/users\/notifications\/[^/]+\/(read|archive)\/$/.test(new URL(url.toString()).pathname),
+      (route) => route.abort(),
+      { times: 1 }
+    );
   }
+
+  // --- Notifications detail, pagination, refresh, mark-all-read
+  // --- (NEWFRONT-564, NTF-007..014).
+
+  async notificationsDetailVariant(): Promise<NotificationsDetailVariant> {
+    const pane = this.notificationsDetailPane();
+    await pane.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if (await this.isShown(pane.getByTestId("notifications-detail-placeholder"))) return "placeholder";
+    if (await this.isShown(pane.getByTestId("notifications-detail-loading"))) return "loading";
+    const accept = pane.getByRole("button", { name: "Accept", exact: true });
+    const decline = pane.getByRole("button", { name: "Decline", exact: true });
+    if ((await accept.count()) > 0 && (await decline.count()) > 0) return "triage";
+    return "peek";
+  }
+
+  async notificationsDetailText(): Promise<string> {
+    return WebNewDriver.notificationsText(
+      await this.notificationsDetailPane()
+        .innerText()
+        .catch(() => "")
+    );
+  }
+
+  async notificationsCloseDetail(): Promise<void> {
+    await this.notificationsDetailPane()
+      .getByTestId("notifications-detail-close")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.notificationsDetailPane().getByTestId("notifications-detail-placeholder").waitFor({
+      timeout: WebNewDriver.WAIT_MS,
+    });
+  }
+
+  async notificationsSelectCardPostedRead(index: number): Promise<boolean> {
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          /\/users\/notifications\/[^/]+\/read\/$/.test(new URL(response.url()).pathname) &&
+          response.ok(),
+        { timeout: 8_000 }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    const card = this.notificationsCard(index);
+    await card.scrollIntoViewIfNeeded().catch(() => undefined);
+    await card.getByTestId("inbox-card-select").click({ timeout: WebNewDriver.WAIT_MS });
+    // A first open settles on the selected content; reselecting the current
+    // card already sits there, so the wait is a no-op on that path.
+    await this.notificationsDetailSettled().catch(() => undefined);
+    return posted;
+  }
+
+  async notificationsSelectCardHeldAccess(index: number, holdMs: number): Promise<{ spinnerShown: boolean }> {
+    const pattern = "**/api/workspaces/*/projects/*/project-members/me/";
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      const card = this.notificationsCard(index);
+      await card.scrollIntoViewIfNeeded().catch(() => undefined);
+      await card.getByTestId("inbox-card-select").click({ timeout: WebNewDriver.WAIT_MS });
+      const loading = this.notificationsDetailPane().getByTestId("notifications-detail-loading");
+      let spinnerShown = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        if (await this.isShown(loading)) {
+          spinnerShown = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await this.notificationsDetailPane()
+        .getByRole("button", { name: "Accept", exact: true })
+        .waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return { spinnerShown };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsNextPageLabel(): Promise<string | null> {
+    const control = this.page.getByTestId("notifications-next-page").first();
+    if (!(await this.isShown(control))) return null;
+    const text = WebNewDriver.notificationsText(await control.innerText().catch(() => ""));
+    return text === "" ? null : text;
+  }
+
+  async notificationsLoadNextPage(): Promise<void> {
+    const before = await this.notificationsCardsLocator().count();
+    await this.page.getByTestId("notifications-next-page").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (expected: number) => document.querySelectorAll('[data-testid="inbox-card"]').length > expected,
+      before,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+
+  async notificationsLoadNextPageHeld(
+    holdMs: number
+  ): Promise<{ loadingShown: boolean; before: number; after: number }> {
+    const pattern = "**/api/workspaces/*/users/notifications*";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET" || WebNewDriver.notificationsIsUnreadRead(route.request().url())) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      const before = await this.notificationsCardsLocator().count();
+      const control = this.page.getByTestId("notifications-next-page");
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+      let loadingShown = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        if (/loading/i.test(WebNewDriver.notificationsText(await control.innerText().catch(() => "")))) {
+          loadingShown = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await this.page.waitForFunction(
+        (expected: number) => document.querySelectorAll('[data-testid="inbox-card"]').length > expected,
+        before,
+        { timeout: WebNewDriver.WAIT_MS }
+      );
+      return { loadingShown, before, after: await this.notificationsCardsLocator().count() };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsSkeletonOnDelayedEntry(
+    workspaceSlug: string,
+    holdMs: number
+  ): Promise<{ skeletonShown: boolean; settledCards: number }> {
+    const pattern = "**/api/workspaces/*/users/notifications*";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET" || WebNewDriver.notificationsIsUnreadRead(route.request().url())) {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+      const skeleton = this.page.getByTestId("notifications-skeleton").first();
+      let skeletonShown = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        if (await this.isShown(skeleton)) {
+          skeletonShown = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await this.notificationsListSettled();
+      return { skeletonShown, settledCards: await this.notificationsCardsLocator().count() };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsEmptyText(): Promise<string | null> {
+    const empty = this.page.getByTestId("notifications-empty-state").first();
+    if (!(await this.isShown(empty))) return null;
+    const text = WebNewDriver.notificationsText(await empty.innerText().catch(() => ""));
+    return text === "" ? null : text;
+  }
+
+  async notificationsRefresh(): Promise<void> {
+    await this.notificationsListSettled();
+    const read = this.notificationsNextListRead();
+    await this.page.getByTestId("inbox-refresh").click({ timeout: WebNewDriver.WAIT_MS });
+    await read;
+  }
+
+  async notificationsRefreshHeld(holdMs: number): Promise<{ spinning: boolean; requests: string[] }> {
+    const pattern = "**/api/workspaces/*/users/notifications*";
+    const requests: string[] = [];
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET" || WebNewDriver.notificationsIsUnreadRead(route.request().url())) {
+        await route.continue();
+        return;
+      }
+      requests.push(route.request().url());
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.notificationsListSettled();
+      const control = this.page.getByTestId("inbox-refresh");
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+      let spinning = false;
+      const deadline = Date.now() + holdMs + 10_000;
+      for (;;) {
+        if (await this.isShown(this.page.getByTestId("inbox-refresh-progress"))) {
+          spinning = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await control.click({ timeout: WebNewDriver.WAIT_MS, force: true });
+      await this.page
+        .getByTestId("inbox-refresh-icon")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined);
+      return { spinning, requests };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  async notificationsMarkAllRead(): Promise<void> {
+    await this.notificationsListSettled();
+    const done = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname.endsWith("/users/notifications/mark-all-read/") &&
+          response.ok(),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => true,
+        () => false
+      );
+    await this.page.getByTestId("inbox-mark-all-read").click({ timeout: WebNewDriver.WAIT_MS });
+    if (!(await done)) throw new Error("[parity] mark-all-read posted no request.");
+    await this.page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="inbox-card-unread-dot"]').length === 0,
+      undefined,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+  }
+
+  async notificationsMarkAllReadHeld(
+    holdMs: number
+  ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }> {
+    let requests = 0;
+    let scopeBody: string | null = null;
+    const pattern = "**/api/workspaces/*/users/notifications/mark-all-read/";
+    await this.page.route(pattern, async (route) => {
+      requests += 1;
+      if (scopeBody === null) scopeBody = route.request().postData() ?? null;
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.notificationsListSettled();
+      const control = this.page.getByTestId("inbox-mark-all-read");
+      await control.click({ timeout: WebNewDriver.WAIT_MS });
+      let progress = false;
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        if (await this.isShown(control.getByRole("status"))) {
+          progress = true;
+          break;
+        }
+        if (Date.now() > deadline) break;
+        await this.page.waitForTimeout(100);
+      }
+      await control.click({ timeout: WebNewDriver.WAIT_MS, force: true });
+      await this.page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="inbox-card-unread-dot"]').length === 0,
+        undefined,
+        { timeout: WebNewDriver.WAIT_MS }
+      );
+      return { progress, requests, scopeBody };
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
+  }
+
+  /** Settle helper used by card writes: the list has finished its entry read. */
+  private async notificationsPageActionSettled(): Promise<void> {
+    await this.notificationsListSettled();
+  }
+
   // --- Archived cycles (NEWFRONT-224, ARCH-014–019). Oracle-stage stubs;
   // --- the new-app implementation lands with the area.
   async archivesCyclesOpenTabViaLive(_workspaceSlug: string, _projectId: string): Promise<void> {
@@ -10776,72 +11751,6 @@ export class WebNewDriver implements ParityDriver {
   }
   async archivesCyclesArchiveDialogCancel(): Promise<void> {
     return todo("archivesCyclesArchiveDialogCancel");
-  }
-
-  // --- Notifications detail, pagination, refresh, mark-all-read
-  // --- (NEWFRONT-199, NTF-007..014). Stubs; the new app implements them.
-
-  async notificationsDetailVariant(): Promise<NotificationsDetailVariant> {
-    return todo("notificationsDetailVariant");
-  }
-
-  async notificationsDetailText(): Promise<string> {
-    return todo("notificationsDetailText");
-  }
-
-  async notificationsCloseDetail(): Promise<void> {
-    return todo("notificationsCloseDetail");
-  }
-
-  async notificationsSelectCardPostedRead(_index: number): Promise<boolean> {
-    return todo("notificationsSelectCardPostedRead");
-  }
-
-  async notificationsSelectCardHeldAccess(_index: number, _holdMs: number): Promise<{ spinnerShown: boolean }> {
-    return todo("notificationsSelectCardHeldAccess");
-  }
-
-  async notificationsNextPageLabel(): Promise<string | null> {
-    return todo("notificationsNextPageLabel");
-  }
-
-  async notificationsLoadNextPage(): Promise<void> {
-    return todo("notificationsLoadNextPage");
-  }
-
-  async notificationsLoadNextPageHeld(
-    _holdMs: number
-  ): Promise<{ loadingShown: boolean; before: number; after: number }> {
-    return todo("notificationsLoadNextPageHeld");
-  }
-
-  async notificationsSkeletonOnDelayedEntry(
-    _workspaceSlug: string,
-    _holdMs: number
-  ): Promise<{ skeletonShown: boolean; settledCards: number }> {
-    return todo("notificationsSkeletonOnDelayedEntry");
-  }
-
-  async notificationsEmptyText(): Promise<string | null> {
-    return todo("notificationsEmptyText");
-  }
-
-  async notificationsRefresh(): Promise<void> {
-    return todo("notificationsRefresh");
-  }
-
-  async notificationsRefreshHeld(_holdMs: number): Promise<{ spinning: boolean; requests: string[] }> {
-    return todo("notificationsRefreshHeld");
-  }
-
-  async notificationsMarkAllRead(): Promise<void> {
-    return todo("notificationsMarkAllRead");
-  }
-
-  async notificationsMarkAllReadHeld(
-    _holdMs: number
-  ): Promise<{ progress: boolean; requests: number; scopeBody: string | null }> {
-    return todo("notificationsMarkAllReadHeld");
   }
 
   // --- Archived modules (NEWFRONT-225, ARCH-020..025). Throwing stubs;
@@ -11521,43 +12430,96 @@ export class WebNewDriver implements ParityDriver {
     return todo("viewsDetailTabTitle");
   }
   async notificationsCurrentUrl(): Promise<string> {
-    return todo("notificationsCurrentUrl");
+    // The full address as the address bar shows it: scenario callers parse
+    // it with `new URL(...)` before reading pathname, search and hash.
+    return this.page.url();
   }
 
-  async notificationsFailListFetches(_status: number): Promise<void> {
-    return todo("notificationsFailListFetches");
+  async notificationsFailListFetches(status: number): Promise<void> {
+    await this.page.route(WebNewDriver.notificationsListReadRoute, async (route) => {
+      await route.fulfill({ status, body: JSON.stringify({ detail: "parity list failure" }) });
+    });
   }
 
   async notificationsClearListFetchFailure(): Promise<void> {
-    return todo("notificationsClearListFetchFailure");
+    await this.page.unroute(WebNewDriver.notificationsListReadRoute);
   }
 
   async notificationsRetryControlVisible(): Promise<boolean> {
-    return todo("notificationsRetryControlVisible");
+    const pane = this.notificationsListPane();
+    const retry = pane.getByRole("button", { name: /retry|try again|reload/i });
+    return this.isShown(retry);
   }
 
-  async notificationsPressKey(_key: string): Promise<void> {
-    return todo("notificationsPressKey");
+  async notificationsPressKey(key: string): Promise<void> {
+    // The probe asks what the keys do with nothing focused in particular.
+    // Clicking the pane would land on whichever card sits under the point,
+    // which is a real selection, not a shortcut; so the read clears focus
+    // first and lets the key reach the page's own default target.
+    await this.notificationsListPane().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    await this.page.keyboard.press(key);
   }
 
-  async notificationsDragCard(_fromIndex: number, _toIndex: number): Promise<void> {
-    return todo("notificationsDragCard");
+  async notificationsDragCard(fromIndex: number, toIndex: number): Promise<void> {
+    const from = this.notificationsCard(fromIndex);
+    const to = this.notificationsCard(toIndex);
+    await from.scrollIntoViewIfNeeded().catch(() => undefined);
+    await from.dragTo(to, { timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
   async notificationsExportImportVisible(): Promise<boolean> {
-    return todo("notificationsExportImportVisible");
+    const exporty = this.notificationsListPane().getByRole("button", {
+      name: /export|import|download/i,
+    });
+    return this.isShown(exporty);
   }
 
-  async notificationsEntryRequestPaths(_workspaceSlug: string): Promise<string[]> {
-    return todo("notificationsEntryRequestPaths");
+  async notificationsEntryRequestPaths(workspaceSlug: string): Promise<string[]> {
+    const paths = new Set<string>();
+    const record = (request: import("@playwright/test").Request): void => {
+      const url = new URL(request.url());
+      if (url.pathname.startsWith("/api/") && url.pathname.includes("notification")) {
+        paths.add(url.pathname);
+      }
+    };
+    const onRequest = (request: import("@playwright/test").Request): void => record(request);
+    this.page.on("request", onRequest);
+    try {
+      await this.page.goto(`/${workspaceSlug}/notifications/`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+      await this.notificationsTabButton("all")
+        .waitFor({ timeout: WebNewDriver.WAIT_MS })
+        .catch(() => undefined);
+      await this.page.waitForTimeout(1500);
+    } finally {
+      this.page.off("request", onRequest);
+      paths.delete("/api/users/me/notification-preferences/");
+    }
+    return [...paths];
   }
 
   async notificationsArmNotificationRequestSpy(): Promise<void> {
-    return todo("notificationsArmNotificationRequestSpy");
+    await this.page.addInitScript(() => {
+      type NotificationProbe = { requestPermission?: () => Promise<string> };
+      const holder = window as unknown as { __parityNotificationRequests?: number; Notification?: NotificationProbe };
+      holder.__parityNotificationRequests = 0;
+      const original = holder.Notification;
+      if (original !== undefined && typeof original.requestPermission === "function") {
+        const call = original.requestPermission.bind(original);
+        original.requestPermission = () => {
+          holder.__parityNotificationRequests = (holder.__parityNotificationRequests ?? 0) + 1;
+          return call();
+        };
+      }
+    });
   }
 
   async notificationsNotificationRequestCount(): Promise<number> {
-    return todo("notificationsNotificationRequestCount");
+    return this.page.evaluate(() => {
+      const holder = window as unknown as { __parityNotificationRequests?: number };
+      return holder.__parityNotificationRequests ?? 0;
+    });
   }
 
   // --- Archives cross-cutting (NEWFRONT-226, ARCH-026–032). Appended; the

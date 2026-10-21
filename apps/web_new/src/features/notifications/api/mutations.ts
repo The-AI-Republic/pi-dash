@@ -31,6 +31,7 @@ import {
 import { getAppClient } from "../../../core/api/client.js";
 import { notifySuccess } from "../../../shared/shell/index.js";
 import { applyBulkRead } from "../lib/bulkRead.js";
+import type { NotificationTab } from "../lib/stream.js";
 import { isStreamPage, streamPages, type StreamData } from "../lib/streamData.js";
 import { notificationKeys } from "./keys.js";
 import { notificationListQueryFromKey } from "./streamQuery.js";
@@ -330,13 +331,22 @@ export function useSnoozeNotification(workspaceSlug: string) {
 export interface BulkReadInput {
   workspaceSlug: string;
   scope: MarkAllReadScope;
+  /** The visible tab: its counter zeroes now, the other tab's stays put. */
+  tab: NotificationTab;
+}
+
+/** The totals field the visible tab reads from. */
+function zeroedCounter(tab: NotificationTab): Partial<UnreadNotifications> {
+  return tab === "mentions" ? { mention_unread_notifications_count: 0 } : { total_unread_notifications_count: 0 };
 }
 
 /**
  * Bulk mark every notification in the current scope read. The cache pass
  * finds each in-scope page through the same stream decoder the card writes
- * use, so there is no second registry of stream state; the unread totals
- * refetch because the write changed more rows than any cached page holds.
+ * use, so there is no second registry of stream state. The visible tab's
+ * counter zeroes with the write itself (spec §7, NTF-014: "the current tab's
+ * unread counter zeroes, other tabs' counters are untouched") and the totals
+ * still refetch afterwards so the badges land on the server's own numbers.
  * A failure leaves the cache untouched, so a retry resends the same scope.
  */
 export function useMarkAllRead() {
@@ -345,7 +355,7 @@ export function useMarkAllRead() {
     mutationFn: async ({ workspaceSlug, scope }) => {
       await markAllNotificationsRead(getAppClient(), workspaceSlug, scope);
     },
-    onSuccess: async (_result, { workspaceSlug, scope }) => {
+    onSuccess: async (_result, { workspaceSlug, scope, tab }) => {
       const entries = client
         .getQueriesData<StreamData>({ queryKey: notificationKeys.lists(workspaceSlug) })
         .flatMap(([key, page]) => {
@@ -355,6 +365,9 @@ export function useMarkAllRead() {
       for (const [key, page] of applyBulkRead(entries, scope)) {
         client.setQueryData(key, page);
       }
+      client.setQueryData<UnreadNotifications>(notificationKeys.unread(workspaceSlug), (totals) =>
+        totals === undefined ? totals : { ...totals, ...zeroedCounter(tab) }
+      );
       await client.invalidateQueries({ queryKey: notificationKeys.unread(workspaceSlug) });
     },
   });

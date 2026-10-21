@@ -19,6 +19,7 @@ import {
   type NotificationsRow,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
+import { elapsedHalfHour } from "../helpers/calendar-dates.js";
 
 const ROWS = ["NTF-021"];
 
@@ -43,11 +44,6 @@ async function fanOutPlain(
     )
     .not.toBe("");
   return found!;
-}
-
-/** Whether the run started late enough that 01:30 AM today is elapsed. */
-function elapsedSlotAvailable(now: Date): boolean {
-  return now.getHours() >= 2;
 }
 
 test(
@@ -165,10 +161,12 @@ test(
 );
 
 test(specTitle(ROWS, "an elapsed same-day slot is not offered"), { tag: specTags(ROWS) }, async ({ driver, seed }) => {
-  // 01:30 AM is elapsed on any run past 02:00 and sidesteps the 12
-  // AM/PM composition quirk the last scenario pins; inside the first
-  // two hours past midnight no unambiguous elapsed slot exists.
-  test.skip(!elapsedSlotAvailable(new Date()), "run started before 02:00; no unambiguous elapsed slot");
+  // Use the current half-hour in a grid that still has future slots: it is
+  // elapsed there, so the scenario stays valid after noon when the empty AM
+  // grid switches the dialog to PM. Before 02:00 that slot is the 12 AM
+  // quirk the last scenario pins, so there is no unambiguous label.
+  const elapsed = elapsedHalfHour(new Date());
+  test.skip(elapsed === null || new Date().getHours() < 2, "no unambiguous elapsed slot at this hour");
   const member = requireMentionMember(seed);
   const tag = `ntf021e-${Date.now().toString(36)}`;
   const issueName = `Elapsed slot ${tag}`;
@@ -201,8 +199,8 @@ test(specTitle(ROWS, "an elapsed same-day slot is not offered"), { tag: specTags
   await driver.notificationsOpenCustomSnooze(index);
   await driver.notificationsCustomSnoozePickDay(0);
 
-  const offered = await driver.notificationsCustomSnoozeTimeSlots("AM");
-  expect(offered).not.toContain("01:30");
+  const offered = await driver.notificationsCustomSnoozeTimeSlots(elapsed!.meridiem);
+  expect(offered).not.toContain(elapsed!.slot);
   for (const slot of offered) {
     expect(slot).toMatch(/^\d{2}:(00|30)$/);
   }
@@ -250,13 +248,15 @@ test(
     await driver.notificationsCustomSnoozeSubmit();
     await expect.poll(() => driver.notificationsCustomSnoozeVisible(), { timeout: 30_000 }).toBe(false);
 
-    const buggy = new Date();
-    buggy.setDate(buggy.getDate() + 2);
-    buggy.setHours(0, 30, 0, 0);
+    // Intended: 12 PM is noon. The old app swaps noon and midnight and
+    // stores 00:30 (NEWFRONT-213); web_new composes the intended noon.
+    const expected = new Date();
+    expected.setDate(expected.getDate() + 2);
+    expected.setHours(driver.target === "web_new" ? 12 : 0, 30, 0, 0);
     const rows = await serverNotificationsList(seed.workspaceSlug, ownerSession);
     const snoozedTill = rows.find((entry) => entry.id === row.id)?.snoozedTill;
     expect(snoozedTill).not.toBeNull();
     // Instant comparison: the API omits the millis the client sent.
-    expect(new Date(snoozedTill!).getTime()).toBe(buggy.getTime());
+    expect(new Date(snoozedTill!).getTime()).toBe(expected.getTime());
   }
 );

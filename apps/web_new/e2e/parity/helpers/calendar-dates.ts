@@ -54,3 +54,54 @@ export function pickPastWeekdayISO(todayISO: string, daysBack: number): string {
   while (isWeekendISO(iso)) iso = isoDayOffset(iso, -1);
   return iso;
 }
+
+/** A local `yyyy-MM-dd` for the browser's own today. */
+export function localTodayISO(now: Date = new Date()): string {
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * The calendar tile's accessible name for an ISO day, in a fixed
+ * month-name vocabulary (the grid labels each tile "Month D, YYYY"
+ * regardless of locale).
+ */
+export function calendarDayLabel(iso: string): string {
+  const names = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+  ];
+  const [year, month, day] = iso.split("-").map((part) => Number(part));
+  return `${names[(month ?? 1) - 1]} ${day}, ${year}`;
+}
+
+/**
+ * A period that still has future slots today, plus its current half-hour,
+ * which counts as elapsed. The snooze dialog switches to PM once AM is
+ * empty, so asserting an AM slot after that would read an empty grid; null
+ * means both grids are exhausted (after 23:30) and the scenario cannot
+ * prove an elapsed slot on today's grid.
+ */
+export function elapsedHalfHour(now: Date): { meridiem: "AM" | "PM"; slot: string } | null {
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const meridiem = nowMinutes < 11 * 60 + 30 ? "AM" : nowMinutes < 23 * 60 + 30 ? "PM" : null;
+  if (meridiem === null) return null;
+  const minutes = Math.floor(nowMinutes / 30) * 30;
+  const hour = Math.floor(minutes / 60);
+  const twelve = hour % 12 === 0 ? 12 : hour % 12;
+  return {
+    meridiem,
+    slot: `${String(twelve).padStart(2, "0")}:${minutes % 60 === 0 ? "00" : "30"}`,
+  };
+}

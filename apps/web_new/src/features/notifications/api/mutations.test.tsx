@@ -708,7 +708,7 @@ describe("useMarkAllRead (NTF-014)", () => {
     client.setQueryData(notificationKeys.unread(WS), UNREAD);
     const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
 
-    await result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false } });
+    await result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false }, tab: "all" });
 
     const post = calls.find((call) => call.method === "POST");
     expect(post?.url).toContain(`/api/workspaces/${WS}/users/notifications/mark-all-read/`);
@@ -717,6 +717,54 @@ describe("useMarkAllRead (NTF-014)", () => {
     expect(client.getQueryData<NotificationListResponse>(unreadOnly)?.results[0]?.read_at).not.toBeNull();
     expect(client.getQueryData<NotificationListResponse>(other)?.results[0]?.read_at).toBeNull();
     await waitFor(() => expect(client.getQueryState(notificationKeys.unread(WS))?.isInvalidated).toBe(true));
+  });
+
+  it("zeroes the visible tab's counter without waiting for the totals read (NTF-014)", async () => {
+    // The badge follows the write itself: the totals refetch is a second
+    // round trip, and the oracle zeroes the current tab's counter as soon
+    // as the bulk call succeeds, leaving the other tab's alone. The refetch
+    // here answers with the pre-write numbers, exactly like a read that
+    // raced ahead of the write, so only the local zeroing can explain the
+    // assertion below.
+    const { client, wrapper: wrap } = bulkReadHarness((call) =>
+      call.url.includes("unread/") ? bulkReadOk(call.url, UNREAD) : bulkReadOk(call.url, { message: "ok" })
+    );
+    client.setQueryData(notificationKeys.unread(WS), UNREAD);
+    const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
+
+    await result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false }, tab: "all" });
+
+    expect(client.getQueryData(notificationKeys.unread(WS))).toEqual({
+      total_unread_notifications_count: 0,
+      mention_unread_notifications_count: 1,
+    });
+
+    await result.current.mutateAsync({
+      workspaceSlug: WS,
+      scope: { snoozed: false, archived: false },
+      tab: "mentions",
+    });
+
+    expect(client.getQueryData(notificationKeys.unread(WS))).toEqual({
+      total_unread_notifications_count: 0,
+      mention_unread_notifications_count: 0,
+    });
+  });
+
+  it("leaves the totals alone when the write fails", async () => {
+    const { client, wrapper: wrap } = bulkReadHarness((call) =>
+      call.url.includes("mark-all-read/")
+        ? jsonResponse(call.url, 500, { detail: "parity bulk failure" })
+        : bulkReadOk(call.url, UNREAD)
+    );
+    client.setQueryData(notificationKeys.unread(WS), UNREAD);
+    const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
+
+    await expect(
+      result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false }, tab: "all" })
+    ).rejects.toThrow();
+
+    expect(client.getQueryData(notificationKeys.unread(WS))).toEqual(UNREAD);
   });
 
   it("narrows the cache pass to the posted origin, snoozed and archived scope", async () => {
@@ -730,6 +778,7 @@ describe("useMarkAllRead (NTF-014)", () => {
     await result.current.mutateAsync({
       workspaceSlug: WS,
       scope: { type: "assigned", snoozed: true, archived: false },
+      tab: "all",
     });
 
     expect(client.getQueryData<NotificationListResponse>(assignedSnoozed)?.results[0]?.read_at).not.toBeNull();
@@ -747,7 +796,7 @@ describe("useMarkAllRead (NTF-014)", () => {
     const { result } = renderHook(() => useMarkAllRead(), { wrapper: wrap });
 
     await expect(
-      result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false } })
+      result.current.mutateAsync({ workspaceSlug: WS, scope: { snoozed: false, archived: false }, tab: "all" })
     ).rejects.toThrow();
 
     expect(client.getQueryData<NotificationListResponse>(key)?.results[0]?.read_at).toBeNull();

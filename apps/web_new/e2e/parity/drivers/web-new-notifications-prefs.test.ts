@@ -37,12 +37,13 @@ function formSwitch(getAttribute: (name: string) => Promise<string | null>) {
 }
 
 describe("notificationsOpenEmailPreferences", () => {
-  it("opens the settings page and waits for the toggles", async () => {
+  function prefsPage(switchWaitFor: (options: unknown) => Promise<void>) {
     const goto = vi.fn(async (_url: unknown, _options: unknown) => undefined);
+    const reload = vi.fn(async (_options: unknown) => undefined);
     const waitForLoadState = vi.fn(async (_state: unknown) => undefined);
-    const switchWaitFor = vi.fn(async (_options: unknown) => undefined);
     const page = {
       goto,
+      reload,
       waitForLoadState,
       getByTestId: (id: string) => {
         expect(id).toBe("email-prefs-form");
@@ -51,13 +52,35 @@ describe("notificationsOpenEmailPreferences", () => {
         };
       },
     };
-    const driver = new WebNewDriver(page as unknown as Page);
+    return { page: page as unknown as Page, goto, reload, waitForLoadState };
+  }
+
+  it("opens the settings page and waits for the toggles", async () => {
+    const switchWaitFor = vi.fn(async (_options: unknown) => undefined);
+    const stub = prefsPage(switchWaitFor);
+    const driver = new WebNewDriver(stub.page);
 
     await driver.notificationsOpenEmailPreferences();
 
-    expect(goto).toHaveBeenCalledWith("/settings/profile/notifications", { timeout: 60_000 });
-    expect(waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+    expect(stub.goto).toHaveBeenCalledWith("/settings/profile/notifications", { timeout: 60_000 });
+    expect(stub.waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
     expect(switchWaitFor).toHaveBeenCalledWith({ timeout: 30_000 });
+    expect(stub.reload).not.toHaveBeenCalled();
+  });
+
+  it("reloads once and waits again when the first visit never paints the toggles", async () => {
+    let calls = 0;
+    const switchWaitFor = vi.fn(async (_options: unknown) => {
+      calls += 1;
+      if (calls === 1) throw new Error("not painted");
+    });
+    const stub = prefsPage(switchWaitFor);
+    const driver = new WebNewDriver(stub.page);
+
+    await driver.notificationsOpenEmailPreferences();
+
+    expect(stub.reload).toHaveBeenCalledWith({ timeout: 60_000 });
+    expect(switchWaitFor).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -152,15 +175,33 @@ describe("notificationsEmailPreferences", () => {
 });
 
 describe("notificationsEmailPreferencesToggle", () => {
-  it("clicks the named toggle and waits for its save", async () => {
+  function togglePage(toasts: number) {
     let predicate!: (response: Response) => boolean;
     const click = vi.fn(async (_options: unknown) => undefined);
+    let openToasts = toasts;
+    const dismiss = vi.fn(async (_options: unknown) => {
+      openToasts = Math.max(0, openToasts - 1);
+    });
+    const dismissButton = {
+      first: () => ({
+        count: async () => openToasts,
+        click: dismiss,
+      }),
+    };
     const page = {
       waitForResponse: (match: (response: Response) => boolean, _options: unknown) => {
         predicate = match;
         return Promise.resolve(stubResponse("PATCH", "https://api.test/api/users/me/notification-preferences/"));
       },
       getByTestId: (id: string) => {
+        if (id === "toast-stack") {
+          return {
+            getByRole: (_role: string, options: { name: string }) => {
+              expect(options.name).toBe("Dismiss notification");
+              return dismissButton;
+            },
+          };
+        }
         expect(id).toBe("email-prefs-form");
         return {
           first: () => ({
@@ -172,15 +213,32 @@ describe("notificationsEmailPreferencesToggle", () => {
         };
       },
     };
+    return { page, click, dismiss, matches: (response: Response) => predicate(response) };
+  }
+
+  it("clicks the named toggle and waits for its save", async () => {
+    const { page, click, dismiss, matches } = togglePage(0);
     const driver = new WebNewDriver(page as unknown as Page);
 
     const pref: NotificationsEmailPref = "comment";
     await driver.notificationsEmailPreferencesToggle(pref);
 
+    expect(dismiss).not.toHaveBeenCalled();
     expect(click).toHaveBeenCalledWith({ timeout: 30_000 });
-    expect(predicate(stubResponse("PATCH", "https://api.test/api/users/me/notification-preferences/"))).toBe(true);
-    expect(predicate(stubResponse("PATCH", "https://api.test/api/other/"))).toBe(false);
-    expect(predicate(stubResponse("GET", "https://api.test/api/users/me/notification-preferences/"))).toBe(false);
+    expect(matches(stubResponse("PATCH", "https://api.test/api/users/me/notification-preferences/"))).toBe(true);
+    expect(matches(stubResponse("PATCH", "https://api.test/api/other/"))).toBe(false);
+    expect(matches(stubResponse("GET", "https://api.test/api/users/me/notification-preferences/"))).toBe(false);
+  });
+
+  it("dismisses leftover toasts through their own control before pressing", async () => {
+    const { page, click, dismiss } = togglePage(2);
+    const driver = new WebNewDriver(page as unknown as Page);
+
+    await driver.notificationsEmailPreferencesToggle("comment");
+
+    expect(dismiss).toHaveBeenCalledTimes(2);
+    expect(dismiss).toHaveBeenNthCalledWith(1, { timeout: 2_000 });
+    expect(click).toHaveBeenCalledWith({ timeout: 30_000 });
   });
 });
 

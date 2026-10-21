@@ -413,16 +413,23 @@ describe("rulesEnsureSignedIn", () => {
       waitForURL: vi.fn(async () => undefined),
     }) as Page & Record<string, unknown>;
     const driver = new WebNewDriver(page);
+    const order: string[] = [];
     const signOut = vi.spyOn(driver, "signOutViaCommandPalette").mockImplementation(async () => {
+      order.push("signOut");
       url = "http://localhost:3000/";
     });
-    const openEntry = vi.spyOn(driver, "openEntry").mockImplementation(async () => undefined);
+    const openEntry = vi.spyOn(driver, "openEntry").mockImplementation(async () => {
+      order.push("openEntry");
+    });
     const signIn = vi.spyOn(driver, "signInWithPassword").mockImplementation(async () => {
       url = "http://localhost:3000/acme/home/";
     });
     await driver.rulesEnsureSignedIn("ann@example.com", "secret", "acme");
     expect(signOut).toHaveBeenCalledTimes(1);
     expect(openEntry).toHaveBeenCalledTimes(1);
+    // Enter before signing out: the live session only bounces to a shell
+    // with a command palette from the entry; a settings page has none.
+    expect(order).toEqual(["openEntry", "signOut"]);
     expect(signIn).toHaveBeenCalledWith("ann@example.com", "secret");
     expect(page.waitForURL).toHaveBeenCalledWith(/\/acme(\/|$)/, { timeout: 60_000 });
   });
