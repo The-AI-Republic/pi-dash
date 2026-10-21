@@ -42,6 +42,17 @@ export function ChangeEmailDialog({
   const checkTaken = useCheckEmailTaken();
   const sendCode = useGenerateEmailCode();
   const confirm = useConfirmEmailChange();
+  const emailField = React.useRef<HTMLInputElement>(null);
+  const codeField = React.useRef<HTMLInputElement>(null);
+
+  // The dialog opens on the address field, not its close control: the old
+  // modal focused the first field, and a late focus move would otherwise
+  // land mid-keystroke. Step two then moves to the code field, as the old
+  // flow autofocused it on entry.
+  React.useEffect(() => {
+    if (!open) return;
+    (step === "code" ? codeField : emailField).current?.focus();
+  }, [open, step]);
 
   React.useEffect(() => {
     if (open) return;
@@ -110,6 +121,7 @@ export function ChangeEmailDialog({
         onOpenChange(next);
       }}
       nonDismissable={busy}
+      initialFocus={emailField}
       actions={
         <>
           <Button variant="secondary" onClick={() => onOpenChange(false)} disabled={busy}>
@@ -133,6 +145,7 @@ export function ChangeEmailDialog({
           type="email"
           autoComplete="off"
           placeholder="Enter your email"
+          inputRef={emailField}
           value={email}
           disabled={step === "code"}
           {...({ error: emailError ?? undefined } as { error?: string })}
@@ -148,6 +161,7 @@ export function ChangeEmailDialog({
               id="change-email-code"
               autoComplete="one-time-code"
               placeholder="123456"
+              inputRef={codeField}
               value={code}
               {...({ error: codeError ?? undefined } as { error?: string })}
               onChange={(event) => {

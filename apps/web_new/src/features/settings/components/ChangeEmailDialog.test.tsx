@@ -116,6 +116,36 @@ describe("ChangeEmailDialog", () => {
     expect(screen.getByText(EMAIL_MESSAGES.sent)).toBeInTheDocument();
   });
 
+  it("keeps every keystroke when the dialog's initial focus frame arrives late", async () => {
+    // Base UI moves initial focus on the next animation frame. On a busy
+    // host that frame can land between keystrokes; a dialog that relies on
+    // the default target then moves focus to its close control mid-word and
+    // the address is truncated. The address field must own focus from open.
+    const raf = vi
+      .spyOn(globalThis, "requestAnimationFrame")
+      .mockImplementation(
+        (callback: FrameRequestCallback) => setTimeout(() => callback(performance.now()), 50) as unknown as number
+      );
+    try {
+      setup();
+      const field = screen.getByLabelText("New email");
+      await waitFor(() => expect(field).toHaveFocus());
+      await typeEmail("grace@example.com");
+      expect(field).toHaveValue("grace@example.com");
+      expect(field).toHaveFocus();
+    } finally {
+      raf.mockRestore();
+    }
+  });
+
+  it("moves focus to the code field when the code step opens", async () => {
+    setup();
+    await typeEmail("grace@example.com");
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Confirm" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByLabelText("Unique code")).toHaveFocus());
+  });
+
   it("requires a code before verifying", async () => {
     setup();
     await typeEmail("grace@example.com");
