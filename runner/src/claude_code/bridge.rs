@@ -25,10 +25,6 @@ use crate::claude_code::process::{ClaudeProcess, SpawnArgs};
 use crate::claude_code::schema::{StreamEvent, UserInput};
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 
-/// How long to wait for Claude's `system/init` frame before giving up on
-/// the run setup. See [`ENGINE_STARTUP_TIMEOUT`].
-const INIT_TIMEOUT: Duration = ENGINE_STARTUP_TIMEOUT;
-
 pub struct Bridge {
     proc: ClaudeProcess,
     /// Claude session id captured from `system/init`, or provided by
@@ -131,7 +127,7 @@ impl Bridge {
     }
 
     async fn wait_for_init(&mut self, run_id: Uuid) -> Result<String> {
-        let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let recv = tokio::time::timeout(remaining, self.proc.inbound.recv())

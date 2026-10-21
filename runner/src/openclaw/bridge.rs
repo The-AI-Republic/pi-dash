@@ -47,10 +47,6 @@ use crate::openclaw::process::OpenClawProcess;
 use crate::openclaw::schema::AcpMessage;
 use crate::util::shell::login_shell_command;
 
-/// How long to wait for `acpx` to emit its first ACP frame carrying a
-/// `sessionId` before giving up on run setup. See [`ENGINE_STARTUP_TIMEOUT`].
-const SESSION_TIMEOUT: Duration = ENGINE_STARTUP_TIMEOUT;
-
 pub struct Bridge {
     binary: String,
     model: Option<String>,
@@ -189,7 +185,7 @@ impl Bridge {
     /// `next_events` re-emits it. Mirrors cursor-agent's `wait_for_init`.
     async fn wait_for_session(&mut self, run_id: Uuid) -> Result<String> {
         let proc = self.proc.as_mut().context("acpx process not spawned")?;
-        let deadline = tokio::time::Instant::now() + SESSION_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let recv = tokio::time::timeout(remaining, proc.inbound.recv())

@@ -41,10 +41,6 @@ use crate::cursor_agent::process::CursorProcess;
 use crate::cursor_agent::schema::StreamEvent;
 use crate::util::shell::login_shell_command;
 
-/// How long to wait for cursor-agent's `system/init` frame before giving up on
-/// the run setup. See [`ENGINE_STARTUP_TIMEOUT`].
-const INIT_TIMEOUT: Duration = ENGINE_STARTUP_TIMEOUT;
-
 pub struct Bridge {
     binary: String,
     model: Option<String>,
@@ -183,7 +179,7 @@ impl Bridge {
             .proc
             .as_mut()
             .context("cursor-agent process not spawned")?;
-        let deadline = tokio::time::Instant::now() + INIT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + ENGINE_STARTUP_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let recv = tokio::time::timeout(remaining, proc.inbound.recv())
