@@ -31,9 +31,9 @@ pub use middleware::{
     auth_cookie_name_for_path, auth_session_layer, ADMIN_SESSION_COOKIE_NAME, SESSION_COOKIE_NAME,
 };
 pub use render::{
-    html_escape, json_error_body, json_error_string, redirect_location, render_csrf_failure,
-    CSRF_FAILURE_TEMPLATE, JSON_400_STATUS, REDIRECT_302_STATUS, THROTTLE_429_STATUS,
-    UNAUTHENTICATED_401_STATUS,
+    disallowed_redirect, html_escape, json_error_body, json_error_string, redirect_location,
+    render_csrf_failure, CSRF_FAILURE_TEMPLATE, JSON_400_STATUS, REDIRECT_302_STATUS,
+    THROTTLE_429_STATUS, UNAUTHENTICATED_401_STATUS,
 };
 
 /// Owned D-16 auth routes (cutover granularity: registered paths

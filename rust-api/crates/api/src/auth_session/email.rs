@@ -77,7 +77,7 @@ use pidash_services::auth_session::tasks as tasks_kernel;
 
 use crate::assistant::governor::throttle_check;
 use crate::assistant::throttles::ThrottleSpec;
-use crate::auth_session::render::render_csrf_failure;
+use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
 use crate::edge;
 use crate::license::handlers_auth_forms::client_ip;
 use crate::state::AppState;
@@ -372,12 +372,18 @@ fn csrf_failure_response(root_url: &str) -> Response {
 
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
 /// `Set-Cookie` values the branch issued. Django percent-encodes the URL
-/// first (`iri_to_uri`, `django/http/response.py:620`).
+/// first (`iri_to_uri`, `django/http/response.py:620`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
+    let too_long = location.chars().count() > shapes_kernel::MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     let mut builder = Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -2299,6 +2305,17 @@ async fn signout_space(State(state): State<AppState>, req: axum::extract::Reques
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(
+            redirect_response(long, Vec::new()).status(),
+            StatusCode::BAD_REQUEST
+        );
+        let ok = redirect_response("http://app.test/?next_path=/x".to_owned(), Vec::new());
+        assert_eq!(ok.status(), StatusCode::FOUND);
+    }
 
     fn prov_with(secret: Option<&str>, token: Option<&str>) -> Provenance {
         Provenance {

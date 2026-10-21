@@ -342,10 +342,17 @@ pub fn url_has_allowed_host_and_scheme(url: &str, allowed_hosts: &[&str]) -> boo
     check_allowed(url, allowed_hosts) && check_allowed(&normalised, allowed_hosts)
 }
 
+/// `MAX_URL_REDIRECT_LENGTH` (`django/utils/http.py:51`):
+/// `HttpResponseRedirectBase` raises `DisallowedRedirect` (400) when
+/// the final `Location` is longer than this many characters
+/// (`django/http/response.py:621-625`).
+pub const MAX_URL_REDIRECT_LENGTH: usize = 16384;
+
 fn check_allowed(url: &str, allowed_hosts: &[&str]) -> bool {
-    // `///` prefix and over-long URLs are unsafe; `len` counts code
-    // points as Python `len()` does.
-    if url.starts_with("///") || url.chars().count() > 2048 {
+    // A `///` prefix is unsafe (`django/utils/http.py:368-372`). There
+    // is no length cap here in 4.2: the 2048 limit is a Django 6 rule,
+    // and over-long redirects 400 later, in `HttpResponseRedirectBase`.
+    if url.starts_with("///") {
         return false;
     }
     let (scheme, rest) = split_scheme(url);
@@ -939,6 +946,39 @@ mod tests {
             get_safe_redirect_url(app, "", &[], &allowed),
             get("success_no_next")
         );
+    }
+
+    #[test]
+    fn allowed_host_check_has_no_length_cap() {
+        // Django 4.2 (`django/utils/http.py:368-372`) rejects only the
+        // `///` prefix here; the 2048 limit is a Django 6 rule.
+        let allowed = ["app.test"];
+        let long = format!("http://app.test/?{}", "a".repeat(3000));
+        assert!(long.chars().count() > 2048);
+        assert!(url_has_allowed_host_and_scheme(&long, &allowed));
+        assert!(!url_has_allowed_host_and_scheme("///app.test/x", &allowed));
+        assert_eq!(MAX_URL_REDIRECT_LENGTH, 16384);
+    }
+
+    #[test]
+    fn long_redirect_keeps_next_path() {
+        let allowed = ["app.test"];
+        let url = get_safe_redirect_url(
+            "http://app.test",
+            "/ws/projects/",
+            &[
+                ("error_code", ParamValue::Int(5075)),
+                (
+                    "error_message",
+                    ParamValue::Str("INVALID_EMAIL_SIGN_IN".to_owned()),
+                ),
+                ("email", ParamValue::Str(format!("{}@", "a".repeat(2000)))),
+            ],
+            &allowed,
+        );
+        assert!(url.contains("next_path=/ws/projects/"), "{url}");
+        assert!(url.chars().count() > 2048, "{}", url.len());
+        assert!(url.chars().count() <= MAX_URL_REDIRECT_LENGTH);
     }
 
     #[test]

@@ -64,8 +64,9 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde_json::Value;
 
-use pidash_services::auth_session::{password as pw, tasks as t};
+use pidash_services::auth_session::{password as pw, tasks as t, MAX_URL_REDIRECT_LENGTH};
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::state::AppState;
 
 /// Register the seven password/CSRF routes. Nothing else: sibling paths
@@ -149,12 +150,18 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
 }
 
 /// `HttpResponseRedirect(url)`: Django percent-encodes the URL first
-/// (`iri_to_uri`, `django/http/response.py:620`).
+/// (`iri_to_uri`, `django/http/response.py:620`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
+    let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -1867,6 +1874,16 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use tower::ServiceExt;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_302("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn state() -> AppState {
         // No pools: every handler answers 500 through `pool_of`, which
