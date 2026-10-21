@@ -796,8 +796,8 @@ const SEARCH_NUL_BODY: &str = r#"["Null characters are not allowed."]"#;
 /// `?search=` terms (DRF `SearchFilter.get_search_terms` over
 /// `search_fields = ["name"]`, `base.py:79` + `BaseViewSet.filter_queryset`,
 /// `app/views/base.py:206-208`): the raw value is validated first (NUL is a
-/// 400, never a stripped term), then commas read as spaces and the value
-/// splits on whitespace; an absent or blank value filters nothing. Each term
+/// 400, never a stripped term), then each token runs through DRF's
+/// `search_smart_split`; an absent or blank value filters nothing. Each term
 /// is an ANDed `name__icontains`.
 #[allow(clippy::result_large_err)]
 fn search_terms(raw: Option<&str>) -> Result<Vec<String>, Response> {
@@ -809,14 +809,143 @@ fn search_terms(raw: Option<&str>) -> Result<Vec<String>, Response> {
                     SEARCH_NUL_BODY.to_owned(),
                 ));
             }
-            Ok(value
-                .replace(',', " ")
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect())
+            Ok(search_smart_split(value))
         }
         None => Ok(Vec::new()),
     }
+}
+
+/// DRF `search_smart_split` (`rest_framework/filters.py:23-37`): each
+/// `smart_split` token is `strip(',')`-ed; a token wrapped in one matching
+/// quote pair is kept whole and unescaped, while any other token splits on
+/// commas with empty pieces dropped and the rest stripped.
+fn search_smart_split(raw: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for token in smart_split_terms(raw) {
+        let trimmed = token.trim_matches(',');
+        let mut chars = trimmed.chars();
+        let Some(first) = chars.next() else {
+            // Empty after the comma trim: `"".split(",")` is `[""]`,
+            // filtered as empty — contributes nothing.
+            continue;
+        };
+        let last = trimmed.chars().next_back().expect("first exists");
+        if (first == '"' || first == '\'') && first == last {
+            terms.push(unescape_string_literal(trimmed));
+        } else {
+            for sub in trimmed.split(',') {
+                if !sub.is_empty() {
+                    terms.push(py_strip(sub).to_owned());
+                }
+            }
+        }
+    }
+    terms
+}
+
+/// Django `smart_split` (`django/utils/text.py`): split on Python
+/// whitespace, keeping quoted phrases (single or double, backslash
+/// escapes, quotes retained) together with any adjacent non-space text.
+/// A backslash-newline or an unclosed quote breaks the quoted match and
+/// the token falls back to a bare non-space run.
+fn smart_split_terms(text: &str) -> Vec<&str> {
+    let mut terms = Vec::new();
+    let mut rest = text.trim_start_matches(py_is_space);
+    while !rest.is_empty() {
+        let end = smart_token_len(rest);
+        terms.push(&rest[..end]);
+        rest = rest[end..].trim_start_matches(py_is_space);
+    }
+    terms
+}
+
+/// One `smart_split` token length: the quote-aware alternative wins when
+/// at least one complete quoted string parses (a later unclosed quote
+/// ends the token instead of failing it, like the regex backtrack),
+/// else the bare non-space run (`\S+`).
+fn smart_token_len(text: &str) -> usize {
+    let mut pos = 0;
+    while let Some(ch) = text[pos..].chars().next() {
+        if py_is_space(ch) || ch == '"' || ch == '\'' {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    let mut end = pos;
+    let mut quoted = 0;
+    while text[end..].starts_with(['"', '\'']) {
+        let Some(after) = quoted_len(&text[end..]) else {
+            break;
+        };
+        end += after;
+        quoted += 1;
+        while let Some(ch) = text[end..].chars().next() {
+            if py_is_space(ch) || ch == '"' || ch == '\'' {
+                break;
+            }
+            end += ch.len_utf8();
+        }
+    }
+    if quoted > 0 {
+        return end;
+    }
+    let mut len = 0;
+    while let Some(ch) = text[len..].chars().next() {
+        if py_is_space(ch) {
+            break;
+        }
+        len += ch.len_utf8();
+    }
+    len
+}
+
+/// One complete quoted string length (`"(?:[^"\\]|\\.)*"` or the
+/// single-quote form — `.` never matches `\n`), or `None` when the
+/// quote never closes.
+fn quoted_len(text: &str) -> Option<usize> {
+    let quote = text.chars().next()?;
+    debug_assert!(quote == '"' || quote == '\'');
+    let mut pos = quote.len_utf8();
+    loop {
+        let ch = text[pos..].chars().next()?;
+        if ch == '\\' {
+            let next = text[pos + 1..].chars().next()?;
+            if next == '\n' {
+                return None;
+            }
+            pos += 1 + next.len_utf8();
+        } else if ch == quote {
+            return Some(pos + quote.len_utf8());
+        } else {
+            pos += ch.len_utf8();
+        }
+    }
+}
+
+/// Django `unescape_string_literal`: strip one quote pair, then unescape
+/// the quote and the backslash, in that order. The caller guarantees a
+/// non-empty string literal (first and last chars the same quote).
+fn unescape_string_literal(term: &str) -> String {
+    let quote = term.chars().next().expect("quoted term");
+    let inner = term
+        .strip_prefix(quote)
+        .and_then(|rest| rest.strip_suffix(quote))
+        .unwrap_or("");
+    let escaped = format!("\\{quote}");
+    inner
+        .replace(&escaped, &quote.to_string())
+        .replace("\\\\", "\\")
+}
+
+/// Python whitespace (`str.strip`, `re \s`, `str.isspace` — all the same
+/// 29 chars: Rust's `char::is_whitespace` plus `\x1c`-`\x1f`).
+fn py_is_space(ch: char) -> bool {
+    ch.is_whitespace() || ('\x1c'..='\x1f').contains(&ch)
+}
+
+/// Python `str.strip()` with no arguments.
+fn py_strip(value: &str) -> &str {
+    value.trim_matches(py_is_space)
 }
 
 /// Escape one term for `name__icontains`: Django escapes the LIKE
@@ -5517,24 +5646,43 @@ mod read_tests {
         assert_eq!(gate::PAGE_NOT_FOUND_BODY, r#"{"error":"Page not found"}"#);
     }
 
-    /// `?search=` term splitting (DRF `SearchFilter.get_search_terms`):
-    /// commas read as spaces, split on whitespace, absent/blank filters
-    /// nothing.
+    /// `?search=` term splitting (DRF `SearchFilter.get_search_terms` over
+    /// `search_smart_split`): quoted phrases stay whole with the quotes
+    /// removed, escaped quotes unescape, and commas trim per token then
+    /// split the remainder; absent/blank filters nothing. Vectors are the
+    /// probe output of Django 4.2.30 + DRF 3.15.2 `search_smart_split`
+    /// (PIDASHCONV-1166).
     #[test]
     fn search_terms_split_like_drf() {
         let terms = |raw| search_terms(raw).expect("terms");
         assert!(terms(None).is_empty());
-        assert!(terms(Some("")).is_empty());
-        assert!(terms(Some("   ")).is_empty());
-        assert_eq!(terms(Some("home")), vec!["home".to_owned()]);
-        assert_eq!(
-            terms(Some("  home   page ")),
-            vec!["home".to_owned(), "page".to_owned()]
-        );
-        assert_eq!(
-            terms(Some("home,page")),
-            vec!["home".to_owned(), "page".to_owned()]
-        );
+        for (raw, expected) in [
+            ("", vec![]),
+            ("   ", vec![]),
+            ("home", vec!["home"]),
+            ("  home   page ", vec!["home", "page"]),
+            ("foo bar", vec!["foo", "bar"]),
+            ("\"foo bar\"", vec!["foo bar"]),
+            ("'foo bar'", vec!["foo bar"]),
+            ("foo, \"bar baz\", qux", vec!["foo", "bar baz", "qux"]),
+            ("\"a\\\"b\"", vec!["a\"b"]),
+            ("'a\\'b'", vec!["a'b"]),
+            ("home,page", vec!["home", "page"]),
+            ("foo,bar", vec!["foo", "bar"]),
+            ("a,,b", vec!["a", "b"]),
+            ("\"unclosed", vec!["\"unclosed"]),
+            ("\"   \"", vec!["   "]),
+            ("''", vec![""]),
+            ("'", vec![""]),
+            ("\"a b\",", vec!["a b"]),
+            (",\"a,b\"", vec!["a,b"]),
+            ("a\"b", vec!["a\"b"]),
+            ("ab\"cd\"ef\"gh", vec!["ab\"cd\"ef", "\"gh"]),
+            ("a\\b", vec!["a\\b"]),
+            ("\"a\\b\"", vec!["a\\b"]),
+        ] {
+            assert_eq!(terms(Some(raw)), expected, "{raw:?}");
+        }
     }
 
     /// The raw value is validated before splitting: DRF's
