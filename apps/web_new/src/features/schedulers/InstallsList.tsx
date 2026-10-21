@@ -130,6 +130,15 @@ export function InstallsList({
     variant === "settings"
       ? "Scheduled instructions installed on this project. Each install fires its prompt on the schedule below."
       : "Scheduled agent runs installed on this project. Members read the list; project admins manage the installs.";
+  // The settings tab keeps its own invitation: the empty row names the
+  // creation control above it rather than describing a member's read-only
+  // view (PSET-061).
+  const emptyBody =
+    variant === "settings"
+      ? "Use New Scheduler to install a catalog definition or write a new one."
+      : canManage
+        ? "Create one here, or install a definition from the workspace catalog."
+        : "A project admin can install scheduled work here.";
 
   return (
     <section aria-labelledby="project-installs-heading" className="flex h-full flex-col">
@@ -187,11 +196,7 @@ export function InstallsList({
                       <CalendarClock size={16} strokeWidth={1.5} aria-hidden="true" />
                       No schedulers installed on this project yet
                     </p>
-                    <p className="text-meta text-(--text-muted)">
-                      {canManage
-                        ? "Create one here, or install a definition from the workspace catalog."
-                        : "A project admin can install scheduled work here."}
-                    </p>
+                    <p className="text-meta text-(--text-muted)">{emptyBody}</p>
                   </td>
                 </tr>
               ) : (

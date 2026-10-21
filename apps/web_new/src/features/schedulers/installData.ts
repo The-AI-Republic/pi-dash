@@ -11,7 +11,9 @@ import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient }
 import {
   createSchedulerBinding,
   deleteSchedulerBinding,
+  getSchedulerBinding,
   isApiError,
+  listBindingRuns,
   listSchedulerBindings,
   updateSchedulerBinding,
   type ApiClient,
@@ -30,7 +32,57 @@ export const bindingKeys = {
   all: (workspaceSlug: string, projectId: string) =>
     [...workspaceScope(workspaceSlug), "scheduler-bindings", projectId] as const,
   list: (workspaceSlug: string, projectId: string) => [...bindingKeys.all(workspaceSlug, projectId), "list"] as const,
+  detail: (workspaceSlug: string, projectId: string, bindingId: string) =>
+    [...bindingKeys.all(workspaceSlug, projectId), "detail", bindingId] as const,
+  runs: (workspaceSlug: string, projectId: string, bindingId: string, page: number) =>
+    [...bindingKeys.all(workspaceSlug, projectId), "runs", bindingId, page] as const,
 };
+
+/** How often the detail's run history re-reads while the page is open. */
+export const RUNS_POLL_INTERVAL_MS = 15_000;
+
+/** The install's own page, including the composed prompt the API builds. */
+export function bindingDetailQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string
+) {
+  return queryOptions({
+    queryKey: bindingKeys.detail(workspaceSlug, projectId, bindingId),
+    queryFn: () => getSchedulerBinding(client, workspaceSlug, projectId, bindingId),
+    staleTime: LIST_STALE_TIME_MS,
+  });
+}
+
+export function useSchedulerBindingDetail(workspaceSlug: string, projectId: string, bindingId: string) {
+  return useQuery(bindingDetailQueryOptions(getAppClient(), workspaceSlug, projectId, bindingId));
+}
+
+/**
+ * One page of the install's run history. The detail page holds this query
+ * on a fifteen-second poll, so a firing appears without a reload; paging
+ * is the page number, and out-of-range pages come back empty with the
+ * real total.
+ */
+export function bindingRunsQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  bindingId: string,
+  page: number
+) {
+  return queryOptions({
+    queryKey: bindingKeys.runs(workspaceSlug, projectId, bindingId, page),
+    queryFn: () => listBindingRuns(client, workspaceSlug, projectId, bindingId, { page }),
+    staleTime: 0,
+    refetchInterval: RUNS_POLL_INTERVAL_MS,
+  });
+}
+
+export function useSchedulerBindingRuns(workspaceSlug: string, projectId: string, bindingId: string, page: number) {
+  return useQuery(bindingRunsQueryOptions(getAppClient(), workspaceSlug, projectId, bindingId, page));
+}
 
 /** The project's installs. The list order is the API's (newest first). */
 export function bindingsQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {
@@ -128,8 +180,11 @@ export function useUpdateSchedulerBinding(workspaceSlug: string) {
   return useMutation<SchedulerBindingDetail, Error, UpdateBindingRequest>({
     mutationFn: ({ projectId, bindingId, input }) =>
       updateSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId, input),
-    onSuccess: async (_data, { projectId }) => {
+    onSuccess: async (data, { projectId }) => {
       notifySuccess("Install updated", "Subsequent runs use the new settings.");
+      if (data !== undefined) {
+        queryClient.setQueryData(bindingKeys.detail(workspaceSlug, projectId, data.id), data);
+      }
       await invalidateInstalls(queryClient, workspaceSlug, projectId);
     },
     onError: (error) => notifyError("Something went wrong", schedulerBindingFailure(error)),

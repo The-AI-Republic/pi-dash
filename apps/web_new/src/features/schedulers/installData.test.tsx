@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { SchedulerBinding } from "@pidash/api-client";
+import { ApiError, type SchedulerBinding } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -13,6 +13,7 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 const { contracts } = vi.hoisted(() => ({
   contracts: {
     createSchedulerBinding: vi.fn(),
+    deleteSchedulerBinding: vi.fn(),
     listSchedulerBindings: vi.fn(),
     updateSchedulerBinding: vi.fn(),
   },
@@ -33,6 +34,9 @@ import {
   useInstallSchedulerBinding,
   useSchedulerBindings,
   useToggleSchedulerBinding,
+  schedulerBindingFailure,
+  useUninstallSchedulerBinding,
+  useUpdateSchedulerBinding,
 } from "./installData.js";
 
 const SLUG = "acme";
@@ -201,6 +205,83 @@ describe("enable switch", () => {
     await act(async () => {
       await promise;
     });
+  });
+});
+
+describe("edit and uninstall mutations", () => {
+  it("saves the edit, seeds the detail cache and refreshes the lists", async () => {
+    const saved = binding({ rrule: "FREQ=WEEKLY" });
+    contracts.updateSchedulerBinding.mockResolvedValue(saved);
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useUpdateSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", input: { rrule: "FREQ=WEEKLY" } });
+    });
+    expect(contracts.updateSchedulerBinding).toHaveBeenCalledWith(expect.anything(), SLUG, PROJECT, "b1", {
+      rrule: "FREQ=WEEKLY",
+    });
+    expect(queryClient.getQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"))).toEqual(saved);
+    expect(notifySuccess).toHaveBeenCalledWith("Install updated", "Subsequent runs use the new settings.");
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: bindingKeys.list(SLUG, PROJECT) });
+  });
+
+  it("reports the edit refusal and leaves the detail cache alone", async () => {
+    contracts.updateSchedulerBinding.mockRejectedValue(new Error("Nope"));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(() => useUpdateSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", input: {} }).catch(() => undefined);
+    });
+    expect(queryClient.getQueryData(bindingKeys.detail(SLUG, PROJECT, "b1"))).toBeUndefined();
+    expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Check your connection and try again.");
+  });
+
+  it("uninstalls the binding and refreshes the lists", async () => {
+    contracts.deleteSchedulerBinding.mockResolvedValue(undefined);
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useUninstallSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1" });
+    });
+    expect(contracts.deleteSchedulerBinding).toHaveBeenCalledWith(expect.anything(), SLUG, PROJECT, "b1");
+    expect(notifySuccess).toHaveBeenCalledWith(
+      "Scheduler uninstalled",
+      "It stops firing on this project until reinstalled."
+    );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: bindingKeys.list(SLUG, PROJECT) });
+  });
+
+  it("reports a refused uninstall", async () => {
+    contracts.deleteSchedulerBinding.mockRejectedValue(new Error("Admins only"));
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    const { result } = renderHook(() => useUninstallSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
+    await act(async () => {
+      await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1" }).catch(() => undefined);
+    });
+    expect(notifyError).toHaveBeenCalledWith("Something went wrong", "Check your connection and try again.");
+  });
+});
+
+describe("schedulerBindingFailure", () => {
+  it("prefers the first field message the server sends", () => {
+    const error = new ApiError({
+      status: 400,
+      code: "invalid",
+      message: "Bad Request",
+      fields: { rrule: ["Rule is invalid."], dtstart: ["Start is invalid."] },
+    });
+    expect(schedulerBindingFailure(error)).toBe("Rule is invalid.");
+  });
+
+  it("falls back to the server message, then to the fixed copy for a blank one", () => {
+    expect(
+      schedulerBindingFailure(new ApiError({ status: 409, code: "conflict", message: "Already installed." }))
+    ).toBe("Already installed.");
+    expect(schedulerBindingFailure(new ApiError({ status: 400, code: "invalid", message: "   " }))).toBe(
+      "The install was refused."
+    );
   });
 });
 

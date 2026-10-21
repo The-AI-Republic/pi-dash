@@ -16,6 +16,7 @@ const { contracts } = vi.hoisted(() => ({
     createScheduler: vi.fn(),
     createSchedulerBinding: vi.fn(),
     listSchedulers: vi.fn(),
+    listPods: vi.fn(),
   },
 }));
 
@@ -32,6 +33,8 @@ import {
   definitionFieldError,
   failureMessage,
   initialInstallMode,
+  installSchedulerError,
+  MISSING_SCHEDULER_MESSAGE,
   validateDefinitionDraft,
   type InstallDialogProps,
 } from "./InstallDialog.js";
@@ -126,6 +129,7 @@ function renderForm(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  contracts.listPods.mockResolvedValue([]);
   createAppClient("https://api.test", () => new Promise<never>(() => {}));
 });
 afterEach(() => {
@@ -134,6 +138,12 @@ afterEach(() => {
 });
 
 describe("install path rules", () => {
+  it("flags only an install submit with no definition picked", () => {
+    expect(installSchedulerError("install", "")).toBe(MISSING_SCHEDULER_MESSAGE);
+    expect(installSchedulerError("install", "s1")).toBeUndefined();
+    expect(installSchedulerError("create", "")).toBeUndefined();
+  });
+
   it("picks the opening path from eligibility and author rights", () => {
     expect(initialInstallMode(true, 2)).toBe("install");
     expect(initialInstallMode(true, 0)).toBe("create");
@@ -219,6 +229,51 @@ describe("InstallForm install path", () => {
     await user.click(screen.getByRole("button", { name: "Install" }));
     expect(await screen.findByText("Start time is required.")).toBeInTheDocument();
     expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+  });
+
+  it("sends the default findings mode and project-default pod", async () => {
+    contracts.createSchedulerBinding.mockResolvedValue(binding());
+    const { user } = renderForm({ canAuthor: false });
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(contracts.createSchedulerBinding).toHaveBeenCalled());
+    const [, , , input] = contracts.createSchedulerBinding.mock.calls[0] as unknown[];
+    expect(input).toMatchObject({ outcome_mode: "create_issue", pod: null });
+  });
+
+  it("sends the chosen findings mode and pod override", async () => {
+    contracts.listPods.mockResolvedValue([
+      {
+        id: "pod1",
+        name: "Main pool",
+        description: "",
+        is_default: false,
+        workspace: "w1",
+        project: PROJECT,
+        project_identifier: "RKT",
+        created_by: null,
+        runner_count: 1,
+        created_at: "2026-10-01T00:00:00Z",
+        updated_at: "2026-10-01T00:00:00Z",
+      },
+    ]);
+    contracts.createSchedulerBinding.mockResolvedValue(binding());
+    const { user } = renderForm({ canAuthor: false });
+    await user.click(screen.getByRole("radio", { name: "Apply fix" }));
+    await user.selectOptions(await screen.findByLabelText("Pod"), "pod1");
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    await waitFor(() => expect(contracts.createSchedulerBinding).toHaveBeenCalled());
+    const [, , , input] = contracts.createSchedulerBinding.mock.calls[0] as unknown[];
+    expect(input).toMatchObject({ outcome_mode: "apply_fix", pod: "pod1" });
+  });
+
+  it("flags the picker when the eligible set emptied before submit", async () => {
+    const { user } = renderForm({ canAuthor: true, installable: [] });
+    await user.click(screen.getByRole("tab", { name: "Install existing" }));
+    expect(screen.getByText(/Every enabled workspace scheduler is already installed here/)).toBeInTheDocument();
+    fireEvent.submit(screen.getByRole("form", { name: "New Scheduler" }));
+    expect(await screen.findByText(MISSING_SCHEDULER_MESSAGE)).toBeInTheDocument();
+    expect(contracts.createSchedulerBinding).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
   });
 
   it("installs with the schedule and closes", async () => {

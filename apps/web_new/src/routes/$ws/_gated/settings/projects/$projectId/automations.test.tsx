@@ -87,6 +87,23 @@ describe("automations route", () => {
     expect(screen.getByTestId("automations-extension")).toBeEmptyDOMElement();
   });
 
+  it("paints the automations skeleton while the project read is unresolved", async () => {
+    vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
+    // The project row never answers, so the shell holds on it and must
+    // paint the tab's own skeleton instead of settling blank.
+    const apiClient = createAppClient("https://api.test", (() => new Promise<never>(() => {})) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(projectDetailsQueryOptions(apiClient, PARAMS.ws).queryKey, [
+      { id: PARAMS.projectId, archive_in: 0, close_in: 0, default_state: null } as ProjectDetails,
+    ]);
+    queryClient.setQueryData(automationStatesQueryOptions(apiClient, PARAMS.ws, PARAMS.projectId).queryKey, []);
+    queryClient.setQueryData(projectRolesQueryOptions(apiClient, PARAMS.ws).queryKey, { [PARAMS.projectId]: 20 });
+    queryClient.setQueryData(membershipQueryOptions(apiClient, PARAMS.ws).queryKey, { role: 20 } as never);
+    renderRoute(queryClient);
+    await waitFor(() => expect(screen.getByRole("status", { name: "Automations" })).toBeInTheDocument());
+    expect(screen.queryByRole("heading", { level: 4, name: "Auto-archive closed work items" })).not.toBeInTheDocument();
+  });
+
   it("renders the feature's own denial for a project member and keeps the rail", async () => {
     vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
     const apiClient = createAppClient("https://api.test", (() => {

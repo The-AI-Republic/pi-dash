@@ -169,6 +169,35 @@ describe("ProjectSettingsShell", () => {
     harness.membership = { status: "success", data: { role: ROLE_ADMIN }, isPending: false };
   });
 
+  it("renders the tab's pending fallback inside the content column while reads resolve", () => {
+    harness.row = {
+      status: "pending",
+      data: undefined,
+      error: undefined,
+      isPending: true,
+      isSuccess: false,
+      isError: false,
+    };
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectSettingsShell workspaceSlug="acme" projectId={PID} pendingFallback={<p>skeleton body</p>}>
+          <p>tab body</p>
+        </ProjectSettingsShell>
+      </QueryClientProvider>
+    );
+    expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument();
+    expect(screen.getByText("skeleton body")).toBeInTheDocument();
+    expect(screen.queryByText("tab body")).not.toBeInTheDocument();
+    harness.row = {
+      status: "success",
+      data: PROJECT,
+      error: undefined,
+      isPending: false,
+      isSuccess: true,
+      isError: false,
+    };
+  });
+
   it("renders the rail, the page body and the role caption", () => {
     renderShell();
     expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument();

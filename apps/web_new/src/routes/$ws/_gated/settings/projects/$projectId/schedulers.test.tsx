@@ -57,14 +57,28 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
 vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   useSchedulerBindings: () => harness.bindings,
+  EditInstallDialog: ({ binding, onSaved }: { binding: SchedulerBinding | null; onSaved: () => void }) => (
+    <div data-testid="edit-dialog" data-binding={binding?.id ?? ""}>
+      <button type="button" onClick={onSaved}>
+        Settle edit
+      </button>
+    </div>
+  ),
+  UninstallInstallDialog: ({ binding }: { binding: SchedulerBinding | null }) => (
+    <div data-testid="uninstall-dialog" data-binding={binding?.id ?? ""} />
+  ),
   InstallsList: ({
     variant,
     onCreate,
     onOpenInstall,
+    onEditInstall,
+    onUninstallInstall,
   }: {
     variant: string;
     onCreate: () => void;
     onOpenInstall: (binding: SchedulerBinding) => void;
+    onEditInstall?: (binding: SchedulerBinding) => void;
+    onUninstallInstall?: (binding: SchedulerBinding) => void;
   }) => (
     <div data-testid="installs-list" data-variant={variant}>
       <button type="button" onClick={onCreate}>
@@ -72,6 +86,12 @@ vi.mock("../../../../../../features/schedulers/index.js", async (importOriginal)
       </button>
       <button type="button" onClick={() => onOpenInstall({ id: "b1" } as SchedulerBinding)}>
         Open install
+      </button>
+      <button type="button" onClick={() => onEditInstall?.({ id: "b2" } as SchedulerBinding)}>
+        Edit row
+      </button>
+      <button type="button" onClick={() => onUninstallInstall?.({ id: "b3" } as SchedulerBinding)}>
+        Uninstall row
       </button>
     </div>
   ),
@@ -171,6 +191,35 @@ describe("schedulers settings route", () => {
 
     await user.click(screen.getByRole("button", { name: "Settle list" }));
     expect(harness.bindings.refetch).toHaveBeenCalled();
+  });
+
+  it("opens the prefilled edit dialog and refreshes the rows after a save", async () => {
+    const user = userEvent.setup();
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("installs-list")).toBeInTheDocument());
+    expect(screen.getByTestId("edit-dialog")).toHaveAttribute("data-binding", "");
+    await user.click(screen.getByRole("button", { name: "Edit row" }));
+    expect(screen.getByTestId("edit-dialog")).toHaveAttribute("data-binding", "b2");
+    await user.click(screen.getByRole("button", { name: "Settle edit" }));
+    expect(harness.bindings.refetch).toHaveBeenCalled();
+  });
+
+  it("opens the uninstall confirmation for a row", async () => {
+    const user = userEvent.setup();
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("installs-list")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Uninstall row" }));
+    expect(screen.getByTestId("uninstall-dialog")).toHaveAttribute("data-binding", "b3");
+  });
+
+  it("offers an empty installed set while the install list is still unsettled", async () => {
+    harness.bindings = { data: undefined, refetch: vi.fn() } as unknown as {
+      data: SchedulerBinding[];
+      refetch: ReturnType<typeof vi.fn>;
+    };
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("install-dialog")).toBeInTheDocument());
+    expect(screen.getByTestId("install-dialog")).toHaveAttribute("data-installed", "");
   });
 
   it("lets a workspace admin author definitions from the settings panel", async () => {

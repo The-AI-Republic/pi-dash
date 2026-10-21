@@ -30,9 +30,14 @@ export type { SchedulerDeleteDialogProps } from "./SchedulerDeleteDialog.js";
 
 // Project installs (AGT-006–012).
 export {
+  bindingDetailQueryOptions,
   bindingKeys,
+  bindingRunsQueryOptions,
   bindingsQueryOptions,
   invalidateInstalls,
+  RUNS_POLL_INTERVAL_MS,
+  useSchedulerBindingDetail,
+  useSchedulerBindingRuns,
   schedulerBindingFailure,
   schedulerCatalogKey,
   useInstallSchedulerBinding,
@@ -99,6 +104,25 @@ export {
 } from "./installResults.js";
 export type { BulkSelection, InstallOutcome, InstallPartition } from "./installResults.js";
 export { InstallsList, formatRunTimestamp, scheduleText } from "./InstallsList.js";
+export {
+  configRows,
+  displayTimeZone,
+  emptyHistoryText,
+  formatDuration,
+  formatMoment,
+  installedByName,
+  isSeriesCompleted,
+  pagerTotalPages,
+  runResultExcerpt,
+  runStartedLabel,
+  runStatusLabel,
+  runStatusTone,
+  SERIES_COMPLETED_BADGE,
+  SERIES_COMPLETED_TEXT,
+  SERIES_EXHAUSTED_FIELD,
+  sourceLabel,
+} from "./bindingDetail.js";
+export type { ConfigRow, RunTone } from "./bindingDetail.js";
 export type { InstallsListProps } from "./InstallsList.js";
 export {
   InstallDialog,
