@@ -9,7 +9,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { adminKeys } from "../queries.js";
+import { instanceAppKeys } from "../../instance/index.js";
 import { AdminEntryGate, type AdminEntrySearch } from "./AdminEntryGate.js";
 
 function envelope(setupDone: boolean): InstanceBootstrap {
@@ -141,6 +141,33 @@ describe("AdminEntryGate", () => {
     expect(seen).toEqual(["/api/instances/"]);
   });
 
+  it("resolves the bare unprovisioned envelope to the setup form", async () => {
+    createAppClient("https://api.test", ((url: string) => {
+      const path = new URL(url, "https://api.test").pathname;
+      if (path === "/auth/get-csrf-token/") {
+        return Promise.resolve({
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: () => Promise.resolve(JSON.stringify({ csrf_token: "csrf-1" })),
+        });
+      }
+      return Promise.resolve({
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ is_activated: false, is_setup_done: false })),
+      });
+    }) as Transport);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AdminEntryGate search={{}} />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("admin-setup-form")).toBeInTheDocument());
+    expect(screen.queryByTestId("admin-failure")).not.toBeInTheDocument();
+  });
+
   it("renders the failure screen when the read errors", async () => {
     createAppClient("https://api.test", ((url: string) =>
       Promise.resolve({
@@ -162,7 +189,7 @@ describe("AdminEntryGate", () => {
   it("forwards the redirect search to the resolved form", async () => {
     createAppClient("https://api.test", stubTransport([]));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(adminKeys.bootstrap, envelope(false));
+    queryClient.setQueryData(instanceAppKeys.bootstrap, { setupDone: false, bootstrap: envelope(false) });
     render(
       <QueryClientProvider client={queryClient}>
         <AdminEntryGate

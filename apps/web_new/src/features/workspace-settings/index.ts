@@ -6,6 +6,8 @@
 // their page bodies through the registry exports.
 
 export { WorkspaceGeneralPage } from "./general/index.js";
+export { ExportsSettingsPage } from "./components/ExportsSettingsPage.js";
+export type { ExportsSettingsPageProps } from "./components/ExportsSettingsPage.js";
 export { SettingsIdentity } from "./components/SettingsIdentity.js";
 export type { SettingsIdentityProps } from "./components/SettingsIdentity.js";
 export { SettingsMobileNav } from "./components/SettingsMobileNav.js";
@@ -34,6 +36,13 @@ export {
   SettingsSectionPlaceholder,
   SETTINGS_SECTION_PLACEHOLDER_TITLE,
 } from "./components/SettingsSectionPlaceholder.js";
+export {
+  getWorkspaceExportsGuide,
+  registerWorkspaceExportsGuide,
+  resetWorkspaceExportsGuide,
+  useWorkspaceExportsGuide,
+} from "./lib/exportsGuide.js";
+export type { WorkspaceExportsGuideComponent, WorkspaceExportsGuideProps } from "./lib/exportsGuide.js";
 export { decideWorkspaceSettingsGate } from "./lib/gate.js";
 export { resolveWorkspaceSettingsIdentity } from "./lib/identity.js";
 export type { WorkspaceSettingsIdentity } from "./lib/identity.js";

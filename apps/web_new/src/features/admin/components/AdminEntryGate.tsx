@@ -9,7 +9,7 @@
 
 import * as React from "react";
 
-import { useInstanceBootstrap } from "../hooks.js";
+import { useAppInstanceBootstrap } from "../../instance/index.js";
 import { AdminBrandLoader } from "./AdminBrandLoader.js";
 import { AdminSetupForm } from "./AdminSetupForm.js";
 import { AdminSignInForm } from "./AdminSignInForm.js";
@@ -28,8 +28,10 @@ export interface AdminEntrySearch {
 }
 
 export function AdminEntryGate({ search }: { search: AdminEntrySearch }): React.ReactElement {
-  const bootstrap = useInstanceBootstrap();
-  const setupDone = bootstrap.data?.instance.is_setup_done;
+  // The startup read accepts the backend's unprovisioned envelope, so a
+  // fresh instance reaches the setup form instead of the failure screen.
+  const bootstrap = useAppInstanceBootstrap();
+  const setupDone = bootstrap.data?.setupDone;
   if (setupDone !== undefined) {
     return setupDone ? <AdminSignInForm search={search} /> : <AdminSetupForm search={search} />;
   }

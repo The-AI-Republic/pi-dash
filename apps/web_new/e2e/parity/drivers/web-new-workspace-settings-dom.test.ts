@@ -7,7 +7,7 @@
 // idle-label probe after saving, and the PATCH matcher after a logo removal.
 import type { Page, Response } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WebNewDriver } from "./web-new";
+import { WebNewDriver, wsSettingsSurfaceSettled } from "./web-new";
 
 type Fn = (...args: never[]) => unknown;
 
@@ -78,6 +78,51 @@ describe("wsSettingsOpen settle probe", () => {
     const page = capturePage();
     await new WebNewDriver(page).wsSettingsOpen("acme", "general");
     expect(predicates(page, "waitForFunction")[0]()).toBe(false);
+  });
+});
+
+describe("workspace-settings surface settle predicate (NEWFRONT-548)", () => {
+  it("settles on the workspace-not-found heading the app renders", () => {
+    document.body.innerHTML = "<main><h1> Workspace not found </h1></main>";
+    document.title = "Pi Dash";
+    expect(wsSettingsSurfaceSettled()).toBe(true);
+  });
+
+  it("does not settle on a document title alone", () => {
+    document.title = "Workspace not found";
+    document.body.innerHTML = "<main><p>Loading</p></main>";
+    expect(wsSettingsSurfaceSettled()).toBe(false);
+  });
+
+  it("ignores an unrelated heading and settles on each instance screen", () => {
+    document.body.innerHTML = "<h2>Recent exports</h2>";
+    document.title = "Workspace not found";
+    expect(wsSettingsSurfaceSettled()).toBe(false);
+
+    document.body.innerHTML = "<div data-testid='workspace-settings-shell'></div>";
+    expect(wsSettingsSurfaceSettled()).toBe(true);
+    document.body.innerHTML = "<div data-testid='instance-maintenance'></div>";
+    expect(wsSettingsSurfaceSettled()).toBe(true);
+    document.body.innerHTML = "<div data-testid='instance-not-ready'></div>";
+    expect(wsSettingsSurfaceSettled()).toBe(true);
+    document.body.innerHTML = "<div data-testid='workspace-settings-not-authorized'></div>";
+    expect(wsSettingsSurfaceSettled()).toBe(true);
+  });
+
+  it("treats a heading without text content as unsettled", () => {
+    document.body.innerHTML = "<h1></h1>";
+    const heading = document.querySelector("h1") as HTMLElement;
+    Object.defineProperty(heading, "textContent", { get: () => null, configurable: true });
+    expect(wsSettingsSurfaceSettled()).toBe(false);
+  });
+
+  it("hands the predicate to Playwright rather than a title check", async () => {
+    const page = capturePage({
+      context: () => ({ addCookies: vi.fn(async () => undefined) }),
+    });
+    await new WebNewDriver(page).exportsSettingsOpen("acme", []);
+    const [settled] = predicates(page, "waitForFunction");
+    expect(settled).toBe(wsSettingsSurfaceSettled);
   });
 });
 

@@ -42,8 +42,11 @@ function element(overrides: LocatorStub = {}): LocatorStub {
     click: async () => undefined,
     waitFor: async () => undefined,
     first: () => self,
+    last: () => self,
     filter: () => self,
     nth: () => self,
+    getByRole: () => self,
+    locator: () => self,
     ...overrides,
   };
   return self;
@@ -55,8 +58,11 @@ function chain(overrides: LocatorStub = {}): LocatorStub {
     ...element(overrides),
     ...overrides,
     first: () => self,
+    last: () => self,
     filter: () => self,
     nth: () => self,
+    getByRole: () => self,
+    locator: () => self,
   };
   return self;
 }
@@ -75,7 +81,13 @@ function stubPage(overrides: Record<string, unknown> = {}): Page {
     getByRole: () => element(),
     getByText: () => element(),
     locator: () => element(),
-    context: () => ({ grantPermissions: vi.fn(async () => undefined) }),
+    context: () => ({
+      grantPermissions: vi.fn(async () => undefined),
+      addCookies: vi.fn(async () => undefined),
+    }),
+    title: async () => "Acme · Members",
+    emulateMedia: vi.fn(async () => undefined),
+    unroute: vi.fn(async () => undefined),
     ...overrides,
   };
   return page as unknown as Page;
@@ -853,5 +865,200 @@ describe("web-new workspace settings integrations driver", () => {
     await new WebNewDriver(page).wsSettingsGitlabHostFill("https://gitlab.example.com");
     expect(page.getByPlaceholder as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("https://gitlab.com");
     expect(fill).toHaveBeenCalledWith("https://gitlab.example.com", { timeout: 30_000 });
+  });
+});
+
+describe("exports entry and instance startup driver (NEWFRONT-548, WSET-033–035)", () => {
+  it("opens the exports address and settles on the shell or denial", async () => {
+    const page = stubPage();
+    const driver = new WebNewDriver(page);
+    await driver.exportsSettingsOpen("acme", []);
+    expect(page.goto as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("/acme/settings/exports", {
+      waitUntil: "domcontentloaded",
+    });
+    expect(page.waitForFunction as ReturnType<typeof vi.fn>).toHaveBeenCalled();
+    expect(await driver.exportsSettingsCurrentPath()).toBe("/acme/settings/");
+  });
+
+  it("classifies the three access shapes", async () => {
+    const denied = stubPage({
+      getByTestId: (id: string) => element({ count: async () => (id === "workspace-settings-not-authorized" ? 1 : 0) }),
+    });
+    await expect(new WebNewDriver(denied).exportsSettingsAccess()).resolves.toBe("not-authorized");
+
+    const form = stubPage({
+      getByTestId: (id: string) => element({ count: async () => (id === "workspace-exports-settings" ? 1 : 0) }),
+    });
+    await expect(new WebNewDriver(form).exportsSettingsAccess()).resolves.toBe("form");
+
+    const outsider = stubPage({ getByTestId: () => element({ count: async () => 0 }) });
+    await expect(new WebNewDriver(outsider).exportsSettingsAccess()).resolves.toBe("no-workspace");
+  });
+
+  it("reads the heading, description, breadcrumb and tab title", async () => {
+    const page = stubPage({
+      getByTestId: () =>
+        element({
+          getByRole: () => element({ innerText: async () => " Exports " }),
+          locator: () => element({ innerText: async () => " Exports " }),
+        }),
+      locator: (selector: string) =>
+        selector.startsWith("nav") ? element({ innerText: async () => " Exports " }) : element(),
+      title: async () => "Acme · Exports",
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.exportsSettingsHeading()).resolves.toEqual({
+      title: "Exports",
+      description: "Exports",
+    });
+    await expect(driver.exportsSettingsBreadcrumb()).resolves.toEqual(["Exports"]);
+    await expect(driver.exportsSettingsPageTitle()).resolves.toBe("Acme · Exports");
+  });
+
+  it("reports empty heading and breadcrumb when the page never mounted", async () => {
+    const page = stubPage({
+      getByTestId: () => element({ count: async () => 0 }),
+      locator: () => element({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.exportsSettingsHeading()).resolves.toEqual({ title: "", description: "" });
+    await expect(driver.exportsSettingsBreadcrumb()).resolves.toEqual([]);
+  });
+
+  it("reads the guide probes the exports area renders", async () => {
+    const page = stubPage({
+      getByRole: () => element({ innerText: async () => " Export " }),
+      locator: (selector: string) =>
+        selector === "tbody tr" ? element({ count: async () => 3 }) : element({ innerText: async () => " CSV " }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.exportsSettingsProjectPickerLabel()).resolves.toBe("CSV");
+    await expect(driver.exportsSettingsFormatLabel()).resolves.toBe("CSV");
+    await expect(driver.exportsSettingsSubmitLabel()).resolves.toBe("Export");
+    await expect(driver.exportsSettingsHistoryCount()).resolves.toBe(3);
+  });
+
+  it("opens a section by address and reads the shared settings surface", async () => {
+    const page = stubPage({
+      getByTestId: (id: string) =>
+        element({ count: async () => (id === "workspace-settings-sidebar" ? 1 : 0), innerText: async () => "  a  b " }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsOpenSection("acme", "members", []);
+    expect(page.goto as ReturnType<typeof vi.fn>).toHaveBeenCalledWith("/acme/settings/members", {
+      waitUntil: "domcontentloaded",
+    });
+    await expect(driver.wsSettingsSidebarVisible()).resolves.toBe(true);
+    await expect(driver.wsSettingsNotAuthorized()).resolves.toBe(false);
+    await expect(driver.wsSettingsOutletText()).resolves.toBe("a b");
+  });
+
+  it("fails, serves not-ready, and resets the instance route in turn", async () => {
+    let handler!: (route: Route) => Promise<void>;
+    const route = vi.fn(async (_pattern: string, installed: (route: Route) => Promise<void>) => {
+      handler = installed;
+    });
+    const unroute = vi.fn(async () => undefined);
+    const page = stubPage({ route, unroute });
+    const driver = new WebNewDriver(page);
+
+    await driver.wsSettingsFailInstanceInfo();
+    expect(route).toHaveBeenCalledWith("**/api/instances/", expect.any(Function));
+    const aborted = { abort: vi.fn(async () => undefined), fallback: vi.fn(async () => undefined) };
+    await handler(aborted as unknown as Route);
+    expect(aborted.abort).toHaveBeenCalledWith("failed");
+
+    await driver.wsSettingsServeInstanceNotReady();
+    // One install only: the mode changes under the same route.
+    expect(route).toHaveBeenCalledTimes(1);
+    const fulfilled = {
+      request: () => ({ method: () => "GET" }),
+      fulfill: vi.fn(async () => undefined),
+      fallback: vi.fn(async () => undefined),
+    };
+    await handler(fulfilled as unknown as Route);
+    expect(fulfilled.fulfill).toHaveBeenCalledWith(
+      expect.objectContaining({ body: JSON.stringify({ is_activated: false, is_setup_done: false }) })
+    );
+
+    await driver.wsSettingsResetInstanceRoutes();
+    expect(unroute).toHaveBeenCalledWith("**/api/instances/");
+  });
+
+  it("passes the running-instance read through once the mode is reset", async () => {
+    let handler!: (route: Route) => Promise<void>;
+    const route = vi.fn(async (_pattern: string, installed: (route: Route) => Promise<void>) => {
+      handler = installed;
+    });
+    const driver = new WebNewDriver(stubPage({ route, unrouteAll: vi.fn(async () => undefined) }));
+    await driver.wsSettingsServeInstanceNotReady();
+    await driver.wsSettingsResetInstanceRoutes();
+    await driver.wsSettingsServeInstanceNotReady();
+    const passthrough = {
+      request: () => ({ method: () => "PATCH" }),
+      fulfill: vi.fn(async () => undefined),
+      fallback: vi.fn(async () => undefined),
+    };
+    await handler(passthrough as unknown as Route);
+    expect(passthrough.fallback).toHaveBeenCalled();
+  });
+
+  it("reads the maintenance screen markers", async () => {
+    const page = stubPage({
+      getByTestId: () => element({ count: async () => 1 }),
+      locator: (selector: string) =>
+        element({
+          count: async () => 1,
+          getAttribute: async () =>
+            selector.includes("maintenance-mode-")
+              ? "/illustrations/maintenance-mode-dark.svg"
+              : "mailto:support@airepublic.com",
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsMaintenanceVisible()).resolves.toBe(true);
+    await expect(driver.wsSettingsMaintenanceIllustration()).resolves.toBe("/illustrations/maintenance-mode-dark.svg");
+    await expect(driver.wsSettingsMaintenanceSupportHref()).resolves.toBe("mailto:support@airepublic.com");
+  });
+
+  it("reports no maintenance markers once the app renders", async () => {
+    const page = stubPage({
+      getByTestId: () => element({ count: async () => 0 }),
+      locator: () => element({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsMaintenanceVisible()).resolves.toBe(false);
+    await expect(driver.wsSettingsMaintenanceIllustration()).resolves.toBeNull();
+    await expect(driver.wsSettingsMaintenanceSupportHref()).resolves.toBeNull();
+  });
+
+  it("reads the not-ready facts and their absent branch", async () => {
+    const screen = element({
+      count: async () => 1,
+      getByRole: () => element({ innerText: async () => " Welcome to Pi Dash " }),
+      locator: () => element({ count: async () => 1, getAttribute: async () => "/god-mode" }),
+    });
+    const page = stubPage({
+      getByTestId: (id: string) => (id === "instance-not-ready" ? screen : element({ count: async () => 0 })),
+    });
+    await expect(new WebNewDriver(page).wsSettingsNotReadyFacts()).resolves.toEqual({
+      heading: "Welcome to Pi Dash",
+      getStartedHref: "/god-mode",
+      workspaceContent: false,
+    });
+
+    const empty = stubPage({ getByTestId: () => element({ count: async () => 0 }) });
+    await expect(new WebNewDriver(empty).wsSettingsNotReadyFacts()).resolves.toEqual({
+      heading: null,
+      getStartedHref: null,
+      workspaceContent: false,
+    });
+  });
+
+  it("marks the requested color scheme", async () => {
+    const emulateMedia = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(stubPage({ emulateMedia }));
+    await driver.wsSettingsSetColorScheme("dark");
+    expect(emulateMedia).toHaveBeenCalledWith({ colorScheme: "dark" });
   });
 });

@@ -765,8 +765,7 @@ dialog exists (§31). Oracle: `billing.spec.ts`.
 
 The exports page (`settings/exports/`) admits admins and members;
 guests get the not-authorized view. Admitted roles see an `Exports`
-heading with an explanatory paragraph about exporting project data in
-several formats and reaching past exports through download links,
+heading with the explanatory paragraph pinned below,
 plus a breadcrumb naming the section and the §2 tab title. Below the
 heading mounts the export guide — the format/project export form and
 the previous-exports history with download links and paging — which
@@ -782,6 +781,12 @@ denial and the seam contract with unit tests (including a stub
 registrant mounting through the seam); the workspace gate proves the
 full entry scenario once the exports provider exists.
 
+Pinned text (EXP-001, and the exports area spec's page-frame section):
+`Export your project data in various formats and access your export
+history with download links.` The exports oracle asserts this exact
+sentence, so it is behavior under the pinned-text convention above and
+this entry renders it verbatim rather than paraphrasing it.
+
 ## 34. Instance maintenance (WSET-034, slice NEWFRONT-548)
 
 The app shell reads GET `/api/instances/` once at startup. While that
@@ -796,6 +801,19 @@ request-level error status that still returns data does not trigger
 the view, and the initial load shows a full-screen spinner until the
 read first settles. Oracle: `cross-cutting.spec.ts`.
 
+The maintenance view appears as soon as the read fails (it never waits
+on a retry), and the read keeps retrying in the background with
+exponential backoff capped at a short interval, so an instance that
+comes back during a restart is picked up without the user reloading.
+The screen picks the illustration from the resolved color scheme
+(custom schemes follow their dark half).
+
+The administrator entry subtree (`/god-mode` and its descendants,
+including setup and sign-in) is exempt from the replacement: it must
+stay reachable even when the instance read fails, so this view never
+covers it. Every other route — workspace, auth-card and space — is
+replaced.
+
 ## 35. Instance not-ready (WSET-035, slice NEWFRONT-548)
 
 When the instance-info read reports setup unfinished
@@ -805,6 +823,11 @@ not-ready view instead of any workspace content: product branding, a
 started` control leading to the administrator sign-in at `/god-mode`.
 No sidebar or workspace content renders underneath. Once setup reads
 finished the app renders normally. Oracle: `cross-cutting.spec.ts`.
+
+As in §34, the administrator entry subtree (`/god-mode` and its
+descendants) stays reachable while setup is unfinished; the view
+replaces every other route. This is what makes `Get started` able to
+reach the setup form on a fresh instance.
 
 ## 36. Deep links (WSET-036, slice NEWFRONT-534)
 

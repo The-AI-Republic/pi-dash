@@ -8,6 +8,7 @@
 // issues-list specs until the mock carried the executor fields).
 import { describe, expect, it } from "vitest";
 import {
+  InstanceBootstrap,
   IssueListResponse,
   Me,
   OwnWorkspaceMembership,
@@ -21,6 +22,7 @@ import {
   WorkspaceList,
 } from "@pidash/api-client";
 import {
+  mockInstanceBootstrap,
   mockIssue,
   mockIssues,
   mockMe,
@@ -37,6 +39,8 @@ import {
 
 describe("perf mocks satisfy their contracts", () => {
   it("parses every mocked payload", () => {
+    expect(() => InstanceBootstrap.parse(mockInstanceBootstrap())).not.toThrow();
+    expect(mockInstanceBootstrap().instance.is_setup_done).toBe(true);
     expect(() => Me.parse(mockMe())).not.toThrow();
     expect(() => Profile.parse(mockProfile())).not.toThrow();
     expect(() => WorkspaceList.parse(mockWorkspaces())).not.toThrow();

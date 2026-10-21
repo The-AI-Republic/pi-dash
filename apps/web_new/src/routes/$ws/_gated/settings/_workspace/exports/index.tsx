@@ -1,14 +1,20 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Workspace settings section route (WSET-001/036). Thin: the shell owns
-// the frame and the gate, and the exports page slice registers its body in the
-// shared page registry.
+// Workspace settings exports route (parity/specs/workspace-settings.md
+// §33, WSET-033). The shell owns the frame and the gate; this slice
+// registers the exports entry in the shell's page registry, and the route
+// only mounts the section outlet. That keeps one entry point for the
+// exports area and its guide slot.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { SettingsSectionOutlet } from "../../../../../../features/workspace-settings/index.js";
+import {
+  ExportsSettingsPage,
+  registerWorkspaceSettingsPage,
+  SettingsSectionOutlet,
+} from "../../../../../../features/workspace-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace/exports/")({
   component: WorkspaceSettingsSectionPage,
@@ -16,5 +22,9 @@ export const Route = createFileRoute("/$ws/_gated/settings/_workspace/exports/")
 
 function WorkspaceSettingsSectionPage(): React.ReactElement {
   const { ws } = Route.useParams();
+  // Register for as long as this section route is mounted: the shell outlet
+  // stays the only render path, and the exports area's page has exactly one
+  // entry point.
+  React.useLayoutEffect(() => registerWorkspaceSettingsPage("exports", ExportsSettingsPage), []);
   return <SettingsSectionOutlet workspaceSlug={ws} section="exports" />;
 }

@@ -8,7 +8,8 @@
 // same shell, with the workspace slug and the webhook id, and the billing
 // half (NEWFRONT-546) likewise mounts its own page. The members roster
 // (NEWFRONT-537) registers its body from its own chunk, so the registry
-// loop covers it after the chunk registers.
+// loop covers it after the chunk registers, and exports (NEWFRONT-548)
+// registers its entry page through the same seam.
 import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
@@ -16,6 +17,8 @@ import type { RouteComponent } from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ExportsSettingsPage,
+  getWorkspaceSettingsPage,
   registerWorkspaceSettingsPage,
   resetWorkspaceSettingsPages,
   type WorkspaceSettingsPageProps,
@@ -38,8 +41,8 @@ const Layout = LayoutRoute.options.component;
 if (Layout === undefined) throw new Error("missing settings layout component");
 const LayoutComponent: RouteComponent = Layout;
 
-// The general and integrations sections ship their own pages (NEWFRONT-535,
-// NEWFRONT-539); every other section still resolves through the shell's
+// The general, integrations and exports sections ship their own pages
+// (NEWFRONT-535, -539, -548); members still resolves through the shell's
 // registration seam.
 
 /** Body that reports a completed leave the way the roster page does. */
@@ -53,7 +56,6 @@ function LeaveProbe({ onLeaveWorkspace }: WorkspaceSettingsPageProps): React.Rea
 
 const SECTIONS: Array<[WorkspaceSettingsSectionKey, string, RouteComponent]> = [
   ["members", "members", MembersRoute.options.component as RouteComponent],
-  ["exports", "exports", ExportsRoute.options.component as RouteComponent],
 ];
 
 // The roster chunk registers its body when the route loads it; the test
@@ -215,6 +217,38 @@ describe("workspace settings section routes", () => {
     // The frame's stub answers 404 for the list: the page owns that state
     // and still renders its heading and Add control.
     expect(await screen.findByRole("button", { name: "Add webhook" })).toBeInTheDocument();
+  });
+
+  // Exports (NEWFRONT-548) publishes its entry into the shell's page
+  // registry while the section route is mounted, so the settings shell
+  // keeps one render path for every section body.
+  it("registers the exports entry with the shell page registry", async () => {
+    expect(getWorkspaceSettingsPage("exports")).toBeNull();
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: ExportsRoute.options.component as RouteComponent,
+      leafPath: "exports",
+      transport: settingsTransport({ role: 20 }),
+    });
+    expect(await screen.findByTestId("workspace-exports-settings")).toBeInTheDocument();
+    expect(getWorkspaceSettingsPage("exports")).toBe(ExportsSettingsPage);
+  });
+
+  it("mounts the exports entry with its explanation and guide slot", async () => {
+    renderSettingsRoute({
+      layoutComponent: LayoutComponent,
+      component: ExportsRoute.options.component as RouteComponent,
+      leafPath: "exports",
+      transport: settingsTransport({ role: 20 }),
+    });
+    expect(await screen.findByTestId("workspace-exports-settings")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Exports" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Export your project data in various formats and access your export history with download links."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("workspace-exports-guide-pending")).toBeInTheDocument();
   });
 
   it("mounts the webhook detail page for its id", async () => {
