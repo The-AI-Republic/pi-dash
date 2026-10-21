@@ -1547,7 +1547,7 @@ fn strip_decimal_suffix(text: &str) -> String {
 
 /// `PrimaryKeyRelatedField.to_internal_value` without `pk_field`
 /// (`relations.py`, which is what `ModelSerializer` builds for these FKs):
-/// bools/lists/dicts fail `incorrect_type`; anything else goes to
+/// bools fail `incorrect_type`; lists/dicts and other scalars go to
 /// `queryset.get(pk=data)`, where unparseable input raises Django's
 /// `ValidationError` (`"..." is not a valid UUID.`, curly quotes,
 /// `db/models/fields/__init__.py`) — caught per-field by
@@ -1567,13 +1567,13 @@ async fn coerce_fk_user(
             "Incorrect type. Expected pk value, received bool.".to_owned(),
         ));
     }
-    if let Some(kind) = match value {
-        Value::Array(_) => Some("list"),
-        Value::Object(_) => Some("dict"),
-        _ => None,
-    } {
+    if value.is_array() || value.is_object() {
+        // `queryset.get(pk=data)` pushes the composite through the target
+        // model's `UUIDField.to_python`, whose miss renders the value inside
+        // curly quotes (Django `UUIDField.default_error_messages['invalid']`).
         return Err(CoerceFail::Msg(format!(
-            "Incorrect type. Expected pk value, received {kind}."
+            "\u{201c}{}\u{201d} is not a valid UUID.",
+            python_str(value)
         )));
     }
     let text = match value {
@@ -1636,35 +1636,24 @@ fn coerce_json(value: &Value) -> Result<Value, CoerceFail> {
     }
 }
 
-/// `ChoiceField.to_internal_value`: `str(data)` looked up in the choice
-/// strings; misses echo the raw input.
-fn coerce_choice(value: &Value, choices: &[&str]) -> Result<String, CoerceFail> {
-    let text = match value {
+/// CPython ``str`` for a JSON value: a bare string is itself; containers
+/// and scalars render through the shared CPython ``repr`` implementation.
+fn python_str(value: &Value) -> String {
+    match value {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => {
-            if *b {
-                "True".to_owned()
-            } else {
-                "False".to_owned()
-            }
-        }
-        _ => {
-            return Err(CoerceFail::Msg(invalid_choice_msg(&render_input(value))));
-        }
-    };
+        _ => pidash_jobs::py_repr(value),
+    }
+}
+
+/// `ChoiceField.to_internal_value`: `str(data)` (CPython semantics) looked
+/// up in the choice strings; a miss echoes that same `str(data)`. Lists and
+/// dicts therefore surface as their Python repr, not their JSON repr.
+fn coerce_choice(value: &Value, choices: &[&str]) -> Result<String, CoerceFail> {
+    let text = python_str(value);
     if choices.contains(&text.as_str()) {
         Ok(text)
     } else {
         Err(CoerceFail::Msg(invalid_choice_msg(&text)))
-    }
-}
-
-fn render_input(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Null => "None".to_owned(),
-        _ => value.to_string(),
     }
 }
 
@@ -1757,14 +1746,10 @@ async fn coerce_field(
         | "is_default"
         | "members_can_edit_states" => FieldValue::Bool(coerce_bool(value)?),
         "archive_in" | "close_in" => FieldValue::Int(coerce_int(value, 0, 12)?),
-        "timezone" => FieldValue::Str({
-            let text = coerce_char(value, false, Some(255))?;
-            coerce_choice(
-                &Value::String(text.clone()),
-                super::tz_zones::PYTZ_COMMON_TIMEZONES,
-            )
-            .map(|_| text)?
-        }),
+        "timezone" => FieldValue::Str(coerce_choice(
+            value,
+            super::tz_zones::PYTZ_COMMON_TIMEZONES,
+        )?),
         "repo_url" => FieldValue::Str(coerce_char(value, true, Some(512))?),
         "base_branch" => {
             let text = coerce_char(value, true, Some(128))?;
@@ -3642,6 +3627,20 @@ mod tests {
                 "link": true, "priority": true, "start_date": true, "state": true,
                 "sub_issue_count": true, "updated_on": true
             })
+        );
+    }
+
+    #[test]
+    fn python_str_matches_cpython() {
+        // A bare string is `str`, not `repr`; containers use the shared
+        // CPython `repr` (quote choice, control escapes, float formatting).
+        assert_eq!(python_str(&serde_json::json!("UTC")), "UTC");
+        assert_eq!(python_str(&serde_json::json!(["UTC"])), "['UTC']");
+        assert_eq!(python_str(&serde_json::json!(["it's"])), r#"["it's"]"#);
+        assert_eq!(python_str(&serde_json::json!(["a\nb"])), r#"['a\nb']"#);
+        assert_eq!(
+            python_str(&serde_json::json!({ "a": true, "b": null })),
+            "{'a': True, 'b': None}"
         );
     }
 
