@@ -107,6 +107,10 @@ use serde_json::Value;
 use crate::state::AppState;
 
 use crate::assistant::throttles::{allow_request, cache_key, ThrottleSpec, RATE_LIMIT_BODY};
+use crate::v1_cycles_modules::body as shared_body;
+use crate::v1_cycles_modules::json_cpython::{
+    parse_request_bytes_spans, to_serde_publish, JsonFail, JSON_PARSE_PREFIX,
+};
 use pidash_services::prompting::{composer, context, recipes, registry, validation};
 
 /// `views.py:59`: numeric `WorkspaceMember.role` for the admin role.
@@ -218,6 +222,9 @@ enum Denial {
     BadError(String),
     /// 400, `{"detail":…}` (DRF `ParseError`, unparseable body).
     BadDetail(String),
+    /// 415, DRF `select_parser` (`{"detail":…}`): every write path that
+    /// reads `request.data` negotiates the body (PIDASHCONV-1230).
+    UnsupportedMediaType(String),
     /// 400, `{"error":…, "kinds":[…]}` (unknown kind).
     BadKind(String),
     /// 404, `{"error":…}` (unknown section / no active override).
@@ -255,6 +262,10 @@ impl Denial {
             ),
             Denial::BadDetail(message) => (
                 StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("{{\"detail\":{}}}", json_string(message)),
             ),
             Denial::BadKind(kind) => (
@@ -381,14 +392,15 @@ async fn check_user_throttle(state: &AppState, user_id: &uuid::Uuid) -> Result<(
 //   check (`_check_referer`), exactly as Django 4.2 does;
 // * the `csrftoken` cookie carries the secret (masked or not); the
 //   request token comes from the `csrfmiddlewaretoken` POST form field
-//   for urlencoded POSTs, else the `X-CSRFToken` header (the only way
-//   for PUT/DELETE).
+//   (form/multipart bodies), else the `X-CSRFToken` header (the only
+//   way for PUT/DELETE).
 //
-// Intentional gaps (documented, not silent): multipart form bodies are
-// not field-scanned (JSON is the API's only contract content type, so a
-// multipart POST without the header reports the header as missing where
-// Django would read the field); percent-decoding of the urlencoded field
-// covers the token alphabet (alphanumeric tokens never encode).
+// The gate runs in two phases, like `_check_token` after
+// `process_request`: the cookie/Origin/Referer phase, then (after the
+// POST body has been negotiated) the request-token phase. The POST
+// `csrfmiddlewaretoken` field comes from the negotiated form map, so
+// multipart and urlencoded bodies both supply it, last value winning
+// exactly like `QueryDict.get` (PIDASHCONV-1230).
 
 /// `CSRF_SECRET_LENGTH` (`csrf.py:43`): the unmasked secret is 32 chars.
 const CSRF_SECRET_LENGTH: usize = 32;
@@ -398,25 +410,47 @@ const CSRF_TOKEN_LENGTH: usize = 64;
 const CSRF_ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Run the CSRF gate for an authenticated unsafe request, mapping the
-/// rejection reason to the DRF 403 body.
+/// rejection reason to the DRF 403 body. Used by the methods whose
+/// bodies Django never touches during authentication (PUT/DELETE).
 fn check_csrf(
     state: &AppState,
     uri_scheme: Option<&str>,
     headers: &axum::http::HeaderMap,
     method: &str,
-    body: &[u8],
+) -> Result<(), Denial> {
+    check_csrf_cookie(state, uri_scheme, headers, method)?;
+    check_csrf_token(headers, method, None)
+}
+
+/// `CsrfViewMiddleware.process_request` + the cookie half of
+/// `process_view`/`_check_token`: Origin/Referer, then the `csrftoken`
+/// cookie's presence and format. Runs before any POST body parse.
+fn check_csrf_cookie(
+    state: &AppState,
+    uri_scheme: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    method: &str,
 ) -> Result<(), Denial> {
     let settings = state.settings();
     let secure = request_is_secure(uri_scheme, headers, settings.secure_proxy_ssl_header);
-    enforce_csrf(
+    enforce_csrf_cookie(
         &settings.cors_allowed_origins,
         settings.session.cookie_domain.as_deref(),
         secure,
         headers,
         method,
-        body,
     )
     .map_err(Denial::CsrfFailed)
+}
+
+/// The request-token half of `_check_token`: POST field (when the body
+/// negotiated to a form) first, then `X-CSRFToken`.
+fn check_csrf_token(
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    form_token: Option<&str>,
+) -> Result<(), Denial> {
+    enforce_csrf_token(headers, method, form_token).map_err(Denial::CsrfFailed)
 }
 
 /// `request.is_secure()` (`django/http/request.py:256-271`): the URI
@@ -513,51 +547,6 @@ fn parse_cookies(header: &str) -> Vec<(&str, &str)> {
             Some((name.trim(), unquoted))
         })
         .collect()
-}
-
-/// Percent-decode a urlencoded form field value (the token alphabet needs
-/// no decoding, but Django unquotes before comparing).
-fn percent_decode(value: &str) -> String {
-    let mut out = Vec::with_capacity(value.len());
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' if index + 3 <= bytes.len() => {
-                match u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                    Ok(byte) => {
-                        out.push(byte);
-                        index += 3;
-                    }
-                    Err(_) => {
-                        out.push(b'%');
-                        index += 1;
-                    }
-                }
-            }
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The urlencoded form field for POST bodies, if present.
-fn form_csrf_token(body: &[u8]) -> Option<String> {
-    let text = std::str::from_utf8(body).ok()?;
-    for pair in text.split('&') {
-        let (name, value) = pair.split_once('=')?;
-        if name == "csrfmiddlewaretoken" {
-            return Some(percent_decode(value));
-        }
-    }
-    None
 }
 
 /// `is_same_domain` (`django/utils/http.py:239-256`): a `.`-prefixed
@@ -777,16 +766,14 @@ fn check_referer(
     Ok(())
 }
 
-/// Enforce CSRF for an authenticated unsafe request
-/// (`CsrfViewMiddleware.process_view` for PUT/DELETE/POST). Returns the
-/// 403 reason on rejection.
-fn enforce_csrf(
+/// `process_view` origin/referer checks plus `_check_token`'s
+/// `_get_secret` gate. Returns the 403 reason on rejection.
+fn enforce_csrf_cookie(
     settings_trusted_origins: &[String],
     cookie_domain: Option<&str>,
     secure: bool,
     headers: &axum::http::HeaderMap,
     method: &str,
-    body: &[u8],
 ) -> Result<(), String> {
     // Safe methods skip everything (`process_view`: GET/HEAD/OPTIONS/TRACE).
     if matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE") {
@@ -807,8 +794,19 @@ fn enforce_csrf(
         // the Referer branch.
         check_referer(headers, cookie_domain, settings_trusted_origins)?;
     }
+    csrf_secret_from_headers(headers)?;
+    Ok(())
+}
+
+/// `_check_token`'s non-cookie token lookup and comparison, after the
+/// body parse that `request.POST` triggers.
+fn enforce_csrf_token(
+    headers: &axum::http::HeaderMap,
+    method: &str,
+    form_token: Option<&str>,
+) -> Result<(), String> {
     let secret = csrf_secret_from_headers(headers)?;
-    let (request_token, source) = csrf_request_token(headers, method, body)?;
+    let (request_token, source) = csrf_request_token(headers, method, form_token)?;
     if !csrf_token_matches(&request_token, &secret) {
         return Err(format!("CSRF token from {source} incorrect."));
     }
@@ -837,30 +835,19 @@ fn csrf_secret_from_headers(headers: &axum::http::HeaderMap) -> Result<String, S
     }
 }
 
-/// The request token: the POST form field for urlencoded POSTs, else the
-/// `X-CSRFToken` header. The source renders into the failure message via
-/// `_bad_token_message` (`'X-Csrftoken'` is `parse_header_name` +
-/// `.title()` of `HTTP_X_CSRFTOKEN`).
+/// The request token: the POST form field (already negotiated to a form
+/// map by the caller), else the `X-CSRFToken` header. The source renders
+/// into the failure message via `_bad_token_message` (`'X-Csrftoken'` is
+/// `parse_header_name` + `.title()` of `HTTP_X_CSRFTOKEN`).
 fn csrf_request_token(
     headers: &axum::http::HeaderMap,
     method: &str,
-    body: &[u8],
+    form_token: Option<&str>,
 ) -> Result<(String, &'static str), String> {
     if method == "POST" {
-        let urlencoded = headers
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|content_type| {
-                content_type
-                    .split(';')
-                    .next()
-                    .is_some_and(|kind| kind.trim() == "application/x-www-form-urlencoded")
-            });
-        if urlencoded {
-            if let Some(field) = form_csrf_token(body) {
-                if !field.is_empty() {
-                    return csrf_token_with_source(field, "POST");
-                }
+        if let Some(field) = form_token {
+            if !field.is_empty() {
+                return csrf_token_with_source(field.to_owned(), "POST");
             }
         }
     }
@@ -1276,14 +1263,63 @@ fn put_scope(data: &Value, query: &HashMap<String, String>) -> Result<&'static s
     }
 }
 
-/// Parse a JSON body: a parse failure is DRF's `ParseError` 400; an empty
-/// body reads as `{}` (form-parser behavior for the scope lookup below).
-fn parse_body(raw: &[u8]) -> Result<Value, Denial> {
-    if raw.is_empty() {
-        return Ok(Value::Object(serde_json::Map::new()));
+/// The prompting bodies are flat scalar maps: no field is a `ListField`
+/// and every scalar keeps a present-but-blank form value (`body=`
+/// reaches the view as `""`, exactly like `request.data.get` on a
+/// `QueryDict`).
+const PROMPTING_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
+    list_fields: &[],
+    skip_blank_fields: &[],
+};
+
+/// Negotiated `request.data` plus the POST form token (`None` for JSON
+/// and empty bodies; `request.POST` carries form fields only).
+struct RequestBody {
+    value: Value,
+    form_token: Option<String>,
+}
+
+/// Port DRF's `request.data` pipeline (`Request._parse` + the default
+/// JSON/Form/MultiPart parsers): empty by Content-Length is `{}`, an
+/// unsupported or missing Content-Type is the 415, JSON runs the
+/// CPython-message parser, and form/multipart bodies become the
+/// last-value scalar map the Python views read.
+fn parse_request_body(headers: &axum::http::HeaderMap, raw: &[u8]) -> Result<RequestBody, Denial> {
+    let map_error = |error: shared_body::BodyError| match error {
+        shared_body::BodyError::UnsupportedMediaType(message) => {
+            Denial::UnsupportedMediaType(message)
+        }
+        shared_body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+        shared_body::BodyError::ServerError => Denial::ServerError,
+    };
+    match shared_body::negotiate_body(headers, raw, &PROMPTING_BODY_SPEC).map_err(map_error)? {
+        shared_body::NegotiatedBody::Empty => Ok(RequestBody {
+            value: Value::Object(serde_json::Map::new()),
+            form_token: None,
+        }),
+        shared_body::NegotiatedBody::JsonText { text, surr } => {
+            match parse_request_bytes_spans(text.as_bytes(), &surr) {
+                Ok(parsed) => Ok(RequestBody {
+                    value: to_serde_publish(&parsed),
+                    form_token: None,
+                }),
+                Err(JsonFail::Message(detail)) => {
+                    Err(Denial::BadDetail(format!("{JSON_PARSE_PREFIX}{detail}")))
+                }
+                Err(JsonFail::Recursion) => Err(Denial::ServerError),
+            }
+        }
+        shared_body::NegotiatedBody::Form { map, .. } => {
+            let form_token = map
+                .get("csrfmiddlewaretoken")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Ok(RequestBody {
+                value: Value::Object(map),
+                form_token,
+            })
+        }
     }
-    serde_json::from_slice(raw)
-        .map_err(|err| Denial::BadDetail(format!("JSON parse error - {err}")))
 }
 
 /// One stored override row for the read serializer.
@@ -1393,10 +1429,10 @@ async fn upsert_section_inner(
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
     // DRF authenticates (including CSRF) before the view body runs.
-    check_csrf(state, uri_scheme, headers, "PUT", raw)?;
+    check_csrf(state, uri_scheme, headers, "PUT")?;
     check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
-    let data = parse_body(raw)?;
+    let data = parse_request_body(headers, raw)?.value;
     let scope = put_scope(&data, query)?;
     if !check_write_permission(&pool, &actor.id, &workspace.id, scope).await? {
         return Err(Denial::Forbidden);
@@ -1698,7 +1734,7 @@ async fn delete_override_inner(
 ) -> Result<(), Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
-    check_csrf(state, uri_scheme, headers, "DELETE", &[])?;
+    check_csrf(state, uri_scheme, headers, "DELETE")?;
     check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let scope = resolve_scope(query);
@@ -1871,7 +1907,9 @@ async fn preview_prompt_inner(
 ) -> Result<Value, Denial> {
     let pool = pool_of(state)?;
     let actor = actor(state, &pool, extension).await?;
-    check_csrf(state, uri_scheme, headers, "POST", raw)?;
+    check_csrf_cookie(state, uri_scheme, headers, "POST")?;
+    let input = parse_request_body(headers, raw)?;
+    check_csrf_token(headers, "POST", input.form_token.as_deref())?;
     check_user_throttle(state, &actor.id).await?;
     let workspace = workspace_or_404(&pool, slug).await?;
     let admin = is_workspace_admin(&pool, &actor.id, &workspace.id).await?;
@@ -1881,7 +1919,7 @@ async fn preview_prompt_inner(
     if recipes::recipe_for(kind, None).is_err() {
         return Err(Denial::BadKind(kind.to_owned()));
     }
-    let data = parse_body(raw)?;
+    let data = input.value;
     // Members may preview their own (user-scope) composition; the
     // workspace default stays admin-only (`views.py:379-384`). Only the
     // exact `"user"` string selects the user scope — a missing, null, or
@@ -2949,6 +2987,26 @@ async fn load_scheduler_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pre-split call shape: the cookie/Origin/Referer phase followed
+    /// by the token phase (PUT carries no form token).
+    fn enforce_csrf(
+        settings_trusted_origins: &[String],
+        cookie_domain: Option<&str>,
+        secure: bool,
+        headers: &axum::http::HeaderMap,
+        method: &str,
+        _body: &[u8],
+    ) -> Result<(), String> {
+        enforce_csrf_cookie(
+            settings_trusted_origins,
+            cookie_domain,
+            secure,
+            headers,
+            method,
+        )?;
+        enforce_csrf_token(headers, method, None)
+    }
 
     fn query_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
