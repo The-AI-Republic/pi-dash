@@ -426,7 +426,9 @@ fn throttle_429() -> Response {
 
 /// DRF `UnsupportedMediaType` (`exceptions.py:217`): the request's
 /// content type echoed verbatim. `Vary: Cookie`, same as above.
-fn unsupported_media_type_response(content_type: &str) -> Response {
+/// Shared with the magic-generate handler (PIDASHCONV-1351), whose
+/// DRF views parse `request.data` under the same default parsers.
+pub(crate) fn unsupported_media_type_response(content_type: &str) -> Response {
     (
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         [
