@@ -3,18 +3,12 @@
 // See the LICENSE file for details.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { RouterProvider, createRouter } from "@tanstack/react-router";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { createRouter } from "@tanstack/react-router";
 
 import { createAppClient } from "./core/api/index.js";
 import { platform } from "./core/platform/index.js";
-import {
-  createCachePersistor,
-  createQueryClient,
-  persistEverything,
-  persistReferenceOnly,
-} from "./core/query/index.js";
-import { InstanceAppGate, persistAppCache } from "./features/instance/index.js";
+import { createQueryClient } from "./core/query/index.js";
+import { AppRoot, createAppCachePersistor } from "./features/instance/entry.js";
 import { routeTree } from "./routeTree.gen";
 import { PIDASH_TARGET } from "./target";
 import "./styles/app.css";
@@ -23,12 +17,7 @@ import "./styles/app.css";
 // at it) → query client (+ cache restore) → router.
 const apiClient = createAppClient();
 const queryClient = createQueryClient();
-const persistor = createCachePersistor(queryClient, platform.storage, {
-  // The startup answer is read once per launch: restoring it would skip the
-  // read and could strand the app on a stale setup/maintenance branch.
-  shouldPersist:
-    PIDASH_TARGET === "desktop" ? (queryKey) => persistEverything() && persistAppCache(queryKey) : persistReferenceOnly,
-});
+const persistor = createAppCachePersistor(PIDASH_TARGET, queryClient, platform.storage);
 await persistor.restore().catch(() => undefined);
 
 const router = createRouter({
@@ -62,10 +51,6 @@ if (import.meta.env.DEV) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <InstanceAppGate>
-        <RouterProvider router={router} />
-      </InstanceAppGate>
-    </QueryClientProvider>
+    <AppRoot queryClient={queryClient} router={router} />
   </StrictMode>
 );
