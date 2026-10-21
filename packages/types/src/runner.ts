@@ -146,8 +146,19 @@ export interface IRunner {
    * from the target machine with `pidash runner add`. */
   revoked_at: string | null;
   revoked_reason: string;
+  /** Set while an operator has paused the runner. Orthogonal to ``status``:
+   * a paused runner keeps heartbeating and finishes its in-flight run, but
+   * the cloud assigns it no new work. Null = not paused. */
+  paused_at: string | null;
+  paused_by: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** ``POST /api/runners/<id>/pause/`` response: the runner plus the runs it
+ * already holds, which pausing does not stop. */
+export interface IRunnerPauseResult extends IRunner {
+  in_flight_runs: { id: string; status: TAgentRunStatus }[];
 }
 
 export type TAgentRunStatus =

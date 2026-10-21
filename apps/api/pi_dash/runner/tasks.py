@@ -121,41 +121,31 @@ def mark_offline_runners() -> int:
 # state transition and Run AI all refuse with ``active_run_exists``).
 
 
-@shared_task(name="runner.release_pins_on_offline_runners")
-def release_pins_on_offline_runners() -> int:
-    """Return QUEUED runs pinned to a long-silent runner to the pod queue.
-
-    Pinning is a repo-locality preference, but only the pinned runner may
-    take a pinned run. Managed runs are skipped: their pin is the execution
-    target, and ``managed_runner.expire_waiting_runs`` owns their timeout.
-    ``RUNNER_OFFLINE_PIN_RELEASE_SECS <= 0`` disables the sweep.
-    """
-    grace = int(getattr(settings, "RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
-    if grace <= 0:
-        return 0
-    cutoff = timezone.now() - timedelta(seconds=grace)
-    stuck = list(
-        AgentRun.objects.filter(
-            status=AgentRunStatus.QUEUED,
-            executor_kind=AgentExecutorKind.LOCAL_RUNNER,
-            pinned_runner__isnull=False,
-            created_at__lt=cutoff,
-        )
-        .filter(Q(pinned_runner__last_heartbeat_at__lt=cutoff) | Q(pinned_runner__last_heartbeat_at__isnull=True))
-        .values_list("id", flat=True)[:500]
+def _pinned_runner_gone_q(cutoff) -> Q:
+    """Pinned runner that will not take its pinned runs: silent past
+    ``cutoff`` or operator-paused (it keeps heartbeating but takes no work)."""
+    return (
+        Q(pinned_runner__last_heartbeat_at__lt=cutoff)
+        | Q(pinned_runner__last_heartbeat_at__isnull=True)
+        | Q(pinned_runner__paused_at__isnull=False)
     )
+
+
+def _release_pins(candidates, still_stuck_q: Q) -> int:
+    """Unpin each QUEUED run in ``candidates`` and drain its pod.
+
+    ``still_stuck_q`` is re-checked under the row lock: the runner may have
+    come back (or been resumed) since the candidate list was read.
+    """
     released = 0
     pod_ids = set()
-    for run_id in stuck:
+    for run_id in list(candidates):
         with transaction.atomic():
             run = (
                 AgentRun.objects.select_for_update(of=("self",))
                 .select_related("parent_run")
                 .filter(id=run_id, status=AgentRunStatus.QUEUED, pinned_runner__isnull=False)
-                # Re-checked under the lock: the runner may have come back.
-                .filter(
-                    Q(pinned_runner__last_heartbeat_at__lt=cutoff) | Q(pinned_runner__last_heartbeat_at__isnull=True)
-                )
+                .filter(still_stuck_q)
                 .first()
             )
             if run is None:
@@ -176,9 +166,53 @@ def release_pins_on_offline_runners() -> int:
         try:
             matcher.drain_pod_by_id(pod_id)
         except Exception:
-            logger.exception("release_pins_on_offline_runners: drain failed for pod %s", pod_id)
+            logger.exception("release pins: drain failed for pod %s", pod_id)
+    return released
+
+
+def _releasable_pins():
+    # Managed runs are skipped: their pin is the execution target, and
+    # ``managed_runner.expire_waiting_runs`` owns their timeout.
+    return AgentRun.objects.filter(
+        status=AgentRunStatus.QUEUED,
+        executor_kind=AgentExecutorKind.LOCAL_RUNNER,
+        pinned_runner__isnull=False,
+    )
+
+
+@shared_task(name="runner.release_pins_on_offline_runners")
+def release_pins_on_offline_runners() -> int:
+    """Return QUEUED runs pinned to a long-silent or paused runner to the pod queue.
+
+    Pinning is a repo-locality preference, but only the pinned runner may
+    take a pinned run. Pausing releases pins immediately
+    (:func:`release_pins_for_paused_runner`); this sweep is the backstop for
+    a pin that raced the pause. Managed runs are skipped.
+    ``RUNNER_OFFLINE_PIN_RELEASE_SECS <= 0`` disables the sweep.
+    """
+    grace = int(getattr(settings, "RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
+    if grace <= 0:
+        return 0
+    cutoff = timezone.now() - timedelta(seconds=grace)
+    gone_q = _pinned_runner_gone_q(cutoff)
+    candidates = (
+        _releasable_pins().filter(created_at__lt=cutoff).filter(gone_q).values_list("id", flat=True)[:500]
+    )
+    released = _release_pins(candidates, gone_q)
     if released:
         logger.info("release_pins_on_offline_runners unpinned %s queued run(s)", released)
+    return released
+
+
+def release_pins_for_paused_runner(runner_id) -> int:
+    """Send every QUEUED local run pinned to a just-paused runner back to its
+    pod queue, so the paused runner's pending work moves to another runner
+    instead of waiting for a resume."""
+    paused_q = Q(pinned_runner__paused_at__isnull=False)
+    candidates = _releasable_pins().filter(pinned_runner_id=runner_id).values_list("id", flat=True)
+    released = _release_pins(candidates, paused_q)
+    if released:
+        logger.info("release_pins_for_paused_runner runner=%s unpinned %s run(s)", runner_id, released)
     return released
 
 
