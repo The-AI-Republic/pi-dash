@@ -758,6 +758,10 @@ pub struct RenderBundle {
     pub ticker: Option<TickerBudget>,
     /// The new run's direct parent `done_payload` (by id, may be absent).
     pub direct_parent_payload: Option<Value>,
+    /// Whether the new run has a parent run at all. Travels separately
+    /// from `direct_parent_payload`: a parent with a NULL payload must
+    /// render the fallback, never the ticker payload (PIDASHCONV-1232).
+    pub has_parent_run: bool,
     /// The ticker-stashed resume parent `done_payload` (may be absent).
     pub ticker_parent_payload: Option<Value>,
     pub override_rows: Vec<composer::OverrideRow>,
@@ -1031,12 +1035,18 @@ pub fn tick_value(
 }
 
 /// The review prompt's implementation payload (`context.py:401-416`):
-/// the run's own parent, else the ticker-stashed resume parent.
+/// the run's own parent when one exists, else the ticker-stashed resume
+/// parent.
 pub fn parent_done_payload(
     direct_parent_payload: Option<&Value>,
+    has_parent_run: bool,
     ticker_parent_payload: Option<&Value>,
 ) -> String {
-    let picked = context::resolve_parent_payload(direct_parent_payload, ticker_parent_payload);
+    let picked = context::resolve_parent_payload(
+        direct_parent_payload,
+        has_parent_run,
+        ticker_parent_payload,
+    );
     context::parent_done_payload_json(picked)
 }
 
@@ -1131,6 +1141,7 @@ pub fn render_first_turn(
         comments_section: context::comments_section(&bundle.comments),
         parent_done_payload: parent_done_payload(
             bundle.direct_parent_payload.as_ref(),
+            bundle.has_parent_run,
             bundle.ticker_parent_payload.as_ref(),
         ),
         workpad_body: issue.workpad.clone().unwrap_or_default(),
@@ -2181,6 +2192,7 @@ mod tests {
             prior_run_count: 0,
             ticker: None,
             direct_parent_payload: None,
+            has_parent_run: false,
             ticker_parent_payload: None,
             override_rows: Vec::new(),
         }
