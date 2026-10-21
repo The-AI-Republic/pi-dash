@@ -39,8 +39,8 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ExitSnapshot, RunPayload, STDERR_RING_LINES, StderrBuffer,
-    StderrRing, StderrSnapshot,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::openclaw::process::OpenClawProcess;
@@ -48,9 +48,8 @@ use crate::openclaw::schema::AcpMessage;
 use crate::util::shell::login_shell_command;
 
 /// How long to wait for `acpx` to emit its first ACP frame carrying a
-/// `sessionId` before giving up on run setup. Generous: acpx has to perform
-/// the ACP handshake and OpenClaw may take several seconds to spin a session.
-const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+/// `sessionId` before giving up on run setup. See [`ENGINE_STARTUP_TIMEOUT`].
+const SESSION_TIMEOUT: Duration = ENGINE_STARTUP_TIMEOUT;
 
 pub struct Bridge {
     binary: String,

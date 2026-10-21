@@ -33,8 +33,8 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::{
-    AgentProcessHandle, BridgeEvent, ExitSnapshot, RunPayload, STDERR_RING_LINES, StderrBuffer,
-    StderrRing, StderrSnapshot,
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, ExitSnapshot, RunPayload,
+    STDERR_RING_LINES, StderrBuffer, StderrRing, StderrSnapshot,
 };
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::cursor_agent::process::CursorProcess;
@@ -42,9 +42,8 @@ use crate::cursor_agent::schema::StreamEvent;
 use crate::util::shell::login_shell_command;
 
 /// How long to wait for cursor-agent's `system/init` frame before giving up on
-/// the run setup. Generous: the CLI can take several seconds to authenticate
-/// and emit init when starting cold.
-const INIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// the run setup. See [`ENGINE_STARTUP_TIMEOUT`].
+const INIT_TIMEOUT: Duration = ENGINE_STARTUP_TIMEOUT;
 
 pub struct Bridge {
     binary: String,

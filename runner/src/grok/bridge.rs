@@ -33,16 +33,17 @@ use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
-use crate::agent::{AgentProcessHandle, BridgeEvent, RunPayload, StderrSnapshot};
+use crate::agent::{
+    AgentProcessHandle, BridgeEvent, ENGINE_STARTUP_TIMEOUT, RunPayload, StderrSnapshot,
+};
 use crate::cloud::protocol::{ApprovalDecision, FailureReason};
 use crate::grok::process::GrokProcess;
 use crate::grok::schema;
 use crate::openclaw::schema::AcpMessage;
 
 /// How long to wait for grok to answer a handshake request (`initialize` /
-/// `session/new`) before giving up on run setup. Generous: grok has to boot
-/// its ACP server and may authenticate against the xAI API first.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// `session/new`) before giving up on run setup. See [`ENGINE_STARTUP_TIMEOUT`].
+const HANDSHAKE_TIMEOUT: Duration = ENGINE_STARTUP_TIMEOUT;
 
 pub struct Bridge {
     proc: GrokProcess,
