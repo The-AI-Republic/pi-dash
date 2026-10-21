@@ -62,6 +62,7 @@ Ownership split (mirrors the worker registry):
 """
 
 import json as _json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -1955,3 +1956,165 @@ def test_rust_dummy_data_before_after(db_conn, broker_url):
             (pid,),
         )
         assert cur.fetchone()["top"] == 8
+
+
+# ---------------------------------------------------------------------------
+# PIDASHCONV-1292: S3-backed asset tasks replayed against the Rust worker.
+# ---------------------------------------------------------------------------
+
+_RUST_COPY_TASK = f"{M}.copy_s3_object.copy_s3_objects_of_description_and_assets"
+_RUST_METADATA_TASK = f"{M}.storage_metadata_task.get_asset_object_metadata"
+
+
+def _rust_page_html(conn, page_id) -> str:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute('SELECT description_html FROM "pages" WHERE id = %s::uuid', (str(page_id),))
+        return cur.fetchone()["description_html"]
+
+
+def _rust_asset_row(conn, asset_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT id, asset, is_uploaded, storage_metadata FROM "file_assets"'
+            " WHERE id = %s::uuid AND deleted_at IS NULL",
+            (str(asset_id),),
+        )
+        return cur.fetchone()
+
+
+def _rust_image_srcs(html: str) -> list:
+    return re.findall(r'<image-component\s+src="([^"]+)"', html or "")
+
+
+def test_rust_copy_task_copies_s3_objects_and_rewrites_page(db_conn, broker_url):
+    """Rust replay of test_copy_task_copies_s3_objects_and_rewrites_page.
+
+    Same seeds, same payload, same assertions through ``rust_queue``: every
+    rewritten src resolves to a file_assets row whose S3 object exists.
+    Red while the worker registers the copy handler with the
+    ``UnavailableObjectStore`` stub (rows rewritten, keys never copied);
+    green once the live store ships (PIDASHCONV-1292).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"rcopy1292-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    proj_id = str(chain["project"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1292-copy-probe-image"
+    src_key = f"{ws_id}/rcopy1292-{tag}.png"
+    s3_helpers.s3_put_key(bucket, src_key, body)
+    assert s3_helpers.s3_key_exists(bucket, src_key)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": src_key,
+            "attributes": {"name": f"rcopy1292-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": proj_id,
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+        },
+    )
+    seed_html = f'<p>t</p><image-component src="{asset["id"]}"></image-component>'
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": ws_id,
+            "owned_by_id": str(chain["owner"]["id"]),
+            "name": f"rcopy1292-{tag}",
+            "description_json": {},
+            "description_html": seed_html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    page_id = str(page["id"])
+    source_id = str(asset["id"])
+    rust_queue.publish(
+        _RUST_COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": page_id,
+            "project_id": proj_id,
+            "slug": chain["workspace"]["slug"],
+            "user_id": str(chain["owner"]["id"]),
+        },
+    )
+    assert wait_for(
+        lambda: _rust_page_html(db_conn, page_id) != seed_html,
+        what="rust copy task rewrote the page description",
+    )
+    srcs = _rust_image_srcs(_rust_page_html(db_conn, page_id))
+    assert srcs, "rewrite removed every image-component"
+    assert source_id not in srcs, "srcs still point at the source asset"
+    for src in srcs:
+        row = _rust_asset_row(db_conn, src)
+        assert row is not None, f"src {src} resolves to no file_assets row"
+        assert row["is_uploaded"] is True, f"duplicate {src} never marked uploaded"
+        assert s3_helpers.s3_key_exists(bucket, row["asset"]), (
+            f"duplicate {src} points at S3 key {row['asset']} with no object behind it"
+        )
+    assert s3_helpers.s3_key_exists(bucket, src_key)
+
+
+def test_rust_metadata_task_stores_head_dict(db_conn, broker_url):
+    """Rust replay of test_metadata_task_stores_head_dict.
+
+    Same seeds, same payload, same assertions through ``rust_queue``:
+    storage_metadata lands the Django-shaped head dict, never SQL NULL.
+    Red while the worker registers the metadata handler with the
+    ``UnavailableObjectStore`` stub (every head answers None);
+    green once the live store ships (PIDASHCONV-1292).
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"rmeta1292-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1292-metadata-probe-image!"
+    key = f"{ws_id}/rmeta1292-{tag}.png"
+    s3_helpers.s3_put_key(bucket, key, body)
+    assert s3_helpers.s3_key_exists(bucket, key)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": key,
+            "attributes": {"name": f"rmeta1292-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": str(chain["project"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+        },
+    )
+    asset_id = str(asset["id"])
+    rust_queue.publish(_RUST_METADATA_TASK, kwargs={"asset_id": asset_id})
+    assert wait_for(
+        lambda: (_rust_asset_row(db_conn, asset_id) or {}).get("storage_metadata") != {},
+        what="rust metadata task saved storage_metadata",
+    )
+    meta = _rust_asset_row(db_conn, asset_id)["storage_metadata"]
+    assert meta is not None, "storage_metadata saved as SQL NULL"
+    assert set(meta) == {"ContentType", "ContentLength", "LastModified", "ETag", "Metadata"}
+    assert meta["ContentLength"] == len(body)
+    assert meta["ContentType"] == "application/octet-stream"
+    assert meta["ETag"], "missing ETag"
+    assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]

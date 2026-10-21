@@ -12,6 +12,7 @@ Cleanup eligibility is env-driven (``HARD_DELETE_AFTER_DAYS=0``,
 minio behind the Django S3 settings (``USE_MINIO=1``).
 """
 
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -1294,3 +1295,181 @@ def test_create_dummy_data_before_after(db_conn, broker_url):
     assert 0 <= delta["issue_assignees"] <= 2 * 2
     assert 0 <= delta["issue_labels"] <= 6 * 5
     assert 0 <= delta["module_issues"] <= 6 * 5
+
+
+# ---------------------------------------------------------------------------
+# PIDASHCONV-1292: the S3-backed asset tasks execute for real.
+# ---------------------------------------------------------------------------
+
+COPY_TASK = f"{M}.copy_s3_object.copy_s3_objects_of_description_and_assets"
+METADATA_TASK = f"{M}.storage_metadata_task.get_asset_object_metadata"
+
+
+def _page_html(conn, page_id) -> str:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute('SELECT description_html FROM "pages" WHERE id = %s::uuid', (str(page_id),))
+        return cur.fetchone()["description_html"]
+
+
+def _asset_row(conn, asset_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            'SELECT id, asset, is_uploaded, storage_metadata FROM "file_assets"'
+            " WHERE id = %s::uuid AND deleted_at IS NULL",
+            (str(asset_id),),
+        )
+        return cur.fetchone()
+
+
+def _image_srcs(html: str) -> list:
+    return re.findall(r'<image-component\s+src="([^"]+)"', html or "")
+
+
+def _seed_copy_world(db_conn, tag: str) -> dict:
+    """Page + uploaded source asset + real S3 object for the copy task."""
+    chain = seed_helpers.issue_chain(db_conn, f"copy1292-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    proj_id = str(chain["project"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1292-copy-probe-image"
+    src_key = f"{ws_id}/copy1292-{tag}.png"
+    s3_helpers.s3_put_key(bucket, src_key, body)
+    assert s3_helpers.s3_key_exists(bucket, src_key)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": src_key,
+            "attributes": {"name": f"copy1292-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": proj_id,
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+        },
+    )
+    seed_html = f'<p>t</p><image-component src="{asset["id"]}"></image-component>'
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": ws_id,
+            "owned_by_id": str(chain["owner"]["id"]),
+            "name": f"copy1292-{tag}",
+            "description_json": {},
+            "description_html": seed_html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    return {
+        "bucket": bucket,
+        "body": body,
+        "src_key": src_key,
+        "asset_id": str(asset["id"]),
+        "page_id": str(page["id"]),
+        "project_id": proj_id,
+        "owner_id": str(chain["owner"]["id"]),
+        "slug": chain["workspace"]["slug"],
+        "seed_html": seed_html,
+    }
+
+
+def test_copy_task_copies_s3_objects_and_rewrites_page(db_conn, broker_url):
+    """Copy task: every rewritten src resolves to a copied S3 object.
+
+    Seeds a page whose description holds one uploaded image-component plus
+    its real S3 object, publishes
+    ``copy_s3_objects_of_description_and_assets``, and asserts the
+    duplicate-side contract: after the worker drains, every
+    image-component src in the page resolves to a file_assets row whose
+    S3 object exists (HEAD 200). The effect wait (not the queue drain)
+    is the gate: the worker acks on receipt, before the copy commits.
+    """
+    tag = uuid.uuid4().hex[:8]
+    world = _seed_copy_world(db_conn, tag)
+    celery_wire.publish(
+        COPY_TASK,
+        kwargs={
+            "entity_name": "PAGE",
+            "entity_identifier": world["page_id"],
+            "project_id": world["project_id"],
+            "slug": world["slug"],
+            "user_id": world["owner_id"],
+        },
+    )
+    assert wait_for(
+        lambda: _page_html(db_conn, world["page_id"]) != world["seed_html"],
+        what="copy task rewrote the page description",
+    )
+    srcs = _image_srcs(_page_html(db_conn, world["page_id"]))
+    assert srcs, "rewrite removed every image-component"
+    assert world["asset_id"] not in srcs, "srcs still point at the source asset"
+    for src in srcs:
+        row = _asset_row(db_conn, src)
+        assert row is not None, f"src {src} resolves to no file_assets row"
+        assert row["is_uploaded"] is True, f"duplicate {src} never marked uploaded"
+        assert s3_helpers.s3_key_exists(world["bucket"], row["asset"]), (
+            f"duplicate {src} points at S3 key {row['asset']} with no object behind it"
+        )
+    # Copy, not move: the source object still exists.
+    assert s3_helpers.s3_key_exists(world["bucket"], world["src_key"])
+
+
+def test_metadata_task_stores_head_dict(db_conn, broker_url):
+    """Metadata task: storage_metadata becomes the S3 head dict, never NULL.
+
+    Seeds an uploaded asset with the model-default ``{}`` plus its real S3
+    object, publishes ``get_asset_object_metadata``, and asserts the field
+    lands the Django-shaped head dict (ContentType/ContentLength/
+    LastModified/ETag/Metadata) instead of SQL NULL.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"meta1292-{tag}")
+    ws_id = str(chain["workspace"]["id"])
+    bucket = s3_helpers.contract_bucket()
+    s3_helpers.s3_setup_bucket(bucket)
+    body = b"1292-metadata-probe-image!"
+    key = f"{ws_id}/meta1292-{tag}.png"
+    s3_helpers.s3_put_key(bucket, key, body)
+    assert s3_helpers.s3_key_exists(bucket, key)
+    asset = insert_row(
+        db_conn,
+        "file_assets",
+        {
+            "asset": key,
+            "attributes": {"name": f"meta1292-{tag}.png", "type": "png", "size": len(body)},
+            "size": float(len(body)),
+            "workspace_id": ws_id,
+            "project_id": str(chain["project"]["id"]),
+            "created_by_id": str(chain["owner"]["id"]),
+            "entity_type": "PAGE_DESCRIPTION",
+            "is_uploaded": True,
+            "is_deleted": False,
+            "is_archived": False,
+            "storage_metadata": {},
+        },
+    )
+    asset_id = str(asset["id"])
+    celery_wire.publish(METADATA_TASK, kwargs={"asset_id": asset_id})
+    assert wait_for(
+        lambda: (_asset_row(db_conn, asset_id) or {}).get("storage_metadata") != {},
+        what="metadata task saved storage_metadata",
+    )
+    meta = _asset_row(db_conn, asset_id)["storage_metadata"]
+    assert meta is not None, "storage_metadata saved as SQL NULL"
+    assert set(meta) == {"ContentType", "ContentLength", "LastModified", "ETag", "Metadata"}
+    assert meta["ContentLength"] == len(body)
+    assert meta["ContentType"] == "application/octet-stream"
+    assert meta["ETag"], "missing ETag"
+    assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]
