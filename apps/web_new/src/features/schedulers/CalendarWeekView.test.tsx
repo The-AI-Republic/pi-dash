@@ -65,6 +65,31 @@ describe("CalendarWeekView", () => {
     expect(onSelect).toHaveBeenCalledWith(firing);
   });
 
+  it("splits same-instant firings into side-by-side lanes that each open", async () => {
+    const onSelect = vi.fn();
+    const at = new Date(2026, 9, 21, 9, 0).toISOString();
+    const first = occurrence(at);
+    const second = occurrence(at, { binding_id: "b2", scheduler_id: "s2", scheduler_name: "Beta" });
+    const byDay = new Map([["2026-10-21", [first, second]]]);
+    render(<CalendarWeekView anchor={ANCHOR} now={TODAY} byDay={byDay} onSelect={onSelect} />);
+    const [left, right] = screen.getAllByTitle(/Weekly|Beta/);
+    expect((left as HTMLElement).style.top).toBe((right as HTMLElement).style.top);
+    expect((left as HTMLElement).style.left).not.toBe((right as HTMLElement).style.left);
+    expect((left as HTMLElement).style.width).toBe((right as HTMLElement).style.width);
+    await userEvent.click(left as HTMLElement);
+    expect(onSelect).toHaveBeenCalledWith(first);
+    await userEvent.click(right as HTMLElement);
+    expect(onSelect).toHaveBeenCalledWith(second);
+  });
+
+  it("gives a lone firing the whole lane", () => {
+    const byDay = new Map([["2026-10-21", [occurrence(new Date(2026, 9, 21, 9, 0).toISOString())]]]);
+    render(<CalendarWeekView anchor={ANCHOR} now={TODAY} byDay={byDay} onSelect={vi.fn()} />);
+    const [block] = screen.getAllByTitle(/Weekly/);
+    expect((block as HTMLElement).style.left).toBe("calc(var(--space-1) + (100% - 2 * var(--space-1)) * 0 / 1)");
+    expect((block as HTMLElement).style.width).toBe("calc((100% - 2 * var(--space-1)) / 1)");
+  });
+
   it("shades a past firing differently from a future one", () => {
     const byDay = new Map([
       ["2026-10-20", [occurrence(new Date(2026, 9, 20, 8, 0).toISOString(), { kind: "past", agent_run_id: "r1" })]],

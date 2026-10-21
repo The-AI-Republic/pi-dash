@@ -3,8 +3,10 @@
 // See the LICENSE file for details.
 // Month grid for the firing calendar (parity/specs/agents.md §5, AGT-015).
 // Whole Sunday-to-Saturday weeks; a day shows up to four firings and folds
-// the rest behind "+ N more". When the server capped the window, days
-// switch to a "N× Name" density line instead of hundreds of blocks.
+// the rest behind "+ N more", which opens the day's first firing like the
+// old calendar does. When the server capped the window, days switch to a
+// "N× Name" density line instead of hundreds of blocks; each line opens
+// that scheduler's first firing of the day.
 
 import type { SchedulerOccurrence } from "@pidash/api-client";
 import * as React from "react";
@@ -82,6 +84,7 @@ interface MonthDayProps {
 }
 
 function MonthDay({ firings, truncated, onSelect }: MonthDayProps): React.ReactElement | null {
+  // Non-empty past this point, so the overflow control can open the day's first firing.
   if (firings.length === 0) return null;
   if (truncated) {
     return (
@@ -90,7 +93,8 @@ function MonthDay({ firings, truncated, onSelect }: MonthDayProps): React.ReactE
           <button
             key={rollup.name}
             type="button"
-            className="text-meta truncate px-(--space-1) text-left text-(--text-muted)"
+            onClick={() => onSelect(rollup.first)}
+            className="text-meta truncate px-(--space-1) text-left text-(--text-muted) hover:opacity-90"
           >
             {rollup.label}
           </button>
@@ -115,7 +119,12 @@ function MonthDay({ firings, truncated, onSelect }: MonthDayProps): React.ReactE
         </button>
       ))}
       {plan.more === null ? null : (
-        <button type="button" className="text-meta px-(--space-1) text-left text-(--text-muted)">
+        <button
+          type="button"
+          aria-label={plan.more}
+          onClick={() => onSelect(firings[0] as SchedulerOccurrence)}
+          className="text-meta px-(--space-1) text-left text-(--text-muted) hover:opacity-90"
+        >
           {plan.more}
         </button>
       )}

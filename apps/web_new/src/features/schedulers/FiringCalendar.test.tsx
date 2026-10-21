@@ -220,6 +220,29 @@ describe("FiringCalendar", () => {
     expect(screen.getAllByTitle(/Alpha|Beta/)).toHaveLength(2);
   });
 
+  it("keeps the rail choice independent when the project changes in place", async () => {
+    hooks.bindings.data = [binding(), binding({ id: "b2", scheduler: "s2", scheduler_name: "Beta" })];
+    hooks.schedulers.data = [{ id: "s1" } as Scheduler, { id: "s2" } as Scheduler];
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <FiringCalendar workspaceSlug={SLUG} projectId="p1" canEdit={false} now={NOW} />
+      </QueryClientProvider>
+    );
+    await userEvent.click(screen.getByRole("checkbox", { name: "Beta" }));
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p1")).toEqual(["s2"]);
+
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <FiringCalendar workspaceSlug={SLUG} projectId="p2" canEdit={false} now={NOW} />
+      </QueryClientProvider>
+    );
+    expect(screen.getByRole("checkbox", { name: "Alpha" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Beta" })).toBeChecked();
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p2")).toEqual([]);
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p1")).toEqual(["s2"]);
+  });
+
   it("opens the occurrence panel from a block and closes it", async () => {
     hooks.occurrences.data = {
       occurrences: [occurrence(new Date(2026, 9, 22, 9, 0).toISOString())],

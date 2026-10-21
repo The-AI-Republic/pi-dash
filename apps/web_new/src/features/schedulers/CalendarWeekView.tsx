@@ -4,7 +4,9 @@
 // Week grid for the firing calendar (parity/specs/agents.md §5, AGT-015).
 // Seven Sunday-to-Saturday lanes of 24 hours; each firing sits at its
 // minute offset in its day, and a line marks the current time on today's
-// lane. Blocks are buttons with a title: click to inspect, nothing else.
+// lane. Firings that start at the same instant split their lane side by
+// side so each stays visible and clickable. Blocks are buttons with a
+// title: click to inspect, nothing else.
 
 import type { SchedulerOccurrence } from "@pidash/api-client";
 import * as React from "react";
@@ -12,6 +14,7 @@ import * as React from "react";
 import {
   DAY_HEIGHT,
   HOUR_HEIGHT,
+  assignWeekLanes,
   dayKey,
   formatBlockTime,
   formatDayLabel,
@@ -65,7 +68,7 @@ export function CalendarWeekView({ anchor, now, byDay, onSelect }: CalendarWeekV
           ))}
         </div>
         {days.map((day) => {
-          const firings = byDay.get(dayKey(day)) ?? [];
+          const firings = assignWeekLanes(byDay.get(dayKey(day)) ?? []);
           const today = isSameDay(day, now);
           return (
             <div
@@ -73,15 +76,17 @@ export function CalendarWeekView({ anchor, now, byDay, onSelect }: CalendarWeekV
               style={{ height: `${DAY_HEIGHT}px` }}
               className="relative border-l border-(--border)"
             >
-              {firings.map((occurrence) => (
+              {firings.map(({ occurrence, lane, lanes }) => (
                 <button
                   key={`${occurrence.binding_id}-${occurrence.dtstart}`}
                   type="button"
                   title={`${occurrence.scheduler_name} · ${formatBlockTime(new Date(occurrence.dtstart))}`}
                   onClick={() => onSelect(occurrence)}
-                  className="absolute inset-x-(--space-1) flex flex-col gap-px overflow-hidden rounded-(--radius-control) px-(--space-2) py-0.5 text-left text-(--on-accent) hover:opacity-90"
+                  className="absolute flex flex-col gap-px overflow-hidden rounded-(--radius-control) px-(--space-2) py-0.5 text-left text-(--on-accent) hover:opacity-90"
                   style={{
                     top: `${occurrenceTop(occurrence.dtstart)}px`,
+                    left: `calc(var(--space-1) + (100% - 2 * var(--space-1)) * ${lane} / ${lanes})`,
+                    width: `calc((100% - 2 * var(--space-1)) / ${lanes})`,
                     height: `${HOUR_HEIGHT}px`,
                     backgroundColor: occurrence.kind === "past" ? PAST_BLOCK : occurrence.scheduler_color,
                   }}

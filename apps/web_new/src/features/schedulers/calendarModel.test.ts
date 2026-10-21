@@ -11,6 +11,7 @@ import {
   DAY_HEIGHT,
   HOUR_HEIGHT,
   addDays,
+  assignWeekLanes,
   dayKey,
   daysBetween,
   formatBlockTime,
@@ -173,10 +174,56 @@ describe("crowded days", () => {
     expect(plan.more).toBe("+ 20 more");
   });
 
+  it("keeps the folded firings so the overflow control can open them", () => {
+    const plan = planMonthDay(many);
+    expect(plan.folded).toEqual(many.slice(4));
+    expect(planMonthDay(many.slice(0, 4)).folded).toEqual([]);
+  });
+
   it("rolls a truncated day up per scheduler", () => {
-    expect(rollupDay(many)).toEqual([{ name: "Hourly", count: 24, label: "24× Hourly" }]);
+    expect(rollupDay(many).map(({ name, count, label }) => ({ name, count, label }))).toEqual([
+      { name: "Hourly", count: 24, label: "24× Hourly" },
+    ]);
     expect(
       rollupDay([...many, occurrence(at(2026, 9, 21, 5).toISOString(), "Daily")]).map((rollup) => rollup.label)
     ).toEqual(["24× Hourly", "1× Daily"]);
+  });
+
+  it("points each rollup at its scheduler's first firing of the day", () => {
+    const daily = occurrence(at(2026, 9, 21, 5).toISOString(), "Daily");
+    const [hourly, dailyRollup] = rollupDay([...many, daily]);
+    expect(hourly?.first).toBe(many[0]);
+    expect(dailyRollup?.first).toBe(daily);
+  });
+});
+
+describe("week lanes", () => {
+  it("keeps one column when starts differ", () => {
+    const lanes = assignWeekLanes([
+      occurrence(at(2026, 9, 21, 8, 0).toISOString(), "A"),
+      occurrence(at(2026, 9, 21, 8, 30).toISOString(), "B"),
+    ]);
+    expect(lanes.map(({ lane, lanes: width }) => ({ lane, width }))).toEqual([
+      { lane: 0, width: 1 },
+      { lane: 0, width: 1 },
+    ]);
+  });
+
+  it("numbers same-instant firings across one group", () => {
+    const start = at(2026, 9, 21, 8, 0).toISOString();
+    const lanes = assignWeekLanes([
+      occurrence(start, "A"),
+      occurrence(at(2026, 9, 21, 8, 30).toISOString(), "B"),
+      occurrence(start, "C"),
+      occurrence(start, "D"),
+    ]);
+    expect(
+      lanes.map(({ occurrence: firing, lane, lanes: width }) => ({ name: firing.scheduler_name, lane, width }))
+    ).toEqual([
+      { name: "A", lane: 0, width: 3 },
+      { name: "B", lane: 0, width: 1 },
+      { name: "C", lane: 1, width: 3 },
+      { name: "D", lane: 2, width: 3 },
+    ]);
   });
 });

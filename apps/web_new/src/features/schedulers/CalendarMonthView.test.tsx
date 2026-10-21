@@ -71,11 +71,32 @@ describe("CalendarMonthView", () => {
     expect(onSelect).toHaveBeenCalledWith(firings[0]);
   });
 
+  it("opens the day's first firing from the overflow control", async () => {
+    const firings = Array.from({ length: 6 }, (_, index) => occurrence(new Date(2026, 9, 21, 8, index).toISOString()));
+    const { onSelect } = rendered({ byDay: new Map([["2026-10-21", firings]]) });
+    await userEvent.click(screen.getByRole("button", { name: "+ 2 more" }));
+    expect(onSelect).toHaveBeenCalledWith(firings[0]);
+  });
+
   it("rolls a truncated day up per scheduler instead of stacking blocks", () => {
     const firings = Array.from({ length: 24 }, (_, index) => occurrence(new Date(2026, 9, 21, 0, index).toISOString()));
     rendered({ byDay: new Map([["2026-10-21", firings]]), truncated: true });
     expect(screen.getByRole("button", { name: "24× Hourly" })).toBeInTheDocument();
     expect(screen.queryAllByTitle(/Hourly/)).toHaveLength(0);
+  });
+
+  it("opens a scheduler's first firing of the day from a rollup line", async () => {
+    const hourly = Array.from({ length: 3 }, (_, index) => occurrence(new Date(2026, 9, 21, 8, index).toISOString()));
+    const daily = occurrence(new Date(2026, 9, 21, 7, 0).toISOString(), {
+      binding_id: "b2",
+      scheduler_id: "s2",
+      scheduler_name: "Daily",
+    });
+    const { onSelect } = rendered({ byDay: new Map([["2026-10-21", [daily, ...hourly]]]), truncated: true });
+    await userEvent.click(screen.getByRole("button", { name: "3× Hourly" }));
+    expect(onSelect).toHaveBeenCalledWith(hourly[0]);
+    await userEvent.click(screen.getByRole("button", { name: "1× Daily" }));
+    expect(onSelect).toHaveBeenCalledWith(daily);
   });
 
   it("leaves a day without firings blank", () => {

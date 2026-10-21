@@ -151,15 +151,18 @@ export function formatBlockTime(date: Date): string {
 export interface MonthDayPlan {
   /** Firings drawn as their own blocks, in time order. */
   blocks: SchedulerOccurrence[];
+  /** Firings folded behind the overflow control. */
+  folded: SchedulerOccurrence[];
   /** Overflow control text ("+ 20 more"), null when nothing folds away. */
   more: string | null;
 }
 
 /** How one month cell packs its firings. */
 export function planMonthDay(occurrences: readonly SchedulerOccurrence[]): MonthDayPlan {
-  if (occurrences.length <= MONTH_BLOCKS_PER_DAY) return { blocks: [...occurrences], more: null };
+  if (occurrences.length <= MONTH_BLOCKS_PER_DAY) return { blocks: [...occurrences], folded: [], more: null };
   return {
     blocks: occurrences.slice(0, MONTH_BLOCKS_PER_DAY),
+    folded: occurrences.slice(MONTH_BLOCKS_PER_DAY),
     more: `+ ${occurrences.length - MONTH_BLOCKS_PER_DAY} more`,
   };
 }
@@ -168,6 +171,35 @@ export interface MonthRollup {
   name: string;
   count: number;
   label: string;
+  /** The scheduler's first firing of the day, opened by the rollup line. */
+  first: SchedulerOccurrence;
+}
+
+export interface WeekLane {
+  occurrence: SchedulerOccurrence;
+  /** Zero-based column within a group of firings sharing one start instant. */
+  lane: number;
+  /** How many columns that group has. */
+  lanes: number;
+}
+
+/**
+ * Side-by-side columns for firings that start at the same instant. Blocks
+ * with distinct starts keep one full-width column each, so a lane only
+ * appears when two schedules would otherwise draw exactly on top of one
+ * another. Order follows the input order (the bucket is time-sorted).
+ */
+export function assignWeekLanes(occurrences: readonly SchedulerOccurrence[]): WeekLane[] {
+  const groups = new Map<string, SchedulerOccurrence[]>();
+  for (const occurrence of occurrences) {
+    const group = groups.get(occurrence.dtstart);
+    if (group === undefined) groups.set(occurrence.dtstart, [occurrence]);
+    else group.push(occurrence);
+  }
+  const indexOf = new Map<SchedulerOccurrence, number>(occurrences.map((occurrence, index) => [occurrence, index]));
+  return [...groups.values()]
+    .flatMap((group) => group.map((occurrence, lane) => ({ occurrence, lane, lanes: group.length })))
+    .sort((left, right) => (indexOf.get(left.occurrence) as number) - (indexOf.get(right.occurrence) as number));
 }
 
 /**
@@ -175,11 +207,18 @@ export interface MonthRollup {
  * line per scheduler so a month of minutely beats stays readable.
  */
 export function rollupDay(occurrences: readonly SchedulerOccurrence[]): MonthRollup[] {
-  const counts = new Map<string, number>();
+  const groups = new Map<string, { count: number; first: SchedulerOccurrence }>();
   for (const occurrence of occurrences) {
-    counts.set(occurrence.scheduler_name, (counts.get(occurrence.scheduler_name) ?? 0) + 1);
+    const group = groups.get(occurrence.scheduler_name);
+    if (group === undefined) groups.set(occurrence.scheduler_name, { count: 1, first: occurrence });
+    else group.count += 1;
   }
-  return [...counts.entries()].map(([name, count]) => ({ name, count, label: `${count}× ${name}` }));
+  return [...groups.entries()].map(([name, { count, first }]) => ({
+    name,
+    count,
+    label: `${count}× ${name}`,
+    first,
+  }));
 }
 
 /** Start of the day after `date`, at local midnight. */

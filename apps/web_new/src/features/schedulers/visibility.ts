@@ -78,19 +78,27 @@ export interface VisibilityState {
 
 /**
  * The rail's hidden set for one project. It starts from storage on mount
- * and writes every change back, so reloads and new tabs see it.
+ * and writes every change back, so reloads and new tabs see it. Switching
+ * to another project during the same page session re-reads that project's
+ * own set instead of carrying the previous one across.
  */
 export function useSchedulerVisibility(workspaceSlug: string, projectId: string): VisibilityState {
-  const [hidden, setHidden] = React.useState<ReadonlySet<string>>(
-    () => new Set(readHiddenSchedulers(browserStorage(), workspaceSlug, projectId))
-  );
+  const key = visibilityStorageKey(workspaceSlug, projectId);
+  const [stored, setStored] = React.useState<{ key: string; hidden: ReadonlySet<string> }>(() => ({
+    key,
+    hidden: new Set(readHiddenSchedulers(browserStorage(), workspaceSlug, projectId)),
+  }));
+  // A project switch inside one page session reads that project's set
+  // instead of showing the previous project's choice.
+  const hidden: ReadonlySet<string> =
+    stored.key === key ? stored.hidden : new Set(readHiddenSchedulers(browserStorage(), workspaceSlug, projectId));
 
   const commit = React.useCallback(
     (next: ReadonlySet<string>) => {
-      setHidden(next);
+      setStored({ key, hidden: next });
       writeHiddenSchedulers(browserStorage(), workspaceSlug, projectId, [...next]);
     },
-    [workspaceSlug, projectId]
+    [key, workspaceSlug, projectId]
   );
 
   const toggle = React.useCallback(

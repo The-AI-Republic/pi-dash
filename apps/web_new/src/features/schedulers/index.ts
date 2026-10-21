@@ -160,6 +160,7 @@ export {
   formatDayLabel,
   formatMonthYear,
   monthCells,
+  assignWeekLanes,
   monthWindow,
   nextMonth,
   occurrenceTop,

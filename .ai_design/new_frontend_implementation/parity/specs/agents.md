@@ -251,7 +251,9 @@ The calendar tab (the section's default landing) renders occurrences from
 24-hour week-grid views — opening on the week view — with period stepping,
 jump-to-today, a today mark and a locally ticking time line. Past and future
 blocks are visually distinct, overcrowded days collapse behind an overflow
-control, and the surface is read-only: no drag to create or reschedule.
+control that opens the day's first firing, and two schedules that fire at
+the same minute draw as side-by-side columns so each stays inspectable. The
+surface is read-only: no drag to create or reschedule.
 Viewers read; edit-from-calendar reuses the edit dialog and needs project
 admin. Gaps carried: past occurrences need run rows the seeded stack never
 produces, so the past/future distinction is unprovable and every block is
@@ -262,9 +264,10 @@ Oracle: `schedulers-project/calendar.spec.ts`. (AGT-015)
 A per-definition visibility rail beside the calendar (wide screens only,
 hidden automatically on narrow ones) offers one toggle row per installed
 definition with color marks plus show-all/hide-all. The hidden set is a
-local-only preference persisted per project across tabs; it is load-time
-state — a second tab loads with it applied, but open tabs do not follow
-each other live. No API. Oracle:
+local-only preference persisted per project across tabs and keyed per
+project, so a project switch in place reads the other project's set; it is
+load-time state — a second tab loads with it applied, but open tabs do not
+follow each other live. No API. Oracle:
 `schedulers-project/visibility-rail.spec.ts`. (AGT-016)
 
 Clicking a calendar block opens an occurrence side panel with timing,

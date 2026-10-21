@@ -112,6 +112,37 @@ describe("useSchedulerVisibility", () => {
     expect(readHiddenSchedulers(window.localStorage, SLUG, PROJECT)).toEqual([]);
   });
 
+  it("reads each project's own set when the project changes in place", () => {
+    writeHiddenSchedulers(window.localStorage, SLUG, "p1", ["s1"]);
+    writeHiddenSchedulers(window.localStorage, SLUG, "p2", ["s2"]);
+    const { result, rerender } = renderHook(
+      ({ project }: { project: string }) => useSchedulerVisibility(SLUG, project),
+      { initialProps: { project: "p1" } }
+    );
+    expect(result.current.isVisible("s1")).toBe(false);
+    expect(result.current.isVisible("s2")).toBe(true);
+
+    rerender({ project: "p2" });
+    expect(result.current.isVisible("s1")).toBe(true);
+    expect(result.current.isVisible("s2")).toBe(false);
+
+    act(() => result.current.toggle("s1"));
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p1")).toEqual(["s1"]);
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p2")).toEqual(["s2", "s1"]);
+  });
+
+  it("starts a project without a stored set empty after a switch", () => {
+    const { result, rerender } = renderHook(
+      ({ project }: { project: string }) => useSchedulerVisibility(SLUG, project),
+      { initialProps: { project: "p1" } }
+    );
+    act(() => result.current.hideAll(["s1"]));
+    rerender({ project: "p2" });
+    expect(result.current.isVisible("s1")).toBe(true);
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p2")).toEqual([]);
+    expect(readHiddenSchedulers(window.localStorage, SLUG, "p1")).toEqual(["s1"]);
+  });
+
   it("hides all and shows all", () => {
     const { result } = renderHook(() => useSchedulerVisibility(SLUG, PROJECT));
     act(() => result.current.hideAll(["s1", "s2"]));
