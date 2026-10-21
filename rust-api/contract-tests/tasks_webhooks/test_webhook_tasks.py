@@ -23,7 +23,7 @@ import pytest
 from _harness import broker_probe, celery_wire, config, taskspec
 from _harness import seed as seed_helpers
 from _harness.db import diff, snapshot, wait_for_condition as wait_for
-from _harness.sinks import WildcardHttpProbe
+from _harness.sinks import HostileLengthSink, WildcardHttpProbe
 
 M = "pi_dash.bgtasks"
 
@@ -142,10 +142,10 @@ def test_worker_registration(broker_url):
     broker_probe.wait_for_registration(set(WEBHOOK_TASKS))
 
 
-def _seed_workspace_with_hook(db_conn, webhook_sink, **flags):
+def _seed_workspace_with_hook(db_conn, webhook_sink, url=None, **flags):
     owner = seed_helpers.user(db_conn, "contract-hook-owner")
     workspace = seed_helpers.workspace(db_conn, "contracthook", owner["id"])
-    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    url = url or f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
     hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True, **flags)
     hook = dict(hook)
     hook["workspace_slug"] = workspace["slug"]
@@ -233,6 +233,107 @@ def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink
     )
     assert after[0]["retry_count"] == 0
     assert str(after[0]["response_status"]) == "500"
+
+
+def test_webhook_send_hostile_content_length_logs_failure_and_retries(
+    db_conn, broker_url, webhook_sink
+):
+    """Hostile Content-Length: failure row + scheduled retry, worker alive (PIDASHCONV-1273).
+
+    The sink answers ``Content-Length: 1000000000000`` and closes.
+    ``requests`` raises ``ConnectionError`` (``IncompleteRead``), so the
+    task logs the failure row (500, ``retry_count`` 0) and autoretries;
+    the retry waits on the worker's ETA timer (``inspect scheduled``),
+    and a follow-up send to the healthy sink proves the worker
+    survived. The scheduled retry keeps the published task id, so it is
+    revoked at teardown — its jittered refire (up to 600s out) must not
+    pollute later tests. A fast jitter draw may refire before the
+    revoke lands, so the row assertions pin the first attempt
+    (``retry_count`` 0) rather than the row count.
+    """
+    app = celery_wire.make_app(broker_url)
+    with HostileLengthSink() as hostile:
+        hook = _seed_workspace_with_hook(
+            db_conn, webhook_sink, url=f"{hostile.url}/hook/{uuid.uuid4().hex}"
+        )
+        before = snapshot(db_conn, ["webhook_logs"])
+        task_id = celery_wire.publish(
+            f"{M}.webhook_task.webhook_send_task",
+            kwargs={
+                "webhook_id": str(hook["id"]),
+                "slug": hook["workspace_slug"],
+                "event": "issue",
+                "event_data": {"id": "contract-hostile-length"},
+                "action": "POST",
+                "current_site": "example.com",
+                "activity": None,
+            },
+        )
+        hostile.wait_for_count(1, what="hostile webhook POST")
+        rows = wait_for(
+            lambda: [
+                row
+                for row in _log_diff_rows(db_conn, before)
+                if "contract-hostile-length" in row["request_body"]
+            ]
+            or None,
+            what="hostile-length webhook_logs row",
+        )
+        first = min(rows, key=lambda row: row["retry_count"])
+        assert first["retry_count"] == 0
+        assert str(first["response_status"]) == "500"
+        assert first["response_headers"] == ""
+        assert first["response_body"]
+
+        def _scheduled():
+            scheduled = app.control.inspect().scheduled() or {}
+            for entries in scheduled.values():
+                for entry in entries or []:
+                    request = (entry or {}).get("request") or {}
+                    if request.get("id") == task_id:
+                        return entry
+            return None
+
+        retry = wait_for(_scheduled, what="scheduled retry on worker ETA timer")
+        assert retry["request"]["name"] == f"{M}.webhook_task.webhook_send_task"
+        app.control.revoke(task_id)
+
+        def _revoked():
+            revoked = app.control.inspect().revoked() or {}
+            if any(task_id in (ids or []) for ids in revoked.values()):
+                return task_id
+            return None
+
+        assert wait_for(_revoked, what="revoked retry") == task_id
+
+    # The worker survived the hostile delivery: a follow-up send to the
+    # healthy sink executes end to end.
+    hook = _seed_workspace_with_hook(db_conn, webhook_sink)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": hook["workspace_slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-hostile-liveness"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    webhook_sink.wait_for_count(1, what="post-hostile webhook POST")
+    alive = wait_for(
+        lambda: [
+            row
+            for row in _log_diff_rows(db_conn, before)
+            if "contract-hostile-liveness" in row["request_body"]
+        ]
+        or None,
+        what="post-hostile webhook_logs row",
+    )
+    assert str(alive[0]["response_status"]) == "200"
 
 
 def test_webhook_redelivery_posts_twice_with_identical_bodies(
