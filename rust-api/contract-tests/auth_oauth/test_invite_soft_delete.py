@@ -1,4 +1,8 @@
-"""Contract suite: consumed OAuth invites soft-delete (PIDASHCONV-1089).
+"""Contract suite: OAuth invite soft-delete semantics.
+
+PIDASHCONV-1089 pins consumed-invite soft deletion. PIDASHCONV-1358 adds
+the signup gate: with ``ENABLE_SIGNUP=0``, a soft-deleted workspace invite
+must not count as an invitation for GitLab or Gitea signup.
 
 Django ends ``process_workspace_project_invitations`` with queryset
 ``.delete()`` on both invite sets (``workspace_project_join.py:90-91``),
@@ -8,23 +12,24 @@ and gitlab already soft-delete. This module pins the soft-delete on both
 backends: after an app login with accepted workspace invites, the invite
 rows are still present with ``deleted_at`` set.
 
-Harness choice (the issue leaves this to the fix run): gitea accepts a
-host override, so the success test points ``GITEA_HOST`` at a loopback
-stub serving the token + userinfo endpoints and drives the full app-gitea
-callback success path over plain HTTP on both backends. Google hardcodes
-its token/userinfo URLs on both backends (the same sealed-provider
-finding as PIDASHCONV-1083 for github), so google has no HTTP success
-test here: its net is the kernel-level harness (``google_kernel_*`` live
-tests in ``oauth_google.rs`` driving ``process_invitations`` directly)
-plus the error-branch pins below.
+Harness choice (the issue leaves this to the fix run): gitea and gitlab
+accept host overrides, so their success tests point ``GITEA_HOST`` /
+``GITLAB_HOST`` at loopback stubs serving the token + userinfo endpoints
+and drive the full callback path over plain HTTP on both backends. Google
+hardcodes its token/userinfo URLs on both backends (the same
+sealed-provider finding as PIDASHCONV-1083 for github), so google has no
+HTTP success test here: its net is the kernel-level harness
+(``google_kernel_*`` live tests in ``oauth_google.rs`` driving
+``process_invitations`` directly) plus the error-branch pins below.
 
 Scope notes: the success world seeds workspace invites ONLY — accepted
 project invites 500 first on both backends (the ported PB-1008 bug), so
-they can never be part of a green success path. The ``GITEA_*``
-``instance_configurations`` rows are inserted function-scoped and deleted
-in teardown, so the suite's boot-time ``oauth_unconfigured`` hermeticity
-holds for every other module (tests run serially; no fixture can observe
-the rows mid-test). No test here contacts a real provider.
+they can never be part of a green success path. Provider and
+``ENABLE_SIGNUP`` ``instance_configurations`` rows are inserted
+function-scoped and deleted in teardown, so the suite's boot-time
+``oauth_unconfigured`` hermeticity holds for every other module (tests run
+serially; no fixture can observe the rows mid-test). No test here contacts
+a real provider.
 """
 
 import os
@@ -44,6 +49,8 @@ from _harness.http import forge_session_data  # noqa: E402
 from _harness.sinks import RoutingStub  # noqa: E402
 
 GITEA_KEYS = ("GITEA_CLIENT_ID", "GITEA_CLIENT_SECRET", "GITEA_HOST")
+GITLAB_KEYS = ("GITLAB_CLIENT_ID", "GITLAB_CLIENT_SECRET", "GITLAB_HOST")
+ENABLE_SIGNUP_KEY = ("ENABLE_SIGNUP",)
 SESSION_HOST = "http://oauth-state.test"
 
 
@@ -71,12 +78,16 @@ def _delete_session(database_url, session_key):
     )
 
 
-def _delete_gitea_config(database_url):
+def _delete_config(database_url, keys):
     db.execute(
         database_url,
         "DELETE FROM instance_configurations WHERE key = ANY(%s)",
-        (list(GITEA_KEYS),),
+        (list(keys),),
     )
+
+
+def _delete_gitea_config(database_url):
+    _delete_config(database_url, GITEA_KEYS)
 
 
 def _delete_world(store, emails, workspace_ids):
@@ -197,6 +208,162 @@ def gitea_stub_world():
         finally:
             _delete_gitea_config(database_url)
             _delete_world(store, emails, world["workspace_ids"])
+
+
+@pytest.fixture(params=["gitlab", "gitea"])
+def signup_disabled_world(request):
+    """A fresh email with only a soft-deleted workspace invite, plus a
+    loopback provider stub and ``ENABLE_SIGNUP=0``.
+
+    Both provider callbacks reach ``__check_signup`` only after the token
+    exchange and userinfo fetch, so the stub must answer those endpoints.
+    The invite is stamped deleted through raw SQL: it is the revoked or
+    already-consumed shape that Django's ``SoftDeletionManager`` excludes.
+    """
+    provider = request.param
+    database_url = config.database_url()
+    store = Database(database_url)
+    tag = uuid.uuid4().hex[:8]
+    owner_email = f"signup-{provider}-own-{tag}@example.test"
+    email = f"signup-{provider}-{tag}@example.test"
+    emails = [email, owner_email]
+    owner = store.make_user(owner_email)
+    workspace = store.make_workspace(
+        f"signup-{provider}-{tag}", f"signup-{provider}-{tag}", owner["id"]
+    )
+    invite = store.make_invite(
+        workspace["id"], email, token=f"tok-signup-{provider}-{tag}"
+    )
+    db.execute(
+        database_url,
+        "UPDATE workspace_member_invites SET deleted_at = now() WHERE id = %s",
+        (invite["id"],),
+    )
+
+    if provider == "gitlab":
+        config_keys = GITLAB_KEYS
+        callback_path = "/auth/gitlab/callback/"
+        token_path = "/oauth/token"
+        userinfo_path = "/api/v4/user"
+        routes = {
+            ("POST", token_path): (
+                200,
+                {"access_token": f"stub-at-{tag}", "token_type": "bearer"},
+            ),
+            ("GET", userinfo_path): (
+                200,
+                {
+                    "id": 424242,
+                    "email": email,
+                    "name": "Contract User",
+                    "username": f"signup-{tag}",
+                    "avatar_url": None,
+                },
+            ),
+        }
+    else:
+        config_keys = GITEA_KEYS
+        callback_path = "/auth/gitea/callback/"
+        token_path = "/login/oauth/access_token"
+        userinfo_path = "/api/v1/user"
+        routes = {
+            ("POST", token_path): (
+                200,
+                {"access_token": f"stub-at-{tag}", "token_type": "bearer"},
+            ),
+            ("GET", userinfo_path): (
+                200,
+                {
+                    "id": 424242,
+                    "email": email,
+                    "login": f"signup-{tag}",
+                    "full_name": "Contract User",
+                    "avatar_url": None,
+                },
+            ),
+            ("GET", "/api/v1/user/emails"): (
+                200,
+                [{"email": email, "primary": True, "verified": True}],
+            ),
+        }
+
+    world = {
+        "provider": provider,
+        "email": email,
+        "callback_path": callback_path,
+        "token_path": token_path,
+        "userinfo_path": userinfo_path,
+        "workspace": workspace,
+        "emails": emails,
+        "workspace_ids": [workspace["id"]],
+    }
+    with RoutingStub(routes) as stub:
+        _delete_config(database_url, config_keys)
+        _delete_config(database_url, ENABLE_SIGNUP_KEY)
+        try:
+            store.make_config(
+                config_keys[0], "contract-id", category="AUTHENTICATION"
+            )
+            store.make_config(
+                config_keys[1], "contract-secret", category="AUTHENTICATION"
+            )
+            store.make_config(config_keys[2], stub.url, category="AUTHENTICATION")
+            store.make_config("ENABLE_SIGNUP", "0")
+            world["stub"] = stub
+            yield world
+        finally:
+            _delete_config(database_url, config_keys)
+            _delete_config(database_url, ENABLE_SIGNUP_KEY)
+            _delete_world(store, emails, world["workspace_ids"])
+
+
+def test_signup_disabled_ignores_soft_deleted_invite(
+    base_url: str, signup_disabled_world
+):
+    """A revoked invite does not satisfy the signup gate.
+
+    Django's manager filters ``deleted_at IS NULL``, so the callback must
+    answer the provider error redirect (5015, email payload) and leave the
+    user table untouched. Before this fix Rust counted the soft-deleted
+    row as an invite, created the user, and logged them in.
+    """
+    database_url = config.database_url()
+    world = signup_disabled_world
+    email = world["email"]
+    state = f"signup-{world['provider']}-state-{uuid.uuid4().hex[:8]}"
+    session_key = _forge_oauth_session(database_url, state)
+    try:
+        authed = httpx.Client(
+            base_url=base_url,
+            cookies={SESSION_COOKIE: session_key},
+            timeout=30,
+            follow_redirects=False,
+        )
+        try:
+            resp = authed.get(
+                world["callback_path"],
+                params={"code": "contract-stub-code", "state": state},
+            )
+        finally:
+            authed.close()
+    finally:
+        _delete_session(database_url, session_key)
+
+    assert resp.status_code == 302, (
+        f"expected 302, got {resp.status_code}: {resp.text[:300]}"
+    )
+    user = db.fetchone(
+        database_url, "SELECT id FROM users WHERE email = %s", (email,)
+    )
+    assert user is None, "soft-deleted invite must not let the callback create a user"
+    location = resp.headers["location"]
+    query = parse_qs(urlsplit(location).query)
+    assert query.get("error_code") == ["5015"], location
+    assert query.get("email") == [email], location
+
+    hits = {(r["method"], urlsplit(r["path"]).path) for r in world["stub"].requests}
+    assert ("POST", world["token_path"]) in hits, world["stub"].requests
+    assert ("GET", world["userinfo_path"]) in hits, world["stub"].requests
 
 
 def test_app_gitea_login_soft_deletes_consumed_invites(

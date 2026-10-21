@@ -1052,8 +1052,9 @@ pub const SIGNUP_DISABLED_CODE: i32 = 5015;
 pub const SIGNUP_DISABLED_NAME: &str = "SIGNUP_DISABLED";
 
 /// `__check_signup` (`base.py:103-122`): with signups disabled
-/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing workspace
-/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). A
+/// (`ENABLE_SIGNUP == "0"`, legacy default `"1"`) a missing live workspace
+/// invite raises `SIGNUP_DISABLED` (payload: the sanitized email). The
+/// default manager excludes soft-deleted invites. A
 /// config-store or DB failure escapes (Django 500), it is not a
 /// provider error.
 async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<(), CallbackOutcome> {
@@ -1084,12 +1085,13 @@ async fn check_signup(pool: &PgPool, secret_key: &str, email: &str) -> Result<()
     if enabled != "0" {
         return Ok(());
     }
-    let invited: Option<(i32,)> =
-        sqlx::query_as(r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 LIMIT 1"#)
-            .bind(email)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| CallbackOutcome::Server)?;
+    let invited: Option<(i32,)> = sqlx::query_as(
+        r#"SELECT 1 FROM "workspace_member_invites" WHERE email = $1 AND deleted_at IS NULL LIMIT 1"#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
     if invited.is_none() {
         return Err(CallbackOutcome::Provider(ProviderError::with_payload(
             SIGNUP_DISABLED_CODE,
