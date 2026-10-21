@@ -97,3 +97,5 @@ export {
   useToggleRepositorySync,
   useUnbindRepository,
 } from "./repository/api.js";
+export { GeneralSkeleton, ProjectSettingsGeneralTab, SAVE_LABEL, SAVING_LABEL } from "./general/GeneralTabScreen.js";
+export type { GeneralTabProps } from "./general/GeneralTabScreen.js";

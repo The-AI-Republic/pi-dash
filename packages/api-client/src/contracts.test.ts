@@ -88,6 +88,7 @@ import {
   updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "./contracts/project-management.js";
+import { getProjectSettingsDetail, updateProjectSettings } from "./contracts/project-settings-general.js";
 import {
   completeTour,
   createQuickLink,
@@ -179,6 +180,7 @@ import {
   uploadUserAvatar,
   uploadWorkspaceLogo,
 } from "./contracts/assets.js";
+import { uploadProjectAsset } from "./contracts/project-settings-general.js";
 import { listCycles, updateCycle } from "./contracts/cycles.js";
 import { listModules, updateModule } from "./contracts/modules.js";
 import {
@@ -2465,6 +2467,53 @@ describe("project lifecycle contracts", () => {
     expect(cleared.estimate).toBeNull();
     const clearCall = clearTransport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
     expect(clearCall?.init.body).toBe(JSON.stringify({ estimate: null }));
+  });
+
+  it("reads the General tab's row with the agent policy columns", async () => {
+    const row = {
+      ...details,
+      agent_ticking_enabled: true,
+      agent_default_max_ticks: 7,
+      agent_default_interval_seconds: 1800,
+      agent_review_default_interval_seconds: 1800,
+      agent_test_default_interval_seconds: 1800,
+    };
+    const transport = stubbedApi(() => ({ status: 200, body: row }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getProjectSettingsDetail(client, "acme", UUID2);
+    expect(parsed.agent_ticking_enabled).toBe(true);
+    expect(parsed.agent_default_max_ticks).toBe(7);
+    expect(parsed.agent_default_interval_seconds).toBe(1800);
+    const readCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(readCall?.init.method ?? "GET").toBe("GET");
+  });
+
+  it("refuses a General tab row that omits the agent policy columns", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: details }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await getProjectSettingsDetail(client, "acme", UUID2).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("patches the agent policy and parses the policy columns back", async () => {
+    const row = {
+      ...details,
+      agent_ticking_enabled: false,
+      agent_default_max_ticks: -1,
+      agent_default_interval_seconds: 3600,
+      agent_review_default_interval_seconds: 3600,
+      agent_test_default_interval_seconds: 3600,
+    };
+    const transport = stubbedApi(() => ({ status: 200, body: row }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProjectSettings(client, "acme", UUID2, {
+      agent_ticking_enabled: false,
+      agent_default_max_ticks: -1,
+    });
+    expect(updated.agent_default_max_ticks).toBe(-1);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.method).toBe("PATCH");
+    expect(patchCall?.init.body).toBe(JSON.stringify({ agent_ticking_enabled: false, agent_default_max_ticks: -1 }));
   });
 
   it("checks identifier availability and parses matches", async () => {
@@ -5301,6 +5350,110 @@ describe("workspace logo asset contracts", () => {
     expect(transport.calls.some((call) => call.url.endsWith(`/api/workspaces/file-assets/${UUID}/logo-key/`))).toBe(
       true
     );
+  });
+});
+
+describe("project asset contracts", () => {
+  const grant = {
+    asset_id: "asset-9",
+    asset_url: "/api/assets/v2/static/asset-9/",
+    upload_data: { url: "https://uploads.test/signed", fields: { key: "emblems/asset-9.png", policy: "p" } },
+  };
+
+  function grantTransport() {
+    return recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      if (call.init.method === "POST") {
+        return fakeResponse({ status: 200, body: JSON.stringify(grant) });
+      }
+      return fakeResponse({ status: 204, body: "" });
+    });
+  }
+
+  it("grants, posts bytes and confirms on the workspace route the handler accepts", async () => {
+    const transport = grantTransport();
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+    const uploads: Array<{ url: string; body: FormData }> = [];
+    const url = await uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file, async (target, body) => {
+      uploads.push({ url: target, body });
+      return { ok: true, status: 204 };
+    });
+    expect(url).toBe("/api/assets/v2/static/asset-9/");
+    // WorkspaceFileAssetEndpoint.post reads `entity_identifier` and assigns
+    // project_id once from the PROJECT_COVER lookup; the project-scoped
+    // ProjectAssetEndpoint passes project_id twice and cannot answer.
+    const grantCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(grantCall?.url).toBe("https://api.test/api/assets/v2/workspaces/acme/");
+    expect(grantCall?.init.body).toBe(
+      JSON.stringify({
+        entity_identifier: UUID2,
+        entity_type: "PROJECT_COVER",
+        name: "emblem.png",
+        size: file.size,
+        type: "image/png",
+      })
+    );
+    expect(uploads[0]?.url).toBe("https://uploads.test/signed");
+    expect(uploads[0]?.body.get("file")).toBe(file);
+    const confirmCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(confirmCall?.url).toBe("https://api.test/api/assets/v2/workspaces/acme/asset-9/");
+  });
+
+  it("rejects when the signed upload refuses the bytes", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+    const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+    const failure = await uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file, async () => ({
+      ok: false,
+      status: 413,
+    })).then(
+      () => null,
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(413);
+  });
+
+  it("posts the bytes to the signed URL through fetch when no uploader is supplied", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+      const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+      await expect(uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file)).resolves.toBe(
+        "/api/assets/v2/static/asset-9/"
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [target, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(target).toBe("https://uploads.test/signed");
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeInstanceOf(FormData);
+      expect((init.body as FormData).get("key")).toBe("emblems/asset-9.png");
+      expect((init.body as FormData).get("file")).toBe(file);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reads the signed upload's refusal status through the default fetch leg", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 413 }))
+    );
+    try {
+      const client = createClient({ baseUrl: "https://api.test", transport: grantTransport() });
+      const file = new File(["bytes"], "emblem.png", { type: "image/png" });
+      const failure = await uploadProjectAsset(client, "acme", UUID2, "PROJECT_COVER", file).then(
+        () => null,
+        (error: unknown) => error
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(413);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

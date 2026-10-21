@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
-import { checkProjectIdentifier, ProjectIdentifierCheck, ProjectIdentifierMatch, updateProject } from "./index.js";
+import {
+  checkProjectIdentifier,
+  ProjectIdentifierCheck,
+  ProjectIdentifierMatch,
+  updateProject,
+  updateProjectSettings,
+} from "./index.js";
 import type { ProjectUpdateInput } from "./index.js";
 import {
   checkProjectIdentifier as directCheck,
@@ -10,6 +16,7 @@ import {
   ProjectIdentifierMatch as DirectMatch,
   updateProject as directUpdate,
 } from "./contracts/project-management.js";
+import { updateProjectSettings as directSettingsUpdate } from "./contracts/project-settings-general.js";
 import {
   billingPlanAction,
   createPersonalApiToken,
@@ -42,6 +49,7 @@ describe("@pidash/api-client entry", () => {
   it("re-exports the project update and identifier contracts", () => {
     expect(checkProjectIdentifier).toBe(directCheck);
     expect(updateProject).toBe(directUpdate);
+    expect(updateProjectSettings).toBe(directSettingsUpdate);
     expect(ProjectIdentifierCheck).toBe(DirectCheck);
     expect(ProjectIdentifierMatch).toBe(DirectMatch);
     const input: ProjectUpdateInput = { description: "typed" };

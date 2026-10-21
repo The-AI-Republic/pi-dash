@@ -7,7 +7,15 @@
 // names the project for assistive tech.
 import * as React from "react";
 
-import { projectIconGlyph, projectMark, projectMarkText } from "./projectIcon.js";
+import { projectMark, projectMarkText } from "./projectIcon.js";
+import { ProjectMarkIcon } from "./ProjectMarkIcon.js";
+
+/** Resolve a stored emblem path to something an <img> can load. */
+export function resolveMarkSource(url: string, apiBaseUrl: string | undefined): string {
+  if (/^[a-z][a-z\d+.-]*:/i.test(url) || url.startsWith("//")) return url;
+  if (apiBaseUrl === undefined || apiBaseUrl === "") return url;
+  return `${apiBaseUrl.replace(/\/+$/, "")}${url.startsWith("/") ? "" : "/"}${url}`;
+}
 
 export interface ProjectMarkProps {
   /** Raw logo value from the project row; parsed defensively. */
@@ -17,28 +25,39 @@ export interface ProjectMarkProps {
   /** Tile edge in pixels. */
   size?: number;
   className?: string;
+  /** Base URL that relative uploaded-emblem paths resolve against. */
+  apiBaseUrl?: string | undefined;
 }
 
-export function ProjectMark({ logoProps, identifier, size = 20, className }: ProjectMarkProps): React.ReactElement {
+export function ProjectMark({
+  logoProps,
+  identifier,
+  size = 20,
+  className,
+  apiBaseUrl,
+}: ProjectMarkProps): React.ReactElement {
   const mark = projectMark(logoProps);
-  const Icon = mark.kind === "icon" ? projectIconGlyph(mark.name) : null;
   const fontSize = size <= 18 ? "text-meta" : "text-body";
   return (
     <span
-      aria-hidden="true"
       data-testid="project-mark"
       data-mark={mark.kind}
-      className={`flex shrink-0 items-center justify-center rounded-(--radius-control) bg-(--subtle) ${fontSize} font-medium text-(--text-muted) ${className ?? ""}`}
+      aria-hidden="true"
+      className={`flex shrink-0 items-center justify-center overflow-hidden rounded-(--radius-control) bg-(--subtle) ${fontSize} font-medium text-(--text-muted) ${className ?? ""}`}
       style={{ width: size, height: size }}
     >
-      {Icon !== null && mark.kind === "icon" ? (
-        <Icon
-          size={Math.round(size * 0.7)}
-          strokeWidth={1.5}
-          {...(mark.color === null ? {} : { color: mark.color, style: { color: mark.color } })}
+      {mark.kind === "image" ? (
+        <img
+          key={mark.url}
+          src={resolveMarkSource(mark.url, apiBaseUrl)}
+          alt=""
+          className="size-full object-cover"
+          data-testid="project-mark-image"
         />
+      ) : mark.kind === "icon" ? (
+        <ProjectMarkIcon mark={mark} identifier={identifier} size={Math.round(size * 0.7)} />
       ) : (
-        projectMarkText(mark, identifier)
+        <span aria-hidden="true">{projectMarkText(mark, identifier)}</span>
       )}
     </span>
   );

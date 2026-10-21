@@ -171,6 +171,12 @@ export {
 } from "./contracts/project-management.js";
 export type { ProjectCreateInput, ProjectUpdateInput } from "./contracts/project-management.js";
 export {
+  ProjectSettingsDetail,
+  getProjectSettingsDetail,
+  updateProjectSettings,
+  uploadProjectAsset,
+} from "./contracts/project-settings-general.js";
+export {
   DashboardActivityBucket,
   DashboardCompletedBucket,
   DashboardOverdueIssue,

@@ -6,8 +6,9 @@
 // project emblem; the mount point names the owning slice.
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ProjectSettingsContext, type ProjectSettingsContextValue } from "./ProjectSettingsLayout.js";
 import { ProjectSettingsPage } from "./ProjectSettingsPage.js";
 import { ProjectSettingsTabMount } from "./ProjectSettingsTabMount.js";
@@ -25,6 +26,10 @@ function wrap(value: ProjectSettingsContextValue, children: React.ReactNode): Re
 }
 
 describe("ProjectSettingsPage", () => {
+  beforeEach(() => createAppClient("https://api.test"));
+
+  afterEach(() => resetAppClient());
+
   it("titles the tab and carries the project emblem", () => {
     render(wrap(BASE, <ProjectSettingsPage title="Members">body</ProjectSettingsPage>));
     expect(screen.getByRole("heading", { level: 1, name: "Members" })).toBeInTheDocument();
@@ -37,6 +42,32 @@ describe("ProjectSettingsPage", () => {
     render(wrap({ ...BASE, project: null }, <ProjectSettingsPage title="States">body</ProjectSettingsPage>));
     expect(screen.queryByTestId("project-logo")).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "States" })).toBeInTheDocument();
+  });
+
+  it("renders a saved emoji mark in the header", () => {
+    render(
+      wrap(
+        { ...BASE, project: { ...BASE.project!, logoProps: { in_use: "emoji", emoji: { value: "128293" } } } },
+        <ProjectSettingsPage title="General">body</ProjectSettingsPage>
+      )
+    );
+    expect(screen.getByTestId("project-logo")).toHaveTextContent("🔥");
+  });
+
+  it("renders a saved icon mark in the header", () => {
+    render(
+      wrap(
+        {
+          ...BASE,
+          project: {
+            ...BASE.project!,
+            logoProps: { in_use: "icon", icon: { name: "rocket_launch", color: "#f97316" } },
+          },
+        },
+        <ProjectSettingsPage title="General">body</ProjectSettingsPage>
+      )
+    );
+    expect(screen.getByTestId("project-logo")).toHaveAttribute("data-mark", "icon");
   });
 });
 

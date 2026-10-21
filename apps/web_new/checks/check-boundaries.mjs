@@ -136,6 +136,19 @@ function entriesCatalogFailure(fromSrcRel, toSrcRel) {
   return "shared/shell/entries/* must not be statically imported outside entries/, the shell barrel and UpdatesDialog";
 }
 
+// The Lucide set behind stored project icons is 100+ glyphs; the eager
+// project marks (shell rail, page header, cards, pickers) are in the first
+// paint's closure. Only the lazy ProjectMarkIcon wrapper and the emblem
+// picker's own chunk may import it statically, or the initial-JS size gate
+// jumps by ~7 kB (NEWFRONT-572).
+const GLYPHS = /^shared\/pickers\/projectIconGlyphs\.(tsx|ts|jsx|js)$/;
+const DRAWS_GLYPHS = /^(shared\/pickers\/ProjectMarkIcon\.tsx|features\/project-settings\/general\/)/;
+
+function projectIconGlyphsFailure(fromSrcRel, toSrcRel) {
+  if (!GLYPHS.test(toSrcRel) || GLYPHS.test(fromSrcRel) || DRAWS_GLYPHS.test(fromSrcRel)) return null;
+  return "shared/pickers/projectIconGlyphs must stay out of eager closures (import it through ProjectMarkIcon, or from the emblem picker)";
+}
+
 function checkFile(full) {
   const text = readFileSync(full, "utf8");
   const rel = relative(root, full).split(sep).join(posix.sep);
@@ -189,6 +202,8 @@ function checkFile(full) {
       const fromSrcRel = relative(appSrc, full).split(sep).join(posix.sep);
       const entriesFailure = entriesCatalogFailure(fromSrcRel, importerRel);
       if (entriesFailure !== null) failures.push(`${rel}: ${entriesFailure} ("${spec}")`);
+      const iconFailure = projectIconGlyphsFailure(fromSrcRel, importerRel);
+      if (iconFailure !== null) failures.push(`${rel}: ${iconFailure} ("${spec}")`);
     }
   }
 
@@ -240,4 +255,4 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
   main();
 }
 
-export { crossFeatureFailure, entriesCatalogFailure };
+export { crossFeatureFailure, entriesCatalogFailure, projectIconGlyphsFailure };

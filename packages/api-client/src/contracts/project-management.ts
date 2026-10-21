@@ -54,6 +54,8 @@ export interface ProjectUpdateInput {
   network?: number;
   project_lead?: string | null;
   timezone?: string;
+  /** Project mark: the emoji/icon/uploaded-emblem object the row stores. */
+  logo_props?: Record<string, unknown>;
   emoji?: string | null;
   repo_url?: string;
   base_branch?: string;
@@ -67,6 +69,16 @@ export interface ProjectUpdateInput {
   module_view?: boolean;
   /** Free-form documents area switch (PSET-047). */
   page_view?: boolean;
+  /** Default executor for new runs; existing runs keep their own (PSET-009). */
+  default_agent_executor?: string;
+  /** Master switch for machine-started runs (PSET-009). */
+  agent_ticking_enabled?: boolean;
+  /** Run pool per work item; -1 is the no-cap sentinel (PSET-009). */
+  agent_default_max_ticks?: number;
+  /** Cadence per ticking stage; the General picker writes all three. */
+  agent_default_interval_seconds?: number;
+  agent_review_default_interval_seconds?: number;
+  agent_test_default_interval_seconds?: number;
   /** Idle-archive delay in months (0 disables); the automations page. */
   archive_in?: number;
   /** Idle-close delay in months (0 disables); the automations page. */
