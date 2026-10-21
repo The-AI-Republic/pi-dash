@@ -1239,6 +1239,192 @@ def test_rust_issue_activity_executes_locally(db_conn, broker_url):
     assert row["epoch"] == epoch
 
 
+#: PIDASHCONV-1277: same stamps as the oracle twins, so the newest-first
+#: expectation is deterministic on both backends.
+_R1277_OLD_TS = "2026-01-01T00:00:00+00:00"
+_R1277_NEW_TS = "2026-06-01T00:00:00+00:00"
+_R1277_EMOJI = "\U0001f44d"  # thumbs up, the issue's example
+_R1277_EPOCH = 1780000000
+
+
+def _r1277_ordered_pair():
+    """Two ascending uuids: random per run, ordered always (PIDASHCONV-1277)."""
+    first, second = str(uuid.uuid4()), str(uuid.uuid4())
+    return (first, second) if first < second else (second, first)
+
+
+def _r1277_pair(db_conn, tag):
+    """One project, two issues (ascending ids), and a reactor user (PIDASHCONV-1277).
+
+    Ascending ids make the pre-fix failure deterministic: the unordered
+    ``LIMIT 1`` returns the older row under every plan (seqscan heap
+    order, pkey id order, partial-unique ``(issue_id,...)`` /
+    ``(comment_id,...)`` key order). The fixed ``ORDER BY created_at
+    DESC`` is unaffected by ids.
+    """
+    chain = seed_helpers.issue_chain(db_conn, tag)
+    issue_x_id, issue_y_id = _r1277_ordered_pair()
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET id = %s WHERE id = %s",
+            (issue_x_id, str(chain["issue"]["id"])),
+        )
+    db_conn.commit()
+    chain["issue"]["id"] = issue_x_id
+    issue2 = insert_row(
+        db_conn,
+        "issues",
+        {
+            "id": issue_y_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "state_id": str(chain["state"]["id"]),
+            "name": "contract issue two",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 2,
+            "is_draft": False,
+            "sort_order": 65534,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    chain["issue2"] = issue2
+    chain["reactor"] = seed_helpers.user(db_conn, f"{tag}-reactor")
+    return chain
+
+
+def _r1277_comment(db_conn, chain, issue, comment_id):
+    # varchar[]-safe array literals; seed.issue_comment's [] lists send
+    # json against varchar[] columns (see the oracle twin's note).
+    return insert_row(
+        db_conn,
+        "issue_comments",
+        {
+            "id": comment_id,
+            "workspace_id": str(chain["workspace"]["id"]),
+            "project_id": str(chain["project"]["id"]),
+            "issue_id": str(issue["id"]),
+            "actor_id": str(chain["reactor"]["id"]),
+            "access": "EXTERNAL",
+            "attachments": "{}",
+            "comment_html": "<p>hi</p>",
+            "comment_json": {},
+            "comment_stripped": "hi",
+            "labels": "{}",
+            "speaker_label": "",
+            "speaker_type": "human",
+        },
+    )
+
+
+def test_rust_issue_activity_comment_reaction_picks_newest(db_conn, broker_url):
+    """comment_reaction created, Rust side: the NEWEST match (PIDASHCONV-1277).
+
+    Mirrors ``test_issue_activity_comment_reaction_picks_newest`` (same
+    seeds, same payload): settlement plus the row diff is the proof —
+    with the Django worker stopped, a forward could never produce a
+    local row. Pre-fix the unordered ``LIMIT 1`` returns the older
+    reaction, so the activity lands on issue X instead of issue Y.
+    """
+    chain = _r1277_pair(db_conn, "rr1277comment")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    comment_a_id, comment_b_id = _r1277_ordered_pair()
+    comment_a = _r1277_comment(db_conn, chain, chain["issue"], comment_a_id)
+    comment_b = _r1277_comment(db_conn, chain, chain["issue2"], comment_b_id)
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _R1277_EMOJI,
+    }
+    old_id, new_id = _r1277_ordered_pair()
+    insert_row(db_conn, "comment_reactions", {
+        "id": old_id,
+        **base, "comment_id": str(comment_a["id"]), "created_at": _R1277_OLD_TS,
+    })
+    newer = insert_row(db_conn, "comment_reactions", {
+        "id": new_id,
+        **base, "comment_id": str(comment_b["id"]), "created_at": _R1277_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "comment_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _R1277_EMOJI}),
+            "current_instance": None,
+            "issue_id": None,
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _R1277_EPOCH,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="comment-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _R1277_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
+def test_rust_issue_activity_issue_reaction_picks_newest(db_conn, broker_url):
+    """issue_reaction created, Rust side: new_identifier is NEWEST (PIDASHCONV-1277).
+
+    Mirrors ``test_issue_activity_issue_reaction_picks_newest`` (same
+    seeds, same payload): settlement plus the row diff is the proof.
+    Pre-fix the unordered ``LIMIT 1`` names the older reaction id.
+    """
+    chain = _r1277_pair(db_conn, "rr1277issue")
+    ws, project, reactor = chain["workspace"], chain["project"], chain["reactor"]
+    base = {
+        "workspace_id": str(ws["id"]),
+        "project_id": str(project["id"]),
+        "actor_id": str(reactor["id"]),
+        "reaction": _R1277_EMOJI,
+    }
+    old_id, new_id = _r1277_ordered_pair()
+    insert_row(db_conn, "issue_reactions", {
+        "id": old_id,
+        **base, "issue_id": str(chain["issue"]["id"]), "created_at": _R1277_OLD_TS,
+    })
+    newer = insert_row(db_conn, "issue_reactions", {
+        "id": new_id,
+        **base, "issue_id": str(chain["issue2"]["id"]), "created_at": _R1277_NEW_TS,
+    })
+    before = snapshot(db_conn, ["issue_activities"])
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue_reaction.activity.created",
+            "requested_data": json.dumps({"reaction": _R1277_EMOJI}),
+            "current_instance": None,
+            "issue_id": str(chain["issue2"]["id"]),
+            "actor_id": str(reactor["id"]),
+            "project_id": str(project["id"]),
+            "epoch": _R1277_EPOCH,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="issue-reaction issue_activities row",
+    )
+    assert row["issue_id"] == str(chain["issue2"]["id"])
+    assert row["new_identifier"] == str(newer["id"])
+    assert row["verb"] == "created"
+    assert row["field"] == "reaction"
+    assert row["new_value"] == _R1277_EMOJI
+    assert row["comment"] == "added the reaction"
+
+
 #: ``data:image/svg+xml;base64,`` + DEFAULT_FAVICON
 #: (``work_item_link_task.py:24``), the favicon fallback.
 DEFAULT_FAVICON_DATA_URI = (
