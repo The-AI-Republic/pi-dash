@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from email import message_from_bytes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -521,6 +522,82 @@ class WorkerWebhookSink:
             return list(self.deliveries)
 
     def wait_for_count(self, n: int, what: str = "webhook deliveries") -> list:
+        return wait_for_condition(
+            lambda: self.snapshot() if len(self.snapshot()) >= n else None,
+            what=what,
+        )
+
+
+class ChunkedKeepAliveSink:
+    """Webhook sink answering ``Transfer-Encoding: chunked`` and staying open.
+
+    Sends ``2\\r\\nok\\r\\n0\\r\\n\\r\\n`` and then holds the connection for
+    longer than the webhook client's 30 s read timeout. ``requests`` (the
+    Django oracle) returns at the terminal chunk; a client that instead
+    reads to EOF hangs and records a false failure.
+    """
+
+    def __init__(self, hold_seconds: float = 45.0):
+        self.hold_seconds = hold_seconds
+        self.deliveries = []
+        self._lock = threading.Lock()
+        self._server = None
+        self._thread = None
+
+    def start(self) -> None:
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length else b""
+                with outer._lock:
+                    outer.deliveries.append(
+                        {
+                            "path": self.path,
+                            "headers": dict(self.headers),
+                            "body": raw.decode("utf-8", "replace"),
+                        }
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self.wfile.write(b"2\r\nok\r\n0\r\n\r\n")
+                self.wfile.flush()
+                time.sleep(outer.hold_seconds)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address
+        return f"http://{host}:{port}"
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._thread.join(timeout=10)
+            self._server.server_close()
+            self._server = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self.deliveries = []
+
+    def snapshot(self) -> list:
+        with self._lock:
+            return list(self.deliveries)
+
+    def wait_for_count(self, n: int, what: str = "chunked webhook deliveries") -> list:
         return wait_for_condition(
             lambda: self.snapshot() if len(self.snapshot()) >= n else None,
             what=what,

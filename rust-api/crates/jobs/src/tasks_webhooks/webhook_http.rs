@@ -377,7 +377,12 @@ pub fn decode_chunked(bytes: &[u8]) -> Result<(Vec<u8>, usize), String> {
             .ok_or_else(|| "Truncated chunked body".to_owned())?;
         body.extend_from_slice(&bytes[at..chunk_end]);
         at = chunk_end;
-        if bytes.get(at..at + 2) != Some(b"\r\n") {
+        // A segment may end at the chunk-data edge: missing bytes mean
+        // truncated (keep reading), present-but-wrong bytes mean invalid.
+        let Some(trailer) = bytes.get(at..at + 2) else {
+            return Err("Truncated chunked body".to_owned());
+        };
+        if trailer != b"\r\n" {
             return Err("Invalid chunked body".to_owned());
         }
         at += 2;
@@ -907,11 +912,17 @@ async fn read_body(
         .split(',')
         .any(|c| c.trim().eq_ignore_ascii_case("chunked"));
     if chunked {
-        // Chunked framing must parse incrementally: read to close, then
-        // decode (trailer handling needs the terminal chunk).
+        // Chunked framing is complete at the terminal chunk; a keep-alive
+        // peer leaves the socket open, so decode incrementally instead of
+        // waiting for EOF.
         let mut buf = already;
         let mut chunk = [0u8; 8192];
         loop {
+            match decode_chunked(&buf) {
+                Ok((body, _)) => return Ok(body),
+                Err(detail) if detail == "Truncated chunked body" => {}
+                Err(detail) => return Err(format!("Chunked encoding error: {detail}")),
+            }
             let step = async {
                 match stream {
                     Stream::Plain(s) => s.read(&mut chunk).await,
@@ -923,13 +934,10 @@ async fn read_body(
                 .map_err(|_| "Read timed out".to_owned())?
                 .map_err(|e| format!("Connection failed: {e}"))?;
             if read == 0 {
-                break;
+                return Err("Chunked encoding error: Truncated chunked body".to_owned());
             }
             buf.extend_from_slice(&chunk[..read]);
         }
-        let (body, _) =
-            decode_chunked(&buf).map_err(|detail| format!("Chunked encoding error: {detail}"))?;
-        return Ok(body);
     }
     if let Some(length) = header_value(headers, "content-length") {
         // First value wins; garbage means close-delimited (`http.client`).
@@ -1207,6 +1215,20 @@ mod tests {
     }
 
     #[test]
+    fn chunked_decode_partial_buffer_is_truncated_not_invalid() {
+        // Every prefix of a valid chunked body must decode as truncated
+        // (keep reading), never as invalid: the incremental reader calls
+        // this after each TCP segment, and a segment may end anywhere —
+        // mid-size-line, mid-chunk, at the chunk-data edge, or inside the
+        // trailing CRLF.
+        let full = b"4;ext=1\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+        for end in 1..full.len() {
+            let err = decode_chunked(&full[..end]).unwrap_err();
+            assert_eq!(err, "Truncated chunked body", "prefix len {end}");
+        }
+    }
+
+    #[test]
     fn content_decoding_handles_gzip_and_deflate() {
         use flate2::write::{DeflateEncoder, GzEncoder};
         use flate2::Compression;
@@ -1436,6 +1458,51 @@ mod tests {
         )
         .await;
         assert!(result.is_err(), "hostile length must fail, got {result:?}");
+        server.await.unwrap();
+    }
+
+    /// A chunked response is complete at the terminal chunk. The peer in
+    /// this test deliberately leaves the socket open afterwards (as a
+    /// keep-alive proxy or server does); the client must return without
+    /// waiting for EOF or the per-read timeout.
+    #[tokio::test]
+    async fn chunked_terminal_chunk_returns_while_socket_stays_open() {
+        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            // Hold the connection open until the client returns.
+            let _ = release_rx.await;
+        });
+        let started = Instant::now();
+        let response = post(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &headers(&[("User-Agent", "Autopilot")]),
+            b"payload",
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "client waited for EOF instead of the terminal chunk"
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+        release_tx.send(()).unwrap();
         server.await.unwrap();
     }
 }

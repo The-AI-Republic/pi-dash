@@ -100,6 +100,7 @@ import hashlib
 import hmac
 import json
 import socket
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -157,6 +158,17 @@ def _seed_sink_hook(db_conn, **flags):
     return hook
 
 
+def _seed_hook_at(db_conn, base_url, **flags):
+    owner = seed_helpers.user(db_conn, "rust-replay-chunked-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaychunked", owner["id"])
+    url = f"{base_url}/hook/{uuid.uuid4().hex}"
+    hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True, **flags)
+    hook = dict(hook)
+    hook["workspace_slug"] = workspace["slug"]
+    hook["owner_id"] = owner["id"]
+    return hook
+
+
 def _send_kwargs(hook, probe_id):
     return {
         "webhook_id": str(hook["id"]),
@@ -204,6 +216,34 @@ def test_rust_webhook_send_executes_locally(db_conn, broker_url, webhook_sink):
     assert "X-Pi Dash-Event" in row["request_headers"]
     assert "rust-replay-probe" in row["request_body"]
     assert "create" in row["request_body"]
+
+
+def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
+    db_conn, broker_url, chunked_keepalive_sink
+):
+    """Rust side: chunked + keep-alive must not time out, log 500, or retry."""
+    hook = _seed_hook_at(db_conn, chunked_keepalive_sink.url)
+    chunked_keepalive_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    baseline = rust_queue.queue_depth()
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-chunked")
+    )
+    deliveries = chunked_keepalive_sink.wait_for_count(1, what="chunked webhook POST")
+    assert len(deliveries) == 1
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="chunked webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["response_body"] == "ok"
+    assert row["retry_count"] == 0
+    rust_queue.wait_for_settled(celery_id, what="chunked send acked")
+    rust_queue.wait_for_queue_drain(baseline=baseline, what="chunked queue drained")
+    time.sleep(1)
+    assert len(chunked_keepalive_sink.snapshot()) == 1, "event was redelivered"
+    assert not rust_queue.row_present(celery_id), "chunked send was requeued"
+    assert len(_log_diff_rows(db_conn, before)) == 1
 
 
 def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink):
