@@ -37,11 +37,24 @@
 //!   `None`.
 //! * The crawl result carries the ORIGINAL input `url`, never the
 //!   post-redirect URL; the error shape has no `favicon_url` key.
+//! * Title decoding mirrors `UnicodeDammit` + `html.parser` + BS4's own
+//!   entity handlers — not `html.unescape` (PIDASHCONV-1280): BOM, then
+//!   the XML prolog / meta charset, then UTF-8, then windows-1252. The
+//!   response `Content-Type` is never consulted (Django hands raw bytes
+//!   to BeautifulSoup). Known gaps: no `charset-normalizer` detection
+//!   step (undeclared non-UTF-8 pages are best-effort), no exotic
+//!   codecs (hz, ptcp154), superset approximations where WHATWG is
+//!   wider than the declared codec (gb2312, big5-hkscs, tis-620,
+//!   iso-8859-9/11), and surrogate code points read as U+FFFD
+//!   (unrepresentable in UTF-8 strings).
 
 use std::net::IpAddr;
+use std::sync::LazyLock;
 
+use encoding_rs::Encoding;
 use serde_json::{Map, Value};
 
+use super::html_entities;
 use crate::assistant::ssrf::address_is_private_or_reserved;
 
 /// Celery task name (`work_item_link_task.py:262`, `@shared_task`).
@@ -486,18 +499,393 @@ fn tag_attrs(html: &str, open: usize, end: usize) -> Vec<(String, String)> {
     attrs
 }
 
+/// The winning body decoder: the Rust half of
+/// `UnicodeDammit.original_encoding`. It travels with the decoded page
+/// because `handle_charref` resolves references below 256 through it.
+#[derive(Debug, Clone, Copy)]
+pub enum PageEncoding {
+    /// Any `encoding_rs` codec (UTF-8, windows-1252, Shift_JIS, ...).
+    Rs(&'static Encoding),
+    /// Python `iso-8859-1` (pure latin-1). WHATWG aliases every
+    /// `iso-8859-1` spelling to windows-1252, which maps `0x80-0x9F`
+    /// to printable characters Django leaves as controls.
+    Latin1,
+    /// Bare `utf-16`: BOM-selected endianness, else little-endian
+    /// (CPython's native default on every supported target).
+    Utf16Bare,
+    /// Bare `utf-32`: same BOM-or-LE rule (`encoding_rs` has no
+    /// UTF-32, so the fixed-endian forms below are manual too).
+    Utf32Bare,
+    /// Python `utf-32be` / `utf-32le`, by hand.
+    Utf32Be,
+    Utf32Le,
+}
+
+impl PartialEq for PageEncoding {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PageEncoding::Rs(left), PageEncoding::Rs(right)) => left.name() == right.name(),
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+impl Eq for PageEncoding {}
+
+impl PageEncoding {
+    /// Strict decode: `None` on any malformed sequence
+    /// (`str(data, encoding, "strict")` raising).
+    fn strict_decode(self, body: &[u8]) -> Option<String> {
+        match self {
+            PageEncoding::Rs(encoding) => {
+                let (text, _, had_errors) = encoding.decode(body);
+                if had_errors {
+                    None
+                } else {
+                    Some(text.into_owned())
+                }
+            }
+            PageEncoding::Latin1 => Some(body.iter().map(|&byte| byte as char).collect()),
+            PageEncoding::Utf16Bare => {
+                if let Some(rest) = body.strip_prefix(b"\xfe\xff") {
+                    PageEncoding::Rs(encoding_rs::UTF_16BE).strict_decode(rest)
+                } else if let Some(rest) = body.strip_prefix(b"\xff\xfe") {
+                    PageEncoding::Rs(encoding_rs::UTF_16LE).strict_decode(rest)
+                } else {
+                    PageEncoding::Rs(encoding_rs::UTF_16LE).strict_decode(body)
+                }
+            }
+            PageEncoding::Utf32Bare => {
+                if let Some(rest) = body.strip_prefix(b"\x00\x00\xfe\xff") {
+                    PageEncoding::Utf32Be.strict_decode(rest)
+                } else if let Some(rest) = body.strip_prefix(b"\xff\xfe\x00\x00") {
+                    PageEncoding::Utf32Le.strict_decode(rest)
+                } else {
+                    PageEncoding::Utf32Le.strict_decode(body)
+                }
+            }
+            PageEncoding::Utf32Be => decode_utf32(body, true),
+            PageEncoding::Utf32Le => decode_utf32(body, false),
+        }
+    }
+
+    /// Lossy decode: every undecodable unit becomes U+FFFD
+    /// (`errors="replace"`). Always succeeds.
+    fn decode_replace(self, body: &[u8]) -> String {
+        match self {
+            PageEncoding::Rs(encoding) => encoding.decode(body).0.into_owned(),
+            PageEncoding::Latin1 => body.iter().map(|&byte| byte as char).collect(),
+            PageEncoding::Utf16Bare => {
+                if let Some(rest) = body.strip_prefix(b"\xfe\xff") {
+                    PageEncoding::Rs(encoding_rs::UTF_16BE).decode_replace(rest)
+                } else if let Some(rest) = body.strip_prefix(b"\xff\xfe") {
+                    PageEncoding::Rs(encoding_rs::UTF_16LE).decode_replace(rest)
+                } else {
+                    PageEncoding::Rs(encoding_rs::UTF_16LE).decode_replace(body)
+                }
+            }
+            PageEncoding::Utf32Bare => {
+                if let Some(rest) = body.strip_prefix(b"\x00\x00\xfe\xff") {
+                    PageEncoding::Utf32Be.decode_replace(rest)
+                } else if let Some(rest) = body.strip_prefix(b"\xff\xfe\x00\x00") {
+                    PageEncoding::Utf32Le.decode_replace(rest)
+                } else {
+                    PageEncoding::Utf32Le.decode_replace(body)
+                }
+            }
+            PageEncoding::Utf32Be => decode_utf32_replace(body, true),
+            PageEncoding::Utf32Le => decode_utf32_replace(body, false),
+        }
+    }
+
+    /// Strict decode of one byte (`bytearray([b]).decode(...)` in
+    /// `handle_charref`).
+    fn strict_byte(self, byte: u8) -> Option<char> {
+        self.strict_decode(&[byte])
+            .and_then(|text| text.chars().next())
+    }
+}
+
+/// One UTF-32 unit in the given endianness.
+fn utf32_unit(unit: &[u8; 4], big_endian: bool) -> u32 {
+    if big_endian {
+        u32::from_be_bytes(*unit)
+    } else {
+        u32::from_le_bytes(*unit)
+    }
+}
+
+/// Strict UTF-32BE/LE decode (`char::from_u32` rejects surrogates and
+/// out-of-range units exactly like CPython's strict decoder).
+fn decode_utf32(body: &[u8], big_endian: bool) -> Option<String> {
+    let (units, tail) = body.as_chunks::<4>();
+    if !tail.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for unit in units {
+        out.push(char::from_u32(utf32_unit(unit, big_endian))?);
+    }
+    Some(out)
+}
+
+/// UTF-32BE/LE with `errors="replace"`: one U+FFFD per bad unit, one
+/// for a short tail.
+fn decode_utf32_replace(body: &[u8], big_endian: bool) -> String {
+    let (units, tail) = body.as_chunks::<4>();
+    let mut out = String::new();
+    for unit in units {
+        out.push(char::from_u32(utf32_unit(unit, big_endian)).unwrap_or('\u{FFFD}'));
+    }
+    if !tail.is_empty() {
+        out.push('\u{FFFD}');
+    }
+    out
+}
+
+/// BOM strip (`EncodingDetector.strip_byte_order_mark`,
+/// `bs4/dammit.py:452`): the body without the mark plus the implied
+/// encoding name. Mirrors the check order and, deliberately, the two
+/// dead `!= "\x00\x00"` bytes-vs-str guards — so a UTF-32LE BOM
+/// misdetects as UTF-16LE with only 2 of its 4 bytes stripped, exactly
+/// as in Django.
+fn strip_bom(body: &[u8]) -> (&[u8], Option<&'static str>) {
+    if body.len() >= 4 && body.starts_with(&[0xFE, 0xFF]) {
+        (&body[2..], Some("utf-16be"))
+    } else if body.len() >= 4 && body.starts_with(&[0xFF, 0xFE]) {
+        (&body[2..], Some("utf-16le"))
+    } else if let Some(rest) = body.strip_prefix(b"\xef\xbb\xbf") {
+        (rest, Some("utf-8"))
+    } else if let Some(rest) = body.strip_prefix(b"\x00\x00\xfe\xff") {
+        (rest, Some("utf-32be"))
+    } else if let Some(rest) = body.strip_prefix(b"\xff\xfe\x00\x00") {
+        (rest, Some("utf-32le"))
+    } else {
+        (body, None)
+    }
+}
+
+static XML_ENCODING_RE: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
+    regex::bytes::Regex::new(r#"(?i)^\s*<\?.*encoding=['"](.*?)['"].*\?>"#)
+        .expect("Dammit XML encoding pattern compiles")
+});
+static META_CHARSET_RE: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
+    regex::bytes::Regex::new(r#"(?i)<\s*meta[^>]+charset\s*=\s*["']?([^>]*?)[ /;'">]"#)
+        .expect("Dammit meta charset pattern compiles")
+});
+
+/// Declared encoding (`EncodingDetector.find_declared_encoding`,
+/// `bs4/dammit.py:482`): the XML prolog first (even for HTML), then
+/// the meta tag, each within its search window. An XML match ends the
+/// search even when its value is empty.
+fn find_declared_encoding(body: &[u8]) -> Option<String> {
+    let xml_end = body.len().min(1024);
+    if let Some(captures) = XML_ENCODING_RE.captures(&body[..xml_end]) {
+        return captured_value(&captures);
+    }
+    let window = ((body.len() as f64 * 0.05) as usize).max(2048);
+    let html_end = body.len().min(window);
+    if let Some(captures) = META_CHARSET_RE.captures(&body[..html_end]) {
+        return captured_value(&captures);
+    }
+    None
+}
+
+/// Capture group 1 as Dammit reads it: ASCII with U+FFFD per
+/// non-ASCII byte, lowercased; empty reads as undeclared.
+fn captured_value(captures: &regex::bytes::Captures) -> Option<String> {
+    let raw = captures.get(1)?.as_bytes();
+    let mut value = String::with_capacity(raw.len());
+    for &byte in raw {
+        if byte.is_ascii() {
+            value.push(byte.to_ascii_lowercase() as char);
+        } else {
+            value.push('\u{FFFD}');
+        }
+    }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Dammit's `CHARSET_ALIASES` (`bs4/dammit.py:530`).
+fn dammit_alias(label: &str) -> String {
+    match label {
+        "macintosh" => "mac-roman".to_owned(),
+        "x-sjis" => "shift-jis".to_owned(),
+        _ => label.to_owned(),
+    }
+}
+
+/// `codecs` label → decoder (`UnicodeDammit.find_codec` +
+/// `codecs.lookup`): each Dammit attempt form (as-is, `-`-stripped,
+/// `-`→`_`) runs the explicit spellings first and
+/// `Encoding::for_label` last. An unresolvable label reads as absent
+/// (Dammit's `LookupError` branch skips it).
+fn resolve_label(label: &str) -> Option<PageEncoding> {
+    let lower = label.to_ascii_lowercase();
+    for form in [
+        dammit_alias(&lower),
+        lower.replace('-', ""),
+        lower.replace('-', "_"),
+    ] {
+        if let Some(encoding) = resolve_form(&form) {
+            return Some(encoding);
+        }
+    }
+    None
+}
+
+/// One attempt form → decoder. The explicit tables are the exact
+/// spellings CPython decodes (`encodings.aliases` + canonical names,
+/// verified) wherever WHATWG maps them wrongly or not at all; the
+/// `for_label` fallback covers the rest. Labels WHATWG knows but
+/// CPython rejects (`mac`, `x-mac-roman`, ...) decode here and skip
+/// there — accepted gap, never seen in real meta tags.
+fn resolve_form(form: &str) -> Option<PageEncoding> {
+    match form {
+        // Pure latin-1, never WHATWG's windows-1252 mapping.
+        "8859" | "cp819" | "csisolatin1" | "ibm819" | "iso8859" | "iso8859_1" | "iso8859-1"
+        | "iso_8859_1" | "iso_8859_1_1987" | "iso_ir_100" | "l1" | "latin" | "latin1"
+        | "latin_1" | "iso-8859-1" => Some(PageEncoding::Latin1),
+        // Short `latinN` names (CPython decodes them; WHATWG has no
+        // such labels). `latin5` is iso-8859-9, read as its
+        // windows-1254 superset like the dashed spelling.
+        "latin2" | "l2" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_2)),
+        "latin3" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_3)),
+        "latin4" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_4)),
+        "latin5" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1254)),
+        "latin6" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_10)),
+        "latin7" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_13)),
+        "latin8" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_14)),
+        "latin9" | "l9" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_15)),
+        "latin10" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_16)),
+        // Bare UTF-16/32 (BOM-or-LE) and fixed-endian forms.
+        "u16" | "utf16" | "utf_16" | "utf-16" => Some(PageEncoding::Utf16Bare),
+        "utf16be" | "utf_16be" | "utf-16be" | "unicodebigunmarked" => {
+            Some(PageEncoding::Rs(encoding_rs::UTF_16BE))
+        }
+        "utf16le" | "utf_16le" | "utf-16le" | "unicodelittleunmarked" => {
+            Some(PageEncoding::Rs(encoding_rs::UTF_16LE))
+        }
+        "u32" | "utf32" | "utf_32" | "utf-32" => Some(PageEncoding::Utf32Bare),
+        "utf32be" | "utf_32be" | "utf-32be" => Some(PageEncoding::Utf32Be),
+        "utf32le" | "utf_32le" | "utf-32le" => Some(PageEncoding::Utf32Le),
+        // Shift_JIS spellings WHATWG lacks.
+        "csshiftjis" | "s_jis" | "shiftjis" | "sjis" => {
+            Some(PageEncoding::Rs(encoding_rs::SHIFT_JIS))
+        }
+        // EUC-JP / EUC-KR spellings WHATWG lacks.
+        "eucjp" | "u_jis" | "ujis" => Some(PageEncoding::Rs(encoding_rs::EUC_JP)),
+        "euckr" => Some(PageEncoding::Rs(encoding_rs::EUC_KR)),
+        // GBK spellings WHATWG lacks.
+        "936" | "cp936" | "euc_cn" | "euccn" | "ms936" => Some(PageEncoding::Rs(encoding_rs::GBK)),
+        // Big5 spellings WHATWG lacks.
+        "big5_tw" => Some(PageEncoding::Rs(encoding_rs::BIG5)),
+        // `tis620`: WHATWG only lists `tis-620` (which hits
+        // `for_label`); both read as windows-874, a superset of
+        // strict TIS-620.
+        "tis620" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_874)),
+        // MacRoman spellings WHATWG lacks (`macintosh` hits `for_label`).
+        "mac-roman" | "macroman" | "mac_roman" => Some(PageEncoding::Rs(encoding_rs::MACINTOSH)),
+        // Underscore / `cp` windows-125x spellings WHATWG lacks.
+        "windows_1250" | "cp1250" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1250)),
+        "windows_1251" | "cp1251" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1251)),
+        "windows_1252" | "cp1252" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1252)),
+        "windows_1253" | "cp1253" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1253)),
+        "windows_1254" | "cp1254" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1254)),
+        "windows_1255" | "cp1255" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1255)),
+        "windows_1256" | "cp1256" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1256)),
+        "windows_1257" | "cp1257" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1257)),
+        "windows_1258" | "cp1258" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1258)),
+        // `utf8` / `utf_8`: WHATWG lacks the latter; skipping it would
+        // still land on UTF-8, but resolving it keeps the strict
+        // attempt (and `original_encoding` behavior) exact.
+        "utf8" | "utf_8" => Some(PageEncoding::Rs(encoding_rs::UTF_8)),
+        // ASCII spellings: WHATWG maps `ascii` to windows-1252, but
+        // CPython's strict ASCII either succeeds (pure-ASCII page,
+        // same text as UTF-8) or fails into the same fallback this
+        // skip takes — so skipping is outcome-exact here.
+        "646" | "ansi_x3.4_1968" | "ansi_x3.4_1986" | "ansi_x3_4_1968" | "ascii" | "cp367"
+        | "csascii" | "ibm367" | "iso646_us" | "iso_646.irv_1991" | "iso_ir_6" | "us"
+        | "us_ascii" | "us-ascii" => None,
+        // WHATWG reads `unicode` as UTF-16LE, but CPython has no such
+        // codec (`LookupError`), so Dammit skips it.
+        "unicode" => None,
+        // WHATWG's `x-user-defined` (PUA mapping) likewise has no
+        // CPython codec, so Dammit skips it too.
+        "x-user-defined" | "x_user_defined" => None,
+        // Dashless `iso8859N`: WHATWG labels, but CPython has no such
+        // spellings (`LookupError`), so Dammit skips them.
+        "iso88591" | "iso88592" | "iso88593" | "iso88594" | "iso88595" | "iso88596"
+        | "iso88597" | "iso88598" | "iso88599" | "iso885910" | "iso885911" | "iso885913"
+        | "iso885914" | "iso885915" | "iso885916" => None,
+        _ => Encoding::for_label(form.as_bytes()).map(PageEncoding::Rs),
+    }
+}
+
+/// Decoded page plus the winning decoder (`UnicodeDammit` over
+/// `response.content`): BOM-sniffed encoding, declared (XML prolog,
+/// then meta tag), UTF-8, then windows-1252 — each strict, then once
+/// more with replacement (`bs4/dammit.py`). The
+/// `charset-normalizer` detection step has no Rust equivalent and is
+/// skipped: undeclared non-UTF-8 pages are best-effort. The response
+/// `Content-Type` is never consulted (Django hands raw bytes to
+/// BeautifulSoup).
+fn decode_body(body: &[u8]) -> (String, PageEncoding) {
+    let (stripped, sniffed) = strip_bom(body);
+    let declared = find_declared_encoding(stripped);
+    let mut candidates: Vec<&str> = Vec::with_capacity(4);
+    let mut seen: Vec<String> = Vec::with_capacity(4);
+    for label in sniffed
+        .into_iter()
+        .chain(declared.as_deref())
+        .chain(["utf-8", "windows-1252"])
+    {
+        let lower = label.to_ascii_lowercase();
+        if !seen.contains(&lower) {
+            seen.push(lower);
+            candidates.push(label);
+        }
+    }
+    for label in &candidates {
+        if let Some(encoding) = resolve_label(label) {
+            if let Some(text) = encoding.strict_decode(stripped) {
+                return (text, encoding);
+            }
+        }
+    }
+    for label in &candidates {
+        if label.eq_ignore_ascii_case("ascii") {
+            continue;
+        }
+        if let Some(encoding) = resolve_label(label) {
+            return (encoding.decode_replace(stripped), encoding);
+        }
+    }
+    // Unreachable in practice (UTF-8 with replacement always
+    // succeeds); Dammit gives up here, we keep the lossy text.
+    (
+        String::from_utf8_lossy(stripped).into_owned(),
+        PageEncoding::Rs(encoding_rs::UTF_8),
+    )
+}
+
 /// Stripped `<title>` text (`soup.find("title").get_text().strip()`,
 /// `:144-145`), or `None` when there is no title tag. `get_text`
 /// concatenates descendant text (nested markup dropped) and decodes
-/// entities; both are mirrored here.
-pub fn extract_title(html: &str) -> Option<String> {
+/// entities; both are mirrored here. `original` is the winning body
+/// decoder from [`decode_body`].
+pub fn extract_title(html: &str, original: PageEncoding) -> Option<String> {
     let open = find_open_tag(html, "title")?;
     let end = tag_end(html, open)?;
     let lower = html.to_ascii_lowercase();
     let rest = &lower[end..];
     let close = rest.find("</title").map(|i| end + i).unwrap_or(html.len());
     Some(
-        decode_entities(&strip_tags(&html[end + 1..close]))
+        decode_entities(&strip_tags(&html[end + 1..close]), original)
             .trim()
             .to_owned(),
     )
@@ -521,44 +909,146 @@ fn strip_tags(text: &str) -> String {
     out
 }
 
-/// Decodes the entities BeautifulSoup resolves in titles: the five
-/// predefined XML entities plus decimal/hex character references.
-fn decode_entities(text: &str) -> String {
+/// Entity-decoded text (`handle_data` after `handle_entityref` /
+/// `handle_charref`, `bs4/builder/_htmlparser.py:182-241`): the full
+/// HTML5 named table plus numeric references. Tokenizing mirrors
+/// `html.parser.goahead` (`parser.py:307-349`): a reference ends at
+/// the first character outside its name class, and that terminator is
+/// consumed only when it is `;`. Unknown names — and malformed
+/// numeric refs — pass through with a dropped `;`, exactly as Django
+/// emits them. All slices split at ASCII bytes, so they are always
+/// char boundaries.
+fn decode_entities(text: &str, original: PageEncoding) -> String {
+    let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(semi) = rest.find(';') {
-        let Some(hash) = rest[..semi].rfind('&') else {
-            break;
-        };
-        let body = &rest[hash + 1..semi];
-        let decoded = if let Some(hex) = body.strip_prefix("#x").or(body.strip_prefix("#X")) {
-            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
-        } else if let Some(dec) = body.strip_prefix('#') {
-            dec.parse::<u32>().ok().and_then(char::from_u32)
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'&' {
+            let start = index;
+            while index < bytes.len() && bytes[index] != b'&' {
+                index += 1;
+            }
+            out.push_str(&text[start..index]);
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index + 1] == b'#' {
+            if let Some(next) = match_charref(&mut out, text, index, original) {
+                index = next;
+            } else {
+                // Failed numeric ref with a `;` later in the document
+                // emits `&#` literally (`parser.py:317-321`). The no-`;`
+                // tail-dump (`break` there) is not mirrored: real pages
+                // always contain a `;` after a `<title>`.
+                out.push_str("&#");
+                index += 2;
+            }
+            continue;
+        }
+        if let Some(next) = match_entityref(&mut out, text, index) {
+            index = next;
         } else {
-            match body {
-                "amp" => Some('&'),
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "quot" => Some('"'),
-                "apos" => Some('\''),
-                _ => None,
-            }
-        };
-        match decoded {
-            Some(char) => {
-                out.push_str(&rest[..hash]);
-                out.push(char);
-                rest = &rest[semi + 1..];
-            }
-            None => {
-                out.push_str(&rest[..semi + 1]);
-                rest = &rest[semi + 1..];
-            }
+            out.push('&');
+            index += 1;
         }
     }
-    out.push_str(rest);
     out
+}
+
+/// Tries `&#...` at `index` (which points at `&`):
+/// `&#(?:[0-9]+|[xX][0-9a-fA-F]+)[^0-9a-fA-F]` (`parser.py:25`).
+/// Pushes the decoded char and returns the resume index on success.
+fn match_charref(
+    out: &mut String,
+    text: &str,
+    index: usize,
+    original: PageEncoding,
+) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut end = index + 2;
+    let hexadecimal = end < bytes.len() && (bytes[end] == b'x' || bytes[end] == b'X');
+    if hexadecimal {
+        end += 1;
+    }
+    let digits = end;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_digit() || hexadecimal && bytes[end].is_ascii_hexdigit())
+    {
+        end += 1;
+    }
+    if end == digits {
+        return None;
+    }
+    if !hexadecimal && end < bytes.len() && bytes[end].is_ascii_hexdigit() {
+        // A decimal run followed by a hex digit (`&#65B`) never
+        // matches: shrinking the run only exposes another hex digit.
+        return None;
+    }
+    let number = if hexadecimal {
+        u32::from_str_radix(&text[digits..end], 16).ok()
+    } else {
+        text[digits..end].parse::<u32>().ok()
+    };
+    out.push(match number {
+        Some(value) => decode_charref(value, original),
+        None => '\u{FFFD}',
+    });
+    // The terminator is consumed only when it is `;`
+    // (`parser.py:311-316`). A reference at the very end of the title
+    // reads as terminated: in the document a `<` (at least `</title>`)
+    // always follows it.
+    if end < bytes.len() && bytes[end] == b';' {
+        end += 1;
+    }
+    Some(end)
+}
+
+/// Numeric reference value → char (`handle_charref`,
+/// `_htmlparser.py:182-220`): below 256, one byte through the
+/// winning body decoder, then windows-1252 (compensating for pages
+/// that number Windows-1252 code points — `&#147;` for `"`), then
+/// the code point itself; otherwise the code point, or U+FFFD when
+/// out of range. Surrogates also read as U+FFFD: Python emits them
+/// as lone-surrogate escapes, which UTF-8 strings cannot hold.
+fn decode_charref(number: u32, original: PageEncoding) -> char {
+    if number < 256 {
+        let byte = number as u8;
+        if let Some(decoded) = original
+            .strict_byte(byte)
+            .or_else(|| PageEncoding::Rs(encoding_rs::WINDOWS_1252).strict_byte(byte))
+        {
+            return decoded;
+        }
+    }
+    char::from_u32(number).unwrap_or('\u{FFFD}')
+}
+
+/// Tries `&name` at `index` (which points at `&`):
+/// `&([a-zA-Z][-.a-zA-Z0-9]*)[^a-zA-Z0-9]` (`parser.py:24`). Pushes
+/// the table text, or `&name` for unknown names (`handle_entityref`,
+/// `_htmlparser.py:222-241`), and returns the resume index.
+fn match_entityref(out: &mut String, text: &str, index: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if index + 1 >= bytes.len() || !bytes[index + 1].is_ascii_alphabetic() {
+        return None;
+    }
+    let mut end = index + 2;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-' || bytes[end] == b'.')
+    {
+        end += 1;
+    }
+    let name = &text[index + 1..end];
+    match html_entities::lookup(name) {
+        Some(replacement) => out.push_str(replacement),
+        None => {
+            out.push('&');
+            out.push_str(name);
+        }
+    }
+    if end < bytes.len() && bytes[end] == b';' {
+        end += 1;
+    }
+    Some(end)
 }
 
 /// `href` of the first `<link>` tag whose `rel` is exactly `rel_value`
@@ -824,8 +1314,8 @@ pub fn crawl(
     match safe_get(url, &headers, GET_TIMEOUT_SECS, validate, get) {
         Ok((response, resolved)) => {
             final_url = resolved;
-            let page = String::from_utf8_lossy(&response.body).into_owned();
-            title = extract_title(&page);
+            let (page, encoding) = decode_body(&response.body);
+            title = extract_title(&page, encoding);
             html = Some(page);
         }
         Err(error) => {
@@ -1625,9 +2115,431 @@ mod tests {
     #[test]
     fn title_get_text_strips_markup_and_decodes_entities() {
         // `get_text()` concatenates descendant text and resolves entities.
-        let title =
-            extract_title("<html><head><title>A &amp; B <b>bold</b>&#33;</title></head></html>");
+        let title = extract_title(
+            "<html><head><title>A &amp; B <b>bold</b>&#33;</title></head></html>",
+            PageEncoding::Rs(encoding_rs::UTF_8),
+        );
         assert_eq!(title, Some("A & B bold!".to_owned()));
+    }
+
+    // -- PIDASHCONV-1280: HTML5 entities + charset-aware decode --------------
+    // Expected values below are Django-observed (bs4 4.12.3, CPython 3.12):
+    // `BeautifulSoup(content, "html.parser").find("title").get_text().strip()`.
+
+    /// Title `crawl()` reports for one stubbed 200 body (404 favicon HEAD).
+    fn crawl_title_of(body: &[u8], headers: HttpHeaders) -> Option<String> {
+        let body = body.to_vec();
+        let get = move |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 200,
+                headers: headers.clone(),
+                body: body.clone(),
+                is_redirect: false,
+            })
+        };
+        let head = |_: &HttpRequest| {
+            Ok(HttpResponse {
+                status: 404,
+                headers: HttpHeaders::new(),
+                body: Vec::new(),
+                is_redirect: false,
+            })
+        };
+        let report = crawl("https://example.com/", &deny_all(), &get, &head);
+        match report.result.get("title") {
+            Some(Value::String(title)) => Some(title.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn crawl_title_decodes_html5_named_entities() {
+        // Issue probe: `&mdash;` → EM DASH, `&nbsp;` → interior NBSP (strip
+        // keeps it; only edge NBSP goes).
+        let body =
+            b"<html><head><title>Docs &mdash; Getting started&nbsp;guide</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Docs \u{2014} Getting started\u{a0}guide".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_honours_meta_charset_windows_1252() {
+        // Issue probe: 0xE9 is U+FFFD under UTF-8, é under windows-1252.
+        let body =
+            b"<html><head><meta charset=\"windows-1252\"><title>Caf\xe9 menu</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Caf\u{e9} menu".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_honours_meta_charset_shift_jis() {
+        // shift_jis bytes for 日本語 (93 FA 96 7B 8C EA).
+        let body = b"<html><head><meta charset=\"shift_jis\"><title>\x93\xfa\x96\x7b\x8c\xea</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("\u{65e5}\u{672c}\u{8a9e}".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_declared_charset_beats_valid_utf8() {
+        // meta wins even when the bytes are valid UTF-8: C3 A9 → Ã©.
+        let body =
+            b"<html><head><meta charset=\"windows-1252\"><title>Caf\xc3\xa9</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Caf\u{c3}\u{a9}".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_bom_beats_declared_charset() {
+        // BOM is tried before the meta declaration: C3 A9 → é.
+        let body = b"\xef\xbb\xbf<html><head><meta charset=\"windows-1252\"><title>Caf\xc3\xa9</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Caf\u{e9}".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_honours_http_equiv_meta() {
+        let body = b"<html><head><meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1252\"><title>Caf\xe9</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Caf\u{e9}".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_xml_prolog_beats_meta() {
+        // Dammit tries the XML declaration before the meta tag, even for
+        // HTML: shift_jis bytes for 日.
+        let body = b"<?xml version=\"1.0\" encoding=\"shift_jis\"?><html><head><meta charset=\"windows-1252\"><title>\x93\xfa</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("\u{65e5}".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_ignores_content_type_charset() {
+        // Django hands raw bytes to BeautifulSoup: a lying Content-Type
+        // never overrides the meta declaration.
+        let body =
+            b"<html><head><meta charset=\"windows-1252\"><title>Caf\xe9 menu</title></head></html>";
+        let headers = HttpHeaders(vec![(
+            "Content-Type".to_owned(),
+            "text/html; charset=utf-8".to_owned(),
+        )]);
+        assert_eq!(
+            crawl_title_of(body, headers),
+            Some("Caf\u{e9} menu".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_metacharset_without_space_matches() {
+        // The Dammit meta regex backtracks: `<metacharset=` still declares.
+        let body =
+            b"<html><head><metacharset=\"windows-1252\"><title>Caf\xe9</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Caf\u{e9}".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_decodes_utf16le_bom_page() {
+        // BOM path: real UTF-16LE page behind its BOM.
+        let mut body = b"\xff\xfe".to_vec();
+        body.extend_from_slice(
+            &"<html><head><title>Hi</title></head></html>"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<u8>>(),
+        );
+        assert_eq!(
+            crawl_title_of(&body, HttpHeaders::new()),
+            Some("Hi".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_reproduces_utf32le_bom_quirk() {
+        // Dammit misdetects the UTF-32LE BOM as UTF-16LE (dead `!=`
+        // bytes-vs-str guard) and strips only 2 of its 4 bytes; the tags
+        // then never parse, so the title is None.
+        let mut body = b"\xff\xfe\x00\x00".to_vec();
+        body.extend_from_slice(
+            &"<html><head><title>Hi</title></head></html>"
+                .chars()
+                .flat_map(|c| (c as u32).to_le_bytes())
+                .collect::<Vec<u8>>(),
+        );
+        assert_eq!(crawl_title_of(&body, HttpHeaders::new()), None);
+    }
+
+    #[test]
+    fn crawl_title_decodes_utf32be_bom_page() {
+        // The correctly-detected sibling: UTF-32BE BOM + UTF-32BE page.
+        let mut body = b"\x00\x00\xfe\xff".to_vec();
+        body.extend_from_slice(
+            &"<html><head><title>Hi</title></head></html>"
+                .chars()
+                .flat_map(|c| (c as u32).to_be_bytes())
+                .collect::<Vec<u8>>(),
+        );
+        assert_eq!(
+            crawl_title_of(&body, HttpHeaders::new()),
+            Some("Hi".to_owned())
+        );
+    }
+
+    #[test]
+    fn crawl_title_falls_past_failed_bom_decode_to_declared() {
+        // BOM-sniffed UTF-8 fails strict on 0xE9, so the meta
+        // declaration wins.
+        let body = b"\xef\xbb\xbf<html><head><meta charset=\"windows-1252\"><title>Caf\xe9</title></head></html>";
+        assert_eq!(
+            crawl_title_of(body, HttpHeaders::new()),
+            Some("Caf\u{e9}".to_owned())
+        );
+    }
+
+    #[test]
+    fn decode_entities_mirrors_bs4_tokenizer_edges() {
+        // Each pair probed against bs4 4.12.3 (`get_text()` output for
+        // the title; `.strip()` not applied here).
+        let utf8 = PageEncoding::Rs(encoding_rs::UTF_8);
+        for (input, expected) in [
+            ("&apos", "'"),
+            ("&apos;", "'"),
+            ("&notin", "\u{2209}"),
+            ("&notin;", "\u{2209}"),
+            ("&unknown;", "&unknown"),
+            ("&unknownx", "&unknownx"),
+            ("&unknownx;", "&unknownx"),
+            ("&ampX;", "&ampX"),
+            ("R&D", "R&D"),
+            ("AT&T", "AT&T"),
+            ("Q&A;", "Q&A"),
+            ("&#65BC", "&#65BC"),
+            ("&#65x", "Ax"),
+            ("&#x41g", "Ag"),
+            ("&#65", "A"),
+            ("&#;", "&#;"),
+            ("&;", "&;"),
+            ("&9;", "&9;"),
+            ("&aMp;", "&aMp"),
+            ("&AMP", "&"),
+            ("&LT", "<"),
+            ("&amp", "&"),
+            ("&lt", "<"),
+            ("&gt", ">"),
+            ("&quot", "\""),
+            ("&#65;", "A"),
+            ("&#x41;", "A"),
+            ("&#X41;", "A"),
+            ("&#x0;", "\x00"),
+            ("&#xD800;", "\u{FFFD}"),
+            ("&#xDFFF;", "\u{FFFD}"),
+            ("&#x110000;", "\u{FFFD}"),
+            ("&#99999999;", "\u{FFFD}"),
+            ("&#99999999999999999999;", "\u{FFFD}"),
+            ("&#x80;", "\u{20ac}"),
+            ("&#128;", "\u{20ac}"),
+            ("&#147;", "\u{201c}"),
+            ("&CounterClockwiseContourIntegral;", "\u{2233}"),
+            ("&frac12;", "\u{bd}"),
+            ("&aacute;", "\u{e1}"),
+            ("&lt=3;", "<=3;"),
+            ("&amp=3;", "&=3;"),
+            ("&a-b.c1;", "&a-b.c1"),
+            ("&", "&"),
+            ("&#", "&#"),
+            ("&#x", "&#x"),
+            ("& ", "& "),
+        ] {
+            assert_eq!(decode_entities(input, utf8), expected, "input: {input:?}");
+        }
+        // NUL survives (Python emits it as a `\u0000` escape downstream).
+        assert_eq!(decode_entities("&#0;", utf8), "\x00");
+    }
+
+    #[test]
+    fn decode_charref_resolves_bytes_through_winning_decoder() {
+        // `&#147;` on a UTF-8 page compensates through windows-1252;
+        // on a latin-1 page the byte decodes there first (U+0093).
+        assert_eq!(
+            decode_entities("&#147;", PageEncoding::Rs(encoding_rs::UTF_8)),
+            "\u{201c}"
+        );
+        assert_eq!(decode_entities("&#147;", PageEncoding::Latin1), "\u{93}");
+        assert_eq!(decode_entities("&#232;", PageEncoding::Latin1), "\u{e8}");
+        assert_eq!(
+            decode_entities("&#232;", PageEncoding::Rs(encoding_rs::UTF_8)),
+            "\u{e8}"
+        );
+    }
+
+    #[test]
+    fn resolve_label_matches_codecs_lookup_outcomes() {
+        use PageEncoding::{Latin1, Rs, Utf16Bare, Utf32Bare, Utf32Be, Utf32Le};
+        for (label, expected) in [
+            ("utf-8", Some(Rs(encoding_rs::UTF_8))),
+            ("UTF-8", Some(Rs(encoding_rs::UTF_8))),
+            ("utf8", Some(Rs(encoding_rs::UTF_8))),
+            ("utf_8", Some(Rs(encoding_rs::UTF_8))),
+            ("windows-1252", Some(Rs(encoding_rs::WINDOWS_1252))),
+            ("windows_1252", Some(Rs(encoding_rs::WINDOWS_1252))),
+            ("cp1252", Some(Rs(encoding_rs::WINDOWS_1252))),
+            ("windows1252", None),
+            ("shift_jis", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("shift-jis", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("shiftjis", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("sjis", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("s_jis", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("x-sjis", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("x_sjis", None),
+            ("xsjis", None),
+            ("iso-8859-1", Some(Latin1)),
+            ("iso8859-1", Some(Latin1)),
+            ("latin1", Some(Latin1)),
+            ("l1", Some(Latin1)),
+            ("l_1", None),
+            ("iso-8859-2", Some(Rs(encoding_rs::ISO_8859_2))),
+            ("iso8859-2", Some(Rs(encoding_rs::ISO_8859_2))),
+            ("iso88592", None),
+            ("iso88591", None),
+            // Underscore `iso8859_N` skips (rare spelling falls
+            // through; Django decodes it — accepted gap).
+            ("iso8859_2", None),
+            ("latin2", Some(Rs(encoding_rs::ISO_8859_2))),
+            ("latin9", Some(Rs(encoding_rs::ISO_8859_15))),
+            ("latin5", Some(Rs(encoding_rs::WINDOWS_1254))),
+            ("euc-jp", Some(Rs(encoding_rs::EUC_JP))),
+            ("euc-kr", Some(Rs(encoding_rs::EUC_KR))),
+            ("gb2312", Some(Rs(encoding_rs::GBK))),
+            ("gbk", Some(Rs(encoding_rs::GBK))),
+            ("big5", Some(Rs(encoding_rs::BIG5))),
+            ("utf-16", Some(Utf16Bare)),
+            ("u16", Some(Utf16Bare)),
+            ("utf-16le", Some(Rs(encoding_rs::UTF_16LE))),
+            ("utf-16be", Some(Rs(encoding_rs::UTF_16BE))),
+            ("unicodebigunmarked", Some(Rs(encoding_rs::UTF_16BE))),
+            ("unicodelittleunmarked", Some(Rs(encoding_rs::UTF_16LE))),
+            ("utf-32", Some(Utf32Bare)),
+            ("u32", Some(Utf32Bare)),
+            ("utf-32be", Some(Utf32Be)),
+            ("utf-32le", Some(Utf32Le)),
+            ("unicode", None),
+            ("macintosh", Some(Rs(encoding_rs::MACINTOSH))),
+            ("mac-roman", Some(Rs(encoding_rs::MACINTOSH))),
+            ("macroman", Some(Rs(encoding_rs::MACINTOSH))),
+            ("ascii", None),
+            ("us-ascii", None),
+            // KOI8 tables verified byte-identical to CPython's,
+            // except koi8-u 0xAE/0xBE (RFC short-U vs CPython
+            // box-drawing) — accepted 2-byte variance.
+            ("koi8-r", Some(Rs(encoding_rs::KOI8_R))),
+            ("koi8-u", Some(Rs(encoding_rs::KOI8_U))),
+            // TIS-620 reads as its windows-874 superset.
+            ("tis-620", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("tis620", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("cp866", Some(Rs(encoding_rs::IBM866))),
+            ("866", Some(Rs(encoding_rs::IBM866))),
+            // Escape-heavy ISO-2022-JP pages are best-effort.
+            ("iso-2022-jp", Some(Rs(encoding_rs::ISO_2022_JP))),
+            ("x-user-defined", None),
+            ("x_user_defined", None),
+            ("eucjp", Some(Rs(encoding_rs::EUC_JP))),
+            ("ujis", Some(Rs(encoding_rs::EUC_JP))),
+            ("euckr", Some(Rs(encoding_rs::EUC_KR))),
+            ("korean", Some(Rs(encoding_rs::EUC_KR))),
+            ("chinese", Some(Rs(encoding_rs::GBK))),
+            ("euccn", Some(Rs(encoding_rs::GBK))),
+            ("936", Some(Rs(encoding_rs::GBK))),
+            ("big5_tw", Some(Rs(encoding_rs::BIG5))),
+            ("utf-7", None),
+            ("bogus-9", None),
+        ] {
+            assert_eq!(resolve_label(label), expected, "label: {label:?}");
+        }
+    }
+
+    #[test]
+    fn strip_bom_mirrors_dammit_order_and_quirks() {
+        for (input, rest, sniffed) in [
+            ("<\u{0}h\u{0}".as_bytes(), "<\u{0}h\u{0}".as_bytes(), None),
+            (
+                b"\xef\xbb\xbf<html>".as_slice(),
+                b"<html>".as_slice(),
+                Some("utf-8"),
+            ),
+            (
+                b"\x00\x00\xfe\xff rest".as_slice(),
+                b" rest".as_slice(),
+                Some("utf-32be"),
+            ),
+            // UTF-32LE BOM misdetects as UTF-16LE, strips 2 bytes.
+            (
+                b"\xff\xfe\x00\x00 rest".as_slice(),
+                b"\x00\x00 rest".as_slice(),
+                Some("utf-16le"),
+            ),
+            // Short inputs never sniff a 16-bit BOM.
+            (b"\xfe\xff".as_slice(), b"\xfe\xff".as_slice(), None),
+            (b"".as_slice(), b"".as_slice(), None),
+        ] {
+            assert_eq!(strip_bom(input), (rest, sniffed));
+        }
+    }
+
+    #[test]
+    fn find_declared_encoding_honours_windows_and_order() {
+        // XML prolog wins over meta, even in HTML.
+        let body = b"<?xml version=\"1.0\" encoding=\"shift_jis\"?><html><head><meta charset=\"windows-1252\">";
+        assert_eq!(find_declared_encoding(body), Some("shift_jis".to_owned()));
+        // Empty XML value ends the search (no meta fallback).
+        let body =
+            b"<?xml version=\"1.0\" encoding=\"\"?><html><head><meta charset=\"windows-1252\">";
+        assert_eq!(find_declared_encoding(body), None);
+        // Meta past the 2048-byte window is invisible.
+        let mut body = b"<html><head>".to_vec();
+        body.extend_from_slice(&vec![b'p'; 2500]);
+        body.extend_from_slice(b"<meta charset=\"windows-1252\">");
+        assert_eq!(find_declared_encoding(&body), None);
+        // ...but reachable in a longer document (5% window): the meta
+        // sits at ~2512 while 5% of the length is ~3126.
+        let mut body = b"<html><head>".to_vec();
+        body.extend_from_slice(&vec![b'p'; 2500]);
+        body.extend_from_slice(b"<meta charset=\"windows-1252\">");
+        body.extend_from_slice(&vec![b'q'; 60_000]);
+        assert_eq!(
+            find_declared_encoding(&body),
+            Some("windows-1252".to_owned())
+        );
+        // Case-insensitive; empty value means undeclared.
+        assert_eq!(
+            find_declared_encoding(b"<META CHARSET=\"WINDOWS-1252\">"),
+            Some("windows-1252".to_owned())
+        );
+        assert_eq!(find_declared_encoding(b"<meta charset=>"), None);
+    }
+
+    #[test]
+    fn decode_utf32_rejects_and_replaces_like_python() {
+        assert_eq!(decode_utf32(&[0, 0, 0, 0x41, 0, 0, 0xD8, 0], true), None);
+        assert_eq!(decode_utf32(&[0, 0, 0], true), None);
+        assert_eq!(
+            decode_utf32_replace(&[0, 0, 0, 0x41, 0, 0, 0xD8, 0, 0, 0], true),
+            "A\u{FFFD}\u{FFFD}"
+        );
     }
 
     #[test]
