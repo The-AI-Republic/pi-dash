@@ -820,9 +820,11 @@ fn csrf_secret_from_headers(headers: &axum::http::HeaderMap) -> Result<String, S
         .get("cookie")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
+    // `parse_cookie` builds a dict, so a later duplicate overwrites an
+    // earlier one: the LAST `csrftoken` pair wins (PIDASHCONV-1235).
     let secret = parse_cookies(cookie_header)
         .into_iter()
-        .find(|(name, _)| *name == "csrftoken")
+        .rfind(|(name, _)| *name == "csrftoken")
         .map(|(_, value)| value.to_owned());
     let Some(secret) = secret else {
         return Err("CSRF cookie not set.".to_owned());
