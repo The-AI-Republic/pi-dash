@@ -52,6 +52,21 @@ export interface CachePersistor {
   stop(): void;
 }
 
+/**
+ * A settled query is past its first read. Pending entries cannot be
+ * restored from JSON (their in-flight promise loses its methods), and
+ * restoring one would abort the rest of the payload. Error entries are
+ * settled on purpose: a failed refetch keeps the previously fetched data,
+ * which is exactly what a warm start paints.
+ */
+function settledStatus(status: unknown): boolean {
+  return status === "success" || status === "error";
+}
+
+function restorableQuery(entry: DehydratedState["queries"][number]): boolean {
+  return settledStatus(entry.state?.status) && entry.promise === undefined;
+}
+
 export function createCachePersistor(
   client: QueryClient,
   storage: KeyValueStore,
@@ -77,8 +92,11 @@ export function createCachePersistor(
   }
 
   async function save(): Promise<void> {
+    // Only settled data can be painted on launch. A pending query has no
+    // rows yet, and `dehydrate` would attach its in-flight promise, which
+    // JSON turns into `{}` and which then breaks the whole restore below.
     const full = dehydrate(client, {
-      shouldDehydrateQuery: (query) => shouldPersist(query.queryKey),
+      shouldDehydrateQuery: (query) => settledStatus(query.state.status) && shouldPersist(query.queryKey),
     });
     const payload: StoredPayload = { version, state: full };
     try {
@@ -107,7 +125,15 @@ export function createCachePersistor(
       await storage.remove(storageKey).catch(() => undefined);
       return;
     }
-    hydrate(client, payload.state);
+    // A payload written before the save-side guard can still carry pending
+    // entries whose promise did not survive JSON. `hydrate` resolves those
+    // promises synchronously and throws, which abandons every remaining
+    // entry, so drop them here and restore the rest.
+    const state: DehydratedState = {
+      ...payload.state,
+      queries: (payload.state.queries ?? []).filter(restorableQuery),
+    };
+    hydrate(client, state);
   }
 
   const unsubscribe = client.getQueryCache().subscribe(scheduleSave);

@@ -136,6 +136,147 @@ describe("cache persistence", () => {
     expect(reader.getQueryData(["ws", "acme", "list"])).toBeUndefined();
   });
 
+  it("skips pending queries when saving and keeps the settled ones", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    seed(writer);
+    // A query with no data, mid-flight, in the middle of the cache. It used
+    // to serialize its promise as `{}` and poison the whole restore.
+    const pending = writer.getQueryCache().build(writer, {
+      queryKey: ["ws", "acme", "issues", "list", "page"],
+      queryFn: () => new Promise<never>(() => undefined),
+      retry: false,
+    });
+    void pending.fetch().catch(() => undefined);
+    expect(pending.state.status).toBe("pending");
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const raw = (await storage.get("tanstack-query-cache")) ?? "";
+    const stored = JSON.parse(raw) as { state: { queries: Array<{ queryKey: unknown[] }> } };
+    expect(stored.state.queries.map((entry) => entry.queryKey)).toEqual([
+      ["ws", "acme", "reference", "states"],
+      ["ws", "acme", "list"],
+    ]);
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+    expect(reader.getQueryData(["ws", "acme", "list"])).toEqual([{ id: "i1" }]);
+    expect(reader.getQueryData(["ws", "acme", "issues", "list", "page"])).toBeUndefined();
+  });
+
+  it("keeps an errored query that still holds previously fetched rows", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    seed(writer);
+    const listKey = ["ws", "acme", "list"];
+    // A failed refetch keeps the last successful data (TanStack keeps the
+    // payload and flips the status to "error"). The list still paints those
+    // rows and the restore side accepts them, so the save must not drop them.
+    const list = writer.getQueryCache().find({ queryKey: listKey });
+    list?.setState({ status: "error", error: new Error("offline"), data: [{ id: "i1" }] });
+    expect(list?.state.data).toEqual([{ id: "i1" }]);
+
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const raw = (await storage.get("tanstack-query-cache")) ?? "";
+    const stored = JSON.parse(raw) as {
+      state: { queries: Array<{ queryKey: unknown[]; state: { status: string; data?: unknown } }> };
+    };
+    const savedList = stored.state.queries.find((entry) => entry.queryKey.join("/") === "ws/acme/list");
+    expect(savedList?.state.status).toBe("error");
+    expect(savedList?.state.data).toEqual([{ id: "i1" }]);
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+    expect(reader.getQueryData(listKey)).toEqual([{ id: "i1" }]);
+    expect(reader.getQueryState(listKey)?.status).toBe("error");
+  });
+
+  it("restores the settled entries after a pending entry written by an older build", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    seed(writer);
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const raw = (await storage.get("tanstack-query-cache")) ?? "";
+    const payload = JSON.parse(raw) as {
+      state: { queries: Array<Record<string, unknown> & { queryKey: unknown[]; state: Record<string, unknown> }> };
+    };
+    // Old builds persisted pending queries with their promise; JSON keeps
+    // only `{}`, and hydrate() would throw on `.then` and drop the rest.
+    payload.state.queries.splice(0, 0, {
+      dehydratedAt: Date.now(),
+      queryKey: ["ws", "acme", "favorites"],
+      queryHash: JSON.stringify(["ws", "acme", "favorites"]),
+      state: { status: "pending", fetchStatus: "fetching", data: undefined, dataUpdatedAt: 0 },
+      promise: {},
+    });
+    await storage.set("tanstack-query-cache", JSON.stringify(payload));
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await expect(loader.restore()).resolves.toBeUndefined();
+    loader.stop();
+    expect(reader.getQueryData(["ws", "acme", "reference", "states"])).toEqual([{ id: "s1" }]);
+    expect(reader.getQueryData(["ws", "acme", "list"])).toEqual([{ id: "i1" }]);
+    expect(reader.getQueryCache().find({ queryKey: ["ws", "acme", "favorites"] })).toBeUndefined();
+  });
+
+  it("restores settled error entries, drops pending ones without a promise, and tolerates a missing query list", async () => {
+    const storage = createMemoryStore();
+    const writer = createQueryClient();
+    seed(writer);
+    const persistor = createCachePersistor(writer, storage, { saveDelayMs: 1 });
+    await persistor.save();
+    persistor.stop();
+
+    const raw = (await storage.get("tanstack-query-cache")) ?? "";
+    const payload = JSON.parse(raw) as {
+      state: { queries: Array<Record<string, unknown> & { queryKey: unknown[]; state: Record<string, unknown> }> };
+    };
+    payload.state.queries.splice(0, 0, {
+      dehydratedAt: Date.now(),
+      queryKey: ["ws", "acme", "detail", "failed"],
+      queryHash: JSON.stringify(["ws", "acme", "detail", "failed"]),
+      state: { status: "error", fetchStatus: "idle", data: undefined, error: { message: "offline" }, dataUpdatedAt: 0 },
+    });
+    payload.state.queries.splice(0, 0, {
+      dehydratedAt: Date.now(),
+      queryKey: ["ws", "acme", "detail", "loading"],
+      queryHash: JSON.stringify(["ws", "acme", "detail", "loading"]),
+      state: { status: "pending", fetchStatus: "fetching", data: undefined, dataUpdatedAt: 0 },
+    });
+    await storage.set("tanstack-query-cache", JSON.stringify(payload));
+
+    const reader = createQueryClient();
+    const loader = createCachePersistor(reader, storage, { saveDelayMs: 1 });
+    await loader.restore();
+    loader.stop();
+    expect(reader.getQueryData(["ws", "acme", "list"])).toEqual([{ id: "i1" }]);
+    expect(reader.getQueryState(["ws", "acme", "detail", "failed"])?.status).toBe("error");
+    expect(reader.getQueryCache().find({ queryKey: ["ws", "acme", "detail", "loading"] })).toBeUndefined();
+
+    await storage.set(
+      "tanstack-query-cache",
+      JSON.stringify({ version: QUERY_CACHE_VERSION, state: { mutations: [] } })
+    );
+    const empty = createQueryClient();
+    const emptyLoader = createCachePersistor(empty, storage, { saveDelayMs: 1 });
+    await emptyLoader.restore();
+    emptyLoader.stop();
+    expect(empty.getQueryCache().getAll()).toEqual([]);
+  });
+
   it("marks reference keys by convention", () => {
     expect(isReferenceQueryKey(["ws", "acme", "reference", "states"])).toBe(true);
     expect(isReferenceQueryKey(["ws", "acme", "list"])).toBe(false);
