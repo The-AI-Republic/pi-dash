@@ -119,7 +119,7 @@ async fn list_messages(
     extension: Option<Extension<SessionHandle>>,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;
@@ -183,7 +183,7 @@ async fn post_message(
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;
@@ -418,7 +418,7 @@ async fn cancel_turn(
     extension: Option<Extension<SessionHandle>>,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;

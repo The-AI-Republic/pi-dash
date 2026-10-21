@@ -77,7 +77,7 @@ async fn list_threads(
     extension: Option<Extension<SessionHandle>>,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;
@@ -176,7 +176,7 @@ async fn create_thread(
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;
@@ -256,7 +256,7 @@ async fn patch_thread(
     body: Bytes,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;
@@ -344,7 +344,7 @@ async fn delete_thread(
     extension: Option<Extension<SessionHandle>>,
 ) -> HandlerResult<Response> {
     let pool = pool_ref(&state)?;
-    let Some(actor) = request_actor(pool, extension).await? else {
+    let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
     let role = role_for(pool, &actor.id, &slug).await?;
