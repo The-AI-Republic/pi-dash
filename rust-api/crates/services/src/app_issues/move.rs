@@ -463,11 +463,12 @@ pub struct HandoffRunRow {
     pub pod_id: Option<Uuid>,
     pub created_by_id: Uuid,
     pub run_config: Value,
-    pub trigger: AgentRunTrigger,
+    /// The raw stored trigger, never parsed: `agent_run.trigger` is a
+    /// plain varchar and migration 0029 keeps `blocker_completed` rows
+    /// readable as an unknown trigger, which every consumer tolerates
+    /// (neither human nor automatic — the `RunView` precedent).
+    pub trigger: String,
 }
-
-/// Re-exported for the [`HandoffRunRow::trigger`] type.
-pub use pidash_db::dispatch::AgentRunTrigger;
 
 /// The moved-issue save image (`:210-235`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1641,7 +1642,7 @@ mod tests {
             pod_id: Some(uuid(0x60)),
             created_by_id: uuid(0x40),
             run_config: serde_json::json!({"keep": "me"}),
-            trigger: AgentRunTrigger::Tick,
+            trigger: "tick".to_owned(),
         }
     }
 
