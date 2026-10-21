@@ -174,6 +174,16 @@ describe("ThemeProvider", () => {
     expect(screen.getByTestId("scheme")).toHaveTextContent("custom:true");
   });
 
+  it("defaults a providerless custom scheme to light without a stored palette", () => {
+    function SchemeProbe(): React.ReactElement {
+      const scheme = useResolvedScheme();
+      return <span data-testid="scheme">{`${scheme.scheme}:${scheme.customDark}`}</span>;
+    }
+    document.documentElement.setAttribute("data-theme", "custom");
+    render(<SchemeProbe />);
+    expect(screen.getByTestId("scheme")).toHaveTextContent("custom:false");
+  });
+
   it("reports a dark custom base through the resolved scheme", async () => {
     function SchemeProbe(): React.ReactElement {
       const scheme = useResolvedScheme();
