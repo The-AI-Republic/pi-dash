@@ -2408,6 +2408,37 @@ def project_member(
     return insert_row(conn, "project_members", values)
 
 
+def issue_subscriber(conn, project_id, workspace_id, issue_id, user_id, **over) -> dict:
+    """One ``issue_subscribers`` row (PIDASHCONV-1276 closed_to oracle)."""
+    values = {
+        "project_id": str(project_id),
+        "workspace_id": str(workspace_id),
+        "issue_id": str(issue_id),
+        "subscriber_id": str(user_id),
+    }
+    values.update(over)
+    return insert_row(conn, "issue_subscribers", values)
+
+
+def notification_preference(conn, user_id, **over) -> dict:
+    """One ``user_notification_preferences`` row, all flags on (PIDASHCONV-1276).
+
+    ``notifications`` looks the row up with ``.get(user_id=...)`` — a
+    missing row raises inside the task's broad ``except`` and no
+    notification is written — so every notified subscriber needs one.
+    """
+    values = {
+        "user_id": str(user_id),
+        "property_change": True,
+        "state_change": True,
+        "comment": True,
+        "mention": True,
+        "issue_completed": True,
+    }
+    values.update(over)
+    return insert_row(conn, "user_notification_preferences", values)
+
+
 def project_user_property(conn, project_id, workspace_id, user_id, **over) -> dict:
     values = {
         "project_id": str(project_id),

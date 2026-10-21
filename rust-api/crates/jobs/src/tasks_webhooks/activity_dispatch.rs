@@ -982,6 +982,13 @@ async fn fetch_update_snapshots(
             }
         }
     }
+    // `track_closed_to` (`:527-556`) reads `closed_to` from the requested
+    // side only and resolves it through the same project-scoped lookup —
+    // without this the resolver misses and the whole task aborts
+    // (PIDASHCONV-1276).
+    if let Some(id) = scalar_id(requested, "closed_to") {
+        state_ids.insert(id);
+    }
     let state_list: Vec<String> = state_ids.into_iter().collect();
     let mut states = HashMap::new();
     if !state_list.is_empty() {
