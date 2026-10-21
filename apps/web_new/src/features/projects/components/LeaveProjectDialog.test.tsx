@@ -121,16 +121,59 @@ describe("LeaveProjectDialog", () => {
     expect(onNavigate).toHaveBeenCalledWith("/acme/projects");
   });
 
-  it("toasts the failure and stays open when leaving is refused", async () => {
+  it("navigates to the list before the held write fires", async () => {
+    const user = userEvent.setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls: string[] = [];
+    createAppClient("https://api.test", (async (url: string) => {
+      calls.push(url);
+      if (url.endsWith("/auth/get-csrf-token/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ csrf_token: "csrf" }),
+        };
+      }
+      await gate;
+      return { status: 204, url, headers: { get: () => null }, text: async () => "" };
+    }) as never);
+    const onNavigate = vi.fn();
+    const onOpenChange = vi.fn();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <LeaveProjectDialog
+          workspaceSlug="acme"
+          projectId={PROJECT_ID}
+          projectName="Web"
+          open
+          onOpenChange={onOpenChange}
+          onNavigate={onNavigate}
+        />
+      </QueryClientProvider>
+    );
+    await fillConfirmations(user, "Web", LEAVE_CONFIRM_PHRASE);
+    fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
+    expect(onNavigate).toHaveBeenCalledWith("/acme/projects");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    await waitFor(() => expect(calls.some((url) => url.endsWith(`/projects/${PROJECT_ID}/members/leave/`))).toBe(true));
+    expect(notifySuccess).not.toHaveBeenCalled();
+    release();
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Left the project", expect.any(String)));
+  });
+
+  it("navigates first, then toasts the failure when leaving is refused", async () => {
     const user = userEvent.setup();
     const onNavigate = vi.fn();
     const { onOpenChange } = setup(400, onNavigate);
     await fillConfirmations(user, "Web", LEAVE_CONFIRM_PHRASE);
     fireEvent.click(screen.getByRole("button", { name: "Leave project" }));
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't leave the project", expect.any(String)));
-    expect(screen.getByRole("heading", { name: "Leave project" })).toBeInTheDocument();
-    expect(onOpenChange).not.toHaveBeenCalledWith(false);
-    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onNavigate).toHaveBeenCalledWith("/acme/projects");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 
   it("clears the confirmations between visits", async () => {

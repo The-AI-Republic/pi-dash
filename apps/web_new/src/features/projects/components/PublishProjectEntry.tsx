@@ -19,6 +19,8 @@ const LazyPublishProjectDialog = React.lazy(() =>
 export type PublishProjectEntryProps = PublishProjectDialogProps;
 
 export function PublishProjectEntry({
+  workspaceSlug,
+  projectId,
   projectName,
   open,
   onOpenChange,
@@ -26,7 +28,13 @@ export function PublishProjectEntry({
   if (!open) return null;
   return (
     <React.Suspense fallback={null}>
-      <LazyPublishProjectDialog projectName={projectName} open={open} onOpenChange={onOpenChange} />
+      <LazyPublishProjectDialog
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectName={projectName}
+        open={open}
+        onOpenChange={onOpenChange}
+      />
     </React.Suspense>
   );
 }

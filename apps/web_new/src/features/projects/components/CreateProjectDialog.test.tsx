@@ -15,7 +15,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { CREATED_TITLE } from "../api/mutations.js";
-import { CREATE_ICON_CHOICES } from "../lib/project-create.js";
+import { CREATE_ICON_CHOICES, CREATE_REPO_URL_MAX_LENGTH } from "../lib/project-create.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 
@@ -162,6 +162,10 @@ describe("CreateProjectDialog", () => {
     expect(screen.getByRole("button", { name: "Project lead" })).toHaveTextContent("Lead");
     expect((screen.getByPlaceholderText("Project name") as HTMLInputElement).value).toBe("");
     expect((screen.getByPlaceholderText("Project ID") as HTMLInputElement).value).toBe("");
+    expect(screen.getByRole("button", { name: "Project template" })).toHaveTextContent("Blank project");
+    expect(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Git repository URL (e.g. git@github.com:org/repo.git)")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Base branch (leave empty to use remote default)")).toBeInTheDocument();
   });
 
   it("derives the short code from the name until hand-edited", () => {
@@ -199,6 +203,34 @@ describe("CreateProjectDialog", () => {
     expect(notifySuccess).not.toHaveBeenCalled();
   });
 
+  it("shows repository and base-branch errors without sending a request", () => {
+    const { calls } = succeed();
+    setup();
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
+    fireEvent.change(screen.getByPlaceholderText("Base branch (leave empty to use remote default)"), {
+      target: { value: "feat branch" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    expect(screen.getByText("Only letters, numbers, and . _ / - are allowed.")).toBeInTheDocument();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("shows the repository length error without sending a request", () => {
+    const { calls } = succeed();
+    setup();
+
+    fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
+    fireEvent.change(screen.getByPlaceholderText("Git repository URL (e.g. git@github.com:org/repo.git)"), {
+      target: { value: "x".repeat(CREATE_REPO_URL_MAX_LENGTH + 1) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+    expect(
+      screen.getByText(`Keep the repository URL to ${CREATE_REPO_URL_MAX_LENGTH} characters or fewer.`)
+    ).toBeInTheDocument();
+    expect(calls).toHaveLength(0);
+  });
+
   it("creates with one POST carrying identity, visibility, lead, icon and timezone", async () => {
     const { calls, bodies } = succeed();
     const { onOpenChange } = setup();
@@ -210,7 +242,15 @@ describe("CreateProjectDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Project icon" }));
     fireEvent.click(screen.getByRole("button", { name: `Use ${CREATE_ICON_CHOICES[3]} as the project icon` }));
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "  Nebula Craft " } });
-    fireEvent.change(screen.getByPlaceholderText("Description"), { target: { value: "Team space" } });
+    fireEvent.change(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)"), {
+      target: { value: "Team space" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Git repository URL (e.g. git@github.com:org/repo.git)"), {
+      target: { value: "git@github.com:acme/nebula.git" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Base branch (leave empty to use remote default)"), {
+      target: { value: "develop" },
+    });
 
     const timezoneLine = screen.getByText(/^Timezone:/).textContent ?? "";
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
@@ -224,6 +264,8 @@ describe("CreateProjectDialog", () => {
       name: "Nebula Craft",
       identifier: "NEBULACRAF",
       description: "Team space",
+      repo_url: "git@github.com:acme/nebula.git",
+      base_branch: "develop",
       network: 0,
       project_lead: LEAD_ID,
       logo_props: { in_use: "emoji", emoji: { value: CREATE_ICON_CHOICES[3] } },

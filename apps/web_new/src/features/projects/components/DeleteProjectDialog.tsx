@@ -21,6 +21,8 @@ export interface DeleteProjectDialogProps {
   projectName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Where the view goes after the delete lands; omitted by hosts that stay put. */
+  onNavigate?: ((href: string) => void) | undefined;
 }
 
 /** True once both confirmations match exactly. Pure for tests. */
@@ -34,6 +36,7 @@ export function DeleteProjectDialog({
   projectName,
   open,
   onOpenChange,
+  onNavigate,
 }: DeleteProjectDialogProps): React.ReactElement {
   const [typedName, setTypedName] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
@@ -54,6 +57,7 @@ export function DeleteProjectDialog({
       {
         onSuccess: () => {
           onOpenChange(false);
+          onNavigate?.(`/${workspaceSlug}/projects`);
         },
       }
     );
