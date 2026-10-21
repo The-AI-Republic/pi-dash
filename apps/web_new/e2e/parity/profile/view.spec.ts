@@ -708,10 +708,17 @@ test.describe("profile pages on small screens", () => {
       const world = await setupProfileWorld("parity-prof002b");
       const member = await seatProfileUser(world, ROLE.MEMBER, "parity-prof002bm", true);
 
+      // The old app never matches the current tab, so its picker label
+      // stays empty (NEWFRONT-433). web_new builds the target from spec §1:
+      // the picker names the current tab, so the target legs assert the
+      // labelled picker rather than the pinned defect.
+      const labels =
+        driver.target === "web_new" ? { summary: "Summary", assigned: "Assigned" } : { summary: "", assigned: "" };
+
       await driver.profileOpen(world.workspaceSlug, member.userId, browserSessionCookies(world.owner));
-      expect(await driver.profileMobileTabPickerLabel()).toBe("");
+      expect(await driver.profileMobileTabPickerLabel()).toBe(labels.summary);
       await driver.profileOpenTab(world.workspaceSlug, member.userId, "assigned", browserSessionCookies(world.owner));
-      expect(await driver.profileMobileTabPickerLabel()).toBe("");
+      expect(await driver.profileMobileTabPickerLabel()).toBe(labels.assigned);
     }
   );
 
