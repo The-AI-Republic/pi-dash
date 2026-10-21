@@ -148,8 +148,11 @@ fn json_400(pairs: &[(String, Value)]) -> Response {
     )
 }
 
+/// `HttpResponseRedirect(url)`: Django percent-encodes the URL first
+/// (`iri_to_uri`, `django/http/response.py:620`).
 fn redirect_302(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
     Response::builder()

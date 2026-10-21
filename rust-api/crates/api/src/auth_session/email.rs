@@ -371,9 +371,11 @@ fn csrf_failure_response(root_url: &str) -> Response {
 // ---------------------------------------------------------------------------
 
 /// `HttpResponseRedirect`: 302 + `Location`, `Vary: Cookie`, and any
-/// `Set-Cookie` values the branch issued.
+/// `Set-Cookie` values the branch issued. Django percent-encodes the URL
+/// first (`iri_to_uri`, `django/http/response.py:620`).
 fn redirect_response(location: String, set_cookies: Vec<String>) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
     let mut builder = Response::builder()

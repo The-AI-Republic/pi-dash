@@ -220,9 +220,11 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
 }
 
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header and an
-/// empty body.
+/// empty body. Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`).
 fn redirect_response(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return Denial::ServerError.into_response();
     };
     Response::builder()

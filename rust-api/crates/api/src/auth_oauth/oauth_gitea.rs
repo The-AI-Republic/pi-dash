@@ -409,10 +409,15 @@ impl Denial {
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
-            Denial::Redirect(location) => match crate::response_headers::header_value(&location) {
-                Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
-                None => Denial::ServerError.into_response(),
-            },
+            // `HttpResponseRedirect(url)`: Django percent-encodes the URL
+            // first (`iri_to_uri`, `django/http/response.py:620`).
+            Denial::Redirect(location) => {
+                let encoded = crate::response_headers::iri_to_uri(&location);
+                match crate::response_headers::header_value(&encoded) {
+                    Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
+                    None => Denial::ServerError.into_response(),
+                }
+            }
             denial => {
                 let (status, body) = denial.status_and_body();
                 (status, body.unwrap_or_default()).into_response()
@@ -421,9 +426,11 @@ impl IntoResponse for Denial {
     }
 }
 
-/// 302 `Location` response.
+/// 302 `Location` response (`HttpResponseRedirect(url)`: Django
+/// percent-encodes the URL first via `iri_to_uri`).
 pub fn redirect(location: String) -> Response {
-    match crate::response_headers::header_value(&location) {
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    match crate::response_headers::header_value(&encoded) {
         Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
         None => Denial::ServerError.into_response(),
     }
