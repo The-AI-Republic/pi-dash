@@ -864,9 +864,9 @@ pub struct GroupValuesQuery {
     /// Workspace scoping column: every DB branch filters
     /// `workspace__slug=slug` (`grouper.py:193,199,206,211,214,220,226`),
     /// so the handler must add `{workspace_column} = $N` bound to the
-    /// board row's workspace id. (BaseModel carries no auto soft-delete
-    /// manager, so these branches have NO `deleted_at` guard in Python —
-    /// soft-deleted labels/modules/cycles/projects ARE listed.)
+    /// board row's workspace id. Every table is a `BaseModel`, whose
+    /// `objects` manager is `SoftDeletionManager`, so the handler also
+    /// adds `{table}.deleted_at IS NULL` to every branch.
     pub workspace_column: &'static str,
     /// `"None"` sentinel appended after the ids.
     pub none_sentinel: bool,
@@ -880,7 +880,7 @@ pub fn group_values_query(field: &str) -> Option<GroupValuesQuery> {
             table: "\"states\"",
             column: "\"id\"",
             project_filter: "\"project_id\"",
-            extra_where: "\"is_triage\" = false",
+            extra_where: "\"states\".\"is_triage\" = false AND \"states\".\"group\" <> 'triage'",
             workspace_column: "\"states\".\"workspace_id\"",
             none_sentinel: false,
         }),

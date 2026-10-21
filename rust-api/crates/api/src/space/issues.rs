@@ -1012,7 +1012,7 @@ fn group_values_plan(field: &str, scope: &BoardScope) -> GroupValuesPlan {
     };
     if field == "assignees__id" && scope.project_id.is_none() {
         return GroupValuesPlan::Sql {
-            sql: "SELECT \"workspace_members\".\"member_id\" AS \"v\" FROM \"workspace_members\" WHERE (\"workspace_members\".\"workspace_id\" = $1 AND \"workspace_members\".\"is_active\" = true)".to_owned(),
+            sql: "SELECT \"workspace_members\".\"member_id\" AS \"v\" FROM \"workspace_members\" WHERE (\"workspace_members\".\"workspace_id\" = $1 AND \"workspace_members\".\"deleted_at\" IS NULL AND \"workspace_members\".\"is_active\" = true)".to_owned(),
             params: vec![SqlParam::Uuid(scope.workspace_id)],
             sentinel: query.none_sentinel,
         };
@@ -1038,6 +1038,12 @@ fn group_values_plan(field: &str, scope: &BoardScope) -> GroupValuesPlan {
             params.push(SqlParam::Uuid(project_id));
         }
     }
+    // Every DB-backed group branch reads a BaseModel through its default
+    // `SoftDeletionManager` (`grouper.py:192-226`; `db/mixins.py:61-67`).
+    sql.push_str(&format!(
+        " AND (\"{}\".\"deleted_at\" IS NULL)",
+        query.table.trim_matches('"')
+    ));
     if !query.extra_where.is_empty() {
         sql.push_str(&format!(" AND ({})", query.extra_where));
     }
@@ -2023,6 +2029,8 @@ mod tests {
             panic!("state branch is a DB plan");
         };
         assert!(sql.contains("\"states\".\"project_id\" = $2"));
+        assert!(sql.contains("\"states\".\"deleted_at\" IS NULL"));
+        assert!(sql.contains("\"states\".\"group\" <> 'triage'"));
         assert_eq!(params.len(), 2);
         // Null-project state branch drops the conjunct and the bind.
         let GroupValuesPlan::Sql { sql, params, .. } = group_values_plan("state_id", &unscoped)
@@ -2038,6 +2046,7 @@ mod tests {
             panic!("assignees branch is a DB plan");
         };
         assert!(sql.contains("\"workspace_members\""));
+        assert!(sql.contains("\"workspace_members\".\"deleted_at\" IS NULL"));
         assert!(!sql.contains("project_members"));
         assert_eq!(params.len(), 1);
         // Scoped assignees branch stays on ProjectMember.
@@ -2054,6 +2063,30 @@ mod tests {
             group_values_plan("bogus", &scoped),
             GroupValuesPlan::Empty
         ));
+    }
+
+    #[test]
+    fn every_group_values_db_branch_honors_soft_delete() {
+        let scope = BoardScope {
+            workspace_id: uuid::Uuid::nil(),
+            project_id: Some(uuid::Uuid::nil()),
+        };
+        for field in [
+            "state_id",
+            "labels__id",
+            "assignees__id",
+            "issue_module__module_id",
+            "cycle_id",
+            "project_id",
+            "target_date",
+            "start_date",
+            "created_by",
+        ] {
+            let GroupValuesPlan::Sql { sql, .. } = group_values_plan(field, &scope) else {
+                panic!("{field} is a DB plan");
+            };
+            assert!(sql.contains("\"deleted_at\" IS NULL"), "{field}: {sql}");
+        }
     }
 
     #[test]
