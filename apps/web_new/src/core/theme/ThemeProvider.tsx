@@ -81,7 +81,8 @@ export function readDocumentScheme(marked: string | null): ResolvedScheme {
 export function useResolvedScheme(): { scheme: ResolvedScheme; customDark: boolean } {
   const context = React.useContext(ThemeContext);
   if (context !== null) return { scheme: context.resolved, customDark: context.custom?.darkPalette ?? false };
-  return { scheme: readDocumentScheme(document.documentElement.getAttribute("data-theme")), customDark: false };
+  const scheme = readDocumentScheme(document.documentElement.getAttribute("data-theme"));
+  return { scheme, customDark: scheme === "custom" ? (readStoredPalette()?.darkPalette ?? false) : false };
 }
 
 function rootElement(): HTMLElement {

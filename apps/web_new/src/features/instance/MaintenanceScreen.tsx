@@ -15,7 +15,7 @@ import { useDocumentHead } from "../../shared/shell/index.js";
 
 export const MAINTENANCE_ARM_LIGHT = "/illustrations/maintenance-mode-light.svg";
 export const MAINTENANCE_ARM_DARK = "/illustrations/maintenance-mode-dark.svg";
-export const MAINTENANCE_HEADING = "Pi Dash didn't start up correctly";
+export const MAINTENANCE_HEADING = "We can't reach your Pi Dash instance";
 export const MAINTENANCE_SUPPORT_HREF = "mailto:support@airepublic.com";
 
 /** The artwork for a resolved scheme; custom schemes follow their dark half. */

@@ -160,6 +160,20 @@ describe("ThemeProvider", () => {
     await waitFor(() => expect(screen.getByTestId("scheme")).toHaveTextContent("dark:false"));
   });
 
+  it("reads a dark custom palette without a provider", () => {
+    function SchemeProbe(): React.ReactElement {
+      const scheme = useResolvedScheme();
+      return <span data-testid="scheme">{`${scheme.scheme}:${scheme.customDark}`}</span>;
+    }
+    window.localStorage.setItem(
+      THEME_PALETTE_STORAGE_KEY,
+      JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: true })
+    );
+    document.documentElement.setAttribute("data-theme", "custom");
+    render(<SchemeProbe />);
+    expect(screen.getByTestId("scheme")).toHaveTextContent("custom:true");
+  });
+
   it("reports a dark custom base through the resolved scheme", async () => {
     function SchemeProbe(): React.ReactElement {
       const scheme = useResolvedScheme();

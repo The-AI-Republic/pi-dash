@@ -10,6 +10,7 @@
 import {
   applyResolvedTheme,
   prefersDarkScheme,
+  readStoredPalette,
   readStoredTheme,
   resolveScheme,
   type ResolvedScheme,
@@ -17,7 +18,8 @@ import {
 
 /** Apply the stored theme mark to the document (or a test target). */
 export function markInstanceBootScheme(target: HTMLElement = document.documentElement): ResolvedScheme {
-  const scheme = resolveScheme(readStoredTheme(), prefersDarkScheme());
-  applyResolvedTheme(scheme, undefined, target);
+  const stored = readStoredTheme();
+  const scheme = resolveScheme(stored, prefersDarkScheme());
+  applyResolvedTheme(scheme, stored === "custom" ? readStoredPalette() : undefined, target);
   return scheme;
 }

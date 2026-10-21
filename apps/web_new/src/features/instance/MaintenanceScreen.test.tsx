@@ -13,9 +13,11 @@ import {
   MaintenanceScreen,
   maintenanceIllustration,
 } from "./MaintenanceScreen.js";
+import { THEME_PALETTE_STORAGE_KEY } from "../../core/theme/index.js";
 
 afterEach(() => {
   document.documentElement.removeAttribute("data-theme");
+  localStorage.removeItem(THEME_PALETTE_STORAGE_KEY);
 });
 
 describe("maintenanceIllustration", () => {
@@ -53,8 +55,28 @@ describe("MaintenanceScreen", () => {
     expect(document.querySelector("[data-maintenance-illustration]")).toHaveAttribute("src", MAINTENANCE_ARM_DARK);
   });
 
-  it("treats custom and unknown schemes by their light default", () => {
+  it("treats a light custom palette as light", () => {
+    localStorage.setItem(
+      THEME_PALETTE_STORAGE_KEY,
+      JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: false })
+    );
     document.documentElement.setAttribute("data-theme", "custom");
+    render(<MaintenanceScreen />);
+    expect(document.querySelector("[data-maintenance-illustration]")).toHaveAttribute("src", MAINTENANCE_ARM_LIGHT);
+  });
+
+  it("uses the dark artwork for a dark custom palette", () => {
+    localStorage.setItem(
+      THEME_PALETTE_STORAGE_KEY,
+      JSON.stringify({ primary: "#112233", background: "#445566", darkPalette: true })
+    );
+    document.documentElement.setAttribute("data-theme", "custom");
+    render(<MaintenanceScreen />);
+    expect(document.querySelector("[data-maintenance-illustration]")).toHaveAttribute("src", MAINTENANCE_ARM_DARK);
+  });
+
+  it("uses the light artwork for an unknown scheme", () => {
+    document.documentElement.setAttribute("data-theme", "sepia");
     render(<MaintenanceScreen />);
     expect(document.querySelector("[data-maintenance-illustration]")).toHaveAttribute("src", MAINTENANCE_ARM_LIGHT);
   });

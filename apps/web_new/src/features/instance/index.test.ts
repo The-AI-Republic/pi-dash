@@ -23,7 +23,7 @@ describe("instance feature barrel", () => {
     expect(decideAppInstanceGate({ isPending: true, isError: false, data: undefined })).toBe("loading");
     expect(instanceAppKeys.bootstrap).toEqual(["instance", "app", "bootstrap"]);
     expect(appInstanceQueryOptions).toBeTypeOf("function");
-    expect(MAINTENANCE_HEADING).toContain("didn't start up correctly");
+    expect(MAINTENANCE_HEADING).toBe("We can't reach your Pi Dash instance");
     expect(ADMIN_ENTRY_HREF).toBe("/god-mode/");
     expect(PRODUCT_NAME).toBe("Pi Dash");
   });
