@@ -277,6 +277,29 @@ function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
 
+/**
+ * Whether the current address has resolved to a settled surface: the
+ * settings shell, a denial, one of the instance screens, or the
+ * workspace-not-found screen. Exported so it can be exercised directly in
+ * a DOM test; Playwright serializes the function into the page, so it must
+ * stay self-contained.
+ */
+export function wsSettingsSurfaceSettled(): boolean {
+  if (
+    document.querySelector("[data-testid='workspace-settings-shell']") !== null ||
+    document.querySelector("[data-testid='workspace-settings-not-authorized']") !== null ||
+    document.querySelector("[data-testid='instance-maintenance']") !== null ||
+    document.querySelector("[data-testid='instance-not-ready']") !== null
+  ) {
+    return true;
+  }
+  // The denial screen carries no document title of its own, so look for the
+  // heading it actually renders.
+  return Array.from(document.querySelectorAll("h1, h2")).some(
+    (heading) => (heading.textContent ?? "").trim() === "Workspace not found"
+  );
+}
+
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
@@ -19587,17 +19610,7 @@ export class WebNewDriver implements ParityDriver {
    * marker that an unregistered section would never paint.
    */
   private async wsSettingsAwaitSettingsSurface(): Promise<void> {
-    await this.page
-      .waitForFunction(
-        () =>
-          document.querySelector("[data-testid='workspace-settings-shell']") !== null ||
-          document.querySelector("[data-testid='workspace-settings-not-authorized']") !== null ||
-          document.querySelector("[data-testid='instance-maintenance']") !== null ||
-          document.querySelector("[data-testid='instance-not-ready']") !== null ||
-          document.title === "Workspace not found",
-        { timeout: 60_000 }
-      )
-      .catch(() => undefined);
+    await this.page.waitForFunction(wsSettingsSurfaceSettled, { timeout: 60_000 }).catch(() => undefined);
   }
 
   async wsSettingsOpenSection(
