@@ -244,6 +244,25 @@ jobs:
           git worktree add --detach /tmp/pi-dash-main "$SHA"
           echo "PIDASH_DJANGO_PROMPTING_DIR=/tmp/pi-dash-main/apps/api/pi_dash/prompting" >> "$GITHUB_ENV"
 
+      # The auth_oauth avatar suite (PIDASHCONV-1321) is the only HTTP suite
+      # doing live S3 I/O: both backends resolve the endpoint from
+      # AWS_S3_ENDPOINT_URL with USE_MINIO unset (MinIO mode signs the app's
+      # own host on both sides, so it cannot reach a test bucket). Provision
+      # LocalStack + the endpoint env for that suite only — the shared job
+      # env deliberately carries no endpoint (other suites pin https-shaped
+      # presigned URLs). The suite creates the contract bucket itself.
+      - name: Provision LocalStack S3 for auth_oauth suite
+        if: matrix.suite == 'auth_oauth'
+        run: |
+          docker run -d --name matrix-s3 -p 4566:4566 \
+            -e SERVICES=s3 \
+            localstack/localstack:4.5.0
+          for i in $(seq 1 45); do
+            curl -sf http://localhost:4566/_localstack/health && break
+            sleep 2
+          done
+          echo "AWS_S3_ENDPOINT_URL=http://localhost:4566" >> "$GITHUB_ENV"
+
       - name: Start live Django server
         working-directory: apps/api
         # The assistant title contract test captures the DeepSeek wire body on
