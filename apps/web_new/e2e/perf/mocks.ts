@@ -7,9 +7,16 @@
 // silently rendering nothing. Anything outside the eleven endpoints the
 // issue-list slice calls is aborted, keeping the specs hermetic: a new
 // endpoint shows up as a failure that updates these mocks.
+//
+// The root startup gate (WSET-034/035) sits above every route and reads
+// GET /api/instances/ before the issues list can render, so the running
+// instance answer is part of the known set. It is a full InstanceBootstrap
+// envelope with setup finished, so the gate admits the app exactly as a
+// provisioned server would.
 import type { Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import type {
+  InstanceBootstrap,
   IssueListItem,
   IssueListResponse,
   Me,
@@ -34,6 +41,49 @@ const NOW = "2026-10-01T00:00:00Z";
 
 export function perfIssuesUrl(): string {
   return `/${PERF_WORKSPACE_SLUG}/projects/${PERF_PROJECT_ID}/issues`;
+}
+
+export function mockInstanceBootstrap(): InstanceBootstrap {
+  return {
+    config: {
+      enable_signup: true,
+      is_workspace_creation_disabled: false,
+      is_google_enabled: false,
+      is_github_enabled: false,
+      is_gitlab_enabled: false,
+      is_gitea_enabled: false,
+      is_magic_login_enabled: false,
+      is_email_password_enabled: true,
+      is_smtp_configured: false,
+      is_self_managed: true,
+      instance_changelog_url: "",
+    },
+    instance: {
+      id: "123e4567-e89b-42d3-a456-426614174005",
+      created_at: NOW,
+      updated_at: NOW,
+      created_by: null,
+      updated_by: null,
+      deleted_at: null,
+      instance_name: "Perf Instance",
+      whitelist_emails: null,
+      instance_id: "perf-instance",
+      current_version: "1.0.0",
+      latest_version: null,
+      edition: "oss",
+      domain: "perf.example.test",
+      last_checked_at: NOW,
+      namespace: null,
+      is_telemetry_enabled: false,
+      is_support_required: false,
+      is_setup_done: true,
+      is_signup_screen_visited: true,
+      is_verified: true,
+      is_test: false,
+      is_current_version_deprecated: false,
+      workspaces_exist: true,
+    },
+  };
 }
 
 export function mockMe(): Me {
@@ -271,6 +321,10 @@ export async function installApiMocks(
   const issuesPayload = mockIssues(options.issueCount);
   // Predicate matchers (not globs) so query strings can't slip a route.
   await page.route(
+    (url) => url.pathname === "/api/instances/",
+    (route) => route.fulfill(jsonFulfill(mockInstanceBootstrap()))
+  );
+  await page.route(
     (url) => url.pathname === "/api/users/me/",
     (route) => route.fulfill(jsonFulfill(mockMe()))
   );
@@ -325,6 +379,7 @@ export async function installApiMocks(
     (route) => route.fulfill(jsonFulfill(mockProjectUserProperties()))
   );
   const known = new Set([
+    "/api/instances/",
     "/api/users/me/",
     "/api/users/me/profile/",
     "/api/users/me/workspaces/",

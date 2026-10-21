@@ -17364,28 +17364,55 @@ export class WebNewDriver implements ParityDriver {
   // Appended; existing stubs above are untouched per the shared driver
   // contract. Throw until the exports build slice lands.
 
-  async exportsSettingsOpen(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("exportsSettingsOpen");
+  // Exports entry (NEWFRONT-548, WSET-033). The frame, denial and guide
+  // seam belong to this slice; the guide's form and history land with the
+  // exports area, so the form probes below read what that provider renders
+  // inside the page. They are not exercised until it registers.
+
+  async exportsSettingsOpen(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/settings/exports`, cookies);
+    await this.wsSettingsAwaitSettingsSurface();
   }
 
   async exportsSettingsAccess(): Promise<"form" | "not-authorized" | "no-workspace"> {
-    return todo("exportsSettingsAccess");
+    if ((await this.page.getByTestId("workspace-settings-not-authorized").count()) > 0) return "not-authorized";
+    if ((await this.page.getByTestId("workspace-exports-settings").count()) > 0) return "form";
+    return "no-workspace";
   }
 
   async exportsSettingsHeading(): Promise<{ title: string; description: string }> {
-    return todo("exportsSettingsHeading");
+    const page = this.page.getByTestId("workspace-exports-settings").first();
+    if ((await page.count()) === 0) return { title: "", description: "" };
+    const title = (
+      (await page
+        .getByRole("heading", { level: 2 })
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const description = (
+      (await page
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { title, description };
   }
 
   async exportsSettingsBreadcrumb(): Promise<string[]> {
-    return todo("exportsSettingsBreadcrumb");
+    const crumb = this.page.locator('nav[aria-label="Breadcrumb"]').first();
+    if ((await crumb.count()) === 0) return [];
+    const text = ((await crumb.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? [] : [text];
   }
 
   async exportsSettingsPageTitle(): Promise<string> {
-    return todo("exportsSettingsPageTitle");
+    return this.page.title();
   }
 
   async exportsSettingsCurrentPath(): Promise<string> {
-    return todo("exportsSettingsCurrentPath");
+    return this.currentPath();
   }
 
   async exportsSettingsProjectPickerOpen(): Promise<void> {
@@ -17404,8 +17431,21 @@ export class WebNewDriver implements ParityDriver {
     return todo("exportsSettingsProjectPickerToggle");
   }
 
+  /** The select control inside the guide box titled `title` (exports area). */
+  private exportsSettingsPicker(title: string): Locator {
+    const box = this.page
+      .locator("section, div")
+      .filter({ has: this.page.getByRole("heading", { name: title, exact: true }) })
+      .last();
+    return box.getByRole("button").first();
+  }
+
   async exportsSettingsProjectPickerLabel(): Promise<string> {
-    return todo("exportsSettingsProjectPickerLabel");
+    return (
+      (await this.exportsSettingsPicker("Exporting project")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async exportsSettingsProjectPickerDisabled(): Promise<boolean> {
@@ -17421,7 +17461,11 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async exportsSettingsFormatLabel(): Promise<string> {
-    return todo("exportsSettingsFormatLabel");
+    return (
+      (await this.exportsSettingsPicker("Format")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async exportsSettingsSubmit(): Promise<void> {
@@ -17429,7 +17473,8 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async exportsSettingsSubmitLabel(): Promise<string> {
-    return todo("exportsSettingsSubmitLabel");
+    const button = this.page.getByRole("button", { name: /^(Export|Exporting)/ }).first();
+    return ((await button.innerText().catch(() => "")) ?? "").trim();
   }
 
   async exportsSettingsSubmitDisabled(): Promise<boolean> {
@@ -17445,7 +17490,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async exportsSettingsHistoryCount(): Promise<number> {
-    return todo("exportsSettingsHistoryCount");
+    return this.page.locator("tbody tr").count();
   }
 
   async exportsSettingsRefresh(): Promise<void> {
@@ -19526,28 +19571,65 @@ export class WebNewDriver implements ParityDriver {
   // --- stubs per the shared driver contract; the area fills these in when
   // --- it lands on web_new.
 
+  /** The address of one workspace-settings section. */
+  private wsSettingsSectionPath(
+    workspaceSlug: string,
+    section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations"
+  ): string {
+    return section === "general" ? `/${workspaceSlug}/settings` : `/${workspaceSlug}/settings/${section}`;
+  }
+
+  /**
+   * Settle on whichever surface the address resolves to: the settings
+   * shell, the denial view, the instance maintenance/not-ready screens, or
+   * the workspace-not-found screen. Every one of them replaces or frames
+   * the same page, so they share one bounded wait instead of a content
+   * marker that an unregistered section would never paint.
+   */
+  private async wsSettingsAwaitSettingsSurface(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () =>
+          document.querySelector("[data-testid='workspace-settings-shell']") !== null ||
+          document.querySelector("[data-testid='workspace-settings-not-authorized']") !== null ||
+          document.querySelector("[data-testid='instance-maintenance']") !== null ||
+          document.querySelector("[data-testid='instance-not-ready']") !== null ||
+          document.title === "Workspace not found",
+        { timeout: 60_000 }
+      )
+      .catch(() => undefined);
+  }
+
   async wsSettingsOpenSection(
-    _workspaceSlug: string,
-    _section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations",
-    _cookies: ParityBrowserCookie[]
+    workspaceSlug: string,
+    section: "general" | "members" | "billing" | "exports" | "webhooks" | "integrations",
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("wsSettingsOpenSection");
+    await this.openAuthenticated(this.wsSettingsSectionPath(workspaceSlug, section), cookies);
+    await this.wsSettingsAwaitSettingsSurface();
   }
 
   async wsSettingsNotAuthorized(): Promise<boolean> {
-    return todo("wsSettingsNotAuthorized");
+    return this.isShown(this.page.getByTestId("workspace-settings-not-authorized"));
   }
 
   async wsSettingsSidebarVisible(): Promise<boolean> {
-    return todo("wsSettingsSidebarVisible");
+    return this.isShown(this.page.getByTestId("workspace-settings-sidebar"));
   }
 
   async wsSettingsOutletText(): Promise<string> {
-    return todo("wsSettingsOutletText");
+    return (
+      (await this.page
+        .getByTestId("workspace-settings-shell")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   async wsSettingsCurrentPath(): Promise<string> {
-    return todo("wsSettingsCurrentPath");
+    return this.currentPath();
   }
 
   async wsSettingsOpenWebhookDetail(
@@ -19600,28 +19682,66 @@ export class WebNewDriver implements ParityDriver {
     return todo("wsSettingsDesktopOnlyCount");
   }
 
+  // Instance startup states (NEWFRONT-548, WSET-034/035). The root gate
+  // reads GET /api/instances/ before any route renders, so these methods
+  // install a route ahead of the navigation and answer with the same
+  // envelope the backend serves.
+
+  private wsSettingsInstanceMode: "pass" | "fail" | "not-ready" = "pass";
+  private wsSettingsInstanceHookInstalled = false;
+
+  private async wsSettingsInstanceHook(): Promise<void> {
+    if (this.wsSettingsInstanceHookInstalled) return;
+    this.wsSettingsInstanceHookInstalled = true;
+    await this.page.route("**/api/instances/", async (route) => {
+      if (this.wsSettingsInstanceMode === "fail") {
+        await route.abort("failed");
+        return;
+      }
+      if (this.wsSettingsInstanceMode === "not-ready" && route.request().method() === "GET") {
+        // A fresh install has no instance row: the backend answers only
+        // the two flags, and the startup reader treats that as settled.
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ is_activated: false, is_setup_done: false }),
+        });
+        return;
+      }
+      await route.fallback();
+    });
+  }
+
   async wsSettingsFailInstanceInfo(): Promise<void> {
-    return todo("wsSettingsFailInstanceInfo");
+    this.wsSettingsInstanceMode = "fail";
+    await this.wsSettingsInstanceHook();
   }
 
   async wsSettingsServeInstanceNotReady(): Promise<void> {
-    return todo("wsSettingsServeInstanceNotReady");
+    this.wsSettingsInstanceMode = "not-ready";
+    await this.wsSettingsInstanceHook();
   }
 
   async wsSettingsResetInstanceRoutes(): Promise<void> {
-    return todo("wsSettingsResetInstanceRoutes");
+    this.wsSettingsInstanceMode = "pass";
+    await this.page.unroute("**/api/instances/").catch(() => undefined);
+    this.wsSettingsInstanceHookInstalled = false;
   }
 
   async wsSettingsMaintenanceVisible(): Promise<boolean> {
-    return todo("wsSettingsMaintenanceVisible");
+    return this.isShown(this.page.getByTestId("instance-maintenance"));
   }
 
   async wsSettingsMaintenanceIllustration(): Promise<string | null> {
-    return todo("wsSettingsMaintenanceIllustration");
+    const img = this.page.locator('img[src*="maintenance-mode-"]').first();
+    if ((await img.count()) === 0) return null;
+    return img.getAttribute("src");
   }
 
   async wsSettingsMaintenanceSupportHref(): Promise<string | null> {
-    return todo("wsSettingsMaintenanceSupportHref");
+    const link = this.page.locator('a[href^="mailto:"]').first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
   }
 
   async wsSettingsNotReadyFacts(): Promise<{
@@ -19629,11 +19749,28 @@ export class WebNewDriver implements ParityDriver {
     getStartedHref: string | null;
     workspaceContent: boolean;
   }> {
-    return todo("wsSettingsNotReadyFacts");
+    const screen = this.page.getByTestId("instance-not-ready").first();
+    if ((await screen.count()) === 0) {
+      return { heading: null, getStartedHref: null, workspaceContent: false };
+    }
+    const heading = (
+      (await screen
+        .getByRole("heading", { level: 1 })
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const entry = screen.locator('a[href*="/god-mode"]').first();
+    const getStartedHref = (await entry.count()) === 0 ? null : await entry.getAttribute("href");
+    const settings = await this.page.getByTestId("workspace-settings-shell").count();
+    return {
+      heading: heading === "" ? null : heading,
+      getStartedHref,
+      workspaceContent: settings > 0,
+    };
   }
 
-  async wsSettingsSetColorScheme(_scheme: "light" | "dark"): Promise<void> {
-    return todo("wsSettingsSetColorScheme");
+  async wsSettingsSetColorScheme(scheme: "light" | "dark"): Promise<void> {
+    await this.page.emulateMedia({ colorScheme: scheme });
   }
 
   async wsSettingsOpenInviteDialog(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
