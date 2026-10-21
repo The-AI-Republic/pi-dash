@@ -347,43 +347,33 @@ pub fn request_is_secure(headers: &HeaderMap) -> bool {
         .is_some_and(|proto| proto.split(',').next().unwrap_or("").trim() == "https")
 }
 
+/// `HostSettings` view over the boot-resolved `Settings`
+/// (`authentication/utils/host.py:19-67` over D-16's kernel).
+fn host_settings(
+    settings: &pidash_db::config::Settings,
+) -> pidash_services::auth_session::shapes::HostSettings<'_> {
+    let urls = &settings.urls;
+    pidash_services::auth_session::shapes::HostSettings {
+        web_url: urls.web_url.as_deref(),
+        app_base_url: urls.app_base_url.as_deref(),
+        admin_base_url: urls.admin_base_url.as_deref(),
+        space_base_url: urls.space_base_url.as_deref(),
+        admin_base_path: Some(urls.admin_base_path.as_str()),
+        space_base_path: Some(urls.space_base_path.as_str()),
+    }
+}
+
 /// App/space base hosts from settings (`authentication/utils/host.py:19-67`
 /// via the D-16 `base_host` kernel). `is_app` returns `APP_BASE_URL` when
 /// set, else the `WEB_URL or APP_BASE_URL` origin; `is_space` appends the
 /// space base path to `SPACE_BASE_URL` when set, else to the origin.
 pub fn app_base(settings: &pidash_db::config::Settings) -> String {
-    let urls = &settings.urls;
-    pidash_services::auth_session::shapes::base_host(
-        &pidash_services::auth_session::shapes::HostSettings {
-            web_url: urls.web_url.as_deref(),
-            app_base_url: urls.app_base_url.as_deref(),
-            admin_base_url: urls.admin_base_url.as_deref(),
-            space_base_url: urls.space_base_url.as_deref(),
-            admin_base_path: Some(urls.admin_base_path.as_str()),
-            space_base_path: Some(urls.space_base_path.as_str()),
-        },
-        false,
-        false,
-        true,
-    )
+    pidash_services::auth_session::shapes::base_host(&host_settings(settings), false, false, true)
 }
 
 /// Space base host from settings (same kernel, `is_space=True`).
 pub fn space_base(settings: &pidash_db::config::Settings) -> String {
-    let urls = &settings.urls;
-    pidash_services::auth_session::shapes::base_host(
-        &pidash_services::auth_session::shapes::HostSettings {
-            web_url: urls.web_url.as_deref(),
-            app_base_url: urls.app_base_url.as_deref(),
-            admin_base_url: urls.admin_base_url.as_deref(),
-            space_base_url: urls.space_base_url.as_deref(),
-            admin_base_path: Some(urls.admin_base_path.as_str()),
-            space_base_path: Some(urls.space_base_path.as_str()),
-        },
-        false,
-        true,
-        false,
-    )
+    pidash_services::auth_session::shapes::base_host(&host_settings(settings), false, true, false)
 }
 
 /// Handler failure with its exact status + body.
@@ -2115,6 +2105,7 @@ pub async fn authenticate_user(
     inputs: &RequestInputs,
     code: &str,
     redirect_uri: &str,
+    site: &str,
     with_callback: bool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<AuthenticatedUser, AuthError> {
@@ -2331,12 +2322,7 @@ pub async fn authenticate_user(
     .await
     .map_err(|_| AuthError::Server(Denial::ServerError))?;
     if !row.is_active {
-        let site = if inputs.is_secure {
-            format!("https://{}", inputs.host)
-        } else {
-            format!("http://{}", inputs.host)
-        };
-        enqueue_activation_email(pool, &site, user_id)
+        enqueue_activation_email(pool, site, user_id)
             .await
             .map_err(|_| AuthError::Server(Denial::ServerError))?;
     }
@@ -2553,6 +2539,14 @@ async fn app_callback(
         Err(response) => return response,
     };
     let inputs = request_inputs(&headers);
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`).
+    let site = pidash_services::auth_session::shapes::base_host(
+        &host_settings(&settings),
+        false,
+        false,
+        false,
+    );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
     let authenticated = authenticate_user(
@@ -2564,6 +2558,7 @@ async fn app_callback(
         &inputs,
         &code,
         &redirect_uri,
+        &site,
         true,
         now,
     )
@@ -2732,6 +2727,14 @@ async fn space_callback(
         Err(response) => return response,
     };
     let inputs = request_inputs(&headers);
+    // `current_site` for the activation mail (`base_host(request)`,
+    // `base.py:230`).
+    let site = pidash_services::auth_session::shapes::base_host(
+        &host_settings(&settings),
+        false,
+        false,
+        false,
+    );
     let redirect_uri = redirect_uri_for(inputs.is_secure, &inputs.host);
     let now = chrono::Utc::now();
     let authenticated = authenticate_user(
@@ -2743,6 +2746,7 @@ async fn space_callback(
         &inputs,
         &code,
         &redirect_uri,
+        &site,
         false,
         now,
     )
