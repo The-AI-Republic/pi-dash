@@ -35,6 +35,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
+use chrono_tz::Tz;
 use http_body_util::BodyExt as _;
 use serde_json::{Map, Value};
 
@@ -670,7 +671,7 @@ struct ServerRow {
 /// disambiguated with a counter. Showing the raw slug tells two
 /// colliding servers they share a prefix when they do not, so the list
 /// view resolves it (see `list_servers`).
-fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>) -> Value {
+fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>, timezone: &Tz) -> Value {
     let mut body = Map::with_capacity(9);
     body.insert("id".to_string(), Value::String(row.id.to_string()));
     body.insert("name".to_string(), Value::String(row.name.clone()));
@@ -692,11 +693,17 @@ fn serialize_server(row: &ServerRow, effective_prefix: Option<&str>) -> Value {
     body.insert("is_enabled".to_string(), Value::Bool(row.is_enabled));
     body.insert(
         "created_at".to_string(),
-        Value::String(crate::serializer::render_datetime(&row.created_at)),
+        Value::String(crate::serializer::render_datetime_in(
+            &row.created_at,
+            timezone,
+        )),
     );
     body.insert(
         "updated_at".to_string(),
-        Value::String(crate::serializer::render_datetime(&row.updated_at)),
+        Value::String(crate::serializer::render_datetime_in(
+            &row.updated_at,
+            timezone,
+        )),
     );
     body.insert(
         "effective_tool_prefix".to_string(),
@@ -886,7 +893,13 @@ async fn list_servers(
     let effective = pidash_services::assistant::mcp::unique_prefixes(&enabled);
     let body: Vec<Value> = rows
         .iter()
-        .map(|row| serialize_server(row, effective.get(&row.id.to_string()).map(String::as_str)))
+        .map(|row| {
+            serialize_server(
+                row,
+                effective.get(&row.id.to_string()).map(String::as_str),
+                &actor.timezone,
+            )
+        })
         .collect();
     json_body(StatusCode::OK, &Value::Array(body))
 }
@@ -999,6 +1012,7 @@ async fn create_server(
                 updated_at: saved.try_get("updated_at").unwrap_or(now),
             },
             None,
+            &actor.timezone,
         ),
     )
 }
@@ -1089,7 +1103,10 @@ async fn patch_server(
         }
         Err(_) => return Denial::ServerError.into_response(),
     }
-    json_body(StatusCode::OK, &serialize_server(&row, None))
+    json_body(
+        StatusCode::OK,
+        &serialize_server(&row, None, &actor.timezone),
+    )
 }
 
 /// `DELETE`: own-row lookup (404 on miss), delete, empty 204
@@ -1552,7 +1569,8 @@ mod tests {
                 .with_timezone(&chrono::Utc),
         };
         let rendered =
-            serde_json::to_string(&serialize_server(&row, Some("mcp_tools"))).expect("json");
+            serde_json::to_string(&serialize_server(&row, Some("mcp_tools"), &chrono_tz::UTC))
+                .expect("json");
         assert_eq!(
             rendered,
             "{\"id\":\"12345678-1234-5678-1234-567812345678\",\"name\":\"Tools\",\
@@ -1561,7 +1579,8 @@ mod tests {
              \"created_at\":\"2026-09-29T12:00:00Z\",\"updated_at\":\"2026-09-29T12:00:01Z\",\
              \"effective_tool_prefix\":\"mcp_tools\"}"
         );
-        let nulled = serde_json::to_string(&serialize_server(&row, None)).expect("json");
+        let nulled =
+            serde_json::to_string(&serialize_server(&row, None, &chrono_tz::UTC)).expect("json");
         assert!(nulled.ends_with("\"effective_tool_prefix\":null}"));
     }
 }
