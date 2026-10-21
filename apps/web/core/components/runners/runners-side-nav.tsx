@@ -18,7 +18,7 @@ const service = new RunnerService();
 function statusColor(status: IRunner["status"]) {
   if (status === "online") return "text-success-primary";
   if (status === "busy") return "text-info-primary";
-  if (status === "revoked") return "text-warning-primary";
+  if (status === "revoked" || status === "paused") return "text-warning-primary";
   return "text-tertiary";
 }
 

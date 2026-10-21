@@ -27,7 +27,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from pi_dash.managed_runner.permissions import IsDesktopSession
-from pi_dash.runner.models import DevMachine, MachineToken, Runner, RunnerProvisioning, RunnerStatus
+from pi_dash.runner.models import (
+    OPERATOR_HELD_STATUSES,
+    DevMachine,
+    MachineToken,
+    Runner,
+    RunnerProvisioning,
+    RunnerStatus,
+)
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.permissions import is_workspace_member
 
@@ -188,7 +195,7 @@ class DesktopEnrollEndpoint(APIView):
             Runner.objects.filter(
                 dev_machine_id__in=machine_ids,
                 provisioning=RunnerProvisioning.DESKTOP_BUNDLED,
-            ).exclude(status=RunnerStatus.REVOKED).update(status=RunnerStatus.OFFLINE)
+            ).exclude(status__in=OPERATOR_HELD_STATUSES).update(status=RunnerStatus.OFFLINE)
 
         logger.info("managed_runner.removed user=%s machines=%s", request.user.id, len(machine_ids))
         return Response(status=status.HTTP_204_NO_CONTENT)
