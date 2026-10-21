@@ -27,6 +27,8 @@
 //!   `getaddrinfo` legacy forms like `0x7f.0.0.1` that DNS cannot confirm)
 //!   is blocked via the `ValueError` branch.
 
+use std::net::IpAddr;
+
 /// Whether private-URL blocking is on (`ssrf.py:21-22`,
 /// `ASSISTANT_BLOCK_PRIVATE_URLS`, default `False`).
 pub fn blocking_enabled(block_private_urls: bool) -> bool {
@@ -253,6 +255,38 @@ pub fn address_is_blocked(address: &str) -> bool {
                     .any(|(base, prefix)| in_v6_net(ip, *base, *prefix))
         }
         Err(_) => true,
+    }
+}
+
+/// CPython 3.12 `is_private | is_loopback | is_reserved | is_link_local`.
+///
+/// Same tables as [`address_is_blocked`], but without the multicast
+/// predicate: Django's work-item link guard never checks `is_multicast`,
+/// so multicast addresses stay reachable there. IPv4-mapped IPv6
+/// addresses delegate only `is_private` to the embedded IPv4 address,
+/// exactly like `ipaddress.IPv6Address.is_private`; `is_reserved` stays
+/// an IPv6 predicate (`::ffff:0:0/96` falls under `::/8`).
+pub(crate) fn address_is_private_or_reserved(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(addr) => {
+            let ip: u32 = addr.into();
+            v4_is_private(ip)
+                || in_v4_net(ip, v4(127, 0, 0, 0), 8)
+                || in_v4_net(ip, v4(169, 254, 0, 0), 16)
+                || in_v4_net(ip, v4(240, 0, 0, 0), 4)
+        }
+        IpAddr::V6(addr) => {
+            let ip: u128 = addr.into();
+            let private = addr
+                .to_ipv4_mapped()
+                .map_or_else(|| v6_is_private(ip), |mapped| v4_is_private(mapped.into()));
+            private
+                || addr.is_loopback()
+                || in_v6_net(ip, v6([0xfe80, 0, 0, 0, 0, 0, 0, 0]), 10)
+                || V6_RESERVED
+                    .iter()
+                    .any(|(base, prefix)| in_v6_net(ip, *base, *prefix))
+        }
     }
 }
 

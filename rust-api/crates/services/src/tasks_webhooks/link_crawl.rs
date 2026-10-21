@@ -17,8 +17,10 @@
 //! Translation notes (translate, don't redesign):
 //!
 //! * Deny set is exactly `is_private | is_loopback | is_reserved |
-//!   is_link_local` — `is_multicast`/`is_unspecified` are NOT checked,
-//!   ported as-is per the fixture.
+//!   is_link_local` on CPython 3.12. `is_multicast` is NOT checked, so
+//!   multicast addresses stay reachable. `is_unspecified` is not a
+//!   separate predicate in Django, but CPython's `is_private` covers both
+//!   `0.0.0.0` and `::`, so both are denied.
 //! * The redirect loop checks `redirect_count >= 5` per hop, so 5 redirects
 //!   followed by a 200 succeed (pinned by the unit oracle); the 6th
 //!   redirect raises `Too many redirects for URL: <original url>`.
@@ -39,6 +41,8 @@
 use std::net::IpAddr;
 
 use serde_json::{Map, Value};
+
+use crate::assistant::ssrf::address_is_private_or_reserved;
 
 /// Celery task name (`work_item_link_task.py:262`, `@shared_task`).
 pub const CRAWL_TASK_NAME: &str = "pi_dash.bgtasks.work_item_link_task.crawl_work_item_link_title";
@@ -204,58 +208,11 @@ impl ValidateError {
 }
 
 /// True when `ip` is in the denied set: `is_private | is_loopback |
-/// is_reserved | is_link_local`. `is_multicast`/`is_unspecified` are NOT
-/// checked, ported as-is per FX-LINK-01.
+/// is_reserved | is_link_local` on CPython 3.12. `is_multicast` is NOT
+/// checked, so multicast stays allowed. `is_unspecified` is covered by
+/// `is_private` for `0.0.0.0` and `::`, exactly as in Django.
 pub fn is_denied_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v) => v4_denied(v.octets()),
-        IpAddr::V6(v) => {
-            // IPv4-mapped addresses (`::ffff:192.168.0.1`) are judged by
-            // their inner IPv4 address, like the Python check would be.
-            if let Some(mapped) = v.to_ipv4_mapped() {
-                return v4_denied(mapped.octets());
-            }
-            v6_denied(v.segments(), v.is_unspecified(), v.is_multicast())
-        }
-    }
-}
-
-/// IPv4 deny check on raw octets (`is_reserved` is unstable on this
-/// toolchain, so the `240.0.0.0/4` reserved range is a manual prefix
-/// check alongside the stable `is_private`/`is_loopback`/`is_link_local`).
-fn v4_denied(octets: [u8; 4]) -> bool {
-    let addr = std::net::Ipv4Addr::from(octets);
-    addr.is_private() || addr.is_loopback() || addr.is_link_local() || octets[0] & 0xf0 == 0xf0
-}
-
-/// IPv6 deny check on raw segments (the `Ipv6Addr` classifier helpers for
-/// unique-local / link-local / global are unstable on this toolchain, so
-/// the Python `is_private | is_loopback | is_reserved | is_link_local`
-/// set is spelled out as prefix checks; `is_multicast`/`is_unspecified`
-/// stay allowed per the fixture).
-fn v6_denied(segments: [u16; 8], is_unspecified: bool, is_multicast: bool) -> bool {
-    // `::1`.
-    if segments == [0, 0, 0, 0, 0, 0, 0, 1] {
-        return true;
-    }
-    // Unique-local `fc00::/7` (Python `is_private`).
-    if segments[0] & 0xfe00 == 0xfc00 {
-        return true;
-    }
-    // Link-local `fe80::/10` (Python `is_link_local`).
-    if segments[0] & 0xffc0 == 0xfe80 {
-        return true;
-    }
-    // Documentation `2001:db8::/32` (Python `is_reserved`).
-    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
-        return true;
-    }
-    // Anything else outside global unicast `2000::/3` is reserved, except
-    // the unspecified `::` and multicast `ff00::/8`, which stay allowed.
-    if !is_unspecified && !is_multicast && segments[0] & 0xe000 != 0x2000 {
-        return true;
-    }
-    false
+    address_is_private_or_reserved(ip)
 }
 
 /// SSRF guard (`validate_url_ip`, `:27-66`): scheme first (so
@@ -1043,12 +1000,60 @@ mod tests {
     }
 
     #[test]
-    fn allows_multicast_and_unspecified_as_is() {
-        // `is_multicast`/`is_unspecified` are NOT in the deny set.
-        for ip in ["224.0.0.1", "0.0.0.0", "::", "ff02::1"] {
+    fn rejects_every_cpython_private_reserved_range() {
+        // Vectors from the issue: `is_private` on CPython 3.12 covers
+        // `0.0.0.0/8`, `::`, the TEST-NETs, `198.18.0.0/15`, `2001::/23`
+        // and `2002::/16`; loopback/link-local/reserved add the rest.
+        for ip in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "0.255.255.255",
+            "::",
+            "192.0.0.0",
+            "192.0.0.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "198.51.100.1",
+            "203.0.113.1",
+            "2001::1",
+            "2002::1",
+            "2001:db8::1",
+        ] {
+            let err = validate_url_ip("http://example.com", &|_| Ok(vec![ip.parse().unwrap()]))
+                .unwrap_err();
+            assert_eq!(err, ValidateError::Private, "expected deny for {ip}");
+        }
+    }
+
+    #[test]
+    fn allows_multicast_only() {
+        // Django never checks `is_multicast`; like CPython, it is not part
+        // of the private/loopback/reserved/link-local deny set.
+        for ip in ["224.0.0.1", "239.255.255.255", "ff02::1"] {
             validate_url_ip("http://example.com", &|_| Ok(vec![ip.parse().unwrap()]))
                 .unwrap_or_else(|err| panic!("{ip} must pass, got {err:?}"));
         }
+    }
+
+    #[test]
+    fn preserves_cpython_private_exceptions_and_public_addresses() {
+        for ip in ["192.0.0.9", "192.0.0.10", "2001:1::1", "93.184.216.34"] {
+            validate_url_ip("http://example.com", &|_| Ok(vec![ip.parse().unwrap()]))
+                .unwrap_or_else(|err| panic!("{ip} must pass, got {err:?}"));
+        }
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_ipv6_reserved_range() {
+        // CPython delegates `is_private` to the mapped IPv4 address but
+        // keeps `is_reserved` on the IPv6 side (`::/8`), so even a public
+        // mapped address is denied by Django.
+        let err = validate_url_ip("http://example.com", &|_| {
+            Ok(vec!["::ffff:93.184.216.34".parse().unwrap()])
+        })
+        .unwrap_err();
+        assert_eq!(err, ValidateError::Private);
     }
 
     // -- safe_get matrix (FX-LINK-01 safe_get_matrix + unit oracle) --------
