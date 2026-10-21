@@ -2884,6 +2884,8 @@ pub const WRITE_VALIDATION_ORDER: &[&str] = &[
     "description_html",
 ];
 
+pub(crate) const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
+
 /// `PageSerializer` `CharField` coercion (`fields.py` `CharField`: bools and
 /// composites fail, numbers stringify, strings trim): `allow_blank`
 /// decides whether the trimmed-empty value passes or fails `blank`.
@@ -2892,8 +2894,6 @@ pub const WRITE_VALIDATION_ORDER: &[&str] = &[
 /// (`ProhibitNullCharactersValidator`) runs, matching DRF's
 /// `to_internal_value` (fail-fast type/blank) followed by `run_validators`
 /// (all validators, accumulated) order in `fields.py:731-746`.
-pub(crate) const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
-
 fn coerce_char(
     value: &Value,
     allow_blank: bool,
