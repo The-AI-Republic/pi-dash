@@ -477,8 +477,13 @@ impl App {
                     Ok(Some(cfg)) => {
                         self.data.config_loaded = Some(cfg.clone());
                         self.data.config_error = None;
-                        if self.data.config_working.is_none() {
-                            self.data.config_working = Some(cfg);
+                        match self.data.config_working.as_mut() {
+                            // Keep in-progress edits, but follow runners the
+                            // daemon or CLI added or removed since the snapshot.
+                            Some(working) => {
+                                working.runners = reconcile_runners(&cfg.runners, &working.runners);
+                            }
+                            None => self.data.config_working = Some(cfg),
                         }
                         self.data.sync_picker_to_ipc();
                         // Disarm the registration form when config exists.
@@ -599,10 +604,11 @@ impl App {
                 // config on its next start. On write failure, surface
                 // the error and *don't* quit, so the user can fix and
                 // retry instead of silently losing edits.
-                if let Some(cfg) = self.data.config_working.clone() {
-                    match crate::config::file::write_config(&self.data.paths, &cfg) {
-                        Ok(()) => {
-                            self.data.config_loaded = Some(cfg);
+                if let Some(working) = self.data.config_working.clone() {
+                    match save_working_config(&self.data.paths, &working) {
+                        Ok(cfg) => {
+                            self.data.config_loaded = Some(cfg.clone());
+                            self.data.config_working = Some(cfg);
                             self.data.config_edit_error = None;
                             self.quit = true;
                         }
@@ -774,16 +780,20 @@ impl App {
     }
 
     fn spawn_save_config(&mut self) {
-        let Some(cfg) = self.data.config_working.clone() else {
+        let Some(working) = self.data.config_working.clone() else {
             return;
         };
         let paths = self.data.paths.clone();
         let tx = self.event_tx.clone();
-        if let Err(e) = crate::config::file::write_config(&paths, &cfg) {
-            self.data.config_edit_error = Some(format!("save failed: {e:#}"));
-            return;
-        }
-        self.data.config_loaded = Some(cfg);
+        let cfg = match save_working_config(&paths, &working) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                self.data.config_edit_error = Some(format!("save failed: {e:#}"));
+                return;
+            }
+        };
+        self.data.config_loaded = Some(cfg.clone());
+        self.data.config_working = Some(cfg);
         self.data.config_edit_error = None;
         tokio::spawn(async move {
             let outcome = crate::service::reload::restart_and_verify(&paths).await;
@@ -1268,6 +1278,50 @@ impl App {
     }
 }
 
+/// The on-disk runner list, with each runner's block taken from the TUI's
+/// working copy when it has one. Runners removed since the TUI took its
+/// snapshot (cloud `RemoveRunner`, `pidash runner remove`) stay removed;
+/// runners added since then are kept.
+fn reconcile_runners(
+    on_disk: &[crate::config::schema::RunnerConfig],
+    working: &[crate::config::schema::RunnerConfig],
+) -> Vec<crate::config::schema::RunnerConfig> {
+    on_disk
+        .iter()
+        .map(|disk| {
+            working
+                .iter()
+                .find(|w| w.runner_id == disk.runner_id)
+                .unwrap_or(disk)
+                .clone()
+        })
+        .collect()
+}
+
+/// Write the TUI's working copy without clobbering changes other
+/// processes made since the TUI loaded it. Writing the snapshot back
+/// wholesale put a cloud-deleted runner's `[[runner]]` block back into
+/// `config.toml`, and the restart that follows a save brought the runner
+/// back up (PDASHOSS01-315). Runs under the host-wide config lock, keeps
+/// the on-disk runner list (see [`reconcile_runners`]) and the on-disk
+/// `[cli]` section (the TUI never edits it). Returns what was written.
+fn save_working_config(
+    paths: &Paths,
+    working: &crate::config::schema::Config,
+) -> Result<crate::config::schema::Config> {
+    crate::config::file::mutate_config_or_init(
+        paths,
+        || Some(working.clone()),
+        |disk| {
+            let mut merged = working.clone();
+            merged.runners = reconcile_runners(&disk.runners, &working.runners);
+            merged.cli = disk.cli.take();
+            *disk = merged;
+            Ok(())
+        },
+    )
+}
+
 pub async fn run(paths: Paths, initial_tab: TabKind) -> Result<()> {
     let mut tui = Tui::init()?;
     let frame_requester = tui.frame_requester().clone();
@@ -1314,4 +1368,137 @@ pub async fn run(paths: Paths, initial_tab: TabKind) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{CliSection, Config, DaemonConfig, RunnerConfig, WorkspaceSection};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn paths() -> Paths {
+        let root = tempfile::tempdir().expect("tempdir").keep();
+        Paths {
+            config_dir: root.join("config"),
+            data_dir: root.join("data"),
+            runtime_dir: root.join("runtime"),
+        }
+    }
+
+    fn runner(name: &str) -> RunnerConfig {
+        RunnerConfig {
+            name: name.into(),
+            runner_id: Uuid::new_v4(),
+            workspace_slug: Some("acme".into()),
+            project_slug: Some("TEST".into()),
+            pod_id: None,
+            workspace: WorkspaceSection {
+                working_dir: PathBuf::from(format!("/tmp/pidash-test-{name}")),
+            },
+            agent: Default::default(),
+            codex: Default::default(),
+            claude_code: Default::default(),
+            cursor_agent: Default::default(),
+            openclaw: Default::default(),
+            grok: Default::default(),
+            muse_code: Default::default(),
+            approval_policy: Default::default(),
+        }
+    }
+
+    fn config(runners: Vec<RunnerConfig>, token: &str) -> Config {
+        Config {
+            version: 2,
+            daemon: DaemonConfig {
+                cloud_url: "https://pidash.example".into(),
+                dev_machine_id: None,
+                log_level: "info".into(),
+                log_retention_days: 14,
+                agent_observability_v1: false,
+                agent_watchdog: Default::default(),
+                auto_update: true,
+            },
+            runners,
+            cli: Some(CliSection {
+                token: Some(token.into()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn names(cfg: &Config) -> Vec<String> {
+        cfg.runners.iter().map(|r| r.name.clone()).collect()
+    }
+
+    /// PDASHOSS01-315: the TUI loaded config with runners `keep` and `gone`;
+    /// the cloud then deleted `gone` and the daemon stripped its block. A
+    /// later TUI save must not write `gone` back.
+    #[test]
+    fn save_does_not_resurrect_a_runner_removed_since_the_snapshot() {
+        let paths = paths();
+        let keep = runner("keep");
+        let gone = runner("gone");
+        let snapshot = config(vec![keep.clone(), gone.clone()], "mt_old");
+        crate::config::file::write_config(&paths, &snapshot).unwrap();
+
+        // The TUI edits `keep` in its working copy.
+        let mut working = snapshot.clone();
+        working.runners[0].workspace.working_dir = PathBuf::from("/tmp/edited");
+        working.daemon.log_level = "debug".into();
+
+        // Meanwhile the daemon's RemoveRunner strip runs, and a new runner
+        // is added and the CLI token rotated by other processes.
+        let added = runner("added");
+        crate::config::file::mutate_config(&paths, |cfg| {
+            cfg.runners.retain(|r| r.runner_id != gone.runner_id);
+            cfg.runners.push(added.clone());
+            cfg.cli.as_mut().unwrap().token = Some("mt_new".into());
+            Ok(())
+        })
+        .unwrap();
+
+        let written = save_working_config(&paths, &working).unwrap();
+        let on_disk = crate::config::file::load_config(&paths).unwrap();
+
+        assert_eq!(names(&on_disk), vec!["keep", "added"]);
+        assert_eq!(names(&written), names(&on_disk));
+        assert_eq!(
+            on_disk.runners[0].workspace.working_dir,
+            PathBuf::from("/tmp/edited")
+        );
+        assert_eq!(on_disk.daemon.log_level, "debug");
+        assert_eq!(on_disk.cli.unwrap().token.as_deref(), Some("mt_new"));
+    }
+
+    #[test]
+    fn save_writes_the_working_copy_when_no_config_exists() {
+        let paths = paths();
+        let working = config(vec![runner("only")], "mt_x");
+        save_working_config(&paths, &working).unwrap();
+        let on_disk = crate::config::file::load_config(&paths).unwrap();
+        assert_eq!(names(&on_disk), vec!["only"]);
+    }
+
+    #[test]
+    fn reconcile_keeps_working_edits_and_follows_the_on_disk_runner_set() {
+        let a = runner("a");
+        let b = runner("b");
+        let c = runner("c");
+        let mut edited_a = a.clone();
+        edited_a.workspace.working_dir = PathBuf::from("/tmp/a-edited");
+
+        let out = reconcile_runners(&[a.clone(), c.clone()], &[edited_a, b]);
+        let got: Vec<_> = out
+            .iter()
+            .map(|r| (r.name.as_str(), r.workspace.working_dir.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("a", PathBuf::from("/tmp/a-edited")),
+                ("c", c.workspace.working_dir.clone()),
+            ]
+        );
+    }
 }
