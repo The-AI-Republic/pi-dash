@@ -13201,45 +13201,118 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Estimates screen shell (NEWFRONT-321, EST-001-003, EST-026-028).
-  // --- Stubs; the new app implements them when the area is built.
-  async estimatesOpenSettings(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("estimatesOpenSettings");
+  // --- The settings entry embeds the shared estimates surface; these
+  // --- methods read its loading, empty and creation states (PSET-049).
+  /** App dialogs only: toasts share role=dialog under Notifications. */
+  private appDialogs(): Locator {
+    return this.page.locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]');
+  }
+
+  private estimatesScreen(): Locator {
+    return this.page.locator('[data-testid="estimates-screen"]').first();
+  }
+
+  private estimatesMain(): Locator {
+    return this.page.getByRole("main").last();
+  }
+
+  async estimatesOpenSettings(workspaceSlug: string, projectId: string): Promise<void> {
+    // Settles on the screen heading or either denial body; a held list
+    // fetch leaves the loader up, so the opening waiter's skeleton poll
+    // drives that state instead.
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/estimates`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.estimatesMain()
+          .getByRole("heading", { name: "Estimates", exact: true })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] estimates settings settled on neither the screen nor the denial view.");
   }
 
   async estimatesNotAuthorized(): Promise<boolean> {
-    return todo("estimatesNotAuthorized");
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
   }
 
   async estimatesHeadingVisible(): Promise<boolean> {
-    return todo("estimatesHeadingVisible");
+    return this.isShown(this.estimatesMain().getByRole("heading", { name: "Estimates", exact: true }));
   }
 
   async estimatesBreadcrumbText(): Promise<string> {
-    return todo("estimatesBreadcrumbText");
+    // The settings page header names the open area beside the project
+    // caption; only a mounted screen carries it.
+    if (!(await this.isShown(this.estimatesScreen()))) return "";
+    const title = this.page.locator('[data-testid="project-settings-page"] h1').first();
+    if ((await title.count()) === 0) return "";
+    return ((await title.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async estimatesSkeletonVisible(): Promise<boolean> {
-    return todo("estimatesSkeletonVisible");
+    const loader = this.page.locator('[role="status"][aria-label="Loading estimates"]').first();
+    if (!(await this.isShown(loader))) return false;
+    return (await loader.locator("span").count()) >= 4;
   }
 
-  async estimatesDelayListFetch(_ms: number): Promise<void> {
-    return todo("estimatesDelayListFetch");
+  async estimatesDelayListFetch(ms: number): Promise<void> {
+    // Every list GET is held (no once-flag) so a remount cannot collapse
+    // the skeleton window; writes pass through untouched.
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/estimates/", hold);
   }
 
   async estimatesEmptyVisible(): Promise<boolean> {
-    return todo("estimatesEmptyVisible");
+    return this.isShown(this.estimatesMain().getByRole("button", { name: /add estimate/i }));
   }
 
   async estimatesEmptyTitle(): Promise<string> {
-    return todo("estimatesEmptyTitle");
+    const empty = this.estimatesScreen().getByText("No estimates yet", { exact: true });
+    if ((await empty.count()) === 0) return "";
+    return (
+      (await empty
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   async estimatesEmptyAddClick(): Promise<void> {
-    return todo("estimatesEmptyAddClick");
+    await this.estimatesMain()
+      .getByRole("button", { name: /add estimate/i })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async estimatesCreateDialogOpen(): Promise<boolean> {
-    return todo("estimatesCreateDialogOpen");
+    const dialog = this.page
+      .getByRole("dialog")
+      .filter({ hasText: /new estimate system/i })
+      .first();
+    return this.isShown(dialog);
   }
 
   async estimatesScreenText(): Promise<string> {
@@ -13920,57 +13993,136 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Estimates permissions matrix + edition split (NEWFRONT-326,
-  // --- EST-024 + EST-029). Stage 0 oracle convention: todo() stubs until
-  // --- the estimates area lands in apps/web_new. The shell child's
-  // --- navigation (NEWFRONT-321, merged) is stubbed above.
+  // --- EST-024 + EST-029, PSET-049). The active system, its single
+  // --- delete control and the creation dialog as the new app renders
+  // --- them; values and family pickers belong to the estimates area.
+  private estimatesActiveRowLocator(): Locator {
+    return this.page.locator('[data-testid="estimates-active-section"] [data-testid="estimate-system-row"]').first();
+  }
+
+  private estimatesCreateDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ hasText: /new estimate system/i })
+      .first();
+  }
 
   async estimatesEnableSwitchVisible(): Promise<boolean> {
-    return todo("estimatesEnableSwitchVisible");
+    return this.isShown(this.page.getByRole("switch", { name: "Enable estimates for this project" }));
   }
+
   async estimatesActiveSystemName(): Promise<string> {
-    return todo("estimatesActiveSystemName");
+    const row = this.estimatesActiveRowLocator();
+    if (!(await this.isShown(row))) return "";
+    return (
+      (await row
+        .locator("h4")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
+
   async estimatesActiveRowButtonCount(): Promise<number> {
-    return todo("estimatesActiveRowButtonCount");
+    const row = this.estimatesActiveRowLocator();
+    if ((await row.count()) === 0) return 0;
+    return row.getByRole("button").count();
   }
+
   async estimatesOpenCreateDialog(): Promise<void> {
-    return todo("estimatesOpenCreateDialog");
+    await this.page
+      .getByRole("button", { name: /add estimate system/i })
+      .first()
+      .click();
+    await this.estimatesCreateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async estimatesDialogOpen(): Promise<boolean> {
-    return todo("estimatesDialogOpen");
+    return this.isShown(this.estimatesCreateDialog());
   }
+
   async estimatesFamilyOptions(): Promise<EstimatesFamilyOption[]> {
     return todo("estimatesFamilyOptions");
   }
+
   async estimatesSelectFamily(_family: "points" | "categories"): Promise<void> {
     return todo("estimatesSelectFamily");
   }
-  async estimatesPickStarter(_title: string): Promise<void> {
-    return todo("estimatesPickStarter");
+
+  async estimatesPickStarter(title: string): Promise<void> {
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.estimatesCreateDialog()
+      .getByRole("button", { name: new RegExp(escaped, "i") })
+      .first()
+      .click();
+    await expect
+      .poll(
+        async () =>
+          (await this.page
+            .locator('[data-testid="estimate-dialog-step"]')
+            .first()
+            .innerText()
+            .catch(() => "")) ?? "",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toContain("Step 2 of 2");
   }
+
   async estimatesSubmit(): Promise<void> {
-    return todo("estimatesSubmit");
+    const dialog = this.estimatesCreateDialog();
+    await dialog
+      .getByRole("button", { name: /create estimate/i })
+      .first()
+      .click();
+    // Success closes the dialog (a toast may linger); a refused or
+    // blocked submit leaves it open.
+    await expect
+      .poll(async () => (await dialog.count()) === 0, { timeout: WebNewDriver.WAIT_MS })
+      .toBe(true)
+      .catch(() => undefined);
   }
+
   async estimatesActiveRowDeleteClick(): Promise<void> {
-    return todo("estimatesActiveRowDeleteClick");
+    await this.estimatesActiveRowLocator().getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async estimatesConfirmDialogOpen(): Promise<boolean> {
-    return todo("estimatesConfirmDialogOpen");
+    return (await this.appDialogs().count()) > 0;
   }
+
   async estimatesConfirmDialogCancel(): Promise<void> {
-    return todo("estimatesConfirmDialogCancel");
+    const dialog = this.appDialogs().first();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
+
   async estimatesEditDeleteConfirmDialogTitle(): Promise<string> {
-    return todo("estimatesEditDeleteConfirmDialogTitle");
+    const dialog = this.appDialogs().first();
+    if ((await dialog.count()) === 0) return "";
+    const raw = (await dialog.innerText().catch(() => "")) ?? "";
+    const lines = raw.split("\n").map((line) => line.trim());
+    return lines.find((line) => line !== "") ?? "";
   }
+
   async estimatesEditDeleteConfirmDialogBody(): Promise<string> {
-    return todo("estimatesEditDeleteConfirmDialogBody");
+    const dialog = this.appDialogs().first();
+    if ((await dialog.count()) === 0) return "";
+    return ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
+
   async estimatesEditDeleteConfirmDialogConfirm(): Promise<void> {
-    return todo("estimatesEditDeleteConfirmDialogConfirm");
+    const dialog = this.appDialogs().first();
+    await dialog.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
+
   async estimatesEditDeleteActiveRowEditControlVisible(): Promise<boolean> {
-    return todo("estimatesEditDeleteActiveRowEditControlVisible");
+    // OSS rows offer deletion only (EST-014): no control names an edit.
+    const row = this.estimatesActiveRowLocator();
+    if ((await row.count()) === 0) return false;
+    return (await row.getByRole("button", { name: /edit/i }).count()) > 0;
   }
   // --- Pages gating, list states, URLs, detail shell (NEWFRONT-314,
   // --- PAGE-018-025,079-080). Throwing stubs per the shared driver contract.
@@ -14679,54 +14831,134 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Estimates enable switch, active/archived display, row gating
-  // --- (NEWFRONT-322, EST-004-007). Stubs; the new app implements
-  // --- them when the area is built.
+  // --- (NEWFRONT-322, EST-004-007, PSET-049). The switch owns the
+  // --- project's stored estimate reference; superseded systems list
+  // --- read-only beside it.
+  private estimatesToggleSwitch(): Locator {
+    return this.page.getByRole("switch", { name: "Enable estimates for this project" }).first();
+  }
+
+  private estimatesArchivedSection(): Locator {
+    return this.page.locator('[data-testid="estimates-archived-section"]').first();
+  }
+
+  private estimatesArchivedLink(): Locator {
+    return this.estimatesArchivedSection().locator('[data-testid="estimates-archived-reference"]').first();
+  }
+
   async estimatesEnableSwitchOn(): Promise<boolean> {
-    return todo("estimatesEnableSwitchOn");
+    const control = this.estimatesToggleSwitch();
+    if (!(await this.isShown(control))) return false;
+    return control.isChecked();
   }
 
   async estimatesEnableSwitchDisabled(): Promise<boolean> {
-    return todo("estimatesEnableSwitchDisabled");
+    const control = this.estimatesToggleSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.isDisabled();
   }
 
   async estimatesEnableSwitchToggle(): Promise<void> {
-    return todo("estimatesEnableSwitchToggle");
+    // Settle on the project write the switch issues, or the notice that
+    // write raises; both start after the click, so the waiter attaches
+    // first.
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/$/.test(response.url()) &&
+          (response.request().method() === "PATCH" || response.request().method() === "PUT"),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    const toasted = this.page
+      .locator('[data-testid="toast-stack"] [data-testid="toast-notification"]')
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.estimatesToggleSwitch().click({ timeout: WebNewDriver.WAIT_MS });
+    await Promise.race([wrote, toasted]);
   }
 
   async estimatesFailProjectUpdate(): Promise<void> {
-    return todo("estimatesFailProjectUpdate");
+    // Refuse project writes so the failure path shows; reads pass
+    // through, and the glob never reaches nested estimate writes.
+    await this.page.route("**/api/workspaces/*/projects/*/", async (route: Route) => {
+      if (route.request().method() === "GET") {
+        await route.continue();
+        return;
+      }
+      await route.abort("failed");
+    });
   }
 
   async estimatesActiveSystemValues(): Promise<string> {
-    return todo("estimatesActiveSystemValues");
+    const row = this.estimatesActiveRowLocator();
+    if (!(await this.isShown(row))) return "";
+    const values =
+      (await row
+        .locator("p")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? "";
+    return values.replace(/\s+/g, " ").trim();
   }
 
   async estimatesArchivedSectionVisible(): Promise<boolean> {
-    return todo("estimatesArchivedSectionVisible");
+    return this.isShown(this.estimatesArchivedSection());
   }
 
   async estimatesArchivedNames(): Promise<string[]> {
-    return todo("estimatesArchivedNames");
+    if (!(await this.isShown(this.estimatesArchivedSection()))) return [];
+    const names = await this.estimatesArchivedSection()
+      .locator('[data-testid="estimate-system-row"] h4')
+      .allInnerTexts();
+    return names.map((name) => name.replace(/\s+/g, " ").trim()).filter((name) => name !== "");
   }
 
   async estimatesArchivedExplainerText(): Promise<string> {
-    return todo("estimatesArchivedExplainerText");
+    if (!(await this.isShown(this.estimatesArchivedSection()))) return "";
+    const explainer = this.estimatesArchivedSection().locator("h3 + p").first();
+    if ((await explainer.count()) === 0) return "";
+    return ((await explainer.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async estimatesArchivedLinkHref(): Promise<string> {
-    return todo("estimatesArchivedLinkHref");
+    const link = this.estimatesArchivedLink();
+    if ((await link.count()) === 0) return "";
+    return (await link.getAttribute("href").catch(() => null)) ?? "";
   }
 
   async estimatesArchivedLinkTarget(): Promise<string> {
-    return todo("estimatesArchivedLinkTarget");
+    const link = this.estimatesArchivedLink();
+    if ((await link.count()) === 0) return "";
+    return (await link.getAttribute("target").catch(() => null)) ?? "";
   }
 
   async estimatesArchivedOpenLinkNewPage(): Promise<string> {
-    return todo("estimatesArchivedOpenLinkNewPage");
+    // The reference must leave the app: capture the page the link opens.
+    const [popup] = await Promise.all([
+      this.page.context().waitForEvent("page", { timeout: WebNewDriver.WAIT_MS }),
+      this.estimatesArchivedLink().click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
   }
 
-  async estimatesArchivedRowButtonCount(_name: string): Promise<number> {
-    return todo("estimatesArchivedRowButtonCount");
+  async estimatesArchivedRowButtonCount(name: string): Promise<number> {
+    if (!(await this.isShown(this.estimatesArchivedSection()))) return 0;
+    const row = this.estimatesArchivedSection()
+      .locator('[data-testid="estimate-system-row"]')
+      .filter({ hasText: name })
+      .first();
+    if ((await row.count()) === 0) return 0;
+    return row.getByRole("button").count();
   }
 
   // --- Modules list states, layouts, rows and cards (NEWFRONT-307,
@@ -17117,61 +17349,196 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Project-settings github tab oracle (NEWFRONT-393, PSET-050..052,
-  // --- PSET-061 slice). Throwing stubs per the shared driver contract; the
-  // --- new app implements them later.
-  async projectGithubOpenTab(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("projectGithubOpenTab");
+  // --- PSET-061 slice). The repository tab in apps/web_new: a skeleton
+  // --- while the binding read is unresolved, then the bound card (admin
+  // --- switch and confirm-free unbind, disabled for members) or the
+  // --- guidance card pointing at General settings.
+  private projectGithubBoundCard(): Locator {
+    return this.page.locator('[data-testid="repository-bound-card"]').first();
   }
+
+  private projectGithubSyncSwitch(): Locator {
+    return this.page.getByRole("switch", { name: "Sync issues with this repository" }).first();
+  }
+
+  async projectGithubOpenTab(workspaceSlug: string, projectId: string): Promise<void> {
+    for (let round = 0; round < 2; round++) {
+      await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/github`);
+      await this.page.waitForLoadState("domcontentloaded");
+      const settled = await Promise.race([
+        this.projectGithubBoundCard()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .locator('[data-testid="repository-guidance-card"]')
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+        this.page
+          .getByRole("heading", { name: /not authorized/i })
+          .first()
+          .waitFor({ timeout: 60_000 })
+          .then(
+            () => true,
+            () => false
+          ),
+      ]);
+      if (settled) return;
+    }
+    throw new Error("[parity] github tab settled on neither card nor the denial view.");
+  }
+
   async projectGithubNotAuthorized(): Promise<boolean> {
-    return todo("projectGithubNotAuthorized");
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
   }
+
   async projectGithubLoaderVisible(): Promise<boolean> {
-    return todo("projectGithubLoaderVisible");
+    return this.isShown(this.page.locator('[role="status"][aria-label="Loading repository binding"]'));
   }
-  async projectGithubDelayBindingFetch(_ms: number): Promise<void> {
-    return todo("projectGithubDelayBindingFetch");
+
+  async projectGithubDelayBindingFetch(ms: number): Promise<void> {
+    const hold = async (route: Route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue().catch(() => undefined);
+    };
+    await this.page.route("**/api/workspaces/*/projects/*/repository/", hold);
   }
+
   async projectGithubBoundVisible(): Promise<boolean> {
-    return todo("projectGithubBoundVisible");
+    return this.isShown(this.projectGithubBoundCard());
   }
+
   async projectGithubProviderLabel(): Promise<string | null> {
-    return todo("projectGithubProviderLabel");
+    for (const label of ["GitHub", "GitLab", "Git provider"]) {
+      if ((await this.page.getByRole("heading", { name: label, exact: true }).count()) > 0) return label;
+    }
+    return null;
   }
+
   async projectGithubRepoLinkText(): Promise<string | null> {
-    return todo("projectGithubRepoLinkText");
+    // The bound card links the repository by its full name beside the
+    // out-bound mark; the seeded binding's web URL stays unasserted.
+    const card = this.projectGithubBoundCard();
+    if ((await card.count()) === 0) return null;
+    const link = card.getByRole("link").first();
+    if ((await link.count()) === 0) return null;
+    return ((await link.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim() || null;
   }
+
   async projectGithubContractVisible(): Promise<boolean> {
-    return todo("projectGithubContractVisible");
+    const card = this.projectGithubBoundCard();
+    if (!(await this.isShown(card))) return false;
+    const text = ((await card.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ");
+    return text.includes("Workflow fields stay editable");
   }
+
   async projectGithubCadenceText(): Promise<string | null> {
-    return todo("projectGithubCadenceText");
+    const line = this.projectGithubBoundCard().getByText("Sync issues every 4 hours", { exact: false });
+    if ((await line.count()) === 0) return null;
+    const text = (
+      (await line
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text || null;
   }
+
   async projectGithubLastError(): Promise<string | null> {
-    return todo("projectGithubLastError");
+    const line = this.projectGithubBoundCard().getByText("Last error:", { exact: false });
+    if ((await line.count()) === 0) return null;
+    const text = (
+      (await line
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    return text || null;
   }
+
   async projectGithubSyncOn(): Promise<boolean> {
-    return todo("projectGithubSyncOn");
+    const control = this.projectGithubSyncSwitch();
+    if (!(await this.isShown(control))) return false;
+    return control.isChecked();
   }
+
   async projectGithubSyncDisabled(): Promise<boolean> {
-    return todo("projectGithubSyncDisabled");
+    const control = this.projectGithubSyncSwitch();
+    if ((await control.count()) === 0) return false;
+    return control.isDisabled();
   }
+
   async projectGithubToggleSync(): Promise<void> {
-    return todo("projectGithubToggleSync");
+    const wrote = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/repository\/$/.test(response.url()) &&
+          (response.request().method() === "PATCH" || response.request().method() === "PUT"),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.projectGithubSyncSwitch().click();
+    await wrote;
   }
+
   async projectGithubUnbindVisible(): Promise<boolean> {
-    return todo("projectGithubUnbindVisible");
+    return (await this.page.getByRole("button", { name: "Unbind", exact: true }).count()) > 0;
   }
+
   async projectGithubUnbindDisabled(): Promise<boolean> {
-    return todo("projectGithubUnbindDisabled");
+    const control = this.page.getByRole("button", { name: "Unbind", exact: true });
+    if ((await control.count()) === 0) return false;
+    return control.first().isDisabled();
   }
+
   async projectGithubUnbind(): Promise<void> {
-    return todo("projectGithubUnbind");
+    // Confirm-free: one click DELETEs the binding; the wait ends when the
+    // delete response lands.
+    const gone = this.page
+      .waitForResponse(
+        (response) =>
+          /\/api\/workspaces\/[^/]+\/projects\/[^/]+\/repository\/$/.test(response.url()) &&
+          response.request().method() === "DELETE",
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .then(
+        () => undefined,
+        () => undefined
+      );
+    await this.page.getByRole("button", { name: "Unbind", exact: true }).first().click();
+    await gone;
   }
+
   async projectGithubGuidanceVisible(): Promise<boolean> {
-    return todo("projectGithubGuidanceVisible");
+    const card = this.page.locator('[data-testid="repository-guidance-card"]').first();
+    if (!(await this.isShown(card))) return false;
+    return (await card.getByRole("heading", { name: "Repository sync", exact: true }).count()) > 0;
   }
+
   async projectGithubTabText(): Promise<string> {
-    return todo("projectGithubTabText");
+    const text =
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? "";
+    return text.replace(/\s+/g, " ").trim();
   }
 
   // --- Workspace-settings members roster (NEWFRONT-537, WSET-008/011/014).

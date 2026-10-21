@@ -41,6 +41,10 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
 import { renderInRouter } from "../../../../../../features/project-settings/testing.js";
 import { Route } from "./estimates.js";
 
+vi.mock("../../../../../../features/estimates/EstimatesScreen.js", () => ({
+  EstimatesScreen: () => <section aria-label="Estimates settings" data-testid="estimates-screen-stub" />,
+}));
+
 function renderRoute(): void {
   vi.spyOn(Route, "useParams").mockReturnValue(harness.params);
   const Component = Route.options.component;
@@ -67,8 +71,8 @@ describe("estimates settings route", () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-shell")).toBeInTheDocument());
     expect(screen.getByRole("heading", { level: 1, name: "Estimates" })).toBeInTheDocument();
-    expect(screen.getByTestId("project-settings-tab-mount")).toHaveAttribute("data-slice", "NEWFRONT-602");
     expect(screen.getByTestId("project-settings-tab-estimates")).toHaveAttribute("data-active", "true");
+    expect(await screen.findByTestId("estimates-screen-stub")).toBeInTheDocument();
   });
 
   it("refuses a role the page does not admit, keeping the rail", async () => {
