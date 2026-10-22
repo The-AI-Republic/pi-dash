@@ -379,6 +379,24 @@ class DevMachine(models.Model):
         return self.label or self.host_label or str(self.id)
 
 
+class RunnerQuerySet(models.QuerySet):
+    def assignable(self):
+        """Runners that may take new work right now.
+
+        Online, heartbeat-fresh, and not operator-paused. Every path that
+        picks a runner for new work (matcher drains, follow-up pinning,
+        availability checks) must go through this so a new eligibility
+        rule only has to be added once.
+        """
+        from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
+
+        return self.filter(
+            status=RunnerStatus.ONLINE,
+            last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
+            paused_at__isnull=True,
+        )
+
+
 class Runner(models.Model):
     """Cloud-visible worker entity under a dev machine.
 
@@ -390,6 +408,8 @@ class Runner(models.Model):
     """
 
     MAX_PER_USER = 5
+
+    objects = RunnerQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     owner = models.ForeignKey(
@@ -474,6 +494,18 @@ class Runner(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    # Operator pause. Orthogonal to ``status``: ``status`` is connectivity
+    # (rewritten by every poll), while a paused runner keeps heartbeating,
+    # finishes its in-flight run, and is skipped by every matcher path until
+    # resumed. NULL means not paused.
+    paused_at = models.DateTimeField(null=True, blank=True)
+    paused_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
 
     class Meta:
         db_table = "runner"
@@ -534,6 +566,12 @@ class Runner(models.Model):
         if self.pod_id is None:
             return None
         return self.pod.project_id
+
+    @property
+    def is_revoked(self) -> bool:
+        # Either marker counts: legacy and partial revokes may have set only
+        # one of the two.
+        return self.revoked_at is not None or self.status == RunnerStatus.REVOKED
 
     def mark_heartbeat(self) -> None:
         self.last_heartbeat_at = timezone.now()
