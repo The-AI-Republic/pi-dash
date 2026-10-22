@@ -40,13 +40,17 @@ const MODULE = "523e4567-e89b-12d3-a456-426614174004";
 const CYCLE_ENTITY: IssuesEntity = { scope: "cycle", projectId: PROJECT, cycleId: CYCLE };
 const MODULE_ENTITY: IssuesEntity = { scope: "module", projectId: PROJECT, moduleId: MODULE };
 
+function wrapper(queryClient: QueryClient) {
+  return function Wrapper({ children }: { children: React.ReactNode }): React.ReactElement {
+    return React.createElement(QueryClientProvider, { client: queryClient }, children);
+  };
+}
+
 function mount(entity: IssuesEntity, extra: { cycleId?: string; moduleId?: string } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const invalidate = vi.spyOn(queryClient, "invalidateQueries");
   const view = renderHook(() => useAttachExisting({ workspaceSlug: SLUG, projectId: PROJECT, entity, ...extra }), {
-    wrapper: ({ children }: { children: React.ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    ),
+    wrapper: wrapper(queryClient),
   });
   return { ...view, invalidate };
 }

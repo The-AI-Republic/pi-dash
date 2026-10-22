@@ -8,7 +8,7 @@
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import * as React from "react";
 
-export function renderInRouter(pathname: string, node: React.ReactElement): React.ReactElement {
+export function renderInRouter(pathname: string, node: React.ReactElement): JSX.Element {
   const rootRoute = createRootRoute({ component: () => node });
   const router = createRouter({
     routeTree: rootRoute,

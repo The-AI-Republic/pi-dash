@@ -75,9 +75,13 @@ describe("archived issues route", () => {
 
   it("mounts the archived screen for the route's project", async () => {
     vi.spyOn(Route, "useParams").mockReturnValue({ ws: WS, projectId: PROJECT });
-    const component = Route.options.component as unknown as React.ComponentType;
+    const Component = Route.options.component as unknown as React.ComponentType;
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<QueryClientProvider client={queryClient}>{React.createElement(component)}</QueryClientProvider>);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Component />
+      </QueryClientProvider>
+    );
     expect(await screen.findByTestId("archived-issues-screen")).toHaveAttribute("data-project", PROJECT);
   });
 });
