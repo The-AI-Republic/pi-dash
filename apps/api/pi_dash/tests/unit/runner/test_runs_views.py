@@ -989,11 +989,19 @@ def test_skip_immediate_dispatch_header_suppresses_run_creation_on_state_change(
 
 @pytest.mark.unit
 def test_no_skip_header_creates_run_on_state_change(db, session_client, workspace, project):
-    """Sanity: without the header, the existing immediate-dispatch path
-    fires. This guards against accidentally inverting the default."""
-    from crum import impersonate
+    """Sanity: without the header, a human state change still owes a run —
+    now held on the clock for the settling window rather than dispatched
+    inline (``.ai_design/state_transition_debounce/design.md``), and fired
+    once the window elapses. This guards against accidentally inverting
+    the default."""
+    from datetime import timedelta
 
+    from crum import impersonate
+    from django.utils import timezone
+
+    from pi_dash.bgtasks.agent_ticker import fire_tick
     from pi_dash.db.models import Issue, Project, State
+    from pi_dash.db.models.issue_agent_ticker import IssueAgentTicker
     from pi_dash.prompting.seed import seed_default_template
 
     seed_default_template()
@@ -1021,6 +1029,15 @@ def test_no_skip_header_creates_run_on_state_change(db, session_client, workspac
         format="json",
     )
     assert resp.status_code == status.HTTP_204_NO_CONTENT
+    # The entry run is owed but held for the settling window — a free
+    # (human) pending entry on the clock, nothing dispatched yet.
+    assert AgentRun.objects.filter(work_item=issue).count() == 0
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    assert sched.pending_entry is True
+    assert sched.pending_entry_free is True
+    # Once the window elapses the scanner/accelerator fires the run.
+    IssueAgentTicker.objects.filter(pk=sched.pk).update(next_run_at=timezone.now() - timedelta(seconds=1))
+    assert fire_tick(str(sched.id)) is True
     assert AgentRun.objects.filter(work_item=issue).count() == 1
 
 
