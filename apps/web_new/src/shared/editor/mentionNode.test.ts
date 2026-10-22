@@ -75,6 +75,19 @@ describe("MentionNode", () => {
     expect(rendered.dom.textContent).toBe("@u-2");
   });
 
+  it("falls back to the plain id when the identifier is missing", async () => {
+    const node = await loadMentionNode();
+    const view = node.config.addNodeView?.call({ options: {}, editor: {} } as never);
+    if (typeof view !== "function") throw new Error("the mention node has no view");
+    const rendered = view({
+      node: { attrs: { ...mentionAttributes({ id: "u-3", name: "" }), entity_identifier: null } },
+      editor: {},
+      getPos: () => 0,
+      view: {},
+    } as never) as unknown as { dom: HTMLElement };
+    expect(rendered.dom.textContent).toBe("@u-3");
+  });
+
   it("renders a readable @identifier as its text", async () => {
     const node = await loadMentionNode();
     const text = node.config.renderText?.call(

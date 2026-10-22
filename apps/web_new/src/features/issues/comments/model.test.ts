@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import type { IssueComment } from "@pidash/api-client";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   applyCommentPatch,
@@ -67,6 +67,10 @@ function comment(overrides: Partial<IssueComment> = {}): IssueComment {
     ...overrides,
   };
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("comment authorship", () => {
   it("is author-only, never true for a signed-out viewer", () => {
@@ -230,15 +234,22 @@ describe("comment image asset ids (CMT-009)", () => {
       '<p>First <image-component src="asset-1" status="uploaded"></image-component> ' +
       'second <img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-2/"> ' +
       'repeat <image-component src="asset-1" status="uploaded"></image-component> ' +
-      'external <img src="https://cdn.test/x.png"></p>';
+      'external <img src="https://cdn.test/x.png"> srcless <img alt="x"></p>';
     expect(commentBodyImageAssetIds(html)).toEqual(["asset-1", "asset-2"]);
     expect(commentBodyImageAssetIds("<p>no pictures</p>")).toEqual([]);
+  });
+
+  it("answers empty where no DOM parser exists", () => {
+    vi.stubGlobal("DOMParser", undefined);
+    expect(commentBodyImageAssetIds("<p>x</p>")).toEqual([]);
+    expect(rewriteCommentImageSrcs("<p>x</p>", new Map([["asset-1", "asset-1b"]]))).toBe("<p>x</p>");
   });
 
   it("rebinds duplicated ids and leaves everything else alone", () => {
     const html =
       '<p>Keep <image-component src="asset-1" status="uploaded"></image-component> ' +
-      'and <img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-2/"></p>';
+      'and <img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-2/"> ' +
+      'external <img src="https://cdn.test/x.png"> srcless <img alt="x"></p>';
     const next = rewriteCommentImageSrcs(html, new Map([["asset-1", "asset-1b"]]));
     expect(next).toContain('src="asset-1b"');
     expect(next).not.toContain('asset-1"');

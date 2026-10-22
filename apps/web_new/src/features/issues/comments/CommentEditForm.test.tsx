@@ -519,6 +519,33 @@ describe("CommentEditForm", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).not.toBeDisabled());
   });
 
+  it("dismisses the mention popup on Escape without saving (CMT-019)", async () => {
+    stubTransport((_method, url) => {
+      if (url.includes("/entity-search/")) {
+        return {
+          status: 200,
+          body: {
+            user_mention: [{ member__id: "u-1", member__display_name: "Ada L", member__avatar_url: null }],
+          },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    // Escape with no popup is a no-op.
+    await user.keyboard("{Escape}");
+    expect(onSave).not.toHaveBeenCalled();
+    await user.keyboard(" @ad");
+    await screen.findByRole("list", { name: "Mention suggestions" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Mention suggestions" })).not.toBeInTheDocument());
+    expect(onSave).not.toHaveBeenCalled();
+    expect(editable.value).toContain("@ad");
+  });
+
   it("notices an image that uploads but cannot attach while editing", async () => {
     stubTransport((_method, url) => {
       if (url.includes("/bulk/")) return { status: 500, body: { error: "Asset missing" } };

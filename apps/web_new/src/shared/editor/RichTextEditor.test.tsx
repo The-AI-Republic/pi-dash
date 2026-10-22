@@ -462,6 +462,50 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(last).not.toContain("<image-component");
   });
 
+  it("routes keys through the caller's guard first (CMT-011)", async () => {
+    const seen: KeyboardEvent[] = [];
+    let swallow = true;
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p>guarded</p>"
+          label="CommentGuard"
+          onChange={() => {}}
+          handleKeyDown={(event) => {
+            seen.push(event);
+            return swallow;
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentGuard");
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    editable.dispatchEvent(enter);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    // A released key bubbles on unconsumed.
+    swallow = false;
+    const plain = new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true });
+    editable.dispatchEvent(plain);
+    expect(seen).toHaveLength(2);
+    expect(plain.defaultPrevented).toBe(false);
+  });
+
+  it("paints a stored image without a source with an empty address", async () => {
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml='<image-component status="uploaded"></image-component>'
+          label="DescriptionSrcless"
+          onChange={() => {}}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("DescriptionSrcless");
+    expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe("");
+  });
+
   it("mounts without a ready handler", async () => {
     render(
       <React.Suspense fallback={<p>loading</p>}>

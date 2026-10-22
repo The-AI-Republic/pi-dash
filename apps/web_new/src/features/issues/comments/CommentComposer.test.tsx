@@ -215,6 +215,13 @@ describe("CommentComposer", () => {
     expect(onCreate).not.toHaveBeenCalled();
   });
 
+  it("ignores a programmatic submit on an empty body", async () => {
+    const { onCreate } = renderComposer();
+    await editor();
+    fireEvent.submit(screen.getByRole("button", { name: "Comment" }).closest("form")!);
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
   it("guards against a double submit while the first post is out", async () => {
     const user = userEvent.setup();
     let release: (() => void) | undefined;
@@ -314,6 +321,7 @@ describe("CommentComposer", () => {
     });
     await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled());
     await user.keyboard("{Enter}");
+    fireEvent.submit(screen.getByRole("button", { name: "Comment" }).closest("form")!);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(onCreate).not.toHaveBeenCalled();
     expect(await editor()).toHaveValue("Waiting");
