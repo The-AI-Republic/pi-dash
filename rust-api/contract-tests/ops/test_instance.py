@@ -53,7 +53,7 @@ from cryptography.fernet import Fernet
 
 from _harness import db as dbh
 from _harness import rust_queue
-from _harness.sinks import FixedResponseStub, SmtpSink
+from _harness.sinks import FixedResponseStub, ProxyStub, SmtpSink, make_test_ca
 
 CONTRACT_ROOT = Path(__file__).resolve().parent.parent
 RUST_ROOT = CONTRACT_ROOT.parent
@@ -697,6 +697,142 @@ def test_register_stub_tag_matches_live_oracle(scratch_pair):
     assert stub.requests[0]["method"] == "GET"
     headers = {key.lower(): value for key, value in stub.requests[0]["headers"].items()}
     assert headers.get("user-agent", "").startswith("pidash-api/")
+
+
+# Match-nothing NO_PROXY override: the runners scrub the proxy vars but
+# not NO_PROXY/no_proxy, so an ambient value (CI sets localhost) would
+# bypass the stub for loopback targets. Empty is not safe either (some
+# clients treat it as bypass-all), hence a sentinel that matches nothing.
+NO_PROXY_SENTINEL = "no-such-bypass.invalid"
+
+
+def proxy_env(proxy_url):
+    return {
+        "HTTP_PROXY": proxy_url,
+        "HTTPS_PROXY": proxy_url,
+        "http_proxy": proxy_url,
+        "https_proxy": proxy_url,
+        "NO_PROXY": NO_PROXY_SENTINEL,
+        "no_proxy": NO_PROXY_SENTINEL,
+    }
+
+
+def test_register_release_probe_honors_proxy_env(scratch_pair, tmp_path):
+    """PIDASHCONV-1271: the release probe honors the proxy env (both legs).
+
+    Django's URL is hard-coded to https, so its leg goes through the
+    stub as a CONNECT tunnel (MITM cert trusted via REQUESTS_CA_BUNDLE);
+    Rust's leg points PIDASH_RELEASES_URL at an unresolvable http host so
+    the stub answers a plain forward hit. Both must store the stub tag
+    with no error line. Before the fix the Rust leg connects direct
+    (``.no_proxy()``), falls back, and fails the tag assertion.
+    """
+    django_db, rust_db = scratch_pair
+    stub_tag = "v1271.0.0-proxy-stub"
+    ca_pem, leaf_pem, leaf_key = make_test_ca(
+        tmp_path, sans=["api.github.com"]
+    )
+    with ProxyStub(
+        body=json.dumps({"tag_name": stub_tag}).encode(),
+        tls_cert=leaf_pem,
+        tls_key=leaf_key,
+    ) as proxy:
+        django_env = proxy_env(proxy.url)
+        django_env["REQUESTS_CA_BUNDLE"] = str(ca_pem)
+        django_env["CURL_CA_BUNDLE"] = str(ca_pem)
+        oracle = run_django(
+            django_db, "register_instance", "sig-proxy", env_extra=django_env
+        )
+        rust_env = proxy_env(proxy.url)
+        rust_env["PIDASH_RELEASES_URL"] = (
+            "http://register-proxy-test.invalid/releases/latest"
+        )
+        rust = run_rust(
+            rust_db,
+            "register-instance",
+            "sig-proxy",
+            env_extra=rust_env,
+            cwd=API_ROOT,
+        )
+    assert oracle.returncode == 0, oracle.stderr
+    assert rust.returncode == 0, rust.stderr
+    assert rust.stdout == oracle.stdout == b"Instance registered\n"
+    assert instance_row(django_db)["latest_version"] == stub_tag
+    rust_row = instance_row(rust_db)
+    assert rust_row["latest_version"] == stub_tag
+    assert stub_tag != rust_row["current_version"]  # parsed, not the fallback
+    connects = [r for r in proxy.requests if r["method"] == "CONNECT"]
+    assert [c["path"] for c in connects] == ["api.github.com:443"]
+    tunneled = [r for r in proxy.requests if r["tunneled"]]
+    assert len(tunneled) == 1
+    assert (
+        tunneled[0]["path"]
+        == "/repos/The-AI-Republic/pi-dash/releases/latest"
+    )
+    plain = [
+        r
+        for r in proxy.requests
+        if r["method"] == "GET" and not r["tunneled"]
+    ]
+    assert len(plain) == 1
+    assert (
+        plain[0]["path"]
+        == "http://register-proxy-test.invalid/releases/latest"
+    )
+
+
+def test_register_rust_probe_sends_https_releases_through_proxy(
+    scratch_pair, tmp_path
+):
+    """PIDASHCONV-1271: Rust consults HTTPS_PROXY for https release URLs.
+
+    The Rust leg points PIDASH_RELEASES_URL at an unresolvable https host
+    with HTTPS_PROXY set; the observable contract is the CONNECT record —
+    reqwest's rustls backend (webpki roots, no test-CA override) rejects
+    the tunnel TLS afterwards, so the probe still falls back with the
+    error line. Before the fix no CONNECT is sent (``.no_proxy()``) and
+    the record assertion fails. The Django leg completes through the
+    tunnel and anchors parity on the stub tag.
+    """
+    django_db, rust_db = scratch_pair
+    stub_tag = "v1271.0.0-proxy-stub"
+    ca_pem, leaf_pem, leaf_key = make_test_ca(
+        tmp_path, sans=["api.github.com", "register-proxy-test.invalid"]
+    )
+    with ProxyStub(
+        body=json.dumps({"tag_name": stub_tag}).encode(),
+        tls_cert=leaf_pem,
+        tls_key=leaf_key,
+    ) as proxy:
+        django_env = proxy_env(proxy.url)
+        django_env["REQUESTS_CA_BUNDLE"] = str(ca_pem)
+        django_env["CURL_CA_BUNDLE"] = str(ca_pem)
+        oracle = run_django(
+            django_db, "register_instance", "sig-proxy-https", env_extra=django_env
+        )
+        rust_env = proxy_env(proxy.url)
+        rust_env["PIDASH_RELEASES_URL"] = (
+            "https://register-proxy-test.invalid/releases/latest"
+        )
+        rust = run_rust(
+            rust_db,
+            "register-instance",
+            "sig-proxy-https",
+            env_extra=rust_env,
+            cwd=API_ROOT,
+        )
+    assert oracle.returncode == 0, oracle.stderr
+    assert oracle.stdout == b"Instance registered\n"
+    assert instance_row(django_db)["latest_version"] == stub_tag
+    assert rust.returncode == 0, rust.stderr
+    assert (
+        rust.stdout
+        == b"Error checking for latest version\nInstance registered\n"
+    )
+    rust_row = instance_row(rust_db)
+    assert rust_row["latest_version"] == rust_row["current_version"]
+    connects = sorted(r["path"] for r in proxy.requests if r["method"] == "CONNECT")
+    assert connects == ["api.github.com:443", "register-proxy-test.invalid:443"]
 
 
 def test_register_current_version_chain(scratch_pair, tmp_path):
