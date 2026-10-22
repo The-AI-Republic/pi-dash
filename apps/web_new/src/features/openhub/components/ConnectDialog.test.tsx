@@ -184,6 +184,25 @@ describe("ConnectDialog", () => {
     await waitFor(() => expect(submit).not.toBeDisabled());
   });
 
+  it("hides inline problems while a submit is in flight (CLOUD-027)", async () => {
+    let release!: (ok: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => {
+      release = resolve;
+    });
+    const onSubmit = vi.fn(() => gate);
+    render(<ConnectDialog app={APP} auth={MANIFEST_AUTH} onSubmit={onSubmit} onClose={() => {}} />);
+    fireEvent.change(within(dialog()).getByLabelText("API key"), { target: { value: "sk-abcd99" } });
+    fireEvent.change(within(dialog()).getByLabelText("Region"), { target: { value: "us" } });
+    fireEvent.click(screen.getByRole("button", { name: CONNECT_DIALOG_SUBMIT }));
+    // Secrets clear at submit start; the cleared secret must not surface
+    // its required-error while the request flies — the rejection toast
+    // owns that moment instead.
+    await waitFor(() => expect((within(dialog()).getByLabelText("API key") as HTMLInputElement).value).toBe(""));
+    expect(within(dialog()).queryAllByRole("alert")).toHaveLength(0);
+    release(false);
+    await waitFor(() => expect(within(dialog()).getAllByRole("alert")).toHaveLength(1));
+  });
+
   it("cancels and dismisses through onClose (CLOUD-027)", async () => {
     const { onClose } = renderDialog();
     fireEvent.click(screen.getByRole("button", { name: CONNECT_DIALOG_CANCEL }));

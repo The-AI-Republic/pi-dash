@@ -42,7 +42,9 @@ export function ConnectDialog({ app, auth, onSubmit, onClose }: ConnectDialogPro
   const [values, setValues] = React.useState<Record<string, string>>({});
   const [attempted, setAttempted] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
-  const problems = attempted ? validateCredentialValues(fields, values) : {};
+  // Secrets clear at submit start; their required-errors stay hidden
+  // while the request flies, so the outcome toast owns that moment.
+  const problems = attempted && !submitting ? validateCredentialValues(fields, values) : {};
   const instructions = cleanInstructions(auth.manualSetup?.instructions_md);
   const setupUrl = auth.manualSetup?.setupUrl;
   const setupHref = isSafeSetupUrl(setupUrl) ? setupUrl : null;

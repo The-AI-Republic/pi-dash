@@ -57335,6 +57335,15 @@ export class WebDriver implements ParityDriver {
     return out;
   }
 
+  async cloudAppsDialogInputValues(): Promise<string[]> {
+    // (NEWFRONT-662) extracted from the CLOUD-027 cleared-fields read.
+    return this.page
+      .locator("div.fixed.inset-0")
+      .last()
+      .locator("input")
+      .evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value));
+  }
+
   private cloudAppsToggleSwitch(): Locator {
     return this.cloudAppsMain().locator('[role="switch"]').first();
   }

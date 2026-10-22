@@ -27489,132 +27489,343 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Cloud Apps catalog (NEWFRONT-439, CLOUD-021–031). Appended;
   // --- existing stubs above are untouched per the shared driver contract.
+  // --- Reads implemented by the cloud area gate (NEWFRONT-662) against
+  // --- the openhub components: same contracts as drivers/web.
+  private cloudAppsMain(): Locator {
+    return this.cloudMain();
+  }
+
+  private cloudAppsGrid(): Locator {
+    return this.cloudAppsMain().getByTestId("apps-catalog-grid");
+  }
+
+  private cloudAppsSearchBox(): Locator {
+    return this.cloudAppsMain().getByPlaceholder("Search apps", { exact: true }).first();
+  }
+
+  private cloudAppsDialog(): Locator {
+    // Toasts share the dialog role, so an unscoped .first() lands on a
+    // toast instead of the modal: scope to the panel holding the Connect
+    // submit (toasts in these flows carry no buttons).
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("button", { name: "Connect", exact: true }) })
+      .first();
+  }
+
+  private cloudAppsToggleSwitch(): Locator {
+    return this.page.getByRole("region", { name: "Agent tools" }).getByRole("switch").first();
+  }
+
+  private async cloudAppsCard(name: string): Promise<Locator | null> {
+    const cards = this.cloudAppsMain().getByTestId("app-card");
+    const count = await cards.count();
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const title = (
+        (await card
+          .getByTestId("app-card-name")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (title === name) return card;
+    }
+    return null;
+  }
+
   async cloudAppsSidebarHref(): Promise<string | null> {
-    return todo("cloudAppsSidebarHref");
+    const link = this.page.locator('#main-sidebar a[href$="/apps/"]').first();
+    if ((await link.count()) === 0) return null;
+    return await link.getAttribute("href");
   }
 
   async cloudAppsSidebarIconPresent(): Promise<boolean> {
-    return todo("cloudAppsSidebarIconPresent");
+    const link = this.page.locator('#main-sidebar a[href$="/apps/"]').first();
+    if ((await link.count()) === 0) return false;
+    return (await link.locator("svg").count()) > 0;
   }
 
   async cloudAppsOpenFromSidebar(): Promise<void> {
-    return todo("cloudAppsOpenFromSidebar");
+    await this.page.locator('#main-sidebar a[href$="/apps/"]').first().click({ timeout: 60_000 });
+    await this.page.waitForURL("**/apps*", { timeout: 60_000 });
   }
 
   async cloudAppsIntroText(): Promise<string> {
-    return todo("cloudAppsIntroText");
+    const paragraphs = this.cloudAppsMain().locator(":scope p");
+    const count = await paragraphs.count();
+    for (let index = 0; index < count; index++) {
+      const text = (
+        (await paragraphs
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") return text;
+    }
+    return "";
   }
 
-  async cloudAppsSearchFill(_value: string): Promise<void> {
-    return todo("cloudAppsSearchFill");
+  async cloudAppsSearchFill(value: string): Promise<void> {
+    await this.cloudAppsSearchBox().fill(value, { timeout: 60_000 });
   }
 
-  async cloudAppsSearchTypeText(_text: string): Promise<void> {
-    return todo("cloudAppsSearchTypeText");
+  async cloudAppsSearchTypeText(text: string): Promise<void> {
+    const box = this.cloudAppsSearchBox();
+    await box.click({ timeout: 60_000 });
+    await box.pressSequentially(text, { delay: 50, timeout: 60_000 });
   }
 
   async cloudAppsSearchValue(): Promise<string> {
-    return todo("cloudAppsSearchValue");
+    return this.cloudAppsSearchBox()
+      .inputValue()
+      .catch(() => "");
   }
 
   async cloudAppsSearchVisible(): Promise<boolean> {
-    return todo("cloudAppsSearchVisible");
+    return this.cloudAppsSearchBox()
+      .isVisible()
+      .catch(() => false);
   }
 
   async cloudAppsCardNames(): Promise<string[]> {
-    return todo("cloudAppsCardNames");
+    const names = this.cloudAppsMain().getByTestId("app-card-name");
+    const count = await names.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index++) {
+      out.push(
+        (
+          (await names
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim()
+      );
+    }
+    return out;
   }
 
   async cloudAppsCards(): Promise<CloudAppsCardFacts[]> {
-    return todo("cloudAppsCards");
+    const cards = this.cloudAppsMain().getByTestId("app-card");
+    const count = await cards.count();
+    const out: CloudAppsCardFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const name = (
+        (await card
+          .getByTestId("app-card-name")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const text = ((await card.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ");
+      const badge: CloudAppsCardFacts["badge"] = /\bInstalled\b/.test(text)
+        ? "installed"
+        : /\bConnection needed\b/.test(text)
+          ? "needs-connection"
+          : null;
+      const buttons = card.getByRole("button");
+      const buttonCount = await buttons.count();
+      const actions: string[] = [];
+      for (let buttonIndex = 0; buttonIndex < buttonCount; buttonIndex++) {
+        const label = (
+          (await buttons
+            .nth(buttonIndex)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .trim()
+          .replace(/\s+/g, " ");
+        if (label !== "") actions.push(label);
+      }
+      const iconImg = card.getByTestId("app-card-icon").first();
+      const iconShown = (await iconImg.count()) > 0 && (await iconImg.isVisible().catch(() => false));
+      let icon: CloudAppsCardFacts["icon"] = "letter";
+      if (iconShown) {
+        const src = (await iconImg.getAttribute("src").catch(() => "")) ?? "";
+        icon = src.startsWith("data:") ? "inline" : "proxied";
+      }
+      const letter = (
+        (await card
+          .getByTestId("app-card-tile")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      out.push({ name, badge, actions, icon, letter });
+    }
+    return out;
   }
 
-  async cloudAppsClickCardAction(_name: string, _action: "Install" | "Connect" | "Uninstall"): Promise<void> {
-    return todo("cloudAppsClickCardAction");
+  async cloudAppsClickCardAction(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<void> {
+    const card = await this.cloudAppsCard(name);
+    if (card === null) throw new Error(`[parity] no Apps card named ${JSON.stringify(name)}.`);
+    await card.getByRole("button", { name: action, exact: true }).click({ timeout: 60_000 });
   }
 
-  async cloudAppsCardActionDisabled(_name: string, _action: "Install" | "Connect" | "Uninstall"): Promise<boolean> {
-    return todo("cloudAppsCardActionDisabled");
+  async cloudAppsCardActionDisabled(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<boolean> {
+    const card = await this.cloudAppsCard(name);
+    if (card === null) throw new Error(`[parity] no Apps card named ${JSON.stringify(name)}.`);
+    const button = card.getByRole("button", { name: action, exact: true }).first();
+    if ((await button.count()) === 0) throw new Error(`[parity] no ${action} action on ${JSON.stringify(name)}.`);
+    return await button.isDisabled();
   }
 
   async cloudAppsNextPage(): Promise<void> {
-    return todo("cloudAppsNextPage");
+    await this.cloudAppsMain().getByRole("button", { name: "Next", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsPrevPage(): Promise<void> {
-    return todo("cloudAppsPrevPage");
+    await this.cloudAppsMain().getByRole("button", { name: "Previous", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsPageIndicator(): Promise<string | null> {
-    return todo("cloudAppsPageIndicator");
+    const indicator = this.cloudAppsMain().getByTestId("apps-page-indicator").first();
+    if ((await indicator.count()) === 0) return null;
+    return ((await indicator.innerText().catch(() => "")) ?? "").trim() || null;
   }
 
   async cloudAppsPagerVisible(): Promise<boolean> {
-    return todo("cloudAppsPagerVisible");
+    return this.cloudAppsMain()
+      .getByTestId("apps-page-indicator")
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   async cloudAppsDialogVisible(): Promise<boolean> {
-    return todo("cloudAppsDialogVisible");
+    return this.cloudAppsDialog()
+      .isVisible()
+      .catch(() => false);
   }
 
   async cloudAppsDialogTitle(): Promise<string | null> {
-    return todo("cloudAppsDialogTitle");
+    const dialog = this.cloudAppsDialog();
+    if ((await dialog.count()) === 0) return null;
+    const title = (
+      (await dialog
+        .getByRole("heading")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return title === "" ? null : title;
   }
 
   async cloudAppsDialogFields(): Promise<CloudAppsDialogFieldFacts[]> {
-    return todo("cloudAppsDialogFields");
+    const dialog = this.cloudAppsDialog();
+    const labels = dialog.locator("label");
+    const count = await labels.count();
+    const out: CloudAppsDialogFieldFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const label = labels.nth(index);
+      const text = ((await label.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+      const fieldId = (await label.getAttribute("for").catch(() => null)) ?? "";
+      const input = fieldId === "" ? null : dialog.locator(`#${fieldId}`).first();
+      const inputType = input === null ? "" : ((await input.getAttribute("type").catch(() => "")) ?? "");
+      const placeholder = input === null ? "" : ((await input.getAttribute("placeholder").catch(() => "")) ?? "");
+      out.push({ label: text, inputType, placeholder });
+    }
+    return out;
   }
 
   async cloudAppsDialogInstructions(): Promise<string | null> {
-    return todo("cloudAppsDialogInstructions");
+    const dialog = this.cloudAppsDialog();
+    if ((await dialog.count()) === 0) return null;
+    const description = dialog.locator("p:not([role='alert'])").first();
+    if ((await description.count()) === 0) return null;
+    const text = ((await description.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
   async cloudAppsDialogSetupHref(): Promise<string | null> {
-    return todo("cloudAppsDialogSetupHref");
+    const dialog = this.cloudAppsDialog();
+    const link = dialog.getByRole("link", { name: "Get credentials" }).first();
+    if ((await link.count()) === 0) return null;
+    return await link.getAttribute("href");
   }
 
-  async cloudAppsDialogFill(_label: string, _value: string): Promise<void> {
-    return todo("cloudAppsDialogFill");
+  async cloudAppsDialogFill(label: string, value: string): Promise<void> {
+    await this.cloudAppsDialog().getByLabel(label, { exact: true }).fill(value, { timeout: 60_000 });
   }
 
   async cloudAppsDialogSubmit(): Promise<void> {
-    return todo("cloudAppsDialogSubmit");
+    await this.cloudAppsDialog().getByRole("button", { name: "Connect", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsDialogCancel(): Promise<void> {
-    return todo("cloudAppsDialogCancel");
+    await this.cloudAppsDialog().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsDialogErrors(): Promise<string[]> {
-    return todo("cloudAppsDialogErrors");
+    const dialog = this.cloudAppsDialog();
+    const alerts = dialog.locator('p[role="alert"]');
+    const count = await alerts.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const text = (
+        (await alerts
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") out.push(text);
+    }
+    return out;
+  }
+
+  async cloudAppsDialogInputValues(): Promise<string[]> {
+    return this.cloudAppsDialog()
+      .locator("input")
+      .evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value));
   }
 
   async cloudAppsToggleState(): Promise<boolean | null> {
-    return todo("cloudAppsToggleState");
+    const toggle = this.cloudAppsToggleSwitch();
+    if ((await toggle.count()) === 0) return null;
+    return (await toggle.getAttribute("aria-checked").catch(() => null)) === "true";
   }
 
   async cloudAppsToggleText(): Promise<string> {
-    return todo("cloudAppsToggleText");
+    const panel = this.page.getByRole("region", { name: "Agent tools" }).first();
+    if ((await panel.count()) === 0) return "";
+    return ((await panel.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ") || "";
   }
 
   async cloudAppsToggle(): Promise<void> {
-    return todo("cloudAppsToggle");
+    await this.cloudAppsToggleSwitch().click({ timeout: 60_000 });
   }
 
   async cloudAppsBodyText(): Promise<string> {
-    return todo("cloudAppsBodyText");
+    const main = this.cloudAppsMain();
+    return ((await main.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ") || "";
   }
 
   async cloudAppsCatalogVisible(): Promise<boolean> {
-    return todo("cloudAppsCatalogVisible");
+    const grid = this.cloudAppsGrid();
+    if ((await grid.count()) === 0) return false;
+    return (await grid.getByTestId("app-card").count()) > 0;
   }
 
   async cloudAppsClickRetry(): Promise<void> {
-    return todo("cloudAppsClickRetry");
+    await this.cloudAppsMain().getByRole("button", { name: "Retry", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsSidebarCreateOpensDialog(): Promise<boolean> {
-    return todo("cloudAppsSidebarCreateOpensDialog");
+    // The command-palette proof on web_new: the sidebar quick-create
+    // control mounts on every gated page and opens the shared dialog.
+    const create = this.page.getByTestId("sidebar-quick-create").first();
+    if ((await create.count()) === 0) return false;
+    await create.click({ timeout: 60_000 });
+    const title = this.page.getByPlaceholder("Title").first();
+    try {
+      await title.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // --- Cloud profile tabs + misc (NEWFRONT-440, CLOUD-032..040).

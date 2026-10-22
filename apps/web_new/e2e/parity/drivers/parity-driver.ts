@@ -9155,6 +9155,8 @@ export interface SpaceBoardStability {
   cloudAppsDialogCancel(): Promise<void>;
   /** Inline credential dialog errors currently shown. */
   cloudAppsDialogErrors(): Promise<string[]>;
+  /** Current values of the credential dialog inputs, in order. */
+  cloudAppsDialogInputValues(): Promise<string[]>;
   /** Agent-tools toggle state, or null when the toggle is absent. */
   cloudAppsToggleState(): Promise<boolean | null>;
   /** Agent-tools toggle label plus description text. */

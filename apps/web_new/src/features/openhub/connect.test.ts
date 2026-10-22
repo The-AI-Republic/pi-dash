@@ -49,11 +49,14 @@ describe("reserveConnectTab", () => {
     } as unknown as Window;
   }
 
-  it("opens a detached placeholder tab synchronously (CLOUD-025)", () => {
-    const tab = fakeTab();
+  it("opens an attached placeholder tab synchronously (CLOUD-025)", () => {
+    const tab = fakeTab({ opener: {} });
     const open = vi.fn(() => tab);
     const reserved = reserveConnectTab({ open } as unknown as Window);
-    expect(open).toHaveBeenCalledWith("about:blank", "_blank", "noopener");
+    // No noopener: the flow steers and closes the tab it opened, which
+    // needs the handle (NEWFRONT-662).
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(tab.opener).toBeNull();
     expect(reserved).toBe(tab);
     expect(tab.document.title).toBe(CONNECT_TAB_TITLE);
     expect(CONNECT_TAB_TITLE).toContain("Connecting");
