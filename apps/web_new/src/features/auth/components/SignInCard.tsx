@@ -18,6 +18,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import { platform } from "../../../core/platform/index.js";
 import { useInstanceConfig } from "../../../core/session/hooks.js";
 import {
   useEmailCheck,
@@ -35,7 +36,8 @@ import {
   type SignInStep,
 } from "../authErrors.js";
 import { isStrongSecret } from "../passwordStrength.js";
-import { resolveSignInProviders } from "../providers.js";
+import { currentPageTarget, startCloudHandoff } from "../cloudLogin.js";
+import { resolveSignInProviders, type SignInProvider } from "../providers.js";
 import { useWorkspaceInvitation } from "../invitations.js";
 import { PasswordStrengthHint } from "./PasswordStrengthHint.js";
 
@@ -198,8 +200,26 @@ export function SignInCard({
   const providers = resolveSignInProviders(edition.auth, loadedConfig, {
     mode,
     apiOrigin: getAppClient().baseUrl,
+    returnToPage: currentPageTarget(globalThis.window.location),
+    browserOrigin: globalThis.window.location.origin,
     ...nextPathInput,
   });
+
+  function startProviderSignIn(provider: SignInProvider): void {
+    // The organizational provider starts the desktop-aware cloud handoff
+    // (CLOUD-017); native providers navigate their auth URL directly.
+    if (provider.cloudHandoff === undefined) {
+      globalThis.window.location.assign(provider.href);
+      return;
+    }
+    void startCloudHandoff({
+      shell: platform.shellSignIn,
+      apiBase: getAppClient().baseUrl,
+      browserOrigin: globalThis.window.location.origin,
+      returnTo: provider.cloudHandoff.returnTo,
+      navigate: (url) => globalThis.window.location.assign(url),
+    });
+  }
   const noMethods = providers.length === 0 && !emailMethods;
   const providerCompact = step === "password";
 
@@ -381,7 +401,7 @@ export function SignInCard({
                   variant="secondary"
                   size={providerCompact ? "small" : "medium"}
                   className={providerCompact ? "" : "w-full"}
-                  onClick={() => globalThis.window.location.assign(provider.href)}
+                  onClick={() => startProviderSignIn(provider)}
                 >
                   {provider.label}
                 </Button>

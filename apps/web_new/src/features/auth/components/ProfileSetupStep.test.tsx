@@ -91,17 +91,22 @@ function configFixture(selfManaged: boolean) {
 
 // The flow gates on loading, so steps mount with the account cached: seed
 // the cache synchronously instead of resolving it mid-render.
-function seedSession(queryClient: QueryClient, me: Record<string, unknown>, selfManaged: boolean): void {
+function seedSession(queryClient: QueryClient, me: Record<string, unknown>, selfManaged: boolean | "unread"): void {
   setSessionClient({
     getJson: async (url: string) => {
       if (url === "/api/users/me/") return me;
-      if (url === "/api/instances/") return configFixture(selfManaged);
+      if (url === "/api/instances/") {
+        if (selfManaged === "unread") throw new Error("instance config unread");
+        return configFixture(selfManaged);
+      }
       throw new Error(`unexpected session read ${url}`);
     },
     parse: (_schema: unknown, data: unknown) => data,
   } as never);
   queryClient.setQueryData(["session", "me"], me);
-  queryClient.setQueryData(["instance", "config"], configFixture(selfManaged).config);
+  if (selfManaged !== "unread") {
+    queryClient.setQueryData(["instance", "config"], configFixture(selfManaged).config);
+  }
 }
 
 const PROFILE_BODY = {
@@ -196,7 +201,7 @@ function seedMutations(setup: MutationSetup): void {
 function renderStep(
   options: {
     me?: Record<string, unknown>;
-    selfManaged?: boolean;
+    selfManaged?: boolean | "unread";
     onAdvance?: () => void;
     bodies?: Record<string, string | undefined>;
     failUsersMe?: boolean;
@@ -207,7 +212,9 @@ function renderStep(
     ...(options.failUsersMe === undefined ? {} : { failUsersMe: options.failUsersMe }),
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  seedSession(queryClient, options.me ?? meFixture(), options.selfManaged ?? false);
+  // Self-managed unless a test opts into the hosted backend (CLOUD-020);
+  // "unread" leaves the config unseeded for the fail-closed paths.
+  seedSession(queryClient, options.me ?? meFixture(), options.selfManaged ?? true);
   render(
     <QueryClientProvider client={queryClient}>
       <ProfileSetupStep onAdvance={options.onAdvance ?? (() => undefined)} />
@@ -253,7 +260,7 @@ describe("ProfileSetupStep", () => {
     const user = userEvent.setup();
     const bodies: Record<string, string | undefined> = {};
     const onAdvance = vi.fn();
-    renderStep({ bodies, onAdvance });
+    renderStep({ bodies, onAdvance, selfManaged: false });
 
     await user.type(await screen.findByLabelText("Your name"), "Ada Byron");
     await user.click(screen.getByLabelText("Email me product updates and tips"));
@@ -271,7 +278,7 @@ describe("ProfileSetupStep", () => {
   it("stores an unchecked consent choice", async () => {
     const user = userEvent.setup();
     const bodies: Record<string, string | undefined> = {};
-    renderStep({ bodies });
+    renderStep({ bodies, selfManaged: false });
 
     await user.type(await screen.findByLabelText("Your name"), "Ada Byron");
     await user.click(screen.getByLabelText("Email me product updates and tips"));
@@ -346,6 +353,28 @@ describe("ProfileSetupStep", () => {
 
     await waitFor(() => expect(onAdvance).toHaveBeenCalledTimes(1));
     expect(JSON.parse(bodies["set-password"] ?? "{}")).toEqual({ password: "Tq7!mZ2@kP9#xR" });
+  });
+
+  it("asks for no password on the hosted backend", async () => {
+    const user = userEvent.setup();
+    const bodies: Record<string, string | undefined> = {};
+    const onAdvance = vi.fn();
+    renderStep({ bodies, me: meFixture({ is_password_autoset: true }), selfManaged: false, onAdvance });
+
+    await user.type(await screen.findByLabelText("Your name"), "Ada Byron");
+    expect(screen.queryByLabelText("New password")).toBeNull();
+    expect(screen.queryByLabelText("Confirm password")).toBeNull();
+    expect(document.querySelectorAll('input[type="password"]')).toHaveLength(0);
+    await user.click(continueButton());
+
+    await waitFor(() => expect(onAdvance).toHaveBeenCalledTimes(1));
+    expect(bodies["set-password"]).toBeUndefined();
+    expect(JSON.parse(bodies["users-me"] ?? "{}")).toEqual({ first_name: "Ada Byron" });
+  });
+
+  it("keeps the password pair when the instance config is unread", async () => {
+    renderStep({ me: meFixture({ is_password_autoset: true }), selfManaged: "unread" });
+    expect(await screen.findByLabelText("New password")).toBeVisible();
   });
 
   it("toasts but still advances when the save fails", async () => {

@@ -26,6 +26,7 @@ import type {
   PendingUpdate,
   Platform,
   SessionTeardownApi,
+  ShellSignInApi,
   StreamInit,
   StreamMessage,
   TitleBarApi,
@@ -620,6 +621,27 @@ const desktopSessionTeardown: SessionTeardownApi = {
   },
 };
 
+const desktopShellSignIn: ShellSignInApi = {
+  get bakedOrigin() {
+    // The raw advertisement, with no page-origin fallback: without it the
+    // provider handoff refuses loudly instead of building a dead URL.
+    const advertised = tauriWindow()?.__PIDASH_NATIVE_HTTP__;
+    return typeof advertised === "string" ? advertised : undefined;
+  },
+  openSystemBrowser: (url) => {
+    if (!isWebAddress(url)) {
+      return Promise.reject(new Error("refusing to open a non-web address"));
+    }
+    const core = tauriWindow()?.__TAURI__?.core;
+    if (!core) {
+      return Promise.reject(new Error("openSystemBrowser needs the native bridge"));
+    }
+    // Invoke-only: a failure rejects so the caller surfaces it instead of
+    // falling back to an in-window navigation the desktop flow cannot use.
+    return core.invoke("plugin:opener|open_url", { url }).then(() => undefined);
+  },
+};
+
 /** Emitted by the shell when an update is found or re-announced (updates.rs). */
 export const UPDATE_AVAILABLE_EVENT = "updater://available";
 
@@ -891,4 +913,5 @@ export const platform: Platform = {
   updates: desktopUpdater,
   cliSetup: desktopCliSetup,
   sessionTeardown: desktopSessionTeardown,
+  shellSignIn: desktopShellSignIn,
 };

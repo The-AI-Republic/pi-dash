@@ -6,9 +6,14 @@
 // returning visitor resume without the card, the loop guard that keeps the
 // flow off the login page, and the tab-scoped explicit-logout marker.
 // Pure and storage-agnostic so the page and its tests share one definition.
+// The desktop handoff below it (CLOUD-017/CLOUD-018, from
+// parity/specs/cloud.md §4) starts the same provider flow from the generic
+// cards and the shared login card: a web navigation, or the system browser
+// with the desktop marker inside the shell.
 
 import { cloudSignInHandoffUrl } from "@pidash/api-client";
 
+import type { ShellSignInApi } from "../../core/platform/index.js";
 import { safeNextPath } from "../../core/session/guards.js";
 
 /** Tab-scoped marker: this tab signed out explicitly (shared with CLOUD-016). */
@@ -149,4 +154,84 @@ export function clearExplicitLogout(storage: Pick<Storage, "removeItem"> | null)
 /** The full provider handoff the browser leaves for. */
 export function cloudSignInUrl(apiBase: string, browserOrigin: string, returnTo: string): string {
   return cloudSignInHandoffUrl(apiBase, { returnTo, returnOrigin: browserOrigin });
+}
+
+/** The current page as a handoff target: pathname plus query, never the fragment. */
+export function currentPageTarget(location: { pathname: string; search: string }): string {
+  return `${location.pathname}${location.search}`;
+}
+
+/**
+ * Loud refusal when the shell advertised no API origin. The
+ * VITE_API_BASE_URL token is pinned by the parity driver (the
+ * provider-button and desktop-signin specs assert the refusal names it),
+ * so it stays verbatim.
+ */
+export const DESKTOP_ORIGIN_MISSING =
+  "Cloud sign-in refused: the desktop shell advertised no API origin, so no provider handoff can be built (VITE_API_BASE_URL).";
+
+/** Loud refusal when the advertised origin is not a usable web address. */
+export const DESKTOP_ORIGIN_UNUSABLE =
+  "Cloud sign-in refused: the desktop shell's API origin is not a usable web address.";
+
+/** Logged when the system browser cannot be opened; the caller surfaces it. */
+export const DESKTOP_OPEN_FAILED = "Cloud sign-in could not open the system browser.";
+
+/** The baked advertisement as a normalized web origin, or null when unusable. */
+function parseBakedOrigin(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+export interface StartCloudHandoffArgs {
+  /** Shell capability; absent on web builds, which navigate instead. */
+  shell: Pick<ShellSignInApi, "bakedOrigin" | "openSystemBrowser"> | undefined;
+  /** API base for the web branch (the app client's). */
+  apiBase: string;
+  /** Page origin for the handoff's split-origin check. */
+  browserOrigin: string;
+  /** Validated return target (app path plus query). */
+  returnTo: string;
+  /** Web-branch navigation (assign for clicks, replace for silent resume). */
+  navigate: (url: string) => void;
+  /** Desktop open failure surface; the refusal paths only log. */
+  onOpenFailed?: ((error: unknown) => void) | undefined;
+}
+
+/**
+ * Start the organizational-provider handoff (CLOUD-017/CLOUD-018). Web
+ * builds navigate to the handoff URL. Inside the desktop shell the
+ * handoff opens in the system browser with the desktop marker and never
+ * navigates the embedded view: a shell without a usable baked origin
+ * refuses with a logged error, and a blocked browser open is logged and
+ * reported through `onOpenFailed` (the login card surfaces it) instead of
+ * falling back to an in-window navigation.
+ */
+export async function startCloudHandoff(args: StartCloudHandoffArgs): Promise<void> {
+  const { shell } = args;
+  if (shell === undefined) {
+    args.navigate(cloudSignInUrl(args.apiBase, args.browserOrigin, args.returnTo));
+    return;
+  }
+  const baked = shell.bakedOrigin;
+  if (baked === undefined) {
+    console.error(DESKTOP_ORIGIN_MISSING);
+    return;
+  }
+  const origin = parseBakedOrigin(baked);
+  if (origin === null) {
+    console.error(DESKTOP_ORIGIN_UNUSABLE);
+    return;
+  }
+  try {
+    await shell.openSystemBrowser(cloudSignInHandoffUrl(origin, { returnTo: args.returnTo, desktop: true }));
+  } catch (error) {
+    console.error(DESKTOP_OPEN_FAILED);
+    args.onOpenFailed?.(error);
+  }
 }

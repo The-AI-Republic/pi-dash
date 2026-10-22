@@ -8,7 +8,7 @@
 // redirects.
 
 import type { QueryClient } from "@tanstack/react-query";
-import type { ApiClient, Me, Profile, WorkspaceList } from "@pidash/api-client";
+import { isApiError, type ApiClient, type Me, type Profile, type WorkspaceList } from "@pidash/api-client";
 
 import {
   meQueryOptions,
@@ -150,18 +150,41 @@ export function resolveLanding(args: {
 }
 
 /**
+ * Whether a gate read failed with a definitive session rejection (a
+ * 401/403 response). Anything else — transport, timeout, server error —
+ * says nothing about the session (CLOUD-015, from parity/specs/cloud.md
+ * §4).
+ */
+export function isSessionRejection(error: unknown): boolean {
+  return isApiError(error) && (error.status === 401 || error.status === 403);
+}
+
+/**
+ * Resolve a failed gate read: a rejected session reads as signed-out (the
+ * guards bounce with the location preserved); a transient failure is
+ * re-raised so the caller keeps its cached user instead of recording the
+ * failure as signed-out.
+ */
+function nullOnRejection<T>(promise: Promise<T>): Promise<T | null> {
+  return promise.catch((error: unknown) => {
+    if (isSessionRejection(error)) return null;
+    throw error;
+  });
+}
+
+/**
  * Gate inputs for a route beforeLoad: the signed-in user and their
- * profile, each null when the read fails. Without a session there is no
- * profile to read. Callers treat a null profile as unfinished (fail
+ * profile, each null when the read is rejected. Without a session there
+ * is no profile to read. Callers treat a null profile as unfinished (fail
  * closed toward onboarding, never into the app).
  */
 export async function loadGateInputs(
   queryClient: QueryClient,
   apiClient: ApiClient
 ): Promise<{ me: Me | null; profile: Profile | null }> {
-  const me = await queryClient.ensureQueryData(meQueryOptions(apiClient)).catch(() => null);
+  const me = await nullOnRejection(queryClient.ensureQueryData(meQueryOptions(apiClient)));
   if (me === null) return { me, profile: null };
-  const profile = await queryClient.ensureQueryData(profileQueryOptions(apiClient)).catch(() => null);
+  const profile = await nullOnRejection(queryClient.ensureQueryData(profileQueryOptions(apiClient)));
   return { me, profile };
 }
 

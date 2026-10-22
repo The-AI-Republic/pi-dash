@@ -8,12 +8,17 @@ import {
   cloudHandoffTarget,
   cloudSignInUrl,
   CLOUD_SIGN_IN_HREF,
+  currentPageTarget,
+  DESKTOP_OPEN_FAILED,
+  DESKTOP_ORIGIN_MISSING,
+  DESKTOP_ORIGIN_UNUSABLE,
   EXPLICIT_LOGOUT_KEY,
   markExplicitLogout,
   parseCloudLoginSearch,
   readExplicitLogout,
   resolveCloudReturnTarget,
   shouldAttemptSilentSignIn,
+  startCloudHandoff,
 } from "./cloudLogin.js";
 
 const ORIGIN = "https://app.test";
@@ -275,5 +280,183 @@ describe("storage probing", () => {
       vi.unstubAllGlobals();
       vi.resetModules();
     }
+  });
+});
+
+describe("currentPageTarget", () => {
+  it("keeps the path plus query and drops the fragment", () => {
+    expect(currentPageTarget({ pathname: "/sign-up", search: "?next_path=%2Fdocs" })).toBe(
+      "/sign-up?next_path=%2Fdocs"
+    );
+    expect(currentPageTarget({ pathname: "/", search: "" })).toBe("/");
+  });
+});
+
+describe("startCloudHandoff", () => {
+  function shellOf(
+    overrides: {
+      bakedOrigin?: string | undefined;
+      openSystemBrowser?: (url: string) => Promise<void>;
+    } = {}
+  ) {
+    return {
+      bakedOrigin: undefined as string | undefined,
+      openSystemBrowser: async (_url: string) => undefined,
+      ...overrides,
+    };
+  }
+
+  it("navigates to the handoff on web builds", async () => {
+    const navigate = vi.fn();
+    await startCloudHandoff({
+      shell: undefined,
+      apiBase: "https://api.test",
+      browserOrigin: "https://app.test",
+      returnTo: "/sign-up?next_path=%2Fdocs",
+      navigate,
+    });
+    expect(navigate).toHaveBeenCalledTimes(1);
+    const url = new URL(String(navigate.mock.calls[0]?.[0]));
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.test/api/auth/sign-in/");
+    expect(url.searchParams.get("return_to")).toBe("/sign-up?next_path=%2Fdocs");
+    expect(url.searchParams.get("return_origin")).toBe("https://app.test");
+    expect(url.searchParams.has("desktop")).toBe(false);
+  });
+
+  it("opens the marked handoff in the system browser inside the shell", async () => {
+    const openSystemBrowser = vi.fn(async (_url: string) => undefined);
+    const navigate = vi.fn();
+    const logged: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((message?: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await startCloudHandoff({
+        shell: shellOf({ bakedOrigin: "https://api.test/", openSystemBrowser }),
+        apiBase: "https://api.test",
+        browserOrigin: "tauri://localhost",
+        returnTo: "/",
+        navigate,
+      });
+    } finally {
+      errors.mockRestore();
+    }
+    expect(navigate).not.toHaveBeenCalled();
+    expect(logged).toEqual([]);
+    expect(openSystemBrowser).toHaveBeenCalledTimes(1);
+    const url = new URL(String(openSystemBrowser.mock.calls[0]?.[0]));
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.test/api/auth/sign-in/");
+    expect(url.searchParams.get("return_to")).toBe("/");
+    expect(url.searchParams.get("desktop")).toBe("1");
+    expect(url.searchParams.has("return_origin")).toBe(false);
+  });
+
+  it("refuses loudly without a baked origin and never navigates", async () => {
+    const openSystemBrowser = vi.fn(async (_url: string) => undefined);
+    const navigate = vi.fn();
+    const onOpenFailed = vi.fn();
+    const logged: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((message?: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await startCloudHandoff({
+        shell: shellOf({ openSystemBrowser }),
+        apiBase: "https://api.test",
+        browserOrigin: "tauri://localhost",
+        returnTo: "/",
+        navigate,
+        onOpenFailed,
+      });
+    } finally {
+      errors.mockRestore();
+    }
+    expect(navigate).not.toHaveBeenCalled();
+    expect(openSystemBrowser).not.toHaveBeenCalled();
+    expect(onOpenFailed).not.toHaveBeenCalled();
+    expect(logged).toEqual([DESKTOP_ORIGIN_MISSING]);
+    expect(DESKTOP_ORIGIN_MISSING).toContain("VITE_API_BASE_URL");
+  });
+
+  it("refuses a malformed baked origin instead of failing unhandled", async () => {
+    for (const bakedOrigin of ["::::", "ftp://files.test/api", "pidash://auth/callback"]) {
+      const openSystemBrowser = vi.fn(async (_url: string) => undefined);
+      const navigate = vi.fn();
+      const logged: string[] = [];
+      const errors = vi.spyOn(console, "error").mockImplementation((message?: unknown) => {
+        logged.push(String(message));
+      });
+      try {
+        await startCloudHandoff({
+          shell: shellOf({ bakedOrigin, openSystemBrowser }),
+          apiBase: "https://api.test",
+          browserOrigin: "tauri://localhost",
+          returnTo: "/",
+          navigate,
+        });
+      } finally {
+        errors.mockRestore();
+      }
+      expect(navigate).not.toHaveBeenCalled();
+      expect(openSystemBrowser).not.toHaveBeenCalled();
+      expect(logged).toEqual([DESKTOP_ORIGIN_UNUSABLE]);
+    }
+  });
+
+  it("logs a blocked browser open and reports it without any fallback", async () => {
+    const failure = new Error("opener blocked");
+    const navigate = vi.fn();
+    const onOpenFailed = vi.fn();
+    const logged: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((message?: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await startCloudHandoff({
+        shell: shellOf({
+          bakedOrigin: "https://api.test",
+          openSystemBrowser: async () => {
+            throw failure;
+          },
+        }),
+        apiBase: "https://api.test",
+        browserOrigin: "tauri://localhost",
+        returnTo: "/",
+        navigate,
+        onOpenFailed,
+      });
+    } finally {
+      errors.mockRestore();
+    }
+    expect(navigate).not.toHaveBeenCalled();
+    expect(logged).toEqual([DESKTOP_OPEN_FAILED]);
+    expect(onOpenFailed).toHaveBeenCalledTimes(1);
+    expect(onOpenFailed).toHaveBeenCalledWith(failure);
+  });
+
+  it("logs a blocked browser open even with no failure surface", async () => {
+    const navigate = vi.fn();
+    const logged: string[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((message?: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await startCloudHandoff({
+        shell: shellOf({
+          bakedOrigin: "https://api.test",
+          openSystemBrowser: async () => {
+            throw new Error("opener blocked");
+          },
+        }),
+        apiBase: "https://api.test",
+        browserOrigin: "tauri://localhost",
+        returnTo: "/",
+        navigate,
+      });
+    } finally {
+      errors.mockRestore();
+    }
+    expect(navigate).not.toHaveBeenCalled();
+    expect(logged).toEqual([DESKTOP_OPEN_FAILED]);
   });
 });

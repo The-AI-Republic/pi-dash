@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { render, screen } from "@testing-library/react";
+import { ApiError } from "@pidash/api-client";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -42,7 +43,7 @@ describe("invitations guard", () => {
   });
 
   it("bounces visitors to the entry route with a return path", async () => {
-    const failed = new Error("signed out");
+    const failed = new ApiError({ status: 401, code: "http", message: "signed out" });
     try {
       await Route.options.beforeLoad?.(stubContext({ me: failed }));
       expect.unreachable("expected a redirect");

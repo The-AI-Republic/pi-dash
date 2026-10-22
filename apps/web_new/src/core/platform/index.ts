@@ -29,6 +29,7 @@ export type {
   Platform,
   PlatformFetch,
   SessionTeardownApi,
+  ShellSignInApi,
   StreamInit,
   StreamMessage,
   TitleBarApi,

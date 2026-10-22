@@ -744,3 +744,48 @@ describe("desktop shareable addresses", () => {
     expect(() => tauri.platform.shareableUrl("/acme/browse/ACME-1/")).toThrow("hosted web origin");
   });
 });
+
+describe("desktop shell sign-in", () => {
+  it("reads the raw shell advertisement without a page fallback", () => {
+    installBridge(async () => undefined);
+    expect(tauri.platform.shellSignIn?.bakedOrigin).toBe(NATIVE_ORIGIN);
+  });
+
+  it("reports no baked origin without the advertisement", () => {
+    const win = globalThis.window as unknown as Record<string, unknown>;
+    win["__TAURI__"] = { core: { invoke: async () => undefined, Channel: FakeChannel } };
+    expect(tauri.platform.shellSignIn?.bakedOrigin).toBeUndefined();
+    win["__PIDASH_NATIVE_HTTP__"] = 42;
+    expect(tauri.platform.shellSignIn?.bakedOrigin).toBeUndefined();
+  });
+
+  it("opens the system browser through the opener with no fallback", async () => {
+    const invoke = vi.fn(async () => undefined);
+    installBridge(invoke);
+    await tauri.platform.shellSignIn!.openSystemBrowser("https://app.example.test/api/auth/sign-in/?return_to=%2F");
+    expect(invoke).toHaveBeenCalledWith("plugin:opener|open_url", {
+      url: "https://app.example.test/api/auth/sign-in/?return_to=%2F",
+    });
+  });
+
+  it("rejects non-web addresses and a missing bridge", async () => {
+    const invoke = vi.fn(async () => undefined);
+    installBridge(invoke);
+    await expect(tauri.platform.shellSignIn!.openSystemBrowser("pidash://auth/callback")).rejects.toThrow(
+      "non-web address"
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    removeBridge();
+    await expect(tauri.platform.shellSignIn!.openSystemBrowser("https://app.example.test/")).rejects.toThrow(
+      "native bridge"
+    );
+  });
+
+  it("propagates a blocked browser open to the caller", async () => {
+    const failure = new Error("opener blocked");
+    installBridge(async () => {
+      throw failure;
+    });
+    await expect(tauri.platform.shellSignIn!.openSystemBrowser("https://app.example.test/")).rejects.toBe(failure);
+  });
+});

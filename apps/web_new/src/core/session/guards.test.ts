@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import type { QueryClient } from "@tanstack/react-query";
-import type { Me, Profile } from "@pidash/api-client";
+import { ApiError, type Me, type Profile } from "@pidash/api-client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -10,6 +10,7 @@ import {
   CREATE_WORKSPACE_PATH,
   decidePageGate,
   isOnboardedProfile,
+  isSessionRejection,
   loadGateInputs,
   loadLandingTarget,
   ONBOARDING_PATH,
@@ -308,16 +309,39 @@ describe("gate loaders", () => {
   });
 
   it("skips the profile read without a session", async () => {
-    const queryClient = stubQueryClient({ me: new Error("signed out") });
-    await expect(loadGateInputs(queryClient, {} as never)).resolves.toEqual({ me: null, profile: null });
-    expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(1);
+    for (const status of [401, 403]) {
+      const queryClient = stubQueryClient({
+        me: new ApiError({ status, code: "http", message: "signed out" }),
+      });
+      await expect(loadGateInputs(queryClient, {} as never)).resolves.toEqual({ me: null, profile: null });
+      expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(1);
+    }
   });
 
-  it("nulls the profile whose read fails", async () => {
-    await expect(loadGateInputs(stubQueryClient({ me, profile: new Error("gone") }), {} as never)).resolves.toEqual({
-      me,
-      profile: null,
-    });
+  it("nulls the profile whose read is rejected", async () => {
+    await expect(
+      loadGateInputs(
+        stubQueryClient({ me, profile: new ApiError({ status: 401, code: "http", message: "gone" }) }),
+        {} as never
+      )
+    ).resolves.toEqual({ me, profile: null });
+  });
+
+  it("re-raises transient gate failures instead of recording them as signed-out", async () => {
+    const failure = new ApiError({ status: 0, code: "network", message: "socket hang up" });
+    await expect(loadGateInputs(stubQueryClient({ me: failure }), {} as never)).rejects.toBe(failure);
+    const serverFailure = new ApiError({ status: 500, code: "http", message: "bad gateway" });
+    await expect(loadGateInputs(stubQueryClient({ me: serverFailure }), {} as never)).rejects.toBe(serverFailure);
+    await expect(loadGateInputs(stubQueryClient({ me, profile: failure }), {} as never)).rejects.toBe(failure);
+  });
+
+  it("grades rejections by response status only", () => {
+    expect(isSessionRejection(new ApiError({ status: 401, code: "http", message: "x" }))).toBe(true);
+    expect(isSessionRejection(new ApiError({ status: 403, code: "http", message: "x" }))).toBe(true);
+    expect(isSessionRejection(new ApiError({ status: 500, code: "http", message: "x" }))).toBe(false);
+    expect(isSessionRejection(new ApiError({ status: 0, code: "network", message: "x" }))).toBe(false);
+    expect(isSessionRejection(new Error("x"))).toBe(false);
+    expect(isSessionRejection(null)).toBe(false);
   });
 
   it("resolves the landing from settings plus the workspace list", async () => {

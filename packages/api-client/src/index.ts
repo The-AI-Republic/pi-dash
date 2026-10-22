@@ -1121,6 +1121,9 @@ export type {
   DesktopExchangeInput,
   DesktopExchangeResult,
 } from "./contracts/cloud-session.js";
+export { CLOUD_REFRESH_PATH, createCloudRefreshMiddleware, isRefreshCall } from "./middleware/cloud-refresh.js";
+export { PAYWALL_PRICING_PATH, createCloudPaywallMiddleware, paywallMessage } from "./middleware/cloud-paywall.js";
+export type { PaywallPrompt } from "./middleware/cloud-paywall.js";
 export { CloudBillingPlan, getCloudBillingPlan } from "./contracts/cloud-billing.js";
 export {
   CHAT_EVENT_STREAM_NAME,

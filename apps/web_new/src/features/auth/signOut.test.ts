@@ -260,3 +260,93 @@ describe("performSignOut", () => {
     expect(notifyError).not.toHaveBeenCalled();
   });
 });
+
+describe("isHostedBackend", () => {
+  it("reads the hosted marker off the cached instance config", async () => {
+    const { isHostedBackend } = await import("./signOut.js");
+    const { instanceKeys } = await import("../../core/session/index.js");
+    const hosted = new QueryClient();
+    hosted.setQueryData(instanceKeys.config, { is_self_managed: false });
+    expect(isHostedBackend(hosted)).toBe(true);
+    const managed = new QueryClient();
+    managed.setQueryData(instanceKeys.config, { is_self_managed: true });
+    expect(isHostedBackend(managed)).toBe(false);
+    expect(isHostedBackend(new QueryClient())).toBe(false);
+  });
+});
+
+describe("performSignOut on the hosted backend", () => {
+  function cloudClient() {
+    return {
+      clearCsrfCache: vi.fn(),
+      getJson: vi.fn(async () => ({ csrf_token: "csrf" })),
+      sendJson: vi.fn(async () => ({
+        data: { airepublic_logout_url: "https://accounts.test/logout" },
+        status: 200,
+        url: "https://api.test/api/auth/sign-out/",
+      })),
+      parse: vi.fn((_schema: unknown, data: unknown) => data),
+    };
+  }
+
+  function hostedQueryClient(): QueryClient {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["instance", "config"], { is_self_managed: false });
+    queryClient.setQueryData(["session", "me"], { id: "user-1" });
+    return queryClient;
+  }
+
+  function stubLocation(): { replace: ReturnType<typeof vi.fn> } {
+    const replace = vi.fn();
+    Object.defineProperty(globalThis.window, "location", {
+      value: { replace },
+      writable: true,
+      configurable: true,
+    });
+    return { replace };
+  }
+
+  it("posts the cloud logout pair and replaces onto the login card", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const { replace } = stubLocation();
+    const client = cloudClient();
+    const queryClient = hostedQueryClient();
+
+    await expect(performSignOut({ client: client as never, queryClient })).resolves.toBe("/login");
+
+    expect(client.getJson).toHaveBeenCalledWith("/api/auth/get-csrf-token/", { csrf: false });
+    expect(client.sendJson).toHaveBeenCalledWith("POST", "/api/auth/sign-out/", {
+      json: {},
+      headers: { "X-CSRFTOKEN": "csrf" },
+    });
+    expect(queryClient.getQueryData(["session", "me"])).toBeUndefined();
+    expect(entries.get(EXPLICIT_LOGOUT_KEY)).toBe("1");
+    expect(replace).toHaveBeenCalledWith("/login");
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("toasts and rethrows a failed cloud POST without navigating", async () => {
+    const entries = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (key: string) => entries.get(key) ?? null,
+      setItem: (key: string, value: string) => void entries.set(key, value),
+      removeItem: (key: string) => void entries.delete(key),
+    });
+    const { replace } = stubLocation();
+    const client = cloudClient();
+    client.sendJson.mockRejectedValueOnce(new Error("boom"));
+    const queryClient = hostedQueryClient();
+
+    await expect(performSignOut({ client: client as never, queryClient })).rejects.toThrow("boom");
+    expect(notifyError).toHaveBeenCalledWith(SIGN_OUT_FAILED_TITLE, SIGN_OUT_FAILED_MESSAGE);
+    expect(replace).not.toHaveBeenCalled();
+    expect(entries.has(EXPLICIT_LOGOUT_KEY)).toBe(false);
+    expect(queryClient.getQueryData(["session", "me"])).toEqual({ id: "user-1" });
+  });
+});

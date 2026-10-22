@@ -7,12 +7,17 @@
 // with a replacing navigation, so the login entry leaves no history step —
 // unless an error landed them here or this tab signed out explicitly. The
 // edition fills the cloudLoginCard slot with this screen, so the OSS build
-// keeps its bare /login redirect.
+// keeps its bare /login redirect. Inside the desktop shell (CLOUD-018/
+// CLOUD-019, from parity/specs/cloud.md §4) this same card opens the
+// system browser instead of navigating: silent resume stays off (opening
+// the browser is always an explicit click) and a blocked open surfaces an
+// alert instead of hanging.
 
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { platform } from "../../../core/platform/index.js";
 import {
   clearExplicitLogout,
   cloudHandoffTarget,
@@ -22,12 +27,14 @@ import {
   readExplicitLogout,
   resolveCloudReturnTarget,
   shouldAttemptSilentSignIn,
+  startCloudHandoff,
 } from "../cloudLogin.js";
 
 const TERMS_HREF = "https://airepublic.com/terms";
 const PRIVACY_HREF = "https://airepublic.com/privacy";
 const HOME_HREF = "/home";
 const RESUME_FAILURE = "That attempt did not complete automatically. Start again below.";
+const BROWSER_OPEN_FAILURE = "The system browser could not be opened. Try again.";
 
 /** This tab's session storage, or null where the runtime exposes none. */
 function tabStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
@@ -57,11 +64,15 @@ function readVisit(): Visit {
   const search = parseCloudLoginSearch(globalThis.window.location.search);
   const origin = browserOrigin();
   const safe = resolveCloudReturnTarget(search.nextPath, origin);
-  const attempt = shouldAttemptSilentSignIn({
-    pendingTarget: safe,
-    error: search.error,
-    explicitlyLoggedOut: readExplicitLogout(tabStorage()),
-  });
+  // The shell never resumes silently: opening the system browser stays an
+  // explicit click, so the card renders and waits for one.
+  const attempt =
+    platform.shellSignIn === undefined &&
+    shouldAttemptSilentSignIn({
+      pendingTarget: safe,
+      error: search.error,
+      explicitlyLoggedOut: readExplicitLogout(tabStorage()),
+    });
   return { pendingTarget: safe, error: search.error, resuming: attempt };
 }
 
@@ -72,6 +83,7 @@ export interface CloudLoginCardProps {
 
 export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.ReactElement {
   const [visit] = React.useState<Visit>(readVisit);
+  const [browserOpenFailed, setBrowserOpenFailed] = React.useState(false);
 
   React.useEffect(() => {
     if (!visit.resuming || visit.pendingTarget === null) return;
@@ -87,7 +99,14 @@ export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.Rea
     const base = apiBase ?? getAppClient().baseUrl;
     const origin = browserOrigin();
     const raw = new URLSearchParams(globalThis.window.location.search).get("next_path");
-    globalThis.window.location.assign(cloudSignInUrl(base, origin, cloudHandoffTarget(raw, origin)));
+    void startCloudHandoff({
+      shell: platform.shellSignIn,
+      apiBase: base,
+      browserOrigin: origin,
+      returnTo: cloudHandoffTarget(raw, origin),
+      navigate: (url) => globalThis.window.location.assign(url),
+      onOpenFailed: () => setBrowserOpenFailed(true),
+    });
   }
 
   if (visit.resuming) return <></>;
@@ -114,6 +133,11 @@ export function CloudLoginCard({ apiBase }: CloudLoginCardProps = {}): React.Rea
                 {RESUME_FAILURE}
               </p>
             )}
+            {browserOpenFailed ? (
+              <p role="alert" className="text-body text-(--danger)">
+                {BROWSER_OPEN_FAILURE}
+              </p>
+            ) : null}
           </div>
           <a href={CLOUD_SIGN_IN_HREF} onClick={startManualSignIn} className="w-full">
             <Button variant="primary" size="large" className="w-full">

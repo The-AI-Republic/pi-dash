@@ -270,6 +270,29 @@ export interface SessionTeardownApi {
 }
 
 /**
+ * Desktop shell sign-in support (CLOUD-017/CLOUD-018, from
+ * parity/specs/cloud.md §4). The web platform leaves this absent, which
+ * is also how features detect the shell without touching native globals
+ * themselves. The desktop platform reads both facts off the bridge.
+ */
+export interface ShellSignInApi {
+  /**
+   * API origin the shell advertised for this bundle, or undefined when it
+   * advertised none. Unlike Platform.apiOrigin this never falls back to
+   * the page origin: without an advertisement the provider handoff cannot
+   * be built and must refuse loudly instead of navigating the webview.
+   */
+  readonly bakedOrigin: string | undefined;
+  /**
+   * Open a URL in the system browser. Rejects when the bridge cannot —
+   * with no webview fallback, so the caller surfaces the failure instead
+   * of starting an embedded provider flow the desktop sign-in could not
+   * complete.
+   */
+  openSystemBrowser(url: string): Promise<void>;
+}
+
+/**
  * An update the shell is holding for the sidebar control (DESK-018): either
  * deferred at launch or found by the daily check. The native side owns both
  * facts, including whether a download is under way, so a control that
@@ -383,4 +406,6 @@ export interface Platform {
   cliSetup?: CliSetupApi;
   updates?: UpdaterApi;
   sessionTeardown?: SessionTeardownApi;
+  /** Desktop shell sign-in support; absent on the web platform. */
+  shellSignIn?: ShellSignInApi;
 }

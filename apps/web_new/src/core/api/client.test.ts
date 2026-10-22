@@ -11,17 +11,26 @@ import { createAppClient, getAppClient, resetAppClient } from "./client.js";
 import type { Platform } from "../platform/index.js";
 
 const platformHarness = vi.hoisted(() => ({ current: {} as Partial<Platform> }));
+const editionHarness = vi.hoisted(() => ({ api: undefined as unknown }));
 vi.mock("../platform/index.js", () => ({
   get platform() {
     return platformHarness.current;
   },
   toApiTransport: () => async () => new Response("{}"),
 }));
-vi.mock("../session/middleware.js", () => ({ createSessionMiddleware: () => async () => undefined }));
+vi.mock("../edition/index.js", () => ({
+  get edition() {
+    return { id: "oss", flags: {}, api: editionHarness.api };
+  },
+}));
+vi.mock("../session/middleware.js", () => ({
+  createSessionMiddleware: () => async (request: unknown, next: (value: unknown) => unknown) => next(request),
+}));
 vi.mock("../session/queries.js", () => ({ setSessionClient: () => undefined }));
 
 afterEach(() => {
   platformHarness.current = {};
+  editionHarness.api = undefined;
   resetAppClient();
   vi.unstubAllGlobals();
 });
@@ -43,5 +52,19 @@ describe("app client default base address", () => {
     platformHarness.current = { kind: "web", apiOrigin: undefined };
     vi.stubGlobal("window", undefined);
     expect(createAppClient().baseUrl).toBe("http://localhost:8000");
+  });
+
+  it("runs the edition interceptors inside the session layer", async () => {
+    platformHarness.current = { kind: "web", apiOrigin: "https://app.example.test" };
+    const seen: string[] = [];
+    editionHarness.api = [
+      async (request: { url: string }, next: (value: unknown) => Promise<unknown>) => {
+        seen.push(request.url);
+        return next(request);
+      },
+    ];
+    const client = createAppClient();
+    await client.getJson("/api/ping/");
+    expect(seen).toEqual(["https://app.example.test/api/ping/"]);
   });
 });

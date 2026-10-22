@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import type { InstanceConfig } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
-import { resolveSignInProviders } from "./providers.js";
+import { CLOUD_PROVIDER_ID, resolveSignInProviders } from "./providers.js";
 
 function configWith(flags: Partial<InstanceConfig>): InstanceConfig {
   return {
@@ -94,5 +94,45 @@ describe("sign-in providers", () => {
     ).toEqual([]);
     expect(resolveSignInProviders([], config, { mode: "sign-in", apiOrigin: "https://api.test" })).toEqual([]);
     expect(resolveSignInProviders(undefined, config, { mode: "sign-in", apiOrigin: "https://api.test" })).toEqual([]);
+  });
+
+  it("resolves the organizational provider with the page-preserving handoff", () => {
+    const config = configWith({});
+    const resolved = resolveSignInProviders([{ id: CLOUD_PROVIDER_ID, label: "AI Republic" }], config, {
+      mode: "sign-up",
+      apiOrigin: "https://api.test",
+      returnToPage: "/sign-up?next_path=%2Fdocs",
+      browserOrigin: "https://app.test",
+    });
+    expect(resolved).toEqual([
+      {
+        id: CLOUD_PROVIDER_ID,
+        label: "Sign up with AI Republic",
+        href: "https://api.test/api/auth/sign-in/?return_to=%2Fsign-up%3Fnext_path%3D%252Fdocs&return_origin=https%3A%2F%2Fapp.test",
+        cloudHandoff: { returnTo: "/sign-up?next_path=%2Fdocs" },
+      },
+    ]);
+  });
+
+  it("needs no instance flag and defaults the return target to the root", () => {
+    const config = configWith({});
+    const resolved = resolveSignInProviders([{ id: CLOUD_PROVIDER_ID, label: "AI Republic" }], config, {
+      mode: "sign-in",
+      apiOrigin: "https://api.test",
+      browserOrigin: "https://api.test",
+    });
+    expect(resolved).toEqual([
+      {
+        id: CLOUD_PROVIDER_ID,
+        label: "Sign in with AI Republic",
+        href: "https://api.test/api/auth/sign-in/?return_to=%2F",
+        cloudHandoff: { returnTo: "/" },
+      },
+    ]);
+    const unoriginated = resolveSignInProviders([{ id: CLOUD_PROVIDER_ID, label: "AI Republic" }], config, {
+      mode: "sign-in",
+      apiOrigin: "https://api.test",
+    });
+    expect(unoriginated[0]?.href).toBe("https://api.test/api/auth/sign-in/?return_to=%2F");
   });
 });
