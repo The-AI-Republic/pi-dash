@@ -454,4 +454,14 @@ describe("saved view loader and route states", () => {
     expect(screen.getByRole("heading", { name: /^View work items will appear here/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New work item" })).toBeEnabled();
   });
+
+  it("disables the entry for a guest on this project even when another project takes work items (ISS-072)", async () => {
+    // The entry follows the view's project standing, not the
+    // workspace-wide creatable set: a guest here sees it dead.
+    await renderScreen(20, viewRecord(), 0, undefined, [
+      { ...projectSeed(), member_role: 5 },
+      { ...projectSeed(), id: USER, identifier: "API", member_role: 20 },
+    ]);
+    expect(await screen.findByRole("button", { name: "New work item" }, LAZY_WAIT)).toBeDisabled();
+  });
 });

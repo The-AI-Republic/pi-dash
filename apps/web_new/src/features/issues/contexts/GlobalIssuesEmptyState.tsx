@@ -73,9 +73,9 @@ export function GlobalIssuesEmptyState({ workspaceSlug, projects }: GlobalIssues
     <>
       <GlobalIssuesEmpty
         projectCount={projects.length}
-        // Starting a project needs only workspace standing; adding a work
-        // item also needs a project the caller may create in.
-        canAct={projects.length === 0 ? canEdit : canEdit && creatable.length > 0}
+        // Both entries need only workspace standing: with no project to
+        // file into, the create dialog states that itself once opened.
+        canAct={canEdit}
         onCreateProject={() => {
           setCreateProjectOpen(true);
         }}

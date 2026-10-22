@@ -20,11 +20,6 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useNavigate: () => mocks.navigate,
 }));
 
-vi.mock("../../../core/session/hooks.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../core/session/hooks.js")>()),
-  usePermissions: () => ({ role: 20, isMember: true, canEdit: true, isAdmin: false, isLoading: false }),
-}));
-
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { ArchivedIssuesScreen } from "./ArchivedIssuesScreen.js";
@@ -233,5 +228,11 @@ describe("ArchivedIssuesScreen", () => {
     renderScreen({ projects: [project(USER)] });
     expect(await screen.findByRole("heading", { name: "Project not found" })).toBeInTheDocument();
     expect(screen.queryByTestId("archived-issues")).not.toBeInTheDocument();
+  });
+
+  it("disables the entries for a project guest (ISS-071)", async () => {
+    renderScreen({ projects: [{ ...project(), member_role: 5 }] });
+    expect(await screen.findByText("No archived work items yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set automation" })).toBeDisabled();
   });
 });

@@ -116,10 +116,13 @@ describe("GlobalIssuesEmptyState", () => {
     expect(await screen.findByRole("button", { name: "Start your first project" })).toBeDisabled();
   });
 
-  it("treats a project the caller cannot create in as no creatable project", async () => {
+  it("enables the work-item entry for a member even with no creatable project (ISS-073)", async () => {
+    // Workspace standing alone gates the entry; the dialog states the
+    // missing project itself once opened.
+    const user = userEvent.setup();
     renderState([project({ member_role: 5 })]);
     expect(await screen.findByText("No Views yet")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add work item" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Add work item" }));
+    expect(await screen.findByRole("dialog", { name: "Create new work item" })).toHaveAttribute("data-projects", "");
   });
-
 });

@@ -36,6 +36,7 @@ import {
   ResolvedIssueList,
 } from "../../../../../../../features/issues/components/lazyLeaves.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
+import { canEditInProject } from "../../../../../../../shared/shell/contextual/index.js";
 import type { SavedViewReadInput } from "../../../../../../../features/issues/filters/rich/savedViewPreload.js";
 
 // The route's `beforeLoad` runs this beside the screen's own request, so the
@@ -119,6 +120,10 @@ export function SavedViewScreen({ params, search, context }: SavedViewScreenProp
   }
 
   const offered: readonly LayoutKind[] = ["list", "gantt_chart"];
+  // The card's entry follows the project standing, like the project list:
+  // a guest on this project sees it dead even when other projects take
+  // their new work items.
+  const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
   const displayControl = (
     <DisplayControl
       workspaceSlug={params.ws}
@@ -145,7 +150,7 @@ export function SavedViewScreen({ params, search, context }: SavedViewScreenProp
     // create dialog, rather than reading as a search that failed.
     const emptyState = (
       <SavedViewIssuesEmpty
-        canAct={creatable.length > 0}
+        canAct={canEdit}
         onCreate={() => {
           setCreateOpen(true);
         }}

@@ -18,7 +18,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { usePermissions } from "../../../core/session/hooks.js";
+import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { IssueList } from "../components/IssueList.js";
 import { ArchivedIssuesEmpty, FilteredEmptyCard } from "../emptyStates/cards.js";
 import { isFilteredEmpty } from "../emptyStates/filteredEmpty.js";
@@ -49,7 +49,6 @@ export interface ArchivedIssuesScreenProps {
 export function ArchivedIssuesScreen({ workspaceSlug, projectId }: ArchivedIssuesScreenProps): React.ReactElement {
   const navigate = useNavigate();
   const client = getAppClient();
-  const { canEdit } = usePermissions(workspaceSlug);
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
   const project = projects.find((entry) => entry.id === projectId) ?? null;
   // The local record seeds the row once per visit; the row owns edits after
@@ -81,6 +80,9 @@ export function ArchivedIssuesScreen({ workspaceSlug, projectId }: ArchivedIssue
     );
   }
 
+  // The card's entries follow the project standing, like every other
+  // project-scoped list: a project guest sees them dead.
+  const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at !== null });
   // A stored expression on its own keeps the first-run card: the archived
   // list changes card only once a condition was added through the row
   // during this visit (spec §8). Clearing puts the unfiltered list back.
