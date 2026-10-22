@@ -1,10 +1,13 @@
-"""Contract tests: v1 scheduler writes (PDASHOSS01-278).
+"""Contract tests: v1 scheduler writes (PDASHOSS01-278, PDASHOSS01-318).
 
 Ports the write half of Django's
 ``apps/api/pi_dash/tests/contract/api/test_schedulers.py``: the binding edit
-(``PATCH .../schedulers/<id>/binding/``), run now (``POST .../run-now/``)
-and the definition edit (``PATCH workspaces/<slug>/schedulers/<id>/``) —
-each write, the permission denials, the 409s and the 412s.
+(``PATCH .../schedulers/<id>/binding/``), run now (``POST .../run-now/``),
+the definition edit (``PATCH workspaces/<slug>/schedulers/<id>/``), and
+(-318) create (``POST workspaces/<slug>/schedulers/``), delete (``DELETE
+workspaces/<slug>/schedulers/<id>/``), install (``POST .../projects/<p>/
+schedulers/``) and uninstall (``DELETE .../binding/``) — each write, the
+permission denials, the 409s and the 412s.
 
 Every test gets its own world (``world`` fixture): writes mutate the
 binding and the definition, so nothing is shared with the read suites or
@@ -35,7 +38,7 @@ BINDING_KEYS = [
 ]
 SCHEDULER_KEYS = [
     "id", "workspace", "slug", "name", "description", "prompt", "color",
-    "source", "is_enabled", "bindings", "created_at", "updated_at",
+    "source", "is_builtin", "is_enabled", "bindings", "created_at", "updated_at",
 ]
 BINDING_WRITABLE = [
     "extra_context", "enabled", "dtstart", "rrule", "tzid", "rdates",
@@ -49,6 +52,11 @@ INVALID_TOKEN = {"detail": "Given API token is not valid"}
 BINDING_NOT_FOUND = {"detail": "No SchedulerBinding matches the given query."}
 SCHEDULER_NOT_FOUND = {"detail": "No Scheduler matches the given query."}
 NOT_AN_OBJECT = {"error": "The request body must be a JSON object"}
+BUILTIN_MESSAGE = (
+    "Built-in schedulers cannot be edited or deleted; put per-project "
+    "instructions in the binding's extra_context instead."
+)
+DEFINITION_WRITABLE = ["prompt", "name", "description", "color", "is_enabled"]
 
 
 # ---------------------------------------------------------------------------
@@ -56,13 +64,15 @@ NOT_AN_OBJECT = {"error": "The request body must be a JSON object"}
 # ---------------------------------------------------------------------------
 
 
-def _scheduler(conn, *, workspace_id, tag, source, created_by_id, is_enabled=True):
+def _scheduler(
+    conn, *, workspace_id, tag, source, created_by_id, is_enabled=True, slug=None
+):
     return db.insert_row(
         conn,
         "schedulers",
         {
             "workspace_id": workspace_id,
-            "slug": f"{source}-{tag}",
+            "slug": slug or f"{source}-{tag}",
             "name": f"CT {source} {tag}",
             "description": "Reads the project and files issues.",
             "prompt": PROMPT,
@@ -156,7 +166,14 @@ def world(conn):
     manifest = _scheduler(
         conn, workspace_id=ws["id"], tag=tag, source="manifest", created_by_id=owner_id
     )
+    # Built-ins are told apart by their catalog slug (what the reseed
+    # matches on); `source` reads `builtin` for user-created rows too
+    # (PDASHOSS01-290), as `custom` shows.
     builtin = _scheduler(
+        conn, workspace_id=ws["id"], tag=tag, source="builtin",
+        created_by_id=owner_id, slug="security-audit",
+    )
+    custom = _scheduler(
         conn, workspace_id=ws["id"], tag=tag, source="builtin", created_by_id=owner_id
     )
     bare = _scheduler(
@@ -212,6 +229,7 @@ def world(conn):
         "other_project": other_project,
         "manifest": manifest,
         "builtin": builtin,
+        "custom": custom,
         "bare": bare,
         "other_ws_scheduler": other_ws_scheduler,
         "binding": binding,
@@ -455,7 +473,7 @@ def test_binding_precondition(world, conn):
 
 
 def test_binding_route_other_methods_405(world):
-    for method in ("GET", "PUT", "POST", "DELETE"):
+    for method in ("GET", "PUT", "POST"):
         r = send(method, world["keys"]["owner"], binding_url(world), json={})
         assert r.status_code == 405, method
 
@@ -665,10 +683,25 @@ def test_builtin_definition_is_rejected(world, conn):
     _assert_conflict(
         r,
         "builtin_scheduler",
-        "Built-in schedulers cannot be edited; put per-project instructions "
-        "in the binding's extra_context instead.",
+        BUILTIN_MESSAGE,
     )
     assert scheduler_row(conn, world["builtin"]["id"])["prompt"] == PROMPT
+
+
+def test_user_created_default_source_is_editable(world, conn):
+    # `source` defaults to `builtin` (PDASHOSS01-290); the slug decides.
+    r = send(
+        "PATCH", world["keys"]["owner"], definition_url(world, world["custom"]["id"]),
+        json={"prompt": "Mine.", "is_enabled": False, "color": "#112233"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["source"] == "builtin"
+    assert body["is_builtin"] is False
+    assert body["is_enabled"] is False
+    assert body["previous"] == {"prompt": PROMPT, "is_enabled": True, "color": "#3b82f6"}
+    assert body["affected_projects"] == []
+    assert scheduler_row(conn, world["custom"]["id"])["color"] == "#112233"
 
 
 def test_definition_validation(world, conn):
@@ -679,7 +712,7 @@ def test_definition_validation(world, conn):
     assert unwritable.status_code == 400
     assert unwritable.json() == {
         "error": "Not writable on a scheduler definition: source",
-        "writable_fields": ["prompt", "name", "description"],
+        "writable_fields": DEFINITION_WRITABLE,
     }
     blank = send("PATCH", key, definition_url(world), json={"prompt": "   "})
     assert blank.status_code == 400
@@ -747,6 +780,460 @@ def test_definition_precondition(world, conn):
 
 
 def test_definition_route_other_methods_405(world):
-    for method in ("GET", "PUT", "POST", "DELETE"):
+    for method in ("GET", "PUT", "POST"):
         r = send(method, world["keys"]["owner"], definition_url(world), json={})
         assert r.status_code == 405, method
+
+
+# ---------------------------------------------------------------------------
+# PDASHOSS01-318: POST workspaces/<slug>/schedulers/
+# ---------------------------------------------------------------------------
+
+DEFINITION_CREATE = ["slug", *DEFINITION_WRITABLE]
+BINDING_CREATE = ["scheduler", *BINDING_WRITABLE]
+NEW_PROMPT = "## Nightly\n\nScan for regressions and file issues."
+
+
+def ws_list_url(w):
+    return f"/api/v1/workspaces/{w['ws']['slug']}/schedulers/"
+
+
+def project_list_url(w, project=None):
+    pid = (project or w["project"])["id"]
+    return f"/api/v1/workspaces/{w['ws']['slug']}/projects/{pid}/schedulers/"
+
+
+def new_scheduler(w, **extra):
+    return {
+        "name": "Nightly Bug Scan",
+        "slug": f"nightly-{w['tag']}",
+        "description": "Looks for regressions.",
+        "prompt": NEW_PROMPT,
+        **extra,
+    }
+
+
+def test_workspace_admin_creates_definition(world, conn):
+    body_in = new_scheduler(world)
+    r = send("POST", world["keys"]["owner"], ws_list_url(world), json=body_in)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert list(body.keys()) == SCHEDULER_KEYS
+    for key in ("name", "slug", "description", "prompt"):
+        assert body[key] == body_in[key]
+    assert body["workspace"] == str(world["ws"]["id"])
+    assert body["color"] == "#3b82f6"
+    assert body["is_enabled"] is True
+    assert body["is_builtin"] is False
+    assert body["bindings"] == []
+    row = scheduler_row(conn, body["id"])
+    assert str(row["created_by_id"]) == str(world["users"]["owner"]["id"])
+    assert row["deleted_at"] is None
+    listed = http.get(world["keys"]["owner"], ws_list_url(world)).json()
+    assert body_in["slug"] in [s["slug"] for s in listed["results"]]
+
+
+def test_create_disabled_with_color(world):
+    r = send(
+        "POST", world["keys"]["owner"], ws_list_url(world),
+        json=new_scheduler(world, is_enabled=False, color="#AABBCC"),
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["is_enabled"] is False
+    assert r.json()["color"] == "#aabbcc"
+
+
+def test_create_slug_errors(world):
+    key = world["keys"]["owner"]
+    taken = send(
+        "POST", key, ws_list_url(world),
+        json=new_scheduler(world, slug=world["manifest"]["slug"]),
+    )
+    assert (taken.status_code, taken.json()) == (
+        400, {"slug": ["This slug is already in use in this workspace."]}
+    )
+    for slug in ("security-audit", "fable-security-audit", " fable-security-audit "):
+        reserved = send("POST", key, ws_list_url(world), json=new_scheduler(world, slug=slug))
+        assert (reserved.status_code, reserved.json()) == (
+            400, {"slug": ["This slug is reserved for a built-in scheduler."]}
+        ), slug
+
+
+def test_create_validation(world, conn):
+    key = world["keys"]["owner"]
+    empty = send("POST", key, ws_list_url(world), json={})
+    assert empty.status_code == 400
+    assert list(empty.json().items()) == [
+        ("slug", ["This field is required."]),
+        ("name", ["This field is required."]),
+        ("prompt", ["This field is required."]),
+    ]
+    bad_color = send("POST", key, ws_list_url(world), json=new_scheduler(world, color="blue"))
+    assert bad_color.status_code == 400
+    assert list(bad_color.json().keys()) == ["color"]
+    unknown = send(
+        "POST", key, ws_list_url(world), json=new_scheduler(world, source="manifest")
+    )
+    assert (unknown.status_code, unknown.json()) == (
+        400,
+        {
+            "error": "Not writable on a new scheduler: source",
+            "writable_fields": DEFINITION_CREATE,
+        },
+    )
+    listed = send("POST", key, ws_list_url(world), json=[new_scheduler(world)])
+    assert (listed.status_code, listed.json()) == (400, NOT_AN_OBJECT)
+    assert db.fetch_one(
+        conn, "SELECT count(*) AS n FROM schedulers WHERE slug = %s",
+        (f"nightly-{world['tag']}",),
+    )["n"] == 0
+
+
+@pytest.mark.parametrize(
+    ("role", "body"),
+    [
+        ("padmin", ROLE_DENIED),
+        ("member", ROLE_DENIED),
+        ("wsmember", ROLE_DENIED),
+        ("wsguest", CLASS_DENIED),
+        ("outsider", CLASS_DENIED),
+    ],
+)
+def test_create_denials(world, conn, role, body):
+    r = send("POST", world["keys"][role], ws_list_url(world), json=new_scheduler(world))
+    assert (r.status_code, r.json()) == (403, body)
+    assert db.fetch_one(
+        conn, "SELECT count(*) AS n FROM schedulers WHERE slug = %s",
+        (f"nightly-{world['tag']}",),
+    )["n"] == 0
+
+
+def test_create_auth_failures(world):
+    anon = send("POST", None, ws_list_url(world), json=new_scheduler(world))
+    assert (anon.status_code, anon.json()) == (401, UNAUTHENTICATED)
+    bad = send("POST", "plane_api_not-a-real-key", ws_list_url(world), json=new_scheduler(world))
+    assert (bad.status_code, bad.json()) == (403, INVALID_TOKEN)
+
+
+def test_list_routes_other_methods_405(world):
+    for url in (ws_list_url(world), project_list_url(world)):
+        for method in ("PUT", "PATCH", "DELETE"):
+            r = send(method, world["keys"]["owner"], url, json={})
+            assert r.status_code == 405, (url, method)
+
+
+# ---------------------------------------------------------------------------
+# PDASHOSS01-318: DELETE workspaces/<slug>/schedulers/<id>/
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_admin_deletes_definition_and_installs(world, conn):
+    r = send("DELETE", world["keys"]["owner"], definition_url(world))
+    assert r.status_code == 204, r.text
+    assert r.content == b""
+    assert scheduler_row(conn, world["manifest"]["id"])["deleted_at"] is not None
+    for b in ("binding", "other_binding"):
+        assert binding_row(conn, world[b]["id"])["deleted_at"] is not None
+    # Other schedulers' installs stay.
+    assert binding_row(conn, world["builtin_binding"]["id"])["deleted_at"] is None
+    listed = http.get(world["keys"]["owner"], project_list_url(world)).json()
+    assert [s["slug"] for s in listed["results"]] == [world["builtin"]["slug"]]
+    again = send("DELETE", world["keys"]["owner"], definition_url(world))
+    assert (again.status_code, again.json()) == (404, SCHEDULER_NOT_FOUND)
+
+
+def test_delete_builtin_is_rejected(world, conn):
+    r = send(
+        "DELETE", world["keys"]["owner"], definition_url(world, world["builtin"]["id"])
+    )
+    _assert_conflict(r, "builtin_scheduler", BUILTIN_MESSAGE)
+    assert scheduler_row(conn, world["builtin"]["id"])["deleted_at"] is None
+
+
+def test_delete_precondition(world, conn):
+    key = world["keys"]["owner"]
+    stale = send(
+        "DELETE", key, definition_url(world),
+        headers={"If-Match": "2020-01-01T00:00:00+00:00"},
+    )
+    assert stale.status_code == 412
+    assert stale.json()["error"] == "The scheduler changed since it was read"
+    assert scheduler_row(conn, world["manifest"]["id"])["deleted_at"] is None
+    by_body = send(
+        "DELETE", key, definition_url(world),
+        json={"expected_updated_at": "2020-01-01T00:00:00+00:00"},
+    )
+    assert by_body.status_code == 412
+    current = send(
+        "DELETE", key, definition_url(world),
+        headers={"If-Match": stale.json()["updated_at"]},
+    )
+    assert current.status_code == 204, current.text
+
+
+def test_delete_404s(world):
+    key = world["keys"]["owner"]
+    for sid in (
+        "00000000-0000-0000-0000-000000000000",
+        world["other_ws_scheduler"]["id"],
+    ):
+        r = send("DELETE", key, definition_url(world, sid))
+        assert (r.status_code, r.json()) == (404, SCHEDULER_NOT_FOUND)
+
+
+@pytest.mark.parametrize(
+    ("role", "body"),
+    [
+        ("padmin", ROLE_DENIED),
+        ("wsmember", ROLE_DENIED),
+        ("wsguest", CLASS_DENIED),
+        ("outsider", CLASS_DENIED),
+    ],
+)
+def test_delete_denials(world, conn, role, body):
+    r = send("DELETE", world["keys"][role], definition_url(world))
+    assert (r.status_code, r.json()) == (403, body)
+    assert scheduler_row(conn, world["manifest"]["id"])["deleted_at"] is None
+    assert binding_row(conn, world["binding"]["id"])["deleted_at"] is None
+
+
+def test_delete_auth_failures(world, conn):
+    anon = send("DELETE", None, definition_url(world))
+    assert (anon.status_code, anon.json()) == (401, UNAUTHENTICATED)
+    assert scheduler_row(conn, world["manifest"]["id"])["deleted_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# PDASHOSS01-318: POST workspaces/<slug>/projects/<p>/schedulers/
+# ---------------------------------------------------------------------------
+
+
+def install_body(ref, **extra):
+    return {"scheduler": ref, "dtstart": DTSTART, "rrule": "FREQ=DAILY", **extra}
+
+
+def test_project_admin_installs_by_slug(world, conn):
+    r = send(
+        "POST", world["keys"]["padmin"], project_list_url(world),
+        json=install_body(world["bare"]["slug"], extra_context="Only the API."),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert list(body.keys()) == BINDING_KEYS
+    assert body["scheduler"] == str(world["bare"]["id"])
+    assert body["scheduler_slug"] == world["bare"]["slug"]
+    assert body["project"] == str(world["project"]["id"])
+    assert body["workspace"] == str(world["ws"]["id"])
+    assert body["rrule"] == "FREQ=DAILY"
+    assert body["extra_context"] == "Only the API."
+    assert body["enabled"] is True
+    assert body["outcome_mode"] == "create_issue"
+    nxt = datetime.fromisoformat(body["next_run_at"].replace("Z", "+00:00"))
+    assert nxt > datetime.now(timezone.utc)
+    assert nxt.hour == 0 and nxt.minute == 0
+    row = binding_row(conn, body["id"])
+    assert str(row["actor_id"]) == str(world["users"]["padmin"]["id"])
+    assert str(row["created_by_id"]) == str(world["users"]["padmin"]["id"])
+    listed = http.get(world["keys"]["owner"], project_list_url(world)).json()
+    assert world["bare"]["slug"] in [s["slug"] for s in listed["results"]]
+
+
+def test_install_by_id_with_every_field(world):
+    r = send(
+        "POST", world["keys"]["owner"], project_list_url(world),
+        json=install_body(
+            str(world["bare"]["id"]),
+            tzid="America/New_York",
+            rdates=["2027-01-01T09:00:00Z"],
+            exdates=[],
+            outcome_mode="apply_fix",
+            pod=str(world["pod"]["id"]),
+            enabled=False,
+        ),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["tzid"] == "America/New_York"
+    assert body["rdates"] == ["2027-01-01T09:00:00+00:00"]
+    assert body["outcome_mode"] == "apply_fix"
+    assert body["pod"] == str(world["pod"]["id"])
+    assert body["pod_name"] == world["pod"]["name"]
+    assert body["enabled"] is False
+
+
+def test_builtin_can_be_installed_and_uninstalled(world, conn):
+    # The project admin of both projects (the owner is not a member of
+    # the second one).
+    key = world["keys"]["padmin"]
+    installed = send(
+        "POST", key, project_list_url(world, world["other_project"]),
+        json=install_body("security-audit"),
+    )
+    assert installed.status_code == 201, installed.text
+    gone = send(
+        "DELETE", key,
+        binding_url(world, scheduler=world["builtin"], project=world["other_project"]),
+    )
+    assert gone.status_code == 204, gone.text
+    assert scheduler_row(conn, world["builtin"]["id"])["deleted_at"] is None
+
+
+def test_install_conflicts(world):
+    key = world["keys"]["owner"]
+    _assert_conflict(
+        send("POST", key, project_list_url(world), json=install_body(world["manifest"]["slug"])),
+        "already_installed",
+        "The scheduler is already installed on this project.",
+    )
+    db.execute(
+        db.get_database_url(),
+        "UPDATE schedulers SET is_enabled = false WHERE id = %s",
+        (world["bare"]["id"],),
+    )
+    _assert_conflict(
+        send("POST", key, project_list_url(world), json=install_body(world["bare"]["slug"])),
+        "scheduler_disabled",
+        "The scheduler definition is disabled; enable it before installing it.",
+    )
+
+
+def test_install_unknown_scheduler(world):
+    key = world["keys"]["owner"]
+    for ref in (
+        "no-such-scheduler",
+        "00000000-0000-0000-0000-000000000000",
+        str(world["other_ws_scheduler"]["id"]),
+    ):
+        r = send("POST", key, project_list_url(world), json=install_body(ref))
+        assert (r.status_code, r.json()) == (404, {"error": "Scheduler not found"}), ref
+
+
+def test_install_validation(world, conn):
+    key = world["keys"]["owner"]
+    for ref in (None, "", "  ", 5):
+        payload = install_body(ref)
+        if ref is None:
+            del payload["scheduler"]
+        r = send("POST", key, project_list_url(world), json=payload)
+        assert (r.status_code, r.json()) == (
+            400, {"scheduler": ["The scheduler's id or slug is required."]}
+        ), ref
+    bad_rule = send(
+        "POST", key, project_list_url(world),
+        json=install_body(world["bare"]["slug"], rrule="FREQ=NEVER"),
+    )
+    assert bad_rule.status_code == 400
+    assert list(bad_rule.json().keys()) == ["rrule"]
+    no_start = install_body(world["bare"]["slug"])
+    del no_start["dtstart"]
+    missing = send("POST", key, project_list_url(world), json=no_start)
+    assert (missing.status_code, missing.json()) == (
+        400, {"dtstart": ["This field is required."]}
+    )
+    foreign = send(
+        "POST", key, project_list_url(world),
+        json=install_body(world["bare"]["slug"], pod=str(world["foreign_pod"]["id"])),
+    )
+    assert foreign.status_code == 400
+    assert list(foreign.json().keys()) == ["pod"]
+    unknown = send(
+        "POST", key, project_list_url(world),
+        json=install_body(world["bare"]["slug"], project=str(world["other_project"]["id"])),
+    )
+    assert (unknown.status_code, unknown.json()) == (
+        400,
+        {
+            "error": "Not writable on a scheduler install: project",
+            "writable_fields": BINDING_CREATE,
+        },
+    )
+    listed = send("POST", key, project_list_url(world), json=[1])
+    assert (listed.status_code, listed.json()) == (400, NOT_AN_OBJECT)
+    assert db.fetch_one(
+        conn, "SELECT count(*) AS n FROM scheduler_bindings WHERE scheduler_id = %s",
+        (world["bare"]["id"],),
+    )["n"] == 0
+
+
+@pytest.mark.parametrize(
+    ("role", "body"),
+    [
+        ("member", ROLE_DENIED),
+        ("guest", CLASS_DENIED),
+        ("wsmember", CLASS_DENIED),
+        ("outsider", CLASS_DENIED),
+    ],
+)
+def test_install_denials(world, conn, role, body):
+    r = send(
+        "POST", world["keys"][role], project_list_url(world),
+        json=install_body(world["bare"]["slug"]),
+    )
+    assert (r.status_code, r.json()) == (403, body)
+    assert db.fetch_one(
+        conn, "SELECT count(*) AS n FROM scheduler_bindings WHERE scheduler_id = %s",
+        (world["bare"]["id"],),
+    )["n"] == 0
+
+
+def test_install_auth_failures(world):
+    anon = send("POST", None, project_list_url(world), json=install_body("x"))
+    assert (anon.status_code, anon.json()) == (401, UNAUTHENTICATED)
+
+
+# ---------------------------------------------------------------------------
+# PDASHOSS01-318: DELETE .../schedulers/<id>/binding/
+# ---------------------------------------------------------------------------
+
+
+def test_project_admin_uninstalls(world, conn):
+    r = send("DELETE", world["keys"]["padmin"], binding_url(world))
+    assert r.status_code == 204, r.text
+    assert r.content == b""
+    row = binding_row(conn, world["binding"]["id"])
+    assert row["deleted_at"] is not None
+    assert str(row["updated_by_id"]) == str(world["users"]["padmin"]["id"])
+    # The definition and its other install stay.
+    assert scheduler_row(conn, world["manifest"]["id"])["deleted_at"] is None
+    assert binding_row(conn, world["other_binding"]["id"])["deleted_at"] is None
+    listed = http.get(world["keys"]["owner"], project_list_url(world)).json()
+    assert world["manifest"]["slug"] not in [s["slug"] for s in listed["results"]]
+    again = send("DELETE", world["keys"]["padmin"], binding_url(world))
+    assert (again.status_code, again.json()) == (404, BINDING_NOT_FOUND)
+    # Reinstalling after an uninstall works.
+    back = send(
+        "POST", world["keys"]["padmin"], project_list_url(world),
+        json=install_body(world["manifest"]["slug"]),
+    )
+    assert back.status_code == 201, back.text
+
+
+def test_uninstall_precondition(world, conn):
+    stale = send(
+        "DELETE", world["keys"]["owner"], binding_url(world),
+        headers={"If-Match": "2020-01-01T00:00:00Z"},
+    )
+    assert stale.status_code == 412
+    assert stale.json()["error"] == "The scheduler binding changed since it was read"
+    assert binding_row(conn, world["binding"]["id"])["deleted_at"] is None
+
+
+@pytest.mark.parametrize(
+    ("role", "body"),
+    [
+        ("member", ROLE_DENIED),
+        ("guest", CLASS_DENIED),
+        ("wsmember", CLASS_DENIED),
+        ("outsider", CLASS_DENIED),
+    ],
+)
+def test_uninstall_denials(world, conn, role, body):
+    r = send("DELETE", world["keys"][role], binding_url(world))
+    assert (r.status_code, r.json()) == (403, body)
+    assert binding_row(conn, world["binding"]["id"])["deleted_at"] is None
+
+
+def test_uninstall_auth_failures(world, conn):
+    anon = send("DELETE", None, binding_url(world))
+    assert (anon.status_code, anon.json()) == (401, UNAUTHENTICATED)
+    assert binding_row(conn, world["binding"]["id"])["deleted_at"] is None

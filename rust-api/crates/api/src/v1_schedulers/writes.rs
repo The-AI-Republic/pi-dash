@@ -1,7 +1,8 @@
-//! v1 scheduler writes (PDASHOSS01-278).
+//! v1 scheduler writes (PDASHOSS01-278, PDASHOSS01-318).
 //!
-//! Ports the three write endpoints `apps/api/pi_dash/api/views/scheduler.py`
-//! gained in PDASHOSS01-278, with their routes in `api/urls/scheduler.py`:
+//! Ports the write endpoints `apps/api/pi_dash/api/views/scheduler.py`
+//! gained in PDASHOSS01-278 and PDASHOSS01-318, with their routes in
+//! `api/urls/scheduler.py`:
 //!
 //! * `PATCH workspaces/<slug>/projects/<project_id>/schedulers/<uuid>/binding/`
 //!   (`ProjectSchedulerBindingAPIEndpoint`): edit the install —
@@ -10,14 +11,31 @@
 //!   make the install due so the scanner fires it on its next tick.
 //! * `PATCH workspaces/<slug>/schedulers/<uuid>/`
 //!   (`WorkspaceSchedulerDetailAPIEndpoint`): edit a definition's `prompt`,
-//!   `name`, `description`; never a built-in one.
+//!   `name`, `description`, `color`, `is_enabled`; never a built-in one.
+//! * `POST workspaces/<slug>/schedulers/` (`WorkspaceSchedulerListAPIEndpoint`,
+//!   -318): create a definition; a built-in slug is refused.
+//! * `DELETE workspaces/<slug>/schedulers/<uuid>/` (-318): soft-delete a
+//!   definition and every install of it; never a built-in one.
+//! * `POST workspaces/<slug>/projects/<project_id>/schedulers/`
+//!   (`ProjectSchedulerListAPIEndpoint`, -318): install a scheduler, named
+//!   by id or slug.
+//! * `DELETE .../schedulers/<uuid>/binding/` (-318): uninstall.
 //!
 //! Validation and the write itself are the web app's — Python routes both
 //! surfaces through `scheduler/binding_writes.py` and
 //! `scheduler/definition_writes.py`; here the binding edit calls
-//! [`crate::app_scheduler::handlers_bind::apply_binding_patch`] and the
+//! [`crate::app_scheduler::handlers_bind::apply_binding_patch`], the
+//! install [`crate::app_scheduler::handlers_bind::apply_install`], the
+//! uninstall [`crate::app_scheduler::handlers_bind::uninstall_binding`], the
 //! definition edit [`crate::app_scheduler::handlers_sched::validate_patch_body`]
-//! plus the app's `SCHEDULER_PATCH_SQL`, so the two surfaces cannot drift.
+//! plus the app's `SCHEDULER_PATCH_SQL`, the create
+//! [`crate::app_scheduler::handlers_sched::create_scheduler`] and the delete
+//! [`crate::app_scheduler::handlers_sched::soft_delete_scheduler`], so the
+//! two surfaces cannot drift.
+//!
+//! Built-in definitions are told apart by their slug (the catalog the
+//! reseed matches on), not by `source`, which reads `builtin` for
+//! user-created rows too (PDASHOSS01-290).
 //!
 //! Request order (Django's, preserved): API-key authentication (401/403),
 //! the slug→UUID project rewrite (project routes), the class gate
@@ -37,7 +55,7 @@
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{patch, post, MethodRouter};
+use axum::routing::{patch, MethodRouter};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Map, Value};
@@ -47,7 +65,7 @@ use uuid::Uuid;
 use pidash_db::tasks_ticker::models::scheduler_binding::SchedulerBinding;
 use pidash_services::app_scheduler::queries;
 
-use crate::app_scheduler::handlers_bind::{self as app_bind, BindingPatchTarget};
+use crate::app_scheduler::handlers_bind::{self as app_bind, BindingPatchTarget, InstallTarget};
 use crate::app_scheduler::handlers_sched as app_sched;
 use crate::state::AppState;
 
@@ -60,21 +78,22 @@ use super::{
 // Routes
 // ---------------------------------------------------------------------------
 
-/// The three write paths. Only the written method serves Rust; the rest
-/// proxy so Django keeps answering its 405s and OPTIONS.
+/// The three detail write paths. Only the written methods serve Rust; the
+/// rest proxy so Django keeps answering its 405s and OPTIONS. The two POSTs
+/// on the list routes are wired in [`super::handlers::routes`].
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route(
             "/api/v1/workspaces/{slug}/schedulers/{scheduler_id}/",
-            proxy_others(patch(definition_patch)),
+            proxy_others(patch(definition_patch).delete(definition_delete)),
         )
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/binding/",
-            proxy_others(patch(binding_patch)),
+            proxy_others(patch(binding_patch).delete(binding_uninstall)),
         )
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/run-now/",
-            proxy_others(post(run_now)),
+            proxy_others(axum::routing::post(run_now)),
         )
 }
 
@@ -102,7 +121,33 @@ pub const BINDING_WRITABLE_FIELDS: &[&str] = &[
 ];
 
 /// `DEFINITION_WRITABLE_FIELDS`.
-pub const DEFINITION_WRITABLE_FIELDS: &[&str] = &["prompt", "name", "description"];
+pub const DEFINITION_WRITABLE_FIELDS: &[&str] =
+    &["prompt", "name", "description", "color", "is_enabled"];
+
+/// `DEFINITION_CREATE_FIELDS`: the slug plus the editable fields.
+pub const DEFINITION_CREATE_FIELDS: &[&str] = &[
+    "slug",
+    "prompt",
+    "name",
+    "description",
+    "color",
+    "is_enabled",
+];
+
+/// `BINDING_CREATE_FIELDS`: the scheduler (id or slug) plus the editable
+/// binding fields.
+pub const BINDING_CREATE_FIELDS: &[&str] = &[
+    "scheduler",
+    "extra_context",
+    "enabled",
+    "dtstart",
+    "rrule",
+    "tzid",
+    "rdates",
+    "exdates",
+    "outcome_mode",
+    "pod",
+];
 
 /// `CADENCE_FIELDS` (`scheduler/binding_writes.py`): editing any of these
 /// moves `next_run_at`, so its old value joins `previous`.
@@ -114,11 +159,17 @@ pub const EXPECTED_UPDATED_AT: &str = "expected_updated_at";
 /// The non-object body 400 both PATCH views answer.
 pub const NOT_AN_OBJECT_MESSAGE: &str = "The request body must be a JSON object";
 
-/// `is_builtin` rejection message (`code: builtin_scheduler`).
-pub const BUILTIN_MESSAGE: &str = "Built-in schedulers cannot be edited; put per-project instructions in the binding's extra_context instead.";
+/// `BUILTIN_CONFLICT` message (`code: builtin_scheduler`).
+pub const BUILTIN_MESSAGE: &str = "Built-in schedulers cannot be edited or deleted; put per-project instructions in the binding's extra_context instead.";
 
-/// `SchedulerSource.BUILTIN`.
-const SOURCE_BUILTIN: &str = "builtin";
+/// The create 400 for a built-in slug.
+pub const RESERVED_SLUG_MESSAGE: &str = "This slug is reserved for a built-in scheduler.";
+
+/// The install 400 for a missing, blank or non-string `scheduler`.
+pub const SCHEDULER_REQUIRED_MESSAGE: &str = "The scheduler's id or slug is required.";
+
+/// `get_object_or_404(Project, pk=..., workspace__slug=...)` miss on install.
+pub const PROJECT_LOOKUP_NOT_FOUND: &str = "No Project matches the given query.";
 
 /// Project admin (`ROLE.ADMIN`) and member role values.
 const ROLE_ADMIN: i32 = 20;
@@ -268,6 +319,7 @@ struct WriteContext {
     user_id: Uuid,
     timezone: Tz,
     project_id: Option<Uuid>,
+    workspace_id: Option<Uuid>,
 }
 
 /// Which pair of gates a route carries.
@@ -321,6 +373,7 @@ async fn write_context(
         user_id: pre.actor.id,
         timezone,
         project_id,
+        workspace_id: pre.workspace_id,
     })
 }
 
@@ -826,11 +879,14 @@ async fn definition_patch(
     respond(definition_patch_inner(&context, &headers, &slug, &scheduler_id, &data).await)
 }
 
-/// `is_builtin` (`scheduler/definition_writes.py`). PDASHOSS01-290:
-/// `Scheduler.source` defaults to `builtin`, so until that is fixed this
-/// is also true for schedulers created in the web app.
-pub fn is_builtin(source: &str) -> bool {
-    source == SOURCE_BUILTIN
+/// `is_builtin_slug` / `is_builtin` (`scheduler/definition_writes.py`):
+/// whether `slug` is in the built-in catalog. The reseed matches rows by
+/// slug, so that, not `source` (which defaults to `builtin` for
+/// user-created rows too, PDASHOSS01-290), is what makes a row built-in.
+pub fn is_builtin_slug(slug: &str) -> bool {
+    pidash_services::scheduler::builtins::BUILTINS
+        .iter()
+        .any(|builtin| builtin.slug == slug)
 }
 
 async fn definition_patch_inner(
@@ -863,7 +919,7 @@ async fn definition_patch_inner(
         .await
         .map_err(|error| db_error(error, "v1-definition-lock"))?
         .ok_or(Denial::SchedulerNotFound)?;
-    if is_builtin(&record.source) {
+    if is_builtin_slug(&record.slug) {
         return Err(conflict("builtin_scheduler", BUILTIN_MESSAGE));
     }
     let token = if_match_header(headers).or_else(|| body_token(Some(body)));
@@ -873,11 +929,13 @@ async fn definition_patch_inner(
     let mut previous = Map::with_capacity(fields.len());
     for key in fields.keys() {
         let value = match key.as_str() {
-            "prompt" => record.prompt.clone(),
-            "name" => record.name.clone(),
-            _ => record.description.clone(),
+            "prompt" => Value::String(record.prompt.clone()),
+            "name" => Value::String(record.name.clone()),
+            "color" => Value::String(record.color.clone()),
+            "is_enabled" => Value::Bool(record.is_enabled),
+            _ => Value::String(record.description.clone()),
         };
-        previous.insert(key.clone(), Value::String(value));
+        previous.insert(key.clone(), value);
     }
     let write = app_sched::validate_patch_body(&Value::Object(fields), &record)
         .map_err(|errors| Denial::Body(StatusCode::BAD_REQUEST, errors))?;
@@ -963,6 +1021,385 @@ fn affected_project(row: &AffectedBindingRow) -> Value {
     Value::Object(map)
 }
 
+// ---------------------------------------------------------------------------
+// PDASHOSS01-318: create / delete a definition, install / uninstall it
+// ---------------------------------------------------------------------------
+
+/// `_scheduler_by_ref` by id: the workspace's live scheduler with that pk
+/// (`Scheduler.objects.filter(workspace_id=..., pk=...).first()`).
+const SCHEDULER_BY_ID_SQL: &str = r#"SELECT "id", "is_enabled" FROM "schedulers" WHERE "deleted_at" IS NULL AND "workspace_id" = $1 AND "id" = $2 ORDER BY "created_at" DESC LIMIT 1"#;
+
+/// `_scheduler_by_ref` by slug.
+const SCHEDULER_BY_SLUG_SQL: &str = r#"SELECT "id", "is_enabled" FROM "schedulers" WHERE "deleted_at" IS NULL AND "workspace_id" = $1 AND "slug" = $2 ORDER BY "created_at" DESC LIMIT 1"#;
+
+/// `SchedulerBinding.objects.filter(scheduler=..., project=...,
+/// deleted_at__isnull=True).exists()`.
+const INSTALLED_SQL: &str = r#"SELECT EXISTS(SELECT 1 FROM "scheduler_bindings" WHERE "deleted_at" IS NULL AND "scheduler_id" = $1 AND "project_id" = $2)"#;
+
+/// A JSON response with `status` (key order is the construction order).
+fn json_status(status: StatusCode, value: &Value) -> Response {
+    axum::http::Response::builder()
+        .status(status)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_string(value).expect("json body"),
+        ))
+        .expect("json response")
+}
+
+fn no_content() -> Response {
+    axum::http::Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(axum::body::Body::empty())
+        .expect("empty 204 response")
+}
+
+/// A 400 `{field: [message]}` field error.
+fn field_error(field: &str, message: &str) -> Denial {
+    let mut body = Map::with_capacity(1);
+    body.insert(
+        field.to_owned(),
+        Value::Array(vec![Value::String(message.to_owned())]),
+    );
+    Denial::Body(StatusCode::BAD_REQUEST, Value::Object(body))
+}
+
+/// The web app scheduler path's failures, re-rendered through the v1
+/// `handle_exception`.
+fn from_sched(denial: app_sched::Denial) -> Denial {
+    match denial {
+        app_sched::Denial::ObjectNotFound => Denial::SchedulerNotFound,
+        app_sched::Denial::BadDetail(detail) => Denial::BadDetail(detail),
+        app_sched::Denial::BadError(message) => Denial::BadError(message),
+        app_sched::Denial::BadJson(body) => Denial::Body(StatusCode::BAD_REQUEST, body),
+        app_sched::Denial::ServerError => Denial::ServerError,
+    }
+}
+
+/// The concurrency token of a bodiless write (`DELETE`): the `If-Match`
+/// header, else the body's `expected_updated_at` — read only when there
+/// is no header, like `request.data` in `_precondition_failure`. `Err`
+/// hands back the request when Django must parse its media type.
+async fn delete_token(
+    state: &AppState,
+    headers: &HeaderMap,
+    req: Request,
+) -> Result<Option<String>, Box<Result<Request, Response>>> {
+    if let Some(token) = if_match_header(headers) {
+        return Ok(Some(token));
+    }
+    if !json_or_empty(headers) {
+        return Err(Box::new(Ok(req)));
+    }
+    match app_bind::read_request_data(state, req).await {
+        Ok(data) => Ok(body_token(data.as_object())),
+        Err(response) => Err(Box::new(Err(response))),
+    }
+}
+
+/// `WorkspaceSchedulerListAPIEndpoint.post`.
+pub async fn definition_create(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    req: Request,
+) -> Response {
+    let headers = req.headers().clone();
+    let context = match write_context(&state, &headers, &slug, None, Scope::Workspace).await {
+        Ok(context) => context,
+        Err(denial) => return denial.into_response(),
+    };
+    let data = match app_bind::read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    respond(definition_create_inner(&context, &data).await)
+}
+
+async fn definition_create_inner(context: &WriteContext, data: &Value) -> Result<Response, Denial> {
+    let Value::Object(body) = data else {
+        return Err(Denial::BadError(NOT_AN_OBJECT_MESSAGE.to_owned()));
+    };
+    // Unknown keys only: an empty body goes on to the serializer's
+    // required-field errors.
+    if body
+        .keys()
+        .any(|key| !DEFINITION_CREATE_FIELDS.contains(&key.as_str()))
+    {
+        if let Some(denial) = unwritable_denial(body, DEFINITION_CREATE_FIELDS, "a new scheduler") {
+            return Err(denial);
+        }
+    }
+    if let Some(Value::String(slug)) = body.get("slug") {
+        if is_builtin_slug(slug.trim_matches(app_bind::is_python_space)) {
+            return Err(field_error("slug", RESERVED_SLUG_MESSAGE));
+        }
+    }
+    let workspace_id = context.workspace_id.ok_or(Denial::ServerError)?;
+    let (row, _count) =
+        app_sched::create_scheduler(&context.pool, &workspace_id, &context.user_id, data)
+            .await
+            .map_err(from_sched)?;
+    let scheduler = SchedulerRow {
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        id: row.id,
+        workspace_id: row.workspace_id,
+        slug: row.slug,
+        name: row.name,
+        description: row.description,
+        prompt: row.prompt,
+        source: row.source,
+        is_enabled: row.is_enabled,
+        color: row.color,
+    };
+    let rendered = render_scheduler(&scheduler, &[], &context.timezone);
+    Ok(json_status(StatusCode::CREATED, &Value::Object(rendered)))
+}
+
+/// `WorkspaceSchedulerDetailAPIEndpoint.delete`.
+async fn definition_delete(
+    State(state): State<AppState>,
+    Path((slug, scheduler_raw)): Path<(String, String)>,
+    req: Request,
+) -> Response {
+    let Some(scheduler_id) = canonical_uuid(&scheduler_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    let headers = req.headers().clone();
+    let context = match write_context(&state, &headers, &slug, None, Scope::Workspace).await {
+        Ok(context) => context,
+        Err(denial) => return denial.into_response(),
+    };
+    let mut tx = match context.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return db_error(error, "v1-definition-delete-begin").into_response(),
+    };
+    let record: app_sched::SchedulerRow = match sqlx::query_as(LOCKED_SCHEDULER_SQL)
+        .bind(scheduler_id)
+        .bind(&slug)
+        .fetch_optional(&mut *tx)
+        .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => return Denial::SchedulerNotFound.into_response(),
+        Err(error) => return db_error(error, "v1-definition-delete-lock").into_response(),
+    };
+    if is_builtin_slug(&record.slug) {
+        return conflict("builtin_scheduler", BUILTIN_MESSAGE).into_response();
+    }
+    let token = match delete_token(&state, &headers, req).await {
+        Ok(token) => token,
+        Err(other) => {
+            drop(tx);
+            return match *other {
+                Ok(req) => crate::edge::proxy(State(state), req).await,
+                Err(response) => response,
+            };
+        }
+    };
+    if let Some(denial) = precondition_denial(token, &record.updated_at, "scheduler") {
+        return denial.into_response();
+    }
+    if let Err(denial) =
+        app_sched::soft_delete_scheduler(&mut tx, &scheduler_id, &context.user_id).await
+    {
+        return from_sched(denial).into_response();
+    }
+    if let Err(error) = tx.commit().await {
+        return db_error(error, "v1-definition-delete-commit").into_response();
+    }
+    // Instance `delete()` → `.delay(...)` after the stamp, as the app does.
+    app_sched::enqueue_soft_delete(&context.pool, "scheduler", &scheduler_id).await;
+    no_content()
+}
+
+/// `ProjectSchedulerListAPIEndpoint.post`.
+pub async fn binding_install(
+    State(state): State<AppState>,
+    Path((slug, project_raw)): Path<(String, String)>,
+    req: Request,
+) -> Response {
+    let headers = req.headers().clone();
+    let context =
+        match write_context(&state, &headers, &slug, Some(&project_raw), Scope::Project).await {
+            Ok(context) => context,
+            Err(denial) => return denial.into_response(),
+        };
+    let data = match app_bind::read_request_data(&state, req).await {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    respond(binding_install_inner(&context, &slug, &data).await)
+}
+
+/// The scheduler a ref names, as `(id, is_enabled)`: a ref that parses
+/// as a UUID (`uuid.UUID(ref)`) is only ever an id, anything else a slug.
+async fn scheduler_by_ref(
+    pool: &PgPool,
+    workspace_id: &Uuid,
+    reference: &str,
+) -> Result<Option<(Uuid, bool)>, Denial> {
+    let query = match app_bind::uuid_from_hex_forms(reference) {
+        Some(id) => sqlx::query_as(SCHEDULER_BY_ID_SQL)
+            .bind(workspace_id)
+            .bind(id),
+        None => sqlx::query_as(SCHEDULER_BY_SLUG_SQL)
+            .bind(workspace_id)
+            .bind(reference),
+    };
+    query
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| db_error(error, "v1-install-scheduler"))
+}
+
+async fn binding_install_inner(
+    context: &WriteContext,
+    slug: &str,
+    data: &Value,
+) -> Result<Response, Denial> {
+    let Value::Object(body) = data else {
+        return Err(Denial::BadError(NOT_AN_OBJECT_MESSAGE.to_owned()));
+    };
+    if body
+        .keys()
+        .any(|key| !BINDING_CREATE_FIELDS.contains(&key.as_str()))
+    {
+        if let Some(denial) = unwritable_denial(body, BINDING_CREATE_FIELDS, "a scheduler install")
+        {
+            return Err(denial);
+        }
+    }
+    let reference = match body.get("scheduler") {
+        Some(Value::String(text)) => text.trim_matches(app_bind::is_python_space),
+        _ => "",
+    };
+    if reference.is_empty() {
+        return Err(field_error("scheduler", SCHEDULER_REQUIRED_MESSAGE));
+    }
+    let project_id = context.project_id.ok_or(Denial::ServerError)?;
+    let project = app_bind::fetch_install_project(&context.pool, &project_id, slug)
+        .await
+        .map_err(from_app)?
+        .ok_or_else(|| {
+            Denial::Body(
+                StatusCode::NOT_FOUND,
+                serde_json::json!({ "detail": PROJECT_LOOKUP_NOT_FOUND }),
+            )
+        })?;
+    let Some((scheduler_id, scheduler_enabled)) =
+        scheduler_by_ref(&context.pool, &project.workspace_id, reference).await?
+    else {
+        return Err(Denial::Body(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "Scheduler not found" }),
+        ));
+    };
+    if !scheduler_enabled {
+        return Err(conflict(
+            "scheduler_disabled",
+            "The scheduler definition is disabled; enable it before installing it.",
+        ));
+    }
+    let already = || {
+        conflict(
+            "already_installed",
+            "The scheduler is already installed on this project.",
+        )
+    };
+    let installed: bool = sqlx::query_scalar(INSTALLED_SQL)
+        .bind(scheduler_id)
+        .bind(project_id)
+        .fetch_one(&context.pool)
+        .await
+        .map_err(|error| db_error(error, "v1-install-exists"))?;
+    if installed {
+        return Err(already());
+    }
+    // The serializer's identity fields come from the URL and the resolved
+    // scheduler, never from the body (`{**data, "scheduler": ...,
+    // "project": ...}`).
+    let mut fields = body.clone();
+    fields.insert(
+        "scheduler".to_owned(),
+        Value::String(scheduler_id.to_string()),
+    );
+    fields.insert("project".to_owned(), Value::String(project_id.to_string()));
+    let target = InstallTarget {
+        scheduler_id,
+        project_id,
+        workspace_id: project.workspace_id,
+        actor_id: context.user_id,
+    };
+    let saved =
+        match app_bind::apply_install(&context.pool, &fields, &target, &context.timezone).await {
+            Ok(saved) => saved,
+            // A concurrent install won the per-project unique constraint.
+            Err(app_bind::Denial::InvalidPayload) => return Err(already()),
+            Err(other) => return Err(from_app(other)),
+        };
+    let fresh = render_row(&context.pool, &saved.row.id).await?;
+    Ok(json_status(
+        StatusCode::CREATED,
+        &render_binding(&fresh, &context.timezone),
+    ))
+}
+
+/// `ProjectSchedulerBindingAPIEndpoint.delete`.
+async fn binding_uninstall(
+    State(state): State<AppState>,
+    Path((slug, project_raw, scheduler_raw)): Path<(String, String, String)>,
+    req: Request,
+) -> Response {
+    let Some(scheduler_id) = canonical_uuid(&scheduler_raw) else {
+        return crate::edge::proxy(State(state), req).await;
+    };
+    let headers = req.headers().clone();
+    let context =
+        match write_context(&state, &headers, &slug, Some(&project_raw), Scope::Project).await {
+            Ok(context) => context,
+            Err(denial) => return denial.into_response(),
+        };
+    let Some(project_id) = context.project_id else {
+        return Denial::ServerError.into_response();
+    };
+    let mut tx = match context.pool.begin().await {
+        Ok(tx) => tx,
+        Err(error) => return db_error(error, "v1-uninstall-begin").into_response(),
+    };
+    let (binding, _) = match lock_binding(&mut tx, &scheduler_id, &project_id, &slug).await {
+        Ok(locked) => locked,
+        Err(denial) => return denial.into_response(),
+    };
+    let token = match delete_token(&state, &headers, req).await {
+        Ok(token) => token,
+        Err(other) => {
+            drop(tx);
+            return match *other {
+                Ok(req) => crate::edge::proxy(State(state), req).await,
+                Err(response) => response,
+            };
+        }
+    };
+    if let Some(denial) = precondition_denial(token, &binding.updated_at, "scheduler binding") {
+        return denial.into_response();
+    }
+    // `binding.delete()`: two `now()` samples (deleted_at, then save's
+    // updated_at), then the related-objects sweep after commit.
+    let now = Utc::now();
+    let now2 = Utc::now();
+    if let Err(denial) =
+        app_bind::uninstall_binding(&mut *tx, &binding.id, &context.user_id, &now, &now2).await
+    {
+        return from_app(denial).into_response();
+    }
+    if let Err(error) = tx.commit().await {
+        return db_error(error, "v1-uninstall-commit").into_response();
+    }
+    app_bind::enqueue_soft_delete(&context.pool, &binding.id).await;
+    no_content()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1008,7 +1445,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
             serde_json::to_string(&body).unwrap(),
-            r#"{"error":"No fields to update","writable_fields":["prompt","name","description"]}"#
+            r#"{"error":"No fields to update","writable_fields":["prompt","name","description","color","is_enabled"]}"#
         );
     }
 
@@ -1238,9 +1675,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_is_source_builtin() {
-        assert!(is_builtin("builtin"));
-        assert!(!is_builtin("manifest"));
+    fn builtin_is_a_catalog_slug() {
+        assert!(is_builtin_slug("security-audit"));
+        assert!(is_builtin_slug("fable-security-audit"));
+        assert!(!is_builtin_slug("contract-test-scheduler"));
+        assert!(!is_builtin_slug("Security-Audit"));
     }
 
     #[test]

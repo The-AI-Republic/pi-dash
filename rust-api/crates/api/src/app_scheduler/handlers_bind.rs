@@ -298,45 +298,63 @@ pub async fn binding_install(
         Ok(None) => return Denial::NotFound(NOT_FOUND_SCHEDULER_BODY).into_response(),
         Err(denial) => return denial.into_response(),
     };
-    // Serializer validation with the view-supplied project context.
-    let attrs = match validate_binding_fields(pool, body, None, &resolved.timezone).await {
-        Ok(attrs) => attrs,
-        Err(denial) => return denial.into_response(),
-    };
-    if let Err(denial) = enforce_unique_install(pool, &scheduler_id, attrs.project.flatten()).await
-    {
-        return denial.into_response();
-    }
-    let install = InstallAttrs {
+    let target = InstallTarget {
         scheduler_id,
         project_id,
         workspace_id: project.workspace_id,
         actor_id: resolved.user_id,
-        attrs,
     };
-    if let Err(denial) = validate_install_cross(&install, &project_id) {
-        return denial.into_response();
-    }
-    let mut saved = match insert_binding(pool, &install).await {
+    let saved = match apply_install(pool, body, &target, &resolved.timezone).await {
         Ok(saved) => saved,
         Err(denial) => return denial.into_response(),
     };
-    // Install recompute (`:216-220`): always compute after save, write back
-    // only when non-null AND different from stored (NULL here).
+    let body = render_saved_binding(&saved, &sched, &resolved.timezone);
+    json_response(StatusCode::CREATED, body)
+}
+
+/// The ids an install pins at save: the guarded scheduler, the URL project
+/// and its workspace, and the acting user.
+pub(crate) struct InstallTarget {
+    pub scheduler_id: Uuid,
+    pub project_id: Uuid,
+    pub workspace_id: Uuid,
+    pub actor_id: Uuid,
+}
+
+/// The install write shared by the web app and the v1 surface
+/// (`scheduler/binding_writes.py::install_binding`, PDASHOSS01-318):
+/// serializer validation with the URL project as context, the unique
+/// check, the cross-field `validate()`, the INSERT, then the first
+/// `next_run_at` (`views.py:216-220`: always computed after save, written
+/// back only when non-null AND different from stored — NULL here).
+pub(crate) async fn apply_install(
+    pool: &PgPool,
+    body: &Map<String, Value>,
+    target: &InstallTarget,
+    timezone: &Tz,
+) -> Result<SavedBinding, Denial> {
+    let attrs = validate_binding_fields(pool, body, None, timezone).await?;
+    enforce_unique_install(pool, &target.scheduler_id, attrs.project.flatten()).await?;
+    let install = InstallAttrs {
+        scheduler_id: target.scheduler_id,
+        project_id: target.project_id,
+        workspace_id: target.workspace_id,
+        actor_id: target.actor_id,
+        attrs,
+    };
+    validate_install_cross(&install, &target.project_id)?;
+    let mut saved = insert_binding(pool, &install).await?;
     let now = Utc::now();
     let bundle = saved.recompute_bundle();
     let write =
         queries::install_next_run_at(&bundle, saved.row.next_run_at, now, next_fire_for_binding);
     if let Some(computed) = write {
         let stamp = Utc::now();
-        if let Err(denial) = write_next_run_at(pool, &saved.row.id, &computed, &stamp).await {
-            return denial.into_response();
-        }
+        write_next_run_at(pool, &saved.row.id, &computed, &stamp).await?;
         saved.row.next_run_at = Some(computed);
         saved.row.updated_at = stamp;
     }
-    let body = render_saved_binding(&saved, &sched, &resolved.timezone);
-    json_response(StatusCode::CREATED, body)
+    Ok(saved)
 }
 
 /// `GET .../scheduler-bindings/<uuid>/` (`views.py:237-249`): 200 or 404.
@@ -1029,7 +1047,7 @@ fn int_hex16(text: &str) -> Option<u128> {
 /// (all occurrences, case-sensitive), strip `{}` ends, drop `-`, require
 /// 32 characters, then `int(hex, 16)` with its whitespace/sign/underscore
 /// leniency and the `0..2^128` range check.
-fn uuid_from_hex_forms(text: &str) -> Option<Uuid> {
+pub(crate) fn uuid_from_hex_forms(text: &str) -> Option<Uuid> {
     let no_prefix = text.replace("urn:", "").replace("uuid:", "");
     // `str.strip('{}')` strips ALL leading/trailing braces, not one pair.
     let stripped = no_prefix.trim_matches(['{', '}']);
@@ -2189,11 +2207,11 @@ fn db_denial(error: sqlx::Error) -> Denial {
 }
 
 /// BR3 install project lookup: `(id, workspace_id)` or `None`.
-struct InstallProject {
-    workspace_id: Uuid,
+pub(crate) struct InstallProject {
+    pub(crate) workspace_id: Uuid,
 }
 
-async fn fetch_install_project(
+pub(crate) async fn fetch_install_project(
     pool: &PgPool,
     project_id: &Uuid,
     slug: &str,
@@ -2526,8 +2544,8 @@ struct InstallAttrs {
 
 /// The just-inserted row in memory (what the 201 re-renders) plus the
 /// validated pod name (the serializer's cached `pod` dereference).
-struct SavedBinding {
-    row: scheduler_binding::SchedulerBinding,
+pub(crate) struct SavedBinding {
+    pub(crate) row: scheduler_binding::SchedulerBinding,
     pod_name: Option<String>,
 }
 
@@ -2774,7 +2792,7 @@ fn soft_delete_message(binding_id: &Uuid) -> pidash_jobs::TaskMessage {
 
 /// Best-effort publish of [`soft_delete_message`]: without the queue
 /// the response still stands.
-async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
+pub(crate) async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
     let message = soft_delete_message(binding_id);
     let job = pidash_jobs::queue::NewJob::new(
         message.task.clone(),
@@ -2789,8 +2807,8 @@ async fn enqueue_soft_delete(pool: &PgPool, binding_id: &Uuid) {
 /// BR8 uninstall (`:290`): `binding.delete()` soft-delete with two `now()`
 /// samples (ported quirk 5). The caller enqueues the related-objects
 /// sweep separately ([`enqueue_soft_delete`]).
-async fn uninstall_binding(
-    pool: &PgPool,
+pub(crate) async fn uninstall_binding(
+    executor: impl sqlx::PgExecutor<'_>,
     binding_id: &Uuid,
     user_id: &Uuid,
     now: &DateTime<Utc>,
@@ -2805,7 +2823,7 @@ async fn uninstall_binding(
         .bind(now2)
         .bind(user_id)
         .bind(binding_id)
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(|_| Denial::ServerError)?;
     Ok(())
