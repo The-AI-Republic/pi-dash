@@ -28,8 +28,7 @@ import { useListReferences } from "./reference.js";
 import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../prefs/entities.js";
-import { addIssuesToModule, addIssueToCycle } from "@pidash/api-client";
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { useAttachExisting } from "./attach.js";
 import type { RichExpression } from "../filters/rich/expression.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
 import type { CreateFormInitialValues } from "../create/createForm.js";
@@ -89,6 +88,11 @@ export interface ListLayoutProps {
   onPeekChange?: ((key: string | null) => void) | undefined;
   /** Compact density from the layout search param. */
   compact?: boolean | undefined;
+  /**
+   * Host entries the empty card below the list reaches, so it opens the
+   * same create and add-existing dialogs the group headers do (ISS-069/070).
+   */
+  onRegisterOverlays?: ((overlays: ListLayoutOverlays) => void) | undefined;
   /** Stored rich filters scoping every page (ISS-095–099). */
   richFilters?: RichExpression | undefined;
   /** Whether this view offers inline quick-add (ISS-011). */
@@ -104,6 +108,12 @@ export interface ListLayoutProps {
    * the cloud workflow layer injects its reason here.
    */
   creationBlockedReason?: string | undefined;
+}
+
+/** Entries the empty card can reach through this layout. */
+export interface ListLayoutOverlays {
+  openCreate: () => void;
+  openAddExisting: () => void;
 }
 
 /**
@@ -168,6 +178,7 @@ export function ListLayout({
   peekKey: controlledPeekKey,
   onPeekChange,
   compact = false,
+  onRegisterOverlays,
   richFilters = {},
   enableQuickAdd = true,
   canEdit,
@@ -257,19 +268,35 @@ export function ListLayout({
     setCreateState(null);
   }
 
-  async function attachExisting(ids: string[]): Promise<void> {
-    try {
-      if (cycleId !== undefined) {
-        for (const id of ids) await addIssueToCycle(client, workspaceSlug, projectId, cycleId, id);
-      } else if (moduleId !== undefined) {
-        await addIssuesToModule(client, workspaceSlug, projectId, moduleId, ids);
-      }
-      notifySuccess(ids.length === 1 ? "Work item added" : "Work items added");
-      setAddExistingOpen(false);
-    } catch {
-      notifyError("Couldn't add the work items", "Check your connection and try again.");
-    }
+  function openCreateBlank(): void {
+    openCreate({});
   }
+
+  const { attach } = useAttachExisting({
+    workspaceSlug,
+    projectId,
+    entity,
+    ...(cycleId === undefined ? {} : { cycleId }),
+    ...(moduleId === undefined ? {} : { moduleId }),
+  });
+  async function attachExisting(ids: string[]): Promise<void> {
+    if (await attach(ids)) setAddExistingOpen(false);
+  }
+
+  // The host's empty card opens the same two overlays the headers do. The
+  // callbacks read state through setters, so the registration stays stable
+  // across renders and cannot loop the host's effect.
+  const overlayRegistration = onRegisterOverlays;
+  React.useEffect(() => {
+    overlayRegistration?.({
+      openCreate: () => {
+        openCreateBlank();
+      },
+      openAddExisting: () => {
+        setAddExistingOpen(true);
+      },
+    });
+  }, [overlayRegistration]);
 
   function hrefFor(issue: IssueListItem): string {
     return `/${workspaceSlug}/browse/${projectIdentifier}-${issue.sequence_id}`;

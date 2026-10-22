@@ -22,6 +22,13 @@ import { projectKeys } from "../../projects/api/keys.js";
 import { GLOBAL_LOAD_MORE_LABEL, GlobalIssuesScreen, globalIssueKey } from "./GlobalIssuesScreen.js";
 import { globalIssuesQueryOptions } from "./queries.js";
 
+// The empty surface reads workspace standing for its entries; the list
+// rows do not, so the harness pins a member throughout.
+vi.mock("../../../core/session/hooks.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../core/session/hooks.js")>()),
+  usePermissions: () => ({ role: 20, isMember: true, canEdit: true, isAdmin: false, isLoading: false }),
+}));
+
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const OTHER_PROJECT = "323e4567-e89b-12d3-a456-426614174002";
@@ -94,6 +101,8 @@ function renderScreen(
     nextPage?: ReturnType<typeof page>;
     /** Records each read URL, for proving the cursor round-trip. */
     onFetch?: (url: string) => void;
+    /** Visible projects; the empty surface picks its card from them. */
+    projects?: Array<Record<string, unknown>>;
   } = {}
 ) {
   createAppClient("https://api.test", ((url: string) => {
@@ -117,10 +126,10 @@ function renderScreen(
     globalIssuesQueryOptions(getAppClient(), options.withoutWorkspaceParam ? "" : SLUG).queryKey,
     { pages: [firstPage], pageParams: [null] }
   );
-  queryClient.setQueryData(projectKeys.list(options.withoutWorkspaceParam ? "" : SLUG), [
-    projectRow(PROJECT, "WEB"),
-    projectRow(OTHER_PROJECT, "API"),
-  ]);
+  queryClient.setQueryData(
+    projectKeys.list(options.withoutWorkspaceParam ? "" : SLUG),
+    options.projects ?? [projectRow(PROJECT, "WEB"), projectRow(OTHER_PROJECT, "API")]
+  );
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
   const layout = createRoute({ getParentRoute: () => rootRoute, path: "/$ws", component: () => <Outlet /> });
   const browse = createRoute({
@@ -227,13 +236,21 @@ describe("GlobalIssuesScreen", () => {
     expect(screen.getByText("Issue b2")).toBeInTheDocument();
   });
 
-  it("offers a filter-aware empty state and the plain one", async () => {
-    const filtered = renderScreen({ results: [] }, { priority: "urgent" });
-    expect(await screen.findByText("No issues match these filters.")).toBeInTheDocument();
-    filtered.view.unmount();
-
+  it("renders the workspace card when the read returns no rows (ISS-073)", async () => {
     renderScreen({ results: [] });
-    expect(await screen.findByText("Issues from every project will appear here.")).toBeInTheDocument();
+    expect(await screen.findByText("No Views yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add work item" })).toBeEnabled();
+  });
+
+  it("asks for a project when the workspace shows none (ISS-073)", async () => {
+    renderScreen({ results: [] }, {}, { projects: [] });
+    expect(await screen.findByText("No project")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start your first project" })).toBeEnabled();
+  });
+
+  it("shows the same card when URL filters are present because the list ignores them (ISS-223)", async () => {
+    renderScreen({ results: [] }, { priority: "urgent" });
+    expect(await screen.findByText("No Views yet")).toBeInTheDocument();
   });
 
   it("falls back to an empty slug when the route carries no workspace param", async () => {

@@ -13,11 +13,14 @@ import * as React from "react";
 import type { SavedView } from "@pidash/api-client";
 
 import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
+import type { IssuesEntity } from "../../prefs/entities.js";
 import { useRichFilterBuilder, type RichFilterBuilderParts } from "./RichFilterBuilder.js";
 
 export interface IssueFiltersProps {
   workspaceSlug: string;
   projectId: string;
+  /** Entity whose expression the row edits; project when absent. */
+  entity?: IssuesEntity | undefined;
   hideCycle: boolean;
   hideModule: boolean;
   viewsEnabled?: boolean | undefined;
@@ -33,6 +36,7 @@ export interface IssueFiltersProps {
 export default function IssueFilters({
   workspaceSlug,
   projectId,
+  entity,
   hideCycle,
   hideModule,
   viewsEnabled,
@@ -48,7 +52,7 @@ export default function IssueFilters({
   const parts = useRichFilterBuilder({
     workspaceSlug,
     projectId,
-    entity: { scope: "project", projectId },
+    entity: entity ?? { scope: "project", projectId },
     hideCycle,
     hideModule,
     viewsEnabled,

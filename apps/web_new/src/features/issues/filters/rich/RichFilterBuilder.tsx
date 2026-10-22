@@ -56,6 +56,13 @@ export interface RichFilterBuilderProps {
   temporary?: boolean | undefined;
   /** Custom config registry for the temporary instance; session-wide by default. */
   temporaryRegistry?: FieldConfigRegistry | undefined;
+  /**
+   * Expression a temporary instance opens with (ISS-071). The archived
+   * page restores its own locally stored filters and never reads the
+   * server record, so the caller hands the stored tree in here; later
+   * edits stay in memory.
+   */
+  temporarySeed?: readonly RichCondition[] | undefined;
   /** Saved-view record the row edits; absent on bare entity lists. */
   view?: { view: SavedView; isDefault: boolean } | undefined;
   /** Display settings the saved view currently shows (local edits included). */
@@ -70,10 +77,31 @@ export interface RichFilterBuilderProps {
 export interface RichFilterBuilderParts {
   /** Header trigger, mounted in the header action slot. */
   control: React.ReactNode;
+  /**
+   * Conditions the row holds right now. Hosts that query with the
+   * expression read it here instead of keeping a second copy that would
+   * drift from the row (ISS-071).
+   */
+  conditions: readonly RichCondition[];
   /** Builder row, mounted beneath the header. */
   row: React.ReactNode;
   /** Client id of this instance: the entity's, or a TEMP- id when ephemeral. */
   instanceId: string;
+  /**
+   * A condition was introduced through this row during the current visit
+   * (ISS-068/070/071). The first-run empty card holds until then, so a
+   * stored expression that happens to empty the list reads as its own
+   * state rather than as a search the user just made.
+   */
+  addedThisVisit: boolean;
+  /** Empty the expression in one step: the filtered-empty card's entry. */
+  clearFilters: () => void;
+  /**
+   * At least one condition is complete. The empty-state rule needs only
+   * this answer, so the host passes it on instead of re-deriving it from
+   * the expression (Quality gates: the parser stays in this chunk).
+   */
+  hasCompleteCondition: boolean;
 }
 
 /**
@@ -106,7 +134,7 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   // own copy for the life of the mount; a saved-view row starts from the
   // view's stored expression and keeps edits local until Update view; a
   // persisted entity row follows the server.
-  const [local, setLocal] = React.useState<readonly RichCondition[]>([]);
+  const [local, setLocal] = React.useState<readonly RichCondition[]>(props.temporarySeed ?? []);
   const [viewConditions, setViewConditions] = React.useState<readonly RichCondition[]>(() =>
     isView ? parseRichExpression(props.view?.view.rich_filters ?? {}) : []
   );
@@ -120,6 +148,9 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   }, [viewSource]);
   const conditions = temporary ? local : isView ? viewConditions : stored;
   const [open, setOpen] = React.useState(true);
+  // Set when a condition is added through either add control, and dropped
+  // again once the expression is empty (clearing restores the list).
+  const [addedThisVisit, setAddedThisVisit] = React.useState(false);
   const fields = React.useMemo(() => richFilterFields({ hideCycle, hideModule }), [hideCycle, hideModule]);
   const [draft, setDraft] = React.useState<readonly RichCondition[] | null>(null);
   const rows = draft ?? conditions;
@@ -209,6 +240,8 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
 
   function commit(next: readonly RichCondition[]): void {
     setDraft(next);
+    if (next.length === 0) setAddedThisVisit(false);
+    else if (next.some((row) => !conditions.some((current) => current.key === row.key))) setAddedThisVisit(true);
     if (temporary || isView) {
       if (temporary) setLocal(next);
       else setViewConditions(next);
@@ -317,7 +350,17 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
       </div>
     ) : null;
 
-  return { control, row, instanceId };
+  return {
+    control,
+    row,
+    instanceId,
+    conditions: rows,
+    addedThisVisit,
+    clearFilters: () => {
+      commit([]);
+    },
+    hasCompleteCondition: rows.some(isConditionComplete),
+  };
 }
 
 /** Stable entity id segment for a persisted instance. */

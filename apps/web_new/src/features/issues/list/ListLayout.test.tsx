@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,6 +36,7 @@ vi.mock("../components/WorkItemCreateDialog.js", () => ({
     initialProjectId?: string;
     initialValues?: Record<string, unknown>;
     onCreated?: (id: string) => void;
+    onOpenChange?: (open: boolean) => void;
   }) =>
     props.open ? (
       <div
@@ -48,6 +49,9 @@ vi.mock("../components/WorkItemCreateDialog.js", () => ({
       >
         <button type="button" onClick={() => props.onCreated?.("created-1")}>
           create
+        </button>
+        <button type="button" data-close="" onClick={() => props.onOpenChange?.(false)}>
+          close
         </button>
       </div>
     ) : null,
@@ -124,6 +128,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { projectKeys } from "../../projects/index.js";
 import { issueKeys } from "../api/keys.js";
 import { entityPrefsKeyPart } from "../prefs/prefsQuery.js";
+import { entityListsKeyPart } from "../prefs/entities.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity, PrefsRecord } from "../prefs/entities.js";
 import { groupedSections } from "./grouping.js";
@@ -483,6 +488,18 @@ describe("ListLayout", () => {
     await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
   });
 
+  it("closes the create dialog through its own open-change handler", async () => {
+    const user = userEvent.setup();
+    renderLayout({ cycleId: CYCLE });
+    fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Create work item" }));
+    const dialog = await screen.findByTestId("create-dialog");
+    const close = dialog.querySelector("[data-close]");
+    expect(close).not.toBeNull();
+    fireEvent.click(close!);
+    await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
+  });
+
   it("offers add-existing in cycle/module context and attaches to the entity", async () => {
     const user = userEvent.setup();
     renderLayout({ moduleId: MODULE });
@@ -494,6 +511,7 @@ describe("ListLayout", () => {
       expect(mocks.addToModule).toHaveBeenCalledWith(expect.anything(), "acme", PROJECT, MODULE, ["one"])
     );
     expect(mocks.notifySuccess).toHaveBeenCalledWith("Work item added");
+    await waitFor(() => expect(screen.queryByTestId("add-existing-modal")).not.toBeInTheDocument());
   });
 
   it("carries a label section's membership and assignee value into the create form", async () => {
@@ -575,10 +593,11 @@ describe("ListLayout", () => {
 
   it("reports attach failures without closing the modal", async () => {
     const user = userEvent.setup();
-    mocks.addToModule.mockRejectedValue(new Error("bridge down"));
     renderLayout({ moduleId: MODULE });
     fireEvent.click(screen.getByRole("button", { name: "Add to All work items" }));
     await user.click(screen.getByRole("menuitem", { name: "Add an existing work item" }));
+    await screen.findByTestId("add-existing-modal");
+    mocks.addToModule.mockRejectedValue(new Error("bridge down"));
     await user.click(screen.getByRole("button", { name: "Attach one" }));
     await waitFor(() =>
       expect(mocks.notifyError).toHaveBeenCalledWith(
@@ -642,5 +661,46 @@ describe("ListLayout", () => {
   it("keeps quick-add enabled for an ordinary project view", async () => {
     renderLayout();
     expect(await screen.findByTestId("quick-add-probe")).toHaveAttribute("data-disabled", "false");
+  });
+
+  it("registers the create and add-existing entries for the empty card (ISS-069/070)", async () => {
+    const user = userEvent.setup();
+    const onRegisterOverlays = vi.fn();
+    renderLayout({ cycleId: CYCLE, moduleId: MODULE, onRegisterOverlays });
+    await waitFor(() => expect(onRegisterOverlays).toHaveBeenCalledTimes(1));
+    const overlays = onRegisterOverlays.mock.calls[0]![0] as {
+      openCreate: () => void;
+      openAddExisting: () => void;
+    };
+    act(() => {
+      overlays.openCreate();
+    });
+    const dialog = await screen.findByTestId("create-dialog");
+    expect(dialog).toHaveAttribute("data-project", PROJECT);
+    expect(JSON.parse(dialog.getAttribute("data-values") ?? "{}")).toEqual({ cycleId: CYCLE, moduleIds: [MODULE] });
+    await user.click(screen.getByRole("button", { name: "create" }));
+    await waitFor(() => expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument());
+    act(() => {
+      overlays.openAddExisting();
+    });
+    expect(await screen.findByTestId("add-existing-modal")).toHaveAttribute("data-module", MODULE);
+  });
+
+  it("refreshes the entity's lists after attaching from the empty card", async () => {
+    const user = userEvent.setup();
+    const onRegisterOverlays = vi.fn();
+    const { queryClient } = renderLayout({ moduleId: MODULE, onRegisterOverlays });
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    await waitFor(() => expect(onRegisterOverlays).toHaveBeenCalledTimes(1));
+    act(() => {
+      (onRegisterOverlays.mock.calls[0]![0] as { openAddExisting: () => void }).openAddExisting();
+    });
+    await user.click(await screen.findByRole("button", { name: "Attach one" }));
+    await waitFor(() => expect(mocks.addToModule).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({
+        queryKey: issueKeys.lists("acme", ...entityListsKeyPart({ scope: "project", projectId: PROJECT })),
+      })
+    );
   });
 });

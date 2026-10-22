@@ -757,3 +757,95 @@ describe("temporary rows never write views", () => {
     expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
   });
 });
+
+describe("builder parts for the empty cards (ISS-068–071)", () => {
+  function PartProbe({ seed }: { seed?: RichFilterBuilderProps["temporarySeed"] }): React.ReactElement {
+    const parts = useRichFilterBuilder({
+      workspaceSlug: "acme",
+      projectId: PROJECT,
+      entity: ENTITY,
+      hideCycle: false,
+      hideModule: false,
+      temporary: true,
+      ...(seed === undefined ? {} : { temporarySeed: seed }),
+    });
+    return (
+      <div>
+        <span data-testid="count">{parts.conditions.length}</span>
+        <span data-testid="added">{String(parts.addedThisVisit)}</span>
+        <div data-testid="control-slot">{parts.control}</div>
+        {parts.row}
+        <button type="button" data-testid="probe-clear" onClick={parts.clearFilters}>
+          clear
+        </button>
+      </div>
+    );
+  }
+
+  const SEED = [{ key: "seed-1", property: "state_group", operator: "in", negated: false, value: "started" }] as const;
+
+  function mount(seed?: readonly (typeof SEED)[number][]): void {
+    createAppClient("https://api.test", (() => {
+      throw new Error("temporary instances must not read the server");
+    }) as never);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <IssuesLoaderProvider>
+          <PartProbe {...(seed === undefined ? {} : { seed })} />
+        </IssuesLoaderProvider>
+      </QueryClientProvider>
+    );
+  }
+
+  it("opens a temporary row on the seed it is handed", () => {
+    mount(SEED);
+    expect(screen.getByTestId("count")).toHaveTextContent("1");
+    expect(screen.getByTestId("added")).toHaveTextContent("false");
+    expect(screen.getByTestId("rich-condition")).toHaveTextContent("State Group");
+  });
+
+  it("reports a condition added through the row as added this visit", async () => {
+    const user = userEvent.setup();
+    mount(SEED);
+    await user.click(screen.getByRole("button", { name: "Add filter" }));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    expect(screen.getByTestId("added")).toHaveTextContent("true");
+    expect(screen.getByTestId("count")).toHaveTextContent("2");
+  });
+
+  it("drops the visit flag and the expression when cleared", async () => {
+    const user = userEvent.setup();
+    mount(SEED);
+    await user.click(screen.getByRole("button", { name: "Add filter" }));
+    await user.click(await screen.findByRole("option", { name: "Priority" }));
+    expect(screen.getByTestId("added")).toHaveTextContent("true");
+    await user.click(screen.getByTestId("rich-clear-all"));
+    expect(screen.getByTestId("count")).toHaveTextContent("0");
+    expect(screen.getByTestId("added")).toHaveTextContent("false");
+  });
+
+  it("clears through the parts' own clear entry", async () => {
+    const user = userEvent.setup();
+    mount(SEED);
+    expect(screen.getByTestId("count")).toHaveTextContent("1");
+    await user.click(screen.getByTestId("probe-clear"));
+    expect(screen.getByTestId("count")).toHaveTextContent("0");
+    expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
+  });
+
+  it("counts the conditions the row is holding", async () => {
+    const user = userEvent.setup();
+    mount(SEED);
+    expect(screen.getByTestId("count")).toHaveTextContent("1");
+    const pill = screen.getByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: "Remove filter" }));
+    expect(screen.getByTestId("count")).toHaveTextContent("0");
+    expect(screen.getByTestId("added")).toHaveTextContent("false");
+  });
+
+  it("renders without a seed as an empty row", () => {
+    mount();
+    expect(screen.getByTestId("count")).toHaveTextContent("0");
+    expect(screen.queryByTestId("rich-filter-row")).not.toBeInTheDocument();
+  });
+});

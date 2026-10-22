@@ -21,6 +21,7 @@ import { prefsQueryOptions } from "../prefs/prefsQuery.js";
 import { selectDisplayPrefs } from "../prefs/displayPrefs.js";
 import { listPageQueryOptions } from "./pages.js";
 import { resolvedListLayout } from "./lazy.js";
+import type { ListLayoutOverlays } from "./ListLayout.js";
 import type { IssuesEntity } from "../prefs/entities.js";
 import { pickerCyclesQueryOptions, pickerModulesQueryOptions } from "../../../shared/pickers/reference.js";
 import { isCompletedCycle } from "../../../shared/pickers/cycles.js";
@@ -29,6 +30,11 @@ import { useCycleProgress } from "../transfer/api.js";
 import { canTransferCycleIssues, showsCompletedCycleNote } from "../transfer/rules.js";
 import { TransferIssuesDialog } from "../transfer/TransferIssuesDialog.js";
 import { TransferIssuesPrompt } from "../transfer/TransferIssuesPrompt.js";
+import { CycleIssuesEmpty, FilteredEmptyCard, ModuleIssuesEmpty } from "../emptyStates/cards.js";
+import { isFilteredEmpty } from "../emptyStates/filteredEmpty.js";
+import { isConditionComplete, parseRichExpression } from "../filters/rich/expression.js";
+import type { RichFilterBuilderParts } from "../filters/rich/RichFilterBuilder.js";
+import { LazyIssueFilters } from "../filters/rich/lazy.js";
 
 export interface EntityListScreenProps {
   workspaceSlug: string;
@@ -45,15 +51,6 @@ export interface EntityListScreenProps {
   peekKey: string | null;
   onPeekChange: (key: string | null) => void;
   compact: boolean;
-}
-
-function EntityEmptyState({ title }: { title: string }): React.ReactElement {
-  return (
-    <section aria-label="Issues" className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
-      <h2 className="text-h3 text-(--text)">No work items in {title}</h2>
-      <p className="text-body text-(--text-muted)">Work items added here will appear in this list.</p>
-    </section>
-  );
 }
 
 /** Same layout root and list renderer as the project issue screen. */
@@ -100,6 +97,9 @@ export function EntityListScreen({
   const completedNote = showsCompletedCycleNote(transferCycle);
   const canTransfer = canTransferCycleIssues(transferCycle);
   const [transferOpen, setTransferOpen] = React.useState(false);
+  // The add-existing entry lives in the list layout's overlays; the empty
+  // card below the list asks for it once that layout has mounted.
+  const [overlays, setOverlays] = React.useState<ListLayoutOverlays | null>(null);
   // Stored rich filters scope the list in cycle/module context too.
   const { data: preferences } = useSuspenseQuery(prefsQueryOptions(client, workspaceSlug, entity));
   const richFilters = preferences.rich_filters;
@@ -143,65 +143,155 @@ export function EntityListScreen({
       hideModule={!project.module_view}
     />
   );
-  return (
-    <IssuesLayoutRoot
-      workspaceSlug={workspaceSlug}
-      entity={entity}
-      title={resolvedTitle}
-      totalCount={firstPage.total_count}
-      resultCount={Array.isArray(firstPage.results) ? firstPage.results.length : firstPage.count}
-      offered={offered}
-      renderLayout={(layout, prefs) =>
-        layout === "calendar" ? (
-          <CalendarEntry
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            projectIdentifier={project.identifier}
-            entity={entity}
-            canEdit={canEdit}
-            canAddExisting
-            membership={{
-              ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
-              ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
-            }}
-          />
-        ) : (
-          <ListLayout
-            workspaceSlug={workspaceSlug}
-            entity={entity}
-            projectId={projectId}
-            projectIdentifier={project.identifier}
-            prefs={prefs}
-            canEdit={canEdit}
-            richFilters={richFilters}
-            cycleId={cycleId}
-            moduleId={moduleId}
-            completedCycle={resolvedCompletedCycle}
-            completedModule={resolvedCompletedModule}
-            peekKey={peekKey}
-            onPeekChange={onPeekChange}
-            compact={compact}
-          />
-        )
-      }
-      emptyState={<EntityEmptyState title={resolvedTitle} />}
-      noMatchState={<EntityEmptyState title={resolvedTitle} />}
-      headerActions={display}
-      displayControl={display}
-      filterRow={
-        completedNote ? (
-          <>
-            <TransferIssuesPrompt canTransfer={canTransfer} onOpen={() => setTransferOpen(true)} />
-            <TransferIssuesDialog
+  const resultCount = Array.isArray(firstPage.results) ? firstPage.results.length : firstPage.count;
+  // ISS-069/070: the cycle keys the card on its stored expression as soon
+  // as it loads; the module keeps the first-run card until a condition was
+  // added through the row (§8). A completed cycle reads as a record before
+  // any filter is considered.
+  const storedMode = entity.scope === "cycle" ? "stored" : "visit";
+  const filtered =
+    !resolvedCompletedCycle &&
+    isFilteredEmpty({
+      mode: storedMode,
+      hasCompleteCondition: parseRichExpression(richFilters).some(isConditionComplete),
+      addedThisVisit: false,
+      visibleCount: firstPage.total_count,
+    });
+  const renderWithFilters = (filters: RichFilterBuilderParts | null): React.ReactElement => {
+    // The visit-scoped rule also applies here once a condition is added
+    // through the row, so the card follows the same predicate as the
+    // project list.
+    const filteredNow =
+      filtered ||
+      (!resolvedCompletedCycle &&
+        filters !== null &&
+        isFilteredEmpty({
+          mode: "visit",
+          hasCompleteCondition: filters.hasCompleteCondition,
+          addedThisVisit: filters.addedThisVisit,
+          visibleCount: firstPage.total_count,
+        }));
+    return (
+      <IssuesLayoutRoot
+        workspaceSlug={workspaceSlug}
+        entity={entity}
+        title={resolvedTitle}
+        totalCount={firstPage.total_count}
+        resultCount={resultCount}
+        offered={offered}
+        renderLayout={(layout, prefs) =>
+          layout === "calendar" ? (
+            <CalendarEntry
               workspaceSlug={workspaceSlug}
               projectId={projectId}
-              cycleId={cycleIdForTransfer}
-              open={transferOpen}
-              onClose={() => setTransferOpen(false)}
+              projectIdentifier={project.identifier}
+              entity={entity}
+              canEdit={canEdit}
+              canAddExisting
+              membership={{
+                ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
+                ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
+              }}
             />
+          ) : (
+            <ListLayout
+              workspaceSlug={workspaceSlug}
+              entity={entity}
+              projectId={projectId}
+              projectIdentifier={project.identifier}
+              prefs={prefs}
+              canEdit={canEdit}
+              richFilters={richFilters}
+              cycleId={cycleId}
+              moduleId={moduleId}
+              completedCycle={resolvedCompletedCycle}
+              completedModule={resolvedCompletedModule}
+              peekKey={peekKey}
+              onPeekChange={onPeekChange}
+              compact={compact}
+              onRegisterOverlays={setOverlays}
+            />
+          )
+        }
+        emptyState={emptyCard(filteredNow, filters)}
+        noMatchState={emptyCard(filteredNow, filters)}
+        headerActions={display}
+        displayControl={display}
+        filterControl={filters?.control}
+        filterRow={
+          <>
+            {completedNote ? (
+              <>
+                <TransferIssuesPrompt canTransfer={canTransfer} onOpen={() => setTransferOpen(true)} />
+                <TransferIssuesDialog
+                  workspaceSlug={workspaceSlug}
+                  projectId={projectId}
+                  cycleId={cycleIdForTransfer}
+                  open={transferOpen}
+                  onClose={() => setTransferOpen(false)}
+                />
+              </>
+            ) : null}
+            {filters?.row}
           </>
-        ) : null
-      }
-    />
+        }
+      />
+    );
+  };
+
+  function emptyCard(isFiltered: boolean, filters: RichFilterBuilderParts | null): React.ReactElement {
+    const context = entity.scope === "cycle" ? "cycle" : "module";
+    if (isFiltered) {
+      return (
+        <FilteredEmptyCard
+          context={context}
+          clearLabel="Clear filters"
+          canAct={canEdit}
+          onClear={() => {
+            filters?.clearFilters();
+          }}
+        />
+      );
+    }
+    if (entity.scope === "cycle") {
+      return (
+        <CycleIssuesEmpty
+          completed={resolvedCompletedCycle}
+          canAct={canEdit}
+          onCreate={() => {
+            overlays?.openCreate();
+          }}
+          onAddExisting={() => {
+            overlays?.openAddExisting();
+          }}
+        />
+      );
+    }
+    return (
+      <ModuleIssuesEmpty
+        canAct={canEdit}
+        onCreate={() => {
+          overlays?.openCreate();
+        }}
+        onAddExisting={() => {
+          overlays?.openAddExisting();
+        }}
+      />
+    );
+  }
+
+  return (
+    <React.Suspense fallback={renderWithFilters(null)}>
+      <LazyIssueFilters
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        entity={entity}
+        hideCycle={!project.cycle_view}
+        hideModule={!project.module_view}
+        viewsEnabled={project.issue_views_view}
+      >
+        {renderWithFilters}
+      </LazyIssueFilters>
+    </React.Suspense>
   );
 }

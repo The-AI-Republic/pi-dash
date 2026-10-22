@@ -19,6 +19,7 @@ import { createAppClient, resetAppClient } from "../../../../../../../core/api/c
 import { sessionKeys } from "../../../../../../../core/session/queries.js";
 import { authKeys } from "../../../../../../../features/auth/queries.js";
 import { issuesQueryOptions, prefsQueryOptions, type PrefsRecord } from "../../../../../../../features/issues/index.js";
+import { loadIssueListLeaves } from "../../../../../../../features/issues/components/lazyLeaves.js";
 import { projectViewQueryOptions } from "../../../../../../../features/issues/filters/rich/savedViewQuery.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
 import { Route } from "./index.js";
@@ -165,14 +166,14 @@ async function load(apiClient: ReturnType<typeof failingClient>): Promise<{ ok: 
   );
 }
 
-function renderScreen(
+async function renderScreen(
   role: number | null = 20,
   view: ReturnType<typeof viewRecord> = viewRecord(),
   rows = 0,
   transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>,
   projects: Project[] = [projectSeed()],
   totalCount = rows
-): void {
+): Promise<void> {
   vi.spyOn(Route, "useParams").mockReturnValue(PARAMS);
   vi.spyOn(Route, "useSearch").mockReturnValue({});
   const apiClient = createAppClient(
@@ -208,6 +209,7 @@ function renderScreen(
     { id: USER, name: "Acme", slug: PARAMS.ws, logo_url: null, total_members: 1, role: role ?? 20 },
   ]);
   if (role !== null) queryClient.setQueryData(authKeys.projectRoles(PARAMS.ws), { [PARAMS.projectId]: role });
+  await loadIssueListLeaves();
   const Component = Route.options.component;
   if (!Component) throw new Error("saved view route has no component");
   render(
@@ -283,7 +285,7 @@ describe("saved view load", () => {
 
 describe("saved view screen", () => {
   it("renders the view's name as the title and its stored expression in the row", async () => {
-    renderScreen();
+    await renderScreen();
     expect(await screen.findByRole("heading", { name: "Unstarted work" }, LAZY_WAIT)).toBeInTheDocument();
     expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByTestId("rich-condition")).toHaveTextContent("State Group");
@@ -291,7 +293,7 @@ describe("saved view screen", () => {
 
   it("offers Save as for the owned view and Update view once the row changes", async () => {
     const user = userEvent.setup();
-    renderScreen();
+    await renderScreen();
     expect(await screen.findByTestId("rich-save-view", undefined, LAZY_WAIT)).toHaveTextContent("Save as");
     const pill = await screen.findByTestId("rich-condition", undefined, LAZY_WAIT);
 
@@ -301,7 +303,7 @@ describe("saved view screen", () => {
   });
 
   it("reads a default view record as untouched: no Update view on mount", async () => {
-    renderScreen(20, {
+    await renderScreen(20, {
       ...viewRecord(),
       // The server's IssueView defaults, as a view nobody edited stores them.
       display_filters: {
@@ -320,7 +322,7 @@ describe("saved view screen", () => {
   });
 
   it("opens in the layout the view stored and offers the timeline in the switcher", async () => {
-    renderScreen(
+    await renderScreen(
       20,
       {
         ...viewRecord(),
@@ -353,7 +355,7 @@ describe("saved view screen", () => {
   it("turns a layout switch in the header into an Update view carrying the view's settings", async () => {
     const user = userEvent.setup();
     const patches: Array<Record<string, unknown>> = [];
-    renderScreen(20, viewRecord(), 1, async (url, init) => {
+    await renderScreen(20, viewRecord(), 1, async (url, init) => {
       if (url.endsWith("/auth/get-csrf-token/")) {
         return { status: 200, url, headers: { get: () => null }, text: async () => '{"csrf_token":"csrf"}' };
       }
@@ -426,16 +428,40 @@ describe("saved view loader and route states", () => {
   });
 
   it("asks for another project when the record points at one outside the list", async () => {
-    renderScreen(20, viewRecord(), 0, undefined, [{ ...projectSeed(), id: USER }]);
+    await renderScreen(20, viewRecord(), 0, undefined, [{ ...projectSeed(), id: USER }]);
     expect(await screen.findByRole("heading", { name: "Project not found" }, LAZY_WAIT)).toBeInTheDocument();
     expect(screen.getByText("Pick another project from the sidebar.")).toBeInTheDocument();
     expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
   });
 
-  it("shows the no-match state when the view's filters exclude every row", async () => {
-    renderScreen(20, viewRecord(), 0, undefined, undefined, 3);
+  it("offers the new-work-item entry when the view matches nothing (ISS-072)", async () => {
+    await renderScreen(20, viewRecord(), 0, undefined, undefined, 0);
     expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "No matching issues" })).toBeInTheDocument();
-    expect(screen.getByText("No issues match the current filters.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^View work items will appear here/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New work item" })).toBeEnabled();
+  });
+
+  it("opens the create dialog from the view's empty card (ISS-072)", async () => {
+    // The dialog is a lazy chunk; it resolves to its own module under test.
+    await renderScreen(20, viewRecord(), 0, undefined, undefined, 0);
+    await userEvent.click(await screen.findByRole("button", { name: "New work item" }, LAZY_WAIT));
+    expect(await screen.findByRole("dialog", undefined, LAZY_WAIT)).toBeInTheDocument();
+  });
+
+  it("keeps the fixed card when the view's expression excludes every row", async () => {
+    await renderScreen(20, viewRecord(), 0, undefined, undefined, 3);
+    expect(await screen.findByTestId("rich-filter-row", undefined, LAZY_WAIT)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^View work items will appear here/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New work item" })).toBeEnabled();
+  });
+
+  it("disables the entry for a guest on this project even when another project takes work items (ISS-072)", async () => {
+    // The entry follows the view's project standing, not the
+    // workspace-wide creatable set: a guest here sees it dead.
+    await renderScreen(20, viewRecord(), 0, undefined, [
+      { ...projectSeed(), member_role: 5 },
+      { ...projectSeed(), id: USER, identifier: "API", member_role: 20 },
+    ]);
+    expect(await screen.findByRole("button", { name: "New work item" }, LAZY_WAIT)).toBeDisabled();
   });
 });

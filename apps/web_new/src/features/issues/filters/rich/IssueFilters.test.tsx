@@ -156,4 +156,15 @@ describe("IssueFilters", () => {
     await waitFor(() => expect(capture.mock.calls.length).toBeGreaterThan(before));
     expect(screen.getByTestId("row-slot")).toHaveTextContent("Urgent");
   });
+
+  it("edits the entity it is handed instead of the project record (ISS-071)", () => {
+    const cycle = { scope: "cycle", projectId: PROJECT, cycleId: "323e4567-e89b-12d3-a456-426614174002" } as const;
+    const parts = setup({ entity: cycle });
+    expect(parts.instanceId).toBe(`cycle:${PROJECT}/${cycle.cycleId}`);
+  });
+
+  it("reads the project record when no entity is passed", () => {
+    const parts = setup();
+    expect(parts.instanceId).toBe(`project:${PROJECT}`);
+  });
 });

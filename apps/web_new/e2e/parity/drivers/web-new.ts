@@ -273,6 +273,9 @@ export function billingPageSettled(root: { querySelector: (selector: string) => 
 const WEBHOOK_DETAIL_HEADING = "Webhook details";
 const WEBHOOKS_LOAD_FAILED = "Couldn't load the webhooks.";
 
+/** Bounded waits for the layouts/scenario surfaces (the oracle uses 300 s). */
+const WEB_NEW_LAYOUTS_WAIT_MS = 300_000;
+
 function todo(target: string): never {
   throw new Error(`[parity] drivers/web_new has no ${target} yet; the area that owns it has not landed.`);
 }
@@ -6652,24 +6655,71 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsRowMenuItemNote");
   }
 
+  // The work-item dialog (create, edit, draft) is the one carrying the
+  // Title field; other dialogs (move, delete, add-existing) do not.
+  private layoutsWorkItemDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByPlaceholder("Title", { exact: true }) });
+  }
+
   async layoutsWorkItemModalVisible(): Promise<boolean> {
-    return todo("layoutsWorkItemModalVisible");
+    return (await this.layoutsWorkItemDialog().count()) > 0;
   }
 
   async layoutsWorkItemModalTitle(): Promise<string | null> {
-    return todo("layoutsWorkItemModalTitle");
+    const dialog = this.layoutsWorkItemDialog();
+    if ((await dialog.count()) === 0) return null;
+    const heading = dialog.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").trim();
   }
 
   async layoutsWorkItemModalClose(): Promise<void> {
-    return todo("layoutsWorkItemModalClose");
+    // Escape may land before the dialog shell attaches its listener, so
+    // poll: press, wait, re-read. The close control is the fallback once
+    // Escape has had its chance.
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      await this.page.keyboard.press("Escape");
+      await this.page.waitForTimeout(250);
+      if (!(await this.layoutsWorkItemModalVisible())) return;
+      const close = this.layoutsWorkItemDialog().getByRole("button", { name: "Close dialog" }).first();
+      if ((await close.count()) > 0) {
+        await close.click({ timeout: 5_000 }).catch(() => {});
+        await this.page.waitForTimeout(250);
+        if (!(await this.layoutsWorkItemModalVisible())) return;
+      }
+      if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed.");
+    }
   }
 
-  async layoutsWorkItemModalSetTitle(): Promise<void> {
-    return todo("layoutsWorkItemModalSetTitle");
+  async layoutsWorkItemModalSetTitle(title: string): Promise<void> {
+    const field = this.layoutsWorkItemDialog().getByPlaceholder("Title", { exact: true }).first();
+    await field.waitFor({ timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await field.fill(title);
   }
 
   async layoutsWorkItemModalSubmit(): Promise<void> {
-    return todo("layoutsWorkItemModalSubmit");
+    // Save on create, Update on edit; either is the dialog's primary.
+    const dialog = this.layoutsWorkItemDialog();
+    const save = dialog.getByRole("button", { name: "Save", exact: true });
+    const update = dialog.getByRole("button", { name: "Update", exact: true });
+    const isCreate = (await save.count()) > 0;
+    const primary = isCreate ? save : update;
+    if ((await primary.count()) === 0) throw new Error("[parity] work-item modal has no Save/Update button.");
+    await primary.first().click();
+    // Creates click once (a re-click would post a duplicate); edits may
+    // land before the description editor initialises and are re-clicked.
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      await this.page.waitForTimeout(250);
+      if (!(await this.layoutsWorkItemModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] work-item modal never closed after submit.");
+      if (!isCreate)
+        await primary
+          .first()
+          .click({ timeout: 5_000 })
+          .catch(() => {});
+    }
   }
 
   async layoutsDeleteModalVisible(): Promise<boolean> {
@@ -6696,12 +6746,35 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsMoveModalChoose");
   }
 
-  async layoutsAddExistingModalVisible(): Promise<boolean> {
-    return todo("layoutsAddExistingModalVisible");
+  private layoutsAddExistingDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Add existing work items" });
   }
 
-  async layoutsAddExistingModalChoose(_issueName: string): Promise<void> {
-    return todo("layoutsAddExistingModalChoose");
+  async layoutsAddExistingModalVisible(): Promise<boolean> {
+    // The submit control exists only while the dialog is open; the search
+    // field's placeholder is shared with other pickers.
+    return (await this.page.getByRole("button", { name: "Add selected work items", exact: true }).count()) > 0;
+  }
+
+  async layoutsAddExistingModalChoose(issueName: string): Promise<void> {
+    // Each row is a label around its checkbox; clicking it toggles the pick.
+    const option = this.page.locator('label[for^="issue-"]', { hasText: issueName }).first();
+    await option.waitFor({ timeout: WEB_NEW_LAYOUTS_WAIT_MS });
+    await option.click();
+    const box = option.locator('input[type="checkbox"]').first();
+    const checkedBy = Date.now() + 30_000;
+    for (;;) {
+      if (await box.isChecked().catch(() => false)) break;
+      if (Date.now() >= checkedBy) throw new Error(`[parity] add-existing option never checked "${issueName}".`);
+      await this.page.waitForTimeout(250);
+    }
+    await this.page.getByRole("button", { name: "Add selected work items", exact: true }).click();
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if (!(await this.layoutsAddExistingModalVisible())) return;
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never closed after submit.");
+      await this.page.waitForTimeout(250);
+    }
   }
 
   async layoutsDetailMenuItems(): Promise<string[]> {
@@ -6724,32 +6797,121 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsGroupHeaderAddMenu");
   }
 
+  /**
+   * The visible issues empty card. Every context card stamps
+   * `data-testid="issues-empty-state"`; the visible-only read skips any
+   * card a screen mounts off-screen first.
+   */
+  private layoutsEmptyScope(): Locator {
+    return this.page.locator('[data-testid="issues-empty-state"]:visible').first();
+  }
+
   async layoutsEmptyTitle(): Promise<string | null> {
-    return todo("layoutsEmptyTitle");
+    const scope = this.layoutsEmptyScope();
+    if ((await scope.count()) === 0) return null;
+    const heading = scope.getByRole("heading").first();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.innerText()) ?? "").trim();
   }
 
   async layoutsEmptyActions(): Promise<Array<{ label: string; disabled: boolean }>> {
-    return todo("layoutsEmptyActions");
+    const scope = this.layoutsEmptyScope();
+    if ((await scope.count()) === 0) return [];
+    const buttons = scope.locator("button");
+    const count = await buttons.count();
+    const actions: Array<{ label: string; disabled: boolean }> = [];
+    for (let index = 0; index < count; index++) {
+      actions.push({
+        label: ((await buttons.nth(index).innerText()) ?? "").trim().replace(/\s+/g, " "),
+        disabled: await buttons.nth(index).isDisabled(),
+      });
+    }
+    return actions;
   }
 
-  async layoutsEmptyChoose(_label: string): Promise<void> {
-    return todo("layoutsEmptyChoose");
+  async layoutsEmptyChoose(label: string): Promise<void> {
+    await this.layoutsEmptyScope().locator("button", { hasText: label }).first().click();
   }
 
-  async layoutsFilterAddConditionViaRow(_propertyLabel: string, _valueLabel: string): Promise<void> {
-    return todo("layoutsFilterAddConditionViaRow");
+  /** Remove-filter controls: one per pill in the row and add control. */
+  private layoutsFilterPills(): Locator {
+    return this.page.getByRole("button", { name: "Remove filter" });
   }
 
-  async layoutsSeedArchivedLocalFilter(
-    _workspaceSlug: string,
-    _projectId: string,
-    _expression: unknown
-  ): Promise<void> {
-    return todo("layoutsSeedArchivedLocalFilter");
+  private async layoutsWaitForCount(read: () => Promise<number>, atLeast: number, timeoutMs: number): Promise<number> {
+    const deadline = Date.now() + timeoutMs;
+    let count = 0;
+    for (;;) {
+      count = await read();
+      if (count >= atLeast || Date.now() > deadline) return count;
+      await this.page.waitForTimeout(500);
+    }
+  }
+
+  private async layoutsPickMenuEntry(label: string): Promise<void> {
+    // The row's pickers list options; wait for the entry itself, never the
+    // (sometimes zero-height) popover container.
+    const option = this.page.getByRole("option", { name: label, exact: true }).first();
+    const menuitem = this.page.getByRole("menuitem", { name: label, exact: true }).first();
+    const found = await this.layoutsWaitForCount(
+      async () => (await option.count()) + (await menuitem.count()),
+      1,
+      WEB_NEW_LAYOUTS_WAIT_MS
+    );
+    if (found === 0) throw new Error(`[parity] no filter menu entry ${label}.`);
+    if ((await option.count()) > 0) await option.click({ timeout: 60_000 });
+    else await menuitem.click({ timeout: 60_000 });
+  }
+
+  async layoutsFilterAddConditionViaRow(propertyLabel: string, valueLabel: string): Promise<void> {
+    // The add control sits at the row's end, after the seeded pills.
+    const before = await this.layoutsWaitForCount(
+      async () => this.layoutsFilterPills().count(),
+      1,
+      WEB_NEW_LAYOUTS_WAIT_MS
+    );
+    if (before === 0) throw new Error("[parity] no filter pill: seed one before adding a condition.");
+    await this.page.getByRole("button", { name: "Add filter", exact: true }).last().click();
+    await this.layoutsPickMenuEntry(propertyLabel);
+    // A static value set (state group, priority) lists itself right after
+    // the property is picked; a workflow state needs its list opened.
+    const pick = this.page.getByRole("checkbox", { name: valueLabel, exact: true }).first();
+    if ((await pick.count()) === 0) {
+      await this.page.getByRole("button", { name: "--", exact: true }).last().click();
+    }
+    const found = await this.layoutsWaitForCount(
+      async () => this.page.getByRole("checkbox", { name: valueLabel, exact: true }).count(),
+      1,
+      WEB_NEW_LAYOUTS_WAIT_MS
+    );
+    if (found === 0) throw new Error(`[parity] no filter value ${valueLabel}.`);
+    await this.page.getByRole("checkbox", { name: valueLabel, exact: true }).first().click();
+  }
+
+  async layoutsSeedArchivedLocalFilter(workspaceSlug: string, projectId: string, expression: unknown): Promise<void> {
+    // The archived page restores its expression from window-local storage,
+    // not from the server record (NEWFRONT-167). Seed that entry and reload
+    // bare: the archived page offers no layout switcher to wait on.
+    await this.page.evaluate(
+      ({ slug, pid, rich }) => {
+        window.localStorage.setItem(
+          "issue_local_filters",
+          JSON.stringify([{ key: "ARCHIVED", workspaceSlug: slug, viewId: pid, filters: { richFilters: rich } }])
+        );
+      },
+      { slug: workspaceSlug, pid: projectId, rich: expression }
+    );
+    await this.page.reload({ waitUntil: "domcontentloaded" });
+    const pills = await this.layoutsWaitForCount(
+      async () => this.layoutsFilterPills().count(),
+      1,
+      WEB_NEW_LAYOUTS_WAIT_MS
+    );
+    if (pills === 0) throw new Error("[parity] archived pill never rendered after local seed.");
   }
 
   async layoutsProfileActivityVisible(): Promise<boolean> {
-    return todo("layoutsProfileActivityVisible");
+    return (await this.page.getByRole("heading", { name: "Recent activity" }).count()) > 0;
   }
 
   async layoutsMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
@@ -6801,7 +6963,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsCurrentUrl(): Promise<string> {
-    return todo("layoutsCurrentUrl");
+    return this.page.url();
   }
 
   async layoutsSheetCellSetAssignee(_issueName: string, _memberName: string): Promise<void> {
@@ -6813,7 +6975,23 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsAddExistingModalIssueNames(): Promise<string[]> {
-    return todo("layoutsAddExistingModalIssueNames");
+    // The search lands after the dialog opens: wait for rows or the empty
+    // message, then read each row's name.
+    const options = this.page.locator('label[for^="issue-"]');
+    const deadline = Date.now() + WEB_NEW_LAYOUTS_WAIT_MS;
+    for (;;) {
+      if ((await options.count()) > 0) break;
+      if ((await this.page.getByText("No matching work items.").count()) > 0) return [];
+      if (!(await this.layoutsAddExistingModalVisible())) return [];
+      if (Date.now() >= deadline) throw new Error("[parity] add-existing modal never listed issues.");
+      await this.page.waitForTimeout(250);
+    }
+    const names: string[] = [];
+    const count = await options.count();
+    for (let index = 0; index < count; index++) {
+      names.push(((await options.nth(index).locator("span").last().innerText()) ?? "").trim());
+    }
+    return names;
   }
 
   async layoutsMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
@@ -6828,8 +7006,15 @@ export class WebNewDriver implements ParityDriver {
     return todo("layoutsRowMenuOpenNewTabUrl");
   }
 
-  async layoutsWorkItemModalHasText(_text: string): Promise<boolean> {
-    return todo("layoutsWorkItemModalHasText");
+  async layoutsWorkItemModalHasText(text: string): Promise<boolean> {
+    // Scoped to the dialog: the list behind it shows the same names.
+    const dialog = this.layoutsWorkItemDialog();
+    if ((await dialog.count()) === 0) return false;
+    if ((await dialog.getByText(text, { exact: false }).count()) > 0) return true;
+    return dialog.first().evaluate((node, want) => {
+      const fields = node.querySelectorAll("input, textarea, select");
+      return Array.from(fields).some((field) => ((field as HTMLInputElement).value ?? "").includes(want));
+    }, text);
   }
 
   async layoutsListPageMenuChoose(_item: string): Promise<void> {
