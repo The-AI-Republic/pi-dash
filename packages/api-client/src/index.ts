@@ -853,14 +853,20 @@ export {
   ESTIMATE_TYPES,
   ESTIMATE_SYSTEM_TIME,
   Estimate,
+  EstimateCreateBody,
   EstimateList,
   EstimatePoint,
+  EstimatePointCreateInput,
   createEstimate,
   deleteEstimate,
+  getProjectEstimate,
+  listProjectEstimatePoints,
   listProjectEstimates,
+  orderEstimatePoints,
   selectActiveEstimate,
+  selectArchivedEstimates,
 } from "./contracts/estimates.js";
-export type { EstimateCreateInput, EstimatePointInput } from "./contracts/estimates.js";
+export type { EstimateCreateInput } from "./contracts/estimates.js";
 export {
   REPOSITORY_CLONE_AUTH_MODES,
   REPOSITORY_PROVIDERS,
