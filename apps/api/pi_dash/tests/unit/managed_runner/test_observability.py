@@ -19,6 +19,27 @@ from pi_dash.core.agent_execution import AgentExecutorKind
 from pi_dash.managed_runner.errors import ManagedRunnerReason
 from pi_dash.runner.models import AgentRun, AgentRunStatus
 
+
+def _settings_logging(settings_module: str) -> dict:
+    """``LOGGING`` of a settings module, read in a child interpreter.
+
+    Importing ``settings.local`` / ``settings.production`` in-process runs
+    their ``INSTALLED_APPS += (...)`` lines, which extend ``common``'s list in
+    place — the very list the live test settings hold — and leak
+    ``debug_toolbar`` / ``scout_apm`` into every later test on the worker.
+    """
+    import json
+    import subprocess
+    import sys
+
+    script = (
+        "import importlib, json, sys; "
+        f"print(json.dumps(importlib.import_module({settings_module!r}).LOGGING, default=str))"
+    )
+    out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
 pytestmark = pytest.mark.unit
 
 # The events are emitted on the name ``settings.LOGGING`` actually
@@ -103,9 +124,7 @@ def test_event_logger_is_declared_in_settings(settings_module):
     ``caplog.at_level`` attaches its own handler and forces the level. This
     test reads the real settings instead.
     """
-    import importlib
-
-    loggers = importlib.import_module(settings_module).LOGGING["loggers"]
+    loggers = _settings_logging(settings_module)["loggers"]
     assert EVENT_LOGGER in loggers, (
         f"{settings_module} does not declare {EVENT_LOGGER!r}; managed_runner.* events would be silently dropped"
     )
@@ -118,8 +137,6 @@ def test_run_pinned_reaches_a_handler_under_the_real_logging_config(project, cre
     """End-to-end proof that the event is observable: apply the project's own
     ``LOGGING`` (handlers swapped for an in-memory one) and confirm the record
     the ``post_save`` handler emits actually arrives."""
-    import copy
-    import importlib
     import logging.config
 
     records: list[logging.LogRecord] = []
@@ -128,7 +145,7 @@ def test_run_pinned_reaches_a_handler_under_the_real_logging_config(project, cre
         def emit(self, record):
             records.append(record)
 
-    config = copy.deepcopy(importlib.import_module("pi_dash.settings.local").LOGGING)
+    config = _settings_logging("pi_dash.settings.local")
     # Leave every other logger in the process alone; this test is only about
     # whether our event name resolves to a handler.
     config["disable_existing_loggers"] = False
