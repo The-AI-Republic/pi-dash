@@ -58,6 +58,7 @@ import {
   answerWorkspaceInvitation,
   createWorkspaceJoinRequest,
   getWorkspaceInvitation,
+  joinProjects,
   listPendingWorkspaceInvites,
   listWorkspaceInvitations,
   listWorkspaceJoinRequests,
@@ -72,6 +73,7 @@ import {
   getWorkspaceUserProperties,
   listProjectDetails,
   listProjects,
+  updateProjectUserProperties,
 } from "./contracts/projects.js";
 import {
   addFavoriteProject,
@@ -79,14 +81,12 @@ import {
   checkProjectIdentifier,
   createProject,
   deleteProject,
-  joinProjects,
   leaveProject,
   listFavoriteProjects,
   listProjectInvitations,
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
-  updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "./contracts/project-management.js";
 import { getProjectSettingsDetail, updateProjectSettings } from "./contracts/project-settings-general.js";

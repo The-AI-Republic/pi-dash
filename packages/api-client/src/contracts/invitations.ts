@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Workspace invitation and join-request contracts: the pending invites the
-// inbox lists, the emailed single-invitation link, and the request-to-join
-// flow for users who arrive with no workspace.
+// inbox lists, the emailed single-invitation link, the request-to-join
+// flow for users who arrive with no workspace, and project invitation
+// acceptance (which the auth flow calls eagerly).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
@@ -225,4 +226,22 @@ export async function createWorkspaceJoinRequest(
   const path = "/api/users/me/workspaces/join-requests/";
   const envelope = await client.sendJson<unknown>("POST", path, { json: input });
   return client.parse(JoinRequestResult, envelope.data, `POST ${path}`);
+}
+
+export const JoinProjectsResult = z.object({
+  message: z.string(),
+});
+export type JoinProjectsResult = z.infer<typeof JoinProjectsResult>;
+
+/**
+ * POST /api/users/me/workspaces/<slug>/projects/invitations/ with
+ * `{ project_ids }` joins the caller to each project (201 + message).
+ * It lives here rather than with the project-management writes because
+ * the auth flow calls it eagerly, which would otherwise pin that whole
+ * module into the initial bundle (NEWFRONT-518, size gate).
+ */
+export async function joinProjects(client: ApiClient, slug: string, projectIds: string[]): Promise<JoinProjectsResult> {
+  const path = `/api/users/me/workspaces/${slug}/projects/invitations/`;
+  const envelope = await client.sendJson<unknown>("POST", path, { json: { project_ids: projectIds } });
+  return client.parse(JoinProjectsResult, envelope.data, `POST ${path}`);
 }

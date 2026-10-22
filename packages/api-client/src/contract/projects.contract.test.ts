@@ -10,21 +10,21 @@ import {
   getWorkspaceUserProperties,
   listProjectDetails,
   listProjects,
+  updateProjectUserProperties,
 } from "../contracts/projects.js";
+import { joinProjects } from "../contracts/invitations.js";
 import {
   addFavoriteProject,
   archiveProject,
   checkProjectIdentifier,
   createProject,
   deleteProject,
-  joinProjects,
   leaveProject,
   listFavoriteProjects,
   listProjectInvitations,
   removeFavoriteProject,
   unarchiveProject,
   updateProject,
-  updateProjectUserProperties,
   updateWorkspaceUserProperties,
 } from "../contracts/project-management.js";
 import { listLabels, listMembers, listStates } from "../contracts/reference.js";
