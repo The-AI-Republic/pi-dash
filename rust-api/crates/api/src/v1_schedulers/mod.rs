@@ -1,4 +1,5 @@
-//! Read-only v1 scheduler endpoints (stage 8 drift, PIDASHCONV-1061).
+//! v1 scheduler endpoints: reads (stage 8 drift, PIDASHCONV-1061) and the
+//! binding / definition writes PDASHOSS01-278 added ([`writes`]).
 //!
 //! Ports `apps/api/pi_dash/api/views/scheduler.py`,
 //! `api/serializers/scheduler.py` and `api/urls/scheduler.py` (04920ea3,
@@ -59,6 +60,7 @@
 
 pub mod handlers;
 pub mod perms;
+pub mod writes;
 
 use std::collections::HashMap;
 
@@ -76,7 +78,7 @@ use crate::state::AppState;
 /// [`handlers::routes`]. Owned GETs serve from Rust (cutover granularity);
 /// everything else keeps proxying to Django through the edge fallback.
 pub fn routes() -> axum::Router<AppState> {
-    handlers::routes()
+    handlers::routes().merge(writes::routes())
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +103,8 @@ pub const BINDING_NOT_FOUND_BODY: &str =
     r#"{"detail":"No SchedulerBinding matches the given query."}"#;
 /// `handle_exception`'s `KeyError` branch (unknown `user_timezone`).
 pub const MISSING_KEY_BODY: &str = r#"{"error":"The required key does not exist."}"#;
+/// `handle_exception`'s `ObjectDoesNotExist` branch.
+pub const OBJECT_NOT_FOUND_BODY: &str = r#"{"error":"The requested resource does not exist."}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
@@ -131,6 +135,15 @@ pub enum Denial {
     BadError(String),
     /// 500, generic branch.
     ServerError,
+    /// 403, `@allow_permission` refusal
+    /// ([`crate::permissions::PERMISSION_DENIED_BODY`]).
+    RoleDenied,
+    /// 404, `handle_exception`'s `ObjectDoesNotExist` branch.
+    ObjectNotFound,
+    /// A view-built body with its status (write 400/409/412s).
+    Body(StatusCode, Value),
+    /// A response the web app's shared write path already rendered.
+    App(Box<Response>),
 }
 
 impl Denial {
@@ -160,12 +173,29 @@ impl Denial {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
             ),
+            Denial::RoleDenied => (
+                StatusCode::FORBIDDEN,
+                crate::permissions::PERMISSION_DENIED_BODY.to_owned(),
+            ),
+            Denial::ObjectNotFound => (StatusCode::NOT_FOUND, OBJECT_NOT_FOUND_BODY.to_owned()),
+            Denial::Body(status, body) => (
+                *status,
+                serde_json::to_string(body).expect("serializable denial"),
+            ),
+            // Rendered by the caller; `into_response` returns it as is.
+            Denial::App(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                SERVER_ERROR_BODY.to_owned(),
+            ),
         }
     }
 }
 
 impl IntoResponse for Denial {
     fn into_response(self) -> Response {
+        if let Denial::App(response) = self {
+            return *response;
+        }
         let (status, body) = self.status_and_body();
         Response::builder()
             .status(status)
