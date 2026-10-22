@@ -6,6 +6,7 @@
 // around the tab body, gates it for the role and keeps its own address.
 // EST-024 pins the member/guest denial with no screen or controls.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { createMemoryHistory, createRouter } from "@tanstack/react-router";
 import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +41,7 @@ vi.mock("../../../../../../features/auth/index.js", async (importOriginal) => ({
 }));
 
 import { renderInRouter } from "../../../../../../features/project-settings/testing.js";
+import { routeTree } from "../../../../../../routeTree.gen.js";
 import { Route } from "./estimates.js";
 
 vi.mock("../../../../../../features/estimates/EstimatesScreen.js", () => ({
@@ -93,5 +95,43 @@ describe("estimates settings route", () => {
     await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
     expect(screen.queryByTestId("estimates-screen-stub")).not.toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("refuses a member with no estimate controls", async () => {
+    harness.role = 15;
+    harness.workspaceRole = 15;
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
+    expect(screen.queryByTestId("estimates-screen-stub")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add estimate/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("estimate-system-row")).not.toBeInTheDocument();
+  });
+
+  it("refuses a guest with no estimate controls", async () => {
+    harness.role = 5;
+    harness.workspaceRole = 5;
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
+    expect(screen.queryByTestId("estimates-screen-stub")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add estimate/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("estimate-system-row")).not.toBeInTheDocument();
+  });
+
+  it("registers no per-system address below the estimates tab", () => {
+    // EST-026: a guessed system id matches no estimates route — the
+    // layout renders the ordinary not-found page for it (pinned in the
+    // workspace-settings layout suite), never the estimates screen.
+    const router = createRouter({
+      routeTree,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+      context: { queryClient: new QueryClient(), apiClient: {} as never },
+      trailingSlash: "preserve",
+    });
+    const guess = `/acme/settings/projects/${harness.params.projectId}/estimates/44444444-4444-4444-8444-444444444444`;
+    const matched = router.matchRoutes(guess) ?? [];
+    expect(matched.length).toBeGreaterThan(0);
+    expect(matched.map((match) => match.routeId)).not.toContain("/$ws/_gated/settings/projects/$projectId/estimates");
   });
 });

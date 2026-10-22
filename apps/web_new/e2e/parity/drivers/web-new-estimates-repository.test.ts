@@ -705,3 +705,155 @@ describe("repository tab driver", () => {
     expect(await new WebNewDriver(pageOf()).projectGithubNotAuthorized()).toBe(false);
   });
 });
+
+describe("estimates shell driver (EST-001-003, EST-026-028)", () => {
+  it("reads the screen text normalized, or blank when unreadable", async () => {
+    const page = pageOf({
+      getByRole: () => locator({ innerText: async () => "  Estimates\n  list " }),
+    });
+    expect(await new WebNewDriver(page).estimatesScreenText()).toBe("Estimates list");
+    const unreadable = pageOf({
+      getByRole: () =>
+        locator({
+          innerText: async () => {
+            throw new Error("detached");
+          },
+        }),
+    });
+    expect(await new WebNewDriver(unreadable).estimatesScreenText()).toBe("");
+  });
+
+  it("lists the system names from their rows, skipping blanks and dead reads", async () => {
+    const rows = [
+      locator({ innerText: async () => "  Alpha " }),
+      locator({ innerText: async () => " " }),
+      locator({
+        innerText: async () => {
+          throw new Error("detached");
+        },
+      }),
+      locator({ innerText: async () => "Beta" }),
+    ];
+    const inner = vi.fn(() => locator());
+    const headAt = (index: number) => {
+      const head = rows[index];
+      if (head === undefined) throw new Error("row out of range");
+      return head;
+    };
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="estimates-screen"]'
+          ? locator({
+              locator: (rowSelector: string) => {
+                inner(rowSelector);
+                return locator({ count: async () => rows.length, nth: headAt });
+              },
+            })
+          : locator(),
+    });
+    expect(await new WebNewDriver(page).estimatesListedNames()).toEqual(["Alpha", "Beta"]);
+    expect(inner).toHaveBeenCalledWith('[data-testid="estimate-system-row"] h4');
+    expect(await new WebNewDriver(pageOf()).estimatesListedNames()).toEqual([]);
+  });
+
+  it("reads the browser tab title", async () => {
+    const title = vi.fn(async () => "Website relaunch - Estimates");
+    expect(await new WebNewDriver(pageOf({ title })).estimatesTabTitle()).toBe("Website relaunch - Estimates");
+  });
+
+  it("reports export/import controls from buttons or menu items", async () => {
+    const seen: unknown[] = [];
+    const shown = locator({ count: async () => 1, isVisible: async () => true });
+    const hidden = locator({ count: async () => 0 });
+    const mainWith = (visibleRole: string) =>
+      locator({
+        getByRole: (role: string, options?: unknown) => {
+          seen.push([role, options]);
+          return role === visibleRole ? shown : hidden;
+        },
+      });
+    const page = pageOf({ getByRole: (role: string) => (role === "main" ? mainWith("button") : hidden) });
+    expect(await new WebNewDriver(page).estimatesExportImportVisible()).toBe(true);
+    const viaMenu = pageOf({
+      getByRole: (role: string) => (role === "main" ? mainWith("menuitem") : hidden),
+    });
+    expect(await new WebNewDriver(viaMenu).estimatesExportImportVisible()).toBe(true);
+    expect(await new WebNewDriver(pageOf()).estimatesExportImportVisible()).toBe(false);
+    expect(seen).toContainEqual(["button", { name: /export|import|download/i }]);
+    expect(seen).toContainEqual(["menuitem", { name: /export|import|download/i }]);
+  });
+
+  it("reports filter/search controls from every query", async () => {
+    const shown = locator({ count: async () => 1, isVisible: async () => true });
+    const hidden = locator({ count: async () => 0 });
+    const fromRole = (role: string) =>
+      pageOf({
+        getByRole: (candidate: string) =>
+          candidate === "main" ? locator({ getByRole: (inner: string) => (inner === role ? shown : hidden) }) : hidden,
+      });
+    expect(await new WebNewDriver(fromRole("searchbox")).estimatesFilterSearchVisible()).toBe(true);
+    expect(await new WebNewDriver(fromRole("button")).estimatesFilterSearchVisible()).toBe(true);
+    const fromSelector = (selector: string) =>
+      pageOf({
+        getByRole: (candidate: string) =>
+          candidate === "main"
+            ? locator({
+                getByRole: () => hidden,
+                locator: (inner: string) => (inner === selector ? shown : hidden),
+              })
+            : hidden,
+      });
+    expect(await new WebNewDriver(fromSelector('input[type="search"]')).estimatesFilterSearchVisible()).toBe(true);
+    expect(await new WebNewDriver(fromSelector('input[placeholder*="earch" i]')).estimatesFilterSearchVisible()).toBe(
+      true
+    );
+    expect(await new WebNewDriver(pageOf()).estimatesFilterSearchVisible()).toBe(false);
+  });
+
+  it("reports bulk controls from checkboxes or bulk buttons", async () => {
+    const shown = locator({ count: async () => 1, isVisible: async () => true });
+    const hidden = locator({ count: async () => 0 });
+    const fromRole = (role: string) =>
+      pageOf({
+        getByRole: (candidate: string) =>
+          candidate === "main" ? locator({ getByRole: (inner: string) => (inner === role ? shown : hidden) }) : hidden,
+      });
+    expect(await new WebNewDriver(fromRole("checkbox")).estimatesBulkVisible()).toBe(true);
+    expect(await new WebNewDriver(fromRole("button")).estimatesBulkVisible()).toBe(true);
+    expect(await new WebNewDriver(pageOf()).estimatesBulkVisible()).toBe(false);
+  });
+
+  it("opens a guessed system address and settles on not-found or the screen", async () => {
+    const goto = vi.fn(async () => null);
+    const waitForLoadState = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const page = pageOf({
+      goto,
+      waitForLoadState,
+      getByRole: () => locator({ first: () => locator({ waitFor }) }),
+    });
+    await new WebNewDriver(page).estimatesOpenSystemGuess("acme", "p1", "e9");
+    expect(goto).toHaveBeenCalledWith("/acme/settings/projects/p1/estimates/e9");
+    expect(waitForLoadState).toHaveBeenCalledWith("domcontentloaded");
+    expect(waitFor).toHaveBeenCalledWith({ timeout: 60_000 });
+  });
+
+  it("fails the system guess when neither surface settles", async () => {
+    const waitFor = vi.fn(async () => {
+      throw new Error("timeout");
+    });
+    const page = pageOf({
+      getByRole: () => locator({ first: () => locator({ waitFor }) }),
+    });
+    await expect(new WebNewDriver(page).estimatesOpenSystemGuess("acme", "p1", "e9")).rejects.toThrow(
+      "system-guess address settled on neither"
+    );
+  });
+
+  it("reads the not-found heading", async () => {
+    const getByRole = vi.fn(() => locator({ count: async () => 1 }));
+    expect(await new WebNewDriver(pageOf({ getByRole })).estimatesNotFoundVisible()).toBe(true);
+    expect(getByRole).toHaveBeenCalledWith("heading", { name: "That page does not exist", exact: true });
+    expect(await new WebNewDriver(pageOf()).estimatesNotFoundVisible()).toBe(false);
+  });
+});

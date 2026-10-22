@@ -16,6 +16,7 @@ import * as React from "react";
 
 import { getAppClient } from "../../../../../core/api/client.js";
 import { usePermissions, useWorkspace } from "../../../../../core/session/index.js";
+import { resolveSettingsAddress } from "../../../../../features/project-settings/index.js";
 import { NotFoundPage, resolveFileUrl } from "../../../../../shared/shell/index.js";
 import {
   decideWorkspaceSettingsGate,
@@ -32,10 +33,14 @@ function isProjectSettingsPath(pathname: string): boolean {
   return head !== undefined && settings === "settings" && first === "projects";
 }
 
-/** Whether a project-settings address names one of the area's tab routes. */
-function hasProjectSettingsTab(pathname: string): boolean {
-  const segments = pathname.split("/").filter(Boolean);
-  return segments.length >= 4;
+/**
+ * Whether a project-settings address names one of the area's tab routes
+ * (EST-026). Resolved against the tab registry, not the segment count:
+ * addresses below a tab's own address — a guessed system id, a mistyped
+ * suffix — are not part of any tab and get the not-found page.
+ */
+function hasProjectSettingsTab(pathname: string, workspaceSlug: string): boolean {
+  return resolveSettingsAddress(pathname, workspaceSlug) !== undefined;
 }
 
 export const Route = createFileRoute("/$ws/_gated/settings/_workspace")({
@@ -72,7 +77,7 @@ function WorkspaceSettingsLayout(): React.ReactElement {
   // its generic addresses get the ordinary not-found page rather than a
   // workspace-settings denial.
   if (isProjectSettingsPath(pathname)) {
-    return hasProjectSettingsTab(pathname) ? <Outlet /> : <NotFoundPage />;
+    return hasProjectSettingsTab(pathname, ws) ? <Outlet /> : <NotFoundPage />;
   }
   if (gate === null || gate.status === "denied") return <SettingsNotAuthorized workspaceSlug={ws} />;
 

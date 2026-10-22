@@ -147,6 +147,18 @@ describe("workspace settings layout", () => {
     expect(screen.queryByTestId("workspace-settings-not-authorized")).not.toBeInTheDocument();
   });
 
+  it("shows the ordinary not-found page for an address below a project tab", async () => {
+    // EST-026: a guessed estimate-system id is not part of any tab, so
+    // the layout renders not-found instead of an empty outlet.
+    renderLayout({ role: ROLE_ADMIN }, "/acme/settings/projects/p1/estimates/e9/", {
+      leafPath: "$",
+      component: () => null,
+    });
+    expect(await screen.findByText("That page does not exist")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-not-authorized")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-settings-shell")).not.toBeInTheDocument();
+  });
+
   it("enters the webhook detail frame with its own title", async () => {
     renderLayout({ role: ROLE_ADMIN }, "/acme/settings/webhooks/223e4567-e89b-12d3-a456-426614174001", {
       leafPath: "webhooks/$webhookId",

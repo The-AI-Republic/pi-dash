@@ -15930,35 +15930,88 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async estimatesScreenText(): Promise<string> {
-    return todo("estimatesScreenText");
+    return (
+      (await this.estimatesMain()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
   async estimatesListedNames(): Promise<string[]> {
-    return todo("estimatesListedNames");
+    // System rows carry the row testid with the system name as their h4;
+    // section headings are h2/h3, so no exclusion pass is needed.
+    const heads = this.estimatesScreen().locator('[data-testid="estimate-system-row"] h4');
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .replace(/\s+/g, " ")
+        .trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
 
   async estimatesTabTitle(): Promise<string> {
-    return todo("estimatesTabTitle");
+    return this.page.title();
   }
 
   async estimatesExportImportVisible(): Promise<boolean> {
-    return todo("estimatesExportImportVisible");
+    const main = this.estimatesMain();
+    if (await this.isShown(main.getByRole("button", { name: /export|import|download/i }))) return true;
+    return this.isShown(main.getByRole("menuitem", { name: /export|import|download/i }));
   }
 
   async estimatesFilterSearchVisible(): Promise<boolean> {
-    return todo("estimatesFilterSearchVisible");
+    const main = this.estimatesMain();
+    if (await this.isShown(main.getByRole("searchbox"))) return true;
+    if (await this.isShown(main.getByRole("button", { name: /filter|search/i }))) return true;
+    if (await this.isShown(main.locator('input[type="search"]'))) return true;
+    return this.isShown(main.locator('input[placeholder*="earch" i]'));
   }
 
   async estimatesBulkVisible(): Promise<boolean> {
-    return todo("estimatesBulkVisible");
+    const main = this.estimatesMain();
+    if (await this.isShown(main.getByRole("checkbox"))) return true;
+    return this.isShown(main.getByRole("button", { name: /bulk|select all/i }));
   }
 
-  async estimatesOpenSystemGuess(_workspaceSlug: string, _projectId: string, _estimateId: string): Promise<void> {
-    return todo("estimatesOpenSystemGuess");
+  async estimatesOpenSystemGuess(workspaceSlug: string, projectId: string, estimateId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/estimates/${estimateId}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on whatever the app renders for the guessed address (the
+    // not-found page when no per-system route exists); callers assert
+    // that no single system was isolated.
+    const settled = await Promise.race([
+      this.page
+        .getByRole("heading", { name: "That page does not exist", exact: true })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+      this.page
+        .getByRole("heading", { name: "Estimates", exact: true })
+        .first()
+        .waitFor({ timeout: 60_000 })
+        .then(
+          () => true,
+          () => false
+        ),
+    ]);
+    if (!settled) throw new Error("[parity] system-guess address settled on neither not-found nor the screen.");
   }
 
   async estimatesNotFoundVisible(): Promise<boolean> {
-    return todo("estimatesNotFoundVisible");
+    return (await this.page.getByRole("heading", { name: "That page does not exist", exact: true }).count()) > 0;
   }
 
   async estimatesOpenAnalytics(): Promise<void> {
