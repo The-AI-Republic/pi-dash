@@ -69,10 +69,16 @@ afterEach(() => {
 
 describe("useUpdateSchedulerBinding", () => {
   it("sends the PATCH, notices the save and refreshes list plus catalog", async () => {
-    contracts.updateSchedulerBinding.mockResolvedValue(binding());
+    const saved = binding();
+    contracts.updateSchedulerBinding.mockResolvedValue(saved);
     const { queryClient, invalidate } = client();
     const { result } = renderHook(() => useUpdateSchedulerBinding(SLUG), { wrapper: wrapper(queryClient) });
-    await result.current.mutateAsync({ projectId: PROJECT, bindingId: "b1", input: { tzid: "Asia/Tokyo" } });
+    const resolved = await result.current.mutateAsync({
+      projectId: PROJECT,
+      bindingId: "b1",
+      input: { tzid: "Asia/Tokyo" },
+    });
+    expect(resolved).toBe(saved);
     expect(contracts.updateSchedulerBinding).toHaveBeenCalledWith(expect.anything(), SLUG, PROJECT, "b1", {
       tzid: "Asia/Tokyo",
     });
