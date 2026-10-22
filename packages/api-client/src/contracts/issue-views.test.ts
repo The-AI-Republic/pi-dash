@@ -137,6 +137,11 @@ describe("getProjectView", () => {
     expect((failure as ApiError).code).toBe("not_found");
   });
 
+  it("reports a null 200 body as a 404", async () => {
+    const { client } = stubClient(() => null);
+    await expect(getProjectView(client, "acme", UUID2, UUID)).rejects.toMatchObject({ status: 404 });
+  });
+
   it("keeps an optional cloud anchor when the record carries one", async () => {
     const { client } = stubClient(() => ({ ...VIEW_ROW, anchor: "public-view-anchor" }));
     const view = await getProjectView(client, "acme", UUID2, UUID);
@@ -201,12 +206,7 @@ describe("view favorites", () => {
 
   it("adds a favorite through the generic collection with the view pointer", async () => {
     const { client, calls } = stubClient(() => FAVORITE);
-    const favorite = await addViewFavorite(client, "acme", {
-      id: UUID2,
-      name: "Triage",
-      project: UUID,
-      logo_props: {},
-    });
+    const favorite = await addViewFavorite(client, "acme", { id: UUID2, name: "Triage", project: UUID });
     expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(["POST /api/workspaces/acme/user-favorites/"]);
     expect(JSON.parse(calls[0]?.body ?? "{}")).toEqual({
       entity_type: "view",

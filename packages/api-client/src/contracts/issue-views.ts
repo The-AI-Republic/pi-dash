@@ -244,7 +244,7 @@ export async function deleteWorkspaceView(client: ApiClient, slug: string, viewI
 export async function addViewFavorite(
   client: ApiClient,
   slug: string,
-  view: Pick<SavedView, "id" | "name" | "project" | "logo_props">
+  view: Pick<SavedView, "id" | "name" | "project">
 ): Promise<Favorite> {
   return createFavorite(client, slug, {
     entity_type: "view",
@@ -256,8 +256,9 @@ export async function addViewFavorite(
 
 /**
  * Remove a view favorite by the favorite row's own id — not the view id.
- * The generic workspace list omits view rows, so take the id from the
- * add response (spec §2).
+ * Keep the id from the add response; the bare workspace favorites list
+ * also carries view rows (proven live in issue-views-read), so it works
+ * as a fallback lookup.
  */
 export async function removeViewFavorite(client: ApiClient, slug: string, favoriteId: string): Promise<void> {
   await deleteFavorite(client, slug, favoriteId);
