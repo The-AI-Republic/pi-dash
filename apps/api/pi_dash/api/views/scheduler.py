@@ -383,7 +383,11 @@ def _precondition_failure(request, row, noun: str = "scheduler binding"):
     raw = str(raw).strip().strip('"')
     if raw == "*":
         return None
-    expected = parse_datetime(raw)
+    try:
+        expected = parse_datetime(raw)
+    except ValueError:
+        # Well-formed but out of range (month 13, a 25-hour offset).
+        expected = None
     if expected is None or expected.tzinfo is None:
         return Response(
             {

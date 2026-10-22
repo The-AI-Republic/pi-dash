@@ -648,6 +648,17 @@ class TestProjectSchedulerBindingUpdate:
         )
         assert garbage.status_code == http_status.HTTP_400_BAD_REQUEST
 
+        # Well-formed but out of range: still a 400, never a 500.
+        out_of_range = api_key_client.patch(
+            url,
+            {"extra_context": "x"},
+            format="json",
+            HTTP_IF_MATCH="2026-13-01T00:00:00+00:00",
+        )
+        assert out_of_range.status_code == http_status.HTTP_400_BAD_REQUEST
+        binding.refresh_from_db()
+        assert binding.extra_context == "fourth"
+
     @pytest.mark.django_db
     def test_404_when_not_installed_on_project(
         self, api_key_client, workspace, sched_project, scheduler
