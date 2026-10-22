@@ -11,6 +11,7 @@ see NOTE on MAIL_TASKS.)
 import json
 import uuid
 from datetime import datetime, timezone
+from email import message_from_bytes, policy
 
 import pytest
 from psycopg.rows import dict_row
@@ -299,6 +300,89 @@ def test_auth_mail_full_capture(db_conn, broker_url, smtp_sink, task_name, args,
     for marker in markers:
         assert marker in raw, f"{task_name} body misses {marker!r}"
     assert diff(before, snapshot(db_conn, ["users", "email_notification_logs"])) == {}
+
+
+# PIDASHCONV-1287: mention content carrying editor-emitted entities and
+# voids must arrive normalized exactly like Django's BeautifulSoup
+# round-trip — in the HTML part, and with no literal entities in the
+# text/plain part. Mirrored case-for-case by
+# test_rust_replay.py::test_rust_send_mention_mail_normalized_like_bs4.
+MENTION_HTML_TEMPLATE = (
+    '<p>a&nbsp;&nbsp;b<br>c <img src="x.png"> it&#39;s &quot;q&quot; '
+    '<mention-component entity_identifier="{user_id}" '
+    'label="x"></mention-component></p>'
+)
+# bs4 output for the template above: entities decoded to characters,
+# void tags self-closed, attributes double-quoted, mention → @name.
+MENTION_HTML_EXPECTED = (
+    '<p>a\xa0\xa0b<br/>c <img src="x.png"/> it\'s "q" @{display}</p>'
+)
+
+
+def _mail_parts(mail):
+    """Decode the text/plain + text/html parts (transfer-encoding agnostic).
+
+    Both planes send valid UTF-8 wire bytes (Django: 8bit), so the sink's
+    `str` re-encodes exactly; parsing bytes (not `str`) keeps `get_content`
+    from mangling 8bit parts. Bytes the sender emitted outside UTF-8 stay
+    U+FFFD and fail the assertions below, as they should.
+    """
+    html_part, text_part = None, None
+    raw_bytes = mail["raw"].encode("utf-8")
+    for part in message_from_bytes(raw_bytes, policy=policy.default).walk():
+        ctype = part.get_content_type()
+        if ctype == "text/html":
+            html_part = part.get_content()
+        elif ctype == "text/plain":
+            text_part = part.get_content()
+    assert html_part is not None, "mail has no text/html part"
+    assert text_part is not None, "mail has no text/plain part"
+    return html_part, text_part
+
+
+def assert_mention_mail_normalized(mail, display_name):
+    """Pin the bs4-normalized mention fragment in both MIME parts."""
+    html_part, text_part = _mail_parts(mail)
+    expected = MENTION_HTML_EXPECTED.format(display=display_name)
+    assert expected in html_part, (
+        f"HTML part misses the normalized fragment:\n{expected!r}\n"
+        f"HTML head: {html_part[:600]!r}"
+    )
+    assert f"@{display_name}" in text_part
+    assert 'it\'s "q"' in text_part
+    assert "\xa0\xa0" in text_part
+    for leaked in ("&nbsp;", "&#39;", "&quot;"):
+        assert leaked not in text_part, f"text/plain leaks {leaked}"
+
+
+def test_mention_mail_html_normalized_like_bs4(db_conn, broker_url, smtp_sink):
+    """Mention mail: entities/voids normalized like BeautifulSoup (Django)."""
+    chain = seed_helpers.issue_chain(db_conn, "mailmention")
+    receiver = seed_helpers.user(db_conn, "contract-mention-receiver")
+    mentioned = seed_helpers.user(db_conn, "Bob")
+    issue_id = str(chain["issue"]["id"])
+    seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": "",
+                "new_value": MENTION_HTML_TEMPLATE.format(user_id=mentioned["id"]),
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+    redis_cache.setex(issue_id, "http://localhost")
+    smtp_sink.clear()
+
+    celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
+    delivered = smtp_sink.wait_for_count(1, what="mention notification mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "stack sent no mail to the mention receiver"
+    assert_mention_mail_normalized(matches[0], mentioned["display_name"])
 
 
 def _processed(conn, log_ids) -> bool:

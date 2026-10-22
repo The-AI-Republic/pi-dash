@@ -34,6 +34,8 @@
 //! against the `F-WIRE-MAIL` fixture below.
 
 pub mod auth_mail;
+pub(crate) mod bs_entities_generated;
+pub(crate) mod bs_normalize;
 pub mod email_notification;
 pub mod live;
 pub mod mail_send;
@@ -196,13 +198,15 @@ pub fn register_membership_mail_tasks(registry: &mut Registry, pool: sqlx::PgPoo
     );
 }
 
-/// Shared mention-component parser.
+/// Shared mention-id parser for the notifications path.
 ///
-/// This is the single implementation of the BeautifulSoup query both mail
-/// helpers build on — `soup.find_all("mention-component",
-/// attrs={"entity_name": "user_mention"})` followed by
-/// `tag["entity_identifier"]` — so `extract_mentions` here and T2's
-/// `process_mention` cannot drift apart (T2 must reuse this, never fork it).
+/// This mirrors the BeautifulSoup query both mail helpers build on —
+/// `soup.find_all("mention-component", attrs={"entity_name":
+/// "user_mention"})` followed by `tag["entity_identifier"]`. The email
+/// path (`process_mention`) needs spans plus full-document normalization,
+/// so it goes through `bs_normalize` instead (PIDASHCONV-1287); the two
+/// parsers must agree on what counts as an element (case-insensitive
+/// match, comments and raw-text bodies excluded).
 ///
 /// Returns `None` when any matched tag has no `entity_identifier`
 /// attribute: Python's list comprehension raises `KeyError` there, which the
