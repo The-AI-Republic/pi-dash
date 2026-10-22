@@ -27,6 +27,7 @@ tests cannot observe each other's rows. See ``_harness/rust_queue.py``.
 """
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
@@ -375,6 +376,55 @@ def test_rust_auth_mail_executes_locally(smtp_sink, db_conn, task_name, args, su
     for marker in markers:
         assert marker in raw, f"{task_name} body misses {marker!r}"
     assert _diff(before, snapshot(db_conn, ["users", "email_notification_logs"])) == {}
+
+
+def test_rust_stack_sends_non_ascii_mention_mail(smtp_sink, db_conn):
+    """PIDASHCONV-1284 replay: non-ASCII mention HTML delivers, no panic.
+
+    Mirrors the Django oracle's ``test_stack_sends_non_ascii_mention_mail``
+    pin-for-pin: the é straddling byte 17 after the ``<p>`` tag start
+    panicked the Rust handler (``match_open_tag`` sliced ``rest[..17]``
+    at a non-char boundary); after the fix the send executes locally,
+    rewrites the component to ``@display_name``, and marks ``sent_at``.
+    """
+    tag = uuid.uuid4().hex[:8]
+    chain = seed_helpers.issue_chain(db_conn, f"mailrustna{tag}")
+    receiver = seed_helpers.user(db_conn, f"contract-rust-na-rcv-{tag}")
+    mentioned = seed_helpers.user(db_conn, f"contract-rust-mentioned-{tag}")
+    issue_id = str(chain["issue"]["id"])
+    html = (
+        "<p>Merci beaucoupé pour la revue</p>"
+        f'<mention-component entity_identifier="{mentioned["id"]}">X</mention-component>'
+    )
+    log_id = seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": html,
+                "new_value": html,
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )["id"]
+    _seed_base_api(issue_id)
+    smtp_sink.clear()
+    _publish_and_observe_local(STACK, {})
+    delivered = smtp_sink.wait_for_count(1, what="non-ascii mention mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "stacked mention mail never arrived"
+    raw = matches[0]["raw"]
+    # ASCII-only markers: the é itself may QP-encode in the raw MIME.
+    assert f"@{mentioned['display_name']}" in raw, "mention not rewritten to @name"
+    assert "mention-component" not in raw, "raw mention-component leaked into the mail"
+    # The DATA receipt lands before the send marks `sent_at`; wait out the
+    # fanned-out sends, then pin the marks.
+    rust_queue.wait_for_queue_drain(what="fanned-out sends settled")
+    assert _processed_at(db_conn, log_id) is not None, "stack never marked processed_at"
+    assert _sent_at(db_conn, log_id) is not None, "fanned-out send never marked sent_at"
 
 
 def test_rust_notifications_executes_locally(db_conn):
