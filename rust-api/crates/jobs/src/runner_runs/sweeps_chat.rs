@@ -1136,8 +1136,8 @@ fn null_json() -> Value {
 }
 
 /// The finalize `UPDATE` (`:71`): binds in clause order, the id last.
-/// `NULL` columns bind typed nulls (`queue_position` is `int2`, the
-/// markers are `timestamptz`); `Now` binds one `now()` per clause.
+/// `NULL` columns bind typed nulls (the markers are `timestamptz`);
+/// `Now` binds one `now()` per clause.
 async fn execute_finalize_update(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     values: &finalization::FinalizeValues,
@@ -1148,7 +1148,6 @@ async fn execute_finalize_update(
     for clause in &values.clauses {
         match &clause.value {
             SetValue::Null => match clause.column {
-                "queue_position" => query = query.bind(None::<i16>),
                 "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
                     query = query.bind(None::<DateTime<Utc>>);
                 }
@@ -1947,8 +1946,8 @@ mod tests {
                 .map(|column| format!("\"runner\".\"{column}\"")),
         );
         assert_eq!(entries, expected);
-        assert_eq!(agent_run::COLUMNS.len(), 41);
-        assert_eq!(runner_cols::COLUMNS.len(), 30);
+        assert_eq!(agent_run::COLUMNS.len(), 40);
+        assert_eq!(runner_cols::COLUMNS.len(), 29);
     }
 
     #[test]

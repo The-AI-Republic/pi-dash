@@ -314,7 +314,6 @@ pub mod runner {
         "dev_metadata",
         "protocol_version",
         "last_heartbeat_at",
-        "free_worktrees",
         "created_at",
         "updated_at",
         "revoked_at",
@@ -347,7 +346,6 @@ pub mod runner {
         Some("{}"),      // dev_metadata (JSONField default=dict)
         Some("1"),       // protocol_version
         None,            // last_heartbeat_at
-        None,            // free_worktrees (NULL = predates feature)
         None,            // created_at (auto_now_add)
         None,            // updated_at (auto_now)
         None,            // revoked_at

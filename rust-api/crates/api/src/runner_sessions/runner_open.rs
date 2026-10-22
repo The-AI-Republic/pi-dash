@@ -186,14 +186,13 @@ const CHAT_RELEASE_DETAIL: &str =
 /// Minimum idle ms for the open-path claim (`outbox.py:286-291`
 /// default): claim everything pending, however fresh.
 const CLAIM_MIN_IDLE_MS: i64 = 0;
-/// The reaper's finalize `SET` order (`status`, `ended_at`,
-/// `queue_position`, the two markers, then `error`, `error_code` in
-/// updates order): pinned so a kernel drift fails loudly instead of
-/// mis-binding (the `runs.rs` `CANCEL_FINALIZE_COLUMNS` precedent).
-const REAP_FINALIZE_COLUMNS: [&str; 7] = [
+/// The reaper's finalize `SET` order (`status`, `ended_at`, the two
+/// markers, then `error`, `error_code` in updates order): pinned so a
+/// kernel drift fails loudly instead of mis-binding (the `runs.rs`
+/// `CANCEL_FINALIZE_COLUMNS` precedent).
+const REAP_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "error",
@@ -1163,12 +1162,11 @@ async fn execute_reap_finalize(
     let Some(row) = found else {
         return Ok(());
     };
-    let error = set_text(&values.clauses, 5)?;
-    let error_code = set_text(&values.clauses, 6)?;
+    let error = set_text(&values.clauses, 4)?;
+    let error_code = set_text(&values.clauses, 5)?;
     sqlx::query(&finalization::finalize_update_sql(&values))
         .bind(AgentRunStatus::Failed.value())
         .bind(Utc::now())
-        .bind(None::<i16>)
         .bind(None::<DateTime<Utc>>)
         .bind(None::<DateTime<Utc>>)
         .bind(error)

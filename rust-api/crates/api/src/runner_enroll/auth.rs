@@ -344,7 +344,6 @@ pub struct RunnerAuthRow {
     pub dev_metadata: Value,
     pub protocol_version: i32,
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub free_worktrees: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -547,7 +546,7 @@ async fn fetch_runner_for_auth(
                   r."enrollment_token_hash", r."enrollment_token_fingerprint",
                   r."enrolled_at", r."capabilities", r."status", r."os", r."arch",
                   r."runner_version", r."dev_metadata", r."protocol_version",
-                  r."last_heartbeat_at", r."free_worktrees",
+                  r."last_heartbeat_at",
                   r."created_at", r."updated_at", r."revoked_at", r."revoked_reason",
                   dm."revoked_at" IS NOT NULL AS "dev_machine_revoked"
            FROM "runner" r

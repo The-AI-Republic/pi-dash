@@ -28,7 +28,7 @@ RUN_KEYS = {
     "cancel_reason", "prompt", "thread_id", "agent_metadata", "runner",
     "work_item", "scheduler_binding", "scheduler_binding_detail",
     "pod", "pod_detail", "created_by", "owner", "created_at",
-    "assigned_at", "queue_position", "started_at", "ended_at", "done_payload",
+    "assigned_at", "started_at", "ended_at", "done_payload",
     "error", "error_code", "error_diagnostic", "refusal_category", "llm_model",
     "input_tokens", "output_tokens", "total_tokens", "usage", "tool_plan",
     "tool_calls",

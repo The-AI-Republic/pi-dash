@@ -371,10 +371,9 @@ struct DeleteStore<'t> {
 /// `:631-640` updates in dict order); the binds below are positional, so
 /// a mismatch fails loudly instead of binding wrong (the L6a sweeps
 /// precedent).
-const REVOKE_FINALIZE_COLUMNS: [&str; 8] = [
+const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "error",
@@ -502,7 +501,6 @@ impl revoke::RevokeStore for DeleteStore<'_> {
         sqlx::query(&finalization::finalize_update_sql(&values))
             .bind(AgentRunStatus::Cancelled.value())
             .bind(now_micros())
-            .bind(None::<i16>)
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
             .bind(revoke::FINALIZE_ERROR)

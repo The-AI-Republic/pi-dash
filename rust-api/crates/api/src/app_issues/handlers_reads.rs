@@ -1922,7 +1922,6 @@ fn agent_run_detail_row(run: &AgentRunOwned) -> AgentRunDetailRow<'_> {
         id: get_str(row, "id").unwrap_or_default(),
         status: get_str(row, "status").unwrap_or_default(),
         executor_kind: get_str(row, "executor_kind").unwrap_or_default(),
-        queue_position: get_i32(row, "queue_position").and_then(|value| i16::try_from(value).ok()),
         runner_id: get_str(row, "runner_id"),
         runner_name: get_str(row, "runner_name"),
         created_at: &run.created_at,

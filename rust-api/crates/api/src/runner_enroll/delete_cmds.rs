@@ -449,7 +449,7 @@ fn body_opt_raw(value: Option<&JVal>) -> Result<Option<String>, Response> {
 // ---------------------------------------------------------------------------
 
 /// The runner facts the delete gate needs (`r_cols::COLUMNS`
-/// positions: id 0, owner 1, workspace 2, visibility 8, revoked 28).
+/// positions: id 0, owner 1, workspace 2, visibility 8, revoked 27).
 struct RunnerGate {
     id: Uuid,
     owner_id: Uuid,
@@ -464,7 +464,7 @@ fn decode_runner_gate(row: &sqlx::postgres::PgRow) -> Result<RunnerGate, Respons
         owner_id: row.try_get(1).map_err(|_| server_error())?,
         workspace_id: row.try_get(2).map_err(|_| server_error())?,
         visibility: row.try_get(8).map_err(|_| server_error())?,
-        revoked_at: row.try_get(28).map_err(|_| server_error())?,
+        revoked_at: row.try_get(27).map_err(|_| server_error())?,
     })
 }
 
@@ -1011,7 +1011,6 @@ fn bind_finalize_value<'q>(
         (_, SetValue::Now) => query.bind(*now),
         (_, SetValue::Text(text)) => query.bind(text.clone()),
         (_, SetValue::Json(payload)) => query.bind(payload.clone()),
-        ("queue_position", SetValue::Null) => query.bind(None::<i16>),
         (_, SetValue::Null) => query.bind(None::<DateTime<Utc>>),
     }
 }
@@ -1310,7 +1309,7 @@ impl delete_svc::RunnerDeleteStore for DeleteStore<'_, '_> {
             .map(|row| {
                 Ok(delete_svc::LockedRunner {
                     id: row.try_get(0).map_err(store_err)?,
-                    revoked_at: row.try_get(28).map_err(store_err)?,
+                    revoked_at: row.try_get(27).map_err(store_err)?,
                 })
             })
             .collect()

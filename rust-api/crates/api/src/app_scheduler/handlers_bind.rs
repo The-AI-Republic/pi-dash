@@ -2362,9 +2362,8 @@ fn decode_agent_run_at(
         total_tokens: row.try_get(base + 35).map_err(|_| Denial::ServerError)?,
         created_at: row.try_get(base + 36).map_err(|_| Denial::ServerError)?,
         assigned_at: row.try_get(base + 37).map_err(|_| Denial::ServerError)?,
-        queue_position: row.try_get(base + 38).map_err(|_| Denial::ServerError)?,
-        started_at: row.try_get(base + 39).map_err(|_| Denial::ServerError)?,
-        ended_at: row.try_get(base + 40).map_err(|_| Denial::ServerError)?,
+        started_at: row.try_get(base + 38).map_err(|_| Denial::ServerError)?,
+        ended_at: row.try_get(base + 39).map_err(|_| Denial::ServerError)?,
     })
 }
 
@@ -3393,25 +3392,25 @@ mod tests {
     fn br1_segment_layout_matches_layer_consts() {
         assert_eq!(BINDING_COLUMN_COUNT, 22);
         assert_eq!(SCHEDULER_COLUMN_COUNT, 14);
-        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 41);
+        assert_eq!(queries::AGENT_RUN_COLUMNS.len(), 40);
         assert_eq!(queries::POD_COLUMNS.len(), 10);
         assert_eq!(
             BINDING_COLUMN_COUNT
                 + SCHEDULER_COLUMN_COUNT
                 + queries::AGENT_RUN_COLUMNS.len()
                 + queries::POD_COLUMNS.len(),
-            87
+            86
         );
         // The display columns the render reads, by layer-const position.
         let run_base = BINDING_COLUMN_COUNT + SCHEDULER_COLUMN_COUNT;
         let pod_base = run_base + queries::AGENT_RUN_COLUMNS.len();
         assert_eq!(queries::AGENT_RUN_COLUMNS[0], "id");
         assert_eq!(queries::AGENT_RUN_COLUMNS[10], "status");
-        assert_eq!(queries::AGENT_RUN_COLUMNS[40], "ended_at");
+        assert_eq!(queries::AGENT_RUN_COLUMNS[39], "ended_at");
         assert_eq!(queries::POD_COLUMNS[0], "id");
         assert_eq!(queries::POD_COLUMNS[3], "name");
         assert_eq!(run_base, 36);
-        assert_eq!(pod_base, 77);
+        assert_eq!(pod_base, 76);
     }
 
     // -- Render ---------------------------------------------------------------

@@ -2514,7 +2514,6 @@ struct AgentRunRow {
     id: Uuid,
     status: String,
     executor_kind: Option<String>,
-    queue_position: Option<i32>,
     runner_id: Option<Uuid>,
     runner_name: Option<String>,
     created_at: Option<DateTime<Utc>>,
@@ -2539,7 +2538,7 @@ pub async fn render_agent_status(
     timezone: chrono_tz::Tz,
 ) -> Result<serde_json::Value, Denial> {
     let runs: Vec<AgentRunRow> = sqlx::query(
-        r#"SELECT r.id, r.status, r.executor_kind, r.queue_position, r.runner_id,
+        r#"SELECT r.id, r.status, r.executor_kind, r.runner_id,
                   ru.name,
                   r.created_at, r.assigned_at, r.started_at, r.ended_at,
                   r.done_payload, r.error, r.error_code, r.llm_model,
@@ -2558,7 +2557,6 @@ pub async fn render_agent_status(
             id: row.try_get("id")?,
             status: row.try_get("status")?,
             executor_kind: row.try_get("executor_kind")?,
-            queue_position: row.try_get("queue_position")?,
             runner_id: row.try_get("runner_id")?,
             runner_name: row.try_get("name")?,
             created_at: row.try_get("created_at")?,
@@ -2661,7 +2659,6 @@ async fn render_agent_run(
         "id": run.id.to_string(),
         "status": run.status,
         "executor_kind": run.executor_kind,
-        "queue_position": run.queue_position,
         "runner": run.runner_id.map(|id| id.to_string()),
         "runner_name": run.runner_id.and(run.runner_name.clone()),
         "created_at": opt_dt_string(&run.created_at, timezone),

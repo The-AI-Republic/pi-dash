@@ -15,8 +15,8 @@
 //! Rows reuse the D-11 [`AgentRun`] read shape and [`AgentRunStatus`]
 //! (`pidash_db::dispatch`, never re-ported): the lookup `SELECT`s
 //! project [`READ_COLUMNS`] (22 columns) where Django selects the full
-//! 41-column row — same row-selection semantics, narrower projection.
-//! The fixture (`active_run.sql`) pins the 41-column Django text; the
+//! 40-column row — same row-selection semantics, narrower projection.
+//! The fixture (`active_run.sql`) pins the 40-column Django text; the
 //! tests pin our projection against [`READ_COLUMNS`] and the
 //! `WHERE`/`ORDER BY`/`LIMIT` tails against the fixture.
 //!

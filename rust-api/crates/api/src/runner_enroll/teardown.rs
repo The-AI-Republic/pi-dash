@@ -541,7 +541,7 @@ fn decode_refresh_runner(row: &sqlx::postgres::PgRow) -> Result<RefreshRunner, R
         refresh_token_hash: row.try_get(9).map_err(|_| server_error())?,
         refresh_token_generation: row.try_get(11).map_err(|_| server_error())?,
         previous_refresh_token_hash: row.try_get(12).map_err(|_| server_error())?,
-        revoked_at: row.try_get(28).map_err(|_| server_error())?,
+        revoked_at: row.try_get(27).map_err(|_| server_error())?,
     })
 }
 
@@ -1078,7 +1078,7 @@ pub async fn dev_machine_revoke(
             Ok(id) => id,
             Err(_) => return server_error(),
         };
-        let revoked_at: Option<DateTime<Utc>> = match row.try_get(28) {
+        let revoked_at: Option<DateTime<Utc>> = match row.try_get(27) {
             Ok(revoked_at) => revoked_at,
             Err(_) => return server_error(),
         };
@@ -1521,8 +1521,8 @@ async fn serialize_machine(
     .to_json()
 }
 
-/// Owned `runner` row for gates + full rendering (token internals and
-/// `free_worktrees` skipped — never serialized here).
+/// Owned `runner` row for gates + full rendering (token internals
+/// skipped — never serialized here).
 struct FullRunner {
     id: Uuid,
     owner_id: Uuid,
@@ -1570,10 +1570,10 @@ fn decode_full_runner(row: &sqlx::postgres::PgRow) -> Result<FullRunner, Respons
         dev_metadata: row.try_get(22).map_err(|_| server_error())?,
         protocol_version: row.try_get(23).map_err(|_| server_error())?,
         last_heartbeat_at: row.try_get(24).map_err(|_| server_error())?,
-        created_at: row.try_get(26).map_err(|_| server_error())?,
-        updated_at: row.try_get(27).map_err(|_| server_error())?,
-        revoked_at: row.try_get(28).map_err(|_| server_error())?,
-        revoked_reason: row.try_get(29).map_err(|_| server_error())?,
+        created_at: row.try_get(25).map_err(|_| server_error())?,
+        updated_at: row.try_get(26).map_err(|_| server_error())?,
+        revoked_at: row.try_get(27).map_err(|_| server_error())?,
+        revoked_reason: row.try_get(28).map_err(|_| server_error())?,
     })
 }
 
@@ -1907,13 +1907,12 @@ impl<'t, 'p> TxStores<'t, 'p> {
     }
 }
 
-/// The revoke-finalize SET order (planned `status`, `ended_at`,
-/// `queue_position`, the two markers, then our extras in dict order):
-/// pinned so a kernel drift fails loudly instead of mis-binding.
-const REVOKE_FINALIZE_COLUMNS: [&str; 8] = [
+/// The revoke-finalize SET order (planned `status`, `ended_at`, the
+/// two markers, then our extras in dict order): pinned so a kernel
+/// drift fails loudly instead of mis-binding.
+const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
-    "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
     "error",
@@ -2009,7 +2008,6 @@ impl RevokeStore for TxStores<'_, '_> {
         sqlx::query(&finalize_kernel::finalize_update_sql(&values))
             .bind(AgentRunStatus::Cancelled.value())
             .bind(chrono::Utc::now())
-            .bind(None::<i16>)
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
             .bind("runner revoked")
