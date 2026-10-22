@@ -16,7 +16,8 @@
     "NEWFRONT-92": { "reason": "M-01 desktop switch", "paths": ["^desktop/", "^desktop-overlay/"] },
     "NEWFRONT-104": { "reason": "D17 nested pages backend", "paths": ["^apps/api/pi_dash/app/views/page/", "^apps/api/pi_dash/app/serializers/page\\.py$", "^apps/api/pi_dash/app/urls/page\\.py$", "^apps/api/pi_dash/tests/"] },
     "NEWFRONT-491": { "reason": "auth area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
-    "NEWFRONT-295": { "reason": "shell area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] }
+    "NEWFRONT-295": { "reason": "shell area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
+    "NEWFRONT-528": { "reason": "workspace-scoped coexistence routing", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] }
   },
   "oracleIssues": {
     "$comment": "Oracle issues may add data-testid attributes to the old apps, nothing else.",
