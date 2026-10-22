@@ -83,5 +83,6 @@ export function useUpdateExecutionTarget(workspaceSlug: string, projectId: strin
     isSaving: mutation.isPending,
     validationError,
     updateExecutionTarget: (input: ExecutionTargetPatch) => mutation.mutate(input),
+    updateExecutionTargetAsync: (input: ExecutionTargetPatch) => mutation.mutateAsync(input),
   };
 }

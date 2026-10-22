@@ -28,6 +28,7 @@ import {
 } from "../../../../shared/pickers/index.js";
 import { useUpdateExecutionTarget } from "../../api/executionTarget.js";
 import { useUpdateIssue } from "../../api/mutations.js";
+import { selectWaitingBadge } from "../waiting/waiting.js";
 import { CreatedByRow } from "./CreatedByRow.js";
 import { selectCreator } from "./creator.js";
 import type { SidebarProject } from "./IssuePropertiesSidebar.js";
@@ -134,6 +135,7 @@ export function SidebarProperties({
           placeholder="Select target"
           preload={selection !== null}
           assignableFor={issue.id}
+          waitingLabel={selectWaitingBadge(issue)}
           saveError={targetUpdate.validationError}
           onChange={(picked) => targetUpdate.updateExecutionTarget(executionTargetPatch(picked))}
         />

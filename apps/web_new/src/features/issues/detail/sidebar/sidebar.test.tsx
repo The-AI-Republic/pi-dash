@@ -851,6 +851,59 @@ describe("SidebarProperties", () => {
     expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("WEB_pod_a");
   });
 
+  it("badges the Runs on trigger while the run waits", async () => {
+    const activeRun = {
+      id: "a23e4567-e89b-12d3-a456-42661417400a",
+      status: "queued",
+      executor_kind: "local_runner",
+      queue_position: null,
+      runner: null,
+      runner_name: null,
+      pinned_runner: RUNNER_GPU,
+      pinned_runner_name: "gpu-box",
+      pin_kind: "dedicated",
+      dispatch_wait: {
+        reason: "runner_offline",
+        pin_kind: "dedicated",
+        runner: RUNNER_GPU,
+        runner_name: "gpu-box",
+        queued_at: "2024-02-03T04:05:06Z",
+        runner_last_seen_at: null,
+        runs_ahead: 0,
+        releasable: true,
+      },
+      created_at: "2024-02-03T04:05:06Z",
+      assigned_at: null,
+      started_at: null,
+      ended_at: null,
+      done_payload: null,
+      error: "",
+      error_code: "",
+      error_diagnostic: null,
+      llm_model: "",
+      input_tokens: null,
+      output_tokens: null,
+      total_tokens: null,
+      live_state: null,
+    };
+    const { queryClient } = harness({ runners: RUNNERS });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({
+          assigned_pod_id: POD_A,
+          assigned_runner_id: RUNNER_GPU,
+          agent_status: { ticker: null, active_run: activeRun, latest_run: activeRun, run_count: 1 },
+        })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("Offline"));
+  });
+
   it("patches the runner pin from the Runs on picker", async () => {
     const { queryClient, writes } = harness({ runners: RUNNERS });
     wrap(
