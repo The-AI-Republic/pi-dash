@@ -532,14 +532,15 @@ async fn fetch_board(pool: &sqlx::PgPool, anchor: &str) -> Result<Option<BoardRo
 
 /// `ProjectBaseModel.save` forces `workspace` from `project.workspace`
 /// (`db/models/project.py:309-311`): written rows resolve the workspace
-/// through the project row. Forward FK reads use the soft-deletion
-/// manager, hence the `deleted_at IS NULL` guard.
+/// through the project row. Forward FK reads use `_base_manager`, which
+/// carries no `deleted_at` filter (no model sets `base_manager_name`),
+/// so a soft-deleted project still resolves (PIDASHCONV-1260).
 async fn project_workspace_id(
     pool: &sqlx::PgPool,
     project_id: &uuid::Uuid,
 ) -> Result<uuid::Uuid, HandlerError> {
     let row: Option<(uuid::Uuid,)> =
-        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
+        sqlx::query_as("SELECT workspace_id FROM projects WHERE id = $1")
             .bind(project_id)
             .fetch_optional(pool)
             .await
@@ -1145,8 +1146,10 @@ async fn render_comment(
     })
 }
 
-/// `issue_detail`: the flat leaf over the comment's issue FK. A dangling
-/// FK is a 500 like Python's `DoesNotExist` → fallback envelope.
+/// `issue_detail`: the flat leaf over the comment's issue FK. The read
+/// mirrors `_base_manager` (no `deleted_at` filter), so a soft-deleted
+/// issue still renders; only a genuinely missing row is a 500 like
+/// Python's `DoesNotExist` → fallback envelope (PIDASHCONV-1260).
 async fn render_issue_flat(
     pool: &sqlx::PgPool,
     issue_id: Option<&str>,
@@ -1156,7 +1159,7 @@ async fn render_issue_flat(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"deleted_at\" IS NULL AND \"issues\".\"id\" = $1)",
+        "SELECT \"issues\".\"id\", \"issues\".\"name\", \"issues\".\"description_json\", \"issues\".\"description_html\", \"issues\".\"priority\", \"issues\".\"complexity_score\", \"issues\".\"start_date\", \"issues\".\"target_date\", \"issues\".\"sequence_id\", \"issues\".\"sort_order\", \"issues\".\"is_draft\" FROM \"issues\" WHERE (\"issues\".\"id\" = $1)",
         &[uuid_param(issue_id)?],
     )
     .await?
@@ -1193,6 +1196,8 @@ async fn render_issue_flat(
 }
 
 /// `project_detail`: the app lite leaf over the comment's project FK.
+/// Unfiltered `_base_manager` read: a soft-deleted project still renders
+/// (PIDASHCONV-1260).
 async fn render_project_lite(
     pool: &sqlx::PgPool,
     project_id: Option<&str>,
@@ -1202,7 +1207,7 @@ async fn render_project_lite(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"id\" = $1)",
+        "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"cover_image\", \"projects\".\"cover_image_asset_id\", \"projects\".\"logo_props\", \"projects\".\"description\", \"projects\".\"is_default\" FROM \"projects\" WHERE (\"projects\".\"id\" = $1)",
         &[uuid_param(project_id)?],
     )
     .await?
@@ -1227,6 +1232,8 @@ async fn render_project_lite(
 }
 
 /// `workspace_detail`: the app lite leaf over the comment's workspace FK.
+/// Unfiltered `_base_manager` read: a soft-deleted workspace still renders
+/// (PIDASHCONV-1260).
 async fn render_workspace_lite(
     pool: &sqlx::PgPool,
     workspace_id: Option<&str>,
@@ -1236,7 +1243,7 @@ async fn render_workspace_lite(
     };
     let row = fetch_optional_object(
         pool,
-        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"deleted_at\" IS NULL AND \"workspaces\".\"id\" = $1)",
+        "SELECT \"workspaces\".\"id\", \"workspaces\".\"name\", \"workspaces\".\"slug\", \"workspaces\".\"logo\", \"workspaces\".\"logo_asset_id\" FROM \"workspaces\" WHERE (\"workspaces\".\"id\" = $1)",
         &[uuid_param(workspace_id)?],
     )
     .await?
@@ -2041,8 +2048,12 @@ async fn comment_create_inner(
     // (sqlx encodes `&[String]` as an array), never as JSON values.
     let attachments = input.attachments.clone().unwrap_or_default();
     let labels = input.labels.clone().unwrap_or_default();
+    // `IssueComment.save` runs the comment insert, the `Description` mirror
+    // insert and the link update inside one `transaction.atomic()` block
+    // (`db/models/issue.py:598-627`): a mid-save failure leaves no rows.
+    let mut tx = pool.begin().await.map_err(|_| HandlerError::ServerError)?;
     insert_comment(
-        pool,
+        &mut tx,
         &comment_id,
         &now,
         &actor.id,
@@ -2070,7 +2081,7 @@ async fn comment_create_inner(
         .bind(&stripped)
         .bind(&comment_json)
         .bind(&html)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| HandlerError::ServerError)?;
     // The description link is a second `save(update_fields=["description_id"])`
@@ -2083,9 +2094,10 @@ async fn comment_create_inner(
     )
     .bind(description_id)
     .bind(comment_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|_| HandlerError::ServerError)?;
+    tx.commit().await.map_err(|_| HandlerError::ServerError)?;
     let row = fetch_comment_by_id(pool, &comment_id)
         .await?
         .ok_or(HandlerError::ServerError)?;
@@ -2131,7 +2143,7 @@ fn string_list(value: &Value) -> Result<Vec<String>, HandlerError> {
 
 #[allow(clippy::too_many_arguments)]
 async fn insert_comment(
-    pool: &sqlx::PgPool,
+    ex: &mut sqlx::PgConnection,
     comment_id: &uuid::Uuid,
     now: &chrono::DateTime<chrono::Utc>,
     actor_id: &uuid::Uuid,
@@ -2171,7 +2183,7 @@ async fn insert_comment(
         .bind(input.speaker_agent_run_id.flatten())
         .bind(edited_at)
         .bind(input.parent_id.flatten())
-        .execute(pool)
+        .execute(&mut *ex)
         .await
         .map_err(integrity_error)?;
     if result.rows_affected() != 1 {
