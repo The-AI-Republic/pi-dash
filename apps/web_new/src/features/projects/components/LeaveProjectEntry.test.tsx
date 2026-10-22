@@ -10,10 +10,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { LeaveProjectEntry } from "./LeaveProjectEntry.js";
 
-// The lazy chunk pulls the dialog, its primitives and the mutation wiring
-// on first open; the first import can outlast the default 1 s find timeout
-// when the suite runs the whole tree.
-const OPEN_TIMEOUT = { timeout: 10_000 };
+// The first open pays the cold lazy import of the dialog graph; async
+// queries poll on the shared budget from src/test-setup.ts, which covers
+// a loaded host (see src/testing/testBudget.ts).
 
 function renderEntry(open: boolean) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -41,7 +40,7 @@ describe("LeaveProjectEntry", () => {
 
   it("loads and shows the confirmation flow once opened", async () => {
     renderEntry(true);
-    expect(await screen.findByRole("heading", { name: "Leave project" }, OPEN_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Leave project" })).toBeInTheDocument();
   });
 
   it("forwards close requests from the confirmation", async () => {
@@ -60,7 +59,7 @@ describe("LeaveProjectEntry", () => {
         />
       </QueryClientProvider>
     );
-    await user.click(await screen.findByRole("button", { name: "Cancel" }, OPEN_TIMEOUT));
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(onOpenChange).toHaveBeenCalledTimes(1);
     expect(onOpenChange.mock.calls[0]?.[0]).toBe(false);
   });
@@ -80,7 +79,7 @@ describe("LeaveProjectEntry", () => {
       </QueryClientProvider>
     );
     const user = userEvent.setup();
-    expect(await screen.findByRole("heading", { name: "Leave project" }, OPEN_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Leave project" })).toBeInTheDocument();
     await user.type(screen.getByLabelText("Enter the project name Web to continue:"), "Web");
     expect(screen.getByLabelText("Enter the project name Web to continue:")).toHaveValue("Web");
 
@@ -94,7 +93,7 @@ describe("LeaveProjectEntry", () => {
         <LeaveProjectEntry {...props} open />
       </QueryClientProvider>
     );
-    expect(await screen.findByRole("heading", { name: "Leave project" }, OPEN_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Leave project" })).toBeInTheDocument();
     expect(screen.getByLabelText("Enter the project name Web to continue:")).toHaveValue("");
   });
 });
