@@ -215,6 +215,7 @@ import {
   listLoopTargets,
   updateLoopJob,
 } from "./contracts/admin-loop.js";
+import { listInstanceRunners } from "./contracts/admin-runners.js";
 import {
   adminSignIn,
   adminSignOut,
@@ -3189,6 +3190,73 @@ describe("instance-admin loop contracts", () => {
     expect(transport.calls[2]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/`);
     await listLoopTargets(client, UUID, { page: 2 });
     expect(transport.calls[3]?.url).toBe(`https://api.test/api/instances/loop/jobs/${UUID}/targets/?page=2`);
+  });
+});
+
+describe("instance-admin runners contracts", () => {
+  const runner = {
+    id: UUID,
+    name: "office-mac",
+    workspace_slug: "acme",
+    owner_email: "ada@example.com",
+    host_label: "office-mac",
+    provisioning: "manual",
+    status: "online",
+    runner_version: "1.2.3",
+    codex_version: "0.44.0",
+    last_heartbeat_at: "2026-01-02T03:04:05+00:00",
+    created_at: "2026-01-01T00:00:00+00:00",
+    revoked_at: null,
+  };
+
+  it("parses the runners page with its total count", async () => {
+    const page = { page: 1, total: 1, results: [runner] };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listInstanceRunners(client);
+    expect(parsed.page).toBe(1);
+    expect(parsed.total).toBe(1);
+    expect(parsed.results).toHaveLength(1);
+    expect(parsed.results[0]?.codex_version).toBe("0.44.0");
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/instances/runners/");
+  });
+
+  it("parses detached runners with null workspace, owner, versions, and heartbeats", async () => {
+    const detached = {
+      ...runner,
+      id: UUID2,
+      workspace_slug: null,
+      owner_email: null,
+      runner_version: "",
+      codex_version: null,
+      last_heartbeat_at: null,
+      created_at: null,
+    };
+    const page = { page: 1, total: 2, results: [runner, detached] };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listInstanceRunners(client);
+    expect(parsed.total).toBe(2);
+    expect(parsed.results[1]?.workspace_slug).toBeNull();
+    expect(parsed.results[1]?.codex_version).toBeNull();
+    expect(parsed.results[1]?.last_heartbeat_at).toBeNull();
+  });
+
+  it("sends set filters and drops blank ones from the URL", async () => {
+    const page = { page: 2, total: 0, results: [] };
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(page) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await listInstanceRunners(client, {
+      provisioning: "desktop_bundled",
+      status: "busy",
+      workspace: "acme",
+      page: 2,
+    });
+    expect(transport.calls[0]?.url).toBe(
+      "https://api.test/api/instances/runners/?provisioning=desktop_bundled&status=busy&workspace=acme&page=2"
+    );
+    await listInstanceRunners(client, { provisioning: "", status: "", workspace: "" });
+    expect(transport.calls[1]?.url).toBe("https://api.test/api/instances/runners/");
   });
 });
 

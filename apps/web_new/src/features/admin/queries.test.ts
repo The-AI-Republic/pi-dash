@@ -12,6 +12,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceRunnersQueryOptions,
   instanceWorkspacesQueryOptions,
   loopJobDetailQueryOptions,
   loopJobsQueryOptions,
@@ -49,6 +50,8 @@ describe("admin keys", () => {
     expect(adminKeys.loopJobTargets("job-1", "")).toEqual(["admin", "loop", "targets", "job-1", ""]);
     expect(adminKeys.loopJobTargets("job-1", "min_role")).toEqual(["admin", "loop", "targets", "job-1", "min_role"]);
     expect(adminKeys.workspaces).toEqual(["admin", "workspaces"]);
+    expect(adminKeys.runners("", 1)).toEqual(["admin", "runners", "", 1]);
+    expect(adminKeys.runners("manual", 2)).toEqual(["admin", "runners", "manual", 2]);
   });
 });
 
@@ -228,6 +231,40 @@ describe("cloud auth probe query", () => {
     expect(options.retry).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
+    expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("instance runners query", () => {
+  it("reads one runners page through the client with the filter and page", async () => {
+    const page = { page: 2, total: 51, results: [] };
+    const getJson = vi.fn(async () => page);
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceRunnersQueryOptions(fakeClient, "manual", 2);
+    expect(options.queryKey).toEqual(adminKeys.runners("manual", 2));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(page);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/runners/", {
+      query: { provisioning: "manual", status: undefined, workspace: undefined, page: 2 },
+    });
+  });
+
+  it("drops the blank filter from the request", async () => {
+    const getJson = vi.fn(async () => ({ page: 1, total: 0, results: [] }));
+    const fakeClient = { getJson, parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = instanceRunnersQueryOptions(fakeClient, "", 1);
+    expect(options.queryKey).toEqual(adminKeys.runners("", 1));
+    await options.queryFn?.({} as never);
+    expect(getJson).toHaveBeenCalledWith("/api/instances/runners/", {
+      query: { provisioning: undefined, status: undefined, workspace: undefined, page: 1 },
+    });
+  });
+
+  it("never retries, refetches, polls, or goes stale", () => {
+    const options = instanceRunnersQueryOptions({} as never, "", 1);
+    expect(options.retry).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
+    expect(options.refetchOnReconnect).toBe(false);
+    expect(options.refetchInterval).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 });

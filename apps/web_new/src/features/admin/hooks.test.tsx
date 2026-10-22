@@ -71,6 +71,7 @@ import {
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useInstanceRunners,
   useInstanceWorkspaces,
   useLoopJobDetail,
   useLoopJobs,
@@ -1505,6 +1506,50 @@ describe("useLoopJobTargets", () => {
   it("surfaces fetch failures instead of retrying", async () => {
     createAppClient("https://api.test", stubTransport({}));
     renderProbe(() => LoopJobTargetsProbe({ jobId: "33333333-3333-4333-8333-333333333333", skipReason: "min_role" }));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
+  });
+});
+
+function InstanceRunnersProbe({ provisioning, page }: { provisioning: string; page: number }): React.ReactElement {
+  const query = useInstanceRunners(provisioning, page);
+  if (query.isPending) return <div data-testid="probe">loading</div>;
+  if (query.isError) return <div data-testid="probe">failed</div>;
+  return <div data-testid="probe">{`${query.data.total}:${query.data.results.map((row) => row.name).join(",")}`}</div>;
+}
+
+describe("useInstanceRunners", () => {
+  const runner = {
+    id: "55555555-5555-4535-8555-555555555555",
+    name: "probe-runner",
+    workspace_slug: "probe-workspace",
+    owner_email: "member@example.test",
+    host_label: "probe-runner",
+    provisioning: "manual",
+    status: "online",
+    runner_version: "1.2.3",
+    codex_version: null,
+    last_heartbeat_at: null,
+    created_at: "2026-02-03T04:05:06Z",
+    revoked_at: null,
+  };
+
+  it("reads one runners page through the app client", async () => {
+    createAppClient(
+      "https://api.test",
+      stubTransport({
+        "/api/instances/runners/": {
+          status: 200,
+          body: { page: 1, total: 1, results: [runner] },
+        },
+      })
+    );
+    renderProbe(() => InstanceRunnersProbe({ provisioning: "", page: 1 }));
+    await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("1:probe-runner"));
+  });
+
+  it("surfaces fetch failures instead of retrying", async () => {
+    createAppClient("https://api.test", stubTransport({}));
+    renderProbe(() => InstanceRunnersProbe({ provisioning: "manual", page: 2 }));
     await waitFor(() => expect(screen.getByTestId("probe")).toHaveTextContent("failed"));
   });
 });

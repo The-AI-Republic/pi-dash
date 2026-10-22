@@ -42,6 +42,7 @@ import { Route as GodModeDashboardAiRouteImport } from './routes/god-mode/_dashb
 import { Route as GodModeDashboardAuthenticationRouteRouteImport } from './routes/god-mode/_dashboard/authentication/route'
 import { Route as GodModeDashboardEmailRouteImport } from './routes/god-mode/_dashboard/email'
 import { Route as GodModeDashboardGeneralRouteImport } from './routes/god-mode/_dashboard/general'
+import { Route as GodModeDashboardRunnersRouteImport } from './routes/god-mode/_dashboard/runners'
 import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god-mode/_dashboard/workspace/route'
 import { Route as SettingsProfileIndexRouteImport } from './routes/settings/profile/index'
 import { Route as SettingsProfileTabRouteImport } from './routes/settings/profile/$tab'
@@ -283,6 +284,11 @@ const GodModeDashboardEmailRoute = GodModeDashboardEmailRouteImport.update({
 const GodModeDashboardGeneralRoute = GodModeDashboardGeneralRouteImport.update({
   id: '/general',
   path: '/general',
+  getParentRoute: () => GodModeDashboardRouteRoute,
+} as any)
+const GodModeDashboardRunnersRoute = GodModeDashboardRunnersRouteImport.update({
+  id: '/runners',
+  path: '/runners',
   getParentRoute: () => GodModeDashboardRouteRoute,
 } as any)
 const GodModeDashboardWorkspaceRouteRoute =
@@ -767,6 +773,7 @@ export interface FileRoutesByFullPath {
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/settings/profile/': typeof SettingsProfileIndexRoute
@@ -870,6 +877,7 @@ export interface FileRoutesByTo {
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
   '/settings/profile': typeof SettingsProfileIndexRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
@@ -978,6 +986,7 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/ai': typeof GodModeDashboardAiRoute
   '/god-mode/_dashboard/email': typeof GodModeDashboardEmailRoute
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
+  '/god-mode/_dashboard/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/settings/profile/': typeof SettingsProfileIndexRoute
@@ -1090,6 +1099,7 @@ export interface FileRouteTypes {
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
+    | '/god-mode/runners'
     | '/settings/profile/$tab'
     | '/$ws/'
     | '/settings/profile/'
@@ -1193,6 +1203,7 @@ export interface FileRouteTypes {
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
+    | '/god-mode/runners'
     | '/settings/profile/$tab'
     | '/settings/profile'
     | '/$ws/assistant/$threadId'
@@ -1300,6 +1311,7 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/ai'
     | '/god-mode/_dashboard/email'
     | '/god-mode/_dashboard/general'
+    | '/god-mode/_dashboard/runners'
     | '/settings/profile/$tab'
     | '/$ws/_gated/'
     | '/settings/profile/'
@@ -1633,6 +1645,13 @@ declare module '@tanstack/react-router' {
       path: '/general'
       fullPath: '/god-mode/general'
       preLoaderRoute: typeof GodModeDashboardGeneralRouteImport
+      parentRoute: typeof GodModeDashboardRouteRoute
+    }
+    '/god-mode/_dashboard/runners': {
+      id: '/god-mode/_dashboard/runners'
+      path: '/runners'
+      fullPath: '/god-mode/runners'
+      preLoaderRoute: typeof GodModeDashboardRunnersRouteImport
       parentRoute: typeof GodModeDashboardRouteRoute
     }
     '/god-mode/_dashboard/workspace': {
@@ -2508,6 +2527,7 @@ interface GodModeDashboardRouteRouteChildren {
   GodModeDashboardAiRoute: typeof GodModeDashboardAiRoute
   GodModeDashboardEmailRoute: typeof GodModeDashboardEmailRoute
   GodModeDashboardGeneralRoute: typeof GodModeDashboardGeneralRoute
+  GodModeDashboardRunnersRoute: typeof GodModeDashboardRunnersRoute
   GodModeDashboardLoopJobIdRoute: typeof GodModeDashboardLoopJobIdRoute
   GodModeDashboardLoopIndexRoute: typeof GodModeDashboardLoopIndexRoute
 }
@@ -2520,6 +2540,7 @@ const GodModeDashboardRouteRouteChildren: GodModeDashboardRouteRouteChildren = {
   GodModeDashboardAiRoute: GodModeDashboardAiRoute,
   GodModeDashboardEmailRoute: GodModeDashboardEmailRoute,
   GodModeDashboardGeneralRoute: GodModeDashboardGeneralRoute,
+  GodModeDashboardRunnersRoute: GodModeDashboardRunnersRoute,
   GodModeDashboardLoopJobIdRoute: GodModeDashboardLoopJobIdRoute,
   GodModeDashboardLoopIndexRoute: GodModeDashboardLoopIndexRoute,
 }

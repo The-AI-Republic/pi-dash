@@ -102,6 +102,7 @@ export {
   useInstanceAdmins,
   useInstanceBootstrap,
   useInstanceConfigurations,
+  useInstanceRunners,
   useInstanceWorkspaces,
   useLoopJobDetail,
   useLoopJobs,
@@ -135,6 +136,7 @@ export {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceRunnersQueryOptions,
   instanceWorkspacesQueryOptions,
   loopJobDetailQueryOptions,
   loopJobsQueryOptions,
@@ -230,6 +232,7 @@ export { AdminEntryGate } from "./components/AdminEntryGate.js";
 export { AdminLoopJobDetailPage } from "./components/AdminLoopJobDetailPage.js";
 export { AdminLoopJobModal } from "./components/AdminLoopJobModal.js";
 export { AdminLoopJobsPage } from "./components/AdminLoopJobsPage.js";
+export { AdminRunnersPage } from "./components/AdminRunnersPage.js";
 export type { AdminEntrySearch } from "./components/AdminEntryGate.js";
 export { AdminDashboardGuard, AdminHomeGuard } from "./components/AdminGuards.js";
 export { AdminHeader } from "./components/AdminHeader.js";

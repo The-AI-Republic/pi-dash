@@ -967,6 +967,8 @@ export type {
   LoopSkipReason,
   LoopTargetsQuery,
 } from "./contracts/admin-loop.js";
+export { InstanceRunner, InstanceRunnerListResponse, listInstanceRunners } from "./contracts/admin-runners.js";
+export type { InstanceRunnerListQuery } from "./contracts/admin-runners.js";
 export {
   AdminMe,
   CloudAuthUser,

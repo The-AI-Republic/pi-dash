@@ -16,6 +16,7 @@ import {
   getLoopJob,
   listInstanceAdmins,
   listInstanceConfigurations,
+  listInstanceRunners,
   listInstanceWorkspaces,
   listLoopJobs,
   listLoopTargets,
@@ -57,6 +58,13 @@ export const adminKeys = {
   loopJobTargets: (jobId: string, skipReason: string) => ["admin", "loop", "targets", jobId, skipReason],
   /** The cursor-paginated instance workspace list. */
   workspaces: ["admin", "workspaces"],
+  /**
+   * One instance runners page (ADM-080). The key carries the
+   * provisioning filter ("" for all) and the page number, so each
+   * combination keeps its own cached entry and returning to it
+   * reuses the cache instead of refetching.
+   */
+  runners: (provisioning: string, page: number) => ["admin", "runners", provisioning, page],
 } as const;
 
 /**
@@ -243,6 +251,21 @@ export function instanceWorkspacesQueryOptions(client: ApiClient) {
     queryFn: ({ pageParam }: { pageParam: string | undefined }) => listInstanceWorkspaces(client, pageParam),
     getNextPageParam: selectNextWorkspaceCursor,
     initialPageParam: undefined as string | undefined,
+    ...adminQueryDefaults,
+    retry: false,
+  });
+}
+
+/**
+ * One instance runners page (ADM-080): the shared never-stale shape
+ * per filter value and page, so paging and filtering fetch each
+ * entry once and reuse it afterwards. The blank filter passes
+ * through; the contract drops the empty provisioning from the URL.
+ */
+export function instanceRunnersQueryOptions(client: ApiClient, provisioning: string, page: number) {
+  return queryOptions({
+    queryKey: adminKeys.runners(provisioning, page),
+    queryFn: () => listInstanceRunners(client, { provisioning, page }),
     ...adminQueryDefaults,
     retry: false,
   });
