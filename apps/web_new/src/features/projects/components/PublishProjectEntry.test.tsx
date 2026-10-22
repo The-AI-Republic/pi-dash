@@ -11,7 +11,6 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { PublishProjectEntry } from "./PublishProjectEntry.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
-const OPEN_TIMEOUT = { timeout: 10_000 };
 
 afterEach(() => resetAppClient());
 
@@ -60,13 +59,13 @@ describe("PublishProjectEntry", () => {
 
   it("loads and shows the dialog once opened", async () => {
     renderEntry(true);
-    expect(await screen.findByRole("heading", { name: "Publish project" }, OPEN_TIMEOUT)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Publish project" })).toBeInTheDocument();
     expect(screen.getByText("Share Web on a public board.")).toBeInTheDocument();
   });
 
   it("forwards close requests from the dialog", async () => {
     const onOpenChange = renderEntry(true);
-    (await screen.findByRole("button", { name: "Close dialog" }, OPEN_TIMEOUT)).click();
+    (await screen.findByRole("button", { name: "Close dialog" })).click();
     expect(onOpenChange).toHaveBeenCalledTimes(1);
     expect(onOpenChange.mock.calls[0]?.[0]).toBe(false);
   });
