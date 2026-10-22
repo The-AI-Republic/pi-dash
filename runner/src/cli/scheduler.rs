@@ -623,10 +623,12 @@ fn binding_path(client: &ApiClient, project: &str, scheduler_id: &str) -> String
 }
 
 /// Ask before a destructive write unless `--yes` was given. Without a
-/// terminal (an agent, a pipe) the answer defaults to no, so the command
-/// fails and names the flag instead of hanging or deleting silently.
+/// terminal (an agent, a pipe) there is no one to ask, so the command fails
+/// at once and names the flag — no prompt text ahead of the JSON error on
+/// stderr, no hang, no silent delete.
 fn confirm(prompt: &str, yes: bool) -> Result<(), CliError> {
-    if maybe_confirm(prompt, false, yes) {
+    use std::io::IsTerminal;
+    if yes || (std::io::stdin().is_terminal() && maybe_confirm(prompt, false, false)) {
         return Ok(());
     }
     Err(CliError::new(
