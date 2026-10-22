@@ -25,6 +25,10 @@ The complete/cancel paths need a provider that streams on demand. There is
 no live third party here; ``_StubProvider`` below speaks just enough of the
 OpenAI chat-completions protocol for the BYOK openai_compatible branch
 (``runtime/llm.py:build_model``) to stream text deltas.
+
+The soft-limit path needs a pool that enforces time limits. The shared
+worker runs ``--pool=solo``, which never does, so that test boots its own
+stock prefork worker on a private queue (``_PreforkWorker``).
 """
 
 from __future__ import annotations
@@ -32,6 +36,9 @@ from __future__ import annotations
 import ast
 import json
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -51,6 +58,17 @@ SWEEP = "assistant.sweep_stale_turns"
 TASKS_MODULE = "pi_dash/assistant/tasks.py"
 
 PASSWORD = "contract-suite-password"
+
+#: Slow-stream turn timeout (PIDASHCONV-1253): the stub streams one chunk
+#: every 20s for ~460s — past the 300s soft limit and the 390s sweep cutoff,
+#: inside the 600s per-request client timeout.
+SLOW_CHUNKS = 23
+SLOW_INTERVAL = 20.0
+SOFT_LIMIT_SECS = 300
+SWEEP_CUTOFF_SECS = 390
+
+TIMEOUT_CODE = "turn_timeout"
+TIMEOUT_DETAIL = "The assistant took too long to respond."
 
 
 # --------------------------------------------------------------------------- #
@@ -374,6 +392,73 @@ class _StubProvider:
             self._server = None
 
 
+class _PreforkWorker:
+    """A test-scoped stock ``celery --pool=prefork`` worker (PIDASHCONV-1253).
+
+    The shared oracle worker runs ``--pool=solo``, which never enforces
+    task time limits (a slow turn runs to completion there), so the
+    soft-limit test boots its own stock prefork worker on a uuid private
+    queue. The worker consumes only that queue, coexists with the shared
+    solo worker on the same broker, and is terminated on stop. Boot takes
+    ~30s (Django import + pool fork); readiness is the consumer's mingle
+    sync plus a pool grace.
+    """
+
+    def __init__(self):
+        self.queue = f"contract-slow-{uuid.uuid4().hex[:8]}"
+        self._proc = None
+        self._log_path = None
+
+    def start(self):
+        env = dict(os.environ)
+        env["DJANGO_SETTINGS_MODULE"] = "pi_dash.settings.local"
+        handle, self._log_path = tempfile.mkstemp(
+            prefix="contract-slow1253-", suffix=".log"
+        )
+        os.close(handle)
+        with open(self._log_path, "w") as log_handle:
+            self._proc = subprocess.Popen(
+                [
+                    sys.executable, "-m", "celery", "-A", "pi_dash", "worker",
+                    "--pool=prefork", "--concurrency=1", "-Q", self.queue,
+                    f"--hostname=slow{self.queue[-8:]}@%h", "--loglevel=info",
+                ],
+                cwd=str(taskspec.source_root()),
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline:
+            with open(self._log_path, errors="replace") as fh:
+                tail = fh.read()
+            if "mingle: sync complete" in tail:
+                time.sleep(10)
+                return self.queue
+            if self._proc.poll() is not None:
+                raise RuntimeError(
+                    f"prefork worker exited early:\n{tail[-3000:]}"
+                )
+            time.sleep(2)
+        self.stop()
+        raise RuntimeError("prefork worker never became ready")
+
+    def stop(self):
+        if self._proc is not None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+            self._proc = None
+        if self._log_path is not None:
+            try:
+                os.unlink(self._log_path)
+            except OSError:
+                pass
+            self._log_path = None
+
+
 # --------------------------------------------------------------------------- #
 # Live oracle: publish in Celery wire format, diff DB, capture SSE effects
 # --------------------------------------------------------------------------- #
@@ -584,3 +669,69 @@ def test_cancel_mid_stream_cancels_turn(db_conn, broker_url):
         assert rdb.get(f"assistant:cancel:{turn_id}") is not None
     finally:
         stub.stop()
+
+
+def test_slow_stream_fails_at_soft_limit(db_conn, broker_url):
+    """A turn streaming past 300s fails with ``turn_timeout``, and no
+    ``turn_completed`` follows (PIDASHCONV-1253).
+
+    The stub streams for ~460s, past the 390s sweep cutoff: the failure must
+    land at the soft limit (300s, not the sweep), carry Django's detail, and
+    stay failed after the stream ends. The turn runs on a test-scoped
+    prefork worker: the shared solo worker never enforces time limits.
+    """
+    worker = _PreforkWorker()
+    queue = worker.start()
+    stub = _StubProvider(
+        chunks=tuple(f"slow-{i}" for i in range(SLOW_CHUNKS)), interval=SLOW_INTERVAL
+    )
+    base = stub.start()
+    try:
+        user, workspace, client = _seed_member(db_conn, "slow")
+        _configure_llm(client, base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        t0 = time.monotonic()
+        celery_wire.publish(RUN_TURN, args=[turn_id], broker_url=broker_url, queue=queue)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="slow turn failed",
+            timeout=SWEEP_CUTOFF_SECS + 60,
+        )
+        elapsed = time.monotonic() - t0
+        assert row["error_code"] == TIMEOUT_CODE
+        assert row["error_detail"] == TIMEOUT_DETAIL
+        assert elapsed >= SOFT_LIMIT_SECS - 5, (
+            f"failed after {elapsed:.0f}s: too early to be the soft limit"
+        )
+        assert elapsed < SWEEP_CUTOFF_SECS - 5, (
+            f"failed after {elapsed:.0f}s: the sweep won, not the soft limit"
+        )
+        assert row["completed_at"] is not None
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        events = _turn_events(db_conn, turn_id)
+        kinds = [e["kind"] for e in events]
+        assert "turn_started" in kinds
+        failed = [e for e in events if e["kind"] == "turn_failed"]
+        assert len(failed) == 1, "exactly one failure event"
+        assert failed[0]["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": TIMEOUT_DETAIL,
+        }
+
+        # Hold until the stream ends plus a settle margin, then prove no
+        # turn_completed followed the failure.
+        hold = (SLOW_CHUNKS * SLOW_INTERVAL + 60) - (time.monotonic() - t0)
+        if hold > 0:
+            time.sleep(hold)
+        kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+        assert "turn_completed" not in kinds, "turn_completed followed turn_failed"
+        assert _turn_row(db_conn, turn_id)["status"] == "failed"
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        stub.stop()
+        worker.stop()
