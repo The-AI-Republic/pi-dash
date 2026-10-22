@@ -663,6 +663,14 @@ describe("module writes", () => {
     await addIssuesToModule(added.client, SLUG, PROJECT, MODULE, [ISSUE, MODULE_2]);
     expect(requests(added.calls)[0]?.url).toBe(moduleIssuesPath(SLUG, PROJECT, MODULE));
     expect(JSON.parse(requests(added.calls)[0]?.init.body ?? "{}")).toEqual({ issues: [ISSUE, MODULE_2] });
+
+    // The work-item-side picker attaches through the issue's own surface;
+    // the module area contracts the body but leaves the writer to Issues.
+    const { setIssueModules } = await import("./issue-actions.js");
+    const picked = client({ message: "success" });
+    await setIssueModules(picked.client, SLUG, PROJECT, ISSUE, ModuleMembershipInput.parse({ modules: [MODULE] }));
+    expect(requests(picked.calls)[0]?.url).toBe(`/api/workspaces/acme/projects/${PROJECT}/issues/${ISSUE}/modules/`);
+    expect(JSON.parse(requests(picked.calls)[0]?.init.body ?? "{}")).toEqual({ modules: [MODULE] });
   });
 
   it("creates, updates and deletes links", async () => {
