@@ -934,8 +934,8 @@ fn label_count_sql() -> String {
 }
 
 /// Whether the project estimates in points (`archive.py:358-363`):
-/// `Project.objects` is the plain manager — no deleted guards, ported
-/// literally.
+/// `Project.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
+/// soft-deleted project is excluded.
 async fn project_estimates_points(
     pool: &sqlx::PgPool,
     slug: &str,
@@ -945,7 +945,8 @@ async fn project_estimates_points(
         "SELECT EXISTS (SELECT 1 FROM projects p \
            JOIN workspaces w ON w.id = p.workspace_id \
            JOIN estimates e ON e.id = p.estimate_id \
-          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points')",
+          WHERE w.slug = $1 AND p.id = $2 AND e.type = 'points' \
+            AND p.deleted_at IS NULL)",
     )
     .bind(slug)
     .bind(project_id)

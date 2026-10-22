@@ -292,6 +292,43 @@ def test_analytics_shape(admin):
     require_keys(r.json(), ANALYTICS_KEYS, "GET cycles/<pk>/analytics/")
 
 
+def test_progress_soft_deleted_cycle_404(admin):
+    """`Cycle.objects` is the soft-deletion manager (`mixins.py:61-67`), so a
+    soft-deleted cycle reads as missing and progress answers 404, like an
+    unknown id (`base.py:661-663`)."""
+    urls = cycle_urls(admin)
+    pk = create_cycle_for(admin, name="Soft-deleted progress")["id"]
+    assert admin["client"].delete(urls["detail"](pk)).status_code == 204
+    r = admin["client"].get(urls["progress"](pk))
+    assert r.status_code == 404, r.text[:500]
+    assert r.json() == {"error": "Cycle not found"}
+
+
+def test_analytics_soft_deleted_cycle_500(admin):
+    """A soft-deleted cycle takes the same path as an unknown id: the
+    `.first()` lookup is None and the `cycle.start_date` dereference 500s
+    (`base.py:789-807`), for every `?type=` including `points`."""
+    urls = cycle_urls(admin)
+    start, end = _past_range(60, 50)
+    r = admin["client"].post(
+        urls["cycles"],
+        json={
+            "name": "Soft-deleted analytics",
+            "start_date": start,
+            "end_date": end,
+        },
+    )
+    assert r.status_code == 201, r.text[:500]
+    pk = r.json()["id"]
+    assert admin["client"].delete(urls["detail"](pk)).status_code == 204
+    for params in ({}, {"type": "points"}):
+        r = admin["client"].get(urls["analytics"](pk), params=params)
+        assert r.status_code == 500, r.text[:500]
+        assert r.json() == {
+            "error": "Something went wrong please try again later"
+        }
+
+
 def test_user_properties_shapes(admin):
     urls = cycle_urls(admin)
     pk = admin["cycle"]["id"]
