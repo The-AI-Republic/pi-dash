@@ -87,11 +87,51 @@ describe("activitiesQueryOptions", () => {
     expect(rows).toHaveLength(1);
     expect(calls[0]?.url).toContain(`/issues/${ISSUE}/history/`);
     expect(calls[0]?.url).toContain("activity_type=issue-property");
+    expect(calls[0]?.url).not.toContain("created_at__gt");
   });
 
   it("surfaces a refused read", async () => {
     const { client } = stubClient(() => ({ status: 500, body: { error: "boom" } }));
     const options = activitiesQueryOptions(client, SCOPE);
+    await expect((options.queryFn as () => Promise<IssueActivity[]>)()).rejects.toBeTruthy();
+  });
+
+  it("refetches only the delta once rows are cached", async () => {
+    const known = activity({ created_at: "2026-10-16T10:00:00Z" });
+    const fresh = activity({
+      id: "a23e4567-e89b-12d3-a456-426614174002",
+      field: "name",
+      verb: "updated",
+      new_value: "Renamed",
+      created_at: "2026-10-16T11:00:00Z",
+    });
+    const { client, calls } = stubClient(() => ({ status: 200, body: [fresh] }));
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(issueKeys.activity(SLUG, PROJECT, ISSUE), [known]);
+    const options = activitiesQueryOptions(client, SCOPE, queryClient);
+    const rows = await (options.queryFn as () => Promise<IssueActivity[]>)();
+    expect(new URL(calls[0]?.url ?? "").searchParams.get("created_at__gt")).toBe("2026-10-16T10:00:00Z");
+    expect(rows.map((row) => row.id)).toEqual([known.id, fresh.id]);
+  });
+
+  it("reads the whole list when the cache is empty or unreadable", async () => {
+    const { client, calls } = stubClient(() => ({ status: 200, body: [activity()] }));
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(issueKeys.activity(SLUG, PROJECT, ISSUE), []);
+    const empty = activitiesQueryOptions(client, SCOPE, queryClient);
+    await (empty.queryFn as () => Promise<IssueActivity[]>)();
+    expect(calls[0]?.url).not.toContain("created_at__gt");
+    queryClient.setQueryData(issueKeys.activity(SLUG, PROJECT, ISSUE), [activity({ created_at: "not a date" })]);
+    const unreadable = activitiesQueryOptions(client, SCOPE, queryClient);
+    await (unreadable.queryFn as () => Promise<IssueActivity[]>)();
+    expect(calls[1]?.url).not.toContain("created_at__gt");
+  });
+
+  it("surfaces a refused delta read", async () => {
+    const { client } = stubClient(() => ({ status: 500, body: { error: "boom" } }));
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(issueKeys.activity(SLUG, PROJECT, ISSUE), [activity()]);
+    const options = activitiesQueryOptions(client, SCOPE, queryClient);
     await expect((options.queryFn as () => Promise<IssueActivity[]>)()).rejects.toBeTruthy();
   });
 });
@@ -127,5 +167,35 @@ describe("useIssueActivities", () => {
     };
     const { result } = renderHook(() => useIssueActivities(SCOPE), { wrapper });
     await waitFor(() => expect(result.current.isError).toBe(true));
+  });
+
+  it("picks up new rows in place when the read is invalidated", async () => {
+    const known = activity({ created_at: "2026-10-16T10:00:00Z" });
+    const fresh = activity({
+      id: "a23e4567-e89b-12d3-a456-426614174002",
+      field: "name",
+      verb: "updated",
+      new_value: "Renamed",
+      created_at: "2026-10-16T11:00:00Z",
+    });
+    const { calls } = stubClient((call) => ({
+      status: 200,
+      body: call.url.includes("created_at__gt=") ? [fresh] : [known],
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = function Wrapper({ children }: { children?: unknown }): React.ReactElement {
+      return (
+        <QueryClientProvider client={queryClient}>
+          <React.Fragment>{children as React.ReactNode}</React.Fragment>
+        </QueryClientProvider>
+      );
+    };
+    const { result } = renderHook(() => useIssueActivities(SCOPE), { wrapper });
+    await waitFor(() => expect(result.current.data).toHaveLength(1));
+    await queryClient.invalidateQueries({ queryKey: issueKeys.activity(SLUG, PROJECT, ISSUE) });
+    await waitFor(() => expect(result.current.data).toHaveLength(2));
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[1]?.url ?? "").searchParams.get("created_at__gt")).toBe("2026-10-16T10:00:00Z");
+    expect(result.current.data?.map((row) => row.id)).toEqual([known.id, fresh.id]);
   });
 });

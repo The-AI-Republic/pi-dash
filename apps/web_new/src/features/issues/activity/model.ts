@@ -10,7 +10,7 @@
 
 import type { IssueActivity, IssueComment } from "@pidash/api-client";
 
-/** The four toggle categories plus the always-visible creation/deletion rows. */
+/** The four toggle categories; only creation rows bypass them. */
 export const FEED_FILTERS = ["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"] as const;
 export type FeedFilter = (typeof FEED_FILTERS)[number];
 
@@ -157,6 +157,9 @@ export function activitySentence(
   switch (activity.field) {
     case null:
       return activity.verb === "deleted" ? "deleted the work item." : "created the work item.";
+    // The server stamps a deletion with field "issue" (parity/specs/comments.md §4.1).
+    case "issue":
+      return "deleted the work item.";
     case "name":
       return `renamed the work item to “${value}”.`;
     case "description":

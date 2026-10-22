@@ -144,6 +144,7 @@ describe("commentsQueryOptions", () => {
     const rows = await (options.queryFn as () => Promise<IssueComment[]>)();
     expect(rows.map((row) => row.id)).toEqual([older.id, COMMENT]);
     expect(calls[0]?.url).toContain(`/issues/${ISSUE}/history/`);
+    expect(calls[0]?.url).not.toContain("created_at__gt");
   });
 
   it("exposes the hook against the app client", async () => {
@@ -152,6 +153,62 @@ describe("commentsQueryOptions", () => {
     const { result } = renderHook(() => useIssueComments(SCOPE), { wrapper });
     await waitFor(() => expect(result.current.data).toHaveLength(1));
     expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toHaveLength(1);
+  });
+
+  it("refetches only the delta once rows are cached, keeping creation order", async () => {
+    const known = comment({ created_at: "2026-10-16T22:00:00Z" });
+    const fresh = comment({
+      id: "923e4567-e89b-12d3-a456-426614174009",
+      created_at: "2026-10-16T23:00:00Z",
+    });
+    const { client, calls } = stubClient(() => ({ status: 200, body: [fresh] }));
+    const { queryClient } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [known]);
+    const options = commentsQueryOptions(client, SCOPE, queryClient);
+    const rows = await (options.queryFn as () => Promise<IssueComment[]>)();
+    expect(new URL(calls[0]?.url ?? "").searchParams.get("created_at__gt")).toBe("2026-10-16T22:00:00Z");
+    expect(rows.map((row) => row.id)).toEqual([known.id, fresh.id]);
+  });
+
+  it("reads the whole list when the cache is empty or unreadable", async () => {
+    const { client, calls } = stubClient(() => ({ status: 200, body: [comment()] }));
+    const { queryClient } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), []);
+    const empty = commentsQueryOptions(client, SCOPE, queryClient);
+    await (empty.queryFn as () => Promise<IssueComment[]>)();
+    expect(calls[0]?.url).not.toContain("created_at__gt");
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment({ created_at: "not a date" })]);
+    const unreadable = commentsQueryOptions(client, SCOPE, queryClient);
+    await (unreadable.queryFn as () => Promise<IssueComment[]>)();
+    expect(calls[1]?.url).not.toContain("created_at__gt");
+  });
+
+  it("surfaces a refused delta read", async () => {
+    const { client } = stubClient(() => ({ status: 500, body: { error: "boom" } }));
+    const { queryClient } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
+    const options = commentsQueryOptions(client, SCOPE, queryClient);
+    await expect((options.queryFn as () => Promise<IssueComment[]>)()).rejects.toBeTruthy();
+  });
+
+  it("picks up new rows in place when the read is invalidated", async () => {
+    const known = comment({ created_at: "2026-10-16T22:00:00Z" });
+    const fresh = comment({
+      id: "923e4567-e89b-12d3-a456-426614174009",
+      created_at: "2026-10-16T23:00:00Z",
+    });
+    const { calls } = stubClient((call) => ({
+      status: 200,
+      body: call.url.includes("created_at__gt=") ? [fresh] : [known],
+    }));
+    const { queryClient, wrapper } = harness();
+    const { result } = renderHook(() => useIssueComments(SCOPE), { wrapper });
+    await waitFor(() => expect(result.current.data).toHaveLength(1));
+    await queryClient.invalidateQueries({ queryKey: issueKeys.comments(SLUG, PROJECT, ISSUE) });
+    await waitFor(() => expect(result.current.data).toHaveLength(2));
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[1]?.url ?? "").searchParams.get("created_at__gt")).toBe("2026-10-16T22:00:00Z");
+    expect(result.current.data?.map((row) => row.id)).toEqual([known.id, fresh.id]);
   });
 });
 
