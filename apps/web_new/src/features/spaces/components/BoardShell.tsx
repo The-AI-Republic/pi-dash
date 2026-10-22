@@ -1,0 +1,122 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Public board shell (SPC-001, SPC-016). The shell is deliberately
+// separate from the workspace AppShell: no sidebar, title bar, palette,
+// workspace switcher or session gate. Slice D fills the navbar controls,
+// slice B the landing gate and slice E the layouts; this slice owns the
+// composition points and the loading/failure states around them.
+
+import { Spinner } from "@pidash/kit";
+import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardSettings, SpaceBoardState } from "@pidash/api-client";
+import * as React from "react";
+
+import { projectMarkGlyph } from "../lib/projectMark.js";
+import { spaceSignInHref, type SpaceBoardSearch } from "../lib/address.js";
+
+export interface BoardNavbarProps {
+  settings: SpaceBoardSettings | undefined;
+  anchor: string;
+  search: SpaceBoardSearch;
+  /** Slice D replaces the right-hand slot; the base keeps a sign-in control. */
+  accountSlot?: React.ReactNode;
+  children?: React.ReactNode;
+}
+
+/** Placeholder while settings load: generic mark and name, no content flash. */
+export function BoardNavbar({ settings, anchor, search, accountSlot, children }: BoardNavbarProps): React.ReactElement {
+  const details = settings?.project_details ?? null;
+  const glyph = details === null ? null : projectMarkGlyph(details.logo_props);
+  const name = details?.name ?? "...";
+  return (
+    <header className="flex min-h-14 items-center gap-(--space-3) border-b border-(--border) px-(--space-4)">
+      <span
+        data-testid="space-navbar-mark"
+        className="text-body flex size-7 items-center justify-center rounded-(--radius-control) bg-(--subtle)"
+      >
+        {glyph ?? (details === null ? null : name.slice(0, 1).toUpperCase())}
+      </span>
+      <span data-testid="space-navbar-name" className="text-emphasis truncate">
+        {name}
+      </span>
+      <div className="ml-auto flex items-center gap-(--space-2)">
+        {children}
+        {accountSlot ?? (
+          <a
+            href={spaceSignInHref(anchor, search)}
+            className="text-body rounded-(--radius-control) border border-(--border) px-(--space-3) py-(--space-1)"
+          >
+            Sign in
+          </a>
+        )}
+      </div>
+    </header>
+  );
+}
+
+export function BoardLoading(): React.ReactElement {
+  return (
+    <div
+      data-testid="space-board-loading"
+      role="status"
+      aria-label="Loading board"
+      className="flex justify-center py-(--space-16)"
+    >
+      <Spinner size="large" label="Loading board" />
+    </div>
+  );
+}
+
+/** Minimal read-only grouped list; slice E replaces this with the real layouts. */
+export function BoardIssues({
+  page,
+  states,
+  projectIdentifier,
+}: {
+  page: SpaceBoardIssuePage;
+  states: SpaceBoardState[];
+  projectIdentifier: string;
+}): React.ReactElement {
+  const stateById = new Map(states.map((state) => [state.id, state]));
+  const groups = Object.entries(page.results).filter(([, group]) => group.results.length > 0);
+  return (
+    <div data-testid="space-board-issues" className="flex flex-col gap-(--space-6) p-(--space-4)">
+      {groups.map(([stateId, group]) => {
+        const state = stateById.get(stateId);
+        return (
+          <section key={stateId} className="flex flex-col gap-(--space-2)">
+            <h2 className="text-emphasis">{state?.name ?? "Issues"}</h2>
+            <ul className="flex flex-col gap-(--space-1)">
+              {group.results.map((issue) => (
+                <IssueRow key={issue.id} issue={issue} projectIdentifier={projectIdentifier} />
+              ))}
+            </ul>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function IssueRow({
+  issue,
+  projectIdentifier,
+}: {
+  issue: SpaceBoardIssue;
+  projectIdentifier: string;
+}): React.ReactElement {
+  return (
+    <li
+      data-testid="space-board-issue"
+      className="rounded-(--radius-control) border border-(--border) px-(--space-3) py-(--space-2)"
+    >
+      <span className="text-meta text-(--text-muted)">{issueKey(projectIdentifier, issue)}</span>
+      <span className="text-body ml-(--space-2)">{issue.name}</span>
+    </li>
+  );
+}
+
+/** Public key shown beside a row, built from the project identifier in settings. */
+export function issueKey(projectIdentifier: string, issue: Pick<SpaceBoardIssue, "sequence_id">): string {
+  return `${projectIdentifier}-${issue.sequence_id}`;
+}

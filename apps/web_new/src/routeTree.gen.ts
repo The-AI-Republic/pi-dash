@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WsRouteRouteImport } from './routes/$ws/route'
+import { Route as R404RouteImport } from './routes/404'
 import { Route as MarketingRouteImport } from './routes/_marketing'
 import { Route as CreateWorkspaceRouteImport } from './routes/create-workspace'
 import { Route as GodModeRouteRouteImport } from './routes/god-mode/route'
@@ -21,6 +22,7 @@ import { Route as RegisterRouteImport } from './routes/register'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as SignUpRouteImport } from './routes/sign-up'
 import { Route as SigninRouteImport } from './routes/signin'
+import { Route as SpacesRouteRouteImport } from './routes/spaces/route'
 import { Route as WorkspaceInvitationsRouteImport } from './routes/workspace-invitations'
 import { Route as WsSplatRouteImport } from './routes/$ws/$'
 import { Route as WsGatedRouteRouteImport } from './routes/$ws/_gated/route'
@@ -39,6 +41,8 @@ import { Route as GodModeDashboardRouteRouteImport } from './routes/god-mode/_da
 import { Route as ProfileSplatRouteImport } from './routes/profile/$'
 import { Route as SettingsIndexRouteImport } from './routes/settings/index'
 import { Route as SettingsProfileRouteRouteImport } from './routes/settings/profile/route'
+import { Route as SpacesIndexRouteImport } from './routes/spaces/index'
+import { Route as SpacesSplatRouteImport } from './routes/spaces/$'
 import { Route as WsGatedIndexRouteImport } from './routes/$ws/_gated/index'
 import { Route as WsGatedAiDevMachinesRouteRouteImport } from './routes/$ws/_gated/ai-dev-machines/route'
 import { Route as WsGatedAssistantRouteRouteImport } from './routes/$ws/_gated/assistant/route'
@@ -51,6 +55,8 @@ import { Route as GodModeDashboardRunnersRouteImport } from './routes/god-mode/_
 import { Route as GodModeDashboardWorkspaceRouteRouteImport } from './routes/god-mode/_dashboard/workspace/route'
 import { Route as SettingsProfileIndexRouteImport } from './routes/settings/profile/index'
 import { Route as SettingsProfileTabRouteImport } from './routes/settings/profile/$tab'
+import { Route as SpacesWorkspaceSlugProjectIdRouteImport } from './routes/spaces/$workspaceSlug/$projectId'
+import { Route as SpacesIssuesAnchorRouteImport } from './routes/spaces/issues/$anchor'
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
 import { Route as WsGatedAnalyticsTabIdRouteImport } from './routes/$ws/_gated/analytics/$tabId'
@@ -151,6 +157,11 @@ const WsRouteRoute = WsRouteRouteImport.update({
   path: '/$ws',
   getParentRoute: () => rootRouteImport,
 } as any)
+const R404Route = R404RouteImport.update({
+  id: '/404',
+  path: '/404',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const MarketingRoute = MarketingRouteImport.update({
   id: '/_marketing',
   getParentRoute: () => rootRouteImport,
@@ -198,6 +209,11 @@ const SignUpRoute = SignUpRouteImport.update({
 const SigninRoute = SigninRouteImport.update({
   id: '/signin',
   path: '/signin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SpacesRouteRoute = SpacesRouteRouteImport.update({
+  id: '/spaces',
+  path: '/spaces',
   getParentRoute: () => rootRouteImport,
 } as any)
 const WorkspaceInvitationsRoute = WorkspaceInvitationsRouteImport.update({
@@ -288,6 +304,16 @@ const SettingsProfileRouteRoute = SettingsProfileRouteRouteImport.update({
   path: '/settings/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SpacesIndexRoute = SpacesIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SpacesRouteRoute,
+} as any)
+const SpacesSplatRoute = SpacesSplatRouteImport.update({
+  id: '/$',
+  path: '/$',
+  getParentRoute: () => SpacesRouteRoute,
+} as any)
 const WsGatedIndexRoute = WsGatedIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -350,6 +376,17 @@ const SettingsProfileTabRoute = SettingsProfileTabRouteImport.update({
   id: '/$tab',
   path: '/$tab',
   getParentRoute: () => SettingsProfileRouteRoute,
+} as any)
+const SpacesWorkspaceSlugProjectIdRoute =
+  SpacesWorkspaceSlugProjectIdRouteImport.update({
+    id: '/$workspaceSlug/$projectId',
+    path: '/$workspaceSlug/$projectId',
+    getParentRoute: () => SpacesRouteRoute,
+  } as any)
+const SpacesIssuesAnchorRoute = SpacesIssuesAnchorRouteImport.update({
+  id: '/issues/$anchor',
+  path: '/issues/$anchor',
+  getParentRoute: () => SpacesRouteRoute,
 } as any)
 const WsGatedAiDevMachinesIndexRoute =
   WsGatedAiDevMachinesIndexRouteImport.update({
@@ -876,6 +913,8 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/$ws': typeof WsRouteRouteWithChildren
   '/god-mode': typeof GodModeRouteRouteWithChildren
+  '/spaces': typeof SpacesRouteRouteWithChildren
+  '/404': typeof R404Route
   '/create-workspace': typeof CreateWorkspaceRoute
   '/invitations': typeof InvitationsRoute
   '/login': typeof LoginRoute
@@ -898,8 +937,10 @@ export interface FileRoutesByFullPath {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/profile/$': typeof ProfileSplatRoute
+  '/spaces/$': typeof SpacesSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/spaces/': typeof SpacesIndexRoute
   '/$ws/ai-dev-machines': typeof WsGatedAiDevMachinesRouteRouteWithChildren
   '/$ws/assistant': typeof WsGatedAssistantRouteRouteWithChildren
   '/$ws/runners': typeof WsGatedRunnersRouteRouteWithChildren
@@ -910,6 +951,8 @@ export interface FileRoutesByFullPath {
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
+  '/spaces/$workspaceSlug/$projectId': typeof SpacesWorkspaceSlugProjectIdRoute
+  '/spaces/issues/$anchor': typeof SpacesIssuesAnchorRoute
   '/$ws/': typeof WsGatedIndexRoute
   '/settings/profile/': typeof SettingsProfileIndexRoute
   '/$ws/profile/$userId': typeof WsGatedProfileUserIdRouteRouteWithChildren
@@ -1005,6 +1048,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/$ws': typeof WsGatedIndexRoute
+  '/404': typeof R404Route
   '/create-workspace': typeof CreateWorkspaceRoute
   '/invitations': typeof InvitationsRoute
   '/login': typeof LoginRoute
@@ -1027,12 +1071,16 @@ export interface FileRoutesByTo {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/profile/$': typeof ProfileSplatRoute
+  '/spaces/$': typeof SpacesSplatRoute
   '/settings': typeof SettingsIndexRoute
+  '/spaces': typeof SpacesIndexRoute
   '/god-mode/ai': typeof GodModeDashboardAiRoute
   '/god-mode/email': typeof GodModeDashboardEmailRoute
   '/god-mode/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
+  '/spaces/$workspaceSlug/$projectId': typeof SpacesWorkspaceSlugProjectIdRoute
+  '/spaces/issues/$anchor': typeof SpacesIssuesAnchorRoute
   '/settings/profile': typeof SettingsProfileIndexRoute
   '/$ws/analytics/$tabId': typeof WsGatedAnalyticsTabIdRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
@@ -1124,6 +1172,8 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/$ws': typeof WsRouteRouteWithChildren
   '/god-mode': typeof GodModeRouteRouteWithChildren
+  '/spaces': typeof SpacesRouteRouteWithChildren
+  '/404': typeof R404Route
   '/_marketing': typeof MarketingRouteWithChildren
   '/create-workspace': typeof CreateWorkspaceRoute
   '/invitations': typeof InvitationsRoute
@@ -1149,8 +1199,10 @@ export interface FileRoutesById {
   '/auth/device': typeof AuthDeviceRoute
   '/god-mode/$': typeof GodModeSplatRoute
   '/profile/$': typeof ProfileSplatRoute
+  '/spaces/$': typeof SpacesSplatRoute
   '/god-mode/': typeof GodModeIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/spaces/': typeof SpacesIndexRoute
   '/$ws/_gated/ai-dev-machines': typeof WsGatedAiDevMachinesRouteRouteWithChildren
   '/$ws/_gated/assistant': typeof WsGatedAssistantRouteRouteWithChildren
   '/$ws/_gated/runners': typeof WsGatedRunnersRouteRouteWithChildren
@@ -1161,6 +1213,8 @@ export interface FileRoutesById {
   '/god-mode/_dashboard/general': typeof GodModeDashboardGeneralRoute
   '/god-mode/_dashboard/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
+  '/spaces/$workspaceSlug/$projectId': typeof SpacesWorkspaceSlugProjectIdRoute
+  '/spaces/issues/$anchor': typeof SpacesIssuesAnchorRoute
   '/$ws/_gated/': typeof WsGatedIndexRoute
   '/settings/profile/': typeof SettingsProfileIndexRoute
   '/$ws/_gated/profile/$userId': typeof WsGatedProfileUserIdRouteRouteWithChildren
@@ -1259,6 +1313,8 @@ export interface FileRouteTypes {
     | '/'
     | '/$ws'
     | '/god-mode'
+    | '/spaces'
+    | '/404'
     | '/create-workspace'
     | '/invitations'
     | '/login'
@@ -1281,8 +1337,10 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/profile/$'
+    | '/spaces/$'
     | '/god-mode/'
     | '/settings/'
+    | '/spaces/'
     | '/$ws/ai-dev-machines'
     | '/$ws/assistant'
     | '/$ws/runners'
@@ -1293,6 +1351,8 @@ export interface FileRouteTypes {
     | '/god-mode/general'
     | '/god-mode/runners'
     | '/settings/profile/$tab'
+    | '/spaces/$workspaceSlug/$projectId'
+    | '/spaces/issues/$anchor'
     | '/$ws/'
     | '/settings/profile/'
     | '/$ws/profile/$userId'
@@ -1388,6 +1448,7 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/$ws'
+    | '/404'
     | '/create-workspace'
     | '/invitations'
     | '/login'
@@ -1410,12 +1471,16 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/profile/$'
+    | '/spaces/$'
     | '/settings'
+    | '/spaces'
     | '/god-mode/ai'
     | '/god-mode/email'
     | '/god-mode/general'
     | '/god-mode/runners'
     | '/settings/profile/$tab'
+    | '/spaces/$workspaceSlug/$projectId'
+    | '/spaces/issues/$anchor'
     | '/settings/profile'
     | '/$ws/analytics/$tabId'
     | '/$ws/assistant/$threadId'
@@ -1506,6 +1571,8 @@ export interface FileRouteTypes {
     | '/'
     | '/$ws'
     | '/god-mode'
+    | '/spaces'
+    | '/404'
     | '/_marketing'
     | '/create-workspace'
     | '/invitations'
@@ -1531,8 +1598,10 @@ export interface FileRouteTypes {
     | '/auth/device'
     | '/god-mode/$'
     | '/profile/$'
+    | '/spaces/$'
     | '/god-mode/'
     | '/settings/'
+    | '/spaces/'
     | '/$ws/_gated/ai-dev-machines'
     | '/$ws/_gated/assistant'
     | '/$ws/_gated/runners'
@@ -1543,6 +1612,8 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard/general'
     | '/god-mode/_dashboard/runners'
     | '/settings/profile/$tab'
+    | '/spaces/$workspaceSlug/$projectId'
+    | '/spaces/issues/$anchor'
     | '/$ws/_gated/'
     | '/settings/profile/'
     | '/$ws/_gated/profile/$userId'
@@ -1640,6 +1711,8 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   WsRouteRoute: typeof WsRouteRouteWithChildren
   GodModeRouteRoute: typeof GodModeRouteRouteWithChildren
+  SpacesRouteRoute: typeof SpacesRouteRouteWithChildren
+  R404Route: typeof R404Route
   MarketingRoute: typeof MarketingRouteWithChildren
   CreateWorkspaceRoute: typeof CreateWorkspaceRoute
   InvitationsRoute: typeof InvitationsRoute
@@ -1674,6 +1747,13 @@ declare module '@tanstack/react-router' {
       path: '/$ws'
       fullPath: '/$ws'
       preLoaderRoute: typeof WsRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/404': {
+      id: '/404'
+      path: '/404'
+      fullPath: '/404'
+      preLoaderRoute: typeof R404RouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_marketing': {
@@ -1744,6 +1824,13 @@ declare module '@tanstack/react-router' {
       path: '/signin'
       fullPath: '/signin'
       preLoaderRoute: typeof SigninRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/spaces': {
+      id: '/spaces'
+      path: '/spaces'
+      fullPath: '/spaces'
+      preLoaderRoute: typeof SpacesRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/workspace-invitations': {
@@ -1872,6 +1959,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsProfileRouteRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/spaces/': {
+      id: '/spaces/'
+      path: '/'
+      fullPath: '/spaces/'
+      preLoaderRoute: typeof SpacesIndexRouteImport
+      parentRoute: typeof SpacesRouteRoute
+    }
+    '/spaces/$': {
+      id: '/spaces/$'
+      path: '/$'
+      fullPath: '/spaces/$'
+      preLoaderRoute: typeof SpacesSplatRouteImport
+      parentRoute: typeof SpacesRouteRoute
+    }
     '/$ws/_gated/': {
       id: '/$ws/_gated/'
       path: '/'
@@ -1955,6 +2056,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/settings/profile/$tab'
       preLoaderRoute: typeof SettingsProfileTabRouteImport
       parentRoute: typeof SettingsProfileRouteRoute
+    }
+    '/spaces/$workspaceSlug/$projectId': {
+      id: '/spaces/$workspaceSlug/$projectId'
+      path: '/$workspaceSlug/$projectId'
+      fullPath: '/spaces/$workspaceSlug/$projectId'
+      preLoaderRoute: typeof SpacesWorkspaceSlugProjectIdRouteImport
+      parentRoute: typeof SpacesRouteRoute
+    }
+    '/spaces/issues/$anchor': {
+      id: '/spaces/issues/$anchor'
+      path: '/issues/$anchor'
+      fullPath: '/spaces/issues/$anchor'
+      preLoaderRoute: typeof SpacesIssuesAnchorRouteImport
+      parentRoute: typeof SpacesRouteRoute
     }
     '/$ws/_gated/ai-dev-machines/': {
       id: '/$ws/_gated/ai-dev-machines/'
@@ -3001,6 +3116,24 @@ const GodModeRouteRouteWithChildren = GodModeRouteRoute._addFileChildren(
   GodModeRouteRouteChildren,
 )
 
+interface SpacesRouteRouteChildren {
+  SpacesSplatRoute: typeof SpacesSplatRoute
+  SpacesIndexRoute: typeof SpacesIndexRoute
+  SpacesWorkspaceSlugProjectIdRoute: typeof SpacesWorkspaceSlugProjectIdRoute
+  SpacesIssuesAnchorRoute: typeof SpacesIssuesAnchorRoute
+}
+
+const SpacesRouteRouteChildren: SpacesRouteRouteChildren = {
+  SpacesSplatRoute: SpacesSplatRoute,
+  SpacesIndexRoute: SpacesIndexRoute,
+  SpacesWorkspaceSlugProjectIdRoute: SpacesWorkspaceSlugProjectIdRoute,
+  SpacesIssuesAnchorRoute: SpacesIssuesAnchorRoute,
+}
+
+const SpacesRouteRouteWithChildren = SpacesRouteRoute._addFileChildren(
+  SpacesRouteRouteChildren,
+)
+
 interface MarketingRouteChildren {
   MarketingDocsRoute: typeof MarketingDocsRoute
   MarketingDownloadsRoute: typeof MarketingDownloadsRoute
@@ -3036,6 +3169,8 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WsRouteRoute: WsRouteRouteWithChildren,
   GodModeRouteRoute: GodModeRouteRouteWithChildren,
+  SpacesRouteRoute: SpacesRouteRouteWithChildren,
+  R404Route: R404Route,
   MarketingRoute: MarketingRouteWithChildren,
   CreateWorkspaceRoute: CreateWorkspaceRoute,
   InvitationsRoute: InvitationsRoute,
