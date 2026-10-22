@@ -99,6 +99,85 @@ describe("desktop project availability refresh", () => {
     expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
   });
 
+  it("stops polling once the agent is available", async () => {
+    mocks.fetchProject
+      .mockResolvedValueOnce({ agent_executor_options: [{ kind: "managed_runner", available: false }] })
+      .mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(2);
+  });
+
+  it("resumes polling when a focus re-check finds the agent gone", async () => {
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(1);
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: false }] });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("status").textContent).toContain("Waiting for Pi Dash Agent");
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+  });
+
+  it("recovers from a failed focus re-check after polling stopped", async () => {
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    mocks.fetchProject.mockRejectedValueOnce(new Error("Network request failed"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(screen.getByRole("status").textContent).toContain("Network request failed");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(3);
+  });
+
+  it("recovers from a failed focus reconnect after polling stopped", async () => {
+    mocks.fetchProject.mockResolvedValue({ agent_executor_options: [{ kind: "managed_runner", available: true }] });
+    await act(async () => {
+      render(<AgentRuntime />);
+    });
+    mocks.connect.mockRejectedValueOnce(new Error("Network request failed"));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(screen.getByRole("status").textContent).toContain("Network request failed");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(65_000);
+    });
+    expect(screen.getByRole("status").textContent).toContain("Runs on this computer");
+    expect(mocks.fetchProject).toHaveBeenCalledTimes(2);
+  });
+
   it("does not claim connectivity when enrollment fails", async () => {
     mocks.connect.mockRejectedValue(new Error("Configure a model first"));
     await act(async () => {

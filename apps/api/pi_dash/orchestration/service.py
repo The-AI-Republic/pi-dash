@@ -540,6 +540,8 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     the pinned runner may take a pinned run, so pinning to a runner that is
     gone would park the run in QUEUED and block every later run on the issue.
     A BUSY runner is alive and stays eligible; the pinned run waits for it.
+    A paused runner is not: it takes no new work until resumed, so a pin to it
+    would park the run exactly like a pin to a gone runner.
     """
     from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
 
@@ -549,6 +551,8 @@ def _pinned_runner_for(parent: AgentRun, target_pod: Optional[Pod] = None) -> Op
     if runner is None:
         return None
     if runner.status in (RunnerStatus.REVOKED, RunnerStatus.OFFLINE):
+        return None
+    if runner.paused_at is not None:
         return None
     if runner.last_heartbeat_at is None or runner.last_heartbeat_at < timezone.now() - HEARTBEAT_GRACE:
         return None

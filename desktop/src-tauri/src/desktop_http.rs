@@ -691,6 +691,7 @@ mod tests {
         let config = crate::AppConfig {
             target_url: Url::parse("http://localhost:8000").unwrap(),
             bundle_root: Some(crate::bundle_root_for(Some(&dev_url))),
+            web_base: Url::parse("http://localhost:8000").unwrap(),
         };
         let page = Url::parse("http://127.0.0.1:1430/acme/projects/").unwrap();
         assert!(from_app_ui("main", &page, &config));
@@ -710,6 +711,7 @@ mod tests {
         let config = crate::AppConfig {
             target_url: Url::parse("https://pidash.example.com").unwrap(),
             bundle_root: Some(crate::bundle_root_for(None)),
+            web_base: Url::parse("https://pidash.example.com").unwrap(),
         };
         let page = Url::parse(crate::BUNDLE_ORIGIN).unwrap().join("/acme/").unwrap();
         assert!(from_app_ui("main", &page, &config));
