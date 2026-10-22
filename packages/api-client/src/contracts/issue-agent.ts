@@ -4,10 +4,48 @@
 // Agent thin slice for the issues widgets: the typed agent-status
 // read the issue detail carries, with its token figures. Run-level
 // contracts (runs, dispatches, cancel, re-tick) live in the runners
-// area; the widgets consume them from there.
+// area; the widgets consume them from there. The two small run
+// shapes below live here instead of runs.js on purpose: the agent
+// summary embeds them, the summary is read on first paint, and
+// keeping them here keeps the full runs module out of the shell's
+// initial bundle (size gate, apps/web_new/.size-limit.mjs).
 import * as z from "zod/mini";
 import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { DispatchWait, RunErrorDiagnostic } from "./runs.js";
+
+export const RUN_ERROR_SOURCES = ["agent", "pidash_runner", "pidash_cloud", "unknown"] as const;
+export type RunErrorSource = (typeof RUN_ERROR_SOURCES)[number];
+
+/**
+ * Structured failure diagnosis. Present on the detail fetch when the
+ * run carries error text; the list fetch always answers null.
+ */
+export const RunErrorDiagnostic = z.object({
+  source: z.enum(RUN_ERROR_SOURCES),
+  source_label: z.string(),
+  kind: z.string(),
+  summary: z.string(),
+  action: z.string(),
+});
+export type RunErrorDiagnostic = z.infer<typeof RunErrorDiagnostic>;
+
+/**
+ * Why a queued pinned run has not dispatched yet (hybrid assignment,
+ * design §14.3). Computed, never stored; null without a pin. `reason`
+ * stays an open string (runner_offline, runner_busy,
+ * runner_not_permitted, dispatching); `releasable` tells the client
+ * whether the requester may release this run to the pod.
+ */
+export const DispatchWait = z.object({
+  reason: z.string(),
+  pin_kind: z.string(),
+  runner: uuid(),
+  runner_name: z.string(),
+  queued_at: nullableDateTime(),
+  runner_last_seen_at: nullableDateTime(),
+  runs_ahead: z.number(),
+  releasable: z.boolean(),
+});
+export type DispatchWait = z.infer<typeof DispatchWait>;
 
 /** The per-issue continuation clock as the detail read carries it. */
 export const AgentTicker = z.object({

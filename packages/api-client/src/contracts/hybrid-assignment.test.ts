@@ -14,7 +14,8 @@ import { AssignedRunnerDetail, getIssue, Issue } from "./issues.js";
 import { updateProject } from "./project-management.js";
 import { ProjectDetail } from "./projects.js";
 import { listRunners, Runner } from "./runners.js";
-import { AgentRun, DispatchWait, releaseRunPin, ReleaseRunPinResult } from "./runs.js";
+import { DispatchWait } from "./issue-agent.js";
+import { AgentRun, releaseRunPin, ReleaseRunPinResult } from "./runs.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";

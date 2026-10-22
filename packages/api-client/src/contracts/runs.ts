@@ -8,6 +8,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { DispatchWait, RunErrorDiagnostic } from "./issue-agent.js";
 import { PodMini } from "./pods.js";
 
 export const RUN_STATUSES = [
@@ -59,22 +60,6 @@ export const RunEvent = z.object({
 });
 export type RunEvent = z.infer<typeof RunEvent>;
 
-export const RUN_ERROR_SOURCES = ["agent", "pidash_runner", "pidash_cloud", "unknown"] as const;
-export type RunErrorSource = (typeof RUN_ERROR_SOURCES)[number];
-
-/**
- * Structured failure diagnosis. Present on the detail fetch when the
- * run carries error text; the list fetch always answers null.
- */
-export const RunErrorDiagnostic = z.object({
-  source: z.enum(RUN_ERROR_SOURCES),
-  source_label: z.string(),
-  kind: z.string(),
-  summary: z.string(),
-  action: z.string(),
-});
-export type RunErrorDiagnostic = z.infer<typeof RunErrorDiagnostic>;
-
 /** Which scheduler binding fired a run, for the back-link. */
 export const RunSchedulerBinding = z.object({
   id: uuid(),
@@ -91,25 +76,6 @@ export const RunToolPlan = z.object({
   limits: z.optional(z.record(z.string(), z.number())),
 });
 export type RunToolPlan = z.infer<typeof RunToolPlan>;
-
-/**
- * Why a queued pinned run has not dispatched yet (hybrid assignment,
- * design §14.3). Computed, never stored; null without a pin. `reason`
- * stays an open string (runner_offline, runner_busy,
- * runner_not_permitted, dispatching); `releasable` tells the client
- * whether the requester may release this run to the pod.
- */
-export const DispatchWait = z.object({
-  reason: z.string(),
-  pin_kind: z.string(),
-  runner: uuid(),
-  runner_name: z.string(),
-  queued_at: nullableDateTime(),
-  runner_last_seen_at: nullableDateTime(),
-  runs_ahead: z.number(),
-  releasable: z.boolean(),
-});
-export type DispatchWait = z.infer<typeof DispatchWait>;
 
 /**
  * One agent run. `events` rides along only when the detail fetch asks
