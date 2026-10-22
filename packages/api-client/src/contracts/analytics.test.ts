@@ -115,6 +115,20 @@ describe("analytics charts", () => {
     });
   });
 
+  it("does not type-allow the project radar type", async () => {
+    const calls: Call[] = [];
+    const client = stubClient([], calls);
+    // The project-scoped chart view only accepts work-items and custom chart
+    // types; a `projects` request answers 400 (pinned live in the contract
+    // suite), so the query union excludes it at compile time.
+    // @ts-expect-error the project radar type is not part of the dialog surface
+    await getProjectAnalyticsChart(client, "acme", "p1", { type: "projects" }).catch(() => undefined);
+    // The stub answers `[]` for any body, so the request still goes out; this
+    // pins that only the type gate blocks the radar, never a runtime rewrite.
+    expect(calls[0]?.url).toBe("/api/workspaces/acme/projects/p1/advance-analytics-charts/");
+    expect(calls[0]?.query).toEqual({ type: "projects" });
+  });
+
   it("keeps stacked segment keys and preserves schema order", async () => {
     const parsed = AnalyticsCustomChart.parse({
       data: [{ key: "backlog", name: "backlog", count: 4, medium: 3, low: 1 }],

@@ -417,6 +417,17 @@ describe.skipIf(!contractEnabled)("analytics read contract", () => {
     expect(emptyModule).toEqual({ data: [], schema: {} });
   });
 
+  it("refuses the project radar type on the scoped chart read with 400", async () => {
+    const client = await sharedSignedIn();
+    const projectId = await seededProjectId(client);
+    // Spec §16.5: the dialog has no radar, and the view answers 400 for any
+    // type other than work-items or custom-work-items.
+    const refusal = await getProjectAnalyticsChart(client, CONTRACT_WORKSPACE, projectId, {
+      type: "projects" as unknown as "work-items",
+    }).catch((error: unknown) => error);
+    expect(isApiError(refusal) && refusal.status).toBe(400);
+  });
+
   it("answers the project-scoped custom chart", async () => {
     const client = await sharedSignedIn();
     const projectId = await seededProjectId(client);

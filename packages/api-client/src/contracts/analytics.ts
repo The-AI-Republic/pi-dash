@@ -191,9 +191,14 @@ export type AnalyticsProjectsChart = z.infer<typeof AnalyticsProjectsChart>;
  * One created-vs-resolved bucket. The workspace read is monthly, from the
  * workspace's creation month through the current month, so a member always
  * sees at least one point. A cycle/module-scoped read is daily over the
- * scope's range. The screen plots `created_issues` and `completed_issues`
- * and labels the point by `name` (`YYYY-MM-DD`); `count` repeats
- * `created_issues` for older consumers.
+ * scope's range; a project-scoped read without one is monthly from the
+ * project's creation month. The screen plots `created_issues` and
+ * `completed_issues` and labels the point by `name` (`YYYY-MM-DD`).
+ *
+ * `count` is a legacy total with two meanings: the monthly builders (workspace
+ * and project scope) set it to `created_issues`, while the daily
+ * cycle/module builder sets it to `created_issues + completed_issues`. Read
+ * the two explicit fields and never infer one from `count`.
  */
 export const AnalyticsWorkItemsChartPoint = z.object({
   key: z.string(),
@@ -303,7 +308,12 @@ export const ANALYTICS_X_AXES = [
 ] as const;
 export type AnalyticsXAxis = (typeof ANALYTICS_X_AXES)[number];
 
-/** Count is the only y metric; the server defaults to `WORK_ITEM_COUNT`. */
+/**
+ * Count is the only y metric the screen offers. The chart views ignore
+ * `y_axis` (an unknown value still answers 200), so sending
+ * `WORK_ITEM_COUNT` is a forward-compatible convention, not a server
+ * requirement.
+ */
 export const ANALYTICS_Y_AXES = ["WORK_ITEM_COUNT"] as const;
 export type AnalyticsYAxis = (typeof ANALYTICS_Y_AXES)[number];
 
@@ -365,6 +375,13 @@ export type AnalyticsChartQuery =
   | AnalyticsProjectsChartQuery
   | AnalyticsWorkItemsChartQuery
   | AnalyticsCustomChartQuery;
+
+/**
+ * The project-scoped chart view has no radar: it accepts only `work-items`
+ * and `custom-work-items`, and anything else (including `projects`) answers
+ * 400 `{message: "Invalid type"}`. The workspace read is the only radar.
+ */
+export type AnalyticsProjectChartQuery = AnalyticsWorkItemsChartQuery | AnalyticsCustomChartQuery;
 
 /**
  * Estimates builder shorthand (EST-020): the project custom-work-item chart
@@ -450,7 +467,7 @@ export async function getAnalyticsChart<Q extends AnalyticsChartQuery>(
  * rather than the strict `AnalyticsChartResponse`: ungrouped answers parse
  * identically, and grouped answers keep their segment keys.
  */
-export async function getProjectAnalyticsChart<Q extends AnalyticsChartQuery | AnalyticsChartBuilderQuery>(
+export async function getProjectAnalyticsChart<Q extends AnalyticsProjectChartQuery | AnalyticsChartBuilderQuery>(
   client: ApiClient,
   slug: string,
   projectId: string,
@@ -562,7 +579,7 @@ export type ProjectStatField = (typeof PROJECT_STAT_FIELDS)[number];
  * Each requested count is a correlated `OuterRef` subquery wrapping
  * `Count(...)`, which always resolves to an integer: a project with no
  * matching rows answers `0`, never `null` or an absent key (verified against
- * the seeded issue-less `CU` project). Unrequested fields are absent
+ * the seeded issue-less `CE` project). Unrequested fields are absent
  * entirely. An empty workspace, or a `project_ids` list that matches
  * nothing, answers `[]`.
  *
