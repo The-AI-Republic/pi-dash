@@ -627,8 +627,24 @@ impl CleanupTask {
     /// (datetime bounds unquoted, exactly as the fixture records them);
     /// Postgres rejects that, so execution quotes it. The cutoff is always
     /// rendered internally by [`render_cutoff`], never user input.
+    ///
+    /// For API logs the executable form also projects the `inet`
+    /// `ip_address` as text: sqlx cannot decode `inet` as `String`, while
+    /// Django reads it through a text loader. `abbrev()` renders what Django
+    /// sees for host addresses (`10.0.0.1`; a `::text` cast would append
+    /// `/32`). `api_logs_sql` keeps Django's exact text for fixture parity.
     pub fn select_sql_for_exec(&self, cutoff: &str) -> String {
-        self.select_sql(&format!("'{cutoff}'"))
+        let sql = self.select_sql(&format!("'{cutoff}'"));
+        // The needle occurs once (select list); WHERE/ORDER BY only touch
+        // created_at, and the unit test below pins the full statement.
+        if matches!(self, CleanupTask::ApiLogs) {
+            sql.replace(
+                "\"api_activity_logs\".\"ip_address\",",
+                "abbrev(\"api_activity_logs\".\"ip_address\") AS \"ip_address\",",
+            )
+        } else {
+            sql
+        }
     }
 }
 
@@ -832,6 +848,8 @@ mod tests {
         // The builders emit Django's `str(query)` debug form (bound
         // unquoted); execution must quote it or Postgres rejects the
         // statement. The window tasks take no bound, so they are unchanged.
+        // The API-log executable form also projects the `inet` ip_address
+        // as text via abbrev() (see select_sql_for_exec).
         let q = fixture_querysets();
         let exec = CleanupTask::ApiLogs.select_sql_for_exec(FROZEN_CUTOFF);
         assert_eq!(
@@ -840,6 +858,10 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .replace(FROZEN_CUTOFF, &format!("'{FROZEN_CUTOFF}'"))
+                .replace(
+                    "\"api_activity_logs\".\"ip_address\",",
+                    "abbrev(\"api_activity_logs\".\"ip_address\") AS \"ip_address\","
+                )
         );
         assert!(exec.contains(&format!("<= '{FROZEN_CUTOFF}'")));
         assert_eq!(
