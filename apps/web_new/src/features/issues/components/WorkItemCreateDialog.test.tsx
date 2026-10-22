@@ -2759,8 +2759,28 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
     );
     await waitFor(() => expect(titleField()).toHaveValue("Mover"));
     fireEvent.click(screen.getByRole("button", { name: "Add to project" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't publish the draft", expect.any(String)));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add to project" })).not.toBeDisabled());
+    // The drafts page owns the promote's failure notice so a 403 can read
+    // as a permission refusal rather than a generic publish error.
+    expect(notifyError).not.toHaveBeenCalled();
     expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it("hides every publish control when conversion is not permitted", async () => {
+    const onPublish = vi.fn(async () => undefined);
+    setup(
+      {},
+      {
+        edit: { kind: "draft", id: "draft-1", projectId: PROJECT_ATLAS, snapshot: editRow({ name: "Guest own" }) },
+        moveToProject: true,
+        onPublish,
+        canPublish: false,
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Guest own"));
+    expect(screen.queryByRole("button", { name: "Add to project" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish issue" })).not.toBeInTheDocument();
+    expect(onPublish).not.toHaveBeenCalled();
   });
 
   it("runs one copy write while the first is still in flight", async () => {

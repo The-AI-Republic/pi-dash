@@ -8,8 +8,8 @@
 // duplicated payload), move to project (the dialog in move mode, whose
 // "Add to project" promotes the draft), and delete behind a confirmation
 // gated to the creator or a workspace admin (drafts spec §4.6,
-// DRAFT-011). No drafts invites the first one; no joined project invites
-// a project instead.
+// DRAFT-011); row abilities follow the DRAFT-025 matrix. No drafts
+// invites the first one; no joined project invites a project instead.
 
 import { Button, Skeleton } from "@pidash/kit";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -29,6 +29,10 @@ import {
   DRAFT_DELETE_FAILED_TITLE,
   DRAFT_DELETE_PERMISSION_BODY,
   DRAFT_DELETE_PERMISSION_TITLE,
+  DRAFT_PROMOTE_FAILED_BODY,
+  DRAFT_PROMOTE_FAILED_TITLE,
+  DRAFT_PROMOTE_PERMISSION_BODY,
+  DRAFT_PROMOTE_PERMISSION_TITLE,
   draftKeys,
   draftListQueryOptions,
   draftTotalCount,
@@ -42,7 +46,14 @@ import {
 import { DraftBlock } from "./DraftBlock.js";
 import { DraftsEmptyState, DraftsNoProjectState } from "./DraftEmptyStates.js";
 import { DeleteDraftDialog } from "./DeleteDraftDialog.js";
-import { canDeleteDraft, copyDraftInput, copyDraftTitle, draftSnapshot, type DraftFieldPatch } from "./model.js";
+import {
+  copyDraftInput,
+  copyDraftTitle,
+  draftAbilities,
+  draftSnapshot,
+  type DraftFieldPatch,
+  type DraftViewer,
+} from "./model.js";
 
 /** Page heading and create-entry label. */
 export const DRAFTS_TITLE = "Drafts";
@@ -69,6 +80,8 @@ export interface DraftDialogProps {
   draftSeed?: DraftSeed | null;
   /** Move mode: the footer offers "Add to project". */
   moveToProject?: boolean;
+  /** False for a guest-owned draft: edit is allowed, conversion is not. */
+  canPublish?: boolean;
   onPublish?: (input: DraftIssueCreateInput) => Promise<void>;
   onCopySaved?: (input: DraftIssueCreateInput) => Promise<unknown>;
   initialProjectId?: string;
@@ -110,6 +123,11 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
   const rows = flattenDraftPages(drafts.data);
   const total = draftTotalCount(drafts.data);
   const projects = projectDetails.data ?? [];
+  const viewer = {
+    meId: me.data?.id ?? null,
+    isAdmin: permissions.isAdmin,
+    canWrite: permissions.canEdit,
+  };
   const joined = projects.filter((project) => project.member_role !== null);
   // "No project" follows the joined projects the viewer can create work
   // in, as the old root does: the empty screen names creating or joining
@@ -146,11 +164,9 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
   }
 
   function requestDelete(draft: DraftIssue): void {
-    const allowed = canDeleteDraft(draft, {
-      meId: me.data?.id ?? null,
-      isWorkspaceAdmin: permissions.isAdmin,
-    });
-    if (!allowed) {
+    // The matrix's manage bit is the creator-or-workspace-admin delete
+    // standing (DRAFT-011).
+    if (!draftAbilities(draft, viewer).manage) {
       notifyError(DRAFT_DELETE_PERMISSION_TITLE, DRAFT_DELETE_PERMISSION_BODY);
       return;
     }
@@ -212,7 +228,7 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
             draft={draft}
             project={projects.find((project) => project.id === draft.project_id)}
             projectIdentifier={identifierOf(projects, draft.project_id)}
-            editable={permissions.canEdit}
+            abilities={draftAbilities(draft, viewer)}
             onEdit={() => setDialog({ kind: "edit", draft })}
             onCopy={() => setDialog({ kind: "copy", draft })}
             onMove={() => setDialog({ kind: "move", draft })}
@@ -269,12 +285,22 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
         dialog={dialog}
         workspaceSlug={workspaceSlug}
         creatable={creatable}
+        viewer={viewer}
         CreateDialog={CreateDialog}
         onClose={closeDialog}
         onCopySaved={(input) => create.mutateAsync(input)}
         onPromote={async (draftId, input) => {
-          await promote.mutateAsync({ draftId, input });
-          closeDialog();
+          try {
+            await promote.mutateAsync({ draftId, input });
+            closeDialog();
+          } catch (error) {
+            if (isDraftPermissionRefusal(error)) {
+              notifyError(DRAFT_PROMOTE_PERMISSION_TITLE, DRAFT_PROMOTE_PERMISSION_BODY);
+            } else {
+              notifyError(DRAFT_PROMOTE_FAILED_TITLE, DRAFT_PROMOTE_FAILED_BODY);
+            }
+            throw error;
+          }
         }}
         onEditChanged={refreshAfterEdit}
       />
@@ -295,6 +321,7 @@ function DraftDialogHost({
   dialog,
   workspaceSlug,
   creatable,
+  viewer,
   CreateDialog,
   onClose,
   onCopySaved,
@@ -304,6 +331,7 @@ function DraftDialogHost({
   dialog: OpenDialog;
   workspaceSlug: string;
   creatable: WorkItemCreateProject[];
+  viewer: DraftViewer;
   CreateDialog: React.ComponentType<DraftDialogProps>;
   onClose: () => void;
   onCopySaved: (input: DraftIssueCreateInput) => Promise<unknown>;
@@ -318,6 +346,7 @@ function DraftDialogHost({
     },
     workspaceSlug,
     projects: creatable,
+    canPublish: dialog.kind === "create" ? true : draftAbilities(dialog.draft, viewer).convert,
   };
   if (dialog.kind === "create") {
     return <CreateDialog {...shared} onCopySaved={onCopySaved} />;

@@ -104,6 +104,26 @@ export function asPriority(value: string): PriorityLevel {
   return (PRIORITY_LEVELS as readonly string[]).includes(value) ? (value as PriorityLevel) : "none";
 }
 
+/** The workspace role facts that decide a draft row's actions (DRAFT-025). */
+export interface DraftViewer {
+  /** The signed-in user's id, or null while the session read is unresolved. */
+  meId: string | null;
+  /** Workspace admin, not merely a project admin. */
+  isAdmin: boolean;
+  /** Workspace member or admin. Guests are workspace members but cannot write. */
+  canWrite: boolean;
+}
+
+/** What the current viewer may do with one draft row. */
+export interface DraftAbilities {
+  /** Edit, fetch and delete: the draft's creator or a workspace admin. */
+  manage: boolean;
+  /** Make a copy: a member/admin acting on their own draft. */
+  copy: boolean;
+  /** Promote to a work item: a member/admin acting on their own draft. */
+  convert: boolean;
+}
+
 /**
  * The delete standing (drafts spec §4.6, DRAFT-011): the draft's
  * creator at any role, or a workspace admin. A project-only admin who
@@ -116,6 +136,23 @@ export function canDeleteDraft(
 ): boolean {
   if (viewer.meId !== null && draft.created_by === viewer.meId) return true;
   return viewer.isWorkspaceAdmin;
+}
+
+/**
+ * The DRAFT-025 matrix for one row. Ownership is checked by user id, and
+ * the admin half is the workspace role, never the project role: a project
+ * admin who is only a workspace member must not manage someone else's
+ * draft. Guests own their drafts and may manage them, but cannot create
+ * copies or convert them. Management reuses the delete standing above,
+ * since creator-or-workspace-admin governs edit, fetch and delete alike.
+ */
+export function draftAbilities(draft: Pick<DraftIssue, "created_by">, viewer: DraftViewer): DraftAbilities {
+  const owns = viewer.meId !== null && draft.created_by === viewer.meId;
+  return {
+    manage: canDeleteDraft(draft, { meId: viewer.meId, isWorkspaceAdmin: viewer.isAdmin }),
+    copy: owns && viewer.canWrite,
+    convert: owns && viewer.canWrite,
+  };
 }
 
 /** State groups that read as finished for the overdue flag. */

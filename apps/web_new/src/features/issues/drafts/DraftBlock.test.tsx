@@ -18,6 +18,7 @@ vi.mock("./DraftProperties.js", () => ({
 }));
 
 import { copyIdentifier, DraftBlock } from "./DraftBlock.js";
+import type { DraftAbilities } from "./model.js";
 
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -48,7 +49,10 @@ function draft(overrides: Partial<DraftIssue> = {}): DraftIssue {
 
 const project = { id: PROJECT, name: "Atlas", identifier: "PAR" } as unknown as ProjectDetails;
 
-function setup(row = draft(), overrides: { identifier?: string | null; editable?: boolean } = {}) {
+const ALL_ACTIONS: DraftAbilities = { manage: true, copy: true, convert: true };
+const GUEST_OWN: DraftAbilities = { manage: true, copy: false, convert: false };
+
+function setup(row = draft(), overrides: { identifier?: string | null; abilities?: DraftAbilities } = {}) {
   const handlers = {
     onEdit: vi.fn(),
     onCopy: vi.fn(),
@@ -62,7 +66,7 @@ function setup(row = draft(), overrides: { identifier?: string | null; editable?
       draft={row}
       project={project}
       projectIdentifier={overrides.identifier === undefined ? "PAR" : overrides.identifier}
-      editable={overrides.editable ?? true}
+      abilities={overrides.abilities ?? ALL_ACTIONS}
       {...handlers}
     />
   );
@@ -195,6 +199,25 @@ describe("DraftBlock", () => {
     expect(screen.queryByRole("menu", { name: "Draft actions" })).toBeInTheDocument();
     fireEvent.keyDown(menu, { key: "Escape" });
     expect(screen.queryByRole("menu", { name: "Draft actions" })).not.toBeInTheDocument();
+  });
+
+  it("offers a guest only self-management on their own row", () => {
+    setup(draft(), { abilities: GUEST_OWN });
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Half written" }));
+    const menu = within(screen.getByRole("menu"));
+    expect(menu.getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+    expect(menu.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+    expect(menu.queryByRole("menuitem", { name: "Make a copy" })).not.toBeInTheDocument();
+    expect(menu.queryByRole("menuitem", { name: "Move to project" })).not.toBeInTheDocument();
+  });
+
+  it("does not open edit on a row the viewer may not manage", () => {
+    const h = setup(draft(), { abilities: { manage: false, copy: false, convert: false } });
+    fireEvent.doubleClick(screen.getByRole("article", { name: "Draft Half written" }));
+    expect(h.onEdit).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Actions for Half written" })).not.toBeInTheDocument();
+    fireEvent.contextMenu(screen.getByRole("article", { name: "Draft Half written" }));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 });
 

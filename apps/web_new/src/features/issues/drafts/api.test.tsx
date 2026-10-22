@@ -30,8 +30,6 @@ import {
   DRAFT_PAGE_SIZE,
   DRAFT_PROMOTED_BODY,
   DRAFT_PROMOTED_TITLE,
-  DRAFT_PROMOTE_FAILED_BODY,
-  DRAFT_PROMOTE_FAILED_TITLE,
   DRAFT_UPDATE_FAILED_TITLE,
   draftKeys,
   draftListQueryOptions,
@@ -402,7 +400,7 @@ describe("writes", () => {
     ).toEqual([]);
   });
 
-  it("explains a failed promote and keeps the row", async () => {
+  it("leaves a failed promote for the caller to explain and keeps the row", async () => {
     const t = transport(() => ({ status: 500, body: { error: "boom" } }));
     createAppClient("https://api.test", t.run as never);
     const queryClient = newClient();
@@ -413,7 +411,7 @@ describe("writes", () => {
         .mutateAsync({ draftId: DRAFT_1, input: { name: "One", project_id: PROJECT } })
         .catch(() => undefined);
     });
-    expect(toasts.notifyError).toHaveBeenCalledWith(DRAFT_PROMOTE_FAILED_TITLE, DRAFT_PROMOTE_FAILED_BODY);
+    expect(toasts.notifyError).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(
         queryClient.getQueryData<{ pages: DraftIssueListResponse[] }>(draftKeys.list(WS))?.pages[0]?.results
