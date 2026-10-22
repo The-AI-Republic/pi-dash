@@ -21,6 +21,7 @@
     "check": "pnpm lint && pnpm check:boundaries && pnpm check:headers && pnpm check:deps && pnpm check:similarity && pnpm check:tokens",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:changed": "node checks/test-changed.mjs",
     "test:e2e": "playwright test",
     "test:perf": "playwright test --config e2e/perf/playwright.perf.config.ts",
     "size": "size-limit",
