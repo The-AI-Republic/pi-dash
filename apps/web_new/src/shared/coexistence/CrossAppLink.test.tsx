@@ -36,6 +36,18 @@ describe("CrossAppLink", () => {
     expect(link).not.toHaveAttribute("data-router-link");
   });
 
+  it("renders a reserved top-level area as a plain anchor even when a workspace matches", () => {
+    render(<CrossAppLink to="/settings/acme/projects">Settings</CrossAppLink>);
+    expect(screen.getByRole("link", { name: "Settings" })).not.toHaveAttribute("data-router-link");
+  });
+
+  it("renders the Shell workspace routes as router links once they are listed", () => {
+    // The default list carries the Shell entries; a workspace home and its
+    // projects list are web_new screens and navigate in-app.
+    render(<CrossAppLink to="/acme/projects">Projects</CrossAppLink>);
+    expect(screen.getByRole("link", { name: "Projects" })).toHaveAttribute("data-router-link");
+  });
+
   it("renders a migrated screen as a router link", () => {
     render(
       <CrossAppLink to="/sign-in" prefixes={["/sign-in"]}>
@@ -48,14 +60,14 @@ describe("CrossAppLink", () => {
   });
 
   it("flips a link when its prefix joins the list", () => {
-    const { rerender } = render(<CrossAppLink to="/acme/projects/1/issues">Issues</CrossAppLink>);
-    expect(screen.getByRole("link", { name: "Issues" })).not.toHaveAttribute("data-router-link");
+    const { rerender } = render(<CrossAppLink to="/acme/active-cycles">Cycles</CrossAppLink>);
+    expect(screen.getByRole("link", { name: "Cycles" })).not.toHaveAttribute("data-router-link");
     rerender(
-      <CrossAppLink to="/acme/projects/1/issues" prefixes={["/acme"]}>
-        Issues
+      <CrossAppLink to="/acme/active-cycles" prefixes={["/{ws}/active-cycles"]}>
+        Cycles
       </CrossAppLink>
     );
-    expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute("data-router-link");
+    expect(screen.getByRole("link", { name: "Cycles" })).toHaveAttribute("data-router-link");
   });
 
   it("appends a deep-link anchor on a plain anchor", () => {

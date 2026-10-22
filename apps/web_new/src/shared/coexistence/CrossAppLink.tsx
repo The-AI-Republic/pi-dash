@@ -11,7 +11,7 @@
 import { Link } from "@tanstack/react-router";
 import * as React from "react";
 
-import { MIGRATED_ROUTE_PREFIXES, resolveLinkKind } from "./migrated-routes.js";
+import { MIGRATED_ROUTE_ENTRIES, resolveLinkKind } from "./migrated-routes.js";
 
 export interface CrossAppLinkProps extends Omit<React.AnchorHTMLAttributes<HTMLAnchorElement>, "href"> {
   /** App path such as "/sign-in" or "/acme/projects/1/issues". */
@@ -33,7 +33,7 @@ export interface CrossAppLinkProps extends Omit<React.AnchorHTMLAttributes<HTMLA
 type RouterLinkProps = Parameters<typeof Link>[0];
 
 export function CrossAppLink({ to, hash, prefixes, children, ...rest }: CrossAppLinkProps): React.ReactElement {
-  if (resolveLinkKind(to, prefixes ?? MIGRATED_ROUTE_PREFIXES) === "anchor") {
+  if (resolveLinkKind(to, prefixes ?? MIGRATED_ROUTE_ENTRIES) === "anchor") {
     return (
       <a href={hash === undefined ? to : `${to}#${hash}`} {...rest}>
         {children}

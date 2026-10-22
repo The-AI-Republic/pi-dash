@@ -4,4 +4,10 @@
 
 export { CrossAppLink } from "./CrossAppLink.js";
 export type { CrossAppLinkProps } from "./CrossAppLink.js";
-export { isMigratedPath, MIGRATED_ROUTE_PREFIXES, normalizePathPrefix, resolveLinkKind } from "./migrated-routes.js";
+export {
+  isMigratedPath,
+  MIGRATED_RESERVED_TOP_LEVEL,
+  MIGRATED_ROUTE_ENTRIES,
+  normalizePathPrefix,
+  resolveLinkKind,
+} from "./migrated-routes.js";
