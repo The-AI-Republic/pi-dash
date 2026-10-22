@@ -38,6 +38,7 @@ function fakeModule(useRichFilterBuilder: ReturnType<typeof vi.fn>): RichFilterB
   return {
     useRichFilterBuilder,
     serializeRichExpression: () => ({}),
+    parseRichExpression: () => [],
     FieldConfigRegistry: RealRegistry,
     buildViewCreate,
     savedViewKeys,
@@ -98,6 +99,41 @@ describe("FilterSectionLoader", () => {
       hideModule: false,
       temporary: true,
       temporaryRegistry: registryRef.current,
+    });
+  });
+
+  it("seeds the temporary instance from the stored expression", async () => {
+    const gate = deferred<RichFilterBuilderModule>();
+    const useRichFilterBuilder = fakeBuilder();
+    const parseRichExpression = vi.fn(() => [
+      { key: "c1", property: "priority", operator: "in", negated: false, value: ["high"] },
+    ]);
+    loader.loadRichFilterBuilder.mockReturnValue(gate.promise);
+    const registryRef: { current: FieldConfigRegistry | null } = { current: null };
+    render(
+      <FilterSectionLoader
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        entity={ENTITY}
+        hideCycle={false}
+        hideModule={false}
+        registryRef={registryRef}
+        seedExpression={{ priority__in: "high" }}
+      />
+    );
+    gate.resolve({ ...fakeModule(useRichFilterBuilder), parseRichExpression });
+    expect(await screen.findByTestId("fake-filter-control")).toBeInTheDocument();
+    expect(parseRichExpression).toHaveBeenCalledWith({ priority__in: "high" });
+    await waitFor(() => expect(registryRef.current).toBeInstanceOf(RealRegistry));
+    expect(useRichFilterBuilder).toHaveBeenCalledWith({
+      workspaceSlug: "acme",
+      projectId: PROJECT,
+      entity: ENTITY,
+      hideCycle: false,
+      hideModule: false,
+      temporary: true,
+      temporaryRegistry: registryRef.current,
+      temporarySeed: [{ key: "c1", property: "priority", operator: "in", negated: false, value: ["high"] }],
     });
   });
 

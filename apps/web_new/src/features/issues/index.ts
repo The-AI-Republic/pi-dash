@@ -410,15 +410,17 @@ export type { SubIssueSectionHandle, SubIssueSectionProps } from "./subIssues/Su
 export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";
 // Saved-view dialog seam (VIEW-013, NEWFRONT-721). The views area builds
 // its create/edit dialog on the rich filter builder, the expression
-// serializer, the temporary registry and the snapshot helpers; it never
-// reaches past this barrel into the rich/ modules. All five arrive
-// through the loader below: the builder chunk is lazy, and a static
+// serializer and parser, the temporary registry and the snapshot
+// helpers; it never reaches past this barrel into the rich/ modules.
+// All six arrive through the loader below: the builder chunk is lazy,
+// and a static
 // barrel edge to views.js makes the bundler hoist the shared expression
 // codec into the initial bundle (size gate). The loader lives here, not
 // in an eager module, so its dynamic imports stay lazy with its callers.
 export type RichFilterBuilderModule = {
   useRichFilterBuilder: (typeof import("./filters/rich/RichFilterBuilder.js"))["useRichFilterBuilder"];
   serializeRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["serializeRichExpression"];
+  parseRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["parseRichExpression"];
   FieldConfigRegistry: (typeof import("./filters/rich/temporary.js"))["FieldConfigRegistry"];
   buildViewCreate: (typeof import("./filters/rich/views.js"))["buildViewCreate"];
   savedViewKeys: (typeof import("./filters/rich/views.js"))["savedViewKeys"];
@@ -435,6 +437,7 @@ export function loadRichFilterBuilder(): Promise<RichFilterBuilderModule> {
   ]).then(([builder, views, temporary]) => ({
     useRichFilterBuilder: builder.useRichFilterBuilder,
     serializeRichExpression: builder.serializeRichExpression,
+    parseRichExpression: builder.parseRichExpression,
     FieldConfigRegistry: temporary.FieldConfigRegistry,
     buildViewCreate: views.buildViewCreate,
     savedViewKeys: views.savedViewKeys,

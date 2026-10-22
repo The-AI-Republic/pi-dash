@@ -9,9 +9,21 @@ export { projectViewsQueryOptions, workspaceViewsQueryOptions } from "./api/quer
 export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
 export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
 export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
+export { WorkspaceViewMenu, selectWorkspaceViewMenuEntries } from "./components/WorkspaceViewMenu.js";
+export type {
+  WorkspaceViewMenuCallbacks,
+  WorkspaceViewMenuProps,
+  WorkspaceViewMenuStanding,
+} from "./components/WorkspaceViewMenu.js";
+export { WorkspaceViewsTabStrip } from "./components/WorkspaceViewsTabStrip.js";
+export type { WorkspaceViewsTabStripProps } from "./components/WorkspaceViewsTabStrip.js";
 export type { ProjectViewsListScreenProps } from "./components/ProjectViewsListScreen.js";
 export { CreateViewDialog } from "./dialog/CreateViewDialog.js";
 export type { CreateViewDialogProps } from "./dialog/CreateViewDialog.js";
+export { WorkspaceViewDialog } from "./dialog/WorkspaceViewDialog.js";
+export type { WorkspaceViewDialogProps } from "./dialog/WorkspaceViewDialog.js";
+export { DeleteWorkspaceViewDialog } from "./dialog/DeleteWorkspaceViewDialog.js";
+export type { DeleteWorkspaceViewDialogProps } from "./dialog/DeleteWorkspaceViewDialog.js";
 export { ViewAccessField, OWNER_ACCESS, SHARED_ACCESS } from "./dialog/ViewAccessField.js";
 export type { ViewAccessFieldProps } from "./dialog/ViewAccessField.js";
 export { ViewIconPicker, ViewLogoMark } from "./dialog/ViewIconPicker.js";

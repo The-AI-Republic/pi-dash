@@ -40,6 +40,9 @@ import {
 // Submit-time serializer for lazy hosts (the views dialog reads its
 // temporary registry through the builder-module loader in the barrel).
 export { serializeRichExpression } from "./expression.js";
+// Stored-expression parser for the same hosts (the edit dialog seeds its
+// temporary instance from the record through the same loader).
+export { parseRichExpression } from "./expression.js";
 import { ConditionPill, conditionField } from "./ConditionPill.js";
 import { FieldPicker } from "./FieldPicker.js";
 import { temporaryInstanceId, useTemporaryFieldConfigs, type FieldConfigRegistry } from "./temporary.js";

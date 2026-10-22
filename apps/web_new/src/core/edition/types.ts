@@ -104,10 +104,11 @@ export interface ViewAccessFieldProps {
   disabled: boolean;
 }
 
-/** Where the edition persists an owner-only choice (VIEW-019). */
+/** Where the edition persists an owner-only choice (VIEW-019, VIEW-034). */
 export interface ViewAccessStoreInput {
   workspaceSlug: string;
-  projectId: string;
+  /** The owning project; null for a workspace view, which spans projects. */
+  projectId: string | null;
   viewId: string;
   access: ViewAccessValue;
 }
