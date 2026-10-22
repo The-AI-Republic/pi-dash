@@ -23,31 +23,31 @@ Two kinds of literal text appear deliberately below:
 
 The oracle reads these strings through user-visible selectors (accessible names, `page.title()`, visible text). A slice must render them exactly as quoted; equivalent wording elsewhere is fine, but these particular spots are contract. A new redesign may restyle the control, but must keep the accessible name/text.
 
-| Where | Pinned string | Oracle |
-| --- | --- | --- |
-| Document title of the drafts route | `Workspace Draft` | `list.spec.ts`, `non-behaviors.spec.ts` |
-| Header/breadcrumb text | contains `Drafts` | `list.spec.ts`, `non-behaviors.spec.ts` |
-| Header create control (accessible name) | `Draft a work item` | `create.spec.ts`, driver `draftsHeaderCreateState` |
-| Empty-state heading | `Half-written work items` | `empty-loading.spec.ts`, `support.ts` |
-| Empty-state primary action | `Create draft work item` | driver `draftsEmptyCreateState` |
-| No-project heading | `No project` | `empty-loading.spec.ts`, `support.ts` |
-| No-project primary action | `Start your first project` | driver `draftsNoProjectCreateState` |
-| Create dialog title placeholder | `Title` | driver `fillCreateTitle` |
-| Discard guard heading | `Save this draft?` | `discard.spec.ts`, `create.spec.ts` |
-| Discard guard actions | `Save to Drafts`, `Discard`, `Cancel` | `discard.spec.ts`, driver `confirmSaveDraft` |
-| Create success toast | contains `Draft created` | `create.spec.ts` |
-| Delete dialog heading | `Delete draft` | driver `confirmDraftDelete` |
-| Delete dialog actions | `Delete`, `Cancel` | driver `confirmDraftDelete` |
-| Delete success toast | contains `Draft deleted` | `duplicate-delete.spec.ts`, `permissions.spec.ts` |
-| Publish success toast | contains `Draft published to project.` | `publish.spec.ts` |
-| Publish control in the edit dialog | `Publish issue` | driver `publishDraft` |
-| Move-mode action | `Add to project` | `edit.spec.ts` |
-| Row menu entries, in order | `Edit`, `Make a copy`, `Move to project`, `Delete` | `edit.spec.ts`, DRAFT-009 |
-| Priority trigger text | `High`, `Medium`, `None` (the picker's own labels) | driver `draftPriorityText` |
+| Where                                   | Pinned string                                      | Oracle                                             |
+| --------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
+| Document title of the drafts route      | `Workspace Draft`                                  | `list.spec.ts`, `non-behaviors.spec.ts`            |
+| Header/breadcrumb text                  | contains `Drafts`                                  | `list.spec.ts`, `non-behaviors.spec.ts`            |
+| Header create control (accessible name) | `Draft a work item`                                | `create.spec.ts`, driver `draftsHeaderCreateState` |
+| Empty-state heading                     | `Half-written work items`                          | `empty-loading.spec.ts`, `support.ts`              |
+| Empty-state primary action              | `Create draft work item`                           | driver `draftsEmptyCreateState`                    |
+| No-project heading                      | `No project`                                       | `empty-loading.spec.ts`, `support.ts`              |
+| No-project primary action               | `Start your first project`                         | driver `draftsNoProjectCreateState`                |
+| Create dialog title placeholder         | `Title`                                            | driver `fillCreateTitle`                           |
+| Discard guard heading                   | `Save this draft?`                                 | `discard.spec.ts`, `create.spec.ts`                |
+| Discard guard actions                   | `Save to Drafts`, `Discard`, `Cancel`              | `discard.spec.ts`, driver `confirmSaveDraft`       |
+| Create success toast                    | contains `Draft created`                           | `create.spec.ts`                                   |
+| Delete dialog heading                   | `Delete draft`                                     | driver `confirmDraftDelete`                        |
+| Delete dialog actions                   | `Delete`, `Cancel`                                 | driver `confirmDraftDelete`                        |
+| Delete success toast                    | contains `Draft deleted`                           | `duplicate-delete.spec.ts`, `permissions.spec.ts`  |
+| Publish success toast                   | contains `Draft published to project.`             | `publish.spec.ts`                                  |
+| Publish control in the edit dialog      | `Publish issue`                                    | driver `publishDraft`                              |
+| Move-mode action                        | `Add to project`                                   | `edit.spec.ts`                                     |
+| Row menu entries, in order              | `Edit`, `Make a copy`, `Move to project`, `Delete` | `edit.spec.ts`, DRAFT-009                          |
+| Priority trigger text                   | `High`, `Medium`, `None` (the picker's own labels) | driver `draftPriorityText`                         |
 
 `Untitled` (the blank-title placeholder) and `Project is required` (the promote refusal) are also contract strings; they are server/storage values rather than UI copy and are covered in §4.1 and §8.6.
 
-**Driver key mapping.** The parity driver's `draftRowMenuClick(name, entry)` is called with the *old* i18n keys `edit`, `make_a_copy`, `move_to_project`, `delete`, not with the pinned labels. The `web_new` driver must map those keys to its own menu entries (by order or by a key→label table); the screen itself renders the pinned labels above.
+**Driver key mapping.** The parity driver's `draftRowMenuClick(name, entry)` is called with the _old_ i18n keys `edit`, `make_a_copy`, `move_to_project`, `delete`, not with the pinned labels. The `web_new` driver must map those keys to its own menu entries (by order or by a key→label table); the screen itself renders the pinned labels above.
 
 ## 2. Screen, shell and route
 
@@ -109,7 +109,7 @@ The property strip presents the editable values in a stable compact row, in this
 
 - reads its value from the draft/list payload and project reference data;
 - is a dropdown/picker using the shared Issues pickers, not a new drafts-only picker;
-- writes one field at a time through `PATCH /api/workspaces/{ws}/draft-issues/{id}/`;
+- writes one field at a time through `PATCH /api/workspaces/{ws}/draft-issues/{id}/`, except dates, which always write both `start_date` and `target_date` together (the changed value plus the currently stored counterpart, or `null` when one is cleared);
 - paints the picked value immediately (optimistic), then keeps it if the write succeeds;
 - on failure, restores the prior value and reports a visible error notice; no silent rollback (fixed behavior, NEWFRONT-303);
 - stops row double-click/context actions from firing when the user is interacting with the picker.
@@ -239,7 +239,7 @@ NEWFRONT-643 (“Issues slice: drafts”, ISS-137–141) merged as squash `351d3
 | DRAFT-021 | Project-less draft row exists; UI refuses publish without project; server 400 is surfaced                                                                     | Verify the refusal leaves the draft and creates nothing; ensure move-to-project can assign a project                                                                                                       | NEWFRONT-784                                      |
 | DRAFT-022 | Empty and no-project states with role-gated actions; project creation dialog                                                                                  | Verify state precedence, artwork is original, guest/member action states, and loading does not flash the empty state                                                                                       | NEWFRONT-782                                      |
 | DRAFT-023 | Cursor list, 50/page, explicit load-more control, footer loader, skeleton                                                                                     | Verify delayed skeleton, 51-row append/no duplicates, end-of-list behavior and failed-next-page retry                                                                                                      | NEWFRONT-782                                      |
-| DRAFT-024 | `/{ws}/drafts` route with a document head; no single-draft route                                                                                                | Change the document title to the pinned `Workspace Draft` (643 ships `Drafts` today, which fails the oracle); verify breadcrumb/header text, no per-draft deep link, and unknown-id URL behavior | NEWFRONT-782                                      |
+| DRAFT-024 | `/{ws}/drafts` route with a document head; no single-draft route                                                                                              | Change the document title to the pinned `Workspace Draft` (643 ships `Drafts` today, which fails the oracle); verify breadcrumb/header text, no per-draft deep link, and unknown-id URL behavior           | NEWFRONT-782                                      |
 | DRAFT-025 | Base list/create/edit/delete/publish and basic role facts                                                                                                     | Verify the complete matrix; backend creator bypass for retrieve/PATCH is still NEWFRONT-299, and the corrected delete standing must agree with the workspace-admin rule; do not claim green until verified | NEWFRONT-787                                      |
 | DRAFT-026 | Standard list with explicit load-more and no filter/bulk/export features; app query defaults disable focus refetch                                            | Verify absence of shortcuts/drag/bulk/filter/export/realtime, focus-safe no-refetch and outside changes appearing only on fresh read                                                                       | NEWFRONT-782                                      |
 | DRAFT-027 | Default surfaces use the same route/components/endpoints; no edition-specific branch                                                                          | Verify in OSS, cloud and desktop, plus no overlay-only divergence; no edition-specific drafts code is allowed                                                                                              | NEWFRONT-782 (smoke), proved by NEWFRONT-788 gate |
@@ -268,6 +268,11 @@ These are target requirements, not oracle-current behavior. The oracle scenarios
 
 These fixes may require changes outside the drafts feature: NEWFRONT-299 is an API permission fix, and NEWFRONT-300 may need a project-detail query or a contract field. Those changes belong to the named slices/issues, not to this spec issue. This spec records the target so a slice cannot “pass” by enshrining the old bug.
 
+Two adjacent backend gaps are deliberately **not** fixed by this area and get no `bug:` row:
+
+- **Partial date writes bypass range validation** (`serializers/draft.py` compares both dates only when both are in the request). The client now guarantees the invariant by always sending both dates (§3.2, §8.4); the owning slice NEWFRONT-783 must unit-test that both fields are sent on every date write. No API change is required for the oracle scenarios.
+- **Cycle and module ids are not project-validated** (`serializers/draft.py` passes them through from `initial_data`). The UI scopes the options to the draft's project; the owning slice NEWFRONT-786 must unit-test that no foreign-project cycle/module can be selected. If a later parity scenario proves the server must refuse these, that becomes a new inventory row and a backend issue, not a silent relaxation of this spec.
+
 ## 8. API surface
 
 All paths are under the API base URL and use the workspace slug (`{ws}`) unless stated. All authenticated calls require an active workspace membership at the stated level. The list and detail responses are the `DraftIssue` contract in `packages/api-client/src/contracts/issue-drafts.ts`; writes use `DraftIssueCreateInput`. The response carries, at minimum: `id`, `name`, `project_id`, `description_html`, `state_id`, `priority`, `parent_id`, `assignee_ids`, `label_ids`, `start_date`, `target_date`, `cycle_id`, `module_ids`, `estimate_point`, `type_id`, `sort_order`, `created_at`, `updated_at`, `created_by`, `updated_by`, `completed_at`. The screen reads `type_id` for the work-type mark, `project_id` for the marker/project features, `description_html` for edit/copy, module/cycle ids for memberships and estimate point for the estimate control. The list envelope additionally carries `total_count`, `next_cursor`, `prev_cursor`, `next_page_results`, `prev_page_results`, `count` and `results`.
@@ -284,7 +289,7 @@ All paths are under the API base URL and use the workspace slug (`{ws}`) unless 
 
 - **Who:** workspace admin, member or guest at the API level. The screen's header action additionally disables guests and hides for project-less users, but that is a UI gate, not an API permission replacement.
 - **Body:** `DraftIssueCreateInput`. `project_id` is optional; a draft may be project-less. `name` is optional at the contract; the UI supplies `Untitled` for a blank/whitespace draft title. `description_html`, state, priority, assignees, labels, dates, cycle, modules, estimate and parent are optional. The create endpoint does not take a separate membership bridge; cycle/modules/estimate ride the create payload.
-- **Validation:** state, labels, assignees, estimate points and parent must belong to the supplied project; assignees must be active project members with at least member role. `cycle_id` and `module_ids` are stored as given and are *not* project-checked by the server, so the UI must offer only the draft project's cycles and modules; do not describe the server as enforcing that scoping. A start date after target date is rejected. Description HTML is sanitized; invalid content/assets are rejected. A project-less payload cannot carry project-scoped relationships meaningfully and must not create cross-project links.
+- **Validation:** state, labels, assignees, estimate points and parent must belong to the supplied project; assignees must be active project members with at least member role. `cycle_id` and `module_ids` are stored as given and are _not_ project-checked by the server, so the UI must offer only the draft project's cycles and modules; do not describe the server as enforcing that scoping. This is accepted current backend behavior, not a fixed bug: the owning slice (NEWFRONT-786) must prove the pickers are project-scoped in a unit test and must not add a cycle/module record from another project. A start date after target date is rejected when both dates are supplied. Description HTML is sanitized; invalid content/assets are rejected. A project-less payload cannot carry project-scoped relationships meaningfully and must not create cross-project links.
 - **Response:** HTTP 201 with the stored draft row (including `type_id`, project, description, memberships and estimate). The screen uses the id to refresh and, for dialog saves, resets/opens the new row. Failure is 400 with field errors; the dialog stays open and the row is not added.
 
 ### 8.3 `GET /api/workspaces/{ws}/draft-issues/{id}/`
@@ -297,7 +302,8 @@ All paths are under the API base URL and use the workspace slug (`{ws}`) unless 
 ### 8.4 `PATCH /api/workspaces/{ws}/draft-issues/{id}/`
 
 - **Who:** workspace admin or the draft's creator (intended; see NEWFRONT-299). A guest may patch their own draft; a non-creator cannot patch another user's draft. The implementation must use draft rows for the creator bypass, not issue rows.
-- **Body:** any subset of `DraftIssueCreateInput`, including `project_id` when the move flow assigns a project. Inline writes send one field: `state_id`, `priority`, `label_ids`, `assignee_ids`, `start_date`, `target_date`, `cycle_id`, `module_ids` (complete set) or `estimate_point` (`null` clears). Labels/assignees/state/estimate/cycle/modules are validated against the resulting project. The server compares `start_date` and `target_date` only when both are present in the same request, so a one-field date write is not range-checked against the stored counterpart. The UI therefore validates the range itself before writing and sends both dates together whenever a change could invert the range; the delete/clear path may send `null` for one side. Do not rely on server validation for a partial date write. Description HTML is sanitized.
+- **Body:** any subset of `DraftIssueCreateInput`, including `project_id` when the move flow assigns a project. Inline writes send one field, except dates. `state_id`, `priority`, `label_ids`, `assignee_ids`, `cycle_id`, `module_ids` (complete set) or `estimate_point` (`null` clears) are sent individually. State, labels, assignees, estimate points and parent are validated against the resulting project. `cycle_id` and `module_ids` are _not_ project-validated by the server; the UI alone keeps them inside the draft's project.
+- **Date writes (binding decision):** the serializer compares `start_date` and `target_date` only when _both_ are present in the same request. A one-field date PATCH would therefore bypass range checking against the stored counterpart, so the inline writer must never send a single date. Every start or due date edit sends both fields — the newly chosen day plus the stored value of the other field, or `null` when that field is being cleared — and the client disables out-of-range calendar days before the write. This is a client obligation, chosen over filing a backend bug because the UI can guarantee the invariant without an API change; the server-side gap is recorded in §7's notes rather than treated as enforcement. Description HTML is sanitized.
 - **Response:** HTTP 204, no body. The screen must apply the successful value to its cache or re-read; a 400/403/500 restores the prior value and shows an error notice. A missing/foreign draft is 404/403 and must not be presented as a successful save.
 
 ### 8.5 `DELETE /api/workspaces/{ws}/draft-issues/{id}/`
