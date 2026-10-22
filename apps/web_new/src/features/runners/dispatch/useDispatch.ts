@@ -79,6 +79,7 @@ export function useTriggerAgentRun(options: DispatchRefreshOptions = {}) {
   const triggerRun = React.useCallback(
     async (args: TriggerRunArgs): Promise<AgentRunCreateResult | null> => {
       setIsSubmitting(true);
+      let outcome: AgentRunCreateResult | null;
       try {
         const run = await triggerAgentRun({ client: getAppClient(), runtime: platform.agentRuntime, ...args });
         if (isQueuedDispatch(run)) {
@@ -91,13 +92,14 @@ export function useTriggerAgentRun(options: DispatchRefreshOptions = {}) {
         } catch {
           /* the card catches up on its next scheduled refresh */
         }
-        return run;
+        outcome = run;
       } catch (error: unknown) {
         notifyError(RUN_START_FAILED_TITLE, failureMessage(error, RUN_START_FAILED_BODY));
-        return null;
+        outcome = null;
       } finally {
         setIsSubmitting(false);
       }
+      return outcome;
     },
     [refresh]
   );
@@ -150,6 +152,7 @@ export function useReTick(options: DispatchRefreshOptions = {}) {
   const reTick = React.useCallback(
     async (issueId: string): Promise<ReTickResponse | null> => {
       setIsSubmitting(true);
+      let outcome: ReTickResponse | null;
       try {
         const result = await requestReTick(getAppClient(), issueId);
         if (result.granted) {
@@ -165,13 +168,14 @@ export function useReTick(options: DispatchRefreshOptions = {}) {
         } catch {
           /* the card catches up on its next scheduled refresh */
         }
-        return result;
+        outcome = result;
       } catch (error: unknown) {
         notifyError(RE_TICK_FAILED_TITLE, failureMessage(error, RE_TICK_FAILED_BODY));
-        return null;
+        outcome = null;
       } finally {
         setIsSubmitting(false);
       }
+      return outcome;
     },
     [refresh]
   );

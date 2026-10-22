@@ -207,6 +207,19 @@ describe("useAbortAgentRun", () => {
     });
     expect(harness.notifyError).toHaveBeenCalledWith(RUN_ABORT_FAILED_TITLE, expect.any(String));
   });
+
+  it("keeps a settled abort when the caller refresh fails", async () => {
+    harness.abortAgentRun.mockResolvedValue(run);
+    const onSettledRefresh = vi.fn(async () => {
+      throw new Error("stale");
+    });
+    const { result } = renderHook(() => useAbortAgentRun("acme", { onSettledRefresh }), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ runId: "run-1" });
+    });
+    expect(onSettledRefresh).toHaveBeenCalledTimes(1);
+    expect(harness.notifyError).not.toHaveBeenCalled();
+  });
 });
 
 describe("useReTick", () => {

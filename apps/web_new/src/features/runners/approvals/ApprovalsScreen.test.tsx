@@ -16,9 +16,10 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   return { ...original, notifyError: (title: string, description?: string) => notifyError(title, description) };
 });
+const areaScope = vi.hoisted(() => ({ value: { workspaceSlug: "acme", projectId: "p-1" } as Record<string, string> }));
 vi.mock("../area.js", () => ({
   useRunnersArea: () => ({
-    scope: { workspaceSlug: "acme", projectId: "p-1" },
+    scope: areaScope.value,
     workspaceId: "ws-id",
     access: "allowed",
     allowed: true,
@@ -63,6 +64,7 @@ function renderScreen(): void {
 
 beforeEach(() => {
   notifyError.mockClear();
+  areaScope.value = { workspaceSlug: "acme", projectId: "p-1" };
   queryMocks.useApprovals.mockReturnValue({ data: [approval()], isPending: false });
   queryMocks.useDecideApproval.mockReturnValue({ mutateAsync: vi.fn(async () => ({})), isPending: false });
 });
@@ -77,6 +79,12 @@ describe("ApprovalsScreen", () => {
     expect(queryMocks.useApprovals).toHaveBeenCalledWith("acme", "p-1");
     expect(queryMocks.useDecideApproval).toHaveBeenCalledWith("acme");
     expect(screen.getByTestId("approval-card")).toBeInTheDocument();
+  });
+
+  it("reads the workspace aggregate without a project id", () => {
+    areaScope.value = { workspaceSlug: "acme" };
+    renderScreen();
+    expect(queryMocks.useApprovals).toHaveBeenCalledWith("acme", null);
   });
 
   it("marks the acted card pending until the decision lands", async () => {
