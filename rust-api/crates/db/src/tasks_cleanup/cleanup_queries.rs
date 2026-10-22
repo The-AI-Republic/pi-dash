@@ -852,6 +852,9 @@ mod tests {
         // as text via abbrev() (see select_sql_for_exec).
         let q = fixture_querysets();
         let exec = CleanupTask::ApiLogs.select_sql_for_exec(FROZEN_CUTOFF);
+        // Pin the projection directly: the mirrored replace below would
+        // pass vacuously if the needle ever stopped matching.
+        assert!(exec.contains("abbrev(\"api_activity_logs\".\"ip_address\")"));
         assert_eq!(
             exec,
             q["api_logs_sql"]
