@@ -15,8 +15,10 @@ import { getAppClient } from "../../../core/api/client.js";
 import { useWorkspace } from "../../../core/session/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
+import { preloadRichFilterBuilder } from "../../issues/index.js";
 import { isProjectAdmin, workspaceMembersQueryOptions } from "../../projects/index.js";
 import { projectViewsQueryOptions } from "../api/queries.js";
+import { CreateViewDialog } from "../dialog/CreateViewDialog.js";
 import {
   PROJECT_VIEWS_CRUMB,
   projectViewsFeatureHref,
@@ -33,7 +35,10 @@ import { ProjectViewsSkeleton } from "./ProjectViewsSkeleton.js";
 export interface ProjectViewsListScreenProps {
   workspaceSlug: string;
   projectId: string;
-  /** Opens the create dialog. Slot owner: NEWFRONT-721. */
+  /**
+   * Opens the create dialog. Slot owner: NEWFRONT-721. An explicit
+   * opener overrides the default, which opens the screen's own dialog.
+   */
   onCreateView?: (() => void) | undefined;
 }
 
@@ -52,6 +57,12 @@ export function ProjectViewsListScreen({
   const roles = useProjectRoles(workspaceSlug);
   const members = useQuery(workspaceMembersQueryOptions(getAppClient(), workspaceSlug));
   const { workspace } = useWorkspace(workspaceSlug);
+  const [createOpen, setCreateOpen] = React.useState(false);
+  // Start the dialog's filter chunk while the list data loads, so opening
+  // the dialog rarely flashes its loading note (mirrors NEWFRONT-619).
+  React.useEffect(() => {
+    preloadRichFilterBuilder();
+  }, []);
 
   useDocumentHead({
     title: project.data === undefined ? PROJECT_VIEWS_CRUMB : projectViewsTitle(project.data.name),
@@ -110,6 +121,9 @@ export function ProjectViewsListScreen({
     // NEWFRONT-720 owns the filtered set; until it lands everything fetched stays visible.
     visibleCount: sorted.length,
   });
+  // The header and the zero state share one opener (VIEW-003/009): the
+  // explicit prop when a host overrides it, else the screen's own dialog.
+  const openCreateView = onCreateView ?? (() => setCreateOpen(true));
   return (
     <section
       aria-label={PROJECT_VIEWS_CRUMB}
@@ -119,7 +133,7 @@ export function ProjectViewsListScreen({
       <ProjectViewsListHeader
         workspaceName={workspace?.name ?? workspaceSlug}
         projectName={project.data.name}
-        onCreateView={onCreateView}
+        onCreateView={openCreateView}
       />
       <ProjectViewsListBody
         state={state}
@@ -127,10 +141,18 @@ export function ProjectViewsListScreen({
         members={members.data}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
-        onCreateView={onCreateView}
+        onCreateView={openCreateView}
         onRetry={() => {
           void views.refetch();
         }}
+      />
+      <CreateViewDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        hideCycle={!project.data.cycle_view}
+        hideModule={!project.data.module_view}
       />
     </section>
   );
