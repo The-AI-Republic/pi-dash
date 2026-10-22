@@ -25857,7 +25857,8 @@ export class WebNewDriver implements ParityDriver {
     return this.settingsProfileGeneralForm().locator("#email").isDisabled();
   }
   async settingsProfileGeneralSave(): Promise<void> {
-    await this.settingsProfileGeneralForm()
+    const form = this.settingsProfileGeneralForm();
+    await form
       .getByRole("button", { name: /Save changes|Saving/ })
       .first()
       .click();
@@ -25868,6 +25869,20 @@ export class WebNewDriver implements ParityDriver {
       .first()
       .waitFor({ timeout: 5_000 })
       .catch(() => undefined);
+    // A round-trip that started must also land before returning: back-to-back
+    // saves toast identically, so a following toast poll would otherwise
+    // match the previous save's card while this write is still in flight
+    // (PROF-011 restore read pre-write state twice under load). Validation
+    // failures never go busy, so they fall through exactly as before.
+    const started = await form
+      .getByRole("button", { name: /Saving/ })
+      .first()
+      .waitFor({ timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (started) {
+      await form.getByRole("button", { name: "Save changes", exact: true }).first().waitFor({ timeout: 30_000 });
+    }
   }
   async settingsProfileGeneralSaveLabel(): Promise<string> {
     const label = await this.settingsProfileGeneralForm()
