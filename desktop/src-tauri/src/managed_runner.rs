@@ -106,15 +106,15 @@ impl ManagedPaths {
 
     /// Where the daemon for *this* tree binds its control socket.
     ///
-    /// Not `runtime_dir`. The daemon is started per workspace with
-    /// `PIDASH_DATA_DIR` pointing at the re-rooted `data_dir`, and the runner
-    /// derives its runtime dir as `<data_dir>/runtime` whenever that override
-    /// is present (`runner/src/util/paths.rs`). `runtime_dir` here is the
-    /// *shared* tree that holds the model token, which no daemon binds under —
-    /// reaching for it is how the chat transport ended up looking for a socket
-    /// nothing was listening on.
-    pub(crate) fn daemon_runtime_dir(&self) -> PathBuf {
-        self.data_dir.join("runtime")
+    /// Chosen here and passed to the daemon in `PIDASH_IPC_SOCKET`
+    /// ([`base_command`]) rather than derived on both sides: the daemon's own
+    /// default, `<data_dir>/runtime/pidash.sock`, is too long to bind once the
+    /// data dir sits under the app-data tree (see
+    /// [`crate::ipc::daemon_socket_path`]). Keyed by the re-rooted per-workspace
+    /// `data_dir` — not `runtime_dir`, the *shared* tree that holds the model
+    /// token, which no daemon binds under.
+    pub(crate) fn daemon_socket(&self) -> PathBuf {
+        crate::ipc::daemon_socket_path(&self.data_dir)
     }
 
     pub fn resolve<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
@@ -419,6 +419,9 @@ pub async fn managed_start_daemon<R: Runtime>(
     let paths = ManagedPaths::for_workspace(&app, &workspace)?;
     paths.ensure()?;
     let engine_home = paths.ensure_engine_home(&account)?;
+    // A socket path the OS cannot bind means a daemon nothing can talk to.
+    // Say so now rather than after `wait_for_daemon` has timed out.
+    pidash_ipc::check_socket_path(&paths.daemon_socket()).map_err(|e| e.to_string())?;
     // The spawn is synchronous and holds the daemon-state lock; keeping it in
     // its own function guarantees the (non-`Send`) guard is dropped before the
     // await below, and keeps this command's future `Send`.
@@ -669,6 +672,10 @@ fn base_command(paths: &ManagedPaths, program: &Path) -> Command {
     let mut cmd = Command::new(program);
     cmd.env("PIDASH_CONFIG_DIR", &paths.config_dir);
     cmd.env("PIDASH_DATA_DIR", &paths.data_dir);
+    // The daemon binds its control socket where we will look for it; the same
+    // value reaches the `pidash` CLI the agent runs, through the daemon's
+    // environment.
+    cmd.env(pidash_ipc::SOCKET_ENV, paths.daemon_socket());
     #[cfg(windows)]
     {
         // Keep the console window from flashing on every invocation.
@@ -835,6 +842,22 @@ pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `pidash` the app spawns is told where the control socket is, and
+    /// it is the same place the app connects to — the two cannot drift
+    /// (PIDESKAPP-48).
+    #[test]
+    fn base_command_assigns_the_socket_the_app_connects_to() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(root.path().to_path_buf());
+        let cmd = base_command(&paths, &paths.runner);
+        let assigned = cmd
+            .get_envs()
+            .find(|(name, _)| *name == pidash_ipc::SOCKET_ENV)
+            .and_then(|(_, value)| value)
+            .expect("PIDASH_IPC_SOCKET is set");
+        assert_eq!(Path::new(assigned), paths.daemon_socket());
+    }
 
     /// The engine path handed to the daemon is derived purely from the
     /// bundle's `resource_dir`, which `ManagedPaths::resolve` re-reads on every

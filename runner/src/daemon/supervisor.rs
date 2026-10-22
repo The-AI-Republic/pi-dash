@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,6 +64,13 @@ impl Supervisor {
 
     pub async fn run(self) -> Result<()> {
         self.paths.ensure()?;
+        // A host app that assigned the control socket talks to this daemon
+        // through it and nothing else. If it cannot be bound, exit with the
+        // reason instead of running on as a daemon the host can never reach.
+        if self.paths.ipc_socket.is_some() {
+            pidash_ipc::check_socket_path(&self.paths.ipc_socket_path())
+                .context("cannot serve the control socket assigned in PIDASH_IPC_SOCKET")?;
+        }
         // Re-run config validation here so any future entry path that
         // bypasses `cli::run` (tests, IPC reload, embedded callers)
         // still gets the duplicate-name / nested-working-dir / cap
@@ -3904,6 +3911,7 @@ mod tests {
             config_dir: root.join("config"),
             data_dir: root.join("data"),
             runtime_dir: root.join("runtime"),
+            ipc_socket: None,
         }
     }
 

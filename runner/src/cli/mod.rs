@@ -60,6 +60,11 @@ pub struct Cli {
     #[arg(long, global = true, env = "PIDASH_DATA_DIR")]
     pub data_dir: Option<std::path::PathBuf>,
 
+    /// Control socket path assigned by a host app that starts the daemon
+    /// (the desktop). Defaults to `pidash.sock` in the runtime directory.
+    #[arg(long, global = true, env = pidash_ipc::SOCKET_ENV, hide = true)]
+    pub ipc_socket: Option<std::path::PathBuf>,
+
     /// Log level filter (trace|debug|info|warn|error).
     #[arg(long, global = true, env = "PIDASH_LOG", default_value = "info")]
     pub log: String,
@@ -173,7 +178,8 @@ pub enum Command {
 
 pub async fn run(cli: Cli) -> Result<()> {
     crate::util::logging::init(&cli.log)?;
-    let paths = crate::util::paths::Paths::resolve(cli.config_dir.clone(), cli.data_dir.clone())?;
+    let paths = crate::util::paths::Paths::resolve(cli.config_dir.clone(), cli.data_dir.clone())?
+        .with_ipc_socket(cli.ipc_socket.clone());
     tracing::debug!(?paths, "resolved runner paths");
 
     let Some(command) = cli.command else {

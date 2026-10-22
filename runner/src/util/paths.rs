@@ -12,6 +12,10 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
     pub runtime_dir: PathBuf,
+    /// Control socket path assigned by a host app (`PIDASH_IPC_SOCKET`), used
+    /// instead of `<runtime_dir>/pidash.sock`. The desktop sets it because its
+    /// data dir is too deep for a socket bound under it to fit in `sun_path`.
+    pub ipc_socket: Option<PathBuf>,
 }
 
 /// Per-instance filesystem paths under `data_dir/runners/<runner_id>/`. Each
@@ -48,7 +52,15 @@ impl Paths {
             config_dir,
             data_dir,
             runtime_dir,
+            ipc_socket: None,
         })
+    }
+
+    /// Use the control socket a host app assigned instead of the one under
+    /// `runtime_dir`. An empty path counts as unset.
+    pub fn with_ipc_socket(mut self, socket: Option<PathBuf>) -> Self {
+        self.ipc_socket = socket.filter(|path| !path.as_os_str().is_empty());
+        self
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -77,7 +89,9 @@ impl Paths {
     }
 
     pub fn ipc_socket_path(&self) -> PathBuf {
-        self.runtime_dir.join("pidash.sock")
+        self.ipc_socket
+            .clone()
+            .unwrap_or_else(|| self.runtime_dir.join("pidash.sock"))
     }
 
     pub fn default_working_dir(&self) -> PathBuf {
@@ -172,6 +186,29 @@ mod tests {
         assert_ne!(first.pid_path(), second.pid_path());
     }
 
+    #[test]
+    fn assigned_ipc_socket_moves_only_the_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = Paths::resolve(None, Some(tmp.path().join("data"))).unwrap();
+        let assigned = default.clone().with_ipc_socket(Some(PathBuf::from(
+            "/run/user/1000/pidash-0123456789",
+        )));
+        assert_eq!(
+            assigned.ipc_socket_path(),
+            PathBuf::from("/run/user/1000/pidash-0123456789")
+        );
+        assert_eq!(assigned.pid_path(), default.pid_path());
+        assert_eq!(assigned.logs_dir(), default.logs_dir());
+    }
+
+    #[test]
+    fn empty_assigned_ipc_socket_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = Paths::resolve(None, Some(tmp.path().join("data"))).unwrap();
+        let empty = default.clone().with_ipc_socket(Some(PathBuf::new()));
+        assert_eq!(empty.ipc_socket_path(), default.ipc_socket_path());
+    }
+
     fn fixed_id() -> Uuid {
         Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap()
     }
@@ -181,6 +218,7 @@ mod tests {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
             runtime_dir: base.join("runtime"),
+            ipc_socket: None,
         }
     }
 

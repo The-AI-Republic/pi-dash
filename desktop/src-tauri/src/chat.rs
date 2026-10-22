@@ -40,7 +40,6 @@ use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
-use crate::ipc::socket_path;
 use crate::managed_runner::ManagedPaths;
 
 /// Tauri event carrying one streamed `Response::Chat*` frame to the webview.
@@ -224,18 +223,17 @@ async fn call_once(socket: &Path, req: Request) -> Result<(), String> {
     }
 }
 
-/// Resolve the managed daemon's control socket for this app.
 /// The managed daemon's control socket **for this workspace**.
 ///
 /// The daemon is started per workspace (`managed_start_daemon`) with its data
-/// dir re-rooted under `managed/pidash/<workspace>/data`, and the runner binds
-/// its socket at `<data_dir>/runtime/pidash.sock`. Resolving from the shared
-/// `managed/runtime/` instead — which only holds the model token — is a socket
-/// nothing listens on, and every chat send failed with "connecting to managed
-/// daemon" even though the daemon was up.
+/// dir re-rooted under `managed/pidash/<workspace>/data`, and binds the socket
+/// [`ManagedPaths::daemon_socket`] assigns to that data dir. Resolving from the
+/// shared `managed/runtime/` instead — which only holds the model token — is a
+/// socket nothing listens on, and every chat send failed with "connecting to
+/// managed daemon" even though the daemon was up.
 fn resolve_socket<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<PathBuf, String> {
     let paths = ManagedPaths::for_workspace(app, workspace)?;
-    Ok(socket_path(&paths.daemon_runtime_dir()))
+    Ok(paths.daemon_socket())
 }
 
 /// Spawn the background reader for a streaming request and register its handle
@@ -460,6 +458,7 @@ pub async fn chat_decide<R: Runtime>(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::ipc::socket_path;
     use pidash_ipc::protocol::RpcError;
     use std::sync::Mutex as StdMutex;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
