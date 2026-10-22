@@ -1083,4 +1083,14 @@ describe("SpreadsheetLayout selection", () => {
     fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
     await waitFor(() => expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument());
   });
+
+  it("marks a row for active-row scrolling and shows a partial header state", async () => {
+    stub({ pages: [page([issue(ID1, "Fix login", 1), issue(ID2, "Second", 2)])] });
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select WEB-1" }));
+    const header = screen.getByRole("checkbox", { name: "Select all work items" }) as HTMLInputElement;
+    expect(header.indeterminate).toBe(true);
+    expect(document.querySelector("[data-selection-id]")).not.toBeNull();
+  });
 });

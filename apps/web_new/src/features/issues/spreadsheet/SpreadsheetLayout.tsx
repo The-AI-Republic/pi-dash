@@ -53,7 +53,9 @@ import {
   BulkToolbar,
   BulkUpgradeBanner,
   ForeignRowSelectionHint,
+  GroupSelectionCheckbox,
   RowSelectionCheckbox,
+  SELECTION_ROW_ATTR,
   isBulkOperationsEnabled,
   useBulkMutations,
   useBulkSelection,
@@ -260,14 +262,10 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
               >
                 <span className="flex items-center gap-(--space-2)">
                   {enableSelection ? (
-                    <input
-                      type="checkbox"
-                      aria-label="Select all work items"
-                      checked={
-                        selectionItems.length > 0 && selectionItems.every((item) => selection.isSelected(item.id))
-                      }
-                      onChange={() => selection.onGroupToggle("all")}
-                      className="size-4 accent-(--accent)"
+                    <GroupSelectionCheckbox
+                      state={selection.groupState("all")}
+                      label="Select all work items"
+                      onToggle={() => selection.onGroupToggle("all")}
                     />
                   ) : null}
                   <span>Work items</span>
@@ -613,6 +611,7 @@ function SheetRow({
   const cellStyle = { boxShadow: scrolled ? "8px 22px 22px 10px rgba(0, 0, 0, 0.05)" : "none" };
   return (
     <tr
+      {...{ [SELECTION_ROW_ATTR]: issue.id }}
       data-highlight={highlighted ? "true" : undefined}
       data-temprow={temp ? "true" : undefined}
       data-active={active ? "true" : undefined}

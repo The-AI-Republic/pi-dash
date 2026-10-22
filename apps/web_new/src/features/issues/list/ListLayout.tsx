@@ -18,7 +18,12 @@ import { usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "./collapse.js";
 
-import { creationDisabledForGroup, quickAddDisabledReason, sectionPrefill } from "./grouping.js";
+import {
+  creationDisabledForGroup,
+  quickAddDisabledReason,
+  sectionPrefill,
+  type IssueGroupSection,
+} from "./grouping.js";
 import { GroupHeader } from "./GroupHeader.js";
 
 import { ListRow } from "./ListRow.js";
@@ -236,12 +241,43 @@ export function ListLayout({
   };
 
   const allRows = pages.sections.flatMap((section) => section.rows);
+  const [expandedSelectionIds, setExpandedSelectionIds] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [childrenByParent, setChildrenByParent] = React.useState<ReadonlyMap<string, readonly IssueListItem[]>>(
+    () => new Map()
+  );
+  const onExpandedChange = React.useCallback((id: string, expanded: boolean) => {
+    setExpandedSelectionIds((current) => {
+      if (current.has(id) === expanded) return current;
+      const next = new Set(current);
+      if (expanded) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+    if (!expanded) {
+      setChildrenByParent((current) => {
+        if (!current.has(id)) return current;
+        const next = new Map(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }, []);
+  const onChildrenChange = React.useCallback((id: string, children: readonly IssueListItem[]) => {
+    setChildrenByParent((current) => {
+      if (current.get(id) === children) return current;
+      const next = new Map(current);
+      if (children.length === 0) next.delete(id);
+      else next.set(id, children);
+      return next;
+    });
+  }, []);
+  const selectionTree = React.useMemo(
+    () => ({ expanded: expandedSelectionIds, children: childrenByParent }),
+    [expandedSelectionIds, childrenByParent]
+  );
   const selectionItems = React.useMemo(
-    () =>
-      pages.sections.flatMap((section) =>
-        section.rows.filter((row) => row.project_id === projectId).map((row) => ({ id: row.id, groupKey: section.key }))
-      ),
-    [pages.sections, projectId]
+    () => flattenSectionSelection(pages.sections, projectId, expandedSelectionIds, childrenByParent),
+    [pages.sections, projectId, expandedSelectionIds, childrenByParent]
   );
   const selection = useBulkSelection(selectionItems, enableSelection);
   const bulk = useBulkMutations({ workspaceSlug, projectId });
@@ -347,6 +383,11 @@ export function ListLayout({
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         projectIdentifier={projectIdentifier}
+        projectIdentifierFor={(row) =>
+          row.project_id === projectId
+            ? projectIdentifier
+            : (projects?.find((item) => item.id === row.project_id)?.identifier ?? projectIdentifier)
+        }
         issue={issue}
         depth={1}
         properties={prefs.properties}
@@ -367,6 +408,9 @@ export function ListLayout({
         active={selection.isActive(issue.id)}
         onSelectionToggle={enableSelection ? selection.onRowToggle : undefined}
         selectionAvailable={issue.project_id === projectId}
+        onExpandedChange={onExpandedChange}
+        onChildrenChange={onChildrenChange}
+        selectionTree={selectionTree}
         compact={compact}
         deferPickers={!pages.grouped}
         showSubIssues={prefs.showSubIssues}
@@ -547,4 +591,26 @@ export function ListLayout({
       )}
     </div>
   );
+}
+
+/**
+ * Ordered selectable rows for a grouped list: each section in render order,
+ * with expanded children inserted directly after their parent. Foreign-project
+ * rows stay visible but are omitted so ranges and group toggles skip them.
+ */
+export function flattenSectionSelection(
+  sections: readonly IssueGroupSection[],
+  projectId: string,
+  expanded: ReadonlySet<string>,
+  childrenByParent: ReadonlyMap<string, readonly IssueListItem[]>
+): Array<{ id: string; groupKey: string }> {
+  const out: Array<{ id: string; groupKey: string }> = [];
+  const visit = (rows: readonly IssueListItem[], groupKey: string): void => {
+    for (const row of rows) {
+      if (row.project_id === projectId) out.push({ id: row.id, groupKey });
+      if (expanded.has(row.id)) visit(childrenByParent.get(row.id) ?? [], groupKey);
+    }
+  };
+  for (const section of sections) visit(section.rows, section.key);
+  return out;
 }

@@ -215,14 +215,50 @@ describe("ListRow selection", () => {
     expect(onSelectionToggle).toHaveBeenCalledWith(ISSUE, true);
   });
 
-  it("hides the control on nested rows", () => {
-    render(<ListRow {...props({ depth: 2, onSelectionToggle: vi.fn() })} />);
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  it("renders the control on nested rows", () => {
+    const onSelectionToggle = vi.fn();
+    render(<ListRow {...props({ depth: 2, onSelectionToggle })} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select WEB-42" }));
+    expect(onSelectionToggle).toHaveBeenCalledWith(ISSUE, false);
   });
 
   it("replaces the control with a disabled hint for a foreign-project row", () => {
     render(<ListRow {...props({ onSelectionToggle: vi.fn(), selectionAvailable: false })} />);
     expect(screen.queryByRole("checkbox", { name: "Select WEB-42" })).not.toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Cannot select WEB-42" })).toBeInTheDocument();
+  });
+
+  it("reports expansion and loaded children to the layout", () => {
+    const onExpandedChange = vi.fn();
+    const onChildrenChange = vi.fn();
+    const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE, sub_issues_count: null });
+    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [child] }, isFetching: false });
+    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), onExpandedChange, onChildrenChange })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
+    expect(onExpandedChange).toHaveBeenCalledWith(ISSUE, true);
+    expect(onChildrenChange).toHaveBeenLastCalledWith(ISSUE, [child]);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sub-work items of Fix login" }));
+    expect(onExpandedChange).toHaveBeenLastCalledWith(ISSUE, false);
+  });
+
+  it("uses the shared expansion tree and per-row key resolver when supplied", () => {
+    const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE, project_id: "other" });
+    const onSelectionToggle = vi.fn();
+    render(
+      <ListRow
+        {...props({
+          issue: issue({ sub_issues_count: 1 }),
+          onSelectionToggle,
+          projectIdentifierFor: (row) => (row.id === "child-1" ? "OTHER" : "WEB"),
+          selectionTree: {
+            expanded: new Set([ISSUE]),
+            children: new Map([[ISSUE, [child]]]),
+          },
+        })}
+      />
+    );
+    expect(screen.getByText("Child")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Select OTHER-43" })).toBeInTheDocument();
+    expect(queryMock.useQuery.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false });
   });
 });

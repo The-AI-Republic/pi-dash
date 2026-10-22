@@ -22,5 +22,7 @@ describe("BulkUpgradeBanner", () => {
   it("pluralizes multiple selected work items", () => {
     render(<BulkUpgradeBanner count={4} />);
     expect(screen.getByTestId("bulk-upgrade-banner")).toHaveTextContent("4 work items selected.");
+    expect(screen.getByTestId("bulk-upgrade-banner")).toHaveTextContent("Unlock multi-field editing");
+    expect(screen.queryByText(/Change state, priority/)).not.toBeInTheDocument();
   });
 });

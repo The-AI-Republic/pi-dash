@@ -23,8 +23,8 @@ export function BulkUpgradeBanner({ count }: BulkUpgradeBannerProps): React.Reac
       className="sticky bottom-0 z-20 flex items-center justify-between gap-(--space-4) border-t border-(--accent)/40 bg-(--accent-subtle) px-(--space-4) py-(--space-3)"
     >
       <p className="text-body text-(--text)">
-        {count === 1 ? "1 work item selected." : `${count} work items selected.`} Change state, priority, and more for
-        several work items at once.
+        {count === 1 ? "1 work item selected." : `${count} work items selected.`} Unlock multi-field editing and other
+        team controls with the Pro plan.
       </p>
       <a
         href={BULK_UPGRADE_HREF}

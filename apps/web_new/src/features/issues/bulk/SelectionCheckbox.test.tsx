@@ -27,6 +27,8 @@ describe("selection checkboxes", () => {
     expect(hint).toHaveAttribute("tabindex", "0");
     expect(hint.className).toContain("cursor-not-allowed");
     expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    fireEvent.focus(hint);
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Selection works within this project");
   });
 
   it("reflects complete and partial group states", () => {

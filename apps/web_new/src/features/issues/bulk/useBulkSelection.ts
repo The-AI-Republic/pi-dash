@@ -54,7 +54,7 @@ function isFormTarget(target: EventTarget | null): boolean {
 /** Scroll the active row into view without moving the page. */
 function revealRow(id: string): void {
   const node = document.querySelector(`[${SELECTION_ROW_ATTR}="${CSS.escape(id)}"]`);
-  node?.scrollIntoView({ block: "nearest" });
+  if (node !== null && typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
 }
 
 export function useBulkSelection(items: readonly SelectionItem[], enabled = true): BulkSelection {

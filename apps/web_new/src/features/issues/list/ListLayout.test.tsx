@@ -143,6 +143,9 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
     selected?: boolean;
     selectionAvailable?: boolean;
     onSelectionToggle?: (id: string, shiftKey: boolean) => void;
+    onExpandedChange?: (id: string, expanded: boolean) => void;
+    onChildrenChange?: (id: string, children: readonly IssueListItem[]) => void;
+    selectionTree?: { expanded: ReadonlySet<string>; children: ReadonlyMap<string, readonly IssueListItem[]> };
     onOpenPeek: (key: string, title: string) => void;
     hrefFor: (row: IssueListItem) => string;
   }) => (
@@ -163,6 +166,35 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
       <button type="button" onClick={() => props.onOpenPeek("WEB-99", "Nested child")}>
         Nested child
       </button>
+      <button
+        type="button"
+        onClick={() => {
+          props.onExpandedChange?.(props.issue.id, true);
+          props.onChildrenChange?.(props.issue.id, [
+            row({ id: "child-row", sequence_id: 43, parent_id: props.issue.id }),
+          ]);
+        }}
+      >
+        Expand selection child
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          props.onExpandedChange?.(props.issue.id, false);
+          props.onChildrenChange?.(props.issue.id, []);
+        }}
+      >
+        Collapse selection child
+      </button>
+      {props.selectionTree?.children.get(props.issue.id)?.map((child) => (
+        <input
+          key={child.id}
+          type="checkbox"
+          aria-label={`Select ${child.sequence_id}`}
+          checked={false}
+          onChange={() => props.onSelectionToggle?.(child.id, false)}
+        />
+      ))}
     </div>
   ),
 }));
@@ -850,5 +882,14 @@ describe("ListLayout selection", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
     await waitFor(() => expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument());
     expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument();
+  });
+
+  it("adds expanded nested rows to the flattened selection order", async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "Expand selection child" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select 43" }));
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse selection child" }));
+    await waitFor(() => expect(screen.queryByText(/work item selected/)).not.toBeInTheDocument());
   });
 });

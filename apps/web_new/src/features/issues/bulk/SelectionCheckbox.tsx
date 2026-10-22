@@ -76,7 +76,7 @@ export interface ForeignRowSelectionHintProps {
 /** The disabled footprint for a row owned by another project. */
 export function ForeignRowSelectionHint({ label }: ForeignRowSelectionHintProps): React.ReactElement {
   return (
-    <Tooltip content="Only work items in the current project can be selected.">
+    <Tooltip content="Selection works within this project; cross-project items are excluded.">
       <span
         aria-label={label}
         role="img"

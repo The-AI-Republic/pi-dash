@@ -67,6 +67,8 @@ export interface ListRowProps {
   workspaceSlug: string;
   projectId: string;
   projectIdentifier: string;
+  /** Resolves the key prefix for a nested child that may live elsewhere. */
+  projectIdentifierFor?: ((issue: IssueListItem) => string) | undefined;
   issue: IssueListItem;
   /** 1 for the section's top-level rows. */
   depth: number;
@@ -101,6 +103,17 @@ export interface ListRowProps {
   onSelectionToggle?: ((id: string, shiftKey: boolean) => void) | undefined;
   /** Enables the checkbox; a foreign-project row gets a disabled hint. */
   selectionAvailable?: boolean | undefined;
+  /** Reports an expansion change so the layout can flatten nested rows. */
+  onExpandedChange?: ((id: string, expanded: boolean) => void) | undefined;
+  /** Reports the loaded children of an expanded row to the layout. */
+  onChildrenChange?: ((id: string, children: readonly IssueListItem[]) => void) | undefined;
+  /** Shared expansion state, supplied when the layout flattens child rows. */
+  selectionTree?:
+    | {
+        expanded: ReadonlySet<string>;
+        children: ReadonlyMap<string, readonly IssueListItem[]>;
+      }
+    | undefined;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -183,6 +196,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     highlightedId,
     depth,
     projectIdentifier,
+    projectIdentifierFor,
     onOpenPeek,
     hrefFor,
     compact = false,
@@ -192,21 +206,36 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     active = false,
     onSelectionToggle,
     selectionAvailable = true,
+    onExpandedChange,
+    onChildrenChange,
+    selectionTree,
   } = props;
   const temp = isTempRowId(issue.id);
   const highlighted = isRowHighlighted(issue, highlightedId);
-  const key = issueKey(projectIdentifier, issue);
+  const key = issueKey(projectIdentifierFor?.(issue) ?? projectIdentifier, issue);
   const href = hrefFor(issue);
-  const [expanded, setExpanded] = React.useState(false);
+  const [uncontrolledExpanded, setUncontrolledExpanded] = React.useState(false);
+  const expanded = selectionTree === undefined ? uncontrolledExpanded : selectionTree.expanded.has(issue.id);
+  const treeChildren = selectionTree?.children.get(issue.id);
   const atCap = depth >= MAX_INLINE_DEPTH;
   const canExpand = (issue.sub_issues_count ?? 0) > 0 && !issue.is_epic;
   const query = useQuery({
     ...subIssuesQueryOptions(getAppClient(), props.workspaceSlug, props.projectId, issue.id),
     // Hiding the expander must also stop any in-flight child read, so the
     // display flag gates the query and the render together.
-    enabled: showSubIssues && expanded && !atCap && canExpand,
+    enabled:
+      showSubIssues && expanded && !atCap && canExpand && (selectionTree === undefined || treeChildren === undefined),
   });
-  const children = query.data?.sub_issues ?? [];
+  const children = treeChildren ?? query.data?.sub_issues ?? [];
+  const toggleExpanded = (): void => {
+    const next = !expanded;
+    if (selectionTree === undefined) setUncontrolledExpanded(next);
+    onExpandedChange?.(issue.id, next);
+  };
+
+  React.useEffect(() => {
+    if (expanded && query.data !== undefined) onChildrenChange?.(issue.id, query.data.sub_issues ?? []);
+  }, [expanded, issue.id, onChildrenChange, query.data]);
 
   return (
     <article id={rowBlockId(issue.id)} data-temprow={temp ? "true" : undefined} className="flex flex-col">
@@ -222,7 +251,7 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           active ? "ring-1 ring-inset ring-(--accent)" : "",
         ].join(" ")}
       >
-        {onSelectionToggle === undefined || depth !== 1 ? null : selectionAvailable ? (
+        {onSelectionToggle === undefined ? null : selectionAvailable ? (
           <RowSelectionCheckbox
             checked={selected}
             label={`Select ${key}`}
@@ -236,8 +265,8 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
           expanded={expanded}
           fetching={query.isFetching}
           depth={depth}
-          projectIdentifier={projectIdentifier}
-          onToggle={() => setExpanded((open) => !open)}
+          projectIdentifier={projectIdentifierFor?.(issue) ?? projectIdentifier}
+          onToggle={toggleExpanded}
           onOpenPeek={onOpenPeek}
           showSubIssues={showSubIssues}
         />
@@ -287,7 +316,13 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
       {expanded && children.length > 0 ? (
         <div data-testid="list-row-children" className="flex flex-col pl-(--space-4)">
           {children.map((child) => (
-            <ListRow {...props} key={child.id} issue={child} depth={depth + 1} />
+            <ListRow
+              {...props}
+              key={child.id}
+              issue={child}
+              depth={depth + 1}
+              selectionAvailable={(props.selectionAvailable ?? true) && child.project_id === props.projectId}
+            />
           ))}
         </div>
       ) : null}
