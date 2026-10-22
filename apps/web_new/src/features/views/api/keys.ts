@@ -11,4 +11,6 @@ export const viewKeys = {
   /** One project's saved-views collection (VIEW-001). */
   projectList: (workspaceSlug: string, projectId: string) =>
     [...viewKeys.all(workspaceSlug), "project", projectId, "list"] as const,
+  /** The workspace's custom saved views, defaults excluded (VIEW-029). */
+  workspaceList: (workspaceSlug: string) => [...viewKeys.all(workspaceSlug), "workspace", "list"] as const,
 };
