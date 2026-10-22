@@ -42,6 +42,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -70,6 +71,10 @@ SWEEP_CUTOFF_SECS = 390
 
 TIMEOUT_CODE = "turn_timeout"
 TIMEOUT_DETAIL = "The assistant took too long to respond."
+
+#: The sweep's failure detail (``tasks.py`` ``sweep_stale_turns``): distinct
+#: from the soft-limit detail above.
+SWEEP_TIMEOUT_DETAIL = "The assistant turn did not finish (worker lost)."
 
 
 # --------------------------------------------------------------------------- #
@@ -193,13 +198,17 @@ def _seed_member(db_conn, tag: str):
     return user, workspace, api_client(_base_url(), cookie)
 
 
-def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None):
+def _seed_turn_trio(db_conn, user, workspace, *, status="queued", started_at=None,
+                    thread_id=None):
     """Replicate the message-POST 202 rows (``views/messages.py``).
 
     Thread (with ``active_turn`` set) + user message (seq 1, completed) +
     turn pointing at the message. Returns (thread_id, turn_id, message_id).
+    ``thread_id`` pins the thread when the caller must subscribe to its
+    channel before the rows exist (the sweep-publish test).
     """
-    thread_id, turn_id, message_id = (str(uuid.uuid4()) for _ in range(3))
+    thread_id = thread_id or str(uuid.uuid4())
+    turn_id, message_id = (str(uuid.uuid4()) for _ in range(2))
     now = _now_iso()
     # FK order (mirroring the 202 path's create order): thread first with no
     # active turn, then the turn, then the user message, then the backlinks.
@@ -905,3 +914,105 @@ def test_turn_tools_see_stateless_issue(db_conn, broker_url):
         )
     finally:
         stub.stop()
+
+
+def _subscribe_thread(rdb, thread_id):
+    """Subscribe to the thread channel; return the confirmed pubsub."""
+    channel = f"assistant:thread:{thread_id}"
+    pubsub = rdb.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(channel)
+    deadline = time.monotonic() + 10
+    while not pubsub.subscribed and time.monotonic() < deadline:
+        pubsub.get_message(timeout=1.0)
+    assert pubsub.subscribed, f"subscription to {channel} never confirmed"
+    return pubsub
+
+
+def _drain_channel(pubsub, timeout=30.0, silence=3.0):
+    """Collect published bodies until ``silence`` idle seconds or ``timeout``.
+
+    A missing publish fails only after the full timeout, so slow
+    assertions stay honest; the silence cut keeps the passing case fast.
+    """
+    bodies = []
+    deadline = time.monotonic() + timeout
+    quiet_until = None
+    while time.monotonic() < deadline:
+        message = pubsub.get_message(timeout=1.0)
+        if message is None:
+            if quiet_until is not None and time.monotonic() >= quiet_until:
+                break
+            continue
+        if message.get("type") != "message":
+            continue
+        bodies.append(message["data"])
+        quiet_until = time.monotonic() + silence
+    return bodies
+
+
+def _failed_event_rows(db_conn, turn_id):
+    with db_conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT id, message_id, seq, created_at FROM assistant_event "
+            "WHERE turn_id = %s AND kind = 'turn_failed' ORDER BY id",
+            (turn_id,),
+        )
+        return cur.fetchall()
+
+
+def test_sweep_publishes_turn_failed_on_thread_channel(db_conn, broker_url):
+    """The sweep's ``turn_failed`` event is PUBLISHed on the thread channel.
+
+    Django persists the event and publishes it on commit (``_publish_by_id``);
+    the SSE live tail only reads Redis, so a silent sweep strands open
+    streams on a spinner (PIDASHCONV-1247). The subscription opens before
+    the stale turn exists, so whichever execution sweeps it — this publish
+    or the 30s beat — its frame is caught, exactly once on the solo worker.
+    """
+    user, workspace, _client = _seed_member(db_conn, "sweeppub")
+    thread_id = str(uuid.uuid4())
+    rdb = redis_helper.client()
+    pubsub = _subscribe_thread(rdb, thread_id)
+    try:
+        _trio_thread, turn_id, _msg = _seed_turn_trio(
+            db_conn, user, workspace, status="running",
+            started_at="2000-01-01T00:00:00Z", thread_id=thread_id,
+        )
+
+        celery_wire.publish(SWEEP, broker_url=broker_url)
+        wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="stale turn swept",
+        )
+        bodies = _drain_channel(pubsub)
+        assert len(bodies) == 1, f"expected one turn_failed publish, got {len(bodies)}"
+        raw = bodies[0]
+        parsed = json.loads(raw)
+        assert parsed["kind"] == "turn_failed"
+        assert parsed["thread"] == thread_id
+        assert parsed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": SWEEP_TIMEOUT_DETAIL,
+        }
+        assert list(parsed.keys()) == [
+            "id", "thread", "message", "seq", "kind", "payload", "created_at",
+        ]
+        assert raw == json.dumps(parsed), (
+            "publish bytes are json.dumps with default separators/escapes"
+        )
+        rows = _failed_event_rows(db_conn, turn_id)
+        assert len(rows) == 1, "exactly one turn_failed row per swept turn"
+        assert parsed["id"] == rows[0]["id"]
+        assert parsed["seq"] == rows[0]["seq"]
+        assert parsed["message"] == str(rows[0]["message_id"])
+        # The session timezone renders the stored stamp in local time;
+        # compare instants, not strings.
+        assert datetime.fromisoformat(parsed["created_at"]) == rows[0]["created_at"]
+        assert parsed["created_at"].endswith("+00:00")
+    finally:
+        pubsub.unsubscribe()
+        pubsub.close()
+        rdb.close()
