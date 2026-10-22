@@ -8,7 +8,8 @@
 // the section shows a loading note, and a failed load surfaces an
 // error note instead of the builder. The host owns the registry the
 // temporary instance reports into and hands it to the dialog through
-// the ref, so submitting reads whatever the builder holds.
+// the ref, so submitting reads whatever the builder holds. An edit
+// dialog seeds the instance with the record's stored expression.
 
 import * as React from "react";
 
@@ -28,6 +29,12 @@ export interface FilterSectionLoaderProps {
   hideModule: boolean;
   /** Receives the temporary registry once the builder chunk has loaded. */
   registryRef: { current: FieldConfigRegistry | null };
+  /**
+   * Stored expression an edit dialog reopens with (VIEW-035). Parsed
+   * inside the loaded chunk so the parser never joins the eager graph;
+   * absent on create, where the builder starts empty.
+   */
+  seedExpression?: Record<string, unknown> | undefined;
 }
 
 interface FilterSectionHostProps extends FilterSectionLoaderProps {
@@ -43,6 +50,7 @@ function FilterSectionHost({
   hideCycle,
   hideModule,
   registryRef,
+  seedExpression,
 }: FilterSectionHostProps): React.ReactElement {
   const registry = React.useMemo(() => new module.FieldConfigRegistry(), [module]);
   React.useEffect(() => {
@@ -51,6 +59,7 @@ function FilterSectionHost({
       registryRef.current = null;
     };
   }, [registry, registryRef]);
+  const seed = seedExpression === undefined ? undefined : module.parseRichExpression(seedExpression);
   const { control, row } = module.useRichFilterBuilder({
     workspaceSlug,
     projectId,
@@ -59,6 +68,7 @@ function FilterSectionHost({
     hideModule,
     temporary: true,
     temporaryRegistry: registry,
+    ...(seed === undefined ? {} : { temporarySeed: seed }),
   });
   return (
     <>

@@ -10,11 +10,20 @@
 // The address sits beside `all-issues`, whose own route mounts the global
 // issue list: `/workspace-views` (no trailing segment) is the list, and a
 // key or id after it is a view. The detail routes land with their slices.
+//
+// The row menus' edit and delete entries open the workspace dialogs
+// (parity/specs/views.md §10, VIEW-035/036); the dialog reports closing
+// only, so its handler clears the record it was opened with.
 
 import { createFileRoute } from "@tanstack/react-router";
+import type { SavedView } from "@pidash/api-client";
 import * as React from "react";
 
-import { WorkspaceViewsListScreen } from "../../../../features/views/index.js";
+import {
+  DeleteWorkspaceViewDialog,
+  WorkspaceViewDialog,
+  WorkspaceViewsListScreen,
+} from "../../../../features/views/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/workspace-views/")({
   component: WorkspaceViewsComponent,
@@ -22,5 +31,28 @@ export const Route = createFileRoute("/$ws/_gated/workspace-views/")({
 
 function WorkspaceViewsComponent(): React.ReactElement {
   const { ws } = Route.useParams();
-  return <WorkspaceViewsListScreen workspaceSlug={ws} />;
+  const [editing, setEditing] = React.useState<SavedView | null>(null);
+  const [deleting, setDeleting] = React.useState<SavedView | null>(null);
+  return (
+    <>
+      <WorkspaceViewsListScreen workspaceSlug={ws} onEditView={setEditing} onDeleteView={setDeleting} />
+      {editing !== null && (
+        <WorkspaceViewDialog
+          open={true}
+          onOpenChange={() => setEditing(null)}
+          workspaceSlug={ws}
+          mode="edit"
+          view={editing}
+        />
+      )}
+      {deleting !== null && (
+        <DeleteWorkspaceViewDialog
+          open={true}
+          onOpenChange={() => setDeleting(null)}
+          workspaceSlug={ws}
+          view={deleting}
+        />
+      )}
+    </>
+  );
 }
