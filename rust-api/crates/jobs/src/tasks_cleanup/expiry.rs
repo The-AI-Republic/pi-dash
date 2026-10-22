@@ -70,6 +70,7 @@
 //!   [`run_expiry`] keeps both via `plan_expiry_deletes`.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -166,6 +167,19 @@ pub fn minio_signing_region(
     }
 }
 
+/// Build the bounded S3 HTTP client: botocore's defaults apply (the
+/// Python task passes no timeout `Config`), 60s to connect and 60s to
+/// read, so a wedged object store fails the task instead of hanging
+/// the worker slot forever (PIDASHCONV-1291; the PIDASHCONV-1156
+/// precedent for the app_assets copy).
+fn build_s3_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("s3 misconfigured: cannot build s3 client: {error}"))
+}
+
 /// Live S3 deleter over [`pidash_storage`] SigV4 + reqwest (the one
 /// shared signer — no AWS SDK): one signed `DELETE` per key, executed
 /// for real. Construction does no I/O (the client connects lazily),
@@ -174,7 +188,7 @@ pub fn minio_signing_region(
 /// task, exactly like the boto3 client built inside the Python task.
 #[derive(Debug, Clone)]
 pub struct LiveS3Deleter {
-    client: reqwest::Client,
+    client: Result<reqwest::Client, String>,
     storage: StorageSettings,
     minio_region: String,
     region_raw: String,
@@ -187,14 +201,14 @@ impl LiveS3Deleter {
     /// env-tier keys, and the worker resolves `Settings` from the same
     /// environment first — a garbage `USE_MINIO` already failed boot
     /// there, like Django's import-time `int()`). Construction never
-    /// fails: the eager client check runs per task run
-    /// ([`ObjectDeleter::check_client`]), like the `boto3.client(...)`
-    /// build inside the Python task.
+    /// fails: the client build outcome is stored and the eager client
+    /// check runs per task run ([`ObjectDeleter::check_client`]), like
+    /// the `boto3.client(...)` build inside the Python task.
     pub fn from_settings(settings: &Settings) -> Self {
         let aws_region = std::env::var("AWS_REGION").ok();
         let aws_default_region = std::env::var("AWS_DEFAULT_REGION").ok();
         Self {
-            client: reqwest::Client::new(),
+            client: build_s3_client(),
             storage: settings.storage.clone(),
             minio_region: minio_signing_region(
                 aws_region.as_deref(),
@@ -257,6 +271,13 @@ impl LiveS3Deleter {
 
 impl ObjectDeleter for LiveS3Deleter {
     fn check_client(&self) -> Result<(), String> {
+        // Pure (no I/O): the stored client build outcome first — a
+        // build failure fails the run here, like the `boto3.client(...)`
+        // build inside the Python task, never a silent unbounded client.
+        self.client
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| error.clone())?;
         // Pure (no I/O): botocore validates the region at client
         // construction, before the loop. The regional arm fails on an
         // invalid name (`InvalidRegionError`) and on `""` (`ValueError:
@@ -285,8 +306,14 @@ impl ObjectDeleter for LiveS3Deleter {
         let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
         let date_stamp = now.format("%Y%m%d").to_string();
         let signed = self.signed_request_for(key, &amz_date, &date_stamp)?;
-        let response = self
+        // Unreachable in production: [`run_expiry`] runs `check_client`
+        // before the loop, so a stored build error already failed the
+        // run; direct callers get the same failure text per call.
+        let client = self
             .client
+            .as_ref()
+            .map_err(|error| format!("s3 delete {key}: {error}"))?;
+        let response = client
             .delete(signed.url)
             .header("Authorization", signed.authorization)
             .header("x-amz-date", signed.amz_date)
@@ -512,7 +539,7 @@ mod tests {
         region_raw: &str,
     ) -> LiveS3Deleter {
         LiveS3Deleter {
-            client: reqwest::Client::new(),
+            client: build_s3_client(),
             storage: test_storage(use_minio, endpoint_url, chained_region),
             minio_region: minio_region.to_owned(),
             region_raw: region_raw.to_owned(),
@@ -693,6 +720,73 @@ mod tests {
         assert!(deleter_with(true, None, "us-east-1", "us-east-1", "")
             .check_client()
             .is_ok());
+    }
+
+    #[test]
+    fn client_build_error_fails_like_boto3_construction() {
+        // A stored client build failure fails the run in `check_client`
+        // (zero rows touched), like the `boto3.client(...)` build inside
+        // the Python task — never a silent unbounded client.
+        let mut deleter = deleter_with(false, None, "us-east-1", "us-east-1", "eu-west-1");
+        deleter.client = Err("s3 misconfigured: cannot build s3 client: probe".to_owned());
+        let error = deleter
+            .check_client()
+            .expect_err("build error fails the run");
+        assert!(error.contains("cannot build s3 client"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn delete_object_surfaces_client_build_error() {
+        // Direct callers (no `check_client`) get the same failure text
+        // per call instead of a panic.
+        let mut deleter = deleter_with(false, None, "us-east-1", "us-east-1", "eu-west-1");
+        deleter.client = Err("s3 misconfigured: cannot build s3 client: probe".to_owned());
+        let error = deleter
+            .delete_object("k.zip")
+            .await
+            .expect_err("build error fails the call");
+        assert!(
+            error.contains("s3 delete k.zip: s3 misconfigured"),
+            "{error}"
+        );
+    }
+
+    /// A wedged object store must not hang the expiry delete forever
+    /// (PIDASHCONV-1291). The deleter client is bounded like botocore's
+    /// defaults (60s connect / 60s read), so a black-hole peer — one that
+    /// accepts the connection and never answers — fails the delete
+    /// instead of holding the worker slot. Before the fix this never
+    /// returns (the test would time out at 90s).
+    #[tokio::test]
+    async fn delete_object_is_bounded_against_a_black_hole() {
+        use std::time::Duration;
+        // Accept every connection and hold it open without ever replying.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind black hole");
+        let addr = listener.local_addr().expect("black-hole addr");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        // MinIO arm against the black hole (path-style
+        // `DELETE /{bucket}/{key}`).
+        let endpoint = format!("http://{addr}");
+        let deleter = deleter_with(true, Some(&endpoint), "us-east-1", "us-east-1", "");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(90),
+            deleter.delete_object("contract-expiry.zip"),
+        )
+        .await;
+        let result = outcome.expect("delete_object never returned: deleter is unbounded");
+        let error = result.expect_err("black hole must fail the delete");
+        // The request reached the wire and the read bound fired — not a
+        // signing fast-fail. (No elapsed-time assert: wall-clock bounds
+        // flake when the shared runner starves this runtime's timers; the
+        // 90s cap plus this error text pin the ~60s bound.)
+        assert!(error.contains("transport failure"), "{error}");
     }
 
     #[tokio::test]
