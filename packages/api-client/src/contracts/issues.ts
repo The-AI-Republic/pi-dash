@@ -388,6 +388,22 @@ export async function listGroupedCycleIssues(
   return client.parse(GroupedIssueListResponse, body, `GET ${path}`);
 }
 
+/**
+ * Sub-grouped variant of the cycle list (the cycle page's hosts a shared
+ * layout with two grouping dimensions). Same envelope as the project.
+ */
+export async function listSubGroupedCycleIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string,
+  query: IssueListQuery & { groupBy: string; subGroupBy: string }
+): Promise<SubGroupedIssueListResponse> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/cycle-issues/`;
+  const body = await client.getJson<unknown>(path, { query: issueListQueryParams(query) });
+  return client.parse(SubGroupedIssueListResponse, body, `GET sub-grouped ${path}`);
+}
+
 /** One module's issues (the module page's list layout). */
 export async function listModuleIssues(
   client: ApiClient,
