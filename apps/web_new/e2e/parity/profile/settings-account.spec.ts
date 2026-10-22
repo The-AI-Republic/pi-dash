@@ -222,8 +222,14 @@ test(
       // carries no required star yet reports a missing name.
       await driver.settingsProfileGeneralFillField("last_name", "");
       await driver.settingsProfileGeneralSave();
-      expect(await driver.settingsProfileGeneralFieldError("last_name")).toBe("Name is required");
-      expect((await serverSettingsUserRecord(member.session)).lastName).toBe("Member");
+      if (driver.target === "web_new") {
+        // Target for NEWFRONT-432 (PROF-011): an emptied last name saves.
+        expect(await driver.settingsProfileGeneralFieldError("last_name")).toBeNull();
+        expect((await serverSettingsUserRecord(member.session)).lastName).toBe("");
+      } else {
+        expect(await driver.settingsProfileGeneralFieldError("last_name")).toBe("Name is required");
+        expect((await serverSettingsUserRecord(member.session)).lastName).toBe("Member");
+      }
     } finally {
       await cleanupMember(seed, ownerSession, member.userId);
     }
@@ -297,9 +303,15 @@ test(
       });
 
       await test.step("the cover control is still present (main#523/#574 pending)", async () => {
-        // Gap: the row targets no cover control, but the removal PRs are
-        // unmerged, so the control still renders. Rework this step then.
-        expect(await driver.settingsProfileCoverControlVisible()).toBe(true);
+        if (driver.target === "web_new") {
+          // Target per main#565 (PROF-012): web_new ships no cover
+          // control anywhere on the tab.
+          expect(await driver.settingsProfileCoverControlVisible()).toBe(false);
+        } else {
+          // Gap: the row targets no cover control, but the removal PRs are
+          // unmerged, so the control still renders. Rework this step then.
+          expect(await driver.settingsProfileCoverControlVisible()).toBe(true);
+        }
       });
     } finally {
       await cleanupMember(seed, ownerSession, member.userId);

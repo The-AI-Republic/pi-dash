@@ -140,6 +140,21 @@ export default defineConfig(({ mode }) => {
           },
         },
         "/api": { target: apiOrigin, changeOrigin: false, configure: rewriteRedirectToDevOrigin },
+        // Object storage in parity runs (NEWFRONT-586; production-shape
+        // parity with the stack Caddyfile's NEWFRONT-143 bucket route): the
+        // API presigns bucket URLs against the request host, which is this
+        // dev server through the /api proxy above, so serve the bucket path
+        // from the slot's minio. PARITY_MINIO_PORT is printed by
+        // parity-up.sh; unset leaves local dev untouched. changeOrigin
+        // stays false: the presigned signature covers the addressed host.
+        ...(process.env.PARITY_MINIO_PORT === undefined
+          ? {}
+          : {
+              "/parity19-assets": {
+                target: `http://localhost:${process.env.PARITY_MINIO_PORT}`,
+                changeOrigin: false,
+              },
+            }),
       },
     },
     build: {

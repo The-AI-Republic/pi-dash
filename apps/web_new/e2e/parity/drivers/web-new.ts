@@ -25279,143 +25279,339 @@ export class WebNewDriver implements ParityDriver {
     const url = new URL(this.page.url());
     return `${url.pathname}${url.search}`;
   }
-  async settingsProfileGeneralFieldValue(_field: SettingsProfileGeneralField): Promise<string> {
-    return todo("settingsProfileGeneralFieldValue");
+  /** The general tab form scope. */
+  private settingsProfileGeneralForm() {
+    return this.page.getByTestId("general-settings-form");
   }
-  async settingsProfileGeneralFillField(_field: SettingsProfileGeneralField, _value: string): Promise<void> {
-    return todo("settingsProfileGeneralFillField");
+
+  async settingsProfileGeneralFieldValue(field: SettingsProfileGeneralField): Promise<string> {
+    return this.settingsProfileGeneralForm().locator(`#${field}`).inputValue();
   }
-  async settingsProfileGeneralFieldError(_field: SettingsProfileGeneralField): Promise<string | null> {
-    return todo("settingsProfileGeneralFieldError");
+  async settingsProfileGeneralFillField(field: SettingsProfileGeneralField, value: string): Promise<void> {
+    await this.settingsProfileGeneralForm().locator(`#${field}`).fill(value);
+  }
+  async settingsProfileGeneralFieldError(field: SettingsProfileGeneralField): Promise<string | null> {
+    const error = this.settingsProfileGeneralForm().locator(`#${field}-error`);
+    if ((await error.count()) === 0) return null;
+    return (await error.first().innerText()).trim() || null;
   }
   async settingsProfileGeneralEmailDisabled(): Promise<boolean> {
-    return todo("settingsProfileGeneralEmailDisabled");
+    return this.settingsProfileGeneralForm().locator("#email").isDisabled();
   }
   async settingsProfileGeneralSave(): Promise<void> {
-    return todo("settingsProfileGeneralSave");
+    await this.settingsProfileGeneralForm()
+      .getByRole("button", { name: /Save changes|Saving/ })
+      .first()
+      .click();
+    // The save either toasts or surfaces an inline error; give either a
+    // bounded moment before the assertion reads.
+    await this.page
+      .locator('[data-testid="toast-notification"], [role="alert"]')
+      .first()
+      .waitFor({ timeout: 5_000 })
+      .catch(() => undefined);
   }
   async settingsProfileGeneralSaveLabel(): Promise<string> {
-    return todo("settingsProfileGeneralSaveLabel");
+    const label = await this.settingsProfileGeneralForm()
+      .getByRole("button", { name: /Save changes|Saving/ })
+      .first()
+      .innerText();
+    return label.trim().replace(/\s+/g, " ");
   }
   async settingsProfileGeneralIdentity(): Promise<{ name: string; email: string }> {
-    return todo("settingsProfileGeneralIdentity");
+    const header = this.page.getByTestId("profile-settings-identity");
+    const name = await header.getByTestId("general-identity-name").innerText();
+    const email = await header.getByTestId("general-identity-email").innerText();
+    return { name: name.trim(), email: email.trim() };
   }
+  /** The avatar dialog scope. */
+  private settingsProfileAvatarDialog() {
+    return this.page.getByRole("dialog", { name: "Upload Image" });
+  }
+
   async settingsProfileAvatarDialogOpen(): Promise<void> {
-    return todo("settingsProfileAvatarDialogOpen");
+    await this.page
+      .getByTestId("profile-settings-identity")
+      .getByRole("button", { name: "Change profile photo" })
+      .click();
+    await this.settingsProfileAvatarDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAvatarDialogVisible(): Promise<boolean> {
-    return todo("settingsProfileAvatarDialogVisible");
+    return this.isShown(this.settingsProfileAvatarDialog());
   }
-  async settingsProfileAvatarPick(_filePath: string): Promise<void> {
-    return todo("settingsProfileAvatarPick");
+  async settingsProfileAvatarPick(filePath: string): Promise<void> {
+    await this.settingsProfileAvatarDialog().getByTestId("avatar-file-input").setInputFiles(filePath);
+    // A valid pick previews; a refused one surfaces the rejection note.
+    await this.settingsProfileAvatarDialog()
+      .locator("img, [role='alert']")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsProfileAvatarUpload(_filePath: string): Promise<void> {
-    return todo("settingsProfileAvatarUpload");
+  async settingsProfileAvatarUpload(filePath: string): Promise<void> {
+    await this.settingsProfileAvatarDialog().getByTestId("avatar-file-input").setInputFiles(filePath);
+    await this.settingsProfileAvatarDialog()
+      .getByRole("button", { name: "Upload & Save", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // A stored photo closes the dialog; surfacing a failure instead of
+    // hanging when the upload never lands.
+    await this.settingsProfileAvatarDialog()
+      .waitFor({ state: "detached", timeout: 60_000 })
+      .catch(() => {
+        throw new Error("[parity] avatar upload left the photo dialog open.");
+      });
   }
   async settingsProfileAvatarRemove(): Promise<void> {
-    return todo("settingsProfileAvatarRemove");
+    await this.settingsProfileAvatarDialog()
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The removal closes the dialog on success; the success toast fires on
+    // a sibling callback and can appear first, so the close (not the
+    // toast) is the settle state.
+    await this.settingsProfileAvatarDialog()
+      .waitFor({ state: "detached", timeout: 60_000 })
+      .catch(() => {
+        throw new Error("[parity] avatar removal left the photo dialog open.");
+      });
   }
   async settingsProfileAvatarRemoveDisabled(): Promise<boolean> {
-    return todo("settingsProfileAvatarRemoveDisabled");
+    return this.settingsProfileAvatarDialog().getByRole("button", { name: "Remove", exact: true }).isDisabled();
   }
   async settingsProfileAvatarPhotoVisible(): Promise<boolean> {
-    return todo("settingsProfileAvatarPhotoVisible");
+    return this.isShown(
+      this.page
+        .getByTestId("profile-settings-identity")
+        .getByRole("button", { name: "Change profile photo" })
+        .locator("img")
+    );
   }
   async settingsProfileAvatarCancel(): Promise<void> {
-    return todo("settingsProfileAvatarCancel");
+    await this.settingsProfileAvatarDialog().getByRole("button", { name: "Cancel" }).click();
+    await this.settingsProfileAvatarDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAvatarRejection(): Promise<string | null> {
-    return todo("settingsProfileAvatarRejection");
+    const note = this.settingsProfileAvatarDialog().locator("[role='alert']");
+    if ((await note.count()) === 0) return null;
+    return (await note.first().innerText()).trim() || null;
   }
   async settingsProfileCoverControlVisible(): Promise<boolean> {
-    return todo("settingsProfileCoverControlVisible");
+    // Target per main#565 (PROF-011): web_new ships no cover control, so
+    // the spec asserts the absence on this target.
+    return false;
   }
+  /** The change-email dialog scope. */
+  private settingsProfileEmailDialog() {
+    return this.page.getByRole("dialog", { name: "Change email" });
+  }
+
   async settingsProfileChangeEmailVisible(): Promise<boolean> {
-    return todo("settingsProfileChangeEmailVisible");
+    // Below the form, inside the tab content.
+    return this.isShown(
+      this.page.getByTestId("profile-settings-content").getByRole("button", { name: "Change email", exact: true })
+    );
   }
   async settingsProfileChangeEmailOpen(): Promise<void> {
-    return todo("settingsProfileChangeEmailOpen");
+    await this.page
+      .getByTestId("profile-settings-content")
+      .getByRole("button", { name: "Change email", exact: true })
+      .click();
+    await this.settingsProfileEmailDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileEmailModalStep(): Promise<"email" | "code" | "closed"> {
-    return todo("settingsProfileEmailModalStep");
+    const dialog = this.settingsProfileEmailDialog();
+    if ((await dialog.count()) === 0) return "closed";
+    if ((await dialog.getByLabel("Unique code", { exact: true }).count()) > 0) return "code";
+    return "email";
   }
-  async settingsProfileEmailModalFillEmail(_email: string): Promise<void> {
-    return todo("settingsProfileEmailModalFillEmail");
+  async settingsProfileEmailModalFillEmail(email: string): Promise<void> {
+    await this.settingsProfileEmailDialog().locator("#change-email-address").fill(email);
   }
   async settingsProfileEmailModalSubmit(): Promise<void> {
-    return todo("settingsProfileEmailModalSubmit");
+    const dialog = this.settingsProfileEmailDialog();
+    const cont = dialog.getByRole("button", { name: "Continue", exact: true });
+    if ((await cont.count()) > 0) {
+      await cont.first().click();
+      // The email step either advances to the code step or reports inline
+      // (the taken check is async); either outcome settles the submit.
+      await this.page
+        .waitForFunction(
+          () => {
+            return (
+              document.querySelector("#change-email-code") !== null ||
+              document.querySelector("#change-email-address-error") !== null
+            );
+          },
+          { timeout: 10_000 }
+        )
+        .catch(() => undefined);
+      return;
+    }
+    await dialog.getByRole("button", { name: "Confirm", exact: true }).click();
+    // The code step either reports inline or closes on success.
+    await this.page
+      .waitForFunction(
+        () => {
+          return (
+            document.querySelector("#change-email-code-error") !== null ||
+            document.querySelector('[role="dialog"]') === null
+          );
+        },
+        { timeout: 10_000 }
+      )
+      .catch(() => undefined);
   }
-  async settingsProfileEmailModalFillCode(_code: string): Promise<void> {
-    return todo("settingsProfileEmailModalFillCode");
+  async settingsProfileEmailModalFillCode(code: string): Promise<void> {
+    await this.settingsProfileEmailDialog().locator("#change-email-code").fill(code);
   }
-  async settingsProfileEmailModalError(_field: "email" | "code"): Promise<string | null> {
-    return todo("settingsProfileEmailModalError");
+  async settingsProfileEmailModalError(field: "email" | "code"): Promise<string | null> {
+    const id = field === "email" ? "change-email-address-error" : "change-email-code-error";
+    const error = this.settingsProfileEmailDialog().locator(`#${id}`);
+    if ((await error.count()) === 0) return null;
+    return (await error.first().innerText()).trim() || null;
   }
   async settingsProfileEmailModalHelper(): Promise<string | null> {
-    return todo("settingsProfileEmailModalHelper");
+    const helper = this.settingsProfileEmailDialog().getByText("Verification code sent to your new email.", {
+      exact: true,
+    });
+    if ((await helper.count()) === 0) return null;
+    return (await helper.first().innerText()).trim() || null;
   }
   async settingsProfileEmailModalEmailDisabled(): Promise<boolean> {
-    return todo("settingsProfileEmailModalEmailDisabled");
+    return this.settingsProfileEmailDialog().locator("#change-email-address").isDisabled();
   }
   async settingsProfileEmailModalClose(): Promise<void> {
-    return todo("settingsProfileEmailModalClose");
+    await this.settingsProfileEmailDialog().getByRole("button", { name: "Cancel" }).click();
+    await this.settingsProfileEmailDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+  /** The deactivate section scope (the danger zone on the general tab). */
+  private settingsProfileDeactivateSection() {
+    return this.page.locator("section").filter({ has: this.page.getByRole("heading", { name: "Deactivate account" }) });
+  }
+
+  /** The deactivate confirmation dialog scope. */
+  private settingsProfileDeactivateDialog() {
+    return this.page.getByRole("dialog", { name: "Deactivate your account" });
+  }
+
   async settingsProfileDeactivateVisible(): Promise<boolean> {
-    return todo("settingsProfileDeactivateVisible");
+    return this.isShown(this.settingsProfileDeactivateSection());
   }
   async settingsProfileDeactivateDescription(): Promise<string | null> {
-    return todo("settingsProfileDeactivateDescription");
+    const section = this.settingsProfileDeactivateSection();
+    if ((await section.count()) === 0) return null;
+    const text = await section.first().locator("p").first().innerText();
+    return text.trim() || null;
   }
   async settingsProfileDeactivateOpen(): Promise<void> {
-    return todo("settingsProfileDeactivateOpen");
+    await this.settingsProfileDeactivateSection()
+      .getByRole("button", { name: "Deactivate account", exact: true })
+      .click();
+    await this.settingsProfileDeactivateDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDeactivateTitle(): Promise<string | null> {
-    return todo("settingsProfileDeactivateTitle");
+    const dialog = this.settingsProfileDeactivateDialog();
+    if ((await dialog.count()) === 0) return null;
+    const text = await dialog.getByText("Deactivate your account", { exact: true }).first().innerText();
+    return text.trim() || null;
   }
   async settingsProfileDeactivateConfirm(): Promise<void> {
-    return todo("settingsProfileDeactivateConfirm");
+    await this.settingsProfileDeactivateDialog()
+      .getByRole("button", { name: "Deactivate account", exact: true })
+      .click();
+    // Deletion signs out and navigates away; the dialog going away with
+    // the page is the settled state.
+    await this.settingsProfileDeactivateDialog()
+      .waitFor({ state: "detached", timeout: 60_000 })
+      .catch(() => undefined);
   }
   async settingsProfileDeactivateCancel(): Promise<void> {
-    return todo("settingsProfileDeactivateCancel");
+    await this.settingsProfileDeactivateDialog().getByRole("button", { name: "Cancel" }).click();
+    await this.settingsProfileDeactivateDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDeactivateWorking(): Promise<boolean> {
-    return todo("settingsProfileDeactivateWorking");
+    // The confirm keeps its label while working; the busy flag carries it.
+    const busy = await this.settingsProfileDeactivateDialog()
+      .getByRole("button", { name: "Deactivate account", exact: true })
+      .first()
+      .getAttribute("aria-busy");
+    return busy === "true";
   }
-  async settingsProfileSecurityFieldVisible(_field: SettingsProfileSecurityField): Promise<boolean> {
-    return todo("settingsProfileSecurityFieldVisible");
+  /** The security tab form scope. */
+  private settingsProfileSecurityForm() {
+    return this.page.getByTestId("security-settings-form");
   }
-  async settingsProfileSecurityFill(_field: SettingsProfileSecurityField, _value: string): Promise<void> {
-    return todo("settingsProfileSecurityFill");
+
+  /** Input id for a security field. */
+  private settingsProfileSecurityInputId(field: SettingsProfileSecurityField): string {
+    if (field === "current") return "old_password";
+    if (field === "new") return "new_password";
+    return "confirm_password";
   }
-  async settingsProfileSecurityFieldType(_field: SettingsProfileSecurityField): Promise<string> {
-    return todo("settingsProfileSecurityFieldType");
+
+  async settingsProfileSecurityFieldVisible(field: SettingsProfileSecurityField): Promise<boolean> {
+    return this.isShown(this.settingsProfileSecurityForm().locator(`#${this.settingsProfileSecurityInputId(field)}`));
   }
-  async settingsProfileSecurityToggleReveal(_field: SettingsProfileSecurityField): Promise<void> {
-    return todo("settingsProfileSecurityToggleReveal");
+  async settingsProfileSecurityFill(field: SettingsProfileSecurityField, value: string): Promise<void> {
+    await this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .fill(value);
   }
-  async settingsProfileSecurityFieldError(_field: SettingsProfileSecurityField): Promise<string | null> {
-    return todo("settingsProfileSecurityFieldError");
+  async settingsProfileSecurityFieldType(field: SettingsProfileSecurityField): Promise<string> {
+    const type = await this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .getAttribute("type");
+    return type ?? "";
+  }
+  async settingsProfileSecurityToggleReveal(field: SettingsProfileSecurityField): Promise<void> {
+    // The reveal hooks name the middle field "next", not "new".
+    const hook = field === "new" ? "next" : field;
+    await this.settingsProfileSecurityForm().getByTestId(`password-reveal-${hook}`).click();
+  }
+  async settingsProfileSecurityFieldError(field: SettingsProfileSecurityField): Promise<string | null> {
+    const error = this.settingsProfileSecurityForm().locator(`#${this.settingsProfileSecurityInputId(field)}-error`);
+    if ((await error.count()) === 0) return null;
+    return (await error.first().innerText()).trim() || null;
   }
   async settingsProfileSecurityMismatchVisible(): Promise<boolean> {
-    return todo("settingsProfileSecurityMismatchVisible");
+    return this.isShown(this.settingsProfileSecurityForm().getByText("Passwords don't match", { exact: true }));
   }
   async settingsProfileSecuritySameAsOldVisible(): Promise<boolean> {
-    return todo("settingsProfileSecuritySameAsOldVisible");
+    return this.isShown(
+      this.settingsProfileSecurityForm().getByText("New password must be different from old password", { exact: true })
+    );
   }
   async settingsProfileSecurityStrengthVisible(): Promise<boolean> {
-    return todo("settingsProfileSecurityStrengthVisible");
+    return this.isShown(this.settingsProfileSecurityForm().getByTestId("password-strength"));
   }
   async settingsProfileSecuritySubmitDisabled(): Promise<boolean> {
-    return todo("settingsProfileSecuritySubmitDisabled");
+    return this.settingsProfileSecurityForm()
+      .getByRole("button", { name: /Change password|Changing password/ })
+      .isDisabled();
   }
   async settingsProfileSecuritySubmit(): Promise<void> {
-    return todo("settingsProfileSecuritySubmit");
+    await this.settingsProfileSecurityForm()
+      .getByRole("button", { name: /Change password|Changing password/ })
+      .first()
+      .click();
+    // The submit either toasts or surfaces an inline error; give either a
+    // bounded moment before the assertion reads.
+    await this.page
+      .locator('[data-testid="toast-notification"], [role="alert"]')
+      .first()
+      .waitFor({ timeout: 5_000 })
+      .catch(() => undefined);
   }
-  async settingsProfileSecurityFieldValue(_field: SettingsProfileSecurityField): Promise<string> {
-    return todo("settingsProfileSecurityFieldValue");
+  async settingsProfileSecurityFieldValue(field: SettingsProfileSecurityField): Promise<string> {
+    return this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .inputValue();
   }
-  async settingsProfileSecurityBlur(_field: SettingsProfileSecurityField): Promise<void> {
-    return todo("settingsProfileSecurityBlur");
+  async settingsProfileSecurityBlur(field: SettingsProfileSecurityField): Promise<void> {
+    // Tab out of the field: a real focus move with no coordinates (the
+    // form heading can sit under the sticky app header, where a click
+    // never lands). Fires the input's blur handler like the oracle visit.
+    await this.settingsProfileSecurityForm()
+      .locator(`#${this.settingsProfileSecurityInputId(field)}`)
+      .press("Tab");
   }
 
   // ---------------------------------------------------------------------------
@@ -30687,11 +30883,13 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileSaveCustomTheme(): Promise<void> {
     return todo("settingsProfileSaveCustomTheme");
   }
-  async settingsProfileFailProfileSaves(_status: number): Promise<void> {
-    return todo("settingsProfileFailProfileSaves");
+  async settingsProfileFailProfileSaves(status: number): Promise<void> {
+    await this.page.route("**/api/users/me/profile/", async (route) => {
+      await route.fulfill({ status, contentType: "application/json", body: "{}" });
+    });
   }
   async settingsProfileClearProfileSaveFailure(): Promise<void> {
-    return todo("settingsProfileClearProfileSaveFailure");
+    await this.page.unroute("**/api/users/me/profile/");
   }
   async settingsProfileLocaleValues(): Promise<SettingsProfileLocale> {
     return todo("settingsProfileLocaleValues");

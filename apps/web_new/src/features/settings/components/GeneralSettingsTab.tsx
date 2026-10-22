@@ -131,8 +131,12 @@ export function GeneralSettingsTab(): React.ReactElement {
           <Avatar name={fullName || me.email} src={avatarSrc ?? ""} size="large" />
         </button>
         <div className="flex min-w-0 flex-col">
-          <span className="text-emphasis font-medium text-(--text)">{fullName || me.display_name}</span>
-          <span className="text-meta truncate text-(--text-muted)">{me.email}</span>
+          <span data-testid="general-identity-name" className="text-emphasis font-medium text-(--text)">
+            {fullName || me.display_name}
+          </span>
+          <span data-testid="general-identity-email" className="text-meta truncate text-(--text-muted)">
+            {me.email}
+          </span>
         </div>
       </header>
 

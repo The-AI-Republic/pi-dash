@@ -755,3 +755,132 @@ describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
     expect(waitFor).toHaveBeenCalled();
   });
 });
+
+describe("settings account reads (NEWFRONT-586, PROF-011..015)", () => {
+  function formPage(ids: Record<string, StubLocator>): Page {
+    const form = locator({
+      locator: (selector: string) => ids[selector] ?? locator({ count: async () => 0 }),
+      getByRole: () => locator(),
+      getByTestId: (id: string) => ids[`testid:${id}`] ?? locator(),
+      getByText: (_text: string) => ids["text"] ?? locator({ count: async () => 0 }),
+    });
+    return pageOf({ getByTestId: () => form });
+  }
+
+  it("reads general field errors with absent twins", async () => {
+    const page = formPage({ "#first_name-error": locator({ innerText: async () => "Please enter first name" }) });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGeneralFieldError("first_name")).toBe("Please enter first name");
+    expect(await driver.settingsProfileGeneralFieldError("last_name")).toBeNull();
+  });
+
+  it("reads the identity header name and email hooks", async () => {
+    const header = locator({
+      getByTestId: (id: string) =>
+        locator({ innerText: async () => (id === "general-identity-name" ? "Opal Whelan" : "opal@example.com") }),
+    });
+    const page = pageOf({ getByTestId: () => header });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGeneralIdentity()).toEqual({ name: "Opal Whelan", email: "opal@example.com" });
+  });
+
+  it("normalizes the save label", async () => {
+    const page = formPage({});
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGeneralSaveLabel()).toBe("");
+  });
+
+  it("reads avatar rejections with absent twins and reports no cover control", async () => {
+    const dialog = locator({
+      locator: (selector: string) =>
+        selector === "[role='alert']"
+          ? locator({ innerText: async () => "Too big." })
+          : locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => dialog, getByTestId: () => dialog }));
+    expect(await driver.settingsProfileAvatarRejection()).toBe("Too big.");
+    const bare = new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) }));
+    expect(await bare.settingsProfileAvatarRejection()).toBeNull();
+    expect(await driver.settingsProfileCoverControlVisible()).toBe(false);
+  });
+
+  it("detects email modal steps", async () => {
+    const closed = new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) }));
+    expect(await closed.settingsProfileEmailModalStep()).toBe("closed");
+    const emailOnly = locator({ getByLabel: () => locator({ count: async () => 0 }) });
+    expect(await new WebNewDriver(pageOf({ getByRole: () => emailOnly })).settingsProfileEmailModalStep()).toBe(
+      "email"
+    );
+    const code = locator({ getByLabel: () => locator({ count: async () => 1 }) });
+    expect(await new WebNewDriver(pageOf({ getByRole: () => code })).settingsProfileEmailModalStep()).toBe("code");
+  });
+
+  it("reads email modal errors and helpers with absent twins", async () => {
+    const dialog = locator({
+      locator: (selector: string) =>
+        selector === "#change-email-code-error"
+          ? locator({ innerText: async () => "Invalid verification code" })
+          : locator({ count: async () => 0 }),
+      getByText: () => locator({ innerText: async () => "Verification code sent to your new email." }),
+    });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => dialog }));
+    expect(await driver.settingsProfileEmailModalError("code")).toBe("Invalid verification code");
+    expect(await driver.settingsProfileEmailModalError("email")).toBeNull();
+    expect(await driver.settingsProfileEmailModalHelper()).toBe("Verification code sent to your new email.");
+    const bareDialog = locator({ count: async () => 0, getByText: () => locator({ count: async () => 0 }) });
+    const bare = new WebNewDriver(pageOf({ getByRole: () => bareDialog }));
+    expect(await bare.settingsProfileEmailModalHelper()).toBeNull();
+  });
+
+  it("reads deactivate titles, descriptions and working flags", async () => {
+    const dialog = locator({ getByText: () => locator({ innerText: async () => "Deactivate your account" }) });
+    const sections = locator({ filter: () => dialog });
+    const driver = new WebNewDriver(pageOf({ getByRole: () => dialog, locator: () => sections }));
+    expect(await driver.settingsProfileDeactivateTitle()).toBe("Deactivate your account");
+    const absent = locator({ count: async () => 0, filter: () => locator({ count: async () => 0 }) });
+    const bare = new WebNewDriver(pageOf({ getByRole: () => absent, locator: () => absent }));
+    expect(await bare.settingsProfileDeactivateTitle()).toBeNull();
+    expect(await bare.settingsProfileDeactivateDescription()).toBeNull();
+    expect(await bare.settingsProfileDeactivateWorking()).toBe(false);
+  });
+
+  it("maps security fields to their input ids and reveal hooks", async () => {
+    const seen: string[] = [];
+    const form = locator({
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({
+          fill: async () => undefined,
+          inputValue: async () => "v",
+          getAttribute: async () => "password",
+        });
+      },
+      getByTestId: (id: string) => {
+        seen.push(`testid:${id}`);
+        return locator();
+      },
+    });
+    const driver = new WebNewDriver(pageOf({ getByTestId: () => form }));
+    await driver.settingsProfileSecurityFill("current", "x");
+    await driver.settingsProfileSecurityToggleReveal("new");
+    await driver.settingsProfileSecurityToggleReveal("confirm");
+    expect(await driver.settingsProfileSecurityFieldType("new")).toBe("password");
+    expect(await driver.settingsProfileSecurityFieldValue("confirm")).toBe("v");
+    expect(seen).toContain("#old_password");
+    expect(seen).toContain("#new_password");
+    expect(seen).toContain("#confirm_password");
+    expect(seen).toContain("testid:password-reveal-next");
+    expect(seen).toContain("testid:password-reveal-confirm");
+    expect(await driver.settingsProfileSecurityFieldError("new")).toBeNull();
+  });
+
+  it("fails profile saves through a route and clears it", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileFailProfileSaves(500);
+    expect(route).toHaveBeenCalledWith("**/api/users/me/profile/", expect.any(Function));
+    await driver.settingsProfileClearProfileSaveFailure();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/profile/");
+  });
+});
