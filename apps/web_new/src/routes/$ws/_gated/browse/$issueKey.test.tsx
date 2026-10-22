@@ -26,16 +26,17 @@ import {
   findPalettePage,
   listCommands,
 } from "../../../../shared/commands/index.js";
+import { ASYNC_QUERY_TIMEOUT_MS } from "../../../../testing/testBudget.js";
 import { projectIdentifier, Route } from "./$issueKey.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 const ISSUE_ID = "323e4567-e89b-12d3-a456-426614174002";
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 // The strip appears after the router's loader and two query waves. Under a
-// full run those share workers with the Tiptap chunk, and the default
-// one-second wait is too tight; the strip itself is only ever late, never
-// absent, in the cases that expect it.
-const STRIP_TIMEOUT = { timeout: 5000 };
+// full run those share workers with the Tiptap chunk, so it uses the same
+// load allowance as the per-test budget. The strip itself is only ever late,
+// never absent, in the cases that expect it.
+const STRIP_TIMEOUT = { timeout: ASYNC_QUERY_TIMEOUT_MS };
 
 function findStrip(): Promise<HTMLElement> {
   return screen.findByTestId("project-tab-strip", undefined, STRIP_TIMEOUT);
@@ -730,7 +731,7 @@ describe("browse widgets", () => {
 
   it("mounts the widget under the description with the project locked", async () => {
     renderBrowse(true, undefined, { details: "member", me: true, child: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     expect(await screen.findByText("Every inspector")).toBeInTheDocument();
     // The detail sidebar also carries a sub-work-item action; the widget's
     // own row is the one inside the widgets root.
@@ -747,14 +748,14 @@ describe("browse widgets", () => {
 
   it("opens a child row at its own browse key", async () => {
     const { router } = renderBrowse(true, undefined, { details: "member", me: true, child: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     await userEvent.setup().click(await screen.findByRole("link", { name: /Every inspector/ }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/acme/browse/WEB-2"));
   });
 
   it("opens a child from another project under that project's key", async () => {
     const { router } = renderBrowse(true, undefined, { details: "member", me: true, foreignChild: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     const link = await screen.findByRole("link", { name: /Every inspector/ });
     expect(link).toHaveAttribute("href", "/acme/browse/BET-9");
     await userEvent.setup().click(link);
@@ -763,7 +764,7 @@ describe("browse widgets", () => {
 
   it("keeps the add entry shut for a guest", async () => {
     renderBrowse(true, undefined, { child: true });
-    await screen.findByTestId("project-tab-strip");
+    await findStrip();
     expect(await screen.findByText("Every inspector")).toBeInTheDocument();
     const widget = await screen.findByTestId("issue-detail-widgets");
     expect(within(widget).getByRole("button", { name: "Add sub-work item" })).toBeDisabled();
