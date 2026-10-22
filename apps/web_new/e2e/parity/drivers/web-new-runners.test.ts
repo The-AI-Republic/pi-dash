@@ -1860,12 +1860,17 @@ describe("issue dispatch and re-tick (NEWFRONT-547, RUN-046/RUN-048)", () => {
     });
     const page = testIdPage({ "issue-run-ai": runButton }, { on, off });
     const driver = new WebNewDriver(page);
-    vi.spyOn(driver, "lastToast").mockResolvedValueOnce(null).mockResolvedValue("Run started");
+    // No toast yet on the first poll, so the driver waits and polls again.
+    vi.spyOn(driver, "lastToast")
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue("Run started");
 
     await expect(driver.issueRunAiDispatch()).resolves.toEqual({
       toast: "Run started",
       requestUrls: ["https://api.test/api/runners/runs/"],
     });
+    expect(page.waitForTimeout).toHaveBeenCalledWith(1_000);
     expect(off).toHaveBeenCalledWith("request", handlers[0]);
   });
 
