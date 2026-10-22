@@ -4,6 +4,7 @@ Every URL pattern in app/urls/cycle.py plus the workspace cycles endpoint in
 app/urls/workspace.py gets a shape assertion against the live backend.
 """
 
+import json
 import os
 import time
 import uuid
@@ -661,3 +662,46 @@ def test_cycle_create_with_deleted_at_500s_and_no_enqueue(admin):
         assert after_celery == before_celery, (
             f"celery broker depth changed: {before_celery} -> {after_celery}"
         )
+
+
+def test_cycle_issues_state_id_in_filter(admin):
+    # PIDASHCONV-1317: the cycle-issues list runs the same rich-filter
+    # compiler; UUID lists must bind typed (pre-fix Rust 500d).
+    urls = cycle_urls(admin)
+    ws_id, project_id = admin["workspace"]["id"], admin["project"]["id"]
+    state_b = admin["seed"].state(
+        project_id, ws_id, name="Second state", group="started")
+    cycle = create_cycle_for(admin, name="Filter cycle")
+    issue_a = create_issue_for(admin, name="Cycle filter A")
+    issue_b = create_issue_for(admin, name="Cycle filter B")
+    with admin["seed"].conn.cursor() as cur:
+        cur.execute(
+            "UPDATE issues SET state_id = %s WHERE id = %s",
+            (state_b, issue_b["id"]),
+        )
+    try:
+        for issue in (issue_a, issue_b):
+            r = admin["client"].post(
+                urls["cycle_issues"](cycle["id"]),
+                json={"issues": [issue["id"]]},
+            )
+            assert r.status_code == 201, r.text[:500]
+        r = admin["client"].get(
+            urls["cycle_issues"](cycle["id"]),
+            params={"filters": json.dumps(
+                {"and": [{"state_id__in": admin["state"]["id"]}]})},
+        )
+        assert r.status_code == 200, r.text[:500]
+        assert {row["id"] for row in r.json()["results"]} == {issue_a["id"]}
+        r = admin["client"].get(
+            urls["cycle_issues"](cycle["id"]),
+            params={"filters": json.dumps({"and": [{"state_id__in": (
+                f"{admin['state']['id']},{state_b}")}]})},
+        )
+        assert r.status_code == 200, r.text[:500]
+        assert {row["id"] for row in r.json()["results"]} == {
+            issue_a["id"], issue_b["id"]}
+    finally:
+        for issue in (issue_a, issue_b):
+            admin["client"].delete(
+                urls["cycle_issue_detail"](cycle["id"], issue["id"]))
