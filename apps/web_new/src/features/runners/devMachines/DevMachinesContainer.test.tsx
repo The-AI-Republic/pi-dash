@@ -22,6 +22,7 @@ vi.mock("../api/devMachines.js", () => ({
 
 const { createAppClient, resetAppClient } = await import("../../../core/api/client.js");
 const { sessionKeys, setSessionClient } = await import("../../../core/session/index.js");
+vi.mock("../addRunner/AddRunnerEntry.js", () => ({ AddRunnerEntry: () => <div data-testid="add-runner-entry" /> }));
 const { DevMachinesContainer } = await import("./DevMachinesContainer.js");
 
 function mount(workspaces: Workspace[] | undefined): void {
@@ -67,6 +68,7 @@ describe("DevMachinesContainer", () => {
     mount([workspace]);
     expect(useDevMachines).toHaveBeenCalledWith("acme", "ws-id");
     expect(screen.getByRole("heading", { name: "AI Dev Machines" })).toBeInTheDocument();
+    expect(screen.getByTestId("add-runner-entry")).toBeInTheDocument();
   });
 
   it("wires the row writers to the machine mutations", async () => {

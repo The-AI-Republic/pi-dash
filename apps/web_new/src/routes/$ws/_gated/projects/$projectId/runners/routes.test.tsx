@@ -174,6 +174,8 @@ describe("project runners section routes", () => {
   it("passes the run id from the address to the same screen", () => {
     mount(RunDetailRoute.options.component);
     expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
+  });
+
   it("mounts the project runner detail screen with the scope from the address (RUN-042)", () => {
     vi.spyOn(DetailRoute, "useParams").mockReturnValue({ ws: "acme", projectId: "p-1", runnerId: "r-7" });
     mount(DetailRoute.options.component);

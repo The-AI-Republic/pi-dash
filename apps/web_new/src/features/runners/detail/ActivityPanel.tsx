@@ -54,9 +54,11 @@ export function ActivityPanel({ runnerName, liveState, tickMs, now }: ActivityPa
       <div className="flex items-center justify-between gap-(--space-3)">
         <div className="flex items-center gap-(--space-2)">
           <h2 className="text-emphasis font-medium text-(--text)">{ACTIVITY_HEADING}</h2>
-          <Badge tone={ACTIVITY_TONES[badge]} dot>
-            {ACTIVITY_LABELS[badge]}
-          </Badge>
+          <span data-testid="activity-status-badge" className="inline-flex">
+            <Badge tone={ACTIVITY_TONES[badge]} dot>
+              {ACTIVITY_LABELS[badge]}
+            </Badge>
+          </span>
         </div>
         <span className="text-meta text-(--text-muted)">{runnerName}</span>
       </div>

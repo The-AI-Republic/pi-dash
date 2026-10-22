@@ -57,6 +57,8 @@ describe("devMachinesQueryOptions", () => {
     expect(options.queryKey).toEqual(runnersKeys.devMachines("acme"));
     expect(options.refetchInterval).toBe(DEV_MACHINES_POLL_INTERVAL_MS);
     expect(options.staleTime).toBe(0);
+    // A 500 must reach the error UI; the poll is the recovery path.
+    expect(options.retry).toBe(false);
     await options.queryFn?.({} as never);
     expect(contractMocks.listDevMachines).toHaveBeenCalledWith(client, "ws-id");
   });

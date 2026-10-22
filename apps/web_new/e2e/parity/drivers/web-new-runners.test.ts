@@ -1842,6 +1842,349 @@ describe("approvals queue (NEWFRONT-547, RUN-023/RUN-024)", () => {
   });
 });
 
+describe("dev machines and runner detail (NEWFRONT-555, RUN-037–043)", () => {
+  it("reads machine rows and state text from the table", async () => {
+    const table = stubLocator({
+      count: vi.fn(async () => 1),
+      evaluate: vi.fn(async () => [
+        {
+          name: "build box",
+          subline: "host / id",
+          status: "Active",
+          runners: "1 active / 1 total",
+          lastSeen: "Jan 1",
+          lastHeartbeat: "Jan 2",
+          actions: ["Rotate", "Revoke", "Delete"],
+        },
+      ]),
+      locator: vi.fn(() => stubLocator({ innerText: vi.fn(async () => "No dev machines registered") })),
+    });
+    const page = pageStub({ getByTestId: vi.fn(() => table) });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.devMachinesRows()).resolves.toEqual([
+      {
+        name: "build box",
+        subline: "host / id",
+        status: "Active",
+        runners: "1 active / 1 total",
+        lastSeen: "Jan 1",
+        lastHeartbeat: "Jan 2",
+        actions: ["Rotate", "Revoke", "Delete"],
+      },
+    ]);
+    await expect(driver.devMachinesRowByName("build box")).resolves.toMatchObject({ status: "Active" });
+    await expect(driver.devMachinesRowByName("missing")).resolves.toBeNull();
+    await expect(driver.devMachinesEmptyVisible()).resolves.toBe(true);
+    await expect(driver.devMachinesLoadingVisible()).resolves.toBe(false);
+    await expect(driver.devMachinesErrorVisible()).resolves.toBe(false);
+  });
+
+  it("reports absent state text without a table", async () => {
+    const driver = new WebNewDriver(
+      pageStub({ getByTestId: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) })
+    );
+    await expect(driver.devMachinesRows()).resolves.toEqual([]);
+    await expect(driver.devMachinesEmptyVisible()).resolves.toBe(false);
+  });
+
+  it("opens the machines page and waits for the table", async () => {
+    const table = stubLocator();
+    const page = pageStub({ getByTestId: vi.fn(() => table) });
+    await new WebNewDriver(page).devMachinesOpen("acme");
+    expect(page.goto).toHaveBeenCalledWith("/acme/ai-dev-machines");
+    expect(table.waitFor).toHaveBeenCalled();
+  });
+
+  it("reads the kit dialog title and description from h2 and p", async () => {
+    const dialog = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn((selector: string) =>
+        selector === "h2"
+          ? stubLocator({ first: () => stubLocator({ innerText: vi.fn(async () => "Rotate token?") }) })
+          : stubLocator({ first: () => stubLocator({ innerText: vi.fn(async () => "The old token stops working.") }) })
+      ),
+      getByRole: vi.fn(() =>
+        stubLocator({
+          count: vi.fn(async () => 2),
+          last: () => stubLocator({ innerText: vi.fn(async () => "Rotate") }),
+        })
+      ),
+    });
+    const page = pageStub({
+      locator: vi.fn(() => stubLocator({ filter: vi.fn(() => dialog) })),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.devMachinesModal()).resolves.toEqual({
+      title: "Rotate token?",
+      body: "The old token stops working.",
+      confirmLabel: "Rotate",
+    });
+    await expect(driver.devMachinesModalVisible()).resolves.toBe(true);
+  });
+
+  it("returns null without an open dialog or without buttons", async () => {
+    const driver = new WebNewDriver(
+      pageStub({
+        locator: vi.fn(() => stubLocator({ filter: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })) })),
+      })
+    );
+    await expect(driver.devMachinesModal()).resolves.toBeNull();
+    await expect(driver.devMachinesModalVisible()).resolves.toBe(false);
+  });
+
+  it("opens each row action and confirms or cancels the dialog", async () => {
+    const clicked: string[] = [];
+    const action = (label: string) =>
+      stubLocator({
+        count: vi.fn(async () => 1),
+        click: vi.fn(async () => {
+          clicked.push(label);
+        }),
+      });
+    const row = stubLocator({
+      getByRole: vi.fn((_role: string, options?: { name?: string }) => action(options?.name ?? "")),
+    });
+    const table = stubLocator({ locator: vi.fn(() => stubLocator({ filter: vi.fn(() => row) })) });
+    const dialog = stubLocator({
+      count: vi.fn(async () => 1),
+      getByRole: vi.fn(() =>
+        stubLocator({ last: () => action("confirm"), first: () => action("Cancel"), count: vi.fn(async () => 1) })
+      ),
+    });
+    const page = pageStub({
+      getByTestId: vi.fn(() => table),
+      getByText: vi.fn(() => stubLocator()),
+      locator: vi.fn(() => stubLocator({ filter: vi.fn(() => dialog) })),
+      keyboard: { press: vi.fn(async () => undefined) } as unknown as Page["keyboard"],
+    });
+    const driver = new WebNewDriver(page);
+
+    await driver.devMachinesOpenRotate("build box");
+    await driver.devMachinesOpenRevoke("build box");
+    await driver.devMachinesOpenDelete("build box");
+    expect(clicked).toEqual(["Rotate", "Revoke", "Delete"]);
+
+    await driver.devMachinesModalConfirm();
+    expect(clicked).toContain("confirm");
+    await driver.devMachinesModalCancel();
+    expect(clicked).toContain("Cancel");
+    await driver.devMachinesModalPressEscape();
+    expect(page.keyboard.press).toHaveBeenCalledWith("Escape");
+  });
+
+  it("stubs, delays, counts and fails machine reads", async () => {
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    await driver.devMachinesStubListOnce([{ id: "m-1" }]);
+    let handler = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const get = stubRoute("GET");
+    await handler(get as unknown as Route);
+    expect(get.fulfill).toHaveBeenCalledWith(expect.objectContaining({ status: 200 }));
+    const second = stubRoute("GET");
+    await handler(second as unknown as Route);
+    expect(second.continue).toHaveBeenCalledTimes(1);
+
+    await driver.devMachinesFailListOnce();
+    handler = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[1]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const fail = stubRoute("GET");
+    await handler(fail as unknown as Route);
+    expect(fail.fulfill).toHaveBeenCalledWith(expect.objectContaining({ status: 500 }));
+
+    await driver.devMachinesDelayListOnce(5);
+    handler = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[2]![1] as (
+      route: Route
+    ) => Promise<void>;
+    await handler(stubRoute("GET") as unknown as Route);
+    expect(page.waitForTimeout).toHaveBeenCalledWith(5);
+
+    await expect(driver.devMachinesListPollCount(0)).resolves.toBe(0);
+    expect(page.unroute).toHaveBeenCalled();
+  });
+
+  it("delays and fails one action, reads the toast, and spies deletes", async () => {
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    await driver.devMachinesDelayActionOnce(10);
+    const delay = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const rotate = stubRoute("POST");
+    (rotate.request as unknown as () => unknown) = () => ({
+      method: () => "POST",
+      url: () => "https://api.test/api/runners/dev-machines/rotate/x",
+    });
+    await delay(rotate as unknown as Route);
+    expect(page.waitForTimeout).toHaveBeenCalledWith(10);
+
+    await driver.devMachinesFailActionOnce();
+    const fail = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[1]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const del = stubRoute("DELETE");
+    (del.request as unknown as () => unknown) = () => ({
+      method: () => "DELETE",
+      url: () => "https://api.test/api/runners/dev-machines/x",
+    });
+    await fail(del as unknown as Route);
+    expect(del.fulfill).toHaveBeenCalledWith(expect.objectContaining({ status: 500 }));
+
+    await expect(driver.devMachinesLastToast()).resolves.toBe(null);
+
+    await driver.devMachinesDeleteSpyStart();
+    const spy = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[2]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const del2 = stubRoute("DELETE");
+    (del2.request as unknown as () => unknown) = () => ({
+      method: () => "DELETE",
+      url: () => "https://api.test/api/runners/dev-machines/x",
+    });
+    await spy(del2 as unknown as Route);
+    await expect(driver.devMachinesDeleteSpyUrls()).resolves.toEqual(["https://api.test/api/runners/dev-machines/x"]);
+    await driver.devMachinesDeleteSpyStop();
+  });
+
+  it("reads install cards, prereq, copy state and clipboard helpers", async () => {
+    const label = stubLocator({ count: vi.fn(async () => 1), textContent: vi.fn(async () => "Linux") });
+    const card = stubLocator({
+      locator: vi.fn(() => stubLocator({ first: () => label })),
+      getByRole: vi.fn(() =>
+        stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Copy command") })
+      ),
+    });
+    const pre = stubLocator({
+      count: vi.fn(async () => 1),
+      nth: () => pre,
+      locator: vi.fn(() => card),
+    });
+    const section = stubLocator({
+      count: vi.fn(async () => 1),
+      evaluate: vi.fn(async () => [{ label: "Linux", command: "curl ...", downloadHref: null }]),
+      locator: vi.fn((selector: string) =>
+        selector === "pre"
+          ? pre
+          : stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Install doctor first") })
+      ),
+    });
+    const page = pageStub({
+      locator: vi.fn(() => section),
+      evaluate: vi.fn(async () => "clipboard"),
+      context: vi.fn(() => ({ grantPermissions: vi.fn(async () => undefined) })) as unknown as Page["context"],
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.devMachinesInstallCards()).resolves.toEqual([
+      { label: "Linux", command: "curl ...", downloadHref: null },
+    ]);
+    await expect(driver.devMachinesInstallPrereq()).resolves.toBe("Install doctor first");
+    await expect(driver.devMachinesReadClipboard()).resolves.toBe("clipboard");
+    await driver.devMachinesInstallCopy("Linux");
+    await driver.devMachinesInstallBreakClipboard();
+    await expect(driver.devMachinesInstallCopyState("Linux")).resolves.not.toBeUndefined();
+  });
+
+  it("opens runner detail in both scopes and reads header, meta, back and chat", async () => {
+    const badge = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "Online") });
+    const header = stubLocator({
+      count: vi.fn(async () => 1),
+      isVisible: vi.fn(async () => true),
+      innerText: vi.fn(async () => "runner-1"),
+      locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 1), getByTestId: vi.fn(() => badge) })),
+    });
+    const page = pageStub({
+      locator: vi.fn(() => header),
+      getByText: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+      getByRole: vi.fn((role: string) =>
+        role === "link"
+          ? stubLocator({
+              count: vi.fn(async () => 1),
+              getAttribute: vi.fn(async () => "/acme/runners"),
+              click: vi.fn(async () => undefined),
+            })
+          : stubLocator()
+      ),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.runnerDetailOpen("acme", "r-1");
+    expect(page.goto).toHaveBeenCalledWith("/acme/runners/detail/r-1");
+    await driver.runnerDetailOpen("acme", "r-1", "p-1");
+    expect(page.goto).toHaveBeenCalledWith("/acme/projects/p-1/runners/detail/r-1");
+    await expect(driver.runnerDetailState()).resolves.toBe("loaded");
+    await expect(driver.runnerDetailHeader()).resolves.toEqual({ name: "runner-1", status: "Online" });
+    await expect(driver.runnerDetailBackHref()).resolves.toBe("/acme/runners");
+    await driver.runnerDetailOpenChat();
+    expect(page.waitForURL).toHaveBeenCalledWith("**/chat/**", expect.anything());
+  });
+
+  it("reads activity badge and telemetry and observes aging", async () => {
+    const badge = stubLocator({ count: vi.fn(async () => 1), innerText: vi.fn(async () => "1m ago") });
+    let reads = 0;
+    const lastActivity = stubLocator({
+      count: vi.fn(async () => 1),
+      innerText: vi.fn(async () => {
+        reads += 1;
+        return reads < 3 ? "1m ago" : "2m ago";
+      }),
+    });
+    const grid = stubLocator({
+      count: vi.fn(async () => 1),
+      evaluate: vi.fn(async () => [{ label: "Last activity", value: "1m ago" }]),
+      locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 1), first: () => lastActivity })),
+    });
+    const section = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn(() => grid),
+      getByRole: vi.fn(() => stubLocator({ count: vi.fn(async () => 1), locator: vi.fn(() => badge) })),
+    });
+    const page = pageStub({
+      getByRole: vi.fn(() => section),
+      route: vi.fn(async () => undefined),
+      unroute: vi.fn(async () => undefined),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.runnerActivityTelemetry()).resolves.toEqual([{ label: "Last activity", value: "1m ago" }]);
+    await expect(driver.runnerActivityBadge()).resolves.toBe("1m ago");
+    await expect(driver.runnerActivityAgingObserved()).resolves.toBe(true);
+  });
+
+  it("shapes runner detail requests and delays/fails only detail GETs", async () => {
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    await driver.runnerDetailDelayOnce(5);
+    const delay = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const get = stubRoute("GET");
+    (get.request as unknown as () => unknown) = () => ({
+      method: () => "GET",
+      url: () => "https://api.test/api/runners/r-1",
+    });
+    await delay(get as unknown as Route);
+    expect(page.waitForTimeout).toHaveBeenCalledWith(5);
+
+    await driver.runnerDetailFailOnce();
+    const fail = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls[1]![1] as (
+      route: Route
+    ) => Promise<void>;
+    const bad = stubRoute("GET");
+    (bad.request as unknown as () => unknown) = () => ({ method: () => "GET", url: () => "not a url" });
+    await fail(bad as unknown as Route);
+    expect(bad.continue).toHaveBeenCalled();
+
+    const list = stubRoute("GET");
+    (list.request as unknown as () => unknown) = () => ({
+      method: () => "GET",
+      url: () => "https://api.test/api/runners/dev-machines/x",
+    });
+    await fail(list as unknown as Route);
+    expect(list.continue).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("issue dispatch and re-tick (NEWFRONT-547, RUN-046/RUN-048)", () => {
   it("dispatches Run AI, dedupes API urls, and unsubscribes", async () => {
     const handlers: Array<(request: { url(): string }) => void> = [];

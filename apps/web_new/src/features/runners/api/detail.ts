@@ -20,6 +20,8 @@ export function runnerDetailQueryOptions(client: ApiClient, workspaceSlug: strin
     queryFn: () => getRunner(client, runnerId),
     staleTime: 0,
     refetchInterval: RUNNER_DETAIL_POLL_INTERVAL_MS,
+    // A 500 renders the page's failure state; the 5 s poll is the recovery.
+    retry: false,
   });
 }
 

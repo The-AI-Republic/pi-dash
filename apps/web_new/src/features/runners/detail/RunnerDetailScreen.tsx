@@ -122,11 +122,11 @@ export function RunnerDetailScreen({
           <section className="rounded-(--radius-control) border border-(--border) p-(--space-4)">
             <div className="flex items-center gap-(--space-3)">
               <h1 className="text-emphasis font-mono font-semibold break-all text-(--text)">{runner.name}</h1>
-              <button type="button" tabIndex={-1} className="contents cursor-default">
+              <span data-testid="runner-status-badge" className="inline-flex">
                 <Badge tone={RUNNER_STATUS_TONES[runnerDisplayStatus(runner)]} dot>
                   {RUNNER_STATUS_LABELS[runnerDisplayStatus(runner)]}
                 </Badge>
-              </button>
+              </span>
             </div>
           </section>
 

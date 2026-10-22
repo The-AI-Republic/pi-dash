@@ -170,6 +170,8 @@ describe("workspace runners section routes", () => {
   it("passes the run id from the address to the same screen", () => {
     mount(RunDetailRoute.options.component);
     expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
+  });
+
   it("mounts the runner detail screen with the runner from the address (RUN-042)", () => {
     vi.spyOn(DetailRoute, "useParams").mockReturnValue({ ws: "acme", runnerId: "r-7" });
     mount(DetailRoute.options.component);

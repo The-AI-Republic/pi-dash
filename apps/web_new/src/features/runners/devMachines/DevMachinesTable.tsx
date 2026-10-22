@@ -43,11 +43,11 @@ export interface DevMachinesTableProps {
 
 export function DevMachineStatusBadge({ status }: { status: DevMachineStatus }): React.ReactElement {
   return (
-    <button type="button" tabIndex={-1} className="contents cursor-default">
+    <span data-testid="dev-machine-status-badge" className="inline-flex">
       <Badge tone={DEV_MACHINE_STATUS_TONES[status]} dot>
         {DEV_MACHINE_STATUS_LABELS[status]}
       </Badge>
-    </button>
+    </span>
   );
 }
 

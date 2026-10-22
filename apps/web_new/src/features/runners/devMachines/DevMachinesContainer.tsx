@@ -8,6 +8,8 @@
 import * as React from "react";
 
 import { selectWorkspace, useWorkspaces } from "../../../core/session/index.js";
+import { AddRunnerEntry } from "../addRunner/AddRunnerEntry.js";
+import { buildRunnersAreaValue, RunnersAreaProvider } from "../area.js";
 import { useDeleteDevMachine, useDevMachines, useRevokeDevMachine, useRotateDevMachine } from "../api/devMachines.js";
 import { DevMachinesScreen } from "./DevMachinesScreen.js";
 
@@ -18,11 +20,17 @@ export function DevMachinesContainer({ workspaceSlug }: { workspaceSlug: string 
   const revoke = useRevokeDevMachine(workspaceSlug, workspace?.id ?? "");
   const remove = useDeleteDevMachine(workspaceSlug, workspace?.id ?? "");
   if (workspace === undefined) return null;
+  const area = buildRunnersAreaValue({ workspaceSlug }, workspace.id, "allowed");
   return (
     <DevMachinesScreen
       workspaceSlug={workspaceSlug}
       workspaceName={workspace.name}
       workspaceId={workspace.id}
+      actions={
+        <RunnersAreaProvider value={area}>
+          <AddRunnerEntry />
+        </RunnersAreaProvider>
+      }
       machines={machines.data}
       loading={machines.isPending}
       failed={machines.isError}

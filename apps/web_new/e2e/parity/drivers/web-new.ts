@@ -8894,7 +8894,7 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Dev machines, runner detail, agent activity (NEWFRONT-555, RUN-037–043).
   // --- The table carries the machine name over a host/id subline, a status
-  // --- badge in a button, the counts sentence and action buttons; the
+  // --- badge in a stable hook, the counts sentence and action buttons; the
   // --- install section is a heading plus one card per <pre>; the activity
   // --- panel is an "Agent" heading with the badge beside it and a dl below.
 
@@ -8930,7 +8930,7 @@ export class WebNewDriver implements ParityDriver {
         out.push({
           name: divs[0]?.textContent?.trim() ?? "",
           subline: divs[1]?.textContent?.trim() ?? "",
-          status: cells[1]?.querySelector("button")?.textContent?.trim() ?? "",
+          status: cells[1]?.querySelector('[data-testid="dev-machine-status-badge"]')?.textContent?.trim() ?? "",
           runners: cells[2]?.textContent?.trim().replace(/\s+/g, " ") ?? "",
           lastSeen: cells[3]?.textContent?.trim() ?? "",
           lastHeartbeat: cells[4]?.textContent?.trim() ?? "",
@@ -9046,17 +9046,15 @@ export class WebNewDriver implements ParityDriver {
 
   private devMachinesDialog(): Locator {
     return this.appDialogs()
-      .filter({ has: this.page.locator("h3") })
+      .filter({ has: this.page.locator("h2") })
       .first();
   }
 
   async devMachinesModal(): Promise<DevMachineModal | null> {
     const dialog = this.devMachinesDialog();
     if ((await dialog.count()) === 0) return null;
-    const title = ((await dialog.locator("h3").first().innerText()) ?? "").trim();
-    const body = (
-      (await dialog.locator("h3").first().locator("xpath=following-sibling::div[1]").innerText()) ?? ""
-    ).trim();
+    const title = ((await dialog.locator("h2").first().innerText()) ?? "").trim();
+    const body = ((await dialog.locator("p").first().innerText()) ?? "").trim();
     const buttons = dialog.getByRole("button");
     if ((await buttons.count()) === 0) return null;
     const confirmLabel = ((await buttons.last().innerText()) ?? "").trim();
@@ -9230,7 +9228,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page.goto(`${base}/detail/${runnerId}`);
     const header = this.page.locator("h1").first();
     const error = this.page.getByText("Failed to load runner").first();
-    await expect(header.or(error)).toBeVisible({ timeout: WebNewDriver.WAIT_MS });
+    await header.or(error).first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async runnerDetailState(): Promise<"loaded" | "loading" | "error"> {
@@ -9243,7 +9241,7 @@ export class WebNewDriver implements ParityDriver {
   async runnerDetailHeader(): Promise<{ name: string; status: string } | null> {
     const header = this.page.locator("h1").first();
     if ((await header.count()) === 0) return null;
-    const badge = header.locator("xpath=ancestor::section[1]").getByRole("button").first();
+    const badge = header.locator("xpath=ancestor::section[1]").getByTestId("runner-status-badge").first();
     if ((await badge.count()) === 0) return null;
     return {
       name: ((await header.innerText()) ?? "").trim(),
@@ -9347,7 +9345,7 @@ export class WebNewDriver implements ParityDriver {
     if ((await section.count()) === 0) return null;
     const heading = section.getByRole("heading", { name: "Agent", exact: true }).first();
     if ((await heading.count()) === 0) return null;
-    const badge = heading.locator("xpath=..").getByRole("button").first();
+    const badge = heading.locator("xpath=..").getByTestId("activity-status-badge").first();
     if ((await badge.count()) === 0) return null;
     return (((await badge.innerText()) ?? "").trim() || null) as string | null;
   }

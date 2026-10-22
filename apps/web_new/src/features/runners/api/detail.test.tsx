@@ -42,6 +42,7 @@ describe("runner detail read", () => {
     const options = runnerDetailQueryOptions(client, "acme", "r-1");
     expect(options.queryKey).toEqual(runnersKeys.runnerDetail("acme", "r-1"));
     expect(options.refetchInterval).toBe(RUNNER_DETAIL_POLL_INTERVAL_MS);
+    expect(options.retry).toBe(false);
     await options.queryFn?.({} as never);
     expect(contractMocks.getRunner).toHaveBeenCalledWith(client, "r-1");
   });

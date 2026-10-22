@@ -51,6 +51,7 @@ describe("DevMachinesTable", () => {
     expect(screen.getByText("Offline")).toBeInTheDocument();
     expect(screen.getByText("Registered")).toBeInTheDocument();
     expect(screen.getByText("Revoked")).toBeInTheDocument();
+    expect(screen.getAllByTestId("dev-machine-status-badge")).toHaveLength(4);
     // Three non-revoked machines carry three actions each, the revoked one delete.
     expect(screen.getAllByRole("button", { name: "Rotate" })).toHaveLength(3);
     expect(screen.getAllByRole("button", { name: "Revoke" })).toHaveLength(3);

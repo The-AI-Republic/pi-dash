@@ -27,6 +27,9 @@ export function devMachinesQueryOptions(client: ApiClient, workspaceSlug: string
     queryFn: () => listDevMachines(client, workspaceId),
     staleTime: 0,
     refetchInterval: DEV_MACHINES_POLL_INTERVAL_MS,
+    // 500s are app-retryable; retrying here would hide the asserted error
+    // states and the recovery poll is the user-visible retry path.
+    retry: false,
   });
 }
 
