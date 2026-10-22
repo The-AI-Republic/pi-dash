@@ -13,6 +13,7 @@ import {
   browserDictationDevices,
   DICTATION_MAX_MS,
   DICTATION_MIN_MS,
+  uploadDictationAudio,
   useDictation,
   type DictationDevices,
 } from "./useDictation.js";
@@ -181,6 +182,78 @@ describe("useDictation", () => {
     expect(view.result.current.errorMessage).toBe("no device");
     act(() => view.result.current.reset());
     expect(view.result.current.status).toBe("idle");
+  });
+
+  it("names missing capture hardware distinctly from other failures", async () => {
+    const missing = Object.assign(new Error("no such device"), { name: "NotFoundError" });
+    const { view } = setup({ getUserMedia: async () => Promise.reject(missing) });
+    expect(view.result.current.captureFailure).toBeNull();
+    await act(async () => view.result.current.start());
+    expect(view.result.current.status).toBe("error");
+    expect(view.result.current.captureFailure).toBe("missing-hardware");
+    act(() => view.result.current.reset());
+    expect(view.result.current.captureFailure).toBeNull();
+  });
+
+  it("names a legacy missing-device rejection as missing hardware", async () => {
+    const missing = Object.assign(new Error("no such device"), { name: "DevicesNotFoundError" });
+    const { view } = setup({ getUserMedia: async () => Promise.reject(missing) });
+    await act(async () => view.result.current.start());
+    expect(view.result.current.captureFailure).toBe("missing-hardware");
+  });
+
+  it("names a generic capture failure distinctly from a lost upload", async () => {
+    const { view } = setup({ getUserMedia: async () => Promise.reject(new Error("no device")) });
+    await act(async () => view.result.current.start());
+    expect(view.result.current.captureFailure).toBe("capture-failed");
+  });
+
+  it("treats a legacy permission refusal as a denied microphone", async () => {
+    const refused = Object.assign(new Error("denied by browser"), { name: "PermissionDeniedError" });
+    const { view } = setup({ getUserMedia: async () => Promise.reject(refused) });
+    await act(async () => view.result.current.start());
+    expect(view.result.current.status).toBe("denied");
+    expect(view.result.current.captureFailure).toBeNull();
+  });
+
+  it("leaves failed uploads out of the capture kind", async () => {
+    const { view } = setup({ transcribe: async () => Promise.reject(new Error("provider down")) });
+    await act(async () => view.result.current.start());
+    act(() => vi.advanceTimersByTime(DICTATION_MIN_MS + 10));
+    act(() => view.result.current.stop());
+    await waitFor(() => expect(view.result.current.status).toBe("error"));
+    expect(view.result.current.captureFailure).toBeNull();
+  });
+
+  it("clears the capture kind when a fresh press records", async () => {
+    const stream = fakeStream();
+    const getUserMedia = vi
+      .fn<() => Promise<MediaStream>>()
+      .mockRejectedValueOnce(new Error("no device"))
+      .mockResolvedValue(stream);
+    const { view } = setup({ getUserMedia });
+    await act(async () => view.result.current.start());
+    expect(view.result.current.captureFailure).toBe("capture-failed");
+    act(() => view.result.current.reset());
+    await act(async () => view.result.current.start());
+    expect(view.result.current.status).toBe("recording");
+    expect(view.result.current.captureFailure).toBeNull();
+  });
+
+  it("names a recorder that cannot be opened as a capture failure", async () => {
+    const view = renderHook(() =>
+      useDictation({
+        onResult: vi.fn(),
+        devices: {
+          getUserMedia: async () => fakeStream(),
+          createRecorder: () => {
+            throw new Error("recorder unavailable");
+          },
+        },
+      })
+    );
+    await act(async () => view.result.current.start());
+    expect(view.result.current.captureFailure).toBe("capture-failed");
   });
 
   it("reports a failed transcription and lets a fresh press retry", async () => {
@@ -458,6 +531,30 @@ describe("useDictation", () => {
         "https://api.test/auth/get-csrf-token/",
         "https://api.test/api/users/me/ai-assistant/transcribe/",
       ]);
+    } finally {
+      clientModule.resetAppClient();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("uploadDictationAudio", () => {
+  it("posts the utterance to the speech endpoint and reads the text", async () => {
+    const seen: string[] = [];
+    const stubFetch = vi.fn(async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return new Response(JSON.stringify({ text: "direct upload" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", stubFetch);
+    const clientModule = await import("../../core/api/client.js");
+    clientModule.createAppClient("https://api.test");
+    try {
+      const text = await uploadDictationAudio(new Blob(["audio-bytes"], { type: "audio/webm" }));
+      expect(text).toBe("direct upload");
+      expect(seen).toContain("https://api.test/api/users/me/ai-assistant/transcribe/");
     } finally {
       clientModule.resetAppClient();
       vi.unstubAllGlobals();

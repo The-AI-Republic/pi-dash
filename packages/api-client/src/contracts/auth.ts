@@ -48,6 +48,12 @@ export const InstanceConfig = z.object({
   is_self_managed: z.boolean(),
   instance_changelog_url: z.string(),
   file_size_limit: z.optional(z.number()),
+  /**
+   * Whether the instance holds an LLM key for the editor writing helper
+   * (AGT-063). Absent on backends older than the flag, which reads as
+   * unconfigured.
+   */
+  has_llm_configured: z.optional(z.boolean()),
 });
 export type InstanceConfig = z.infer<typeof InstanceConfig>;
 
