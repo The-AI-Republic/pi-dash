@@ -63,6 +63,7 @@ import { Route as WsGatedRunnersRunsRouteImport } from './routes/$ws/_gated/runn
 import { Route as WsGatedSchedulersIndexRouteImport } from './routes/$ws/_gated/schedulers/index'
 import { Route as WsGatedSettingsWorkspaceRouteRouteImport } from './routes/$ws/_gated/settings/_workspace/route'
 import { Route as WsGatedSettingsApiTokensRouteImport } from './routes/$ws/_gated/settings/api-tokens'
+import { Route as WsGatedWorkspaceViewsIndexRouteImport } from './routes/$ws/_gated/workspace-views/index'
 import { Route as WsGatedWorkspaceViewsAllIssuesRouteImport } from './routes/$ws/_gated/workspace-views/all-issues'
 import { Route as GodModeDashboardAuthenticationIndexRouteImport } from './routes/god-mode/_dashboard/authentication/index'
 import { Route as GodModeDashboardAuthenticationGiteaRouteImport } from './routes/god-mode/_dashboard/authentication/gitea'
@@ -398,6 +399,12 @@ const WsGatedSettingsApiTokensRoute =
   WsGatedSettingsApiTokensRouteImport.update({
     id: '/settings/api-tokens',
     path: '/settings/api-tokens',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
+const WsGatedWorkspaceViewsIndexRoute =
+  WsGatedWorkspaceViewsIndexRouteImport.update({
+    id: '/workspace-views/',
+    path: '/workspace-views/',
     getParentRoute: () => WsGatedRouteRoute,
   } as any)
 const WsGatedWorkspaceViewsAllIssuesRoute =
@@ -815,6 +822,7 @@ export interface FileRoutesByFullPath {
   '/$ws/prompts/': typeof WsGatedPromptsIndexRoute
   '/$ws/runners/': typeof WsGatedRunnersIndexRoute
   '/$ws/schedulers/': typeof WsGatedSchedulersIndexRoute
+  '/$ws/workspace-views/': typeof WsGatedWorkspaceViewsIndexRoute
   '/god-mode/authentication/': typeof GodModeDashboardAuthenticationIndexRoute
   '/god-mode/loop/': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/workspace/': typeof GodModeDashboardWorkspaceIndexRoute
@@ -918,6 +926,7 @@ export interface FileRoutesByTo {
   '/$ws/prompts': typeof WsGatedPromptsIndexRoute
   '/$ws/runners': typeof WsGatedRunnersIndexRoute
   '/$ws/schedulers': typeof WsGatedSchedulersIndexRoute
+  '/$ws/workspace-views': typeof WsGatedWorkspaceViewsIndexRoute
   '/god-mode/authentication': typeof GodModeDashboardAuthenticationIndexRoute
   '/god-mode/loop': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/workspace': typeof GodModeDashboardWorkspaceIndexRoute
@@ -1032,6 +1041,7 @@ export interface FileRoutesById {
   '/$ws/_gated/prompts/': typeof WsGatedPromptsIndexRoute
   '/$ws/_gated/runners/': typeof WsGatedRunnersIndexRoute
   '/$ws/_gated/schedulers/': typeof WsGatedSchedulersIndexRoute
+  '/$ws/_gated/workspace-views/': typeof WsGatedWorkspaceViewsIndexRoute
   '/god-mode/_dashboard/authentication/': typeof GodModeDashboardAuthenticationIndexRoute
   '/god-mode/_dashboard/loop/': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/_dashboard/workspace/': typeof GodModeDashboardWorkspaceIndexRoute
@@ -1147,6 +1157,7 @@ export interface FileRouteTypes {
     | '/$ws/prompts/'
     | '/$ws/runners/'
     | '/$ws/schedulers/'
+    | '/$ws/workspace-views/'
     | '/god-mode/authentication/'
     | '/god-mode/loop/'
     | '/god-mode/workspace/'
@@ -1250,6 +1261,7 @@ export interface FileRouteTypes {
     | '/$ws/prompts'
     | '/$ws/runners'
     | '/$ws/schedulers'
+    | '/$ws/workspace-views'
     | '/god-mode/authentication'
     | '/god-mode/loop'
     | '/god-mode/workspace'
@@ -1363,6 +1375,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/prompts/'
     | '/$ws/_gated/runners/'
     | '/$ws/_gated/schedulers/'
+    | '/$ws/_gated/workspace-views/'
     | '/god-mode/_dashboard/authentication/'
     | '/god-mode/_dashboard/loop/'
     | '/god-mode/_dashboard/workspace/'
@@ -1818,6 +1831,13 @@ declare module '@tanstack/react-router' {
       path: '/settings/api-tokens'
       fullPath: '/$ws/settings/api-tokens'
       preLoaderRoute: typeof WsGatedSettingsApiTokensRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/workspace-views/': {
+      id: '/$ws/_gated/workspace-views/'
+      path: '/workspace-views'
+      fullPath: '/$ws/workspace-views/'
+      preLoaderRoute: typeof WsGatedWorkspaceViewsIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/$ws/_gated/workspace-views/all-issues': {
@@ -2436,6 +2456,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedProjectsIndexRoute: typeof WsGatedProjectsIndexRoute
   WsGatedPromptsIndexRoute: typeof WsGatedPromptsIndexRoute
   WsGatedSchedulersIndexRoute: typeof WsGatedSchedulersIndexRoute
+  WsGatedWorkspaceViewsIndexRoute: typeof WsGatedWorkspaceViewsIndexRoute
   WsGatedSettingsAccountSplatRoute: typeof WsGatedSettingsAccountSplatRoute
   WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
   WsGatedSettingsProjectsIndexRoute: typeof WsGatedSettingsProjectsIndexRoute
@@ -2474,6 +2495,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedProjectsIndexRoute: WsGatedProjectsIndexRoute,
   WsGatedPromptsIndexRoute: WsGatedPromptsIndexRoute,
   WsGatedSchedulersIndexRoute: WsGatedSchedulersIndexRoute,
+  WsGatedWorkspaceViewsIndexRoute: WsGatedWorkspaceViewsIndexRoute,
   WsGatedSettingsAccountSplatRoute: WsGatedSettingsAccountSplatRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
   WsGatedSettingsProjectsIndexRoute: WsGatedSettingsProjectsIndexRoute,

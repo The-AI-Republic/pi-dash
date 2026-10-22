@@ -5,8 +5,10 @@
 // enter here; routes render the list screen.
 
 export { viewKeys } from "./api/keys.js";
-export { projectViewsQueryOptions } from "./api/queries.js";
+export { projectViewsQueryOptions, workspaceViewsQueryOptions } from "./api/queries.js";
 export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
+export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
+export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
 export type { ProjectViewsListScreenProps } from "./components/ProjectViewsListScreen.js";
 export {
   PROJECT_VIEWS_CRUMB,
@@ -22,3 +24,16 @@ export {
   viewAccessLabel,
 } from "./lib/projectViews.js";
 export type { ProjectViewsBodyState, ProjectViewsBodyInput, ViewOwner } from "./lib/projectViews.js";
+export {
+  capWorkspaceViewName,
+  matchesWorkspaceViewQuery,
+  resolveWorkspaceCustomsState,
+  selectWorkspaceViewGroups,
+  sortWorkspaceViewsNewestFirst,
+  WORKSPACE_DEFAULT_VIEWS,
+  WORKSPACE_VIEW_NAME_LIMIT,
+  workspaceCustomViewHref,
+  workspaceDefaultViewHref,
+  workspaceViewsTitle,
+} from "./lib/workspaceViews.js";
+export type { WorkspaceCustomsState, WorkspaceDefaultView, WorkspaceViewGroups } from "./lib/workspaceViews.js";
