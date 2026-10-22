@@ -89,7 +89,7 @@ function cardOf(facts: {
     count: async () => 1,
     innerText: async () => facts.text,
     getByTestId: (id: string) => {
-      if (id === "app-card-name") return locator({ innerText: async () => facts.name });
+      if (id === "app-card-name") return locator({ count: async () => 1, innerText: async () => facts.name });
       if (id === "app-card-icon") {
         if (facts.iconSrc === null || facts.iconSrc === undefined) return locator();
         return locator({
@@ -98,7 +98,10 @@ function cardOf(facts: {
           getAttribute: async () => facts.iconSrc,
         });
       }
-      if (id === "app-card-tile") return locator({ innerText: async () => facts.letter ?? "" });
+      if (id === "app-card-tile") {
+        if (facts.letter === undefined) return locator();
+        return locator({ count: async () => 1, innerText: async () => facts.letter ?? "" });
+      }
       return locator();
     },
     getByRole: (role: string, options?: { name?: string }) => {
@@ -266,14 +269,14 @@ describe("cloud apps cards", () => {
       text: "Inline Icon Install",
       actions: ["Install"],
       iconSrc: "data:image/svg+xml,abc",
-      letter: "I",
+      // No tile: the icon card reports the name initial.
     }),
   };
   const needsAuth = {
     name: "Manual CRM",
     card: cardOf({
       name: "Manual CRM",
-      text: "Manual CRM Connection needed Connect",
+      text: "Manual CRM Needs connection Connect",
       actions: ["Connect"],
       letter: "M",
     }),

@@ -27548,7 +27548,8 @@ export class WebNewDriver implements ParityDriver {
 
   async cloudAppsOpenFromSidebar(): Promise<void> {
     await this.page.locator('#main-sidebar a[href$="/apps/"]').first().click({ timeout: 60_000 });
-    await this.page.waitForURL("**/apps*", { timeout: 60_000 });
+    // SPA navigation never fires load: settle on the Apps heading instead.
+    await this.cloudAppsMain().getByRole("heading", { name: "Apps" }).first().waitFor({ timeout: 60_000 });
   }
 
   async cloudAppsIntroText(): Promise<string> {
@@ -27611,17 +27612,12 @@ export class WebNewDriver implements ParityDriver {
     const out: CloudAppsCardFacts[] = [];
     for (let index = 0; index < count; index++) {
       const card = cards.nth(index);
-      const name = (
-        (await card
-          .getByTestId("app-card-name")
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      ).trim();
+      const nameNode = card.getByTestId("app-card-name").first();
+      const name = (await nameNode.count()) > 0 ? ((await nameNode.innerText().catch(() => "")) ?? "").trim() : "";
       const text = ((await card.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ");
       const badge: CloudAppsCardFacts["badge"] = /\bInstalled\b/.test(text)
         ? "installed"
-        : /\bConnection needed\b/.test(text)
+        : /\bNeeds connection\b/.test(text)
           ? "needs-connection"
           : null;
       const buttons = card.getByRole("button");
@@ -27645,13 +27641,13 @@ export class WebNewDriver implements ParityDriver {
         const src = (await iconImg.getAttribute("src").catch(() => "")) ?? "";
         icon = src.startsWith("data:") ? "inline" : "proxied";
       }
-      const letter = (
-        (await card
-          .getByTestId("app-card-tile")
-          .first()
-          .innerText()
-          .catch(() => "")) ?? ""
-      ).trim();
+      // Count first: innerText() on a missing tile would auto-wait out
+      // the poll instead of resolving empty.
+      const tile = card.getByTestId("app-card-tile").first();
+      const tileText = (await tile.count()) > 0 ? ((await tile.innerText().catch(() => "")) ?? "").trim() : "";
+      // The tile renders only when no icon does (row CLOUD-028); under an
+      // icon the letter is the name initial the tile would show.
+      const letter = tileText !== "" ? tileText : name.trim().slice(0, 1).toUpperCase();
       out.push({ name, badge, actions, icon, letter });
     }
     return out;
