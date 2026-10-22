@@ -2710,6 +2710,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "system-configuration",
  "tauri",
  "tauri-build",
  "tauri-plugin-deep-link",
@@ -2721,6 +2722,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "windows-registry",
 ]
 
 [[package]]
