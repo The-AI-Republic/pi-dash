@@ -70,6 +70,60 @@ pub use pidash_services::app_cycles::queries;
 /// (`app/views/cycle/issue.py:49`).
 pub use queries::CYCLE_ISSUE_FILTERSET_FIELDS;
 
+/// Django's `<uuid:>` converter is lowercase-hyphenated only
+/// (`django/urls/converters.py`, compiled case-sensitively). Every other
+/// spelling `Uuid::parse_str` accepts — uppercase, simple 32-hex, braced
+/// `{…}`, `urn:uuid:…` — fails URL resolution and answers Django's
+/// resolver 404 before any auth or view code runs. Mirrors the
+/// PIDASHCONV-1132 `license` helper (`license/handlers_admin.rs`).
+pub(crate) fn is_canonical_uuid(raw: &str) -> bool {
+    if raw.len() != 36 {
+        return false;
+    }
+    raw.bytes().enumerate().all(|(index, byte)| {
+        if index == 8 || index == 13 || index == 18 || index == 23 {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+        }
+    })
+}
+
+/// A path segment `Uuid::parse_str` accepts but Django's `<uuid:>` never
+/// routes (uppercase / simple / braced / urn). Such routes must proxy to
+/// Django so its own resolver 404 comes back byte-for-byte, rather than
+/// the segment being served like the canonical id.
+pub(crate) fn is_noncanonical_uuid(raw: &str) -> bool {
+    raw.parse::<uuid::Uuid>().is_ok() && !is_canonical_uuid(raw)
+}
+
+/// Rebuild the incoming request (method, uri and headers only, empty
+/// body) and proxy it to Django. The resolver 404 reads no body, and the
+/// PIDASHCONV-1095/-1132 precedents rebuild exactly this way.
+pub(crate) async fn proxy_segment(
+    state: AppState,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let mut builder = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers.iter() {
+        // The body is rebuilt empty, so a copied `Content-Length` (or a
+        // `Transfer-Encoding`) would describe bytes that never arrive and
+        // hang Django waiting for them. Let the client set the length.
+        if name == axum::http::header::CONTENT_LENGTH
+            || name == axum::http::header::TRANSFER_ENCODING
+        {
+            continue;
+        }
+        builder = builder.header(name, value);
+    }
+    let req = builder
+        .body(axum::body::Body::empty())
+        .expect("proxy request");
+    crate::edge::proxy(axum::extract::State(state), req).await
+}
+
 /// Endpoints whose list path runs the shared `ComplexFilterBackend`
 /// JSON-tree filter before the filterset (`issue.py:43` + `:119`).
 pub const COMPLEX_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
