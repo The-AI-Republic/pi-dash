@@ -73,7 +73,13 @@ export function ProjectQuickActions({
           onSelect: () => runAction(entry.id),
         }))}
       />
-      <PublishProjectEntry projectName={projectName} open={publishOpen} onOpenChange={setPublishOpen} />
+      <PublishProjectEntry
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectName={projectName}
+        open={publishOpen}
+        onOpenChange={setPublishOpen}
+      />
       <LeaveProjectEntry
         workspaceSlug={workspaceSlug}
         projectId={projectId}

@@ -283,7 +283,13 @@ export function SidebarProjectRow({
       {dropIndicator === "below" ? (
         <span data-testid="project-drop-indicator" className="absolute inset-x-2 bottom-0 h-0.5 bg-(--accent)" />
       ) : null}
-      <PublishProjectEntry projectName={project.name} open={publishOpen} onOpenChange={setPublishOpen} />
+      <PublishProjectEntry
+        workspaceSlug={workspaceSlug}
+        projectId={project.id}
+        projectName={project.name}
+        open={publishOpen}
+        onOpenChange={setPublishOpen}
+      />
       <LeaveProjectEntry
         workspaceSlug={workspaceSlug}
         projectId={project.id}

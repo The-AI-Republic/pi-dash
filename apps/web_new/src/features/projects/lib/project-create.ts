@@ -15,6 +15,19 @@ export const CREATE_NAME_MAX_LENGTH = 255;
 /** Longest short code the form keeps while deriving or typing. */
 export const CREATE_IDENTIFIER_MAX_LENGTH = 10;
 
+/** Longest repository URL and base branch the form accepts. */
+export const CREATE_REPO_URL_MAX_LENGTH = 512;
+export const CREATE_BASE_BRANCH_MAX_LENGTH = 128;
+
+/** Characters a base branch may contain. */
+export const BASE_BRANCH_PATTERN = /^[A-Za-z0-9._/-]*$/;
+
+/** Guidance the description field carries on the create form (target main#503). */
+export const CREATE_DESCRIPTION_PLACEHOLDER = "Project Context (Will be shown to AI agents)";
+
+/** Reserved identifier shape: one to ten uppercase ASCII letters or digits. */
+export const IDENTIFIER_PATTERN = /^[\p{L}\p{N}]{1,10}$/u;
+
 /** Visibility values the server reads (private hides, public shares). */
 export const CREATE_NETWORK_PRIVATE = 0;
 export const CREATE_NETWORK_PUBLIC = 2;
@@ -89,14 +102,18 @@ export function buildCreateLogoProps(emoji: string): Record<string, unknown> {
 export interface CreateFieldValues {
   name: string;
   identifier: string;
+  repoUrl?: string;
+  baseBranch?: string;
 }
 
 export interface CreateFieldErrors {
   name?: string | undefined;
   identifier?: string | undefined;
+  repoUrl?: string | undefined;
+  baseBranch?: string | undefined;
 }
 
-/** Client-side rules: both fields required, both length-capped. */
+/** Client-side rules: identity required; repository and branch length/shape capped. */
 export function validateCreateFields(values: CreateFieldValues): CreateFieldErrors {
   const errors: CreateFieldErrors = {};
   if (values.name.trim() === "") {
@@ -108,6 +125,16 @@ export function validateCreateFields(values: CreateFieldValues): CreateFieldErro
     errors.identifier = "Enter a short code.";
   } else if (values.identifier.length > CREATE_IDENTIFIER_MAX_LENGTH) {
     errors.identifier = `Keep the short code to ${CREATE_IDENTIFIER_MAX_LENGTH} characters.`;
+  } else if (!IDENTIFIER_PATTERN.test(values.identifier.toUpperCase())) {
+    errors.identifier = "Use up to 10 letters and numbers only.";
+  }
+  if ((values.repoUrl ?? "").trim().length > CREATE_REPO_URL_MAX_LENGTH) {
+    errors.repoUrl = `Keep the repository URL to ${CREATE_REPO_URL_MAX_LENGTH} characters or fewer.`;
+  }
+  if ((values.baseBranch ?? "").length > CREATE_BASE_BRANCH_MAX_LENGTH) {
+    errors.baseBranch = `Keep the base branch to ${CREATE_BASE_BRANCH_MAX_LENGTH} characters.`;
+  } else if (!BASE_BRANCH_PATTERN.test(values.baseBranch ?? "")) {
+    errors.baseBranch = "Base branch may only contain letters, numbers, and . _ / -.";
   }
   return errors;
 }
@@ -126,6 +153,8 @@ export function selectCreateFieldErrors(error: unknown): CreateFieldErrors {
 }
 
 export interface CreatePayloadValues extends CreateFieldValues {
+  repoUrl?: string;
+  baseBranch?: string;
   description: string;
   network: number;
   projectLead: string | null;
@@ -143,6 +172,8 @@ export function buildCreatePayload(values: CreatePayloadValues): ProjectCreateIn
     name: values.name.trim(),
     identifier: values.identifier.toUpperCase(),
     description: values.description,
+    repo_url: (values.repoUrl ?? "").trim(),
+    base_branch: (values.baseBranch ?? "").trim(),
     network: values.network,
     project_lead: values.projectLead,
     logo_props: buildCreateLogoProps(values.icon),

@@ -9,8 +9,10 @@ import {
   buildCreatePayload,
   CREATE_DEFAULT_ICON,
   CREATE_ICON_CHOICES,
+  CREATE_BASE_BRANCH_MAX_LENGTH,
   CREATE_IDENTIFIER_MAX_LENGTH,
   CREATE_NAME_MAX_LENGTH,
+  CREATE_REPO_URL_MAX_LENGTH,
   deriveProjectIdentifier,
   IDENTIFIER_TAKEN_CODE,
   IDENTIFIER_TAKEN_MESSAGE,
@@ -130,6 +132,27 @@ describe("validateCreateFields", () => {
       String(CREATE_IDENTIFIER_MAX_LENGTH)
     );
   });
+
+  it("rejects identifier punctuation", () => {
+    expect(validateCreateFields({ name: "Nebula", identifier: "NEB!" }).identifier).toContain("letters and numbers");
+  });
+
+  it("caps the repository URL", () => {
+    const long = "x".repeat(CREATE_REPO_URL_MAX_LENGTH + 1);
+    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", repoUrl: long }).repoUrl).toContain(
+      String(CREATE_REPO_URL_MAX_LENGTH)
+    );
+  });
+
+  it("caps and shapes the base branch", () => {
+    const long = "x".repeat(CREATE_BASE_BRANCH_MAX_LENGTH + 1);
+    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", baseBranch: long }).baseBranch).toContain(
+      String(CREATE_BASE_BRANCH_MAX_LENGTH)
+    );
+    expect(validateCreateFields({ name: "Nebula", identifier: "NEB", baseBranch: "feat branch" }).baseBranch).toContain(
+      "may only contain"
+    );
+  });
 });
 
 describe("selectCreateFieldErrors", () => {
@@ -184,6 +207,8 @@ describe("buildCreatePayload", () => {
       name: "  Nebula Craft ",
       identifier: "neb",
       description: "Team space",
+      repoUrl: "git@github.com:acme/nebula.git",
+      baseBranch: "develop",
       network: 2,
       projectLead: null,
       icon: "🌊",
@@ -193,6 +218,8 @@ describe("buildCreatePayload", () => {
       name: "Nebula Craft",
       identifier: "NEB",
       description: "Team space",
+      repo_url: "git@github.com:acme/nebula.git",
+      base_branch: "develop",
       network: 2,
       project_lead: null,
       logo_props: { in_use: "emoji", emoji: { value: "🌊" } },
@@ -210,6 +237,8 @@ describe("buildCreatePayload", () => {
       name: "Nebula",
       identifier: "NEB",
       description: "",
+      repoUrl: "",
+      baseBranch: "",
       network: 0,
       projectLead: "323e4567-e89b-12d3-a456-426614174002",
       icon: "🌊",
@@ -219,5 +248,19 @@ describe("buildCreatePayload", () => {
       expect(key.startsWith("cover_")).toBe(false);
     }
     expect(payload.project_lead).toBe("323e4567-e89b-12d3-a456-426614174002");
+  });
+
+  it("sends empty repository fields when the optional values are omitted", () => {
+    const payload = buildCreatePayload({
+      name: "Nebula",
+      identifier: "NEB",
+      description: "",
+      network: 0,
+      projectLead: null,
+      icon: "🌊",
+      timezone: "UTC",
+    });
+    expect(payload.repo_url).toBe("");
+    expect(payload.base_branch).toBe("");
   });
 });

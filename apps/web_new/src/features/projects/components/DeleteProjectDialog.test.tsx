@@ -38,6 +38,7 @@ function stubClient(status: number, calls: string[] = []) {
 function setup(status = 204) {
   const calls = stubClient(status);
   const onOpenChange = vi.fn();
+  const onNavigate = vi.fn();
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <DeleteProjectDialog
@@ -46,10 +47,11 @@ function setup(status = 204) {
         projectName="Doomed Project"
         open
         onOpenChange={onOpenChange}
+        onNavigate={onNavigate}
       />
     </QueryClientProvider>
   );
-  return { calls, onOpenChange };
+  return { calls, onOpenChange, onNavigate };
 }
 
 function fillBoth(name: string, phrase: string) {
@@ -96,6 +98,16 @@ describe("DeleteProjectDialog", () => {
     expect(screen.getByRole("button", { name: "Delete project" }).hasAttribute("disabled")).toBe(false);
   });
 
+  it("ignores a click while the confirmations are incomplete", () => {
+    const { calls } = setup();
+    const submit = screen.getByRole("button", { name: "Delete project" });
+    // Disabled controls swallow clicks; drop the attribute to prove the
+    // handler's own gate also refuses an unconfirmed submission.
+    (submit as HTMLButtonElement).disabled = false;
+    fireEvent.click(submit);
+    expect(calls).toHaveLength(0);
+  });
+
   it("deletes on correct entries with a success notice and closes", async () => {
     const { calls, onOpenChange } = setup();
 
@@ -108,6 +120,13 @@ describe("DeleteProjectDialog", () => {
       )
     ).toBe(true);
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("returns to the project list when the host provides navigation", async () => {
+    const { onNavigate } = setup();
+    fillBoth("Doomed Project", DELETE_CONFIRM_PHRASE);
+    fireEvent.click(screen.getByRole("button", { name: "Delete project" }));
+    await waitFor(() => expect(onNavigate).toHaveBeenCalledWith("/acme/projects"));
   });
 
   it("shows the working label while the delete flies", async () => {

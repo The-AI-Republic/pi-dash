@@ -16,6 +16,8 @@ export interface ProjectCreateInput {
   name: string;
   identifier: string;
   description?: string;
+  repo_url?: string;
+  base_branch?: string;
   network?: number;
   project_lead?: string | null;
   logo_props?: Record<string, unknown>;

@@ -67,7 +67,6 @@ export function LeaveProjectDialog({
     onSuccess: () => {
       notifySuccess(LEFT_TITLE, `${projectName} is off your project list.`);
       onOpenChange(false);
-      onNavigate(`/${workspaceSlug}/projects`);
     },
   });
 
@@ -82,6 +81,10 @@ export function LeaveProjectDialog({
       return;
     }
     setPhraseError(null);
+    // The list route lands before the leave request fires (PSET-015), so a
+    // held write leaves the caller on the list with membership intact.
+    onOpenChange(false);
+    onNavigate(`/${workspaceSlug}/projects`);
     leave.mutate();
   }
 

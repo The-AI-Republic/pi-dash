@@ -8,7 +8,7 @@
 // visibility, lead and icon with an auto-derived short code;
 // duplicates map onto their fields. The form offers no cover
 // control and the submit is a single POST with no cover value.
-import { Button, Dialog, Input, Menu, Popover, Textarea, cn } from "@pidash/kit";
+import { Button, Combobox, Dialog, Input, Menu, Popover, Textarea, cn } from "@pidash/kit";
 import type { WorkspaceMember } from "@pidash/api-client";
 import { Check, ChevronDown, Globe, Lock } from "lucide-react";
 import * as React from "react";
@@ -19,6 +19,8 @@ import {
   buildCreatePayload,
   CREATE_ICON_CHOICES,
   CREATE_IDENTIFIER_MAX_LENGTH,
+  CREATE_DESCRIPTION_PLACEHOLDER,
+  CREATE_REPO_URL_MAX_LENGTH,
   CREATE_NETWORK_PRIVATE,
   CREATE_NETWORK_PUBLIC,
   deriveProjectIdentifier,
@@ -50,6 +52,9 @@ export function CreateProjectDialog({
   const [identifier, setIdentifier] = React.useState("");
   const [autoSync, setAutoSync] = React.useState(true);
   const [description, setDescription] = React.useState("");
+  const [repoUrl, setRepoUrl] = React.useState("");
+  const [baseBranch, setBaseBranch] = React.useState("");
+  const [template, setTemplate] = React.useState("blank");
   const [network, setNetwork] = React.useState<number>(CREATE_NETWORK_PUBLIC);
   const [lead, setLead] = React.useState<string | null>(null);
   const [icon, setIcon] = React.useState(() => pickCreateIcon());
@@ -64,6 +69,9 @@ export function CreateProjectDialog({
     setIdentifier("");
     setAutoSync(true);
     setDescription("");
+    setRepoUrl("");
+    setBaseBranch("");
+    setTemplate("blank");
     setNetwork(CREATE_NETWORK_PUBLIC);
     setLead(null);
     setIcon(pickCreateIcon());
@@ -87,15 +95,25 @@ export function CreateProjectDialog({
   }
 
   function submit(): void {
-    const local = validateCreateFields({ name, identifier });
-    if (local.name !== undefined || local.identifier !== undefined) {
+    const local = validateCreateFields({ name, identifier, repoUrl, baseBranch });
+    if (Object.keys(local).length > 0) {
       setFieldErrors(local);
       return;
     }
     create.mutate(
       {
         workspaceSlug,
-        payload: buildCreatePayload({ name, identifier, description, network, projectLead: lead, icon, timezone }),
+        payload: buildCreatePayload({
+          name,
+          identifier,
+          description,
+          repoUrl,
+          baseBranch,
+          network,
+          projectLead: lead,
+          icon,
+          timezone,
+        }),
       },
       {
         onSuccess: () => {
@@ -131,6 +149,19 @@ export function CreateProjectDialog({
       }
     >
       <div className="flex flex-col gap-(--space-4)">
+        <Combobox
+          trigger={
+            <Button variant="secondary" size="small" aria-label="Project template" className="w-fit">
+              Blank project
+            </Button>
+          }
+          options={[{ id: "blank", label: "Blank project" }]}
+          value={template}
+          onSelect={setTemplate}
+          listLabel="Project template"
+          searchEnabled={false}
+          emptyText="No templates"
+        />
         <div className="flex items-start gap-(--space-3)">
           <Popover
             trigger={
@@ -188,8 +219,32 @@ export function CreateProjectDialog({
           label="Description"
           value={description}
           onChange={(event) => setDescription(event.target.value)}
-          placeholder="Description"
+          placeholder={CREATE_DESCRIPTION_PLACEHOLDER}
           rows={3}
+        />
+        <Input
+          label="Repository URL"
+          value={repoUrl}
+          maxLength={CREATE_REPO_URL_MAX_LENGTH}
+          onChange={(event) => {
+            setRepoUrl(event.target.value);
+            setFieldErrors((prev) => ({ ...prev, repoUrl: undefined }));
+          }}
+          placeholder="Repository URL, e.g. https://github.com/team/project"
+          autoComplete="off"
+          {...(fieldErrors.repoUrl === undefined ? {} : { error: fieldErrors.repoUrl })}
+        />
+        <Input
+          label="Base branch"
+          value={baseBranch}
+          maxLength={128}
+          onChange={(event) => {
+            setBaseBranch(event.target.value);
+            setFieldErrors((prev) => ({ ...prev, baseBranch: undefined }));
+          }}
+          placeholder="Base branch (blank uses the remote default)"
+          autoComplete="off"
+          {...(fieldErrors.baseBranch === undefined ? {} : { error: fieldErrors.baseBranch })}
         />
         <div className="flex flex-wrap items-center gap-(--space-2)">
           <Menu

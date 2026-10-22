@@ -21,6 +21,7 @@ import { EmblemPicker } from "./components/EmblemPicker.js";
 import { EmblemUploadDialog } from "./components/EmblemUploadDialog.js";
 import { ExecutionSection } from "./components/ExecutionSection.js";
 import { GeneralDetailsFields } from "./components/GeneralDetailsFields.js";
+import { GeneralDangerZone } from "./components/GeneralDangerZone.js";
 import { GeneralIdentity } from "./components/GeneralIdentity.js";
 import { RepositoryRow } from "./components/RepositoryRow.js";
 import {
@@ -228,6 +229,9 @@ function GeneralTabBody({
         executorOptions={stored.agent_executor_options}
         onChange={update}
       />
+      {canEdit ? (
+        <GeneralDangerZone workspaceSlug={workspaceSlug} projectId={projectId} projectName={stored.name} />
+      ) : null}
       {canEdit ? (
         <div className="flex justify-end">
           <Button type="submit" loading={save.isPending}>
