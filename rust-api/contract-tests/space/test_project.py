@@ -168,3 +168,62 @@ def test_issues_group_keys_exclude_soft_deleted_and_triage(anon_client, world, s
     cycle_keys = set(cycles.json()["results"])
     assert world["cycle"]["id"] in cycle_keys
     assert deleted_cycle["id"] not in cycle_keys
+
+
+def test_settings_soft_deleted_cover_asset_still_200(anon_client, world, seeder, db):
+    # Forward FKs use the unscoped _base_manager (no base_manager_name), so a
+    # soft-deleted cover asset still renders its static URL (PIDASHCONV-1262).
+    cover = seeder.create_asset(
+        world["workspace"]["id"], world["project"]["id"], world["owner"]["id"],
+        entity_type="PROJECT_COVER",
+    )
+    db.execute(
+        "UPDATE projects SET cover_image_asset_id = %s WHERE id = %s",
+        (cover["id"], world["project"]["id"]),
+    )
+    db.execute("UPDATE file_assets SET deleted_at = now() WHERE id = %s", (cover["id"],))
+
+    expected = f"/api/assets/v2/static/{cover['id']}/"
+    settings = anon_client.get(f"{BASE}/anchor/{world['anchor']}/settings/")
+    assert settings.status_code == 200
+    assert settings.json()["project_details"]["cover_image_url"] == expected
+
+    slug = world["workspace"]["slug"]
+    project_id = world["project"]["id"]
+    anchor = anon_client.get(f"{BASE}/workspaces/{slug}/projects/{project_id}/anchor/")
+    assert anchor.status_code == 200
+    assert anchor.json()["project_details"]["cover_image_url"] == expected
+
+
+def test_settings_soft_deleted_logo_asset_still_200(anon_client, world, seeder, db):
+    logo = seeder.create_asset(
+        world["workspace"]["id"], world["project"]["id"], world["owner"]["id"],
+        entity_type="WORKSPACE_LOGO",
+    )
+    db.execute(
+        "UPDATE workspaces SET logo_asset_id = %s WHERE id = %s",
+        (logo["id"], world["workspace"]["id"]),
+    )
+    db.execute("UPDATE file_assets SET deleted_at = now() WHERE id = %s", (logo["id"],))
+
+    response = anon_client.get(f"{BASE}/anchor/{world['anchor']}/settings/")
+    assert response.status_code == 200
+    assert response.json()["workspace_detail"]["logo_url"] == f"/api/assets/v2/static/{logo['id']}/"
+
+
+def test_settings_soft_deleted_project_and_workspace_still_200(anon_client, world, db):
+    # The board row itself is not soft-deleted; its nested project/workspace
+    # rows are followed through unscoped forward FKs (PIDASHCONV-1262).
+    db.execute("UPDATE projects SET deleted_at = now() WHERE id = %s", (world["project"]["id"],))
+    response = anon_client.get(f"{BASE}/anchor/{world['anchor']}/settings/")
+    assert response.status_code == 200
+    assert response.json()["project_details"]["id"] == world["project"]["id"]
+    db.execute("UPDATE projects SET deleted_at = NULL WHERE id = %s", (world["project"]["id"],))
+
+    db.execute(
+        "UPDATE workspaces SET deleted_at = now() WHERE id = %s", (world["workspace"]["id"],)
+    )
+    response = anon_client.get(f"{BASE}/anchor/{world['anchor']}/settings/")
+    assert response.status_code == 200
+    assert response.json()["workspace_detail"]["id"] == world["workspace"]["id"]
+    db.execute("UPDATE workspaces SET deleted_at = NULL WHERE id = %s", (world["workspace"]["id"],))
