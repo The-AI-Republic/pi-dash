@@ -16,5 +16,9 @@
   "friday13_window_count": 2,
   "friday13_window_has_more": false,
   "friday13_window_first": "2026-11-13T12:00:00+00:00",
-  "friday13_window_last": "2027-08-13T12:00:00+00:00"
+  "friday13_window_last": "2027-08-13T12:00:00+00:00",
+  "friday13_micro_window_count": 1,
+  "friday13_micro_window_has_more": false,
+  "friday13_micro_window_first": "2026-11-13T12:00:00+00:00",
+  "friday13_micro_window_last": "2026-11-13T12:00:00+00:00"
 }

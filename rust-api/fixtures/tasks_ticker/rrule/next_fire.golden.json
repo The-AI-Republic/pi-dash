@@ -100,6 +100,10 @@
     {
       "name": "r1300-monthly-byweekno-wkst",
       "next": "2027-05-16T12:00:00+00:00"
+    },
+    {
+      "name": "r1300-dtstart-subsecond",
+      "next": "2026-11-13T12:00:00+00:00"
     }
   ]
 }

@@ -1475,6 +1475,12 @@ mod fallback {
         /// Only expansion-relevant state is kept (`_original_rule` feeds
         /// `__str__`, which nothing calls).
         fn build(raw: RawRule, dtstart: NaiveDateTime, aware: bool) -> Result<Self> {
+            // `rrule.__init__` truncates the anchor to whole seconds
+            // (`dtstart.replace(microsecond=0)`, `rrule.py:443`); without
+            // this a sub-second anchor wrongly excludes its own
+            // truncated fire (`res >= dtstart`). `0` is always a valid
+            // nanosecond, so the fallback never runs.
+            let dtstart = dtstart.with_nanosecond(0).unwrap_or(dtstart);
             // A missing FREQ fails in the constructor call itself.
             let freq = raw.freq.ok_or(FallbackError)?;
             let interval = raw.interval.unwrap_or(1);
@@ -3166,7 +3172,7 @@ mod fallback {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
 
     fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap()
@@ -3481,6 +3487,20 @@ mod tests {
                 vec![],
                 utc(2026, 10, 19, 12, 0),
             ),
+            // Review: `rrule.__init__` truncates a sub-second anchor
+            // (`dtstart.replace(microsecond=0)`), so the truncated fire
+            // itself is yielded.
+            "r1300-dtstart-subsecond" => (
+                Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0)
+                    .unwrap()
+                    .with_nanosecond(500_000_000)
+                    .unwrap(),
+                "FREQ=WEEKLY;BYDAY=FR;BYMONTHDAY=13",
+                "UTC",
+                vec![],
+                vec![],
+                utc(2026, 11, 1, 0, 0),
+            ),
             _ => panic!("unknown next_fire vector: {name}"),
         }
     }
@@ -3586,6 +3606,38 @@ mod tests {
         assert_golden(
             out[out.len() - 1],
             fixture["friday13_window_last"].as_str().unwrap(),
+        );
+
+        // Review: a sub-second anchor still yields its truncated fire
+        // (`dtstart.replace(microsecond=0)` in `rrule.__init__`).
+        let (out, has_more) = occurrences_between(
+            Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0)
+                .unwrap()
+                .with_nanosecond(500_000_000)
+                .unwrap(),
+            "FREQ=WEEKLY;BYDAY=FR;BYMONTHDAY=13",
+            "UTC",
+            &[],
+            &[],
+            utc(2026, 11, 1, 0, 0),
+            utc(2026, 12, 1, 0, 0),
+            5000,
+        );
+        assert_eq!(
+            out.len(),
+            fixture["friday13_micro_window_count"].as_u64().unwrap() as usize
+        );
+        assert_eq!(
+            has_more,
+            fixture["friday13_micro_window_has_more"].as_bool().unwrap()
+        );
+        assert_golden(
+            out[0],
+            fixture["friday13_micro_window_first"].as_str().unwrap(),
+        );
+        assert_golden(
+            out[out.len() - 1],
+            fixture["friday13_micro_window_last"].as_str().unwrap(),
         );
 
         // Single-shot in window (`:394-402`).
