@@ -8,7 +8,7 @@
 // (start stays at or before due). The bare DateCalendar is exported for
 // surfaces that compose their own trigger.
 
-import { IconButton, Popover } from "@pidash/kit";
+import { IconButton, Popover, cn } from "@pidash/kit";
 import { CalendarDays, ChevronLeft, ChevronRight, X } from "lucide-react";
 import * as React from "react";
 
@@ -162,6 +162,8 @@ export interface DatePickerProps {
   disabled?: boolean | undefined;
   /** Hover clear resetting to null. Defaults to true. */
   clearable?: boolean | undefined;
+  /** Danger day styling for an overdue value (ISS-153); the trigger carries it too. */
+  overdue?: boolean | undefined;
   testId?: string | undefined;
   /** Explicit keyboard position inside a dialog's tab order. */
   tabIndex?: number | undefined;
@@ -183,6 +185,7 @@ export function DatePicker({
   placeholder = "Select date",
   disabled = false,
   clearable = true,
+  overdue = false,
   testId = "date-picker",
   tabIndex,
   trigger,
@@ -214,11 +217,10 @@ export function DatePicker({
               aria-label={label}
               disabled={disabled}
               data-testid={`${testId}-trigger`}
-              className={
-                value === null
-                  ? "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text-muted) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
-                  : "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--text) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent"
-              }
+              className={cn(
+                "text-body inline-flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) hover:bg-(--subtle) disabled:cursor-not-allowed disabled:hover:bg-transparent",
+                value === null ? "text-(--text-muted)" : overdue ? "text-(--danger)" : "text-(--text)"
+              )}
             >
               <CalendarDays size={14} strokeWidth={2} aria-hidden="true" className="shrink-0" />
               {value === null ? placeholder : formatDay(value)}

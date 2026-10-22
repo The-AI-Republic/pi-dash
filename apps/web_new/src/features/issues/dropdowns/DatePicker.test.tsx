@@ -153,6 +153,22 @@ describe("DatePicker", () => {
     expect(screen.queryByTestId("date-picker-calendar")).not.toBeInTheDocument();
   });
 
+  it("paints an overdue value's trigger in the danger tone", () => {
+    const { rerender } = render(<DatePicker label="Due date" value="2020-01-01" onChange={() => {}} overdue />);
+    const trigger = screen.getByRole("button", { name: "Due date" });
+    expect(trigger).toHaveClass("text-(--danger)");
+    expect(trigger).not.toHaveClass("text-(--text)");
+    rerender(<DatePicker label="Due date" value="2020-01-01" onChange={() => {}} />);
+    expect(screen.getByRole("button", { name: "Due date" })).toHaveClass("text-(--text)");
+  });
+
+  it("keeps the muted placeholder when asked to flag an empty value", () => {
+    render(<DatePicker label="Due date" value={null} onChange={() => {}} overdue />);
+    const trigger = screen.getByRole("button", { name: "Due date" });
+    expect(trigger).toHaveClass("text-(--text-muted)");
+    expect(trigger).not.toHaveClass("text-(--danger)");
+  });
+
   it("threads min, max and week start into the calendar", () => {
     render(
       <DatePicker

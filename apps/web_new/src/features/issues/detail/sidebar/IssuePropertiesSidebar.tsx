@@ -19,10 +19,14 @@ import { SidebarProperties, SidebarPropertiesSkeleton } from "./SidebarPropertie
 export const PROPERTIES_LOAD_FAILED = "Couldn't load the properties.";
 
 /**
- * The fields the sidebar reads: the offered execution targets and the
- * default executor an issue with no override inherits.
+ * The fields the sidebar reads: the offered execution targets, the
+ * default executor an issue with no override inherits, and the feature
+ * switches that hide the estimate, module and cycle rows.
  */
-export type SidebarProject = Pick<ProjectDetail, "agent_executor_options" | "default_agent_executor">;
+export type SidebarProject = Pick<
+  ProjectDetail,
+  "agent_executor_options" | "default_agent_executor" | "identifier" | "module_view" | "cycle_view" | "estimate"
+>;
 
 export interface IssuePropertiesSidebarProps {
   workspaceSlug: string;

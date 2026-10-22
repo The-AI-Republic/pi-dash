@@ -6,8 +6,8 @@
 // global (detail/store): wide viewports honor it with a collapse toggle
 // and an expand rail, while narrow viewports (< 768px) always render
 // the sidebar content inline under the main column. Sidebar rows arrive
-// from NEWFRONT-640/642 through the sidebar slot; until then the rail
-// stays unmounted.
+// through the sidebar slot. The parent banner (ISS-158) sits directly
+// above the title when the item has a parent.
 
 import { IconButton } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
@@ -16,6 +16,7 @@ import * as React from "react";
 
 import { useNarrowViewport } from "../../../shared/shell/narrowViewport.js";
 import { DetailMainColumn } from "./DetailMainColumn.js";
+import { ParentBanner } from "./ParentBanner.js";
 import { useDetailUiStore } from "./store.js";
 
 export interface IssueDetailRootProps {
@@ -30,6 +31,8 @@ export interface IssueDetailRootProps {
   topSlot?: React.ReactNode;
   /** Block under the description-meta row (the activity feed). */
   activity?: React.ReactNode;
+  /** Render the parent banner above the title (default true). */
+  showParentBanner?: boolean;
 }
 
 export function IssueDetailRoot({
@@ -40,6 +43,7 @@ export function IssueDetailRoot({
   sidebar,
   topSlot,
   activity,
+  showParentBanner = true,
 }: IssueDetailRootProps): React.ReactElement {
   const collapsed = useDetailUiStore((state) => state.sidebarCollapsed);
   const setCollapsed = useDetailUiStore((state) => state.setSidebarCollapsed);
@@ -58,8 +62,11 @@ export function IssueDetailRoot({
   }, [narrow, collapsed, setCollapsed]);
 
   return (
-    <div className="flex flex-col gap-(--space-8) p-(--space-8) md:flex-row">
-      <div className="min-w-0 flex-1">
+    <div data-testid="issue-detail-root" className="flex flex-col gap-(--space-8) p-(--space-8) md:flex-row">
+      <div className="flex min-w-0 flex-1 flex-col gap-(--space-4)">
+        {showParentBanner ? (
+          <ParentBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} editable={editable} />
+        ) : null}
         <DetailMainColumn
           workspaceSlug={workspaceSlug}
           projectId={projectId}

@@ -197,6 +197,22 @@ export type { DescriptionHistoryProps, VersionAuthor } from "./detail/Descriptio
 export { IssueDescriptionField } from "./detail/IssueDescriptionField.js";
 export type { IssueDescriptionFieldProps, RestoredDescription } from "./detail/IssueDescriptionField.js";
 export { IssueDetailRoot } from "./detail/IssueDetailRoot.js";
+export {
+  PARENT_BANNER_LABEL,
+  ParentBanner,
+  REMOVE_PARENT_TEXT,
+  SIBLINGS_EMPTY_TEXT,
+  SIBLINGS_LOADING_TEXT,
+} from "./detail/ParentBanner.js";
+export type { ParentBannerProps } from "./detail/ParentBanner.js";
+export {
+  PARENT_SAVE_FAILED_TITLE,
+  parentIssueQueryOptions,
+  parentSiblingsQueryOptions,
+  siblingRows,
+  useParentWrite,
+} from "./api/parent.js";
+export type { ParentWriteScope } from "./api/parent.js";
 export { IssuePropertiesSidebar } from "./detail/sidebar/index.js";
 export type { IssuePropertiesSidebarProps } from "./detail/sidebar/index.js";
 export type { IssueDetailRootProps } from "./detail/IssueDetailRoot.js";

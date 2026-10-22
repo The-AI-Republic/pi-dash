@@ -1,15 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Detail sidebar, property rows A (parity/specs/issues.md §13,
-// ISS-148–152): state, assignees, runs on, priority, created by. Each
-// editable row writes one property with an optimistic PATCH; guests,
-// archived items and synced items render the same rows with every
-// control disabled (the archived pattern from §17, ISS-220). The
-// pickers read lazily on open, except that a row already carrying a
+// Detail sidebar, property rows (parity/specs/issues.md §13,
+// ISS-148–159). Rows A: state, assignees, runs on, priority, created by.
+// Rows B: start and due dates, estimate, modules, cycle, parent and
+// labels. Each editable row writes one property with an optimistic
+// PATCH; guests, archived items and synced items render the same rows
+// with every control disabled (the archived pattern from §17, ISS-220).
+// The pickers read lazily on open, except that a row already carrying a
 // value preloads the list that names it so the first paint is accurate.
 // The workspace directory loads eagerly when a creator or an assignee
-// has to be named.
+// has to be named; the project states decide the overdue highlight.
 
 import { Skeleton, type ButtonVariant } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
@@ -22,6 +23,7 @@ import {
   StatePicker,
   executionTargetLabel,
   executionTargetPatch,
+  usePickerStates,
   usePickerWorkspaceMembers,
   type ExecutionSelection,
   type PriorityLevel,
@@ -33,6 +35,7 @@ import { CreatedByRow } from "./CreatedByRow.js";
 import { selectCreator } from "./creator.js";
 import type { SidebarProject } from "./IssuePropertiesSidebar.js";
 import { SIDEBAR_ROW_CLASS, SIDEBAR_ROW_LABEL_CLASS, SidebarRow } from "./SidebarRow.js";
+import { SidebarPropertiesB } from "./SidebarPropertiesB.js";
 
 /** Notice title when a sidebar property write is refused. */
 export const PROPERTY_SAVE_FAILED_TITLE = "Couldn't update the work item";
@@ -67,7 +70,7 @@ export interface SidebarPropertiesProps {
   workspaceSlug: string;
   projectId: string;
   issue: Issue;
-  /** Project row carrying the agent options the runs-on row is built from. */
+  /** Project row carrying the agent options and the feature switches. */
   project: SidebarProject;
   /** Project member/admin on a live project. Archived and synced items always read. */
   editable: boolean;
@@ -97,6 +100,11 @@ export function SidebarProperties({
   // neutral placeholder rather than an "unknown" verdict.
   const creatorPending = issue.created_by !== null && directory.isPending;
   const selection = selectExecutionSelection(issue, project);
+
+  // The overdue highlight reads the state's group, so the project states
+  // load with the panel rather than waiting for the state picker.
+  const states = usePickerStates(workspaceSlug, projectId, true);
+  const stateGroup = states.data?.find((state) => state.id === issue.state_id)?.group ?? null;
 
   return (
     <div className="flex flex-col gap-(--space-1)">
@@ -149,6 +157,15 @@ export function SidebarProperties({
         />
       </SidebarRow>
       <CreatedByRow creator={creator} pending={creatorPending} />
+      <SidebarPropertiesB
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        identifier={project.identifier}
+        issue={issue}
+        project={project}
+        stateGroup={stateGroup}
+        editable={editable}
+      />
     </div>
   );
 }

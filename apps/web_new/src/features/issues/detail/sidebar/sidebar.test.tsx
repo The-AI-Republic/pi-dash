@@ -671,7 +671,7 @@ describe("SidebarProperties immediate updates", () => {
 });
 
 describe("SidebarProperties", () => {
-  it("renders the five rows in order with a read-only creator", async () => {
+  it("renders the property rows in order with a read-only creator", async () => {
     const { queryClient } = harness();
     wrap(
       <SidebarProperties
@@ -684,8 +684,18 @@ describe("SidebarProperties", () => {
       queryClient
     );
     const labels = screen.getAllByRole("group").map((group) => group.getAttribute("aria-labelledby") ?? "");
-    expect(labels.length).toBe(5);
-    for (const text of ["State", "Assignees", "Runs on", "Priority", "Created by"]) {
+    expect(labels.length).toBe(9);
+    for (const text of [
+      "State",
+      "Assignees",
+      "Runs on",
+      "Priority",
+      "Created by",
+      "Start date",
+      "Due date",
+      "Parent",
+      "Labels",
+    ]) {
       expect(screen.getByText(text)).toBeInTheDocument();
     }
     await waitFor(() => expect(row("Created by")).toHaveTextContent("Ada L"));
@@ -721,7 +731,7 @@ describe("SidebarProperties", () => {
       queryClient
     );
     expect(screen.queryByText("Created by")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("group")).toHaveLength(4);
+    expect(screen.getAllByRole("group")).toHaveLength(8);
   });
 
   it("masks an intake-bot creator in the row", async () => {
@@ -1077,8 +1087,9 @@ describe("SidebarProperties", () => {
     expect(within(row("State")).getByRole("button")).toHaveTextContent("Set state");
     expect(within(row("Assignees")).getByRole("button")).toHaveTextContent("Add assignees");
     expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("Select target");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(queryClient.getQueryData(pickerKeys.states(SLUG, PROJECT))).toBeUndefined();
+    await waitFor(() => expect(queryClient.getQueryData(pickerKeys.states(SLUG, PROJECT))).toBeDefined());
+    // The states load with the panel because the overdue highlight reads
+    // the state group; the pod list still waits for its picker.
     expect(queryClient.getQueryData(pickerKeys.pods(SLUG, PROJECT))).toBeUndefined();
   });
 

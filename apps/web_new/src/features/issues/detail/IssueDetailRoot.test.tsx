@@ -190,6 +190,18 @@ describe("IssueDetailRoot", () => {
     expect(screen.getByRole("complementary", { name: "Properties" })).toHaveClass("md:hidden");
   });
 
+  it("mounts no parent banner for an item without a parent", () => {
+    stubViewport(false);
+    renderRoot();
+    expect(screen.queryByTestId("parent-banner")).not.toBeInTheDocument();
+  });
+
+  it("skips the parent banner when a host asks it to", () => {
+    stubViewport(false);
+    renderRoot({ showParentBanner: false });
+    expect(screen.queryByTestId("parent-banner")).not.toBeInTheDocument();
+  });
+
   it("reads only for guests, with no history line", () => {
     stubViewport(false);
     renderRoot({ editable: false });

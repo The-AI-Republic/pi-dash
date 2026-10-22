@@ -5,7 +5,8 @@
 // over the project's active cycles with search; a No-cycle row clears
 // the assignment. Completed cycles never list. The assigned cycle stays
 // listed unless the caller excludes it. There is no inline cycle
-// creation. Reads resolve lazily on open.
+// creation. Reads resolve lazily on open; a caller that has to name an
+// existing value before the popup opens preloads the list instead.
 import { Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
 import { Repeat } from "lucide-react";
 import * as React from "react";
@@ -35,6 +36,8 @@ export interface CyclePickerProps {
   tabIndex?: number | undefined;
   /** Stable id for the trigger, so dialogs can name the field. */
   triggerId?: string | undefined;
+  /** Read the list up front so a set value names itself before the popup opens. */
+  preload?: boolean;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -65,6 +68,7 @@ export function CyclePicker({
   placeholder = "No cycle",
   tabIndex,
   triggerId,
+  preload = false,
   open: controlledOpen,
   onOpenChange,
 }: CyclePickerProps): React.ReactElement {
@@ -76,7 +80,7 @@ export function CyclePicker({
     onOpenChange?.(next);
   }
 
-  const cycles = usePickerCycles(workspaceSlug, projectId, open && !disabled);
+  const cycles = usePickerCycles(workspaceSlug, projectId, open || preload);
   const options = React.useMemo(
     () => selectCycleOptions({ cycles: cycles.data ?? [], excludeIds: excludeCycleIds, allowClear }),
     [cycles.data, excludeCycleIds, allowClear]

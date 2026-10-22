@@ -30,6 +30,8 @@ export interface EstimatePickerProps {
   placeholder?: string;
   /** Explicit keyboard position inside a dialog's tab order. */
   tabIndex?: number | undefined;
+  /** Read the list up front so a set value names itself before the popup opens. */
+  preload?: boolean;
   open?: boolean | undefined;
   onOpenChange?: ((open: boolean) => void) | undefined;
 }
@@ -58,6 +60,7 @@ export function EstimatePicker({
   trigger,
   placeholder = "None",
   tabIndex,
+  preload = false,
   open: controlledOpen,
   onOpenChange,
 }: EstimatePickerProps): React.ReactElement {
@@ -69,7 +72,7 @@ export function EstimatePicker({
     onOpenChange?.(next);
   }
 
-  const estimates = usePickerEstimates(workspaceSlug, projectId, open && !disabled);
+  const estimates = usePickerEstimates(workspaceSlug, projectId, open || preload);
   const options = React.useMemo(
     () => selectEstimateOptions(estimates.data === undefined ? undefined : selectActiveEstimate(estimates.data)),
     [estimates.data]
