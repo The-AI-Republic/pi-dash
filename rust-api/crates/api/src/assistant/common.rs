@@ -1271,49 +1271,36 @@ pub type HandlerResult<T> = Result<T, Response>;
 
 /// The request's user: `Some` is an active session user (DRF
 /// `SessionAuthentication.authenticate`: a missing session, an unknown user
-/// id, or an inactive user all authenticate as nobody).
+/// id, an inactive user, a mismatching `_auth_user_hash`, or a backend other
+/// than `ModelBackend` all authenticate as nobody).
 pub struct Actor {
     pub id: Uuid,
     pub timezone: Tz,
 }
 
-/// Resolve the actor from the Django session (`_auth_user_id`), mirroring
-/// the `app_issues` / `license` precedent. An unparseable id, an unknown
-/// row, or an inactive user all resolve to `None` (anonymous); an
+/// Resolve the actor from the Django session through the shared
+/// [`crate::license::resolve_actor`] check — the same `get_user` semantics
+/// every DRF view gets: `_auth_user_id` must parse and name an active user,
+/// `_auth_user_backend` must be `ModelBackend`, and `_auth_user_hash` must
+/// match `user.get_session_auth_hash()`. Anything else is anonymous (Django
+/// flushes the session; the observable outcome is what is ported). An
 /// unparseable `user_timezone` is a 500 (`zoneinfo.ZoneInfo` raises inside
 /// `TimezoneMixin.initial`, which `handle_exception` maps to the generic
 /// branch).
 pub async fn request_actor(
+    state: &AppState,
     pool: &PgPool,
     extension: Option<Extension<SessionHandle>>,
 ) -> Result<Option<Actor>, Response> {
-    let raw = extension
-        .and_then(|Extension(handle)| {
-            handle
-                .snapshot()
-                .get("_auth_user_id")
-                .and_then(|v| v.as_str().map(str::to_owned))
-        })
-        .and_then(|raw| raw.parse::<Uuid>().ok());
-    let id = match raw {
-        Some(id) => id,
-        None => return Ok(None),
-    };
-    let row: Option<(bool, Option<String>)> =
-        sqlx::query_as("SELECT is_active, user_timezone FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    match row {
-        Some((true, timezone)) => {
-            let tz: Tz = match timezone.as_deref().unwrap_or("UTC").parse() {
-                Ok(tz) => tz,
-                Err(_) => return Err(server_error()),
-            };
-            Ok(Some(Actor { id, timezone: tz }))
-        }
-        _ => Ok(None),
+    match crate::license::resolve_actor(pool, state.settings().secret_key.as_bytes(), extension)
+        .await
+    {
+        Ok(Some(actor)) => Ok(Some(Actor {
+            id: actor.id,
+            timezone: actor.timezone,
+        })),
+        Ok(None) => Ok(None),
+        Err(_) => Err(server_error()),
     }
 }
 
