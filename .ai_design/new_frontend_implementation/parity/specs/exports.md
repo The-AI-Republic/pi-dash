@@ -92,9 +92,11 @@ analytics inventory; EXP-014/015 own its behavior through these tables.
 
 ### 0.3 Pages host and page-export dialog (NEWFRONT-770 / 773)
 
-The page-export dialog belongs to Pages: PAGE-074 owns the detail-header menu
-entry that opens it and PAGE-060 owns page export behavior. Exports builds the
-dialog, the local document/plain-text renderers, and a registration seam.
+The page-export dialog belongs to Pages: PAGE-060 owns the detail-header menu
+entry that opens it and PAGE-074 records the dialog's deep behavior (the
+Pages-side proof of the same dialog EXP-016–021 prove from the exports side).
+Exports builds the dialog, the local document/plain-text renderers, and a
+registration seam.
 
 Preferred seam, mirroring 548: Pages' page-detail toolbar owns the menu entry
 and the currently mounted editor/page facts; the exports feature exports
@@ -250,9 +252,10 @@ markers on EXP-018/023 so the gate can identify them without reading titles.
   NEWFRONT-765 encodes this; do not re-derive in the component. Evidence:
   old `ExportCSVToMail`; EXP-005 scenario and captured submit bodies.
 - While in flight the button reads `Exporting...` (oracle-pinned working label),
-  is non-interactive, and cannot double-submit. Success toast names the format;
-  failure toast asks for retry; the button returns usable either way. Evidence:
-  old form toast branches; EXP-005 scenario.
+  is non-interactive, and cannot double-submit. Success toast (`Export
+successful`, message naming the format); failure toast (`Error` /
+  `Export was unsuccessful. Please try again.`); the button returns to `Export`
+  and usable either way. Evidence: old form toast branches; EXP-005 scenario.
 - On success, revalidate the history list so a fresh request appears without a
   reload. Evidence: old `mutateServices`; EXP-006.
 - Backend behavior (reference, encoded by 765): POST accepts only the three
@@ -359,8 +362,9 @@ pin a distinct history error copy; do not invent a dead-end.
 - Switching to Markdown hides the size row but preserves its chosen size;
   switching back restores it. Size has no effect on Markdown. Evidence:
   EXP-017 scenario.
-- Cancel and the footer primary action; while saving the primary reads
-  `Exporting` and is non-interactive. Evidence: old modal.
+- A `Cancel` secondary action and an `Export` primary action; while saving the
+  primary reads `Exporting` and is non-interactive. Evidence: old modal;
+  EXP-021 clicks the exact `Export` name and EXP-023 tabs to both footer names.
 
 ### Content scope (EXP-018)
 
@@ -404,10 +408,11 @@ pin a distinct history error copy; do not invent a dead-end.
 - Success raises a confirmation (`Page exported successfully.` per oracle),
   closes, and resets to PDF / Everything / A4 for the next open. Evidence:
   old modal toast/reset; EXP-021.
-- Failure keeps the dialog open, shows an error notice asking for a later retry,
-  preserves choices, and returns the primary action to idle. The oracle forces
-  this through a sabotaged browser save primitive. Evidence: old catch branch;
-  EXP-021.
+- Failure keeps the dialog open, shows an error notice containing `Page could not
+be exported.` (old copy `Page could not be exported. Please try again
+later.`), preserves choices, and returns the primary action to its idle
+  `Export` label. The oracle forces this through a sabotaged browser save
+  primitive. Evidence: old catch branch; EXP-021.
 - Cancel/dismiss downloads nothing and discards choices; reopening shows
   defaults. Evidence: EXP-021.
 
