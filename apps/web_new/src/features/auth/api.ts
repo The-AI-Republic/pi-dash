@@ -41,7 +41,6 @@ import {
   type MePatch,
   type MeSettings,
   type Profile,
-  type ProfilePatch,
   type ResetPasswordInput,
   type SetPasswordResult,
   type SignInResult,
@@ -152,20 +151,6 @@ export function useUpdateMe() {
     mutationFn: (input: MePatch) => updateMe(getAppClient(), input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: sessionKeys.me });
-    },
-  });
-}
-
-/**
- * Profile writes: role, use cases, marketing consent, progress flags
- * (AUTH-031–033, AUTH-039). Refreshes the cached profile.
- */
-export function useUpdateProfile() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input: ProfilePatch) => updateProfile(getAppClient(), input),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: sessionKeys.profile });
     },
   });
 }

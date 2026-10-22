@@ -17,7 +17,8 @@ import * as React from "react";
 import { platform } from "../../../core/platform/index.js";
 import { useInstanceConfig, useMe, useProfile, useWorkspaces } from "../../../core/session/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import { useFinishOnboarding, useUpdateProfile } from "../api.js";
+import { useFinishOnboarding } from "../api.js";
+import { useUpdateProfile } from "../profile.js";
 import {
   advanceOnboardingStep,
   decideInitialOnboardingStep,

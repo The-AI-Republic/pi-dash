@@ -33,9 +33,9 @@ export {
   useSetPassword,
   useSwitchAccount,
   useUpdateMe,
-  useUpdateProfile,
   useUploadUserAvatar,
 } from "./api.js";
+export { useUpdateProfile } from "./profile.js";
 export type { AnswerInvitationInput } from "./api.js";
 export { runSignOutAction, SIGN_OUT_COMMAND_ID, signOutCommand } from "./commands.js";
 export { describeAuthError, describeSubmitFailure } from "./authErrors.js";
