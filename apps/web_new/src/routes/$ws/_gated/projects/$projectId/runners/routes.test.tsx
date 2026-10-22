@@ -59,10 +59,18 @@ vi.mock("../../../../../../features/runners/components/RunnersOverviewScreen.js"
     return <div data-testid="overview-screen" />;
   },
 }));
+const runsProps: Array<Record<string, unknown>> = [];
+vi.mock("../../../../../../features/runners/runs/RunsScreen.js", () => ({
+  RunsScreen: (props: Record<string, unknown>) => {
+    runsProps.push(props);
+    return <h1>Runs</h1>;
+  },
+}));
 
 const { Route: LayoutRoute } = await import("./route.js");
 const { Route: IndexRoute } = await import("./index.js");
-const { Route: RunsRoute } = await import("./runs.js");
+const { Route: RunsRoute } = await import("./runs.index.js");
+const { Route: RunDetailRoute } = await import("./runs.$id.js");
 const { Route: ApprovalsRoute } = await import("./approvals.js");
 const { Route: DetailRoute } = await import("./detail/$runnerId.js");
 const { Route: ChatRoute } = await import("./chat/$runnerId.js");
@@ -87,7 +95,12 @@ function mount(Component: React.ComponentType | undefined, seed = true): void {
 beforeEach(() => {
   shellProps.length = 0;
   screenProps.length = 0;
+  runsProps.length = 0;
   for (const route of [LayoutRoute, IndexRoute]) vi.spyOn(route, "useParams").mockReturnValue(params);
+  vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: 2 });
+  vi.spyOn(RunsRoute, "useParams").mockReturnValue({ ws: "acme", projectId: "p-1" });
+  vi.spyOn(RunDetailRoute, "useSearch").mockReturnValue({ page: 2 });
+  vi.spyOn(RunDetailRoute, "useParams").mockReturnValue({ ws: "acme", projectId: "p-1", id: "run-1" });
   setSessionClient({} as never);
   // The shell's reads resolve from the seeded cache; the factory only has
   // to hand the hooks a client.
@@ -132,6 +145,25 @@ describe("project runners section routes", () => {
   ])("mounts the %s section", (heading, route) => {
     mount(route.options.component);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+  });
+
+  it("passes the URL page and no selection to the runs screen", () => {
+    mount(RunsRoute.options.component);
+    expect(runsProps[0]).toEqual({ search: { page: 2 }, selectedRunId: null });
+  });
+
+  it("normalizes the runs page from the address", () => {
+    vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: "3" });
+    mount(RunsRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ search: { page: "3" }, selectedRunId: null });
+    vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: "nope" });
+    mount(RunsRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ search: { page: "nope" }, selectedRunId: null });
+  });
+
+  it("passes the run id from the address to the same screen", () => {
+    mount(RunDetailRoute.options.component);
+    expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
   });
 
   it("mounts the chat page inside the project scope", () => {

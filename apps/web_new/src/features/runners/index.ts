@@ -97,6 +97,12 @@ export { RunnersProjectShell } from "./RunnersProjectShell.js";
 export type { RunnersProjectShellProps } from "./RunnersProjectShell.js";
 export { RunnersWorkspaceShell } from "./RunnersWorkspaceShell.js";
 export type { RunnersWorkspaceShellProps } from "./RunnersWorkspaceShell.js";
+// RUN-022: the shared status badge is consumed outside this area (the
+// scheduler-binding detail), so it belongs on the public barrel. The runs
+// screens and their model stay internal to this feature and are imported
+// directly by the runs routes.
+export { RunStatusBadge } from "./runs/RunStatusBadge.js";
+export type { RunStatusBadgeProps } from "./runs/RunStatusBadge.js";
 export { runnersBase, runnersPath } from "./scope.js";
 export type { RunnersScopeInput } from "./scope.js";
 export { RUNNER_STATUS_LABELS, RUNNER_STATUS_TONES, runnerDisplayStatus, type RunnerStatus } from "./status.js";

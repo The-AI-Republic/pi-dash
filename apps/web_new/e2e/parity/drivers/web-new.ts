@@ -17590,23 +17590,63 @@ export class WebNewDriver implements ParityDriver {
   async pagesToolbarSeedStickyPref(_value: boolean): Promise<void> {
     return todo("pagesToolbarSeedStickyPref");
   }
-  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180). Stubs until
-  // --- the area lands in apps/web_new; the oracle driver stays untouched.
+  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180). The runs
+  // --- methods read the new app's own DOM contract (test ids and the runs
+  // --- API); the approvals and dispatch methods stay stubs for their slice.
 
-  async openRunsList(_workspaceSlug: string, _projectId?: string): Promise<void> {
-    return todo("openRunsList");
+  private runsBase(workspaceSlug: string, projectId?: string): string {
+    return projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
   }
 
-  async openRunsListAtPage(_workspaceSlug: string, _page: number, _projectId?: string): Promise<void> {
-    return todo("openRunsListAtPage");
+  /** A runs-list response: the collection endpoint, not a detail or cancel. */
+  private isRunsListUrl(url: string): boolean {
+    return /\/api\/runners\/runs\/\?/.test(url) && !/\/runs\/[^/?]+\//.test(url);
+  }
+
+  /** A run-detail response for one run id, including its events query. */
+  private isRunDetailUrl(url: string, runId: string): boolean {
+    try {
+      return new URL(url).pathname.endsWith(`/api/runners/runs/${runId}/`);
+    } catch {
+      return url.includes(`/api/runners/runs/${runId}/`);
+    }
+  }
+
+  private async waitRunsListSettled(timeoutMs = WebNewDriver.WAIT_MS): Promise<void> {
+    await this.page.getByTestId("runs-table").waitFor({ timeout: timeoutMs });
+    // A pending first page renders one spinner row inside the table. Wait
+    // for actual content instead: either a data row or the empty marker,
+    // which only exists once loading has finished.
+    await this.page
+      .locator('[data-testid="runs-row"], [data-testid="runs-empty"]')
+      .first()
+      .waitFor({ timeout: timeoutMs });
+  }
+
+  private async waitRunDetailSettled(timeoutMs = WebNewDriver.WAIT_MS): Promise<void> {
+    await this.page
+      .locator('[data-testid="run-detail"], [data-testid="run-detail-unavailable"]')
+      .first()
+      .waitFor({ timeout: timeoutMs });
+  }
+
+  async openRunsList(workspaceSlug: string, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs`, { timeout: 60_000 });
+    await this.waitRunsListSettled();
+  }
+
+  async openRunsListAtPage(workspaceSlug: string, page: number, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs?page=${page}`, { timeout: 60_000 });
+    await this.waitRunsListSettled();
   }
 
   async runsHistoryLength(): Promise<number> {
-    return todo("runsHistoryLength");
+    return await this.page.evaluate(() => window.history.length);
   }
 
-  async openRunDetail(_workspaceSlug: string, _runId: string, _projectId?: string): Promise<void> {
-    return todo("openRunDetail");
+  async openRunDetail(workspaceSlug: string, runId: string, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/runs/${runId}`, { timeout: 60_000 });
+    await this.waitRunDetailSettled();
   }
 
   async openApprovals(_workspaceSlug: string, _projectId?: string): Promise<void> {
@@ -17614,43 +17654,145 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async runsRows(): Promise<RunsListRow[]> {
-    return todo("runsRows");
+    const table = this.page.getByTestId("runs-table");
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const out: RunsListRow[] = [];
+    for (const row of await table.getByTestId("runs-row").all()) {
+      const statusLabel = (
+        (await row
+          .getByTestId("runs-row-status")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const prompt = (
+        (await row
+          .getByTestId("runs-row-prompt")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      out.push({ statusLabel, prompt });
+    }
+    return out;
   }
 
   async runsPager(): Promise<{ label: string; prevDisabled: boolean; nextDisabled: boolean } | null> {
-    return todo("runsPager");
+    const pager = this.page.getByTestId("runs-pager");
+    if ((await pager.count()) === 0) return null;
+    const label = (
+      (await pager
+        .getByTestId("runs-page-label")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const buttons = pager.getByRole("button");
+    if ((await buttons.count()) < 2) return null;
+    return {
+      label,
+      prevDisabled: await buttons.nth(0).isDisabled(),
+      nextDisabled: await buttons.nth(1).isDisabled(),
+    };
   }
 
   async runsEmptyVisible(): Promise<boolean> {
-    return todo("runsEmptyVisible");
+    const list = this.page.getByTestId("runs-list");
+    await list.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if ((await this.page.getByTestId("runs-row").count()) > 0) return false;
+    return (await list.getByText("No runs yet.", { exact: true }).count()) > 0;
+  }
+
+  /** Turn a pager page; waits for the URL's page value and a settled list. */
+  private async runsTurnPage(direction: "next" | "prev"): Promise<void> {
+    const pager = this.page.getByTestId("runs-pager");
+    const before = (
+      (await pager
+        .getByTestId("runs-page-label")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    await pager.getByRole("button", { name: direction === "next" ? "Next" : "Previous", exact: true }).click();
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const label = (
+        (await pager
+          .getByTestId("runs-page-label")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (label !== before) return;
+      if (Date.now() > deadline) throw new Error(`[parity] runs pager did not turn ${direction}.`);
+      await this.page.waitForTimeout(100);
+    }
   }
 
   async runsNextPage(): Promise<void> {
-    return todo("runsNextPage");
+    await this.runsTurnPage("next");
   }
 
   async runsPrevPage(): Promise<void> {
-    return todo("runsPrevPage");
+    await this.runsTurnPage("prev");
   }
 
-  async runsSelectRun(_promptMarker: string): Promise<void> {
-    return todo("runsSelectRun");
+  async runsSelectRun(promptMarker: string): Promise<void> {
+    const table = this.page.getByTestId("runs-table");
+    await table.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    for (const row of await table.getByTestId("runs-row").all()) {
+      const prompt = (
+        (await row
+          .getByTestId("runs-row-prompt")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (prompt.includes(promptMarker)) {
+        await row.click({ timeout: WebNewDriver.WAIT_MS });
+        await this.waitRunDetailSettled();
+        return;
+      }
+    }
+    throw new Error(`[parity] run row ${JSON.stringify(promptMarker)} not found.`);
   }
 
   async runDetailState(): Promise<"none" | "loading" | "loaded" | "unavailable"> {
-    return todo("runDetailState");
+    if ((await this.page.getByTestId("run-detail").count()) > 0) return "loaded";
+    if ((await this.page.getByTestId("run-detail-unavailable").count()) > 0) return "unavailable";
+    if ((await this.page.getByTestId("run-detail-loading").count()) > 0) return "loading";
+    if ((await this.page.getByTestId("run-detail-none").count()) > 0) return "none";
+    return "none";
   }
 
   async runDetailHeader(): Promise<{ id: string; statusLabel: string; executor: string } | null> {
-    return todo("runDetailHeader");
+    if ((await this.page.getByTestId("run-detail").count()) === 0) return null;
+    return {
+      id: (
+        (await this.page
+          .getByTestId("run-detail-id")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      statusLabel: (
+        (await this.page
+          .getByTestId("run-status")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      executor: (
+        (await this.page
+          .getByTestId("run-executor")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+    };
   }
 
   async runDetailPrompt(): Promise<string | null> {
-    return todo("runDetailPrompt");
+    const prompt = this.page.getByTestId("run-prompt");
+    if ((await prompt.count()) === 0) return null;
+    return (await prompt.innerText()).trim();
   }
 
   async runDetailScheduler(): Promise<{ name: string; href: string } | null> {
-    return todo("runDetailScheduler");
+    const link = this.page.getByTestId("run-scheduler-link");
+    if ((await link.count()) === 0) return null;
+    return { name: ((await link.innerText()) ?? "").trim(), href: (await link.getAttribute("href")) ?? "" };
   }
 
   async runDetailError(): Promise<{
@@ -17660,46 +17802,155 @@ export class WebNewDriver implements ParityDriver {
     summary: string | null;
     action: string | null;
   } | null> {
-    return todo("runDetailError");
+    const raw = this.page.getByTestId("run-error");
+    if ((await raw.count()) === 0) return null;
+    const text = async (id: string): Promise<string | null> => {
+      const node = this.page.getByTestId(id);
+      if ((await node.count()) === 0) return null;
+      return ((await node.innerText()) ?? "").trim() || null;
+    };
+    return {
+      raw: ((await raw.innerText()) ?? "").trim(),
+      source: await text("run-error-source"),
+      kind: await text("run-error-kind"),
+      summary: await text("run-error-summary"),
+      action: await text("run-error-action"),
+    };
   }
 
   async runDetailResult(): Promise<{ summary: string | null; raw: string } | null> {
-    return todo("runDetailResult");
+    const raw = this.page.getByTestId("run-result");
+    if ((await raw.count()) === 0) return null;
+    const summaryNode = this.page.getByTestId("run-result-summary");
+    const summary = (await summaryNode.count()) === 0 ? null : ((await summaryNode.innerText()) ?? "").trim() || null;
+    return { summary, raw: ((await raw.innerText()) ?? "").trim() };
   }
 
   async runCloudPanel(): Promise<{
     tools: string[];
     calls: Array<{ tool: string; risk: string; status: string }>;
   } | null> {
-    return todo("runCloudPanel");
+    const panel = this.page.getByTestId("run-cloud-panel");
+    if ((await panel.count()) === 0) return null;
+    const tools: string[] = [];
+    for (const node of await this.page.getByTestId("run-cloud-tool").all()) {
+      tools.push(((await node.innerText()) ?? "").trim());
+    }
+    const calls: Array<{ tool: string; risk: string; status: string }> = [];
+    for (const node of await this.page.getByTestId("run-cloud-call").all()) {
+      const tool = (
+        (await node
+          .getByTestId("run-cloud-call-name")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const meta = (
+        (await node
+          .getByTestId("run-cloud-call-meta")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const [risk = "", status = ""] = meta.split(/\s*·\s*/);
+      calls.push({ tool, risk: risk.trim(), status: status.trim() });
+    }
+    return { tools, calls };
   }
 
   async runEvents(): Promise<Array<{ seq: string; kind: string; narrative: string | null }>> {
-    return todo("runEvents");
+    const out: Array<{ seq: string; kind: string; narrative: string | null }> = [];
+    for (const row of await this.page.getByTestId("run-events").locator("tbody tr").all()) {
+      if ((await row.getAttribute("data-testid")) === "run-event-narrative-row") {
+        const narrative = (
+          (await row
+            .getByTestId("run-event-narrative")
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+        const last = out.at(-1);
+        if (last !== undefined && narrative !== "") last.narrative = narrative;
+        continue;
+      }
+      const cells = row.locator("td");
+      out.push({
+        seq: (
+          (await cells
+            .nth(0)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+        kind: (
+          (await cells
+            .nth(1)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+        narrative: null,
+      });
+    }
+    return out;
   }
 
   async runCancelAvailable(): Promise<boolean> {
-    return todo("runCancelAvailable");
+    const button = this.page.getByTestId("run-cancel");
+    if ((await button.count()) === 0) return false;
+    return await button
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   async runCancelOpen(): Promise<void> {
-    return todo("runCancelOpen");
+    await this.page.getByTestId("run-cancel").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("dialog").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async runCancelDialog(): Promise<{ title: string; body: string } | null> {
-    return todo("runCancelDialog");
+    const dialog = this.page.getByRole("dialog");
+    if ((await dialog.count()) === 0) return null;
+    return {
+      title: (
+        (await dialog
+          .getByRole("heading")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      body: (
+        (await dialog
+          .getByTestId("run-cancel-body")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+    };
   }
 
   async runCancelConfirm(): Promise<void> {
-    return todo("runCancelConfirm");
+    const dialog = this.page.getByRole("dialog");
+    await dialog.getByTestId("run-cancel-confirm").click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async runsListPollCount(_windowMs: number): Promise<number> {
-    return todo("runsListPollCount");
+  /** Count GET requests matching `match` over `windowMs`. */
+  private async countRunsRequests(windowMs: number, match: (url: string) => boolean): Promise<number> {
+    let hits = 0;
+    const onRequest = (request: { url(): string; method(): string }): void => {
+      if (request.method() === "GET" && match(request.url())) hits += 1;
+    };
+    this.page.on("request", onRequest);
+    try {
+      await this.page.waitForTimeout(windowMs);
+    } finally {
+      this.page.off("request", onRequest);
+    }
+    return hits;
   }
 
-  async runDetailPollCount(_runId: string, _windowMs: number): Promise<number> {
-    return todo("runDetailPollCount");
+  async runsListPollCount(windowMs: number): Promise<number> {
+    return await this.countRunsRequests(windowMs, (url) => this.isRunsListUrl(url));
+  }
+
+  async runDetailPollCount(runId: string, windowMs: number): Promise<number> {
+    return await this.countRunsRequests(windowMs, (url) => this.isRunDetailUrl(url, runId));
   }
 
   async approvalsCards(): Promise<ApprovalCard[]> {
@@ -17726,8 +17977,24 @@ export class WebNewDriver implements ParityDriver {
     return todo("issueReTickClick");
   }
 
-  async runDetailLoadingObserved(_workspaceSlug: string, _runId: string): Promise<boolean> {
-    return todo("runDetailLoadingObserved");
+  async runDetailLoadingObserved(workspaceSlug: string, runId: string): Promise<boolean> {
+    const pattern = `**/api/runners/runs/${runId}/**`;
+    await this.page.route(pattern, async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.goto(`${this.runsBase(workspaceSlug)}/runs/${runId}`, { timeout: 60_000 });
+      const deadline = Date.now() + WebNewDriver.WAIT_MS;
+      for (;;) {
+        if ((await this.page.getByTestId("run-detail-loading").count()) > 0) return true;
+        if ((await this.page.getByTestId("run-detail").count()) > 0) return false;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(100);
+      }
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
   }
 
   // --- Analytics shell, scoping, permissions (NEWFRONT-375, ANL-001..004 + ANL-018). ---

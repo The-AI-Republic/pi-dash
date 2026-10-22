@@ -59,7 +59,6 @@ import { Route as WsGatedProjectsProjectIdRouteRouteImport } from './routes/$ws/
 import { Route as WsGatedPromptsIndexRouteImport } from './routes/$ws/_gated/prompts/index'
 import { Route as WsGatedRunnersIndexRouteImport } from './routes/$ws/_gated/runners/index'
 import { Route as WsGatedRunnersApprovalsRouteImport } from './routes/$ws/_gated/runners/approvals'
-import { Route as WsGatedRunnersRunsRouteImport } from './routes/$ws/_gated/runners/runs'
 import { Route as WsGatedSchedulersIndexRouteImport } from './routes/$ws/_gated/schedulers/index'
 import { Route as WsGatedSettingsWorkspaceRouteRouteImport } from './routes/$ws/_gated/settings/_workspace/route'
 import { Route as WsGatedSettingsApiTokensRouteImport } from './routes/$ws/_gated/settings/api-tokens'
@@ -80,6 +79,8 @@ import { Route as WsGatedProjectsProjectIdSchedulersRouteRouteImport } from './r
 import { Route as WsGatedProjectsArchivesIndexRouteImport } from './routes/$ws/_gated/projects/archives/index'
 import { Route as WsGatedRunnersChatRunnerIdRouteImport } from './routes/$ws/_gated/runners/chat/$runnerId'
 import { Route as WsGatedRunnersDetailRunnerIdRouteImport } from './routes/$ws/_gated/runners/detail/$runnerId'
+import { Route as WsGatedRunnersRunsIndexRouteImport } from './routes/$ws/_gated/runners/runs.index'
+import { Route as WsGatedRunnersRunsIdRouteImport } from './routes/$ws/_gated/runners/runs.$id'
 import { Route as WsGatedSettingsWorkspaceIndexRouteImport } from './routes/$ws/_gated/settings/_workspace/index'
 import { Route as WsGatedSettingsWorkspaceSplatRouteImport } from './routes/$ws/_gated/settings/_workspace/$'
 import { Route as WsGatedSettingsAccountSplatRouteImport } from './routes/$ws/_gated/settings/account/$'
@@ -95,7 +96,6 @@ import { Route as WsGatedProjectsProjectIdModulesModuleIdRouteImport } from './r
 import { Route as WsGatedProjectsProjectIdPagesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/pages/index'
 import { Route as WsGatedProjectsProjectIdRunnersIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/index'
 import { Route as WsGatedProjectsProjectIdRunnersApprovalsRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/approvals'
-import { Route as WsGatedProjectsProjectIdRunnersRunsRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/runs'
 import { Route as WsGatedProjectsProjectIdSchedulersIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/index'
 import { Route as WsGatedProjectsProjectIdSchedulersListRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/list'
 import { Route as WsGatedProjectsProjectIdSettingsSplatRouteImport } from './routes/$ws/_gated/projects/$projectId/settings/$'
@@ -117,6 +117,8 @@ import { Route as WsGatedSettingsProjectsProjectIdSchedulersRouteImport } from '
 import { Route as WsGatedSettingsProjectsProjectIdStatesRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/states'
 import { Route as WsGatedProjectsProjectIdRunnersChatRunnerIdRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/chat/$runnerId'
 import { Route as WsGatedProjectsProjectIdRunnersDetailRunnerIdRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/detail/$runnerId'
+import { Route as WsGatedProjectsProjectIdRunnersRunsIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/runs.index'
+import { Route as WsGatedProjectsProjectIdRunnersRunsIdRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/runs.$id'
 import { Route as WsGatedProjectsProjectIdViewsViewIdIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/views/$viewId/index'
 import { Route as WsGatedSettingsProjectsProjectIdFeaturesCyclesRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/features/cycles'
 import { Route as WsGatedSettingsProjectsProjectIdFeaturesIntakeRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/features/intake'
@@ -379,11 +381,6 @@ const WsGatedRunnersApprovalsRoute = WsGatedRunnersApprovalsRouteImport.update({
   path: '/approvals',
   getParentRoute: () => WsGatedRunnersRouteRoute,
 } as any)
-const WsGatedRunnersRunsRoute = WsGatedRunnersRunsRouteImport.update({
-  id: '/runs',
-  path: '/runs',
-  getParentRoute: () => WsGatedRunnersRouteRoute,
-} as any)
 const WsGatedSchedulersIndexRoute = WsGatedSchedulersIndexRouteImport.update({
   id: '/schedulers/',
   path: '/schedulers/',
@@ -503,6 +500,16 @@ const WsGatedRunnersDetailRunnerIdRoute =
     path: '/detail/$runnerId',
     getParentRoute: () => WsGatedRunnersRouteRoute,
   } as any)
+const WsGatedRunnersRunsIndexRoute = WsGatedRunnersRunsIndexRouteImport.update({
+  id: '/runs/',
+  path: '/runs/',
+  getParentRoute: () => WsGatedRunnersRouteRoute,
+} as any)
+const WsGatedRunnersRunsIdRoute = WsGatedRunnersRunsIdRouteImport.update({
+  id: '/runs/$id',
+  path: '/runs/$id',
+  getParentRoute: () => WsGatedRunnersRouteRoute,
+} as any)
 const WsGatedSettingsWorkspaceIndexRoute =
   WsGatedSettingsWorkspaceIndexRouteImport.update({
     id: '/',
@@ -591,12 +598,6 @@ const WsGatedProjectsProjectIdRunnersApprovalsRoute =
   WsGatedProjectsProjectIdRunnersApprovalsRouteImport.update({
     id: '/approvals',
     path: '/approvals',
-    getParentRoute: () => WsGatedProjectsProjectIdRunnersRouteRoute,
-  } as any)
-const WsGatedProjectsProjectIdRunnersRunsRoute =
-  WsGatedProjectsProjectIdRunnersRunsRouteImport.update({
-    id: '/runs',
-    path: '/runs',
     getParentRoute: () => WsGatedProjectsProjectIdRunnersRouteRoute,
   } as any)
 const WsGatedProjectsProjectIdSchedulersIndexRoute =
@@ -725,6 +726,18 @@ const WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute =
     path: '/detail/$runnerId',
     getParentRoute: () => WsGatedProjectsProjectIdRunnersRouteRoute,
   } as any)
+const WsGatedProjectsProjectIdRunnersRunsIndexRoute =
+  WsGatedProjectsProjectIdRunnersRunsIndexRouteImport.update({
+    id: '/runs/',
+    path: '/runs/',
+    getParentRoute: () => WsGatedProjectsProjectIdRunnersRouteRoute,
+  } as any)
+const WsGatedProjectsProjectIdRunnersRunsIdRoute =
+  WsGatedProjectsProjectIdRunnersRunsIdRouteImport.update({
+    id: '/runs/$id',
+    path: '/runs/$id',
+    getParentRoute: () => WsGatedProjectsProjectIdRunnersRouteRoute,
+  } as any)
 const WsGatedProjectsProjectIdViewsViewIdIndexRoute =
   WsGatedProjectsProjectIdViewsViewIdIndexRouteImport.update({
     id: '/views/$viewId/',
@@ -803,7 +816,6 @@ export interface FileRoutesByFullPath {
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/runners/approvals': typeof WsGatedRunnersApprovalsRoute
-  '/$ws/runners/runs': typeof WsGatedRunnersRunsRoute
   '/$ws/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
   '/$ws/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
   '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
@@ -830,10 +842,12 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/schedulers': typeof WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren
   '/$ws/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
+  '/$ws/runners/runs/$id': typeof WsGatedRunnersRunsIdRoute
   '/$ws/settings/$': typeof WsGatedSettingsWorkspaceSplatRoute
   '/$ws/settings/account/$': typeof WsGatedSettingsAccountSplatRoute
   '/$ws/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/runners/runs/': typeof WsGatedRunnersRunsIndexRoute
   '/$ws/settings/': typeof WsGatedSettingsWorkspaceIndexRoute
   '/$ws/settings/projects/': typeof WsGatedSettingsProjectsIndexRoute
   '/$ws/projects/$projectId/archives/issues': typeof WsGatedProjectsProjectIdArchivesIssuesRoute
@@ -841,7 +855,6 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
   '/$ws/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
-  '/$ws/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsRoute
   '/$ws/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/settings/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
@@ -869,11 +882,13 @@ export interface FileRoutesByFullPath {
   '/$ws/settings/projects/$projectId/': typeof WsGatedSettingsProjectsProjectIdIndexRoute
   '/$ws/projects/$projectId/runners/chat/$runnerId': typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   '/$ws/projects/$projectId/runners/detail/$runnerId': typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  '/$ws/projects/$projectId/runners/runs/$id': typeof WsGatedProjectsProjectIdRunnersRunsIdRoute
   '/$ws/settings/projects/$projectId/features/cycles': typeof WsGatedSettingsProjectsProjectIdFeaturesCyclesRoute
   '/$ws/settings/projects/$projectId/features/intake': typeof WsGatedSettingsProjectsProjectIdFeaturesIntakeRoute
   '/$ws/settings/projects/$projectId/features/modules': typeof WsGatedSettingsProjectsProjectIdFeaturesModulesRoute
   '/$ws/settings/projects/$projectId/features/pages': typeof WsGatedSettingsProjectsProjectIdFeaturesPagesRoute
   '/$ws/settings/projects/$projectId/features/views': typeof WsGatedSettingsProjectsProjectIdFeaturesViewsRoute
+  '/$ws/projects/$projectId/runners/runs/': typeof WsGatedProjectsProjectIdRunnersRunsIndexRoute
   '/$ws/projects/$projectId/views/$viewId/': typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 export interface FileRoutesByTo {
@@ -907,7 +922,6 @@ export interface FileRoutesByTo {
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/runners/approvals': typeof WsGatedRunnersApprovalsRoute
-  '/$ws/runners/runs': typeof WsGatedRunnersRunsRoute
   '/$ws/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
   '/$ws/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
   '/god-mode/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
@@ -932,10 +946,12 @@ export interface FileRoutesByTo {
   '/god-mode/workspace': typeof GodModeDashboardWorkspaceIndexRoute
   '/$ws/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
+  '/$ws/runners/runs/$id': typeof WsGatedRunnersRunsIdRoute
   '/$ws/settings/$': typeof WsGatedSettingsWorkspaceSplatRoute
   '/$ws/settings/account/$': typeof WsGatedSettingsAccountSplatRoute
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/projects/archives': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/runners/runs': typeof WsGatedRunnersRunsIndexRoute
   '/$ws/settings': typeof WsGatedSettingsWorkspaceIndexRoute
   '/$ws/settings/projects': typeof WsGatedSettingsProjectsIndexRoute
   '/$ws/projects/$projectId/archives/issues': typeof WsGatedProjectsProjectIdArchivesIssuesRoute
@@ -943,7 +959,6 @@ export interface FileRoutesByTo {
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
   '/$ws/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
-  '/$ws/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsRoute
   '/$ws/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/settings/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
@@ -971,11 +986,13 @@ export interface FileRoutesByTo {
   '/$ws/settings/projects/$projectId': typeof WsGatedSettingsProjectsProjectIdIndexRoute
   '/$ws/projects/$projectId/runners/chat/$runnerId': typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   '/$ws/projects/$projectId/runners/detail/$runnerId': typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  '/$ws/projects/$projectId/runners/runs/$id': typeof WsGatedProjectsProjectIdRunnersRunsIdRoute
   '/$ws/settings/projects/$projectId/features/cycles': typeof WsGatedSettingsProjectsProjectIdFeaturesCyclesRoute
   '/$ws/settings/projects/$projectId/features/intake': typeof WsGatedSettingsProjectsProjectIdFeaturesIntakeRoute
   '/$ws/settings/projects/$projectId/features/modules': typeof WsGatedSettingsProjectsProjectIdFeaturesModulesRoute
   '/$ws/settings/projects/$projectId/features/pages': typeof WsGatedSettingsProjectsProjectIdFeaturesPagesRoute
   '/$ws/settings/projects/$projectId/features/views': typeof WsGatedSettingsProjectsProjectIdFeaturesViewsRoute
+  '/$ws/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsIndexRoute
   '/$ws/projects/$projectId/views/$viewId': typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 export interface FileRoutesById {
@@ -1022,7 +1039,6 @@ export interface FileRoutesById {
   '/$ws/_gated/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/_gated/runners/approvals': typeof WsGatedRunnersApprovalsRoute
-  '/$ws/_gated/runners/runs': typeof WsGatedRunnersRunsRoute
   '/$ws/_gated/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
   '/$ws/_gated/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
   '/god-mode/_dashboard/authentication/gitea': typeof GodModeDashboardAuthenticationGiteaRoute
@@ -1049,10 +1065,12 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/schedulers': typeof WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren
   '/$ws/_gated/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/_gated/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
+  '/$ws/_gated/runners/runs/$id': typeof WsGatedRunnersRunsIdRoute
   '/$ws/_gated/settings/_workspace/$': typeof WsGatedSettingsWorkspaceSplatRoute
   '/$ws/_gated/settings/account/$': typeof WsGatedSettingsAccountSplatRoute
   '/$ws/_gated/projects/$projectId/': typeof WsGatedProjectsProjectIdIndexRoute
   '/$ws/_gated/projects/archives/': typeof WsGatedProjectsArchivesIndexRoute
+  '/$ws/_gated/runners/runs/': typeof WsGatedRunnersRunsIndexRoute
   '/$ws/_gated/settings/_workspace/': typeof WsGatedSettingsWorkspaceIndexRoute
   '/$ws/_gated/settings/projects/': typeof WsGatedSettingsProjectsIndexRoute
   '/$ws/_gated/projects/$projectId/archives/issues': typeof WsGatedProjectsProjectIdArchivesIssuesRoute
@@ -1060,7 +1078,6 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/_gated/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
   '/$ws/_gated/projects/$projectId/runners/approvals': typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
-  '/$ws/_gated/projects/$projectId/runners/runs': typeof WsGatedProjectsProjectIdRunnersRunsRoute
   '/$ws/_gated/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/_gated/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/_gated/settings/_workspace/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
@@ -1088,11 +1105,13 @@ export interface FileRoutesById {
   '/$ws/_gated/settings/projects/$projectId/': typeof WsGatedSettingsProjectsProjectIdIndexRoute
   '/$ws/_gated/projects/$projectId/runners/chat/$runnerId': typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   '/$ws/_gated/projects/$projectId/runners/detail/$runnerId': typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  '/$ws/_gated/projects/$projectId/runners/runs/$id': typeof WsGatedProjectsProjectIdRunnersRunsIdRoute
   '/$ws/_gated/settings/projects/$projectId/features/cycles': typeof WsGatedSettingsProjectsProjectIdFeaturesCyclesRoute
   '/$ws/_gated/settings/projects/$projectId/features/intake': typeof WsGatedSettingsProjectsProjectIdFeaturesIntakeRoute
   '/$ws/_gated/settings/projects/$projectId/features/modules': typeof WsGatedSettingsProjectsProjectIdFeaturesModulesRoute
   '/$ws/_gated/settings/projects/$projectId/features/pages': typeof WsGatedSettingsProjectsProjectIdFeaturesPagesRoute
   '/$ws/_gated/settings/projects/$projectId/features/views': typeof WsGatedSettingsProjectsProjectIdFeaturesViewsRoute
+  '/$ws/_gated/projects/$projectId/runners/runs/': typeof WsGatedProjectsProjectIdRunnersRunsIndexRoute
   '/$ws/_gated/projects/$projectId/views/$viewId/': typeof WsGatedProjectsProjectIdViewsViewIdIndexRoute
 }
 export interface FileRouteTypes {
@@ -1138,7 +1157,6 @@ export interface FileRouteTypes {
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
     | '/$ws/runners/approvals'
-    | '/$ws/runners/runs'
     | '/$ws/settings/api-tokens'
     | '/$ws/workspace-views/all-issues'
     | '/god-mode/authentication/gitea'
@@ -1165,10 +1183,12 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/schedulers'
     | '/$ws/runners/chat/$runnerId'
     | '/$ws/runners/detail/$runnerId'
+    | '/$ws/runners/runs/$id'
     | '/$ws/settings/$'
     | '/$ws/settings/account/$'
     | '/$ws/projects/$projectId/'
     | '/$ws/projects/archives/'
+    | '/$ws/runners/runs/'
     | '/$ws/settings/'
     | '/$ws/settings/projects/'
     | '/$ws/projects/$projectId/archives/issues'
@@ -1176,7 +1196,6 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/projects/$projectId/modules/$moduleId'
     | '/$ws/projects/$projectId/runners/approvals'
-    | '/$ws/projects/$projectId/runners/runs'
     | '/$ws/projects/$projectId/schedulers/list'
     | '/$ws/projects/$projectId/settings/$'
     | '/$ws/settings/webhooks/$webhookId'
@@ -1204,11 +1223,13 @@ export interface FileRouteTypes {
     | '/$ws/settings/projects/$projectId/'
     | '/$ws/projects/$projectId/runners/chat/$runnerId'
     | '/$ws/projects/$projectId/runners/detail/$runnerId'
+    | '/$ws/projects/$projectId/runners/runs/$id'
     | '/$ws/settings/projects/$projectId/features/cycles'
     | '/$ws/settings/projects/$projectId/features/intake'
     | '/$ws/settings/projects/$projectId/features/modules'
     | '/$ws/settings/projects/$projectId/features/pages'
     | '/$ws/settings/projects/$projectId/features/views'
+    | '/$ws/projects/$projectId/runners/runs/'
     | '/$ws/projects/$projectId/views/$viewId/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -1242,7 +1263,6 @@ export interface FileRouteTypes {
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
     | '/$ws/runners/approvals'
-    | '/$ws/runners/runs'
     | '/$ws/settings/api-tokens'
     | '/$ws/workspace-views/all-issues'
     | '/god-mode/authentication/gitea'
@@ -1267,10 +1287,12 @@ export interface FileRouteTypes {
     | '/god-mode/workspace'
     | '/$ws/runners/chat/$runnerId'
     | '/$ws/runners/detail/$runnerId'
+    | '/$ws/runners/runs/$id'
     | '/$ws/settings/$'
     | '/$ws/settings/account/$'
     | '/$ws/projects/$projectId'
     | '/$ws/projects/archives'
+    | '/$ws/runners/runs'
     | '/$ws/settings'
     | '/$ws/settings/projects'
     | '/$ws/projects/$projectId/archives/issues'
@@ -1278,7 +1300,6 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/projects/$projectId/modules/$moduleId'
     | '/$ws/projects/$projectId/runners/approvals'
-    | '/$ws/projects/$projectId/runners/runs'
     | '/$ws/projects/$projectId/schedulers/list'
     | '/$ws/projects/$projectId/settings/$'
     | '/$ws/settings/webhooks/$webhookId'
@@ -1306,11 +1327,13 @@ export interface FileRouteTypes {
     | '/$ws/settings/projects/$projectId'
     | '/$ws/projects/$projectId/runners/chat/$runnerId'
     | '/$ws/projects/$projectId/runners/detail/$runnerId'
+    | '/$ws/projects/$projectId/runners/runs/$id'
     | '/$ws/settings/projects/$projectId/features/cycles'
     | '/$ws/settings/projects/$projectId/features/intake'
     | '/$ws/settings/projects/$projectId/features/modules'
     | '/$ws/settings/projects/$projectId/features/pages'
     | '/$ws/settings/projects/$projectId/features/views'
+    | '/$ws/projects/$projectId/runners/runs'
     | '/$ws/projects/$projectId/views/$viewId'
   id:
     | '__root__'
@@ -1356,7 +1379,6 @@ export interface FileRouteTypes {
     | '/$ws/_gated/assistant/$threadId'
     | '/$ws/_gated/browse/$issueKey'
     | '/$ws/_gated/runners/approvals'
-    | '/$ws/_gated/runners/runs'
     | '/$ws/_gated/settings/api-tokens'
     | '/$ws/_gated/workspace-views/all-issues'
     | '/god-mode/_dashboard/authentication/gitea'
@@ -1383,10 +1405,12 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/schedulers'
     | '/$ws/_gated/runners/chat/$runnerId'
     | '/$ws/_gated/runners/detail/$runnerId'
+    | '/$ws/_gated/runners/runs/$id'
     | '/$ws/_gated/settings/_workspace/$'
     | '/$ws/_gated/settings/account/$'
     | '/$ws/_gated/projects/$projectId/'
     | '/$ws/_gated/projects/archives/'
+    | '/$ws/_gated/runners/runs/'
     | '/$ws/_gated/settings/_workspace/'
     | '/$ws/_gated/settings/projects/'
     | '/$ws/_gated/projects/$projectId/archives/issues'
@@ -1394,7 +1418,6 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/issues/$issueId'
     | '/$ws/_gated/projects/$projectId/modules/$moduleId'
     | '/$ws/_gated/projects/$projectId/runners/approvals'
-    | '/$ws/_gated/projects/$projectId/runners/runs'
     | '/$ws/_gated/projects/$projectId/schedulers/list'
     | '/$ws/_gated/projects/$projectId/settings/$'
     | '/$ws/_gated/settings/_workspace/webhooks/$webhookId'
@@ -1422,11 +1445,13 @@ export interface FileRouteTypes {
     | '/$ws/_gated/settings/projects/$projectId/'
     | '/$ws/_gated/projects/$projectId/runners/chat/$runnerId'
     | '/$ws/_gated/projects/$projectId/runners/detail/$runnerId'
+    | '/$ws/_gated/projects/$projectId/runners/runs/$id'
     | '/$ws/_gated/settings/projects/$projectId/features/cycles'
     | '/$ws/_gated/settings/projects/$projectId/features/intake'
     | '/$ws/_gated/settings/projects/$projectId/features/modules'
     | '/$ws/_gated/settings/projects/$projectId/features/pages'
     | '/$ws/_gated/settings/projects/$projectId/features/views'
+    | '/$ws/_gated/projects/$projectId/runners/runs/'
     | '/$ws/_gated/projects/$projectId/views/$viewId/'
   fileRoutesById: FileRoutesById
 }
@@ -1805,13 +1830,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedRunnersApprovalsRouteImport
       parentRoute: typeof WsGatedRunnersRouteRoute
     }
-    '/$ws/_gated/runners/runs': {
-      id: '/$ws/_gated/runners/runs'
-      path: '/runs'
-      fullPath: '/$ws/runners/runs'
-      preLoaderRoute: typeof WsGatedRunnersRunsRouteImport
-      parentRoute: typeof WsGatedRunnersRouteRoute
-    }
     '/$ws/_gated/schedulers/': {
       id: '/$ws/_gated/schedulers/'
       path: '/schedulers'
@@ -1952,6 +1970,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedRunnersDetailRunnerIdRouteImport
       parentRoute: typeof WsGatedRunnersRouteRoute
     }
+    '/$ws/_gated/runners/runs/': {
+      id: '/$ws/_gated/runners/runs/'
+      path: '/runs'
+      fullPath: '/$ws/runners/runs/'
+      preLoaderRoute: typeof WsGatedRunnersRunsIndexRouteImport
+      parentRoute: typeof WsGatedRunnersRouteRoute
+    }
+    '/$ws/_gated/runners/runs/$id': {
+      id: '/$ws/_gated/runners/runs/$id'
+      path: '/runs/$id'
+      fullPath: '/$ws/runners/runs/$id'
+      preLoaderRoute: typeof WsGatedRunnersRunsIdRouteImport
+      parentRoute: typeof WsGatedRunnersRouteRoute
+    }
     '/$ws/_gated/settings/_workspace/': {
       id: '/$ws/_gated/settings/_workspace/'
       path: '/'
@@ -2055,13 +2087,6 @@ declare module '@tanstack/react-router' {
       path: '/approvals'
       fullPath: '/$ws/projects/$projectId/runners/approvals'
       preLoaderRoute: typeof WsGatedProjectsProjectIdRunnersApprovalsRouteImport
-      parentRoute: typeof WsGatedProjectsProjectIdRunnersRouteRoute
-    }
-    '/$ws/_gated/projects/$projectId/runners/runs': {
-      id: '/$ws/_gated/projects/$projectId/runners/runs'
-      path: '/runs'
-      fullPath: '/$ws/projects/$projectId/runners/runs'
-      preLoaderRoute: typeof WsGatedProjectsProjectIdRunnersRunsRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdRunnersRouteRoute
     }
     '/$ws/_gated/projects/$projectId/schedulers/': {
@@ -2211,6 +2236,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdRunnersRouteRoute
     }
+    '/$ws/_gated/projects/$projectId/runners/runs/': {
+      id: '/$ws/_gated/projects/$projectId/runners/runs/'
+      path: '/runs'
+      fullPath: '/$ws/projects/$projectId/runners/runs/'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdRunnersRunsIndexRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRunnersRouteRoute
+    }
+    '/$ws/_gated/projects/$projectId/runners/runs/$id': {
+      id: '/$ws/_gated/projects/$projectId/runners/runs/$id'
+      path: '/runs/$id'
+      fullPath: '/$ws/projects/$projectId/runners/runs/$id'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdRunnersRunsIdRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRunnersRouteRoute
+    }
     '/$ws/_gated/projects/$projectId/views/$viewId/': {
       id: '/$ws/_gated/projects/$projectId/views/$viewId/'
       path: '/views/$viewId'
@@ -2287,18 +2326,20 @@ const WsGatedAssistantRouteRouteWithChildren =
 
 interface WsGatedRunnersRouteRouteChildren {
   WsGatedRunnersApprovalsRoute: typeof WsGatedRunnersApprovalsRoute
-  WsGatedRunnersRunsRoute: typeof WsGatedRunnersRunsRoute
   WsGatedRunnersIndexRoute: typeof WsGatedRunnersIndexRoute
   WsGatedRunnersChatRunnerIdRoute: typeof WsGatedRunnersChatRunnerIdRoute
   WsGatedRunnersDetailRunnerIdRoute: typeof WsGatedRunnersDetailRunnerIdRoute
+  WsGatedRunnersRunsIdRoute: typeof WsGatedRunnersRunsIdRoute
+  WsGatedRunnersRunsIndexRoute: typeof WsGatedRunnersRunsIndexRoute
 }
 
 const WsGatedRunnersRouteRouteChildren: WsGatedRunnersRouteRouteChildren = {
   WsGatedRunnersApprovalsRoute: WsGatedRunnersApprovalsRoute,
-  WsGatedRunnersRunsRoute: WsGatedRunnersRunsRoute,
   WsGatedRunnersIndexRoute: WsGatedRunnersIndexRoute,
   WsGatedRunnersChatRunnerIdRoute: WsGatedRunnersChatRunnerIdRoute,
   WsGatedRunnersDetailRunnerIdRoute: WsGatedRunnersDetailRunnerIdRoute,
+  WsGatedRunnersRunsIdRoute: WsGatedRunnersRunsIdRoute,
+  WsGatedRunnersRunsIndexRoute: WsGatedRunnersRunsIndexRoute,
 }
 
 const WsGatedRunnersRouteRouteWithChildren =
@@ -2306,24 +2347,27 @@ const WsGatedRunnersRouteRouteWithChildren =
 
 interface WsGatedProjectsProjectIdRunnersRouteRouteChildren {
   WsGatedProjectsProjectIdRunnersApprovalsRoute: typeof WsGatedProjectsProjectIdRunnersApprovalsRoute
-  WsGatedProjectsProjectIdRunnersRunsRoute: typeof WsGatedProjectsProjectIdRunnersRunsRoute
   WsGatedProjectsProjectIdRunnersIndexRoute: typeof WsGatedProjectsProjectIdRunnersIndexRoute
   WsGatedProjectsProjectIdRunnersChatRunnerIdRoute: typeof WsGatedProjectsProjectIdRunnersChatRunnerIdRoute
   WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute: typeof WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute
+  WsGatedProjectsProjectIdRunnersRunsIdRoute: typeof WsGatedProjectsProjectIdRunnersRunsIdRoute
+  WsGatedProjectsProjectIdRunnersRunsIndexRoute: typeof WsGatedProjectsProjectIdRunnersRunsIndexRoute
 }
 
 const WsGatedProjectsProjectIdRunnersRouteRouteChildren: WsGatedProjectsProjectIdRunnersRouteRouteChildren =
   {
     WsGatedProjectsProjectIdRunnersApprovalsRoute:
       WsGatedProjectsProjectIdRunnersApprovalsRoute,
-    WsGatedProjectsProjectIdRunnersRunsRoute:
-      WsGatedProjectsProjectIdRunnersRunsRoute,
     WsGatedProjectsProjectIdRunnersIndexRoute:
       WsGatedProjectsProjectIdRunnersIndexRoute,
     WsGatedProjectsProjectIdRunnersChatRunnerIdRoute:
       WsGatedProjectsProjectIdRunnersChatRunnerIdRoute,
     WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute:
       WsGatedProjectsProjectIdRunnersDetailRunnerIdRoute,
+    WsGatedProjectsProjectIdRunnersRunsIdRoute:
+      WsGatedProjectsProjectIdRunnersRunsIdRoute,
+    WsGatedProjectsProjectIdRunnersRunsIndexRoute:
+      WsGatedProjectsProjectIdRunnersRunsIndexRoute,
   }
 
 const WsGatedProjectsProjectIdRunnersRouteRouteWithChildren =

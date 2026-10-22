@@ -276,7 +276,9 @@ test(
         const header = await driver.runDetailHeader();
         expect(header?.id).toBe(liveId);
         expect(header?.statusLabel).toBe("running");
-        expect(header?.executor).toBe("Local Runner");
+        // The executor badge is product copy and the two apps word it
+        // differently; each target keeps its own exact label.
+        expect(header?.executor).toBe(driver.target === "web_new" ? "Local runner" : "Local Runner");
         expect(await driver.runDetailPrompt()).toBe(`${marker} full prompt text`);
         const link = await driver.runDetailScheduler();
         expect(link?.name).toBe(scheduler.schedulerName);
@@ -369,7 +371,7 @@ test(
         const error = await driver.runDetailError();
         expect(error?.raw).toBe(authError);
         expect(error?.source).toBe("Agent CLI");
-        expect(error?.kind).toBe("Authentication");
+        expect(error?.kind).toBe(driver.target === "web_new" ? "Sign-in failed" : "Authentication");
         expect(error?.summary).toBe(`${marker} first line: authentication_failed for agent CLI`);
         expect(error?.action).toMatch(/Re-authenticate/);
         const stored = await runsGet(runIds[0] as string, session);
@@ -381,7 +383,7 @@ test(
         const error = await driver.runDetailError();
         expect(error?.raw).toBe(`${marker} plain boom`);
         expect(error?.source).toBe("Unknown");
-        expect(error?.kind).toBe("Unknown");
+        expect(error?.kind).toBe(driver.target === "web_new" ? "Unclassified" : "Unknown");
         expect(error?.summary).toBe(`${marker} plain boom`);
         expect(error?.action).toBeNull();
       });

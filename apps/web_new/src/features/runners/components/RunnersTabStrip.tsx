@@ -32,7 +32,7 @@ export function runnersActiveTabKey(pathname: string, scope: RunnersScopeInput):
   const base = runnersBase(scope).replace(/\/+$/, "");
   const current = pathname.replace(/\/+$/, "");
   if (current === base) return "overview";
-  if (current === `${base}/runs`) return "runs";
+  if (current === `${base}/runs` || current.startsWith(`${base}/runs/`)) return "runs";
   if (current === `${base}/approvals`) return "approvals";
   return null;
 }
