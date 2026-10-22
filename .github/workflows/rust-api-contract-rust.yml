@@ -23,11 +23,6 @@
 name: rust-api contract tests — Rust matrix
 
 on:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-contract-rust.yml"
   push:
     branches: [rust-dev]
     paths:

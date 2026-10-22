@@ -15,11 +15,6 @@ on:
       - "rust-api/**"
       - "apps/api/**"
       - ".github/workflows/rust-api-replay.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-replay.yml"
 
 permissions:
   contents: read

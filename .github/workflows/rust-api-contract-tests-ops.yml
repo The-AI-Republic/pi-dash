@@ -21,10 +21,6 @@ on:
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-ops.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-ops.yml"
 
 permissions:
   contents: read
