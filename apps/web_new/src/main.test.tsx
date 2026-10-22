@@ -19,6 +19,15 @@ vi.mock("react-dom/client", () => ({
   }),
 }));
 
+// The generated tree pulls every route module into the import, which took
+// the mount test to ~24 s focused against the 30 s full-run budget
+// (NEWFRONT-861). This suite asserts the bootstrap structure, not the route
+// table, so it boots a bare root route; createRouter itself stays real.
+vi.mock("./routeTree.gen", async () => {
+  const { createRootRoute } = await import("@tanstack/react-router");
+  return { routeTree: createRootRoute() };
+});
+
 beforeEach(() => {
   rendered.elements.length = 0;
   vi.resetModules();
