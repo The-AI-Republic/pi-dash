@@ -31,6 +31,12 @@ export interface TransportResponse {
   url: string;
   headers: { get(name: string): string | null };
   text(): Promise<string>;
+  /**
+   * Binary bodies (the page PDF export). Present on fetch Responses;
+   * JSON-only test fakes omit it, and binary contracts fail closed
+   * with a contract ApiError when it is missing.
+   */
+  arrayBuffer?(): Promise<ArrayBuffer>;
 }
 
 /**

@@ -904,20 +904,41 @@ export {
 } from "./contracts/modules.js";
 export type { ModulePatch, ModuleStatus } from "./contracts/modules.js";
 export {
+  ConvertDocumentErrorBody,
+  ConvertDocumentResponse,
+  ConvertDocumentViolation,
+  LiveHealthResponse,
   PAGE_ACCESS_PRIVATE,
   PAGE_ACCESS_PUBLIC,
   PageArchiveResult,
   PageUpdate,
+  PdfExportErrorBody,
   addPageFavorite,
   archivePage,
+  convertDocument,
+  convertDocumentErrorFrom,
+  exportPagePdf,
+  getLiveHealth,
   lockPage,
+  pdfExportErrorFrom,
   removePageFavorite,
   restorePage,
   setPageAccess,
   unlockPage,
   updatePage,
 } from "./contracts/pages.js";
-export type { PagePatch } from "./contracts/pages.js";
+export type {
+  ConvertDocumentFailure,
+  ConvertDocumentInput,
+  ConvertDocumentVariant,
+  PagePatch,
+  PagePdfExport,
+  PagePdfExportInput,
+  PagePdfPageOrientation,
+  PagePdfPageSize,
+  PdfExportFailure,
+  PdfExportFailureKind,
+} from "./contracts/pages.js";
 export {
   ESTIMATE_TYPES,
   ESTIMATE_SYSTEM_TIME,
