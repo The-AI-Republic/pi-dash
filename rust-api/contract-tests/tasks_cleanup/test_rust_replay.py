@@ -65,6 +65,8 @@ import json as _json
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
+from io import StringIO
 
 import pytest
 from psycopg.rows import dict_row
@@ -2249,3 +2251,79 @@ def test_rust_sync_description_version_large_workspace(db_conn, broker_url):
             (str(wid),),
         )
         assert cur.fetchone()["n"] == 4400
+
+
+class _MLStripper(HTMLParser):
+    """Local copy of Django's MLStripper (html_processor.py:9-25)."""
+
+    def __init__(self):
+        super().__init__()
+        self.reset()
+        self.strict = False
+        self.convert_charrefs = True
+        self.text = StringIO()
+
+    def handle_data(self, d):
+        self.text.write(d)
+
+    def get_data(self):
+        return self.text.getvalue()
+
+
+def _ml_strip(html: str) -> str:
+    stripper = _MLStripper()
+    stripper.feed(html)
+    return stripper.get_data()
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<p>a &amp; b</p>",
+        "<p>1 < 2 and 3 > 1</p>",
+        "<p>x&nbsp;y</p>",
+    ],
+)
+def test_rust_track_page_version_description_stripped(db_conn, broker_url, html):
+    """Rust track_page_version stores HTMLParser text (PIDASHCONV-1296).
+
+    Replay of ``test_track_page_version_description_stripped``: entities
+    decoded (``a & b``, not ``a &amp; b``), a bare ``<`` kept as text.
+    """
+    tag = uuid.uuid4().hex[:8]
+    owner = seed_helpers.user(db_conn, f"rust-trackver-{tag}")
+    workspace = seed_helpers.workspace(db_conn, f"rusttrackver{tag}", owner["id"])
+    page = insert_row(
+        db_conn,
+        "pages",
+        {
+            "workspace_id": str(workspace["id"]),
+            "owned_by_id": str(owner["id"]),
+            "name": f"rust track version {tag}",
+            "description_json": {},
+            "description_html": html,
+            "access": 0,
+            "color": "",
+            "is_locked": False,
+            "view_props": {},
+            "logo_props": {},
+            "is_global": False,
+            "sort_order": 65535,
+        },
+    )
+    rust_queue.publish(
+        f"{M}.page_version_task.track_page_version",
+        args=[str(page["id"]), None, str(owner["id"])],
+    )
+
+    def _version_row():
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                'SELECT description_stripped FROM "page_versions"'
+                " WHERE page_id = %s::uuid ORDER BY last_saved_at DESC LIMIT 1",
+                (str(page["id"]),),
+            )
+            return cur.fetchone()
+
+    row = wait_for(_version_row, what="page_version stripped by rust worker")
+    assert row["description_stripped"] == _ml_strip(html)
