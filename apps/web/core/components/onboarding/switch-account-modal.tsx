@@ -40,7 +40,7 @@ export function SwitchAccountModal(props: Props) {
   const handleSwitchAccount = async () => {
     setSwitchingAccount(true);
 
-    await signOut()
+    await signOut({ skipConfirmation: true })
       .then(() => {
         setTheme("system");
         router.push("/");

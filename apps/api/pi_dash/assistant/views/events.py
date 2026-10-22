@@ -14,9 +14,9 @@ from __future__ import annotations
 import json
 import logging
 
-from asgiref.sync import sync_to_async
 from django.http import HttpResponse, StreamingHttpResponse
 
+from pi_dash.utils.db_async import close_idle_connections, db_sync_to_async
 from pi_dash.assistant.models import AssistantEvent, AssistantThread
 from pi_dash.assistant.runtime.events import event_channel, serialize_event
 from pi_dash.core.permissions import ROLE_MEMBER, workspace_role_by_slug
@@ -48,7 +48,17 @@ def _sse(payload: dict) -> str:
 
 
 async def assistant_event_stream(request, slug, thread_id):
-    user, thread = await sync_to_async(_resolve)(request, slug, thread_id)
+    # ``db_sync_to_async`` (not a bare ``sync_to_async``): these helpers
+    # run ORM queries. With ``CONN_MAX_AGE=0`` Django closes a connection only
+    # when ``close_old_connections`` runs on the thread that opened it, and
+    # under ASGI that happens via ``response.close()`` — which for a stream is
+    # not until the stream ends, and never at all if the client disconnects
+    # abruptly. A bare ``sync_to_async`` here therefore parks one idle Postgres
+    # connection per open stream for the life of that stream (observed in prod
+    # 2026-09-23: ~85 idle connections exhausting the shared Postgres host).
+    # ``db_sync_to_async`` closes stale connections around every call, so
+    # the connection is held only for the query itself.
+    user, thread = await db_sync_to_async(_resolve)(request, slug, thread_id)
     if user is None:
         return HttpResponse(status=401)
     if thread is None:
@@ -60,7 +70,7 @@ async def assistant_event_stream(request, slug, thread_id):
         after = 0
 
     async def stream():
-        for ev in await sync_to_async(_replay)(thread_id, after):
+        for ev in await db_sync_to_async(_replay)(thread_id, after):
             yield _sse(ev)
 
         client = async_redis_instance()
@@ -88,6 +98,13 @@ async def assistant_event_stream(request, slug, thread_id):
                 await pubsub.aclose()
             except Exception:
                 pass
+            # Belt-and-braces: the replay above already closes its connection,
+            # but anything that opened one on this request's thread-sensitive
+            # executor would otherwise sit idle until the worker recycles.
+            try:
+                await db_sync_to_async(close_idle_connections)()
+            except Exception:
+                logger.exception("failed to close DB connection after assistant SSE for thread %s", thread_id)
 
     response = StreamingHttpResponse(stream(), content_type="text/event-stream")
     response["Cache-Control"] = "no-cache"

@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -47,6 +48,16 @@ pub const RUNNER_BIN: &str = "pidash.exe";
 #[cfg(not(windows))]
 pub const RUNNER_BIN: &str = "pidash";
 
+/// The bundled engine binary path for a given Tauri `resource_dir`.
+///
+/// Pulled out of [`ManagedPaths::resolve`] so a test can pin that the engine
+/// path is a pure function of `resource_dir` — which `resolve` re-reads on
+/// every call — so after an app update the daemon is handed the newly bundled
+/// engine, never a stale path from the previous install.
+fn engine_bin_path(resource_dir: &Path) -> PathBuf {
+    resource_dir.join("bin").join(ENGINE_BIN)
+}
+
 /// Daemons this app started, keyed by workspace.
 ///
 /// Empty whenever no daemon is running — which is the normal state before
@@ -65,17 +76,25 @@ pub struct ManagedPaths {
     pub root: PathBuf,
     pub config_dir: PathBuf,
     pub data_dir: PathBuf,
-    pub codex_home: PathBuf,
+    /// Root of the per-account tree: `managed/accounts/<account-key>/`. The
+    /// engine's home lives under it (see [`ManagedPaths::engine_home`]), so one
+    /// account's transcripts are never in a directory another account's engine
+    /// is pointed at.
+    pub accounts_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub model_token_file: PathBuf,
     pub workdirs: PathBuf,
+    /// Root of the per-account local chat history tree (see `chat_history`).
+    /// Deliberately a sibling of `workdirs`, never a child, so a local chat's
+    /// working copy can never be the same path as a managed run's.
+    pub chat_dir: PathBuf,
     pub engine: PathBuf,
     pub runner: PathBuf,
     pub bin_dir: PathBuf,
 }
 
 impl ManagedPaths {
-    fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
+    pub(crate) fn for_workspace<R: Runtime>(app: &AppHandle<R>, workspace: &str) -> Result<Self, String> {
         if !valid_component(workspace) {
             return Err("Invalid workspace slug".into());
         }
@@ -85,48 +104,141 @@ impl ManagedPaths {
         Ok(paths)
     }
 
+    /// Where the daemon for *this* tree binds its control socket.
+    ///
+    /// Not `runtime_dir`. The daemon is started per workspace with
+    /// `PIDASH_DATA_DIR` pointing at the re-rooted `data_dir`, and the runner
+    /// derives its runtime dir as `<data_dir>/runtime` whenever that override
+    /// is present (`runner/src/util/paths.rs`). `runtime_dir` here is the
+    /// *shared* tree that holds the model token, which no daemon binds under —
+    /// reaching for it is how the chat transport ended up looking for a socket
+    /// nothing was listening on.
+    pub(crate) fn daemon_runtime_dir(&self) -> PathBuf {
+        self.data_dir.join("runtime")
+    }
+
     pub fn resolve<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
         let base = app
             .path()
             .app_data_dir()
             .map_err(|e| format!("resolving app data dir: {e}"))?;
         let root = base.join("managed");
-        let bin_dir = app
+        // Re-read the *current* bundle's resource dir on every call — nothing
+        // here is cached. This is what makes an app update pick up the newly
+        // bundled engine: once the update installs a new bundle, `resource_dir()`
+        // points at it, so `engine` resolves to the new binary rather than a
+        // stale path from the previous install. There is no auto-download; a new
+        // engine only ever arrives with a new app build (see PDASHOSS01-158).
+        let resource_dir = app
             .path()
             .resource_dir()
-            .map_err(|e| format!("resolving resource dir: {e}"))?
-            .join("bin");
+            .map_err(|e| format!("resolving resource dir: {e}"))?;
+        let bin_dir = resource_dir.join("bin");
         Ok(Self {
             config_dir: root.join("pidash"),
             data_dir: root.join("pidash/data"),
-            codex_home: root.join("codex-home"),
+            accounts_dir: root.join("accounts"),
             runtime_dir: root.join("runtime"),
             model_token_file: root.join("runtime/model.token"),
             workdirs: root.join("workdirs"),
-            engine: bin_dir.join(ENGINE_BIN),
+            chat_dir: root.join("chat"),
+            engine: engine_bin_path(&resource_dir),
             runner: bin_dir.join(RUNNER_BIN),
             bin_dir,
             root,
         })
     }
 
-    /// Create every directory the daemon and engine expect to exist.
+    /// Build a `ManagedPaths` rooted at an arbitrary directory, for tests that
+    /// exercise the on-disk layout without a Tauri `AppHandle`.
+    #[cfg(test)]
+    pub fn for_test_root(root: PathBuf) -> Self {
+        let bin_dir = root.join("bin");
+        Self {
+            config_dir: root.join("pidash"),
+            data_dir: root.join("pidash/data"),
+            accounts_dir: root.join("accounts"),
+            runtime_dir: root.join("runtime"),
+            model_token_file: root.join("runtime/model.token"),
+            workdirs: root.join("workdirs"),
+            chat_dir: root.join("chat"),
+            engine: bin_dir.join(ENGINE_BIN),
+            runner: bin_dir.join(RUNNER_BIN),
+            bin_dir,
+            root,
+        }
+    }
+
+    /// The engine's `CODEX_HOME` for one account:
+    /// `managed/accounts/<account-key>/codex-home`.
     ///
-    /// `CODEX_HOME` in particular must exist as a directory before the engine
-    /// starts — it refuses to run against a missing one rather than creating
-    /// it, so a first launch would otherwise fail with a confusing error.
+    /// Per account because the engine keeps its own copy of every conversation
+    /// there — rollouts, `history.jsonl`, thread/log/memory databases — and
+    /// isolation in the engine is by `CODEX_HOME` and nothing else. Keyed with
+    /// the same [`account_key`](crate::chat_history::account_key) as the chat
+    /// store, so the two copies of an account's history share one identity.
+    pub(crate) fn engine_home(&self, account: &str) -> Result<PathBuf, String> {
+        Ok(self
+            .accounts_dir
+            .join(crate::chat_history::account_key(account)?)
+            .join("codex-home"))
+    }
+
+    /// Where builds before the per-account layout kept the one engine home
+    /// every account shared.
+    fn legacy_engine_home(&self) -> PathBuf {
+        self.root.join("codex-home")
+    }
+
+    /// Create every directory the daemon expects to exist.
     fn ensure(&self) -> Result<(), String> {
         for dir in [
             &self.root,
             &self.config_dir,
             &self.data_dir,
-            &self.codex_home,
             &self.runtime_dir,
             &self.workdirs,
         ] {
             std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         }
+        self.remove_legacy_engine_home();
         Ok(())
+    }
+
+    /// Create the account's engine home, owner-only, and return it.
+    ///
+    /// `CODEX_HOME` must exist as a directory before the engine starts — it
+    /// refuses to run against a missing one rather than creating it, so a first
+    /// launch would otherwise fail with a confusing error. The engine creates
+    /// its own files with the default umask, so the directory is what keeps the
+    /// transcripts inside it from being readable by other local users.
+    pub(crate) fn ensure_engine_home(&self, account: &str) -> Result<PathBuf, String> {
+        let home = self.engine_home(account)?;
+        std::fs::create_dir_all(&home).map_err(|e| format!("creating {}: {e}", home.display()))?;
+        if let Some(account_root) = home.parent() {
+            crate::chat_history::restrict_dir(account_root);
+        }
+        crate::chat_history::restrict_dir(&home);
+        Ok(home)
+    }
+
+    /// Delete the shared engine home left behind by an earlier build.
+    ///
+    /// It holds transcripts from every account that used this machine, in
+    /// databases that cannot be split per account, so there is no owner to
+    /// migrate it to: handing it to whoever signs in first would give them the
+    /// other accounts' conversations. The app's own chat store is untouched, so
+    /// every conversation is still listed and readable; only the engine's copy
+    /// goes. Best-effort and cheap once the directory is gone — every managed
+    /// command passes through [`ensure`](Self::ensure), so this runs before the
+    /// fixed build first starts an engine.
+    fn remove_legacy_engine_home(&self) {
+        let legacy = self.legacy_engine_home();
+        match std::fs::remove_dir_all(&legacy) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("removing legacy engine home {}: {e}", legacy.display()),
+        }
     }
 }
 
@@ -209,6 +321,7 @@ pub async fn managed_bootstrap<R: Runtime>(
 #[tauri::command]
 pub async fn managed_enroll<R: Runtime>(
     app: AppHandle<R>,
+    account: String,
     workspace: String,
     project: String,
     host_label: String,
@@ -218,6 +331,7 @@ pub async fn managed_enroll<R: Runtime>(
     }
     let paths = ManagedPaths::for_workspace(&app, &workspace)?;
     paths.ensure()?;
+    let engine_home = paths.ensure_engine_home(&account)?;
     let working_dir = paths.workdirs.join(&workspace).join(&project);
     std::fs::create_dir_all(&working_dir)
         .map_err(|e| format!("creating {}: {e}", working_dir.display()))?;
@@ -235,7 +349,7 @@ pub async fn managed_enroll<R: Runtime>(
             "--engine",
             &paths.engine.to_string_lossy(),
             "--codex-home",
-            &paths.codex_home.to_string_lossy(),
+            &engine_home.to_string_lossy(),
             "--working-dir",
             &working_dir.to_string_lossy(),
             "--path-prepend",
@@ -251,7 +365,8 @@ pub async fn managed_enroll<R: Runtime>(
     finish(child, "enroll")
 }
 
-/// Write the managed `CODEX_HOME/config.toml` from the cloud's profile.
+/// Write the account's managed `CODEX_HOME/config.toml` from the cloud's
+/// profile.
 ///
 /// Rewritten whenever the profile changes (a settings save, a model switch)
 /// and read by the engine at its next spawn, so a user changing their model in
@@ -259,10 +374,12 @@ pub async fn managed_enroll<R: Runtime>(
 #[tauri::command]
 pub async fn managed_write_engine_config<R: Runtime>(
     app: AppHandle<R>,
+    account: String,
     profile: AgentProfile,
 ) -> Result<(), String> {
     let paths = ManagedPaths::resolve(&app)?;
     paths.ensure()?;
+    let engine_home = paths.ensure_engine_home(&account)?;
     if !profile.available {
         return Err(format!(
             "profile unavailable ({}); refusing to write an engine config that cannot run",
@@ -270,7 +387,7 @@ pub async fn managed_write_engine_config<R: Runtime>(
         ));
     }
     let config = render_engine_config(&profile, &paths.runner, &paths.model_token_file);
-    atomic_write(&paths.codex_home.join("config.toml"), config.as_bytes())
+    atomic_write(&engine_home.join("config.toml"), config.as_bytes())
 }
 
 /// Store the short-lived model credential for the engine's auth helper.
@@ -296,20 +413,50 @@ pub async fn managed_write_model_token<R: Runtime>(
 #[tauri::command]
 pub async fn managed_start_daemon<R: Runtime>(
     app: AppHandle<R>,
+    account: String,
     workspace: String,
 ) -> Result<(), String> {
     let paths = ManagedPaths::for_workspace(&app, &workspace)?;
     paths.ensure()?;
+    let engine_home = paths.ensure_engine_home(&account)?;
+    // The spawn is synchronous and holds the daemon-state lock; keeping it in
+    // its own function guarantees the (non-`Send`) guard is dropped before the
+    // await below, and keeps this command's future `Send`.
+    if spawn_daemon_locked(&app, &paths, &engine_home, &workspace)? == DaemonStart::AlreadyRunning {
+        return Ok(());
+    }
+    // Spawning is not the same as being reachable. The daemon binds its control
+    // socket a moment after exec, and callers — the chat transport above all —
+    // connect the instant this returns, so returning early surfaced as
+    // "connecting to managed daemon: … pidash.sock" on the first send of a
+    // session. Wait for the socket to answer before claiming the daemon is up.
+    wait_for_daemon(&paths).await;
+    Ok(())
+}
 
+#[derive(PartialEq)]
+enum DaemonStart {
+    Spawned,
+    AlreadyRunning,
+}
+
+/// Spawn the daemon for `workspace` unless one is already running. Synchronous
+/// on purpose — see the caller.
+fn spawn_daemon_locked<R: Runtime>(
+    app: &AppHandle<R>,
+    paths: &ManagedPaths,
+    engine_home: &Path,
+    workspace: &str,
+) -> Result<DaemonStart, String> {
     let state = app.state::<DaemonState>();
     let mut guard = state.0.lock().map_err(|_| "daemon state poisoned")?;
-    if let Some(child) = guard.get_mut(&workspace) {
+    if let Some(child) = guard.get_mut(workspace) {
         match child.try_wait() {
             // Already running — starting a second daemon on the same config
             // would have two processes claiming the same runner rows.
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(DaemonStart::AlreadyRunning),
             _ => {
-                guard.remove(&workspace);
+                guard.remove(workspace);
             }
         }
     }
@@ -317,11 +464,11 @@ pub async fn managed_start_daemon<R: Runtime>(
     // Refresh every configured project's paths, even when sessionStorage
     // restores a workspace without reopening each project. AppImage mounts
     // are ephemeral; persisted paths from the previous launch are invalid.
-    let rebind = base_command(&paths, &paths.runner)
+    let rebind = base_command(paths, &paths.runner)
         .args(["__managed", "rebind", "--engine"])
         .arg(&paths.engine)
         .arg("--codex-home")
-        .arg(&paths.codex_home)
+        .arg(engine_home)
         .arg("--path-prepend")
         .arg(&paths.bin_dir)
         .arg("--model-token-file")
@@ -333,20 +480,48 @@ pub async fn managed_start_daemon<R: Runtime>(
         .map_err(|e| format!("spawning managed path refresh: {e}"))?;
     finish(rebind, "rebind")?;
 
+    let child = spawn_daemon_process(paths)?;
+    guard.insert(workspace.to_string(), child);
+    Ok(DaemonStart::Spawned)
+}
+
+/// Spawn `pidash __run` with its output captured in `desktop-daemon.log`.
+///
+/// Both streams go to the file: the daemon's tracing output is written to
+/// stdout, while panics and its fatal startup error go to stderr.
+fn spawn_daemon_process(paths: &ManagedPaths) -> Result<Child, String> {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(paths.data_dir.join("desktop-daemon.log"))
         .map_err(|e| format!("opening daemon log: {e}"))?;
-    let child = base_command(&paths, &paths.runner)
+    let log_stdout = log
+        .try_clone()
+        .map_err(|e| format!("opening daemon log: {e}"))?;
+    base_command(paths, &paths.runner)
         .arg("__run")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(log_stdout))
         .stderr(Stdio::from(log))
         .spawn()
-        .map_err(|e| format!("spawning pidash __run: {e}"))?;
-    guard.insert(workspace, child);
-    Ok(())
+        .map_err(|e| format!("spawning pidash __run: {e}"))
+}
+
+/// Poll the daemon's control socket until it answers, or give up.
+///
+/// Best-effort by design: a daemon that is slow to bind is common (cold start,
+/// a busy machine), while one that never binds is a real failure the caller
+/// will see on its first request with a far better error than anything this
+/// could invent. So the timeout is generous and a miss is not an error.
+async fn wait_for_daemon(paths: &ManagedPaths) {
+    const ATTEMPTS: u32 = 40;
+    const INTERVAL: Duration = Duration::from_millis(250);
+    for _ in 0..ATTEMPTS {
+        if crate::ipc::managed_status(paths).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
 }
 
 /// Stop the daemon, waiting briefly for an in-flight run to finish.
@@ -366,15 +541,53 @@ pub async fn managed_stop_daemon<R: Runtime>(
     Ok(())
 }
 
+/// What sign-out should do with the signed-out account's local chat history.
+///
+/// Absent (the default) means keep it: the approved behaviour is that history
+/// stays on disk, scoped to the account, and is hidden until that same account
+/// signs in again. Present means the user ticked "Delete chat history" in the
+/// sign-out dialog, so we wipe that one account's history — the app's store and
+/// the engine's own copy. Only the user-initiated sign-out ever sends it; the
+/// automatic teardown paths (an expired session) never do.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClearChatHistory {
+    pub account: String,
+}
+
 /// Sign-out teardown: stop the daemon and destroy every local credential.
 ///
 /// After this the bundled binaries are inert — the engine has no model
 /// credential and the daemon has no machine token — which is what makes
 /// "signed out" mean something for a binary the user could still execute.
+///
+/// Chat history is deliberately **not** removed here by default: it belongs to
+/// the account and is kept, hidden, until that account signs in again. The only
+/// time sign-out touches it is when the user asked to delete it
+/// (`clear_chat_history` is `Some`). Task folders (`workdirs`) are never
+/// removed here.
 #[tauri::command]
-pub async fn managed_sign_out<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+pub async fn managed_sign_out<R: Runtime>(
+    app: AppHandle<R>,
+    clear_chat_history: Option<ClearChatHistory>,
+) -> Result<(), String> {
     stop_daemon(&app, 5);
     let paths = ManagedPaths::resolve(&app)?;
+    sign_out_teardown(&paths, clear_chat_history)
+}
+
+/// The on-disk half of sign-out, once the daemon is stopped.
+fn sign_out_teardown(
+    paths: &ManagedPaths,
+    clear_chat_history: Option<ClearChatHistory>,
+) -> Result<(), String> {
+    // Destroying the credentials is the security-critical half of sign-out and
+    // must not be skipped because an optional history wipe failed (e.g. a busy
+    // file on Windows). Run the wipe first but hold its result until *after*
+    // the credentials are gone, then surface it.
+    let history_result = match clear_chat_history {
+        Some(request) => crate::chat_history::clear_account_history(paths, &request.account),
+        None => Ok(()),
+    };
     let _ = std::fs::remove_file(&paths.model_token_file);
     let _ = std::fs::remove_file(paths.config_dir.join("credentials.toml"));
     let _ = std::fs::remove_file(paths.config_dir.join("config.toml"));
@@ -392,7 +605,8 @@ pub async fn managed_sign_out<R: Runtime>(app: AppHandle<R>) -> Result<(), Strin
             }
         }
     }
-    Ok(())
+    // Credentials are now gone regardless; surface any history-wipe failure.
+    history_result
 }
 
 /// Whether the bundled binaries are present and runnable.
@@ -419,7 +633,7 @@ pub async fn managed_doctor<R: Runtime>(app: AppHandle<R>) -> Result<serde_json:
         "engine_present": paths.engine.exists(),
         "config_present": config_present(&paths.config_dir),
         "token_present": paths.model_token_file.exists(),
-        "codex_home": paths.codex_home.to_string_lossy(),
+        "accounts_dir": paths.accounts_dir.to_string_lossy(),
     }))
 }
 
@@ -592,7 +806,7 @@ fn toml_value(raw: &str) -> String {
 
 /// Write via a temp file and rename, so a reader never sees a half-written
 /// config or a truncated credential.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent", path.display()))?;
@@ -621,6 +835,100 @@ pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine path handed to the daemon is derived purely from the
+    /// bundle's `resource_dir`, which `ManagedPaths::resolve` re-reads on every
+    /// call. So after an app update installs a new bundle (a new resource dir),
+    /// the daemon runs the newly bundled engine — never a stale path from the
+    /// previous install. This pins that invariant (PDASHOSS01-158, item 2).
+    #[test]
+    fn engine_path_tracks_the_current_bundle_resource_dir() {
+        let old = Path::new("/Applications/Pi Dash.app/Contents/Resources/v1");
+        let new = Path::new("/Applications/Pi Dash.app/Contents/Resources/v2");
+
+        // Fully determined by resource_dir: `<resource_dir>/bin/<engine>`.
+        assert_eq!(engine_bin_path(old), old.join("bin").join(ENGINE_BIN));
+        // A different install dir therefore yields a different engine path —
+        // an update can never resolve to the old bundle's binary.
+        assert_ne!(engine_bin_path(old), engine_bin_path(new));
+        // And it always lives under the given bundle's bin/.
+        assert!(engine_bin_path(new).starts_with(new.join("bin")));
+        assert!(engine_bin_path(new).ends_with(ENGINE_BIN));
+    }
+
+    /// A transcript the way the pinned engine leaves one in its home.
+    fn write_rollout(home: &Path, who: &str) -> PathBuf {
+        let rollout = home.join(format!("sessions/2026/10/05/rollout-{who}.jsonl"));
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        std::fs::write(&rollout, format!("{who} transcript")).unwrap();
+        rollout
+    }
+
+    #[test]
+    fn engine_home_is_per_account_under_the_accounts_root() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(root.path().join("managed"));
+        let a = paths.engine_home("user-a").unwrap();
+        let b = paths.engine_home("user-b").unwrap();
+        assert_ne!(a, b, "two accounts must never share an engine home");
+        // `managed/accounts/<account-key>/codex-home`, keyed like the chat store.
+        let key = crate::chat_history::account_key("user-a").unwrap();
+        assert_eq!(a, paths.root.join("accounts").join(&key).join("codex-home"));
+        assert!(!a.starts_with(paths.legacy_engine_home()));
+        // No account, no engine home: nothing may fall back to a shared path.
+        assert!(paths.engine_home("").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engine_home_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(root.path().join("managed"));
+        let home = paths.ensure_engine_home("user-a").unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&home), 0o700, "engine home must not be group/world readable");
+        assert_eq!(mode(home.parent().unwrap()), 0o700, "account root must be 0700");
+    }
+
+    #[test]
+    fn sign_out_keeps_engine_transcripts_unless_asked_to_delete_them() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(root.path().join("managed"));
+        paths.ensure().unwrap();
+        let a = write_rollout(&paths.ensure_engine_home("user-a").unwrap(), "user-a");
+        let b = write_rollout(&paths.ensure_engine_home("user-b").unwrap(), "user-b");
+        let task = paths.workdirs.join("acme/web/notes.txt");
+        std::fs::create_dir_all(task.parent().unwrap()).unwrap();
+        std::fs::write(&task, "task folder").unwrap();
+        atomic_write(&paths.model_token_file, b"tok").unwrap();
+
+        // Default sign-out (and every automatic teardown): credentials go,
+        // history stays where only that account's engine will look for it.
+        sign_out_teardown(&paths, None).unwrap();
+        assert!(!paths.model_token_file.exists());
+        assert!(a.exists() && b.exists());
+
+        // "Delete chat history" ticked: that account's engine folder goes as a
+        // whole; the other account's and the task folders are untouched.
+        sign_out_teardown(&paths, Some(ClearChatHistory { account: "user-a".into() })).unwrap();
+        assert!(!paths.engine_home("user-a").unwrap().exists());
+        assert!(b.exists(), "another account's transcripts must survive");
+        assert!(task.exists(), "sign-out must never delete task folders");
+    }
+
+    #[test]
+    fn legacy_shared_engine_home_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(root.path().join("managed"));
+        let legacy = write_rollout(&paths.legacy_engine_home(), "everyone");
+        let kept = write_rollout(&paths.ensure_engine_home("user-a").unwrap(), "user-a");
+        paths.ensure().unwrap();
+        assert!(!paths.legacy_engine_home().exists(), "{} survived", legacy.display());
+        assert!(kept.exists());
+        // And again with nothing left to remove.
+        paths.ensure().unwrap();
+    }
 
     #[test]
     fn workspace_and_project_paths_accept_identifiers_but_not_traversal() {
@@ -795,5 +1103,41 @@ sandbox_mode = "danger-full-access"#
         atomic_write(&path, b"first").unwrap();
         atomic_write(&path, b"second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+    }
+
+    /// The daemon logs through tracing, which writes to stdout; only panics
+    /// and the fatal startup error reach stderr. Both have to land in
+    /// `desktop-daemon.log`, or the file is empty exactly when a run fails
+    /// (PIDESKAPP-22).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_log_captures_stdout_and_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ManagedPaths::for_test_root(dir.path().to_path_buf());
+        std::fs::create_dir_all(&paths.bin_dir).unwrap();
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        std::fs::write(
+            &paths.runner,
+            "#!/bin/sh\necho \"stdout from $1\"\necho \"stderr from $1\" >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&paths.runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A concurrently forking test can briefly inherit the script's write
+        // handle, which makes exec fail with ETXTBSY; retry past it.
+        let mut child = loop {
+            match spawn_daemon_process(&paths) {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                other => break other.unwrap(),
+            }
+        };
+        assert!(child.wait().unwrap().success());
+
+        let log = std::fs::read_to_string(paths.data_dir.join("desktop-daemon.log")).unwrap();
+        assert!(log.contains("stdout from __run"), "stdout missing: {log:?}");
+        assert!(log.contains("stderr from __run"), "stderr missing: {log:?}");
     }
 }

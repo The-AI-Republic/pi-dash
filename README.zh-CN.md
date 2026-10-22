@@ -139,7 +139,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 ```bash
 # 1. 基于浏览器的设备码登录（类似 `gh auth login` / `stripe login`）。
 #    会在 ~/.config/pidash/config.toml 中存储 CLI 令牌。
-pidash auth login --url https://your-pidash-instance.com
+pidash login --url https://your-pidash-instance.com
 
 # 2. 将本主机注册为 runner。使用步骤 1 中的令牌——无需
 #    粘贴 enrollment-token。在第一个 runner 上，会安装操作系统
@@ -148,7 +148,7 @@ pidash auth login --url https://your-pidash-instance.com
 pidash runner add --project <project-id>
 ```
 
-当尚不存在 runner 时，`pidash auth login` 会内联提示添加一个 runner，因此一台全新的开发笔记本仅需一条命令即可完成上线。之后可使用 `pidash runner add --project <other-project-id>` 添加更多 runner。
+当尚不存在 runner 时，`pidash login`（`pidash auth login` 的别名）会内联提示添加一个 runner，因此一台全新的开发笔记本仅需一条命令即可完成上线。之后可使用 `pidash runner add --project <other-project-id>` 添加更多 runner。
 
 Runner 守护进程在后台运行，轮询分配的任务，将其派发给你的 AI 智能体，并把结果回报给平台。
 

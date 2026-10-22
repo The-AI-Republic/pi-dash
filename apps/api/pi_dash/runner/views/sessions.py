@@ -22,7 +22,6 @@ import time
 import uuid as _uuid
 from typing import Any, Dict, List
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import OperationalError, connection, transaction
 from django.http import JsonResponse
@@ -33,6 +32,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.utils.db_async import db_sync_to_async
 from pi_dash.runner.authentication import RunnerAccessTokenAuthentication
 from pi_dash.runner.models import RunnerSession, RunnerStatus
 from pi_dash.runner.services import chat as chat_service
@@ -547,13 +547,21 @@ async def runner_session_poll(request, runner_id, sid):
     in a worker shares one ``thread_sensitive`` thread — a sync long
     poll therefore blocks every other request on that worker for the
     whole window. Auth and DB bookkeeping stay sync (briefly, via
-    ``sync_to_async``); only the wait is async.
+    ``db_sync_to_async``); only the wait is async.
+
+    The helper must be ``db_sync_to_async`` rather than a bare
+    ``sync_to_async``: with ``CONN_MAX_AGE=0`` Django closes a connection
+    only when ``close_old_connections`` runs on the thread that opened it.
+    A bare ``sync_to_async`` would leave the bookkeeping connection open
+    across the ~25s wait below, so every connected runner would hold one
+    permanently-idle Postgres connection (observed in prod 2026-09-23:
+    ~85 idle connections exhausting the shared Postgres host).
     """
     if request.method != "POST":
         return JsonResponse({"detail": f'Method "{request.method}" not allowed.'}, status=405)
 
     try:
-        runner = await sync_to_async(_authenticate_poll_runner)(request)
+        runner = await db_sync_to_async(_authenticate_poll_runner)(request)
     except drf_exceptions.AuthenticationFailed as exc:
         return JsonResponse({"detail": str(exc.detail)}, status=status.HTTP_401_UNAUTHORIZED)
     if runner is None or str(runner.id) != str(runner_id):
@@ -568,7 +576,7 @@ async def runner_session_poll(request, runner_id, sid):
         if isinstance(parsed, dict):
             body = parsed
 
-    error, plan = await sync_to_async(_poll_bookkeeping)(runner, body, sid)
+    error, plan = await db_sync_to_async(_poll_bookkeeping)(runner, body, sid)
     if error is not None:
         return JsonResponse(error["payload"], status=error["status"])
 
@@ -582,7 +590,7 @@ async def runner_session_poll(request, runner_id, sid):
     except _SessionEvictedDuringPoll:
         return JsonResponse({"error": "session_evicted"}, status=status.HTTP_409_CONFLICT)
     if plan["use_zero"]:
-        await sync_to_async(outbox.mark_pel_drained)(sid)
+        await db_sync_to_async(outbox.mark_pel_drained)(sid)
 
     return JsonResponse(
         {

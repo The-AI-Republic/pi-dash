@@ -26,7 +26,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("runner", "0024_managed_runner_provisioning"),
+        ("runner", "0031_runner_paused"),
     ]
 
     operations = [

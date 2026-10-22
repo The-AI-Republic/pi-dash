@@ -4,5 +4,6 @@
  * See the LICENSE file for details.
  */
 
+export * from "./chat-approvals";
 export * from "./helper";
 export * from "./sidebar-workspace-menu";

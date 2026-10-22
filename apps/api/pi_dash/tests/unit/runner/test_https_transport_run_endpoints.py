@@ -201,6 +201,100 @@ def test_idempotency_key_dedupes_duplicate(db, api_client, runner_token, assigne
 
 
 @pytest.mark.unit
+def test_started_endpoint_persists_agent_metadata(db, api_client, runner_token, assigned_run):
+    """The run-started call records the runner-reported session id / thread id
+    / agent kind into ``agent_metadata`` while keeping the ``thread_id`` write
+    for backward-compatible resume."""
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/started/",
+        {
+            "thread_id": "sess_xyz",
+            "local_session_id": "sess_xyz",
+            "agent_kind": "claude_code",
+        },
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.status == AgentRunStatus.RUNNING
+    assert assigned_run.thread_id == "sess_xyz"
+    assert assigned_run.agent_metadata == {
+        "local_session_id": "sess_xyz",
+        # local_thread_id defaults to thread_id when not sent explicitly.
+        "local_thread_id": "sess_xyz",
+        "agent_kind": "claude_code",
+    }
+
+
+@pytest.mark.unit
+def test_started_endpoint_agent_metadata_backward_compatible(db, api_client, runner_token, assigned_run):
+    """An older runner that reports only ``thread_id`` still populates
+    ``agent_metadata`` (local_thread_id mirrors thread_id; the unreported keys
+    are empty rather than absent)."""
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/started/",
+        {"thread_id": "sess_legacy"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assigned_run.refresh_from_db()
+    assert assigned_run.agent_metadata == {
+        "local_session_id": "",
+        "local_thread_id": "sess_legacy",
+        "agent_kind": "",
+    }
+
+
+@pytest.mark.unit
+def test_resume_unavailable_clears_thread_id_but_keeps_agent_metadata(
+    db, api_client, runner_token, assigned_run, create_user, workspace, pod, enrolled_runner
+):
+    """A retry that nulls the parent's ``thread_id`` (fresh-session Assign)
+    must leave the parent's ``agent_metadata`` intact — the failed attempt's
+    session id survives for audit."""
+    parent = AgentRun.objects.create(
+        owner=create_user,
+        created_by=create_user,
+        workspace=workspace,
+        pod=pod,
+        runner=enrolled_runner,
+        prompt="parent",
+        status=AgentRunStatus.RUNNING,
+        thread_id="sess_parent",
+        agent_metadata={
+            "local_session_id": "sess_parent",
+            "local_thread_id": "sess_parent",
+            "agent_kind": "codex",
+        },
+        started_at=timezone.now(),
+    )
+    assigned_run.parent_run = parent
+    assigned_run.save(update_fields=["parent_run"])
+
+    resp = api_client.post(
+        f"/api/v1/runner/runs/{assigned_run.id}/fail/",
+        {"reason": "resume_unavailable", "detail": "session gone"},
+        format="json",
+        HTTP_AUTHORIZATION=f"Bearer {runner_token}",
+    )
+    assert resp.status_code == 200, resp.data
+    assert resp.data.get("rescheduled") is True
+
+    parent.refresh_from_db()
+    # thread_id is a resume handle and is cleared so the next dispatch builds a
+    # fresh-session Assign...
+    assert parent.thread_id == ""
+    # ...but agent_metadata is never cleared.
+    assert parent.agent_metadata == {
+        "local_session_id": "sess_parent",
+        "local_thread_id": "sess_parent",
+        "agent_kind": "codex",
+    }
+
+
+@pytest.mark.unit
 def test_complete_endpoint_marks_terminal_and_drains(db, api_client, runner_token, assigned_run):
     resp = api_client.post(
         f"/api/v1/runner/runs/{assigned_run.id}/complete/",

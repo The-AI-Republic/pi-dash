@@ -20,12 +20,14 @@ from uuid import UUID
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    AgentHealth,
     AgentRun,
     AgentRunStatus,
     Runner,
     RunnerLiveState,
     RunnerStatus,
 )
+from pi_dash.runner.services.usage import normalize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,10 @@ OFFLINE_GRACE_SECS = 60
 # without meaningfully delaying real reaps after a daemon crash, since
 # crash detection comes from missing heartbeats anyway.
 ASSIGN_DELIVERY_GRACE_SECS = 60
+
+# ``error_code`` on runs that ``runner.fail_runs_on_offline_runners`` moved to
+# a terminal status (FAILED, or CANCELLED for a pending cancellation).
+RUNNER_OFFLINE_ERROR_CODE = "runner_offline"
 
 
 def _merge_dev_metadata(current: Any, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -162,11 +168,7 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
     """
     from django.db import transaction
 
-    from pi_dash.runner.services.matcher import (
-        BUSY_STATUSES,
-        drain_for_runner_by_id,
-        drain_pod_by_id,
-    )
+    from pi_dash.runner.services.matcher import BUSY_STATUSES
 
     now = timezone.now()
     ts_raw = body.get("ts")
@@ -209,17 +211,30 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
     )
     if in_flight_id:
         stale = stale.exclude(id=in_flight_id)
-        if not exclude_redeliverable and AgentRun.objects.filter(
-            id=in_flight_id,
-            runner=runner,
-            status=AgentRunStatus.CANCEL_REQUESTED,
-        ).exists():
+        cancel_reason = None
+        if not exclude_redeliverable:
+            claimed = AgentRun.objects.filter(id=in_flight_id, runner=runner).values("status", "error_code").first()
+            if claimed is not None and claimed["status"] == AgentRunStatus.CANCEL_REQUESTED:
+                cancel_reason = "cancellation_pending"
+            elif (
+                claimed is not None
+                and claimed["status"] in (AgentRunStatus.FAILED, AgentRunStatus.CANCELLED)
+                and claimed["error_code"] == RUNNER_OFFLINE_ERROR_CODE
+            ):
+                # The offline sweep finalized this run while the daemon was
+                # silent (asleep, partitioned) and the daemon is still working
+                # on it. Nothing else tells it to stop on the poll path, and
+                # the issue may already have a replacement run elsewhere. For
+                # a run that was CANCEL_REQUESTED this keeps the redelivery
+                # above going after the sweep moved it to CANCELLED.
+                cancel_reason = f"run_already_{claimed['status']}"
+        if cancel_reason is not None:
             # Re-enqueue on every poll until the daemon acknowledges. This
             # recovers when the initial best-effort enqueue happened during a
             # transient Redis outage without waiting for a session reconnect.
             from pi_dash.runner.services.pubsub import send_to_runner
 
-            def _retry_cancel(rid=runner.id, run_id=in_flight_id):
+            def _retry_cancel(rid=runner.id, run_id=in_flight_id, reason=cancel_reason):
                 try:
                     send_to_runner(
                         rid,
@@ -227,7 +242,7 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
                             "v": 1,
                             "type": "cancel",
                             "run_id": str(run_id),
-                            "reason": "cancellation_pending",
+                            "reason": reason,
                         },
                     )
                 except Exception:
@@ -239,35 +254,63 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
 
             transaction.on_commit(_retry_cancel)
 
+    _finish_unclaimed_runs(
+        runner,
+        stale,
+        detail=(
+            "reaped by heartbeat: runner reported in_flight_run="
+            f"{in_flight_id or '(none)'} but cloud had this run marked busy"
+        ),
+        error_code="heartbeat_reaped",
+    )
+
+
+def _finish_unclaimed_runs(
+    runner: Runner, stale, *, detail: str, error_code: str, stamp_cancelled: bool = False
+) -> int:
+    """Terminate ``stale`` BUSY runs that ``runner`` is no longer serving.
+
+    Shared by the heartbeat reaper (the daemon stopped reporting the run) and
+    the offline-runner sweep (the daemon stopped reporting at all). Returns
+    the number of runs moved to a terminal status.
+
+    ``stamp_cancelled`` also records ``error_code`` on the runs that end
+    CANCELLED. The heartbeat reaper leaves it off: there the daemon has
+    confirmed it stopped. The offline sweep has no such confirmation, and the
+    stamp is how the poll path recognises the run if the daemon returns.
+    """
+    from django.db import transaction
+
+    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
+    from pi_dash.runner.services.matcher import drain_for_runner_by_id, drain_pod_by_id
+
     # A cancellation request disappears from the daemon's in-flight report
-    # only after its worker has stopped. Treat that heartbeat as the same
-    # barrier as an explicit RunCancelled lifecycle frame.
+    # only after its worker has stopped. Treat that as the same barrier as an
+    # explicit RunCancelled lifecycle frame.
     stopped_cancel_ids = list(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("id", flat=True))
     stopped_cancel_pod_ids = set(stale.filter(status=AgentRunStatus.CANCEL_REQUESTED).values_list("pod_id", flat=True))
     if stopped_cancel_ids:
+        cancelled_updates = {"error_code": error_code} if stamp_cancelled else {}
         AgentRun.objects.filter(id__in=stopped_cancel_ids).update(
             status=AgentRunStatus.CANCELLED,
-            ended_at=now,
+            ended_at=timezone.now(),
+            **cancelled_updates,
         )
         stale = stale.exclude(id__in=stopped_cancel_ids)
 
     reaped = list(stale.values_list("id", "pod_id"))
     if not reaped and not stopped_cancel_ids:
-        return
+        return 0
 
-    from pi_dash.runner.services.agent_run_finalization import finalize_agent_run
-
-    detail = (
-        "reaped by heartbeat: runner reported in_flight_run="
-        f"{in_flight_id or '(none)'} but cloud had this run marked busy"
-    )
+    failed = 0
     for run_id, _ in reaped:
-        finalize_agent_run(
+        if finalize_agent_run(
             run_id,
             AgentRunStatus.FAILED,
-            updates={"error": detail, "error_code": "heartbeat_reaped"},
+            updates={"error": detail, "error_code": error_code},
             expected_runner_id=runner.id,
-        )
+        ):
+            failed += 1
     pod_ids = {pid for _, pid in reaped if pid is not None}
     pod_ids.update(pid for pid in stopped_cancel_pod_ids if pid is not None)
     runner_id = runner.id
@@ -286,6 +329,7 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
             drain_pod_by_id(pid)
 
     transaction.on_commit(_drain_after_commit)
+    return failed + len(stopped_cancel_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -303,9 +347,10 @@ def reap_stale_busy_runs(runner: Runner, body: Dict[str, Any], *, exclude_redeli
 
 # Snapshot fields stored on RunnerLiveState. Does NOT include
 # `observed_run_id` (that field drives the wipe, it is not a wipe target).
-# Tokens travel as a nested `tokens.{input,output,total}` object and the
-# selected LLM travels as top-level `model`; both are unpacked into flat
-# columns by the upsert.
+# Tokens travel as a nested `tokens` object (canonical counters plus the
+# agent's verbatim usage under `raw`) and are normalised into the `usage`
+# JSON column; the selected LLM travels as top-level `model`. Both are
+# unpacked by the upsert rather than copied field-for-field.
 SNAPSHOT_FIELDS = (
     "last_event_at",
     "last_event_kind",
@@ -313,11 +358,12 @@ SNAPSHOT_FIELDS = (
     "agent_pid",
     "agent_subprocess_alive",
     "approvals_pending",
-    "input_tokens",
-    "output_tokens",
-    "total_tokens",
     "llm_model",
     "turn_count",
+    # Activity-watchdog health. Sent on every busy poll, not gated by the
+    # runner's observability flag, alongside ``observed_run_id``.
+    "agent_health",
+    "agent_last_activity_at",
 )
 
 
@@ -375,21 +421,23 @@ def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> No
         # wipe, not just the fields present on this poll.
         for f in SNAPSHOT_FIELDS:
             setattr(state, f, None)
-        update_fields.extend(SNAPSHOT_FIELDS)
+        state.usage = {}
+        update_fields.extend((*SNAPSHOT_FIELDS, "usage"))
         state.observed_run_id = incoming_run_id
         update_fields.append("observed_run_id")
 
     for f in SNAPSHOT_FIELDS:
         if f in status_entry:
-            setattr(state, f, status_entry[f])
+            value = status_entry[f]
+            if f == "agent_health" and value not in AgentHealth.values:
+                # Unknown label from a newer runner: keep the known-good value.
+                continue
+            setattr(state, f, value)
             update_fields.append(f)
 
     if "tokens" in status_entry:
-        tokens = status_entry["tokens"] or {}
-        state.input_tokens = tokens.get("input")
-        state.output_tokens = tokens.get("output")
-        state.total_tokens = tokens.get("total")
-        update_fields.extend(["input_tokens", "output_tokens", "total_tokens"])
+        state.usage = normalize_usage(status_entry["tokens"])
+        update_fields.append("usage")
     if "model" in status_entry:
         model = str(status_entry.get("model") or "").strip()
         state.llm_model = model[:128] or None
