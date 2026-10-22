@@ -152,11 +152,15 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
     // W-export). Django drops both (PDASHOSS01-292); Rust runs them.
     crate::tasks_export::register_issue_export_task(registry, ctx.pools.primary().clone());
     crate::tasks_export::register_analytic_task(registry, ctx.pools.primary().clone());
-    // `register_assets` installs sweep + metadata + copy (assets.rs:692).
+    // `register_assets` installs sweep + metadata + copy with the live
+    // S3 store (PIDASHCONV-1292): the copy and metadata handlers execute
+    // real HEAD and PUT-copy requests, exactly like the Django tasks.
     crate::tasks_cleanup::assets::register_assets(
         registry,
         ctx.pools.primary().clone(),
-        std::sync::Arc::new(crate::tasks_cleanup::assets::UnavailableObjectStore),
+        std::sync::Arc::new(
+            crate::tasks_cleanup::assets::LiveS3ObjectStore::from_settings(&ctx.settings),
+        ),
         std::sync::Arc::new(crate::tasks_cleanup::assets::NoopLiveConvert),
     );
     crate::tasks_cleanup::register_expiry(

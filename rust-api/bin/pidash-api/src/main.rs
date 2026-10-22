@@ -630,7 +630,9 @@ mod tests {
         tasks_cleanup::assets::register_assets(
             &mut registry,
             pool.clone(),
-            std::sync::Arc::new(tasks_cleanup::assets::UnavailableObjectStore),
+            std::sync::Arc::new(tasks_cleanup::assets::LiveS3ObjectStore::from_settings(
+                &pidash_db::config::Settings::test_defaults(),
+            )),
             std::sync::Arc::new(tasks_cleanup::assets::NoopLiveConvert),
         );
         tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
