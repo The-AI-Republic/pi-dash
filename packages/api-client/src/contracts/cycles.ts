@@ -8,7 +8,7 @@
 // representation.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
-import { nullableDateTime, uuid } from "./fields.js";
+import { dateTime, nullableDateTime, uuid } from "./fields.js";
 
 export const CycleUpdate = z.object({
   id: uuid(),
@@ -120,4 +120,133 @@ export async function transferCycleIssues(
   const path = `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/transfer-issues/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: { new_cycle_id: newCycleId } });
   return client.parse(CycleTransferResult, envelope.data, `POST ${path}`);
+}
+
+/**
+ * One row of the archived-cycles list (ARCH-014). A flat array, newest
+ * created first within favorites; the status is server-derived from the
+ * dates (CURRENT, UPCOMING, COMPLETED, DRAFT). The backend selects its
+ * columns with .values(), so every key below is always present.
+ */
+export const ArchivedCycleListItem = z.object({
+  id: uuid(),
+  workspace_id: uuid(),
+  project_id: uuid(),
+  name: z.string(),
+  description: z.string(),
+  start_date: nullableDateTime(),
+  end_date: nullableDateTime(),
+  owned_by_id: uuid(),
+  status: z.string(),
+  archived_at: dateTime(),
+  is_favorite: z.boolean(),
+  total_issues: z.number(),
+  completed_issues: z.number(),
+  started_issues: z.number(),
+  unstarted_issues: z.number(),
+  cancelled_issues: z.number(),
+  backlog_issues: z.number(),
+  assignee_ids: z.array(uuid()),
+});
+export type ArchivedCycleListItem = z.infer<typeof ArchivedCycleListItem>;
+
+export const ArchivedCycleList = z.array(ArchivedCycleListItem);
+export type ArchivedCycleList = z.infer<typeof ArchivedCycleList>;
+
+/** GET .../archived-cycles/: the project's archived cycles, flat. */
+export async function listArchivedCycles(
+  client: ApiClient,
+  slug: string,
+  projectId: string
+): Promise<ArchivedCycleList> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-cycles/`);
+  return client.parse(ArchivedCycleList, body, `GET archived cycles ${projectId}`);
+}
+
+/**
+ * Assignee/label distribution envelope the archived detail reads carry.
+ * Rows are string-keyed dicts (dimension columns plus count or estimate
+ * sums); the estimate variant is an empty object when the project has
+ * no points estimate, so every member is optional there.
+ */
+export const ArchivedDistribution = z.object({
+  assignees: z.array(z.record(z.string(), z.unknown())),
+  labels: z.array(z.record(z.string(), z.unknown())),
+  completion_chart: z.unknown(),
+});
+export type ArchivedDistribution = z.infer<typeof ArchivedDistribution>;
+
+export const ArchivedEstimateDistribution = z.object({
+  assignees: z.optional(z.array(z.record(z.string(), z.unknown()))),
+  labels: z.optional(z.array(z.record(z.string(), z.unknown()))),
+  completion_chart: z.optional(z.unknown()),
+});
+export type ArchivedEstimateDistribution = z.infer<typeof ArchivedEstimateDistribution>;
+
+/**
+ * Archived cycle detail for the peek body (ARCH-014): the list columns
+ * plus the sub-issue count, the estimate sums and the analytics
+ * summaries. The backend's extra model columns (view_props, sort_order,
+ * external ids, snapshots, logo) are ignored — the peek never reads
+ * them.
+ */
+export const ArchivedCycleDetail = z.object({
+  ...ArchivedCycleListItem.shape,
+  sub_issues: z.nullable(z.number()),
+  completed_estimate_points: z.number(),
+  total_estimate_points: z.number(),
+  estimate_distribution: ArchivedEstimateDistribution,
+  distribution: ArchivedDistribution,
+});
+export type ArchivedCycleDetail = z.infer<typeof ArchivedCycleDetail>;
+
+/** GET .../archived-cycles/<id>/: one archived cycle for the peek. */
+export async function getArchivedCycle(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string
+): Promise<ArchivedCycleDetail> {
+  const body = await client.getJson<unknown>(
+    `/api/workspaces/${slug}/projects/${projectId}/archived-cycles/${cycleId}/`
+  );
+  return client.parse(ArchivedCycleDetail, body, `GET archived cycle ${cycleId}`);
+}
+
+/**
+ * Cycle archive stamp: POST .../cycles/<id>/archive/ answers 200 with
+ * the stamp. Only finished cycles archive (end_date in the past,
+ * otherwise 400), so callers gate the entry on the COMPLETED status.
+ * The backend str()s a datetime (space-separated, not ISO), so the
+ * stamp stays a plain string like the project one.
+ */
+export const CycleArchiveStamp = z.object({
+  archived_at: z.string(),
+});
+export type CycleArchiveStamp = z.infer<typeof CycleArchiveStamp>;
+
+export async function archiveCycle(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string
+): Promise<CycleArchiveStamp> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/archive/`;
+  const envelope = await client.sendJson<unknown>("POST", path, {});
+  return client.parse(CycleArchiveStamp, envelope.data, `POST ${path}`);
+}
+
+/**
+ * DELETE .../cycles/<id>/archive/ clears the stamp and restores the
+ * cycle. Resolves the status (204); the archived-cycles unarchive alias
+ * 404s and is deliberately not contracted.
+ */
+export async function restoreCycle(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  cycleId: string
+): Promise<number> {
+  const response = await client.delete(`/api/workspaces/${slug}/projects/${projectId}/cycles/${cycleId}/archive/`);
+  return response.status;
 }

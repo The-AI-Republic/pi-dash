@@ -603,6 +603,137 @@ def seed():
     )
     note("module", module.name, module_created)
 
+    # Archives area (NEWFRONT-697): read fixtures stay archived, the
+    # round-trip fixtures stay live with archivable gates (cycle end in
+    # the past, module finished), and the upcoming cycle proves the
+    # unfinished-cycle 400. Everything is repaired, not just created, so
+    # re-seeding heals fixtures a dead run left mid-round-trip.
+    from datetime import timedelta  # noqa: E402
+
+    now = timezone.now()
+    archived_cycle, archived_cycle_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract archived cycle",
+        defaults={
+            "owned_by": user,
+            "start_date": now - timedelta(days=30),
+            "end_date": now - timedelta(days=1),
+            "archived_at": now,
+        },
+    )
+    if (
+        archived_cycle.archived_at is None
+        or archived_cycle.end_date is None
+        or archived_cycle.end_date >= now
+    ):
+        archived_cycle.start_date = now - timedelta(days=30)
+        archived_cycle.end_date = now - timedelta(days=1)
+        archived_cycle.archived_at = now
+        archived_cycle.save(update_fields=["start_date", "end_date", "archived_at"])
+    note("cycle", archived_cycle.name, archived_cycle_created)
+
+    live_cycle, live_cycle_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract archive cycle",
+        defaults={
+            "owned_by": user,
+            "start_date": now - timedelta(days=30),
+            "end_date": now - timedelta(days=1),
+        },
+    )
+    if (
+        live_cycle.archived_at is not None
+        or live_cycle.end_date is None
+        or live_cycle.end_date >= now
+    ):
+        live_cycle.start_date = now - timedelta(days=30)
+        live_cycle.end_date = now - timedelta(days=1)
+        live_cycle.archived_at = None
+        live_cycle.save(update_fields=["start_date", "end_date", "archived_at"])
+    note("cycle", live_cycle.name, live_cycle_created)
+
+    upcoming_cycle, upcoming_cycle_created = Cycle.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract upcoming cycle",
+        defaults={
+            "owned_by": user,
+            "start_date": now + timedelta(days=1),
+            "end_date": now + timedelta(days=30),
+        },
+    )
+    if upcoming_cycle.archived_at is not None or upcoming_cycle.end_date is None or upcoming_cycle.end_date <= now:
+        upcoming_cycle.start_date = now + timedelta(days=1)
+        upcoming_cycle.end_date = now + timedelta(days=30)
+        upcoming_cycle.archived_at = None
+        upcoming_cycle.save(update_fields=["start_date", "end_date", "archived_at"])
+    note("cycle", upcoming_cycle.name, upcoming_cycle_created)
+
+    archived_module, archived_module_created = Module.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract archived module",
+        defaults={
+            "lead": user,
+            "status": "completed",
+            "start_date": (now - timedelta(days=30)).date(),
+            "target_date": (now - timedelta(days=1)).date(),
+            "archived_at": now,
+        },
+    )
+    if archived_module.archived_at is None or archived_module.status not in ("completed", "cancelled"):
+        archived_module.status = "completed"
+        archived_module.start_date = (now - timedelta(days=30)).date()
+        archived_module.target_date = (now - timedelta(days=1)).date()
+        archived_module.archived_at = now
+        archived_module.save(update_fields=["status", "start_date", "target_date", "archived_at"])
+    note("module", archived_module.name, archived_module_created)
+
+    live_module, live_module_created = Module.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract archive module",
+        defaults={
+            "lead": user,
+            "status": "completed",
+            "start_date": (now - timedelta(days=30)).date(),
+            "target_date": (now - timedelta(days=1)).date(),
+        },
+    )
+    if live_module.archived_at is not None or live_module.status not in ("completed", "cancelled"):
+        live_module.status = "completed"
+        live_module.start_date = (now - timedelta(days=30)).date()
+        live_module.target_date = (now - timedelta(days=1)).date()
+        live_module.archived_at = None
+        live_module.save(update_fields=["status", "start_date", "target_date", "archived_at"])
+    note("module", live_module.name, live_module_created)
+
+    # Unfinished module proving the archive gate 400. Dedicated (not the
+    # shared Contract module: the updates suite patches that one's status).
+    planned_module, planned_module_created = Module.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract planned module",
+        defaults={"lead": user, "status": "planned"},
+    )
+    if planned_module.archived_at is not None or planned_module.status in ("completed", "cancelled"):
+        planned_module.status = "planned"
+        planned_module.archived_at = None
+        planned_module.save(update_fields=["status", "archived_at"])
+    note("module", planned_module.name, planned_module_created)
+
+    # One membership on the archived module so member_ids parses non-empty.
+    from pi_dash.db.models import ModuleMember  # noqa: E402
+
+    _, membership_created = ModuleMember.objects.get_or_create(
+        module=archived_module,
+        member=user,
+        defaults={"workspace": workspace, "project": project},
+    )
+    note("module-member", f"{archived_module.name}/{user.email}", membership_created)
+
     page, page_created = Page.objects.get_or_create(
         workspace=workspace,
         owned_by=user,

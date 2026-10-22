@@ -263,15 +263,100 @@ export async function getIssue(client: ApiClient, slug: string, projectId: strin
  * Archived issues of one project. Workspace search only indexes live
  * issues, so key resolution falls back to this list for archived keys.
  * Rows share the flat list shape; the envelope carries the same cursor
- * fields as the live list plus grouping extras the schema ignores.
+ * fields as the live list plus grouping extras the schema ignores. The
+ * archived tab sends the live list query (order_by, group_by, the
+ * JSON-stringified rich expression in `filters`) through the same
+ * builder, so this reader takes the same IssueListQuery.
  */
 export async function listArchivedIssues(
   client: ApiClient,
   slug: string,
-  projectId: string
+  projectId: string,
+  query: IssueListQuery = {}
 ): Promise<IssueListResponse> {
-  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-issues/`);
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-issues/`, {
+    query: issueListQueryParams(query),
+  });
   return client.parse(IssueListResponse, body, "GET archived issues");
+}
+
+/** GET .../archived-issues/ with group_by: one bucket per group value. */
+export async function listGroupedArchivedIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  query: IssueListQuery & { groupBy: string }
+): Promise<GroupedIssueListResponse> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-issues/`, {
+    query: issueListQueryParams(query),
+  });
+  return client.parse(GroupedIssueListResponse, body, "GET grouped archived issues");
+}
+
+/** GET .../archived-issues/ with group_by + sub_group_by: buckets within buckets. */
+export async function listSubGroupedArchivedIssues(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  query: IssueListQuery & { groupBy: string; subGroupBy: string }
+): Promise<SubGroupedIssueListResponse> {
+  const body = await client.getJson<unknown>(`/api/workspaces/${slug}/projects/${projectId}/archived-issues/`, {
+    query: issueListQueryParams(query),
+  });
+  return client.parse(SubGroupedIssueListResponse, body, "GET sub-grouped archived issues");
+}
+
+/**
+ * One archived issue, read through its archive-scoped path. The backend
+ * serves the same detail serializer as the live read but without the
+ * annotation-backed keys — cycle, module/label/assignee memberships and
+ * the sub-issue, attachment and link counts are always absent here, so
+ * this schema is deliberately narrower than Issue. The archived tab and
+ * detail must not depend on live rows, so the app calls this — not the
+ * live detail — for archived ids.
+ */
+export const ArchivedIssue = z.object({
+  id: uuid(),
+  name: z.string(),
+  state_id: nullableUuid(),
+  sort_order: z.number(),
+  completed_at: nullableDateTime(),
+  estimate_point: z.optional(z.nullable(z.union([uuid(), z.number()]))),
+  priority: z.enum(ISSUE_PRIORITIES),
+  complexity_score: z.number(),
+  start_date: z.optional(z.nullable(z.iso.date())),
+  target_date: z.optional(z.nullable(z.iso.date())),
+  sequence_id: z.number(),
+  project_id: uuid(),
+  parent_id: nullableUuid(),
+  assigned_pod_id: z.optional(nullableUuid()),
+  agent_executor: z.nullable(z.string()),
+  created_at: dateTime(),
+  updated_at: dateTime(),
+  created_by: z.nullable(z.string()),
+  updated_by: z.nullable(z.string()),
+  is_draft: z.boolean(),
+  archived_at: nullableDate(),
+  is_synced: z.boolean(),
+  description_html: z.string(),
+  is_subscribed: z.boolean(),
+  agent_ticker: z.nullable(AgentTicker),
+  agent_status: z.nullable(AgentStatus),
+  relations_summary: IssueRelationsSummary,
+  has_open_blockers: z.boolean(),
+});
+export type ArchivedIssue = z.infer<typeof ArchivedIssue>;
+
+export async function getArchivedIssue(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  issueId: string
+): Promise<ArchivedIssue> {
+  const body = await client.getJson<unknown>(
+    `/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/archive/`
+  );
+  return client.parse(ArchivedIssue, body, "GET archived issue detail");
 }
 
 /**
