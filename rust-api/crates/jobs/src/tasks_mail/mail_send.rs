@@ -2959,6 +2959,52 @@ mod tests {
     }
 
     #[test]
+    fn header_path_residuals_vs_old_parser_getaddresses() {
+        // Known divergences from Django's HEADER path (probed on Django
+        // 4.2.30 / CPython 3.12 in the PIDASHCONV-1286 review): the header
+        // path feeds `getaddresses` TUPLES through `sanitize_address`
+        // (`message.py:63-69`), while this port sanitizes each comma
+        // piece with the string-path (`get_mailbox`) rules. The two agree
+        // on every realistic input (bare and `Display <addr>` addresses,
+        // quoted `,`/`;` in displays, multi-recipient lists — see the
+        // vectors above); they differ only on malformed or exotic inputs
+        // that app validation (`validate_email` on invites) and the
+        // single-recipient `to=[email]` shape keep out of reach. The
+        // envelope is unaffected throughout (the display never reaches
+        // the wire there).
+        // An unquoted `:` reads as a route marker to the old parser, so
+        // Django SENDS `To: boss <x@y.de>`; refused here, like the new
+        // parser refuses it.
+        assert!(address_header("To", "José: boss <x@y.de>").is_err());
+        // The old parser keeps `(comment)` text in the display name and
+        // encodes it (`To: =?utf-8?b?Sm9zw6kgKGJvc3Mp?= <x@y.de>`);
+        // stripped here.
+        assert_eq!(
+            address_header("To", "José (boss) <x@y.de>").expect("builds"),
+            "To: =?utf-8?b?Sm9zw6k=?= <x@y.de>",
+        );
+        // A trailing comment becomes the display name to the old parser
+        // (`To: =?utf-8?b?Sm9zw6k=?= <x@y.de>`); stripped here.
+        assert_eq!(
+            address_header("To", "x@y.de (José)").expect("builds"),
+            "To: x@y.de",
+        );
+        // Quoted local parts keep their quotes through `getaddresses`
+        // and `Address` re-quotes them (`To: "\"ab\""@x.de`, Django's own
+        // garbage); unquoted here.
+        assert_eq!(
+            address_header("To", "\"ab\"@x.de, é@y.de").expect("builds"),
+            "To: ab@x.de, =?utf-8?b?w6k=?=@y.de",
+        );
+        // Group syntax (`Friends: a@x.de, é@y.de;`) delivers to the
+        // members upstream; refused here (the `:` fails the piece).
+        assert!(address_header("To", "Friends: a@x.de, é@y.de;").is_err());
+        // `""` parses to an empty mailbox upstream (`Address('','')`
+        // renders `<>`, so Django sends `MAIL FROM:<>`); refused here.
+        assert!(envelope_address("\"\"").is_err());
+    }
+
+    #[test]
     fn message_bytes_encodes_headers_like_django() {
         // The issue case end to end: non-ASCII From/To/Subject render
         // as Django's wire bytes (folded encoded words, punycode).
