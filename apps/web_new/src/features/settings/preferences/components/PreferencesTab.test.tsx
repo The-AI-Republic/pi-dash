@@ -326,7 +326,8 @@ describe("PreferencesTab", () => {
     render(<PreferencesTab />);
     fireEvent.click(trigger("Timezone"));
     const listbox = await screen.findByRole("listbox", { name: "Timezone options" });
-    expect(within(listbox).getAllByRole("option")).toHaveLength(2);
+    // Two catalog zones plus the pinned UTC the server defaults members to (NEWFRONT-586).
+    expect(within(listbox).getAllByRole("option")).toHaveLength(3);
     fireEvent.click(screen.getByRole("option", { name: "Paris" }));
     expect(harness.updateTimezone.mutate).toHaveBeenCalledWith({ timezone: "Europe/Paris" });
   });
@@ -390,6 +391,7 @@ describe("PreferencesTab", () => {
     await user.type(screen.getByRole("combobox", { name: "Search" }), "paris");
     expect(within(screen.getByRole("listbox")).getAllByRole("option")).toHaveLength(1);
     await user.clear(screen.getByRole("combobox", { name: "Search" }));
-    await waitFor(() => expect(within(screen.getByRole("listbox")).getAllByRole("option")).toHaveLength(2));
+    // Two catalog zones plus the pinned UTC (NEWFRONT-586).
+    await waitFor(() => expect(within(screen.getByRole("listbox")).getAllByRole("option")).toHaveLength(3));
   });
 });
