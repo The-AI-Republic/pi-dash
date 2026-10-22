@@ -59,8 +59,10 @@ describe("CrossAppLink", () => {
   });
 
   it("appends a deep-link anchor on a plain anchor", () => {
+    // Empty prefixes pin the anchor branch: the bundled list migrates
+    // /settings/profile (NEWFRONT-586), which would flip this to a link.
     render(
-      <CrossAppLink to="/settings/profile/ai-assistant" hash="voice-dictation">
+      <CrossAppLink to="/settings/profile/ai-assistant" hash="voice-dictation" prefixes={[]}>
         Voice
       </CrossAppLink>
     );
