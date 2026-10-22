@@ -12,6 +12,7 @@ import type { AnyExtension } from "@tiptap/core";
 import { describe, expect, it } from "vitest";
 
 import { loadCommentExtensions, loadDescriptionExtensions } from "./extensions.js";
+import { prepareEditorHtml } from "./sanitize.js";
 
 interface Fixture {
   name: string;
@@ -86,20 +87,51 @@ describe("stored description round-trip", () => {
 });
 
 describe("comment editor extensions", () => {
-  it("adds inline images to the description set without changing its round trip", async () => {
+  it("adds the stored-image and mention nodes to the description set", async () => {
     const description = (await loadDescriptionExtensions()) as unknown as AnyExtension[];
     const comment = (await loadCommentExtensions()) as unknown as AnyExtension[];
-    expect(comment).toHaveLength(description.length + 1);
+    expect(comment).toHaveLength(description.length + 2);
+    const names = comment.map((extension) => extension.name).sort();
+    expect(names).toContain("image");
+    expect(names).toContain("mention");
+  });
 
+  it("keeps a plain image a plain image", async () => {
     const { Editor } = await import("@tiptap/core");
+    const extensions = (await loadCommentExtensions()) as unknown as AnyExtension[];
     const editor = new Editor({
-      extensions: comment,
+      extensions,
       content: '<h2>Shot</h2><p>Look</p><img src="https://cdn.test/shot.png">',
     });
     try {
       const serialized = editor.getHTML();
       expect(serialized).toContain('<img src="https://cdn.test/shot.png">');
+      expect(serialized).not.toContain("image-component");
       expect(textOf(serialized)).toBe("ShotLook");
+    } finally {
+      editor.destroy();
+    }
+  });
+
+  it("round-trips a stored image and a stored mention (CMT-009/019)", async () => {
+    const { Editor } = await import("@tiptap/core");
+    const extensions = (await loadCommentExtensions()) as unknown as AnyExtension[];
+    // The edit form resolves bare asset ids for display before the
+    // editor parses, so the stored id survives the round trip.
+    const content = prepareEditorHtml(
+      '<p>Thanks <mention-component id="u-1" entity_identifier="u-1" entity_name="user_mention" data-name="Ada"></mention-component></p>' +
+        '<image-component src="asset-9" status="uploaded"></image-component>',
+      (src) => `/api/assets/v2/workspaces/acme/projects/p-1/${src}/`
+    );
+    const editor = new Editor({ extensions, content });
+    try {
+      const serialized = editor.getHTML();
+      expect(serialized).toContain("mention-component");
+      expect(serialized).toContain('entity_identifier="u-1"');
+      expect(serialized).toContain("image-component");
+      expect(serialized).toContain('src="asset-9"');
+      expect(serialized).toContain('status="uploaded"');
+      expect(textOf(serialized)).toContain("Thanks");
     } finally {
       editor.destroy();
     }

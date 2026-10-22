@@ -114,6 +114,34 @@ export async function uploadCommentImage(
   return { assetId: grant.asset_id, assetUrl: grant.asset_url ?? "" };
 }
 
+/** Answer of an asset duplication: the new asset's id. */
+export const CommentImageDuplicate = z.object({
+  asset_id: z.string(),
+});
+export type CommentImageDuplicate = z.infer<typeof CommentImageDuplicate>;
+
+/**
+ * Duplicate an image already in a body into a new revision (CMT-009).
+ * An edit that keeps a picture duplicates its asset so the new body
+ * owns the copy. Answers 200 with the duplicate's id.
+ */
+export async function duplicateCommentImage(
+  client: ApiClient,
+  slug: string,
+  assetId: string,
+  scope: { commentId: string; projectId: string }
+): Promise<string> {
+  const path = `/api/assets/v2/workspaces/${slug}/duplicate-assets/${encodeURIComponent(assetId)}/`;
+  const envelope = await client.sendJson<unknown>("POST", path, {
+    json: {
+      entity_id: scope.commentId,
+      entity_type: COMMENT_IMAGE_ENTITY_TYPE,
+      project_id: scope.projectId,
+    },
+  });
+  return client.parse(CommentImageDuplicate, envelope.data, `POST ${path}`).asset_id;
+}
+
 /**
  * Link parked assets to the comment that embeds them. The bulk write
  * is addressed by the comment id: the service files every listed

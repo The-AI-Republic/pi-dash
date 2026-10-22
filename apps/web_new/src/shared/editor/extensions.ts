@@ -4,41 +4,25 @@
 // Editor extension sets (UI kit and editor page). Tiptap arrives only
 // through dynamic import() (Stack: heavy dependencies never join the
 // eager closure), so each surface exposes an async loader. The
-// description set below covers the detail core (ISS-147); the composer
-// adds inline images with the comment set (ISS-197), and the slices
-// that own mentions, task lists and highlighting extend it further.
+// description set below covers the detail core (ISS-147); the work-item
+// description and the comment composer share the stored-image and
+// mention nodes (ISS-127, CMT-009/019), and the slices that own task
+// lists and highlighting extend it further.
 // The compatibility fixtures (compat.test.ts) load this same set, so
 // what the tests pin is exactly what the editor runs.
 
 import { MENTION_ENTITY, MENTION_TAG, mentionLabel } from "./mention.js";
 
-/** Description editing: paragraphs, headings, lists, code, links. */
-export async function loadDescriptionExtensions() {
-  const [{ default: StarterKit }, { default: Link }] = await Promise.all([
-    import("@tiptap/starter-kit"),
-    import("@tiptap/extension-link"),
-  ]);
-  // Links stay inert while editing: a click moves the caret instead of
-  // navigating away mid-edit. Serialized links keep the extension's
-  // default target/rel (pinned in compat.test.ts).
-  return [StarterKit, Link.configure({ openOnClick: false })];
-}
+type TiptapCore = typeof import("@tiptap/core");
+type TiptapImage = typeof import("@tiptap/extension-image").default;
 
 /**
- * Work-item description editing: the description set plus inline images
- * and person mentions (ISS-127). Images arrive through the modal's own
- * upload control and mentions through its lookup, so this set only has
- * to parse and serialize what those controls insert.
+ * The person-mention node both rich editors share (ISS-127, CMT-019).
+ * Built inside the lazy loaders because the boundary check allows
+ * Tiptap only through import().
  */
-export async function loadIssueDescriptionExtensions() {
-  const [{ default: Image }, { Node, mergeAttributes }, base] = await Promise.all([
-    import("@tiptap/extension-image"),
-    import("@tiptap/core"),
-    loadDescriptionExtensions(),
-  ]);
-  // The mention node is built here, inside the lazy loader, because the
-  // boundary check allows Tiptap only through import() (ISS-127).
-  const MentionNode = Node.create({
+function createMentionNode(Node: TiptapCore["Node"], mergeAttributes: TiptapCore["mergeAttributes"]) {
+  return Node.create({
     name: "mention",
     group: "inline",
     inline: true,
@@ -90,12 +74,18 @@ export async function loadIssueDescriptionExtensions() {
       return mentionLabel(attrs["data-name"], attrs.entity_identifier ?? attrs.id);
     },
   });
-  // Stored bodies written by earlier clients hold images as an
-  // `image-component` element; the editor reads both spellings so an
-  // old body opens with its pictures (ISS-127). The element keeps its own
-  // name and attributes on the way out, and a stored asset id travels in
-  // `data-stored-src` so an edit never rewrites the stored id to a URL.
-  const DescriptionImage = Image.extend({
+}
+
+/**
+ * The stored-image node both rich editors share (ISS-127, CMT-009).
+ * Stored bodies written by earlier clients hold images as an
+ * `image-component` element; the editor reads both spellings so an
+ * old body opens with its pictures. The element keeps its own name
+ * and attributes on the way out, and a stored asset id travels in
+ * `data-stored-src` so an edit never rewrites the stored id to a URL.
+ */
+function createStoredImageNode(Image: TiptapImage) {
+  return Image.extend({
     parseHTML() {
       return [{ tag: "img" }, { tag: "image-component" }];
     },
@@ -155,14 +145,46 @@ export async function loadIssueDescriptionExtensions() {
       };
     },
   }).configure({ inline: false, allowBase64: false });
-  return [...base, DescriptionImage, MentionNode];
 }
 
-/** Comment editing: the description set plus inline images (ISS-197). */
-export async function loadCommentExtensions() {
-  const [{ default: Image }, base] = await Promise.all([
+/** Description editing: paragraphs, headings, lists, code, links. */
+export async function loadDescriptionExtensions() {
+  const [{ default: StarterKit }, { default: Link }] = await Promise.all([
+    import("@tiptap/starter-kit"),
+    import("@tiptap/extension-link"),
+  ]);
+  // Links stay inert while editing: a click moves the caret instead of
+  // navigating away mid-edit. Serialized links keep the extension's
+  // default target/rel (pinned in compat.test.ts).
+  return [StarterKit, Link.configure({ openOnClick: false })];
+}
+
+/**
+ * Work-item description editing: the description set plus inline images
+ * and person mentions (ISS-127). Images arrive through the modal's own
+ * upload control and mentions through its lookup, so this set only has
+ * to parse and serialize what those controls insert.
+ */
+export async function loadIssueDescriptionExtensions() {
+  const [{ default: Image }, { Node, mergeAttributes }, base] = await Promise.all([
     import("@tiptap/extension-image"),
+    import("@tiptap/core"),
     loadDescriptionExtensions(),
   ]);
-  return [...base, Image.configure({ inline: false, allowBase64: false })];
+  return [...base, createStoredImageNode(Image), createMentionNode(Node, mergeAttributes)];
+}
+
+/**
+ * Comment editing: the description set plus the shared stored-image
+ * and mention nodes (ISS-197, CMT-009/019). A comment body stores its
+ * pictures as `image-component` with an upload status and its people
+ * as `mention-component`, exactly like a description does.
+ */
+export async function loadCommentExtensions() {
+  const [{ default: Image }, { Node, mergeAttributes }, base] = await Promise.all([
+    import("@tiptap/extension-image"),
+    import("@tiptap/core"),
+    loadDescriptionExtensions(),
+  ]);
+  return [...base, createStoredImageNode(Image), createMentionNode(Node, mergeAttributes)];
 }

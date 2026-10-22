@@ -13,9 +13,11 @@ import {
   attachCommentImages,
   createIssueComment,
   deleteIssueComment,
+  duplicateCommentImage,
   gitSyncedCommentErrorFrom,
   isApiError,
   listIssueComments,
+  searchMentionPeople,
   updateIssueComment,
   uploadCommentImage,
   type ApiClient,
@@ -25,11 +27,19 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 import { rollbackSnapshots, snapshotQueries, type QuerySnapshot } from "../../../core/query/optimistic.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { mergeDeltaRows, newestCreatedAt } from "../api/incremental.js";
 import { issueKeys } from "../api/keys.js";
-import { patchCommentList, toggledAccess, withFold, type CommentPatch } from "./model.js";
+import {
+  commentBodyImageAssetIds,
+  patchCommentList,
+  rewriteCommentImageSrcs,
+  toggledAccess,
+  withFold,
+  type CommentPatch,
+} from "./model.js";
 
 /** Notice copy the comment flows raise; the oracle scenarios assert it. */
 export const COMMENT_CREATED_TITLE = "Comment created successfully";
@@ -273,6 +283,78 @@ export function useUploadCommentImage(scope: Pick<CommentScope, "workspaceSlug" 
       return { assetId: uploaded.assetId, src: uploaded.assetUrl };
     },
     onError: (error: Error) => notifyError(COMMENT_IMAGE_UPLOAD_FAILED_TITLE, commentFailureDetail(error)),
+  });
+}
+
+/**
+ * Duplicate the images an edit keeps so the new revision owns its
+ * pictures (CMT-009). Ids in both bodies are duplicated and rebound;
+ * added uploads and dropped pictures need no call. Rejects when a
+ * duplicate is refused, so the caller fails the save instead of
+ * storing a body that points at the old revision's assets.
+ */
+export async function duplicateKeptCommentImages(
+  client: ApiClient,
+  scope: { workspaceSlug: string; projectId: string; commentId: string },
+  originalHtml: string,
+  nextHtml: string
+): Promise<string> {
+  const original = new Set(commentBodyImageAssetIds(originalHtml));
+  const kept = commentBodyImageAssetIds(nextHtml).filter((id) => original.has(id));
+  if (kept.length === 0) return nextHtml;
+  const mapping = new Map<string, string>();
+  for (const id of kept) {
+    const duplicate = await duplicateCommentImage(client, scope.workspaceSlug, id, {
+      commentId: scope.commentId,
+      projectId: scope.projectId,
+    });
+    mapping.set(id, duplicate);
+  }
+  return rewriteCommentImageSrcs(nextHtml, mapping);
+}
+
+/** How many people one comment mention search may offer (CMT-019). */
+export const COMMENT_MENTION_LIMIT = 5;
+
+/** One mention suggestion row the comment @ popup renders. */
+export interface CommentMentionPerson {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+/** Mention lookup key, nested under the workspace like every read. */
+export function commentMentionSearchKey(workspaceSlug: string, projectId: string, text: string) {
+  return [...workspaceScope(workspaceSlug), "issues", "comments", "mention-search", projectId, text] as const;
+}
+
+/** People matching the text typed after an @; none without a project. */
+export async function requestCommentMentions(
+  client: ApiClient,
+  workspaceSlug: string,
+  projectId: string,
+  query: string
+): Promise<CommentMentionPerson[]> {
+  if (projectId === "") return [];
+  const people = await searchMentionPeople(client, workspaceSlug, {
+    query,
+    projectId,
+    count: COMMENT_MENTION_LIMIT,
+  });
+  return people.map((person) => ({
+    id: person.member__id,
+    name: person.member__display_name,
+    avatarUrl: person.member__avatar_url,
+  }));
+}
+
+/** Mention lookup for the comment composer and edit form (CMT-019). */
+export function useCommentMentionSearch(workspaceSlug: string, projectId: string, query: string, enabled: boolean) {
+  return useQuery({
+    queryKey: commentMentionSearchKey(workspaceSlug, projectId, query),
+    queryFn: () => requestCommentMentions(getAppClient(), workspaceSlug, projectId, query),
+    staleTime: REFERENCE_STALE_TIME_MS,
+    enabled: enabled && projectId !== "",
   });
 }
 

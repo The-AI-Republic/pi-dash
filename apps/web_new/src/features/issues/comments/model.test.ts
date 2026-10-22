@@ -9,12 +9,17 @@ import {
   applyCommentPatch,
   commentAuthorAvatar,
   commentAuthorName,
+  commentBodyImageAssetIds,
   commentDeepLink,
+  commentEnterAction,
+  commentImageAssetId,
   commentMenuEntries,
   isCommentAuthor,
   isCommentBodyEmpty,
   isCommentFolded,
   patchCommentList,
+  rewriteCommentImageSrcs,
+  swallowCommentEnter,
   toggledAccess,
   withFold,
 } from "./model.js";
@@ -198,6 +203,77 @@ describe("comment link and empty check", () => {
   it("leaves other markup-only bodies empty", () => {
     expect(isCommentBodyEmpty("<p><strong> </strong></p>")).toBe(true);
     expect(isCommentBodyEmpty("<p><br></p>")).toBe(true);
+  });
+});
+
+describe("comment image asset ids (CMT-009)", () => {
+  it("reads a bare asset id and the served asset paths", () => {
+    expect(commentImageAssetId("asset-9")).toBe("asset-9");
+    expect(commentImageAssetId("  asset-9  ")).toBe("asset-9");
+    expect(commentImageAssetId("/api/assets/v2/workspaces/acme/projects/p-1/asset-9/")).toBe("asset-9");
+    expect(commentImageAssetId("/api/assets/v2/workspaces/acme/projects/p-1/asset-9")).toBe("asset-9");
+    expect(commentImageAssetId("https://api.test/api/assets/v2/workspaces/acme/projects/p-1/asset-9/")).toBe("asset-9");
+  });
+
+  it("answers null for empty, external and unparseable sources", () => {
+    expect(commentImageAssetId("")).toBeNull();
+    expect(commentImageAssetId("   ")).toBeNull();
+    expect(commentImageAssetId("https://cdn.test/shot.png")).toBeNull();
+    expect(commentImageAssetId("data:image/png;base64,AAA")).toBeNull();
+    expect(commentImageAssetId("/files/shot.png")).toBeNull();
+    expect(commentImageAssetId("not an id")).toBeNull();
+    expect(commentImageAssetId("/api/assets/v2/")).toBeNull();
+  });
+
+  it("collects embedded ids in order without repeats", () => {
+    const html =
+      '<p>First <image-component src="asset-1" status="uploaded"></image-component> ' +
+      'second <img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-2/"> ' +
+      'repeat <image-component src="asset-1" status="uploaded"></image-component> ' +
+      'external <img src="https://cdn.test/x.png"></p>';
+    expect(commentBodyImageAssetIds(html)).toEqual(["asset-1", "asset-2"]);
+    expect(commentBodyImageAssetIds("<p>no pictures</p>")).toEqual([]);
+  });
+
+  it("rebinds duplicated ids and leaves everything else alone", () => {
+    const html =
+      '<p>Keep <image-component src="asset-1" status="uploaded"></image-component> ' +
+      'and <img src="/api/assets/v2/workspaces/acme/projects/p-1/asset-2/"></p>';
+    const next = rewriteCommentImageSrcs(html, new Map([["asset-1", "asset-1b"]]));
+    expect(next).toContain('src="asset-1b"');
+    expect(next).not.toContain('asset-1"');
+    expect(next).toContain("asset-2");
+    expect(next).toContain('status="uploaded"');
+  });
+
+  it("returns an unmapped body untouched, never renormalized", () => {
+    const html = "<p>Plain <strong>words</strong></p>";
+    expect(rewriteCommentImageSrcs(html, new Map())).toBe(html);
+    expect(rewriteCommentImageSrcs(html, new Map([["asset-9", "asset-9b"]]))).toBe(html);
+  });
+});
+
+describe("comment Enter decision (CMT-011)", () => {
+  it("picks the mention while the popup is open", () => {
+    expect(commentEnterAction({ mentionOpen: true, busy: false, empty: false })).toBe("pick-mention");
+    expect(commentEnterAction({ mentionOpen: true, busy: true, empty: true })).toBe("pick-mention");
+  });
+
+  it("submits only when idle with content", () => {
+    expect(commentEnterAction({ mentionOpen: false, busy: false, empty: false })).toBe("submit");
+  });
+
+  it("is a no-op while busy or empty", () => {
+    expect(commentEnterAction({ mentionOpen: false, busy: true, empty: false })).toBe("none");
+    expect(commentEnterAction({ mentionOpen: false, busy: false, empty: true })).toBe("none");
+    expect(commentEnterAction({ mentionOpen: false, busy: true, empty: true })).toBe("none");
+  });
+
+  it("swallows every Enter except a submit", () => {
+    expect(swallowCommentEnter({ mentionOpen: true, busy: false, empty: false })).toBe(true);
+    expect(swallowCommentEnter({ mentionOpen: false, busy: true, empty: false })).toBe(true);
+    expect(swallowCommentEnter({ mentionOpen: false, busy: false, empty: true })).toBe(true);
+    expect(swallowCommentEnter({ mentionOpen: false, busy: false, empty: false })).toBe(false);
   });
 });
 

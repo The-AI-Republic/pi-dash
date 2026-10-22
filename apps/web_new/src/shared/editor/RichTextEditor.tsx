@@ -22,9 +22,22 @@ type EditorExtension =
   | Awaited<ReturnType<typeof loadDescriptionExtensions>>[number]
   | Awaited<ReturnType<typeof loadCommentExtensions>>[number];
 
+/** Stored identity a freshly uploaded picture keeps (CMT-009). */
+export interface StoredImageInsert {
+  /** Asset id the serialization keeps as the stored source. */
+  storedSrc: string;
+  /** Upload status stamped on the stored node. */
+  status: string;
+}
+
 /** The slice of the Tiptap editor the composer needs. */
 export interface RichTextEditorHandle {
-  insertImage: (src: string) => void;
+  /**
+   * Insert a picture at the caret. With `stored` the picture keeps its
+   * asset id and status, so it serializes as a stored image node
+   * instead of a plain image.
+   */
+  insertImage: (src: string, stored?: StoredImageInsert) => void;
   /** Insert a person mention at the caret (ISS-127). */
   insertMention: (target: { id: string; name: string }) => void;
   /** Insert stored HTML at the caret, keeping surrounding text (ISS-127). */
@@ -85,8 +98,19 @@ interface EditorLike {
   state: { selection: EditorSelectionLike };
 }
 
-function insertImage(editor: EditorLike, src: string): void {
-  editor.chain().focus().setImage({ src }).run();
+function insertImage(editor: EditorLike, src: string, stored?: StoredImageInsert): void {
+  if (stored === undefined) {
+    editor.chain().focus().setImage({ src }).run();
+    return;
+  }
+  editor
+    .chain()
+    .focus()
+    .insertContent({
+      type: "image",
+      attrs: { src, "data-stored-src": stored.storedSrc, status: stored.status },
+    })
+    .run();
 }
 
 function insertMention(editor: EditorLike, target: { id: string; name: string }): void {
@@ -131,7 +155,7 @@ function textBeforeCaret(editor: EditorLike): string {
 
 function toHandle(editor: EditorLike): RichTextEditorHandle {
   return {
-    insertImage: (src: string) => insertImage(editor, src),
+    insertImage: (src: string, stored?: StoredImageInsert) => insertImage(editor, src, stored),
     insertMention: (target: { id: string; name: string }) => insertMention(editor, target),
     insertHtml: (html: string) => insertHtml(editor, html),
     textBeforeCaret: () => textBeforeCaret(editor),
@@ -276,8 +300,9 @@ export const RichTextEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadDe
 export const IssueDescriptionEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadIssueDescriptionExtensions));
 
 /**
- * The comment editor: the same lazy surface with inline images (ISS-197).
- * Each editor piece owns its own loader, so a surface never suspends a
- * second time for an extension set after its chunk arrives.
+ * The comment editor: the same lazy surface with stored images and
+ * person mentions (ISS-197, CMT-009/019). Each editor piece owns its
+ * own loader, so a surface never suspends a second time for an
+ * extension set after its chunk arrives.
  */
 export const CommentRichTextEditor = /* #__PURE__ */ React.lazy(() => loadEditor(loadCommentExtensions));

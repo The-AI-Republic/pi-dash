@@ -25,7 +25,7 @@ import {
   signUpWithMagicCode,
 } from "./contracts/auth-entry.js";
 import { getMe, getMeSettings } from "./contracts/users.js";
-import { attachCommentImages, uploadCommentImage } from "./contracts/comment-assets.js";
+import { attachCommentImages, duplicateCommentImage, uploadCommentImage } from "./contracts/comment-assets.js";
 import { markOnboarded, updateMe } from "./contracts/user-writes.js";
 import {
   exportUserProfileActivity,
@@ -5164,6 +5164,34 @@ describe("comment image asset contract", () => {
     });
     const file = new File(["bytes"], "shot.png", { type: "image/png" });
     const error = await uploadCommentImage(client, "acme", UUID2, file).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
+  });
+
+  it("duplicates a kept image into the edited comment", async () => {
+    const transport = recordingTransport((call) => {
+      if (call.url.endsWith("/auth/get-csrf-token/")) {
+        return fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) });
+      }
+      return fakeResponse({ body: JSON.stringify({ asset_id: "asset-new" }) });
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const assetId = await duplicateCommentImage(client, "acme", UUID, { commentId: UUID2, projectId: "p-1" });
+    expect(assetId).toBe("asset-new");
+    const call = transport.calls.find((entry) => entry.init.method === "POST");
+    expect(call?.url).toBe(`https://api.test/api/assets/v2/workspaces/acme/duplicate-assets/${UUID}/`);
+    expect(call?.init.body).toBe(
+      JSON.stringify({ entity_id: UUID2, entity_type: "COMMENT_DESCRIPTION", project_id: "p-1" })
+    );
+  });
+
+  it("rejects a duplication answer without an asset id", async () => {
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({ asset_id: null }),
+    });
+    const error = await duplicateCommentImage(client, "acme", UUID, { commentId: UUID2, projectId: "p-1" }).catch(
+      (e: unknown) => e
+    );
     expect((error as ApiError).code).toBe("contract");
   });
 });

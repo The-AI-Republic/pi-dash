@@ -8,7 +8,7 @@ export { loadCommentExtensions, loadDescriptionExtensions, loadIssueDescriptionE
 export { CommentRichTextEditor, IssueDescriptionEditor, RichTextEditor } from "./RichTextEditor.js";
 export { MENTION_CONTENT_TAGS, MENTION_ENTITY, MENTION_TAG, mentionAttributes, mentionQueryAt } from "./mention.js";
 export type { MentionQuery, MentionTarget } from "./mention.js";
-export type { RichTextEditorHandle, RichTextEditorProps } from "./RichTextEditor.js";
+export type { RichTextEditorHandle, RichTextEditorProps, StoredImageInsert } from "./RichTextEditor.js";
 export { RichTextView } from "./RichTextView.js";
 export type { RichTextViewProps } from "./RichTextView.js";
 export {

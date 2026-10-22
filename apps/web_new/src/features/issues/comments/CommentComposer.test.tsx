@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,7 @@ vi.mock("../../../shared/shell/index.js", () => ({
 
 import type { TransportInit } from "@pidash/api-client";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { mentionQueryAt } from "../../../shared/editor/mention.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import {
   CommentComposer,
@@ -32,24 +33,50 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     onChange,
     label,
     onReady,
+    onMentionQuery,
+    handleKeyDown,
   }: {
     initialHtml: string;
     onChange: (html: string) => void;
     label: string;
-    onReady?: (handle: { insertImage: (src: string) => void }) => void;
+    onReady?: (handle: {
+      insertImage: (src: string) => void;
+      insertMention: (target: { id: string; name: string }) => void;
+    }) => void;
+    onMentionQuery?: (query: string | null) => void;
+    handleKeyDown?: (event: KeyboardEvent) => boolean;
   }) {
     const images = React.useRef<string[]>([]);
+    const mentions = React.useRef<{ id: string; name: string }[]>([]);
+    const boxRef = React.useRef<HTMLTextAreaElement>(null);
     const [, rerender] = React.useReducer((value: number) => value + 1, 0);
     const text = React.useRef("");
     const emit = (): void => {
-      const markup = images.current.map((src) => `<img src="${src}">`).join("");
+      const markup =
+        images.current.map((src) => `<img src="${src}">`).join("") +
+        mentions.current
+          .map(
+            (mention) =>
+              `<mention-component id="${mention.id}" entity_identifier="${mention.id}" entity_name="user_mention" data-name="${mention.name}"></mention-component>`
+          )
+          .join("");
       onChange(text.current.trim() === "" && markup === "" ? "<p></p>" : `<p>${text.current}${markup}</p>`);
+      onMentionQuery?.(mentionQueryAt(text.current)?.text ?? null);
     };
     React.useEffect(
       () =>
         onReady?.({
           insertImage: (src) => {
             images.current.push(src);
+            rerender();
+            emit();
+          },
+          insertMention: (target) => {
+            // The real handle replaces the typed @query with the node.
+            const query = mentionQueryAt(text.current);
+            if (query !== null) text.current = text.current.slice(0, text.current.length - query.text.length - 1);
+            if (boxRef.current !== null) boxRef.current.value = text.current;
+            mentions.current.push(target);
             rerender();
             emit();
           },
@@ -62,11 +89,18 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
           <img key={src} src={src} alt="" />
         ))}
         <textarea
+          ref={boxRef}
           aria-label={label}
           defaultValue={initialHtml.replace(/<[^>]*>/g, "").trim()}
           onInput={(event) => {
             text.current = event.currentTarget.value;
             emit();
+          }}
+          onKeyDown={(event) => {
+            // Mirror the editing surface: the editor-level guard runs
+            // first, and a swallowed key reaches the form prevented,
+            // exactly as ProseMirror delivers it (CMT-011).
+            if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
           }}
         />
       </div>
@@ -75,9 +109,11 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
   return { ...original, RichTextEditor: FakeEditor, CommentRichTextEditor: FakeEditor };
 });
 
+type HandlerAnswer = { status: number; body: unknown };
+
 function renderComposer(
   props: Partial<React.ComponentProps<typeof CommentComposer>> = {},
-  handler: (url: string, init: { method: string; body: string }) => { status: number; body: unknown } = () => ({
+  handler: (url: string, init: { method: string; body: string }) => HandlerAnswer | Promise<HandlerAnswer> = () => ({
     status: 200,
     body: {},
   })
@@ -89,7 +125,7 @@ function renderComposer(
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify({ csrf_token: "x" }) };
     }
-    const answer = handler(url, { method: init.method, body: init.body ?? "" });
+    const answer = await handler(url, { method: init.method, body: init.body ?? "" });
     return {
       status: answer.status,
       url,
@@ -214,17 +250,157 @@ describe("CommentComposer", () => {
     expect(await editor()).toHaveValue("");
   });
 
-  it("keeps the draft when the post fails", async () => {
+  it("clears the draft and drops parked images when the post fails (CMT-001)", async () => {
     const user = userEvent.setup();
-    const { onCreate } = renderComposer({ onCreate: vi.fn(async () => Promise.reject(new Error("nope"))) });
+    let attempts = 0;
+    const onCreate = vi.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("nope");
+    });
+    const { onCreate: created } = renderComposer({ onCreate }, (url, init) => {
+      if (init.method === "POST" && url.includes("/projects/p-1/") && !url.includes("/bulk/")) {
+        return {
+          status: 200,
+          body: {
+            asset_id: "asset-9",
+            asset_url: "/api/assets/v2/workspaces/acme/projects/p-1/asset-9/",
+            upload_data: { url: "https://s3.test/upload", fields: {} },
+          },
+        };
+      }
+      return { status: 204, body: "" };
+    });
     const box = await editor();
     box.focus();
     await user.keyboard("Keep me");
-    await waitFor(() => expect(box).toHaveValue("Keep me"));
+    fireEvent.change(screen.getByLabelText("Add an image to the comment"), {
+      target: { files: [new File(["img"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(document.querySelector("img")).not.toBeNull());
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(created).toHaveBeenCalledTimes(1));
+    expect(created).toHaveBeenCalledWith(expect.objectContaining({ assetIds: ["asset-9"] }));
+    // The failed post clears the composer for the next comment.
+    expect(await editor()).toHaveValue("");
+    expect(document.querySelector("img")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled());
+    // The parked image does not leak into the next comment.
+    const retry = await editor();
+    retry.focus();
+    await user.keyboard("After");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(created).toHaveBeenCalledTimes(2));
+    expect(created).toHaveBeenLastCalledWith(expect.objectContaining({ assetIds: [] }));
+  });
+
+  it("disables submit and holds Enter while an upload is in flight (CMT-011)", async () => {
+    const user = userEvent.setup();
+    let release!: (answer: { status: number; body: unknown }) => void;
+    let held = true;
+    const { onCreate } = renderComposer({}, () => {
+      if (!held) return { status: 204, body: "" };
+      return new Promise((resolve) => {
+        release = (answer) => {
+          held = false;
+          resolve(answer);
+        };
+      });
+    });
+    const box = await editor();
+    box.focus();
+    await user.keyboard("Waiting");
+    fireEvent.change(screen.getByLabelText("Add an image to the comment"), {
+      target: { files: [new File(["img"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).toBeDisabled());
+    await user.keyboard("{Enter}");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(await editor()).toHaveValue("Waiting");
+    release({
+      status: 200,
+      body: {
+        asset_id: "asset-9",
+        asset_url: "/api/assets/v2/workspaces/acme/projects/p-1/asset-9/",
+        upload_data: { url: "https://s3.test/upload", fields: {} },
+      },
+    });
+    // Once the upload lands, Enter posts again.
+    await waitFor(() => expect(document.querySelector("img")).not.toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).not.toBeDisabled());
     await user.keyboard("{Enter}");
     await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
-    expect(await editor()).toHaveValue("Keep me");
+    expect(onCreate).toHaveBeenCalledWith(expect.objectContaining({ assetIds: ["asset-9"] }));
+  });
+
+  it("leaves no image node and a usable submit after a failed upload (CMT-009)", async () => {
+    const user = userEvent.setup();
+    renderComposer({}, () => ({ status: 400, body: { error: "Invalid file type." } }));
+    const box = await editor();
+    box.focus();
+    await user.keyboard("Draft kept");
+    fireEvent.change(screen.getByLabelText("Add an image to the comment"), {
+      target: { files: [new File(["x"], "bad.svg", { type: "image/svg+xml" })] },
+    });
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't upload the image", "Invalid file type."));
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("img")).toBeNull();
+    expect(await editor()).toHaveValue("Draft kept");
     await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).not.toBeDisabled());
+  });
+
+  it("offers mention suggestions and posts the picked person (CMT-019)", async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderComposer({}, (url) => {
+      if (url.includes("/entity-search/")) {
+        return {
+          status: 200,
+          body: {
+            user_mention: [{ member__id: "u-1", member__display_name: "Ada L", member__avatar_url: null }],
+          },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+    const box = await editor();
+    box.focus();
+    await user.keyboard("Hello @ad");
+    const popup = await screen.findByRole("list", { name: "Mention suggestions" });
+    expect(within(popup).getByText("Users")).toBeInTheDocument();
+    expect(within(popup).getByRole("button").textContent).toContain("Ada L");
+    await user.keyboard("{Enter}");
+    // The pick lands in the draft instead of posting.
+    expect(onCreate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Mention suggestions" })).not.toBeInTheDocument());
+    expect(await editor()).toHaveValue("Hello ");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onCreate).toHaveBeenCalledTimes(1));
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ html: expect.stringContaining("mention-component") })
+    );
+  });
+
+  it("dismisses the mention popup on Escape without posting (CMT-019)", async () => {
+    const user = userEvent.setup();
+    const { onCreate } = renderComposer({}, (url) => {
+      if (url.includes("/entity-search/")) {
+        return {
+          status: 200,
+          body: {
+            user_mention: [{ member__id: "u-1", member__display_name: "Ada L", member__avatar_url: null }],
+          },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+    const box = await editor();
+    box.focus();
+    await user.keyboard("Hello @ad");
+    await screen.findByRole("list", { name: "Mention suggestions" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Mention suggestions" })).not.toBeInTheDocument());
+    expect(onCreate).not.toHaveBeenCalled();
+    expect(await editor()).toHaveValue("Hello @ad");
   });
 
   it("shows the access switch only on published projects and posts the choice", async () => {

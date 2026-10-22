@@ -28,11 +28,16 @@ import {
   COMMENT_UPDATED_TITLE,
   accessPatch,
   commentFailureDetail,
+  commentMentionSearchKey,
   commentsQueryOptions,
   COMMENT_FAILURE_FALLBACK,
+  COMMENT_MENTION_LIMIT,
+  duplicateKeptCommentImages,
   foldPatch,
   paintComment,
   removeCommentRow,
+  requestCommentMentions,
+  useCommentMentionSearch,
   useCreateComment,
   useDeleteComment,
   useIssueComments,
@@ -444,6 +449,102 @@ describe("useCreateComment", () => {
     await result.current.mutateAsync({ html: "", access: "INTERNAL" }).catch(() => undefined);
     expect(notifyError).toHaveBeenCalledTimes(1);
     expect(notifyError).toHaveBeenCalledWith(COMMENT_CREATE_FAILED_TITLE, "Invalid HTML passed");
+  });
+
+  it("carries the server text and stores nothing on a guest refusal (CMT-002)", async () => {
+    stubClient(() => ({ status: 400, body: { error: "Guests may only comment on work items they created." } }));
+    const { queryClient, wrapper } = harness();
+    const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
+    await result.current.mutateAsync({ html: "<p>Hi</p>", access: "INTERNAL" }).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledWith(
+      COMMENT_CREATE_FAILED_TITLE,
+      "Guests may only comment on work items they created."
+    );
+    expect(queryClient.getQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE))).toBeUndefined();
+  });
+});
+
+describe("duplicateKeptCommentImages", () => {
+  const SCOPE_WITH_COMMENT = { workspaceSlug: SLUG, projectId: PROJECT, commentId: COMMENT };
+
+  it("duplicates kept images and rebinds the new body (CMT-009)", async () => {
+    const { client, calls } = stubClient(() => ({ status: 200, body: { asset_id: "asset-1b" } }));
+    const original = '<p>First <image-component src="asset-1" status="uploaded"></image-component></p>';
+    const next =
+      '<p>First <image-component src="asset-1" status="uploaded"></image-component> ' +
+      '<img src="/api/assets/v2/workspaces/acme/projects/p/asset-new/"></p>';
+    const saved = await duplicateKeptCommentImages(client, SCOPE_WITH_COMMENT, original, next);
+    expect(saved).toContain('src="asset-1b"');
+    expect(saved).not.toContain('src="asset-1"');
+    expect(saved).toContain("asset-new");
+    const duplicate = calls.find((call) => call.url.includes("/duplicate-assets/"));
+    expect(duplicate?.url).toBe(`https://api.test/api/assets/v2/workspaces/${SLUG}/duplicate-assets/asset-1/`);
+    expect(JSON.parse(duplicate?.body ?? "{}")).toEqual({
+      entity_id: COMMENT,
+      entity_type: "COMMENT_DESCRIPTION",
+      project_id: PROJECT,
+    });
+    expect(calls.filter((call) => call.url.includes("/duplicate-assets/"))).toHaveLength(1);
+  });
+
+  it("makes no call when nothing is kept and returns the body untouched", async () => {
+    const { client, calls } = stubClient(() => ({ status: 200, body: { asset_id: "asset-x" } }));
+    const added = '<p>New <image-component src="asset-new" status="uploaded"></image-component></p>';
+    await expect(duplicateKeptCommentImages(client, SCOPE_WITH_COMMENT, "<p>Before</p>", added)).resolves.toBe(added);
+    const dropped = "<p>Text only now</p>";
+    const original = '<p>Text <image-component src="asset-1" status="uploaded"></image-component></p>';
+    await expect(duplicateKeptCommentImages(client, SCOPE_WITH_COMMENT, original, dropped)).resolves.toBe(dropped);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects when a duplicate is refused so the save fails instead", async () => {
+    const { client } = stubClient(() => ({ status: 404, body: { error: "Asset missing" } }));
+    const body = '<p>Keep <image-component src="asset-1" status="uploaded"></image-component></p>';
+    await expect(duplicateKeptCommentImages(client, SCOPE_WITH_COMMENT, body, body)).rejects.toBeTruthy();
+  });
+});
+
+describe("useCommentMentionSearch", () => {
+  const PEOPLE = {
+    user_mention: [
+      { member__id: "u-1", member__display_name: "Ada L", member__avatar_url: "https://cdn.test/a.png" },
+      { member__id: "u-2", member__display_name: "Grace H", member__avatar_url: null },
+    ],
+  };
+
+  it("caps the lookup at five people per project (CMT-019)", async () => {
+    expect(COMMENT_MENTION_LIMIT).toBe(5);
+    const { client, calls } = stubClient(() => ({ status: 200, body: PEOPLE }));
+    const people = await requestCommentMentions(client, SLUG, PROJECT, "a");
+    expect(people).toEqual([
+      { id: "u-1", name: "Ada L", avatarUrl: "https://cdn.test/a.png" },
+      { id: "u-2", name: "Grace H", avatarUrl: null },
+    ]);
+    const call = calls.find((entry) => entry.url.includes("/entity-search/"));
+    expect(call?.url).toContain("query=a");
+    expect(call?.url).toContain("query_type=user_mention");
+    expect(call?.url).toContain(`project_id=${PROJECT}`);
+    expect(call?.url).toContain("count=5");
+  });
+
+  it("reads no one without a project and keys the query by its text", async () => {
+    const { client, calls } = stubClient(() => ({ status: 200, body: PEOPLE }));
+    await expect(requestCommentMentions(client, SLUG, "", "a")).resolves.toEqual([]);
+    expect(calls).toHaveLength(0);
+    expect(commentMentionSearchKey(SLUG, PROJECT, "ad")).toContain("ad");
+    expect(commentMentionSearchKey(SLUG, PROJECT, "ad")).not.toEqual(commentMentionSearchKey(SLUG, PROJECT, "ada"));
+  });
+
+  it("exposes the hook against the app client and stays idle while disabled", async () => {
+    stubClient(() => ({ status: 200, body: PEOPLE }));
+    const { wrapper } = harness();
+    const { result } = renderHook(() => useCommentMentionSearch(SLUG, PROJECT, "a", true), { wrapper });
+    await waitFor(() => expect(result.current.data).toHaveLength(2));
+    // A query text of its own: the shared cache would hand the idle
+    // hook the rows above, hiding whether it fetched.
+    const idle = renderHook(() => useCommentMentionSearch(SLUG, PROJECT, "ad", false), { wrapper });
+    expect(idle.result.current.data).toBeUndefined();
+    expect(idle.result.current.fetchStatus).toBe("idle");
   });
 });
 

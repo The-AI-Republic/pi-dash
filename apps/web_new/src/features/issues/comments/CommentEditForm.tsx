@@ -1,20 +1,31 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Inline comment editor (parity/specs/issues.md §16, ISS-198; CMT-003).
-// Opens prefilled and focused on the stored body; the check (or Enter)
-// saves once the draft differs from it, Enter on an empty or unchanged
-// body does nothing, and cancel drops the draft without a write.
-// Uploads stay on while editing and attach to the comment.
+// Inline comment editor (parity/specs/issues.md §16, ISS-198; CMT-003;
+// parity/specs/comments.md §2/§6, CMT-009/011/019). Opens
+// prefilled and focused on the stored body; the check (or Enter) saves
+// once the draft differs from it, Enter on an empty or unchanged body
+// does nothing, and cancel drops the draft without a write. Uploads
+// stay on while editing and attach to the comment; saving duplicates
+// the images the edit keeps into the new revision. Typing @ opens the
+// mention picker; Enter picks its first row and Escape dismisses it.
 
 import { Button, IconButton } from "@pidash/kit";
 import type { IssueComment } from "@pidash/api-client";
 import { Check, ImagePlus, X } from "lucide-react";
 import * as React from "react";
 
-import { CommentRichTextEditor, type RichTextEditorHandle } from "../../../shared/editor/index.js";
-import { isCommentBodyEmpty } from "./model.js";
-import { useUploadCommentImage } from "./api.js";
+import { getAppClient } from "../../../core/api/client.js";
+import { CommentRichTextEditor, descriptionAssetSrc, type RichTextEditorHandle } from "../../../shared/editor/index.js";
+import { notifyError } from "../../../shared/shell/index.js";
+import { commentEnterAction, COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
+import {
+  COMMENT_UPDATE_FAILED_TITLE,
+  commentFailureDetail,
+  duplicateKeptCommentImages,
+  useUploadCommentImage,
+} from "./api.js";
+import { CommentMentionSuggestions, useCommentMentionPicker } from "./MentionSuggestions.js";
 
 export const EDIT_COMMENT_LABEL = "Edit comment";
 export const SAVE_COMMENT_LABEL = "Save comment";
@@ -38,23 +49,70 @@ export function CommentEditForm({
 }: CommentEditFormProps): React.ReactElement {
   const [html, setHtml] = React.useState(comment.comment_html);
   const [saving, setSaving] = React.useState(false);
+  const [uploads, setUploads] = React.useState(0);
   const handleRef = React.useRef<RichTextEditorHandle | null>(null);
   const empty = isCommentBodyEmpty(html);
   // A pristine draft (no change from the stored body) cannot be saved:
   // only a content change arms the check (CMT-003).
   const pristine = html === comment.comment_html;
+  const busy = saving || uploads > 0;
   const upload = useUploadCommentImage({ workspaceSlug, projectId });
+  const mentions = useCommentMentionPicker({
+    workspaceSlug,
+    projectId,
+    getHandle: () => handleRef.current,
+    busy,
+    empty,
+  });
+  // Stored bodies keep bare asset ids; the editor paints the resolved
+  // picture and carries the id back out, so opening and saving never
+  // rewrites a kept image into a plain tag (CMT-009).
+  const resolveAsset = React.useCallback(
+    (src: string) => descriptionAssetSrc(src, { workspaceSlug, projectId, apiBaseUrl: getAppClient().baseUrl }),
+    [workspaceSlug, projectId]
+  );
 
   const save = async (): Promise<void> => {
-    if (saving || empty || pristine) return;
+    if (busy || empty || pristine) return;
     setSaving(true);
+    let next: string;
     try {
-      await onSave(html);
+      next = await duplicateKeptCommentImages(
+        getAppClient(),
+        { workspaceSlug, projectId, commentId: comment.id },
+        comment.comment_html,
+        html
+      );
+    } catch (error) {
+      // The duplicate runs before the mutation owns the save, so this
+      // refusal needs its own notice; the draft stays for a retry.
+      notifyError(COMMENT_UPDATE_FAILED_TITLE, commentFailureDetail(error));
+      setSaving(false);
+      return;
+    }
+    try {
+      await onSave(next);
     } catch {
       // The mutation raised its own notice; the draft stays for a retry.
     } finally {
       setSaving(false);
     }
+  };
+
+  const uploadImage = (file: File): void => {
+    setUploads((count) => count + 1);
+    void upload
+      .mutateAsync({ file, commentId: comment.id })
+      .then((image) => {
+        handleRef.current?.insertImage(image.src, {
+          storedSrc: image.assetId,
+          status: COMMENT_IMAGE_UPLOADED_STATUS,
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        setUploads((count) => count - 1);
+      });
   };
 
   return (
@@ -67,10 +125,29 @@ export function CommentEditForm({
     >
       <div
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !empty && !pristine) {
-            event.preventDefault();
-            void save();
+          if (event.key === "Escape") {
+            if (mentions.mentionOpen) {
+              event.preventDefault();
+              mentions.dismiss();
+            }
+            return;
           }
+          // Enter with a pristine draft saves nothing: the chain below
+          // reaches save(), which holds pristine as well as busy and
+          // empty (CMT-003/011).
+          if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
+          if (event.defaultPrevented) {
+            // The editing surface already swallowed this Enter (a pick
+            // or a no-op); only a pick still needs its insertion.
+            if (commentEnterAction({ mentionOpen: mentions.mentionOpen, busy, empty }) === "pick-mention") {
+              mentions.pickFirst();
+            }
+            return;
+          }
+          // IME composition commits with Enter: leave that Enter to the input.
+          if (event.nativeEvent.isComposing) return;
+          event.preventDefault();
+          void save();
         }}
       >
         <React.Suspense fallback={<div className="min-h-24 rounded-(--radius-control) bg-(--subtle)" />}>
@@ -82,8 +159,12 @@ export function CommentEditForm({
             onReady={(handle) => {
               handleRef.current = handle;
             }}
+            onMentionQuery={mentions.onMentionQuery}
+            handleKeyDown={mentions.handleEditorKeyDown}
+            resolveAsset={resolveAsset}
           />
         </React.Suspense>
+        {mentions.mentionOpen ? <CommentMentionSuggestions people={mentions.people} onPick={mentions.pick} /> : null}
       </div>
       <div className="flex items-center justify-end gap-(--space-2)">
         <label className="cursor-pointer rounded-(--radius-control) p-(--space-2) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)">
@@ -97,12 +178,7 @@ export function CommentEditForm({
               const file = event.target.files?.[0];
               event.target.value = "";
               if (file === undefined) return;
-              void upload
-                .mutateAsync({ file, commentId: comment.id })
-                .then((image) => {
-                  handleRef.current?.insertImage(image.src);
-                })
-                .catch(() => undefined);
+              uploadImage(file);
             }}
           />
           <ImagePlus size={16} strokeWidth={1.5} aria-hidden="true" />
@@ -111,7 +187,7 @@ export function CommentEditForm({
           label={SAVE_COMMENT_LABEL}
           size="small"
           className="border border-(--success) text-(--success)"
-          disabled={saving || empty || pristine}
+          disabled={busy || empty || pristine}
           onClick={() => void save()}
         >
           <Check size={16} strokeWidth={2} />

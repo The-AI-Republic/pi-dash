@@ -151,6 +151,98 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.test/shot.png");
   });
 
+  it("stores an uploaded comment picture as image-component with its status (CMT-009)", async () => {
+    const onChange = vi.fn();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p>with image</p>"
+          label="CommentStored"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    await editorSurface("CommentStored");
+    await vi.waitFor(() => expect(handles.length).toBeGreaterThan(0));
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    handle.insertImage("/api/assets/v2/workspaces/acme/projects/p-1/asset-9/", {
+      storedSrc: "asset-9",
+      status: "uploaded",
+    });
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("<image-component");
+    expect(last).toContain('src="asset-9"');
+    expect(last).toContain('status="uploaded"');
+    expect(last).not.toContain("data-stored-src");
+  });
+
+  it("stores a picked person in the comment editor (CMT-019)", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p></p>"
+          label="CommentMention"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentMention");
+    editable.focus();
+    await user.keyboard("Hello @ad");
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    handle.insertMention({ id: "u-1", name: "Ada" });
+    await vi.waitFor(() => expect(editable.querySelector("mention-component")).not.toBeNull());
+    expect(editable.innerHTML).not.toContain("@ad");
+    expect(editable.querySelector(".mention-chip")?.textContent).toBe("@Ada");
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("mention-component");
+    expect(last).toContain('entity_identifier="u-1"');
+    expect(last).toContain('data-name="Ada"');
+  });
+
+  it("keeps pasted formatting in the comment editor (CMT-001)", async () => {
+    const onChange = vi.fn();
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor initialHtml="<p>typed marker</p>" label="CommentPaste" onChange={onChange} />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentPaste");
+    editable.focus();
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      // A real clipboard answers "" for types it does not carry; the
+      // code-block plugin JSON-parses its own type, so anything else
+      // there would throw before the paste lands.
+      value: {
+        getData: (type: string) => {
+          if (type === "text/html") return "<p>pasted <strong>bold</strong> fragment</p>";
+          if (type === "text/plain") return "pasted bold fragment";
+          return "";
+        },
+      },
+    });
+    editable.dispatchEvent(paste);
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("typed marker");
+    expect(last).toContain("<strong>bold</strong>");
+  });
+
   it("reports the @-query under the caret and its absence", async () => {
     const user = userEvent.setup();
     const queries: Array<string | null> = [];
