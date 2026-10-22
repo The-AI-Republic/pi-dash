@@ -31,10 +31,13 @@ import {
   usePickerProjectMembers,
   usePickerProjects,
   usePickerStates,
+  usePickerWorkspaceCycles,
   usePickerWorkspaceMembers,
+  usePickerWorkspaceModules,
+  usePickerWorkspaceStates,
   type StateGroup,
 } from "../../../../shared/pickers/index.js";
-import { useLabels } from "../../labels/api.js";
+import { useLabels, useWorkspaceLabels } from "../../labels/api.js";
 import { DateCalendar } from "../../dropdowns/DatePicker.js";
 import { DateRangeCalendar } from "../../dropdowns/DateRangePicker.js";
 import { useWeekStart } from "../../dropdowns/weekStart.js";
@@ -216,34 +219,59 @@ function PickSlot({
   // A stored condition must resolve its names before the popup opens, so
   // reads stay enabled while ids are selected as well as while open.
   const readValues = open || selected.length > 0;
-  const states = usePickerStates(workspaceSlug, projectId, field.source === "states" && readValues);
-  const members = usePickerProjectMembers(workspaceSlug, projectId, field.source === "members" && readValues);
+  // A workspace host (the workspace view dialog) carries no project, so
+  // its pickers read the workspace lists instead of the project ones.
+  const workspace = projectId === "";
+  const states = usePickerStates(workspaceSlug, projectId, !workspace && field.source === "states" && readValues);
+  const workspaceStates = usePickerWorkspaceStates(workspaceSlug, workspace && field.source === "states" && readValues);
+  const members = usePickerProjectMembers(
+    workspaceSlug,
+    projectId,
+    !workspace && field.source === "members" && readValues
+  );
   const directory = usePickerWorkspaceMembers(workspaceSlug, field.source === "members" && readValues);
-  const labels = useLabels(workspaceSlug, projectId, field.source === "labels" && readValues);
+  const labels = useLabels(workspaceSlug, projectId, !workspace && field.source === "labels" && readValues);
+  const workspaceLabels = useWorkspaceLabels(workspaceSlug, workspace && field.source === "labels" && readValues);
   // Project, cycle and module picks borrow the shared pickers' thin reads;
   // all three stay lazy until opened or while resolving stored ids.
   const projects = usePickerProjects(workspaceSlug, field.source === "projects" && readValues);
-  const cycles = usePickerCycles(workspaceSlug, projectId, field.source === "cycles" && readValues);
-  const modules = usePickerModules(workspaceSlug, projectId, field.source === "modules" && readValues);
+  const cycles = usePickerCycles(workspaceSlug, projectId, !workspace && field.source === "cycles" && readValues);
+  const workspaceCycles = usePickerWorkspaceCycles(workspaceSlug, workspace && field.source === "cycles" && readValues);
+  const modules = usePickerModules(workspaceSlug, projectId, !workspace && field.source === "modules" && readValues);
+  const workspaceModules = usePickerWorkspaceModules(
+    workspaceSlug,
+    workspace && field.source === "modules" && readValues
+  );
   const me = useMe();
   const meId = me.data?.id ?? null;
+
+  const stateRows = workspace ? (workspaceStates.data ?? []) : (states.data ?? []);
+  const labelRows = workspace ? (workspaceLabels.data ?? []) : (labels.data ?? []);
+  // Both cycle projections carry identity and name; only the project
+  // rows annotate a lifecycle marker for the glyph.
+  const cycleRows: readonly { id: string; name: string; status?: string | undefined }[] = workspace
+    ? (workspaceCycles.data ?? [])
+    : (cycles.data ?? []);
+  const moduleRows = workspace ? (workspaceModules.data ?? []) : (modules.data ?? []);
 
   // Applied states lead and the rest keep server order (ISS-082).
   const stateOptions = React.useMemo(() => {
     if (field.source !== "states") return [];
     const chosenSet = new Set(selected);
-    const options = selectStateOptions(states.data ?? []);
+    const options = selectStateOptions(stateRows);
     return [
       ...options.filter((option) => chosenSet.has(option.id)),
       ...options.filter((option) => !chosenSet.has(option.id)),
     ];
-  }, [field.source, selected, states.data]);
+  }, [field.source, selected, stateRows]);
 
   const memberOptions = React.useMemo(() => {
-    if (field.source !== "members" || directory.data === undefined || members.data === undefined) return [];
+    if (field.source !== "members" || directory.data === undefined) return [];
+    // Without a project the directory itself is the option source.
+    if (!workspace && members.data === undefined) return [];
     return orderMemberOptions(
       selectMemberOptions({
-        projectMembers: members.data,
+        projectMembers: workspace ? undefined : members.data,
         directory: directory.data,
         meId,
         selectedIds: selected,
@@ -251,11 +279,11 @@ function PickSlot({
       selected,
       meId
     );
-  }, [directory.data, field.source, meId, members.data, selected]);
+  }, [directory.data, field.source, meId, members.data, selected, workspace]);
 
   const labelOptions = React.useMemo(
-    () => (field.source === "labels" ? orderLabelOptions(labels.data ?? [], selected) : []),
-    [field.source, labels.data, selected]
+    () => (field.source === "labels" ? orderLabelOptions(labelRows, selected) : []),
+    [field.source, labelRows, selected]
   );
 
   // Applied picks lead, then names alphabetically (ISS-089–091). The cycle
@@ -270,26 +298,23 @@ function PickSlot({
     [field.source, projects.data, selected]
   );
   const cycleOptions = React.useMemo(
-    () => (field.source === "cycles" ? orderAppliedByName(cycleFilterRows(cycles.data ?? []), selected) : []),
-    [cycles.data, field.source, selected]
+    () => (field.source === "cycles" ? orderAppliedByName(cycleFilterRows(cycleRows), selected) : []),
+    [cycleRows, field.source, selected]
   );
   const moduleOptions = React.useMemo(
     () =>
       field.source === "modules"
-        ? orderAppliedByName(
-            selectModuleOptions({ modules: modules.data ?? [], selectedIds: [], single: false }),
-            selected
-          )
+        ? orderAppliedByName(selectModuleOptions({ modules: moduleRows, selectedIds: [], single: false }), selected)
         : [],
-    [field.source, modules.data, selected]
+    [field.source, moduleRows, selected]
   );
   // Cycle rows keep the status the option list dropped; the running one
   // pulses and each lifecycle gets its own glyph.
   const cycleStatuses = React.useMemo(() => {
     const map = new Map<string, string | undefined>();
-    for (const cycle of cycles.data ?? []) map.set(cycle.id, cycle.status);
+    for (const cycle of cycleRows) map.set(cycle.id, cycle.status);
     return map;
-  }, [cycles.data]);
+  }, [cycleRows]);
 
   const labelsById = React.useMemo(() => {
     const map = new Map<string, string>();
@@ -399,21 +424,33 @@ function PickSlot({
     onChange(togglePickValue(field, condition.value, id));
   }
 
+  // Pending and error flags follow the active read: the project hooks
+  // stay idle in workspace scope, so their flags would mislead.
+  const statesLoading = workspace ? workspaceStates.isPending : states.isPending;
+  const membersLoading = workspace ? directory.isPending : members.isPending || directory.isPending;
+  const labelsLoading = workspace ? workspaceLabels.isPending : labels.isPending;
+  const cyclesLoading = workspace ? workspaceCycles.isPending : cycles.isPending;
+  const modulesLoading = workspace ? workspaceModules.isPending : modules.isPending;
   const loading =
     open &&
-    ((field.source === "states" && states.isPending) ||
-      (field.source === "members" && (members.isPending || directory.isPending)) ||
-      (field.source === "labels" && labels.isPending) ||
+    ((field.source === "states" && statesLoading) ||
+      (field.source === "members" && membersLoading) ||
+      (field.source === "labels" && labelsLoading) ||
       (field.source === "projects" && projects.isPending) ||
-      (field.source === "cycles" && cycles.isPending) ||
-      (field.source === "modules" && modules.isPending));
+      (field.source === "cycles" && cyclesLoading) ||
+      (field.source === "modules" && modulesLoading));
+  const statesFailed = workspace ? workspaceStates.isError : states.isError;
+  const membersFailed = workspace ? directory.isError : members.isError || directory.isError;
+  const labelsFailed = workspace ? workspaceLabels.isError : labels.isError;
+  const cyclesFailed = workspace ? workspaceCycles.isError : cycles.isError;
+  const modulesFailed = workspace ? workspaceModules.isError : modules.isError;
   const failed =
-    (field.source === "states" && states.isError) ||
-    (field.source === "members" && (members.isError || directory.isError)) ||
-    (field.source === "labels" && labels.isError) ||
+    (field.source === "states" && statesFailed) ||
+    (field.source === "members" && membersFailed) ||
+    (field.source === "labels" && labelsFailed) ||
     (field.source === "projects" && projects.isError) ||
-    (field.source === "cycles" && cycles.isError) ||
-    (field.source === "modules" && modules.isError);
+    (field.source === "cycles" && cyclesFailed) ||
+    (field.source === "modules" && modulesFailed);
   const errorText = failed ? `Couldn't load ${field.label.toLowerCase()} values.` : undefined;
 
   return (

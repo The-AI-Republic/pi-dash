@@ -20,7 +20,10 @@ import {
   listProjects,
   listRunners,
   listStates,
+  listWorkspaceCycles,
   listWorkspaceMembers,
+  listWorkspaceModules,
+  listWorkspaceStates,
   type ApiClient,
   type State,
 } from "@pidash/api-client";
@@ -49,6 +52,9 @@ export const pickerKeys = {
     [...pickerKeys.all(workspaceSlug), "project", projectId] as const,
   runners: (workspaceSlug: string, projectId: string, assignableFor: string) =>
     [...pickerKeys.all(workspaceSlug), "runners", projectId, assignableFor] as const,
+  workspaceStates: (workspaceSlug: string) => [...pickerKeys.all(workspaceSlug), "workspace-states"] as const,
+  workspaceCycles: (workspaceSlug: string) => [...pickerKeys.all(workspaceSlug), "workspace-cycles"] as const,
+  workspaceModules: (workspaceSlug: string) => [...pickerKeys.all(workspaceSlug), "workspace-modules"] as const,
 };
 
 function referenceOptions<T>(key: readonly unknown[], fetch: () => Promise<T>) {
@@ -95,14 +101,47 @@ export function pickerModulesQueryOptions(client: ApiClient, workspaceSlug: stri
   );
 }
 
-/** Project workflow states, fetched once the popup opens. */
-export function usePickerStates(workspaceSlug: string, projectId: string, enabled: boolean) {
-  return useQuery({ ...pickerStatesQueryOptions(getAppClient(), workspaceSlug, projectId), enabled });
+export function pickerWorkspaceStatesQueryOptions(client: ApiClient, workspaceSlug: string) {
+  return referenceOptions(pickerKeys.workspaceStates(workspaceSlug), () => listWorkspaceStates(client, workspaceSlug));
 }
 
-/** Bare project memberships (ids plus roles); names join from the directory. */
+export function pickerWorkspaceCyclesQueryOptions(client: ApiClient, workspaceSlug: string) {
+  return referenceOptions(pickerKeys.workspaceCycles(workspaceSlug), () => listWorkspaceCycles(client, workspaceSlug));
+}
+
+export function pickerWorkspaceModulesQueryOptions(client: ApiClient, workspaceSlug: string) {
+  return referenceOptions(pickerKeys.workspaceModules(workspaceSlug), () =>
+    listWorkspaceModules(client, workspaceSlug)
+  );
+}
+
+/**
+ * Project workflow states, fetched once the popup opens. An empty
+ * project id never fires: cross-project hosts read the workspace
+ * list instead.
+ */
+export function usePickerStates(workspaceSlug: string, projectId: string, enabled: boolean) {
+  return useQuery({
+    ...pickerStatesQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: enabled && projectId !== "",
+  });
+}
+
+/**
+ * Bare project memberships (ids plus roles); names join from the
+ * directory. An empty project id never fires: cross-project hosts
+ * offer the directory itself.
+ */
 export function usePickerProjectMembers(workspaceSlug: string, projectId: string, enabled: boolean) {
-  return useQuery({ ...pickerProjectMembersQueryOptions(getAppClient(), workspaceSlug, projectId), enabled });
+  return useQuery({
+    ...pickerProjectMembersQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: enabled && projectId !== "",
+  });
+}
+
+/** Workspace-wide states for cross-project hosts, fetched once the popup opens. */
+export function usePickerWorkspaceStates(workspaceSlug: string, enabled: boolean) {
+  return useQuery({ ...pickerWorkspaceStatesQueryOptions(getAppClient(), workspaceSlug), enabled });
 }
 
 /** Workspace member directory: names, avatars and suspended flags. */
@@ -115,14 +154,36 @@ export function usePickerProjects(workspaceSlug: string, enabled: boolean) {
   return useQuery({ ...pickerProjectsQueryOptions(getAppClient(), workspaceSlug), enabled });
 }
 
-/** Thin project cycle rows for the cycle picker. */
+/**
+ * Thin project cycle rows for the cycle picker. An empty project id
+ * never fires: cross-project hosts read the workspace list instead.
+ */
 export function usePickerCycles(workspaceSlug: string, projectId: string, enabled: boolean) {
-  return useQuery({ ...pickerCyclesQueryOptions(getAppClient(), workspaceSlug, projectId), enabled });
+  return useQuery({
+    ...pickerCyclesQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: enabled && projectId !== "",
+  });
 }
 
-/** Thin project module rows for the module picker. */
+/**
+ * Thin project module rows for the module picker. An empty project id
+ * never fires: cross-project hosts read the workspace list instead.
+ */
 export function usePickerModules(workspaceSlug: string, projectId: string, enabled: boolean) {
-  return useQuery({ ...pickerModulesQueryOptions(getAppClient(), workspaceSlug, projectId), enabled });
+  return useQuery({
+    ...pickerModulesQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: enabled && projectId !== "",
+  });
+}
+
+/** Thin workspace cycle rows for cross-project hosts. */
+export function usePickerWorkspaceCycles(workspaceSlug: string, enabled: boolean) {
+  return useQuery({ ...pickerWorkspaceCyclesQueryOptions(getAppClient(), workspaceSlug), enabled });
+}
+
+/** Thin workspace module rows for cross-project hosts. */
+export function usePickerWorkspaceModules(workspaceSlug: string, enabled: boolean) {
+  return useQuery({ ...pickerWorkspaceModulesQueryOptions(getAppClient(), workspaceSlug), enabled });
 }
 
 export function pickerEstimatesQueryOptions(client: ApiClient, workspaceSlug: string, projectId: string) {

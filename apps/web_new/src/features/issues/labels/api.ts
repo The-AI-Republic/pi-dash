@@ -13,6 +13,7 @@ import {
   deleteLabel,
   isApiError,
   listLabels,
+  listWorkspaceLabels,
   updateLabel,
   type ApiClient,
   type Label,
@@ -43,6 +44,7 @@ export const LABELS_LOAD_FAILED_TITLE = "Couldn't load the labels";
 export const labelKeys = {
   all: (workspaceSlug: string) => [...workspaceScope(workspaceSlug), "labels"] as const,
   list: (workspaceSlug: string, projectId: string) => [...labelKeys.all(workspaceSlug), "list", projectId] as const,
+  workspace: (workspaceSlug: string) => [...labelKeys.all(workspaceSlug), "workspace-list"] as const,
 };
 
 /** One project's label list. Reference data with the shared freshness. */
@@ -54,9 +56,30 @@ export function labelsQueryOptions(client: ApiClient, workspaceSlug: string, pro
   });
 }
 
-/** One project's label list; pickers disable it until they open. */
+/** The workspace's label list for cross-project hosts. */
+export function workspaceLabelsQueryOptions(client: ApiClient, workspaceSlug: string) {
+  return queryOptions({
+    queryKey: labelKeys.workspace(workspaceSlug),
+    queryFn: () => listWorkspaceLabels(client, workspaceSlug),
+    staleTime: REFERENCE_STALE_TIME_MS,
+  });
+}
+
+/**
+ * One project's label list; pickers disable it until they open. An
+ * empty project id never fires: cross-project hosts read the
+ * workspace list instead.
+ */
 export function useLabels(workspaceSlug: string, projectId: string, enabled = true) {
-  return useQuery({ ...labelsQueryOptions(getAppClient(), workspaceSlug, projectId), enabled });
+  return useQuery({
+    ...labelsQueryOptions(getAppClient(), workspaceSlug, projectId),
+    enabled: enabled && projectId !== "",
+  });
+}
+
+/** The workspace's label list; pickers disable it until they open. */
+export function useWorkspaceLabels(workspaceSlug: string, enabled = true) {
+  return useQuery({ ...workspaceLabelsQueryOptions(getAppClient(), workspaceSlug), enabled });
 }
 
 /** True when the server refused a label write as a duplicate name. */

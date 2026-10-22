@@ -222,6 +222,167 @@ describe("ValueSlot stored values without an open popup", () => {
   });
 });
 
+describe("ValueSlot in workspace scope", () => {
+  const CYCLE = "c23e4567-e89b-12d3-a456-42661417400c";
+  const MODULE = "d23e4567-e89b-12d3-a456-42661417400d";
+  const ANA = "423e4567-e89b-12d3-a456-426614174003";
+  const LABEL_ID = "b23e4567-e89b-12d3-a456-42661417400a";
+
+  const WORKSPACE_CYCLE = {
+    id: CYCLE,
+    workspace_id: PROJECT,
+    project_id: PROJECT,
+    name: "Sprint 4",
+    description: "",
+    start_date: null,
+    end_date: null,
+    owned_by_id: null,
+    view_props: {},
+    sort_order: 1,
+    external_source: null,
+    external_id: null,
+    progress_snapshot: null,
+    logo_props: {},
+    total_issues: 2,
+    cancelled_issues: 0,
+    completed_issues: 1,
+    started_issues: 1,
+    unstarted_issues: 0,
+    backlog_issues: 0,
+  };
+
+  /** Workspace routes recording every requested URL. */
+  function workspaceRoutes(calls: string[]) {
+    return (url: string): unknown | null => {
+      calls.push(url);
+      if (url.endsWith("/api/users/me/")) return ME_ROW;
+      if (url.endsWith("/api/workspaces/acme/states/")) return [STATE_ROW];
+      if (url.endsWith("/api/workspaces/acme/labels/")) {
+        return [
+          {
+            id: LABEL_ID,
+            name: "Zeta",
+            color: "#ff0000",
+            project_id: PROJECT,
+            workspace_id: PROJECT,
+            parent: null,
+            sort_order: 1,
+          },
+        ];
+      }
+      if (url.endsWith("/api/workspaces/acme/members/")) {
+        return [
+          {
+            id: "823e4567-e89b-12d3-a456-426614174007",
+            member: {
+              id: ANA,
+              first_name: "Ana",
+              last_name: "",
+              avatar: "",
+              avatar_url: null,
+              display_name: "Ana",
+              is_bot: false,
+            },
+            role: 15,
+            is_active: true,
+          },
+        ];
+      }
+      if (url.endsWith("/api/workspaces/acme/cycles/")) return [WORKSPACE_CYCLE];
+      if (url.endsWith("/api/workspaces/acme/modules/")) {
+        return [{ id: MODULE, project_id: PROJECT, name: "Billing", status: "planned" }];
+      }
+      return null;
+    };
+  }
+
+  function expectNoProjectRead(calls: readonly string[]): void {
+    expect(calls.filter((url) => url.includes("/projects/"))).toEqual([]);
+  }
+
+  it.each([
+    ["state_id", STATE_ID, "Todo", "/api/workspaces/acme/states/"],
+    ["assignee_id", ANA, "Ana", "/api/workspaces/acme/members/"],
+    ["label_id", LABEL_ID, "Zeta", "/api/workspaces/acme/labels/"],
+    ["cycle_id", CYCLE, "Sprint 4", "/api/workspaces/acme/cycles/"],
+    ["module_id", MODULE, "Billing", "/api/workspaces/acme/modules/"],
+  ] as const)("resolves a stored %s id from the workspace list", async (stem, id, name, path) => {
+    const calls: string[] = [];
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId=""
+          field={findField(FIELDS, stem)!}
+          condition={{ key: "a", property: stem, operator: "in", negated: false, value: [id] }}
+          onChange={() => {}}
+        />,
+        workspaceRoutes(calls)
+      )
+    );
+    expect(await screen.findByRole("button", { name: new RegExp(name) })).toBeInTheDocument();
+    expect(calls.some((url) => url.endsWith(path))).toBe(true);
+    expectNoProjectRead(calls);
+  });
+
+  it("lists workspace states in an opened picker and commits the pick", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const calls: string[] = [];
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId=""
+          field={STATE}
+          condition={{ key: "a", property: "state_id", operator: "in", negated: false, value: null }}
+          onChange={onChange}
+        />,
+        workspaceRoutes(calls)
+      )
+    );
+    // The empty slot opens by itself and reads the workspace list.
+    await user.click(await screen.findByRole("checkbox", { name: "Todo" }));
+    expect(onChange).toHaveBeenCalledWith([STATE_ID]);
+    expectNoProjectRead(calls);
+  });
+
+  it("reads a workspace cycle row without a lifecycle marker as a draft", async () => {
+    const calls: string[] = [];
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId=""
+          field={findField(FIELDS, "cycle_id")!}
+          condition={{ key: "a", property: "cycle_id", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />,
+        workspaceRoutes(calls)
+      )
+    );
+    expect(await screen.findByRole("checkbox", { name: "Sprint 4" })).toBeInTheDocument();
+    expect(screen.getByTestId("cycle-glyph-draft")).toBeInTheDocument();
+    expectNoProjectRead(calls);
+  });
+
+  it("reports a failed workspace states read instead of an empty list", async () => {
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId=""
+          field={STATE}
+          condition={{ key: "a", property: "state_id", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />,
+        (url) => (url.endsWith("/api/users/me/") ? ME_ROW : null)
+      )
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load state values.");
+  });
+});
+
 describe("ValueSlot", () => {
   it("opens a pick slot that holds no value and commits the first pick from it", async () => {
     const user = userEvent.setup();
@@ -880,6 +1041,46 @@ describe("ValueSlot failure and suspended rows", () => {
       </QueryClientProvider>
     );
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load assignees values.");
+  });
+
+  it("offers no member options in project scope when the project join fails", async () => {
+    const ZOE = "523e4567-e89b-12d3-a456-426614174004";
+    render(
+      coldWrap(
+        <ValueSlot
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          field={findField(FIELDS, "assignee_id")!}
+          condition={{ key: "a", property: "assignee_id", operator: "in", negated: false, value: null }}
+          onChange={() => {}}
+        />,
+        (url) => {
+          if (url.endsWith("/api/users/me/")) return ME_ROW;
+          if (url.includes("/projects/")) return null;
+          if (url.endsWith("/members/")) {
+            return [
+              {
+                id: "b23e4567-e89b-12d3-a456-426614174010",
+                member: {
+                  id: ZOE,
+                  first_name: "Zoe",
+                  last_name: "",
+                  avatar: "",
+                  avatar_url: null,
+                  display_name: "Zoe",
+                  is_bot: false,
+                },
+                role: 15,
+                is_active: true,
+              },
+            ];
+          }
+          return null;
+        }
+      )
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load assignees values.");
+    expect(screen.queryAllByRole("checkbox")).toEqual([]);
   });
 
   it("renders a suspended member disabled and ignores a pick", async () => {

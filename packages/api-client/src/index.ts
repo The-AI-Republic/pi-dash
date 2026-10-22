@@ -224,6 +224,8 @@ export {
   listLabels,
   listMembers,
   listStates,
+  listWorkspaceLabels,
+  listWorkspaceStates,
   updateLabel,
 } from "./contracts/reference.js";
 export type { LabelCreate, LabelPatch } from "./contracts/reference.js";
@@ -895,10 +897,13 @@ export {
   ModuleList,
   ModuleListItem,
   ModuleUpdate,
+  WorkspaceModuleList,
+  WorkspaceModuleRow,
   archiveModule,
   getArchivedModule,
   listArchivedModules,
   listModules,
+  listWorkspaceModules,
   restoreModule,
   updateModule,
 } from "./contracts/modules.js";
