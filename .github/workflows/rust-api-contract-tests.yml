@@ -66,6 +66,10 @@ jobs:
           -r apps/api/requirements/base.txt
           -r rust-api/contract-tests/requirements.txt
 
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --no-input
+
       - name: Start live Django server
         working-directory: apps/api
         run: |
