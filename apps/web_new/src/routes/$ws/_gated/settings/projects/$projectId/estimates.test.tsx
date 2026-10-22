@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 // Estimates leaf (PSET-001/PSET-004): the route mounts the settings shell
 // around the tab body, gates it for the role and keeps its own address.
+// EST-024 pins the member/guest denial with no screen or controls.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
@@ -81,5 +82,16 @@ describe("estimates settings route", () => {
     renderRoute();
     await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
     expect(screen.getByTestId("project-settings-sidebar")).toBeInTheDocument();
+    expect(screen.queryByTestId("estimates-screen-stub")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("refuses a project member with no screen, switch or row controls", async () => {
+    harness.role = 15;
+    harness.workspaceRole = 15;
+    renderRoute();
+    await waitFor(() => expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument());
+    expect(screen.queryByTestId("estimates-screen-stub")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
   });
 });
