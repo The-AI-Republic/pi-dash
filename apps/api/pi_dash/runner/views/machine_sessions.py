@@ -54,7 +54,7 @@ class _SessionEvictedDuringPoll(Exception):
 
 # Same charset discipline as ``session_service._AGENT_KIND_RE``, plus ``-``:
 # the daemon advertises the kebab-case CLI spellings (``claude-code``).
-_SUPPORTED_AGENT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_SUPPORTED_AGENT_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 _SUPPORTED_AGENTS_MAX = 32
 
 
@@ -73,13 +73,27 @@ def _sanitize_supported_agents(body: Any) -> List[str] | None:
         return None
     cleaned: List[str] = []
     for item in raw:
-        if not isinstance(item, str) or not _SUPPORTED_AGENT_RE.match(item):
+        # ``fullmatch``, not ``match``: ``$`` would also accept a trailing
+        # newline (``"codex\n"``).
+        if not isinstance(item, str) or not _SUPPORTED_AGENT_RE.fullmatch(item):
             continue
         if item not in cleaned:
             cleaned.append(item)
         if len(cleaned) >= _SUPPORTED_AGENTS_MAX:
             break
     return cleaned or None
+
+
+def _request_supported_agents(request) -> List[str] | None:
+    """``_sanitize_supported_agents`` over the request body, where a body
+    DRF cannot parse (malformed JSON, an unsupported media type) counts as
+    "advertised nothing": the advertised set is advisory, so it must never
+    fail the session open."""
+    try:
+        data = request.data
+    except (drf_exceptions.ParseError, drf_exceptions.UnsupportedMediaType):
+        return None
+    return _sanitize_supported_agents(data)
 
 
 def _auth_dev_machine(request, dev_machine_id) -> DevMachine | None:
@@ -135,7 +149,7 @@ class MachineSessionOpenEndpoint(APIView):
                 last_seen_at=timezone.now(),
             )
             machine_updates: Dict[str, Any] = {"last_seen_at": timezone.now()}
-            supported_agents = _sanitize_supported_agents(request.data)
+            supported_agents = _request_supported_agents(request)
             if (
                 supported_agents is not None
                 and supported_agents != machine.supported_agents
