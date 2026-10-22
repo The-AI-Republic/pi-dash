@@ -155,6 +155,10 @@ describe("entry guard", () => {
     expect.unreachable("expected a redirect");
   }
 
+  // Session-shaped signed-out read: only an ApiError 401/403 resolves the
+  // gate to signed-out; any other failure rethrows (core/session/guards).
+  const signedOut = new ApiError({ status: 401, code: "http", message: "signed out" });
+
   it("renders the card for signed-out visitors", async () => {
     const failed = new ApiError({ status: 401, code: "http", message: "signed out" });
     await expect(Route.options.beforeLoad?.(stubContext({ me: failed }))).resolves.toEqual({});
@@ -162,30 +166,30 @@ describe("entry guard", () => {
 
   it("forwards a signed-out visitor to the marketing home on the cloud root (CLOUD-001)", async () => {
     edition.routes = [{ path: "/", scope: "top-level" }];
-    await expect(landingOf(stubContext({ me: new Error("signed out") }))).resolves.toBe("/home");
+    await expect(landingOf(stubContext({ me: signedOut }))).resolves.toBe("/home");
   });
 
   it("keeps the desktop entry card on the cloud root (DESK-011)", async () => {
     edition.routes = [{ path: "/", scope: "top-level" }];
     platformHarness.kind = "desktop";
-    await expect(Route.options.beforeLoad?.(stubContext({ me: new Error("signed out") }))).resolves.toEqual({});
+    await expect(Route.options.beforeLoad?.(stubContext({ me: signedOut }))).resolves.toEqual({});
   });
 
   it("carries a deep target to the login page as next_path (CLOUD-001)", async () => {
     edition.routes = [{ path: "/", scope: "top-level" }];
-    await expect(landingOf(stubContext({ me: new Error("signed out") }, { next_path: "/docs" }))).resolves.toBe(
+    await expect(landingOf(stubContext({ me: signedOut }, { next_path: "/docs" }))).resolves.toBe(
       "/login?next_path=%2Fdocs"
     );
   });
 
   it("carries the alias spelling too and drops an unsafe one", async () => {
     edition.routes = [{ path: "/", scope: "top-level" }];
-    await expect(landingOf(stubContext({ me: new Error("signed out") }, { next: "/acme" }))).resolves.toBe(
+    await expect(landingOf(stubContext({ me: signedOut }, { next: "/acme" }))).resolves.toBe(
       "/login?next_path=%2Facme"
     );
-    await expect(
-      landingOf(stubContext({ me: new Error("signed out") }, { next_path: "https://evil.test/x" }))
-    ).resolves.toBe("/home");
+    await expect(landingOf(stubContext({ me: signedOut }, { next_path: "https://evil.test/x" }))).resolves.toBe(
+      "/home"
+    );
   });
 
   it("leaves signed-in members on their landing even with the cloud root", async () => {
