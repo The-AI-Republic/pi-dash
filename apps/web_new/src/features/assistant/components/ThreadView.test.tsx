@@ -519,6 +519,15 @@ describe("ThreadView dictation", () => {
     expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
   });
 
+  it("links nowhere from a fully keyed conversation", async () => {
+    stubDevices();
+    renderThread({ sttSeed: STT_KEYED });
+    await screen.findByTestId("assistant-mic");
+    // No setup card, no setup hint, no keyed-mic link: the registry and
+    // the keys live in settings, never in chat (AGT-060).
+    expect(document.querySelectorAll('a[href*="/settings/"]')).toHaveLength(0);
+  });
+
   it("transcribes a hold into the draft", async () => {
     stubDevices();
     renderThread({

@@ -36,6 +36,9 @@ describe("platform selection", () => {
     expect(webPlatform.menu).toBeUndefined();
     expect(webPlatform.deepLinks).toBeUndefined();
     expect(webPlatform.agentRuntime).toBeUndefined();
+    // Without the local-chat seam the bundled-engine profile read never
+    // fires on web, so the desktop endpoints stay desktop-only (AGT-059).
+    expect(webPlatform.localChat).toBeUndefined();
     expect(webPlatform.updates).toBeUndefined();
     expect(webPlatform.sessionTeardown).toBeUndefined();
     expect(webPlatform.shellSignIn).toBeUndefined();
