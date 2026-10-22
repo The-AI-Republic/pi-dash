@@ -1784,6 +1784,25 @@ def test_rust_workspace_seed_before_after(db_conn, broker_url):
         == expected_modules
     )
 
+    # Link-row audit wipe (PIDASHCONV-1298): the `.objects.create(
+    # created_by_id=bot)` rows run `BaseModel.save` with no save kwarg and
+    # no crum user in the worker, so Django NULLs both audit columns
+    # (`db/models/base.py:31-33`). The explicit IssueSequence create is one
+    # of the two per-issue rows; the `Issue.save` auto-row is NULL-audit on
+    # both backends already, so asserting every project sequence row NULL
+    # pins the explicit row too.
+    link_rows = (
+        _seed_project_rows(db_conn, "issue_labels", project["id"])
+        + _seed_project_rows(db_conn, "cycle_issues", project["id"])
+        + _seed_project_rows(db_conn, "module_issues", project["id"])
+        + _seed_project_rows(db_conn, "issue_sequences", project["id"])
+    )
+    assert len(link_rows) == (
+        expected_labels + expected_cycles + expected_modules + 2 * len(seed_issues)
+    )
+    assert all(r["created_by_id"] is None for r in link_rows)
+    assert all(r["updated_by_id"] is None for r in link_rows)
+
     # Views: empty seed filters store an empty query; first view keeps its
     # seed sort.
     views = _seed_project_rows(db_conn, "issue_views", project["id"])
