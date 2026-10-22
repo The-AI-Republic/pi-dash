@@ -17,9 +17,11 @@ import {
   copyDraftTitle,
   cyclePatch,
   DRAFT_COPY_SUFFIX,
+  draftLabelsTriggerText,
   draftSnapshot,
   draftStateId,
   estimatePatch,
+  isDateRangeValid,
   isDraftOverdue,
   labelPatch,
   modulePatch,
@@ -281,11 +283,25 @@ describe("field patches", () => {
     expect(priorityPatch("low")).toEqual({ priority: "low" });
     expect(labelPatch(["label-1"])).toEqual({ label_ids: ["label-1"] });
     expect(assigneePatch(["user-2"])).toEqual({ assignee_ids: ["user-2"] });
-    expect(startDatePatch("2026-02-01")).toEqual({ start_date: "2026-02-01" });
-    expect(targetDatePatch(null)).toEqual({ target_date: null });
     expect(cyclePatch(null)).toEqual({ cycle_id: null });
     expect(modulePatch(["module-1"])).toEqual({ module_ids: ["module-1"] });
     expect(estimatePatch("point-1")).toEqual({ estimate_point: "point-1" });
+  });
+
+  it("sends both dates on every date pick so the server order check runs", () => {
+    expect(startDatePatch("2026-02-03", "2026-02-10")).toEqual({
+      start_date: "2026-02-03",
+      target_date: "2026-02-10",
+    });
+    expect(targetDatePatch("2026-02-10", "2026-02-03")).toEqual({
+      start_date: "2026-02-03",
+      target_date: "2026-02-10",
+    });
+  });
+
+  it("clears the counterpart a date pick does not carry", () => {
+    expect(startDatePatch(null, undefined)).toEqual({ start_date: null, target_date: null });
+    expect(targetDatePatch("2026-02-10", null)).toEqual({ start_date: null, target_date: "2026-02-10" });
   });
 
   it("copies the id lists so the caller's array is not shared", () => {
@@ -293,5 +309,43 @@ describe("field patches", () => {
     const patch = labelPatch(labels);
     labels.push("label-2");
     expect(patch.label_ids).toEqual(["label-1"]);
+  });
+});
+
+describe("isDateRangeValid", () => {
+  it("accepts an ordered range and a shared day", () => {
+    expect(isDateRangeValid("2026-02-01", "2026-02-10")).toBe(true);
+    expect(isDateRangeValid("2026-02-10", "2026-02-10")).toBe(true);
+  });
+
+  it("accepts a range missing either end", () => {
+    expect(isDateRangeValid(null, "2026-02-10")).toBe(true);
+    expect(isDateRangeValid("2026-02-01", null)).toBe(true);
+    expect(isDateRangeValid(null, null)).toBe(true);
+  });
+
+  it("refuses a start day after the due day, comparing days only", () => {
+    expect(isDateRangeValid("2026-02-11", "2026-02-10")).toBe(false);
+    expect(isDateRangeValid("2026-02-11T00:00:00Z", "2026-02-10T23:00:00Z")).toBe(false);
+  });
+});
+
+describe("draftLabelsTriggerText", () => {
+  const labels = [
+    { id: "label-1", name: "Mine" },
+    { id: "label-2", name: "Theirs" },
+  ];
+
+  it("prompts for labels with no selection", () => {
+    expect(draftLabelsTriggerText([], labels, "Labels")).toBe("Labels");
+  });
+
+  it("names every chosen label once all resolve", () => {
+    expect(draftLabelsTriggerText(["label-1", "label-2"], labels, "Labels")).toBe("Mine, Theirs");
+  });
+
+  it("counts the selection while a name is still unknown", () => {
+    expect(draftLabelsTriggerText(["label-1"], [], "Labels")).toBe("1 selected");
+    expect(draftLabelsTriggerText(["label-1", "label-9"], labels, "Labels")).toBe("2 selected");
   });
 });

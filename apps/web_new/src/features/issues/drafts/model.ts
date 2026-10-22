@@ -197,12 +197,45 @@ export function assigneePatch(assigneeIds: readonly string[]): DraftFieldPatch {
   return { assignee_ids: [...assigneeIds] };
 }
 
-export function startDatePatch(date: string | null): DraftFieldPatch {
-  return { start_date: date };
+/**
+ * A start-date pick writes both ends of the range: the server compares
+ * the two only when both arrive in one request, so a lone start write
+ * would bypass the order check (parity/specs/drafts.md §8.4). A missing
+ * counterpart travels as null, which clears it.
+ */
+export function startDatePatch(date: string | null, targetDate: string | null | undefined): DraftFieldPatch {
+  return { start_date: date, target_date: targetDate ?? null };
 }
 
-export function targetDatePatch(date: string | null): DraftFieldPatch {
-  return { target_date: date };
+/** A due-date pick writes both ends, mirroring the start pick above. */
+export function targetDatePatch(date: string | null, startDate: string | null | undefined): DraftFieldPatch {
+  return { start_date: startDate ?? null, target_date: date };
+}
+
+/**
+ * Whether a start/due pair keeps the range order: a missing end is
+ * always fine, otherwise the start day must not fall after the due day
+ * (parity/specs/drafts.md §3.2). Only the day part is compared.
+ */
+export function isDateRangeValid(startDate: string | null, targetDate: string | null): boolean {
+  if (startDate === null || targetDate === null) return true;
+  return startDate.slice(0, 10) <= targetDate.slice(0, 10);
+}
+
+/**
+ * The labels trigger text: the empty prompt with no selection, the
+ * chosen names once every one resolves, otherwise the selected count
+ * while the label read is still pending (parity/specs/drafts.md §3.2).
+ */
+export function draftLabelsTriggerText(
+  labelIds: readonly string[],
+  labels: readonly { id: string; name: string }[],
+  emptyText: string
+): string {
+  if (labelIds.length === 0) return emptyText;
+  const names = labelIds.map((id) => labels.find((label) => label.id === id)?.name);
+  if (names.every((name) => name !== undefined)) return names.join(", ");
+  return `${labelIds.length} selected`;
 }
 
 export function cyclePatch(cycleId: string | null): DraftFieldPatch {
