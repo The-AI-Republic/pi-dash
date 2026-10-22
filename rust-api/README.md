@@ -132,15 +132,17 @@ client never waits on the shadow call. Code:
 | `PIDASH_RUST_SHADOW` | off | `1/true/yes/on` enables shadow reads |
 | `PIDASH_RUST_SHADOW_MAX_INFLIGHT` | `8` | concurrent shadow cap; over it, skip and count |
 | `PIDASH_RUST_SHADOW_SAMPLE` | `1.0` | sampling rate, clamped to `0.0`–`1.0` |
+| `PIDASH_RUST_SHADOW_METRICS_TOKEN` | (unset) | shared secret unlocking `/internal/shadow-metrics`; unset locks it for everyone |
 
 Eligibility: safe reads only. Writes (`POST`/`PUT`/`PATCH`/`DELETE`)
-never shadow, `X-Api-Key` requests never shadow (both backends stamp
-`last_used` on every one, so a re-dispatch would double-write), and the
-denylist in `edge_shadow.rs` (`DENYLIST`) excludes `GET`s with side
-effects: the CSRF-token mint, OAuth initiates/callbacks (all four
-providers, app + space), and the presigned-URL `GET`s. Shadow work runs
-after the response is sent with a 10 s budget per phase and the
-concurrency cap above; event streams, content-encoded bodies, and bodies over 8 MiB skip.
+never shadow and leave no trace in metrics, `X-Api-Key` requests never
+shadow (both backends stamp `last_used` on every one, so a re-dispatch
+would double-write), and the denylist in `edge_shadow.rs` (`DENYLIST`)
+excludes `GET`s with side effects: the CSRF-token mint, OAuth
+initiates/callbacks (all four providers, app + space), and the
+presigned-URL `GET`s. Shadow work runs after the response is sent with a
+10 s budget per phase and the concurrency cap above; event streams,
+content-encoded bodies, and bodies over 8 MiB skip.
 
 Comparison: status, content-type, body. Byte-identical bodies match;
 otherwise JSON bodies are normalized over the fixed volatile allowlist
@@ -152,25 +154,31 @@ match byte for byte. Extend the allowlist only with cited evidence.
 On mismatch the proxy logs one structured `shadow mismatch` line (route
 template, method, both statuses, a body excerpt capped at 2 KB with
 tokens/cookies/authorization redacted, never the full body) and counts it.
-Counters live on the internal endpoint (always Rust-served, like
-`/healthz` — restrict it by network in deployments):
+Excerpts stay in the logs: the internal endpoint serves counters plus
+route/method/status tuples only, and only to callers presenting the
+metrics token (without it the endpoint 404s exactly as if it did not
+exist, which is what Django serves for `/internal/*`):
 
 ```sh
-curl localhost:8080/internal/shadow-metrics | jq .
+curl -H "x-shadow-metrics-token: $PIDASH_RUST_SHADOW_METRICS_TOKEN" \
+  localhost:8080/internal/shadow-metrics | jq .
 # {"enabled": true,
 #  "totals": {"compared": N, "matched": N, "mismatched": N,
 #             "skipped": N, "errored": N},
-#  "routes": {"/": {"compared": N, ...}, ...},
+#  "routes": {"/": {"compared": N, ...}, "_other": {...}},
 #  "recent_mismatches": [{"route": ..., "method": ..., "django_status": ...,
-#                         "rust_status": ..., "diff": ...}]}
+#                         "rust_status": ...}]}
 ```
 
-Route templates collapse integer/UUID segments to `{id}` and are capped
-at 4096 entries (`_other` overflow). Known limits: the shadow dispatch
-shares the process (pools, throttles) and skips outer middleware except a
-read-only session layer, so throttle-quota and host-absolute responses
-can false-mismatch under load; `X-Api-Key` coverage needs a read-only
-shadow auth mode (not built).
+Counter keys come from a fixed template list — denylist templates,
+exact static paths (`/`, `/robots.txt`), and the `_other` overflow
+bucket for everything else — so raw request paths (slugs, uids, tokens)
+never become keys. Keys are capped at 256 characters and 4096 entries,
+so the map pins about a megabyte at most. Known limits: the shadow
+dispatch shares the process (pools, throttles) and skips outer middleware
+except a read-only session layer, so throttle-quota and host-absolute
+responses can false-mismatch under load; `X-Api-Key` coverage needs a
+read-only shadow auth mode (not built).
 
 ## Config and settings (F-03)
 
