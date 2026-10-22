@@ -42,13 +42,7 @@ export interface BulkSelection {
 function isFormTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   const tag = target.tagName;
-  return (
-    tag === "INPUT" ||
-    tag === "TEXTAREA" ||
-    tag === "SELECT" ||
-    target.isContentEditable ||
-    target.closest('[contenteditable="true"]') !== null
-  );
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
 }
 
 /** Scroll the active row into view without moving the page. */
@@ -82,7 +76,12 @@ export function useBulkSelection(
       if (next.size === current.size && [...current].every((id) => next.has(id))) return current;
       return next;
     });
-    setActiveId((current) => (current !== null && items.some((item) => item.id === current) ? current : null));
+    setActiveId((current) => {
+      if (current === null) return null;
+      const present = items.some((item) => item.id === current);
+      if (!present) return null;
+      return current;
+    });
   }, [items]);
 
   React.useEffect(() => {

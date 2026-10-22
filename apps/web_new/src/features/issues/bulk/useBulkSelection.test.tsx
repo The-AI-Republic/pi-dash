@@ -28,6 +28,7 @@ describe("useBulkSelection", () => {
   it("clears the selection", () => {
     const { result } = renderHook(() => useBulkSelection(ITEMS));
     act(() => result.current.onRowToggle("a", false));
+    act(() => result.current.onRowToggle("a", false));
     act(() => result.current.clear());
     expect(result.current.selectedIds.size).toBe(0);
   });
@@ -61,6 +62,29 @@ describe("useBulkSelection", () => {
     input.remove();
   });
 
+  it.each([
+    ["textarea", () => document.createElement("textarea")],
+    ["select", () => document.createElement("select")],
+    [
+      "a direct isContentEditable hit",
+      () => {
+        const host = document.createElement("div");
+        Object.defineProperty(host, "isContentEditable", { value: true });
+        return host;
+      },
+    ],
+  ])("ignores arrows typed inside a %s", (_name, makeTarget) => {
+    const { result } = renderHook(() => useBulkSelection(ITEMS));
+    const target = makeTarget();
+    document.body.appendChild(target);
+    target.focus();
+    act(() => {
+      target.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(result.current.activeId).toBeNull();
+    target.remove();
+  });
+
   it("does nothing when selection is disabled", () => {
     const { result } = renderHook(() => useBulkSelection(ITEMS, false));
     act(() => {
@@ -79,13 +103,57 @@ describe("useBulkSelection", () => {
     expect([...result.current.selectedIds]).toEqual([]);
   });
 
+  it("drops an active row that leaves the list", () => {
+    const { result, rerender } = renderHook(({ items }) => useBulkSelection(items), { initialProps: { items: ITEMS } });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(result.current.activeId).toBe("a");
+    rerender({ items: ITEMS.slice(1) });
+    expect(result.current.activeId).toBeNull();
+  });
+
+  it("ignores letter keys", () => {
+    const { result } = renderHook(() => useBulkSelection(ITEMS));
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    });
+    expect(result.current.activeId).toBeNull();
+  });
+
+  it("reports empty group state while selection is off", () => {
+    const { result } = renderHook(() => useBulkSelection(ITEMS, false));
+    act(() => result.current.onRowToggle("a", false));
+    expect(result.current.groupState("todo")).toBe("empty");
+  });
+
+  it("keeps a null active row when the list changes", () => {
+    const { result, rerender } = renderHook(({ items }) => useBulkSelection(items), { initialProps: { items: ITEMS } });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(result.current.activeId).toBe("b");
+    rerender({ items: ITEMS.slice(0, 1) });
+    expect(result.current.activeId).toBeNull();
+  });
+
+  it("reports group state from selected rows", () => {
+    const { result } = renderHook(() => useBulkSelection(ITEMS));
+    act(() => result.current.onRowToggle("a", false));
+    expect(result.current.groupState("todo")).toBe("partial");
+  });
+
   it("keeps a still-present active row after a regroupl", () => {
     const { result, rerender } = renderHook(({ items }) => useBulkSelection(items), { initialProps: { items: ITEMS } });
     act(() => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
     });
-    rerender({ items: ITEMS });
+    rerender({ items: [...ITEMS] });
     expect(result.current.activeId).toBe("a");
+    expect(result.current.isActive("a")).toBe(true);
   });
 
   it("arms beforeunload while a selection exists and reveals the active row", () => {
