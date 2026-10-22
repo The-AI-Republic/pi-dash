@@ -34,19 +34,22 @@ breadcrumb, title, or role gate.
 The typed seam is `registerWorkspaceExportsGuide` in
 `apps/web_new/src/features/workspace-settings/lib/exportsGuide.ts`, with
 `WorkspaceExportsGuideProps = { workspaceSlug: string }`; registration returns
-an unregister cleanup and the shell reads it with
-`useWorkspaceExportsGuide()`. Evidence: the seam module and its tests on
-`pi-dash/newfront-548`, and workspace-settings spec §§33/41.
+an unregister cleanup and the frame reads it with
+`useWorkspaceExportsGuide()`. Evidence: NEWFRONT-548 as merged in
+`66197a3da` (`lib/exportsGuide.ts`, `ExportsSettingsPage.tsx`, and their
+tests), and workspace-settings spec §§33/41.
 
-As of base `ded261d5c`, NEWFRONT-548 is an open PR (#1823), not merged: the base
-route still renders the settings placeholder and there is no
-`exportsGuide.ts`. On the 548 branch the frame (`ExportsSettingsPage`) reads the
-seam, while the route registers only the frame; nothing imports an exports
-registration yet. The correct wiring is: the guide registers through this seam
-for as long as the exports guide is mounted, and the section route or the frame
-mounts that registration (an effect is acceptable). NEWFRONT-768 owns making the
-registration real, proving it with a route-level test, and landing after 548.
-The spec records this rather than treating a not-yet-merged branch as base.
+The merged wiring is: the exports section route renders
+`SettingsSectionOutlet` and registers `ExportsSettingsPage` in the settings
+page registry; the frame renders the heading, explanation and one guide slot,
+and substitutes a quiet pending state while the slot is empty. Nothing imports
+an exports-area registration yet, so the slot is empty in production. The
+correct wiring is: the exports guide registers through
+`registerWorkspaceExportsGuide` for as long as the guide is mounted, and the
+section route or the frame mounts that registration (an effect is acceptable).
+NEWFRONT-768 owns making that registration import real and proving it with a
+route-level test; it must register into this seam, not replace or duplicate the
+frame.
 
 EXP-001/002 prove the frame through the EXP oracle while the frame code comes
 from 548. The guide owns everything from the form downward: project and format
