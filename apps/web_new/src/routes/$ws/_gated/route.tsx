@@ -73,7 +73,7 @@ import {
   type RailDockItem,
   type SwitcherWorkspace,
 } from "../../../shared/shell/index.js";
-import { isWorkspaceSettingsRouteId } from "../../../features/workspace-settings/index.js";
+import { isWorkspaceSettingsRouteId } from "../../../features/workspace-settings/lib/routeId.js";
 import { ToastHost } from "@pidash/kit";
 import { resolveSearchTarget } from "./searchTarget.js";
 

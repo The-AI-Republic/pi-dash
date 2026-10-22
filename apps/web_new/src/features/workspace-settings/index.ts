@@ -67,8 +67,6 @@ export type {
 export {
   canOpenWorkspaceSettingsSection,
   findWorkspaceSettingsSection,
-  isWorkspaceSettingsRouteId,
-  WORKSPACE_SETTINGS_ROUTE_ID,
   resolveWorkspaceSettingsSection,
   visibleWorkspaceSettingsGroups,
   WORKSPACE_SETTINGS_GROUPS,
@@ -76,6 +74,7 @@ export {
   workspaceSettingsHref,
   workspaceSettingsRoleLabel,
 } from "./lib/sections.js";
+export { WORKSPACE_SETTINGS_ROUTE_ID, isWorkspaceSettingsRouteId } from "./lib/routeId.js";
 export type {
   VisibleWorkspaceSettingsGroup,
   VisibleWorkspaceSettingsSection,

@@ -6,6 +6,12 @@
 // month grid with min/max disabling, the merged smart label, and the
 // range click state machine (repick adjusts one end; a same-day double
 // pick resets). Pure: no React, no network.
+// The week-start primitives live in weekDays.ts (NEWFRONT-852, size
+// gate) and are re-exported here, so existing importers keep working.
+
+import { normalizeWeekStart } from "./weekDays.js";
+
+export { DEFAULT_WEEK_START, normalizeWeekStart } from "./weekDays.js";
 
 /** Full month names for the caption select, January-first. */
 export const MONTH_NAMES: readonly string[] = [
@@ -57,9 +63,6 @@ export const WEEKDAY_SHORT: readonly string[] = ["Su", "Mo", "Tu", "We", "Th", "
 export const CAPTION_YEAR_MIN = 1900;
 export const CAPTION_YEAR_MAX = 2100;
 
-/** Fallback week start (Sunday) when the profile carries none. */
-export const DEFAULT_WEEK_START = 0;
-
 /** A picked range: either end may be empty while picking or clearing. */
 export interface RangeValue {
   start: string | null;
@@ -96,14 +99,6 @@ export function parseIsoDay(value: string | null | undefined): { year: number; m
 /** Today's ISO day in local time. */
 export function todayIsoDay(now: Date = new Date()): string {
   return toIsoDay(now.getFullYear(), now.getMonth(), now.getDate());
-}
-
-/** Clamp an unknown week-start value onto the 0-6 Sunday-first range. */
-export function normalizeWeekStart(value: unknown): number {
-  if (typeof value !== "number" || Number.isNaN(value)) return DEFAULT_WEEK_START;
-  const floored = Math.floor(value);
-  if (floored < 0 || floored > 6) return DEFAULT_WEEK_START;
-  return floored;
 }
 
 /** Weekday header labels rotated so the week starts on the given day. */

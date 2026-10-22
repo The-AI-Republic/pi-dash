@@ -9,7 +9,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { profileQueryOptions } from "../../../core/session/queries.js";
-import { DEFAULT_WEEK_START, normalizeWeekStart } from "./calendar.js";
+import { DEFAULT_WEEK_START, normalizeWeekStart } from "./weekDays.js";
 
 /** The signed-in user's first day of week, Sunday-first 0-6. */
 export function useWeekStart(): number {

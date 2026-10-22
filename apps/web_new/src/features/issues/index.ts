@@ -246,7 +246,6 @@ export type { LabelChipsProps } from "./labels/LabelChips.js";
 export {
   CAPTION_YEAR_MAX,
   CAPTION_YEAR_MIN,
-  DEFAULT_WEEK_START,
   MONTH_ABBREVS,
   MONTH_NAMES,
   WEEKDAY_NAMES,
@@ -258,13 +257,13 @@ export {
   isDayInRange,
   isIsoDay,
   monthGrid,
-  normalizeWeekStart,
   orderedWeekdays,
   parseIsoDay,
   shiftMonth,
   todayIsoDay,
   toIsoDay,
 } from "./dropdowns/calendar.js";
+export { DEFAULT_WEEK_START, normalizeWeekStart } from "./dropdowns/weekDays.js";
 export type { CalendarDay, RangeValue } from "./dropdowns/calendar.js";
 export { DateCalendar, DatePicker } from "./dropdowns/DatePicker.js";
 export type { DateCalendarProps, DatePickerProps } from "./dropdowns/DatePicker.js";

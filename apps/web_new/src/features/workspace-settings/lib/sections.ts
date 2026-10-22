@@ -100,19 +100,7 @@ export function resolveWorkspaceSettingsSection(pathname: string): WorkspaceSett
   return SECTIONS.find((section) => section.suffix === first)?.key ?? null;
 }
 
-/**
- * The file-route id of the workspace-settings layout. Addresses beneath
- * it are the six section pages, the webhook detail and the unknown-section
- * catch-all; sibling settings areas (project settings beneath
- * `settings/projects`, the workspace-less profile settings) are other
- * routes and keep their own chrome.
- */
-export const WORKSPACE_SETTINGS_ROUTE_ID = "/$ws/_gated/settings/_workspace";
-
-/** True for the settings layout route and every route beneath it. */
-export function isWorkspaceSettingsRouteId(routeId: string): boolean {
-  return routeId === WORKSPACE_SETTINGS_ROUTE_ID || routeId.startsWith(`${WORKSPACE_SETTINGS_ROUTE_ID}/`);
-}
+export { WORKSPACE_SETTINGS_ROUTE_ID, isWorkspaceSettingsRouteId } from "./routeId.js";
 
 /**
  * Whether the viewer may open a section: guests never; billing, webhooks

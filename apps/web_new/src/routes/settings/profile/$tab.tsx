@@ -17,7 +17,6 @@ import {
   DEFAULT_PROFILE_SETTINGS_TAB,
   resolveProfileSettingsTab,
 } from "../../../features/settings/lib/tabNavigation.js";
-import { isTabAddressServed, tabHasInstanceGate } from "../../../features/settings/lib/tabAvailability.js";
 import { defaultTabHref } from "./index.js";
 
 /**
@@ -29,9 +28,14 @@ export function unknownTabHref(search: string): string {
 }
 
 export const Route = createFileRoute("/settings/profile/$tab")({
+  // NOTE (NEWFRONT-852, size gate): the instance-gate read stays behind a
+  // dynamic import so it never joins the initial bundle — this gate only
+  // runs on settings-tab navigation, after first paint.
   beforeLoad: async ({ context, params, location }) => {
     const tab = resolveProfileSettingsTab(params.tab);
     if (tab === null) throw redirect({ href: unknownTabHref(location.searchStr) });
+    const { isTabAddressServed, tabHasInstanceGate } =
+      await import("../../../features/settings/lib/tabAvailability.js");
     if (!tabHasInstanceGate(tab)) return;
     const served = await isTabAddressServed({ queryClient: context.queryClient, apiClient: context.apiClient, tab });
     if (!served) throw redirect({ href: unknownTabHref(location.searchStr) });
