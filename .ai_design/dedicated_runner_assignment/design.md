@@ -5,7 +5,7 @@
 
 Today an issue is routed to a **pod**: any free runner in that squad takes the run. This doc adds a second mode: the issue is routed to **one dedicated runner**, chosen by a person, because of the machine, tools or access that runner has.
 
-Every decision in this doc is settled. The offline policy (§11) was decided by the project owner on 2026-10-12, and the five open questions H-2 to H-6 were answered on 2026-10-15; §21 lists the answers and where each one lands.
+Every decision in this doc is settled. The offline policy (§11) was decided by the project owner on 2026-10-12, the five open questions H-2 to H-6 were answered on 2026-10-15, and H-7 to H-9 on 2026-10-21; §21 lists the answers and where each one lands.
 
 ---
 
@@ -173,6 +173,8 @@ A runner `R` can be the dedicated runner of issue `X`, when user `U` makes the r
 E7 is `filter_runs_usable_by_runner` reduced to the clauses that hold for _every_ run of the issue. A tick run is created by the agent system user, so "the run's creator owns the runner" cannot be relied on. On issue creation the requester is the creator, so a user's own runner always passes E7. Combined with E1, in v1 a user dedicates an issue to **their own** runner, on an issue they created or are assigned to.
 
 **Decision (project owner, 2026-10-15, H-4): confirmed as written.** The requester must be the runner's owner (E1) and also the issue's creator or a current assignee (E7). An issue has no separate owner field; "issue owner" means its creator. A request that fails E7 is rejected with `runner_owner_not_on_issue` and a message that says to add the runner's owner as an assignee. The owner is **not** added as an assignee automatically. When a non-private visibility is added to runners, E1 and E7 widen with `can_use_runner` and `filter_runs_usable_by_runner` and nothing else in this doc changes.
+
+**Decision (project owner, 2026-10-21, H-7): any creator or current assignee may change or clear the dedicated runner**, whoever set it. If A dedicates the issue to A's runner and B is an assignee, B may switch it to B's own runner or clear it back to the pod; the rules check only the requester's relation to the runner they pick. There is no rule protecting the previous choice. The change is recorded in the activity log (§14.7).
 
 ### 7.2 Reject or warn
 
@@ -379,7 +381,7 @@ A second pass in the same task handles one case for dedicated queued runs, and i
 
 `POST /api/runners/runs/<run_id>/release-pin/` keeps its contract for locality pins. For a dedicated pin:
 
-- Allowed for whoever may cancel the run (`_can_cancel_run`), only while the run is `QUEUED`.
+- Allowed only for the issue's creator and its current assignees (**decision, project owner, 2026-10-21, H-8**), only while the run is `QUEUED`. Anyone else gets HTTP 403. The same check gates the issue's waiting-banner actions (§14.4) and `dispatch_wait.releasable` (§14.3). Restricting cancel to the same people for every issue run is tracked outside this design, in PDASHOSS01-317.
 - Sets `pinned_runner = NULL`, `pin_kind = "locality"`, clears the parent's `thread_id` as today, drains the pod.
 - Does **not** change `Issue.assigned_runner`. The response says so: the run payload plus `"assignment": {"assigned_runner_id": "<uuid>", "changed": false}`.
 - Posts a system comment: "Run released from runner **gpu-box** to pod **Default** by Ana. The issue stays assigned to gpu-box."
@@ -392,17 +394,17 @@ To move the issue itself, change its runner (§13.2). The CLI and the MCP tools 
 
 Every row that clears the assignment calls `clear_dedicated_runner(issue, reason=…)`, which sets `assigned_runner = NULL`, leaves `assigned_pod` alone, writes an activity entry, and posts one system comment naming the runner and the reason.
 
-| Event                                                                  | Issue                                                                                   | Its queued run                                                     | Its running run                         |
-| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------- |
-| Runner revoked (any reason, including the owner losing membership)     | Cleared. Then the project's lost-runner rule (below).                                   | Per the lost-runner rule (below)                                   | Cancelled (today)                       |
-| Runner deleted                                                         | Same; delete is revoke then delete. `SET_NULL` is the net.                              | Same                                                               | Same                                    |
-| Runner moved to another pod of the same project                        | Follows the runner: `assigned_pod` is updated to the new pod in the move's transaction. | Cannot exist: the move is refused while a run is bound (see below) | Cannot exist (same guard)               |
-| Issue's pod changed to another pod, no runner in the request           | Cleared.                                                                                | Cannot exist: pod changes are refused during an active run         | —                                       |
-| Issue's executor changed to `cloud_agent` / `managed_runner` / inherit | Cleared (§8).                                                                           | Cannot exist: same guard                                           | —                                       |
-| Issue moved to another project (`utils/issue_move.py`)                 | Cleared in the same `save(update_fields=…)` that resets `assigned_pod`.                 | Cancelled and replaced by the handoff run, unpinned (today)        | Handoff as today                        |
-| Runner's owner removed from the issue's assignees (and is not creator) | Not cleared. The next run is bounced by preflight with a comment (§9.4).                | Failed by the sweep as stranded (§12.1)                            | Finishes                                |
-| Runner offline                                                         | Unchanged.                                                                              | Waits (§11)                                                        | `fail_runs_on_offline_runners` as today |
-| Sub-issue created under a dedicated issue                              | The child does **not** inherit. It gets the project default pod, like any new issue.    | —                                                                  | —                                       |
+| Event                                                                  | Issue                                                                                     | Its queued run                                                     | Its running run                         |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | --------------------------------------- |
+| Runner revoked (any reason, including the owner losing membership)     | Cleared. Then the project's lost-runner rule (below).                                     | Per the lost-runner rule (below)                                   | Cancelled (today)                       |
+| Runner deleted                                                         | Same; delete is revoke then delete. `SET_NULL` is the net.                                | Same                                                               | Same                                    |
+| Runner moved to another pod of the same project                        | Follows the runner: `assigned_pod` is updated to the new pod in the move's transaction.   | Cannot exist: the move is refused while a run is bound (see below) | Cannot exist (same guard)               |
+| Issue's pod changed to another pod, no runner in the request           | Cleared.                                                                                  | Cannot exist: pod changes are refused during an active run         | —                                       |
+| Issue's executor changed to `cloud_agent` / `managed_runner` / inherit | Cleared (§8).                                                                             | Cannot exist: same guard                                           | —                                       |
+| Issue moved to another project (`utils/issue_move.py`)                 | Cleared in the same `save(update_fields=…)` that resets `assigned_pod`.                   | Cancelled and replaced by the handoff run, unpinned (today)        | Handoff as today                        |
+| Runner's owner removed from the issue's assignees (and is not creator) | Not cleared (confirmed, H-9). The next run is bounced by preflight with a comment (§9.4). | Failed by the sweep as stranded (§12.1)                            | Finishes                                |
+| Runner offline                                                         | Unchanged.                                                                                | Waits (§11)                                                        | `fail_runs_on_offline_runners` as today |
+| Sub-issue created under a dedicated issue                              | The child does **not** inherit. It gets the project default pod, like any new issue.      | —                                                                  | —                                       |
 
 The runner-move guard (`runner/views/runners.py`) refuses a move while a non-terminal run has `runner` or `pinned_runner` set to the runner. A run released by hand (§12.2) is no longer pinned and may be queued or running elsewhere in the old pod, so the guard gains one clause: the move is also refused while any issue dedicated to the runner has a non-terminal run. Without it the move would change `assigned_pod` under an active run, which the issue-side guard forbids.
 
@@ -410,6 +412,7 @@ The runner-move guard (`runner/views/runners.py`) refuses a move while a non-ter
 
 - **`fail_to_backlog` (default).** The issue's queued run is failed with `error_code = "dedicated_runner_revoked"` instead of being un-pinned. The issue moves to Backlog through the existing bounce (`orchestration/scheduling.py:_bounce_issue_no_eligible_runner`, reason `dedicated-runner-revoked`), whose system comment (a new message for this reason) names the runner and says it was revoked or deleted and that a person must choose a new runner or the pod. This applies whether or not the issue had a queued run: an issue in a ticking state is moved to Backlog so no tick creates a run on a squad the user did not choose. An issue in another state (Backlog, Todo, Done, …) only gets the cleared assignment and the comment.
 - **`fall_back`.** The issue is routed to a squad, in this order:
+
   1. Its own pod, if that pod still has a runner that could serve the issue after this revoke. The queued run is un-pinned and served by the pod's shared queue (today's revoke behaviour).
   2. Otherwise the project's default pod (`Pod.default_for_project`), if it has such a runner. `assigned_pod` is set to it in the same transaction. `AgentRun.pod` is immutable, so the queued run is cancelled and, on commit, a replacement is created in the default pod through `_create_and_dispatch_run`, as the project-move handoff does.
   3. Otherwise the existing no-eligible-runner bounce applies: back to Backlog with its comment (reason `no-eligible-runner`).
@@ -605,7 +608,7 @@ Scope this design adds to the epics as first written: `--pod` on the CLI and `as
 
 ## 21. Decisions
 
-All decided. H-1 by the project owner on 2026-10-12; H-2 to H-6 on 2026-10-15.
+All decided. H-1 by the project owner on 2026-10-12; H-2 to H-6 on 2026-10-15; H-7 to H-9 on 2026-10-21.
 
 | #   | Question                                                         | Decision                                                                                                                                                                                                | Section     |
 | --- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
@@ -615,6 +618,9 @@ All decided. H-1 by the project owner on 2026-10-12; H-2 to H-6 on 2026-10-15.
 | H-4 | Who may dedicate an issue to a runner                            | Confirmed: the runner's owner, who is also the issue's creator or a current assignee. Otherwise rejected; the owner is not auto-added.                                                                  | §7.1        |
 | H-5 | Rollout gate                                                     | No gate. HA-2's write path lands after HA-3's dispatch, recorded as `blocked_by` relations.                                                                                                             | §19         |
 | H-6 | Showing a dedicated runner's name, status and owner on the issue | Confirmed: shown to everyone who can see the issue.                                                                                                                                                     | §14.1       |
+| H-7 | Who may change or clear a dedicated runner someone else set      | Any creator or current assignee, whoever set it. No rule protects the previous choice.                                                                                                                  | §7.1        |
+| H-8 | Who may release a waiting dedicated run to the pod               | Only the issue's creator and current assignees. (Cancel for every issue run is restricted the same way in PDASHOSS01-317, outside this design.)                                                         | §12.2       |
+| H-9 | The dedicated runner's owner is removed from the assignees       | Confirmed as written: the assignment is not cleared; a queued run is failed as stranded and the next run is bounced to Backlog.                                                                         | §13.1       |
 
 ## 22. Deferred
 
