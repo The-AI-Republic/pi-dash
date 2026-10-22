@@ -25065,7 +25065,16 @@ export class WebNewDriver implements ParityDriver {
     return new URL(this.page.url()).search.replace(/^\?/, "");
   }
   async settingsProfileLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("settingsProfileLastToast");
+    // Cards append in arrival order, so the last one is the newest; its
+    // lines are the title first, then the body.
+    const cards = this.page.getByTestId("toast-notification");
+    if ((await cards.count()) === 0) return null;
+    const lines = ((await cards.last().innerText()) ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) return null;
+    return { title: lines[0]!, message: lines.slice(1).join(" ") };
   }
   async settingsProfileAssistantFacts(): Promise<{
     provider: string;
@@ -25079,28 +25088,73 @@ export class WebNewDriver implements ParityDriver {
     removeVisible: boolean;
     lastVerified: string | null;
   }> {
-    return todo("settingsProfileAssistantFacts");
+    const section = this.page.getByTestId("assistant-llm");
+    // The tab holds a skeleton until both config reads resolve; the model
+    // field landing proves the forms painted with their seeded values.
+    await section.locator("#assistant-llm-model").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const baseUrlField = section.locator("#assistant-llm-base-url");
+    const baseUrlVisible = (await baseUrlField.count()) > 0;
+    const keyField = section.locator("#assistant-llm-key");
+    const verified = section.getByText("Last verified:");
+    const lastVerified =
+      (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
+    return {
+      provider: await section.locator("#assistant-llm-provider").inputValue(),
+      baseUrlVisible,
+      baseUrl: baseUrlVisible ? await baseUrlField.inputValue() : "",
+      model: await section.locator("#assistant-llm-model").inputValue(),
+      keyValue: await keyField.inputValue(),
+      keyPlaceholder: (await keyField.getAttribute("placeholder")) ?? "",
+      saveDisabled: await section.getByRole("button", { name: "Save", exact: true }).isDisabled(),
+      testDisabled: await section.getByRole("button", { name: "Test connection", exact: true }).isDisabled(),
+      removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
+      lastVerified,
+    };
   }
-  async settingsProfileAssistantSetProvider(_provider: "openai_compatible" | "anthropic"): Promise<void> {
-    return todo("settingsProfileAssistantSetProvider");
+  async settingsProfileAssistantSetProvider(provider: "openai_compatible" | "anthropic"): Promise<void> {
+    // A native select: the endpoint row shows or hides synchronously.
+    await this.page.getByTestId("assistant-llm").locator("#assistant-llm-provider").selectOption(provider);
   }
-  async settingsProfileAssistantFill(_field: "baseUrl" | "model" | "key", _value: string): Promise<void> {
-    return todo("settingsProfileAssistantFill");
+  async settingsProfileAssistantFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
+    const suffix = field === "baseUrl" ? "base-url" : field;
+    await this.page.getByTestId("assistant-llm").locator(`#assistant-llm-${suffix}`).fill(value);
   }
   async settingsProfileAssistantSave(): Promise<void> {
-    return todo("settingsProfileAssistantSave");
+    // The spec polls the toast for the outcome; the click only fires it.
+    await this.page
+      .getByTestId("assistant-llm")
+      .getByRole("button", { name: "Save", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantTest(): Promise<void> {
-    return todo("settingsProfileAssistantTest");
+    await this.page
+      .getByTestId("assistant-llm")
+      .getByRole("button", { name: "Test connection", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantRemove(): Promise<void> {
-    return todo("settingsProfileAssistantRemove");
+    await this.page
+      .getByTestId("assistant-llm")
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileAssistantFailWrites(): Promise<void> {
-    return todo("settingsProfileAssistantFailWrites");
+    // Fail the config PUT saves only: reads, probes, and tool-server
+    // writes pass through so the save-failure half keeps its form state.
+    await this.page.route("**/api/users/me/ai-assistant/**", (route) => {
+      const url = route.request().url();
+      if (
+        route.request().method() === "PUT" &&
+        (url.includes("/ai-assistant/config/") || url.includes("/ai-assistant/stt-config/"))
+      ) {
+        void route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' });
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileAssistantClearRoutes(): Promise<void> {
-    return todo("settingsProfileAssistantClearRoutes");
+    await this.page.unroute("**/api/users/me/ai-assistant/**");
   }
   async settingsProfileDictationFacts(): Promise<{
     sectionVisible: boolean;
@@ -25113,36 +25167,120 @@ export class WebNewDriver implements ParityDriver {
     removeVisible: boolean;
     lastVerified: string | null;
   }> {
-    return todo("settingsProfileDictationFacts");
+    // Settle on the sibling form: the page renders every section only
+    // after both config reads resolve, so past this wait the voice
+    // section is genuinely present or genuinely absent.
+    await this.page
+      .getByTestId("assistant-llm")
+      .locator("#assistant-llm-model")
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const section = this.page.getByTestId("assistant-voice");
+    if ((await section.count()) === 0) {
+      return {
+        sectionVisible: false,
+        baseUrl: "",
+        model: "",
+        keyValue: "",
+        keyPlaceholder: "",
+        saveDisabled: true,
+        testDisabled: true,
+        removeVisible: false,
+        lastVerified: null,
+      };
+    }
+    const keyField = section.locator("#assistant-voice-key");
+    const verified = section.getByText("Last verified:");
+    const lastVerified =
+      (await verified.count()) === 0 ? null : ((await verified.first().innerText()) ?? "").trim() || null;
+    return {
+      sectionVisible: true,
+      baseUrl: await section.locator("#assistant-voice-base-url").inputValue(),
+      model: await section.locator("#assistant-voice-model").inputValue(),
+      keyValue: await keyField.inputValue(),
+      keyPlaceholder: (await keyField.getAttribute("placeholder")) ?? "",
+      saveDisabled: await section.getByRole("button", { name: "Save", exact: true }).isDisabled(),
+      testDisabled: await section.getByRole("button", { name: "Test connection", exact: true }).isDisabled(),
+      removeVisible: await this.isShown(section.getByRole("button", { name: "Remove", exact: true })),
+      lastVerified,
+    };
   }
-  async settingsProfileDictationFill(_field: "baseUrl" | "model" | "key", _value: string): Promise<void> {
-    return todo("settingsProfileDictationFill");
+  async settingsProfileDictationFill(field: "baseUrl" | "model" | "key", value: string): Promise<void> {
+    const suffix = field === "baseUrl" ? "base-url" : field;
+    await this.page.getByTestId("assistant-voice").locator(`#assistant-voice-${suffix}`).fill(value);
   }
   async settingsProfileDictationSave(): Promise<void> {
-    return todo("settingsProfileDictationSave");
+    await this.page
+      .getByTestId("assistant-voice")
+      .getByRole("button", { name: "Save", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDictationTest(): Promise<void> {
-    return todo("settingsProfileDictationTest");
+    await this.page
+      .getByTestId("assistant-voice")
+      .getByRole("button", { name: "Test connection", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileDictationRemove(): Promise<void> {
-    return todo("settingsProfileDictationRemove");
+    await this.page
+      .getByTestId("assistant-voice")
+      .getByRole("button", { name: "Remove", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileToolServerRows(): Promise<
     { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[]
   > {
-    return todo("settingsProfileToolServerRows");
+    const items = this.page.getByTestId("tool-server-row");
+    const total = await items.count();
+    const rows: { name: string; url: string; disabled: boolean; locked: boolean; prefix: string | null }[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const row = items.nth(index);
+      const name = ((await row.getAttribute("data-server-name")) ?? "").trim();
+      const prefix = row.locator("code");
+      rows.push({
+        name,
+        url: ((await row.getByTestId("tool-server-url").innerText()) ?? "").trim(),
+        disabled: (await row.getByRole("button", { name: `Enable ${name}`, exact: true }).count()) > 0,
+        locked: (await row.getByRole("img", { name: "Credentials saved" }).count()) > 0,
+        prefix: (await prefix.count()) === 0 ? null : ((await prefix.first().innerText()) ?? "").trim() || null,
+      });
+    }
+    return rows;
   }
   async settingsProfileToolServerAddDisabled(): Promise<boolean> {
-    return todo("settingsProfileToolServerAddDisabled");
+    return this.page
+      .getByTestId("assistant-tools")
+      .getByRole("button", { name: "Add server", exact: true })
+      .isDisabled();
   }
-  async settingsProfileToolServerAdd(_name: string, _url: string, _authHeader?: string): Promise<void> {
-    return todo("settingsProfileToolServerAdd");
+  async settingsProfileToolServerAdd(name: string, url: string, authHeader?: string): Promise<void> {
+    // The draft resets on every successful add, so an omitted header
+    // always means a headerless add.
+    const section = this.page.getByTestId("assistant-tools");
+    await section.getByLabel("Name", { exact: true }).fill(name);
+    await section.getByLabel("Server URL", { exact: true }).fill(url);
+    if (authHeader !== undefined) {
+      await section.getByLabel("Authorization header (optional)", { exact: true }).fill(authHeader);
+    }
+    await section.getByRole("button", { name: "Add server", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async settingsProfileToolServerToggle(_name: string): Promise<void> {
-    return todo("settingsProfileToolServerToggle");
+  async settingsProfileToolServerToggle(name: string): Promise<void> {
+    const section = this.page.getByTestId("assistant-tools");
+    const disable = section.getByRole("button", { name: `Disable ${name}`, exact: true });
+    if ((await disable.count()) > 0) {
+      await disable.first().click({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await section
+        .getByRole("button", { name: `Enable ${name}`, exact: true })
+        .first()
+        .click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async settingsProfileToolServerRemove(_name: string): Promise<void> {
-    return todo("settingsProfileToolServerRemove");
+  async settingsProfileToolServerRemove(name: string): Promise<void> {
+    await this.page
+      .locator(`[data-server-name="${name}"]`)
+      .getByRole("button", { name: "Remove", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileUpkeepFacts(): Promise<{
     emptyExplanation: string | null;

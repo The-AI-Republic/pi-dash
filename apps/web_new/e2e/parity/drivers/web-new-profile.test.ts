@@ -1235,3 +1235,281 @@ describe("settings own activity (NEWFRONT-586, PROF-019)", () => {
     expect(await bare.settingsProfileOwnActivityEmptyIllustration()).toBeNull();
   });
 });
+
+describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
+  function sectionPage(section: StubLocator): Page {
+    return pageOf({ getByTestId: () => section });
+  }
+
+  it("reads the newest toast as title plus body with absent twins", async () => {
+    const cards = locator({
+      last: () => locator({ innerText: async () => " Saved \n AI provider configuration updated. \n" }),
+    });
+    const driver = new WebNewDriver(pageOf({ getByTestId: () => cards }));
+    expect(await driver.settingsProfileLastToast()).toEqual({
+      title: "Saved",
+      message: "AI provider configuration updated.",
+    });
+    const bare = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
+    expect(await bare.settingsProfileLastToast()).toBeNull();
+    const blank = new WebNewDriver(
+      pageOf({ getByTestId: () => locator({ last: () => locator({ innerText: async () => "  " }) }) })
+    );
+    expect(await blank.settingsProfileLastToast()).toBeNull();
+  });
+
+  it("reads the assistant facts and drives its controls", async () => {
+    const clicks: string[] = [];
+    const fills: Array<[string, string]> = [];
+    const selected: string[] = [];
+    const section = locator({
+      locator: (selector: string) => {
+        if (selector === "#assistant-llm-base-url") return locator({ inputValue: async () => "http://dead:9" });
+        if (selector === "#assistant-llm-provider") {
+          return locator({
+            inputValue: async () => "openai_compatible",
+            selectOption: async (value: string) => {
+              selected.push(value);
+            },
+          });
+        }
+        if (selector === "#assistant-llm-model")
+          return locator({
+            inputValue: async () => "probe-model",
+            fill: async (value: string) => {
+              fills.push([selector, value]);
+            },
+          });
+        return locator({
+          inputValue: async () => "",
+          fill: async (value: string) => {
+            fills.push([selector, value]);
+          },
+          getAttribute: async () => "Your provider API key",
+        });
+      },
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string;
+        return locator({
+          isDisabled: async () => name === "Save",
+          click: async () => {
+            clicks.push(name);
+          },
+        });
+      },
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileAssistantFacts()).toEqual({
+      provider: "openai_compatible",
+      baseUrlVisible: true,
+      baseUrl: "http://dead:9",
+      model: "probe-model",
+      keyValue: "",
+      keyPlaceholder: "Your provider API key",
+      saveDisabled: true,
+      testDisabled: false,
+      removeVisible: true,
+      lastVerified: null,
+    });
+    await driver.settingsProfileAssistantSetProvider("anthropic");
+    await driver.settingsProfileAssistantFill("model", "m");
+    await driver.settingsProfileAssistantSave();
+    await driver.settingsProfileAssistantTest();
+    await driver.settingsProfileAssistantRemove();
+    expect(selected).toEqual(["anthropic"]);
+    expect(fills).toEqual([["#assistant-llm-model", "m"]]);
+    expect(clicks).toEqual(["Save", "Test connection", "Remove"]);
+  });
+
+  it("blanks the base URL when the endpoint hides", async () => {
+    const section = locator({
+      locator: (selector: string) =>
+        selector === "#assistant-llm-base-url"
+          ? locator({ count: async () => 0 })
+          : locator({ inputValue: async () => "", getAttribute: async () => "" }),
+      getByRole: () => locator({ isDisabled: async () => false }),
+      getByText: () => locator({ innerText: async () => "Last verified: whenever" }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileAssistantFacts()).toMatchObject({
+      baseUrlVisible: false,
+      baseUrl: "",
+      lastVerified: "Last verified: whenever",
+    });
+  });
+
+  it("fails assistant writes through routes and clears them", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileAssistantFailWrites();
+    expect(route).toHaveBeenCalledWith("**/api/users/me/ai-assistant/**", expect.any(Function));
+    const handler = route.mock.calls[0]![1] as (route: unknown) => void;
+    const fulfilled: unknown[] = [];
+    const continued: number[] = [];
+    const put = {
+      request: () => ({ method: () => "PUT", url: () => "https://app.test/api/users/me/ai-assistant/config/" }),
+      fulfill: async (body: unknown) => {
+        fulfilled.push(body);
+      },
+      continue: async () => {
+        continued.push(1);
+      },
+    };
+    handler(put);
+    expect(fulfilled).toEqual([{ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' }]);
+    handler({
+      request: () => ({ method: () => "GET", url: () => "https://app.test/api/users/me/ai-assistant/config/" }),
+      fulfill: async () => undefined,
+      continue: async () => {
+        continued.push(1);
+      },
+    });
+    expect(continued).toHaveLength(1);
+    await driver.settingsProfileAssistantClearRoutes();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/ai-assistant/**");
+  });
+
+  it("reads dictation facts with a hidden twin and drives its controls", async () => {
+    const section = locator({
+      locator: (selector: string) => {
+        if (selector === "#assistant-voice-base-url") return locator({ inputValue: async () => "http://dead:9" });
+        if (selector === "#assistant-voice-model") return locator({ inputValue: async () => "whisper-1" });
+        return locator({ inputValue: async () => "", getAttribute: async () => "Your transcription API key" });
+      },
+      getByRole: () => locator({ isDisabled: async () => true, count: async () => 0 }),
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(sectionPage(section));
+    expect(await driver.settingsProfileDictationFacts()).toEqual({
+      sectionVisible: true,
+      baseUrl: "http://dead:9",
+      model: "whisper-1",
+      keyValue: "",
+      keyPlaceholder: "Your transcription API key",
+      saveDisabled: true,
+      testDisabled: true,
+      removeVisible: false,
+      lastVerified: null,
+    });
+    const hidden = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
+    expect(await hidden.settingsProfileDictationFacts()).toMatchObject({ sectionVisible: false });
+    const fills: string[] = [];
+    const clicks: string[] = [];
+    const controls = locator({
+      locator: () =>
+        locator({
+          fill: async (value: string) => {
+            fills.push(value);
+          },
+        }),
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+        }),
+    });
+    const writer = new WebNewDriver(sectionPage(controls));
+    await writer.settingsProfileDictationFill("key", "k");
+    await writer.settingsProfileDictationSave();
+    await writer.settingsProfileDictationTest();
+    await writer.settingsProfileDictationRemove();
+    expect(fills).toEqual(["k"]);
+    expect(clicks).toEqual(["Save", "Test connection", "Remove"]);
+  });
+
+  it("reads tool server rows with disabled, locked and prefix states", async () => {
+    const rows = [
+      {
+        name: "probe-mcp-a",
+        url: "https://mcp-a.example.com/sse",
+        disabled: false,
+        locked: false,
+        prefix: "probe_mcp_a_*",
+      },
+      { name: "probe-mcp-b", url: "https://mcp-b.example.com/mcp", disabled: true, locked: true, prefix: null },
+    ];
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id !== "tool-server-row") return locator({ isDisabled: async () => true });
+        return locator({
+          count: async () => rows.length,
+          nth: (index: number) => {
+            const row = rows[index]!;
+            return locator({
+              getAttribute: async () => row.name,
+              getByTestId: () => locator({ innerText: async () => row.url }),
+              getByRole: (_role: string, options?: Record<string, unknown>) =>
+                locator({
+                  count: async () =>
+                    (options?.["name"] as string) === `Enable ${row.name}`
+                      ? row.disabled
+                        ? 1
+                        : 0
+                      : row.locked
+                        ? 1
+                        : 0,
+                }),
+              locator: () =>
+                locator({
+                  count: async () => (row.prefix === null ? 0 : 1),
+                  first: () => locator({ innerText: async () => row.prefix ?? "" }),
+                }),
+            });
+          },
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileToolServerRows()).toEqual(rows);
+    expect(await driver.settingsProfileToolServerAddDisabled()).toBe(true);
+  });
+
+  it("adds, toggles and removes tool servers through the section", async () => {
+    const fills: Array<[string, string]> = [];
+    const clicks: string[] = [];
+    const section = locator({
+      getByLabel: (label: string) =>
+        locator({
+          fill: async (value: string) => {
+            fills.push([label, value]);
+          },
+        }),
+      getByRole: (_role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string;
+        return locator({
+          count: async () => (name === "Disable probe-mcp-a" ? 1 : 1),
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push(name);
+              },
+            }),
+          click: async () => {
+            clicks.push(name);
+          },
+        });
+      },
+    });
+    const page = pageOf({
+      getByTestId: () => section,
+      locator: () => section,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileToolServerAdd("probe-mcp-b", "https://mcp-b.example.com/mcp", "Bearer x");
+    expect(fills).toEqual([
+      ["Name", "probe-mcp-b"],
+      ["Server URL", "https://mcp-b.example.com/mcp"],
+      ["Authorization header (optional)", "Bearer x"],
+    ]);
+    await driver.settingsProfileToolServerAdd("probe-mcp-a", "https://mcp-a.example.com/sse");
+    expect(fills).toHaveLength(5);
+    await driver.settingsProfileToolServerToggle("probe-mcp-a");
+    await driver.settingsProfileToolServerRemove("probe-mcp-b");
+    expect(clicks).toContain("Add server");
+    expect(clicks).toContain("Disable probe-mcp-a");
+    expect(clicks).toContain("Remove");
+  });
+});
