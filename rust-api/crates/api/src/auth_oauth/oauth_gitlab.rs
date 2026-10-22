@@ -954,8 +954,10 @@ fn invalid_email_sanitized(sanitized: &str) -> ProviderError {
 
 /// `sanitize_email` (`base.py:60-84`): falsy → `INVALID_EMAIL` (raw
 /// payload); else `str().lower().strip()` + Django `validate_email`
-/// → `INVALID_EMAIL` (sanitized payload).
+/// → `INVALID_EMAIL` (sanitized payload). Reuses the D-01 email kernel
+/// (verified against Django 4.2.30), like the Gitea twin.
 fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
+    use crate::license::handlers_auth_forms::email_is_valid;
     if !pidash_services::auth_oauth::providers::json_truthy(raw) {
         return Err(invalid_email_raw(raw));
     }
@@ -971,203 +973,10 @@ fn sanitize_email(raw: &serde_json::Value) -> Result<String, ProviderError> {
     };
     let sanitized = sanitized.to_lowercase();
     let sanitized = sanitized.trim().to_owned();
-    if !validate_email_address(&sanitized) {
+    if !email_is_valid(&sanitized) {
         return Err(invalid_email_sanitized(&sanitized));
     }
     Ok(sanitized)
-}
-
-/// Django `EmailValidator` (`django.core.validators`, Django 6.0):
-/// 320-char cap, `@` split from the right, dot-atom/quoted-string
-/// user part, hostname + TLD domain part (no trailing dot), IP
-/// literal, `localhost` allowlist. Hand-rolled: the domain patterns
-/// use lookarounds (`(?!-)`, `(?<!-)`) the `regex` crate cannot
-/// express.
-fn validate_email_address(value: &str) -> bool {
-    // `len(value) > 320` counts characters, not bytes (Semantic trap).
-    if value.is_empty() || !value.contains('@') || value.chars().count() > 320 {
-        return false;
-    }
-    let (user_part, domain_part) = match value.rsplit_once('@') {
-        Some(pair) => pair,
-        None => return false,
-    };
-    if !valid_email_user_part(user_part) {
-        return false;
-    }
-    if domain_part == "localhost" {
-        return true;
-    }
-    valid_email_domain_part(domain_part)
-}
-
-/// `user_regex`, `re.IGNORECASE`: dot-atom or quoted-string, full
-/// match (`\Z`-anchored).
-fn valid_email_user_part(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    if user.starts_with('"') && user.ends_with('"') && user.len() >= 2 {
-        return valid_quoted_string(&user[1..user.len() - 1]);
-    }
-    valid_dot_atom(user)
-}
-
-fn is_atom_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || "-!#$%&'*+/=?^_`{}|~".contains(c)
-}
-
-/// dot-atom: `atom(.atom)*`, ASCII case-insensitive.
-fn valid_dot_atom(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    for atom in user.split('.') {
-        if atom.is_empty() || !atom.chars().all(is_atom_char) {
-            return false;
-        }
-    }
-    true
-}
-
-/// quoted-string inner: `([\001-\010\013\014\016-\037!#-\[\]-\177] |
-/// \\[\001-\011\013\014\016-\177])*`.
-fn valid_quoted_char(c: char) -> bool {
-    ('\u{1}'..='\u{8}').contains(&c)
-        || c == '\u{b}'
-        || c == '\u{c}'
-        || ('\u{e}'..='\u{1f}').contains(&c)
-        || ('!'..='[').contains(&c)
-        || (']'..='\u{7f}').contains(&c)
-}
-
-fn valid_quoted_escape(c: char) -> bool {
-    ('\u{1}'..='\u{9}').contains(&c)
-        || c == '\u{b}'
-        || c == '\u{c}'
-        || ('\u{e}'..='\u{7f}').contains(&c)
-}
-
-fn valid_quoted_string(inner: &str) -> bool {
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some(escaped) if valid_quoted_escape(escaped) => continue,
-                _ => return false,
-            }
-        } else if valid_quoted_char(c) {
-            continue;
-        } else {
-            return false;
-        }
-    }
-    true
-}
-
-/// Unicode-letter range in the hostname patterns
-/// (`ul = "\u00a1-\uffff"`).
-fn is_hostname_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || ('\u{a1}'..='\u{10ffff}').contains(&c)
-}
-
-/// One domain label, 1-63 chars, no leading/trailing hyphen
-/// (`hostname_re` for the first label; `domain_re` interiors share
-/// the shape).
-fn valid_domain_label(label: &str) -> bool {
-    let count = label.chars().count();
-    if count == 0 || count > 63 {
-        return false;
-    }
-    let mut chars = label.chars();
-    let first = chars.next().unwrap_or('\0');
-    let last = label.chars().next_back().unwrap_or('\0');
-    if !is_hostname_char(first) || !is_hostname_char(last) {
-        return false;
-    }
-    if first == '-' || last == '-' {
-        return false;
-    }
-    label.chars().all(|c| is_hostname_char(c) || c == '-')
-}
-
-/// TLD label: `[a-z\ul-]{2,63}` (no digits) or `xn--[a-z0-9]{1,59}`,
-/// no leading/trailing hyphen (`tld_no_fqdn_re`, IGNORECASE — the
-/// `xn--` test lowercases first).
-fn valid_tld_label(label: &str) -> bool {
-    let lower = label.to_lowercase();
-    if let Some(rest) = lower.strip_prefix("xn--") {
-        let count = rest.chars().count();
-        return (1..=59).contains(&count) && rest.chars().all(|c| c.is_ascii_alphanumeric());
-    }
-    let count = label.chars().count();
-    if !(2..=63).contains(&count) {
-        return false;
-    }
-    let first = label.chars().next().unwrap_or('\0');
-    let last = label.chars().next_back().unwrap_or('\0');
-    if first == '-' || last == '-' {
-        return false;
-    }
-    label
-        .chars()
-        .all(|c| c.is_ascii_alphabetic() || ('\u{a1}'..='\u{10ffff}').contains(&c) || c == '-')
-}
-
-/// `domain_regex` + IP literal (`validate_domain_part`).
-fn valid_email_domain_part(domain: &str) -> bool {
-    if domain.is_empty() {
-        return false;
-    }
-    if let Some(inner) = domain
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        return valid_ipv46_literal(inner);
-    }
-    let labels: Vec<&str> = domain.split('.').collect();
-    if labels.len() < 2 {
-        return false;
-    }
-    let (tld, host) = labels.split_last().expect("at least two labels");
-    if !valid_tld_label(tld) {
-        // Case-insensitivity: the patterns compile with IGNORECASE;
-        // the char checks above are case-agnostic except ASCII
-        // alpha, which accepts both cases already.
-        return false;
-    }
-    if host.is_empty() {
-        return false;
-    }
-    if !valid_domain_label(host[0]) {
-        return false;
-    }
-    host[1..].iter().all(|label| valid_domain_label(label))
-}
-
-/// `validate_ipv46_address` for `[...]` literals: dotted quad (each
-/// octet `25[0-5]|2[0-4]\d|[0-1]?\d?\d`, leading zeros accepted) or
-/// an IPv6 address.
-fn valid_ipv46_literal(literal: &str) -> bool {
-    if valid_ipv4_literal(literal) {
-        return true;
-    }
-    literal.parse::<std::net::Ipv6Addr>().is_ok()
-}
-
-fn valid_ipv4_octet(octet: &str) -> bool {
-    if octet.is_empty() || octet.len() > 3 || !octet.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    match octet.parse::<u32>() {
-        Ok(v) => v <= 255,
-        Err(_) => false,
-    }
-}
-
-fn valid_ipv4_literal(literal: &str) -> bool {
-    let parts: Vec<&str> = literal.split('.').collect();
-    parts.len() == 4 && parts.iter().all(|part| valid_ipv4_octet(part))
 }
 
 // ---------------------------------------------------------------------------
@@ -2708,62 +2517,44 @@ mod tests {
         );
     }
 
-    // -- email validator (vectors verified against Django 6.0.5) -----------
+    // -- email validator (vectors verified against Django 4.2.30) -----------
+    // The verdicts below run through `sanitize_email`, so they pin the
+    // wiring to the shared kernel too. The kernel's own suite
+    // (`handlers_auth_forms`) pins the full 4.2.30 matrix (quoted
+    // strings, IP literals, IDN, 64-char labels, the 320-char cap).
 
     #[test]
     fn email_validator_matches_django() {
-        let valid = [
-            "a@b.com",
-            "A@B.COM",
-            "a.b+c@sub.example.co",
-            "x@localhost",
-            "\"a\\\"b\"@c.com",
-            "a@[1.2.3.4]",
-            "a@[::1]",
-            "x@[127.0.0.1]",
-            "a@xn--nxasmq6b.example",
-            "a@XN--NXASMQ6B.example",
-            "test@münchen.de",
-            "x@y.zz",
-        ];
+        // Django 4.2.30 allows digits in the TLD; the old Django-6
+        // port rejected every address here (PIDASHCONV-1360).
+        for address in ["dev@corp.k8s", "ops@host.lan2", "x@y.z1"] {
+            assert_eq!(
+                sanitize_email(&serde_json::Value::String(address.to_owned())).expect("valid"),
+                address,
+                "valid: {address}",
+            );
+        }
+        let valid = ["a@b.com", "x@localhost", "a.b+c@sub.example.co"];
         for address in valid {
-            assert!(validate_email_address(address), "valid: {address}");
+            sanitize_email(&serde_json::Value::String(address.to_owned())).expect("valid");
         }
         let invalid = [
-            "LOCALHOST@LOCALHOST",
+            "plainaddress",
             "a@b",
             "a@b.c",
-            "a@-b.com",
-            "a@b-.com",
             "a@b..com",
-            ".a@b.com",
-            "a.@b.com",
-            "a..b@c.com",
-            "\"a b\"@c.com",
-            "a b@c.com",
             "@c.com",
             "a@",
+            "a b@c.com",
             "a@[999.1.1.1]",
-            "a@[not-an-ip]",
-            "plainaddress",
-            "a@b@c.com",
             "user@tld",
-            "üñîçødé@example.com",
-            "x@y.z1",
             "x@1.2.3.4",
         ];
         for address in invalid {
-            assert!(!validate_email_address(address), "invalid: {address}");
+            let error = sanitize_email(&serde_json::Value::String(address.to_owned()))
+                .expect_err("invalid");
+            assert_eq!(error.code, INVALID_EMAIL_CODE, "invalid: {address}");
         }
-        // 64-char labels and the 320-char cap.
-        assert!(!validate_email_address(&format!(
-            "a@{}",
-            "b".repeat(64) + ".com"
-        )));
-        assert!(!validate_email_address(&format!("a@b.{}", "c".repeat(64))));
-        assert!(!validate_email_address(
-            "u@toolonglabeltoolonglabeltoolonglabeltoolonglabeltoolonglabeltoolonglabel.com"
-        ));
     }
 
     // -- session hash ------------------------------------------------------
