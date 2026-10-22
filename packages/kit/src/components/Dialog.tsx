@@ -34,6 +34,11 @@ export interface DialogProps {
   className?: string | undefined;
   /** Body wrapper classes; the default spacing sits below the title block. */
   bodyClassName?: string | undefined;
+  /**
+   * Control to focus when the dialog opens. Without it Base UI focuses the
+   * first tabbable element, which is the header close button.
+   */
+  initialFocus?: React.RefObject<HTMLElement | null> | undefined;
   children: React.ReactNode;
 }
 
@@ -49,6 +54,7 @@ export function Dialog({
   closeButton = true,
   className,
   bodyClassName = "mt-(--space-8)",
+  initialFocus,
   children,
 }: DialogProps): React.ReactElement {
   const handleOpenChange = (next: boolean, details: { reason: string }): void => {
@@ -61,6 +67,7 @@ export function Dialog({
       <BaseDialog.Portal>
         <BaseDialog.Backdrop className="fixed inset-0 bg-black/40 transition-opacity duration-(--motion-duration)" />
         <BaseDialog.Popup
+          {...pickDefined({ initialFocus })}
           className={cn(
             "shadow-dialog fixed top-1/2 left-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
             className

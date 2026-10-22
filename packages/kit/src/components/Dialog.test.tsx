@@ -1,8 +1,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Button } from "./Button";
 import { Dialog } from "./Dialog";
@@ -49,6 +50,19 @@ describe("Dialog", () => {
     await user.click(screen.getByRole("button", { name: "Edit title" }));
     await user.click(screen.getByRole("button", { name: "Close dialog" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("focuses the caller's initial control instead of the close button", async () => {
+    function Harness(): React.ReactElement {
+      const field = React.useRef<HTMLInputElement>(null);
+      return (
+        <Dialog title="Rename" open onOpenChange={() => undefined} initialFocus={field}>
+          <input ref={field} aria-label="Name" />
+        </Dialog>
+      );
+    }
+    render(<Harness />);
+    await waitFor(() => expect(screen.getByLabelText("Name")).toHaveFocus());
   });
 
   it("leaves the header close control out when the caller orders its own actions", () => {
