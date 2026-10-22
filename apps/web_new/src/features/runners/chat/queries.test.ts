@@ -54,7 +54,15 @@ describe("chatKeys", () => {
     expect(chatKeys.runner("acme", "r-1")).toEqual(["ws", "acme", "runners", "chat", "runner", "r-1"]);
     expect(chatKeys.sessions("acme", "r-1")).toEqual(["ws", "acme", "runners", "chat", "sessions", "r-1"]);
     expect(chatKeys.messages("acme", "s-1")).toEqual(["ws", "acme", "runners", "chat", "messages", "s-1"]);
-    expect(chatKeys.workingDir("r-1")).toEqual(["runners", "chat", "working-dir", "r-1"]);
+    expect(chatKeys.workingDir("acme", "ws-id", "r-1")).toEqual([
+      "ws",
+      "acme",
+      "runners",
+      "chat",
+      "working-dir",
+      "ws-id",
+      "r-1",
+    ]);
   });
 });
 
@@ -158,19 +166,23 @@ describe("useChatWorkingDir", () => {
   }
 
   it("reads the machine's directory for a local contact and caches it for a while", async () => {
-    setChatTransport(localTransport(async () => "/home/me/chat/acme/PROJ"));
+    const chatWorkingDir = vi.fn(async () => "/home/me/chat/acme/PROJ");
+    setChatTransport(localTransport(chatWorkingDir));
     const wrapper = provider(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
-    const { result } = renderHook(() => useChatWorkingDir("pidash-builtin"), { wrapper });
+    const { result } = renderHook(() => useChatWorkingDir("acme", "ws-id", "pidash-builtin"), { wrapper });
     await waitFor(() => expect(result.current.data).toBe("/home/me/chat/acme/PROJ"));
+    // The workspace id, not the route slug: the machine resolved the chat's
+    // own directory from it.
+    expect(chatWorkingDir).toHaveBeenCalledWith("ws-id", "pidash-builtin");
     expect(CHAT_WORKING_DIR_STALE_MS).toBeGreaterThan(0);
   });
 
   it("stays idle without the history capability or without access", async () => {
     setChatTransport(null);
     const wrapper = provider(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
-    const none = renderHook(() => useChatWorkingDir("pidash-builtin"), { wrapper });
+    const none = renderHook(() => useChatWorkingDir("acme", "ws-id", "pidash-builtin"), { wrapper });
     setChatTransport(localTransport(async () => "/repo"));
-    const denied = renderHook(() => useChatWorkingDir("pidash-builtin", false), { wrapper });
+    const denied = renderHook(() => useChatWorkingDir("acme", "ws-id", "pidash-builtin", false), { wrapper });
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(none.result.current.fetchStatus).toBe("idle");
     expect(denied.result.current.fetchStatus).toBe("idle");
@@ -179,7 +191,7 @@ describe("useChatWorkingDir", () => {
   it("stays quiet when the machine cannot answer, leaving the header its own value", async () => {
     setChatTransport(localTransport(async () => Promise.reject(new Error("no store"))));
     const wrapper = provider(new QueryClient({ defaultOptions: { queries: { retry: false } } }));
-    const { result } = renderHook(() => useChatWorkingDir("pidash-builtin"), { wrapper });
+    const { result } = renderHook(() => useChatWorkingDir("acme", "ws-id", "pidash-builtin"), { wrapper });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(result.current.data).toBeUndefined();
   });

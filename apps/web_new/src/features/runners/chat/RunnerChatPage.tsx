@@ -37,7 +37,6 @@ import { HistoryRemovalDialog, RenameChatDialog } from "./ChatHistoryManage.js";
 import { remainingSessions, selectionAfterDelete } from "./historyActions.js";
 import { supportsLocalHistory, useClearHistory, useDeleteChat, useRenameChat } from "./historyQueries.js";
 import {
-  approvalRemainingMs,
   pendingApprovalFromEvent,
   rememberApprovalMode,
   storedApprovalMode,
@@ -165,7 +164,7 @@ export function RunnerChatPage({
   // a server row; when the read answers, it is the directory the header
   // shows (DESK-009).
   const localHistory = supportsLocalHistory(runnerId);
-  const workingDir = useChatWorkingDir(runnerId, area.allowed && localHistory);
+  const workingDir = useChatWorkingDir(workspaceSlug, area.workspaceId, runnerId, area.allowed && localHistory);
   const headerSession = React.useMemo(
     () => (session === null ? null : { ...session, cwd: workingDir.data || session.cwd }),
     [session, workingDir.data]
@@ -337,20 +336,6 @@ export function RunnerChatPage({
     if (request !== null) setPendingApproval(request);
   }, [approvalsSupported, approvalEvent]);
 
-  // The runner drops a request at its own deadline; stop offering buttons
-  // for it at the same moment rather than after a failed decision.
-  React.useEffect(() => {
-    if (pendingApproval === null) return;
-    const remaining = approvalRemainingMs(pendingApproval, Date.now());
-    if (remaining === null) return;
-    if (remaining <= 0) {
-      setPendingApproval(null);
-      return;
-    }
-    const timer = setTimeout(() => setPendingApproval(null), remaining);
-    return () => clearTimeout(timer);
-  }, [pendingApproval]);
-
   // Load the stored mode for the contact on screen, and hand it to the
   // session the page is about to warm (RUN-035).
   React.useEffect(() => {
@@ -425,6 +410,7 @@ export function RunnerChatPage({
             </button>
           </div>
         )}
+        {/* An expired request stays mounted: the prompt renders the timed-out state itself (DESK-008). */}
         {approvalsSupported && pendingApproval !== null ? (
           <ChatApprovalPrompt
             request={pendingApproval}

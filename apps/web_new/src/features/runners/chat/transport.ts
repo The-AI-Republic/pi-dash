@@ -101,9 +101,10 @@ export interface ChatTransport {
   clearChatHistory?(): Promise<void>;
   /**
    * Resolve the working copy a local conversation runs in (DESK-009).
-   * Absent on the cloud path.
+   * Absent on the cloud path. The workspace is the id the sessions carry,
+   * which is what the machine resolved the directory from.
    */
-  chatWorkingDir?(runnerId: string): Promise<string>;
+  chatWorkingDir?(workspaceId: string, runnerId: string): Promise<string>;
   /** Whether this transport's store carries the conversation. */
   ownsChatSession?(sessionId: string): Promise<boolean>;
   /** Whether this contact is served by this transport rather than the server. */
@@ -294,10 +295,10 @@ export async function clearChatHistory(): Promise<boolean> {
  * working copy of its own (cloud, or a server contact on the desktop), so
  * the header keeps whatever the session row already carried.
  */
-export async function fetchChatWorkingDir(runnerId: string): Promise<string | null> {
+export async function fetchChatWorkingDir(workspaceId: string, runnerId: string): Promise<string | null> {
   if (activeTransport.chatWorkingDir === undefined) return null;
   if (activeTransport.ownsRunner !== undefined && !activeTransport.ownsRunner(runnerId)) return null;
-  const dir = await activeTransport.chatWorkingDir(runnerId);
+  const dir = await activeTransport.chatWorkingDir(workspaceId, runnerId);
   return dir === "" ? null : dir;
 }
 

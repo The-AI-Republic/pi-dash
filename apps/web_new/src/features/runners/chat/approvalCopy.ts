@@ -139,11 +139,3 @@ export function pendingApprovalFromEvent(payload: Record<string, unknown>): Pend
     expiresAt: typeof payload["expires_at"] === "string" ? payload["expires_at"] : null,
   };
 }
-
-/** Milliseconds until a request's deadline; null when it has none or is unreadable. */
-export function approvalRemainingMs(request: PendingApproval, nowMs: number): number | null {
-  if (request.expiresAt === null) return null;
-  const deadline = Date.parse(request.expiresAt);
-  if (!Number.isFinite(deadline)) return null;
-  return deadline - nowMs;
-}

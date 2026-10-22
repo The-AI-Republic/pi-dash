@@ -500,7 +500,7 @@ describe("on-machine history seams", () => {
     await expect(renameChatSession("s-1", "Planning")).resolves.toBe(false);
     await expect(deleteChatSession("s-1")).resolves.toBe(false);
     await expect(clearChatHistory()).resolves.toBe(false);
-    await expect(fetchChatWorkingDir("pidash-builtin")).resolves.toBeNull();
+    await expect(fetchChatWorkingDir("ws-id", "pidash-builtin")).resolves.toBeNull();
   });
 
   it("forward every history write and confirm that one happened", async () => {
@@ -519,19 +519,20 @@ describe("on-machine history seams", () => {
   it("reads the working copy only for a contact the transport serves", async () => {
     const chatWorkingDir = vi.fn(async () => "/home/me/.pi/chat/acme/PROJ");
     setChatTransport(local({ chatWorkingDir }));
-    await expect(fetchChatWorkingDir("pidash-builtin")).resolves.toBe("/home/me/.pi/chat/acme/PROJ");
-    await expect(fetchChatWorkingDir("r-1")).resolves.toBeNull();
+    await expect(fetchChatWorkingDir("ws-id", "pidash-builtin")).resolves.toBe("/home/me/.pi/chat/acme/PROJ");
+    await expect(fetchChatWorkingDir("ws-id", "r-1")).resolves.toBeNull();
     expect(chatWorkingDir).toHaveBeenCalledTimes(1);
+    expect(chatWorkingDir).toHaveBeenCalledWith("ws-id", "pidash-builtin");
   });
 
   it("treats an empty working copy as unknown", async () => {
     setChatTransport(local({ chatWorkingDir: vi.fn(async () => "") }));
-    await expect(fetchChatWorkingDir("pidash-builtin")).resolves.toBeNull();
+    await expect(fetchChatWorkingDir("ws-id", "pidash-builtin")).resolves.toBeNull();
   });
 
   it("reads the working copy from a whole-surface transport that names no contacts", async () => {
     const chatWorkingDir = vi.fn(async () => "/repo");
     setChatTransport({ subscribeChatEvents: vi.fn(() => () => undefined), chatWorkingDir } as unknown as ChatTransport);
-    await expect(fetchChatWorkingDir("any")).resolves.toBe("/repo");
+    await expect(fetchChatWorkingDir("ws-id", "any")).resolves.toBe("/repo");
   });
 });

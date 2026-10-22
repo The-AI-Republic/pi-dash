@@ -266,8 +266,8 @@ export interface LocalChatTransport extends ChatTransport {
   deleteChatSession(sessionId: string): Promise<void>;
   /** Wipe the signed-in account's whole on-machine history. */
   clearChatHistory(): Promise<void>;
-  /** The working copy the bundled engine runs a chat in. */
-  chatWorkingDir(runnerId: string): Promise<string>;
+  /** The working copy the bundled engine runs a chat in, under the sessions' workspace id. */
+  chatWorkingDir(workspaceId: string, runnerId: string): Promise<string>;
   /** The bundled engine's row; every other contact belongs to the server. */
   chatRunner(runnerId: string): Promise<Runner | null>;
   ownsChatSession(sessionId: string): Promise<boolean>;
@@ -461,12 +461,14 @@ export function createLocalChatTransport(deps: LocalTransportDeps): LocalChatTra
       activeTurns.clear();
     },
 
-    chatWorkingDir: async (runnerId) => {
+    chatWorkingDir: async (workspaceId, runnerId) => {
       if (runnerId !== BUILTIN_CHAT_ID) throw new Error(CHAT_SESSION_GONE_MESSAGE);
       const owner = account();
-      const workspace = deps.workspaceSlug();
-      if (workspace === "") throw new Error("Open a workspace to see the built-in agent's working copy.");
-      return api.workingDir(owner, workspace, runnerId);
+      // The id, not the route slug: the machine resolved the chat's own
+      // directory from it at create time, and the native read creates a
+      // different directory for any other value.
+      if (workspaceId === "") throw new Error("Open a workspace to see the built-in agent's working copy.");
+      return api.workingDir(owner, workspaceId, runnerId);
     },
 
     subscribeChatEvents: (sessionId, _after, handlers: ChatSubscriptionHandlers) => {

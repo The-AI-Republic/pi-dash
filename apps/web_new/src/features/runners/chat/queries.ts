@@ -77,13 +77,15 @@ export const CHAT_WORKING_DIR_STALE_MS = 5 * 60_000;
 
 /**
  * The working copy a local conversation runs in (DESK-009), read once per
- * contact. Only a transport that keeps history on this machine has one; a
- * failure stays quiet and the header keeps the session row's directory.
+ * workspace and contact. Only a transport that keeps history on this machine
+ * has one; a failure stays quiet and the header keeps the session row's
+ * directory. The read is keyed by the workspace id the sessions carry, not
+ * the route slug, so it names the directory the chat actually runs in.
  */
-export function useChatWorkingDir(runnerId: string, enabled = true) {
+export function useChatWorkingDir(workspaceSlug: string, workspaceId: string, runnerId: string, enabled = true) {
   return useQuery({
-    queryKey: chatKeys.workingDir(runnerId),
-    queryFn: () => fetchChatWorkingDir(runnerId),
+    queryKey: chatKeys.workingDir(workspaceSlug, workspaceId, runnerId),
+    queryFn: () => fetchChatWorkingDir(workspaceId, runnerId),
     enabled: enabled && supportsLocalHistory(runnerId),
     staleTime: CHAT_WORKING_DIR_STALE_MS,
     retry: false,

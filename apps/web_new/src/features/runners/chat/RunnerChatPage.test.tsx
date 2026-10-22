@@ -641,7 +641,7 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     expect(await screen.findByTestId("chat-approval-error")).toHaveTextContent("did not reach the agent");
   });
 
-  it("drops the prompt at the request's own deadline", async () => {
+  it("keeps the prompt on screen past its deadline in the timed-out state", async () => {
     vi.useFakeTimers();
     try {
       stream.approval = {
@@ -653,7 +653,9 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
       await React.act(async () => {
         vi.advanceTimersByTime(5_001);
       });
-      expect(screen.queryByRole("alertdialog")).toBeNull();
+      const prompt = screen.getByRole("alertdialog", { name: "Approval requested" });
+      expect(within(prompt).getByTestId("chat-approval-countdown")).toHaveTextContent("This request timed out.");
+      for (const button of within(prompt).getAllByRole("button")) expect(button).toBeDisabled();
     } finally {
       vi.useRealTimers();
     }
@@ -751,13 +753,15 @@ describe("RunnerChatPage desktop approvals (RUN-034/035)", () => {
     }
   });
 
-  it("never shows a request whose deadline already passed", () => {
+  it("shows a request whose deadline already passed in the timed-out state", () => {
     stream.approval = {
       ...approval,
       payload: { ...approval.payload, expires_at: new Date(Date.now() - 1_000).toISOString() },
     };
     renderPage();
-    expect(screen.queryByRole("alertdialog")).toBeNull();
+    const prompt = screen.getByRole("alertdialog", { name: "Approval requested" });
+    expect(within(prompt).getByTestId("chat-approval-countdown")).toHaveTextContent("This request timed out.");
+    for (const button of within(prompt).getAllByRole("button")) expect(button).toBeDisabled();
   });
 
   it("refuses to answer a request when no conversation is open", async () => {
@@ -811,7 +815,7 @@ describe("RunnerChatPage on-machine history (DESK-009)", () => {
   it("reads the machine's working copy and shows it in the header", () => {
     hooks.useChatWorkingDir.mockReturnValue({ data: "/home/me/chat/acme/PROJ", isPending: false });
     renderPage();
-    expect(hooks.useChatWorkingDir).toHaveBeenCalledWith("r-1", true);
+    expect(hooks.useChatWorkingDir).toHaveBeenCalledWith("acme", "ws-id", "r-1", true);
     expect(screen.getByTestId("runner-chat-secondary")).toHaveTextContent("/home/me/chat/acme/PROJ");
   });
 
@@ -826,7 +830,7 @@ describe("RunnerChatPage on-machine history (DESK-009)", () => {
   it("asks the machine for nothing when the viewer is not admitted", () => {
     area.value = { workspaceId: "ws-id", allowed: false, access: "denied" };
     renderPage();
-    expect(hooks.useChatWorkingDir).toHaveBeenCalledWith("r-1", false);
+    expect(hooks.useChatWorkingDir).toHaveBeenCalledWith("acme", "ws-id", "r-1", false);
   });
 
   it("renames the chosen entry and closes the dialog once the write lands", async () => {

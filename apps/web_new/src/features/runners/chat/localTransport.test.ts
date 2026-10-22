@@ -543,23 +543,16 @@ describe("local transport", () => {
     expect(h.api.clearHistory).not.toHaveBeenCalled();
   });
 
-  it("asks for the working copy with the account, workspace and engine id", async () => {
+  it("asks for the working copy with the account, workspace id and engine id", async () => {
     const h = harness();
-    await expect(transportFor(h).chatWorkingDir(BUILTIN_CHAT_ID)).resolves.toBe("/repo");
-    expect(h.api.workingDir).toHaveBeenCalledWith("u-1", "acme", BUILTIN_CHAT_ID);
-    await expect(transportFor(h).chatWorkingDir("r-other")).rejects.toThrow(CHAT_SESSION_GONE_MESSAGE);
+    await expect(transportFor(h).chatWorkingDir("ws-id", BUILTIN_CHAT_ID)).resolves.toBe("/repo");
+    expect(h.api.workingDir).toHaveBeenCalledWith("u-1", "ws-id", BUILTIN_CHAT_ID);
+    await expect(transportFor(h).chatWorkingDir("ws-id", "r-other")).rejects.toThrow(CHAT_SESSION_GONE_MESSAGE);
   });
 
-  it("refuses a working copy without a workspace in the address", async () => {
+  it("refuses a working copy without a workspace id", async () => {
     const h = harness();
-    const transport = createLocalChatTransport({
-      api: h.api,
-      account: () => "u-1",
-      workspaceSlug: () => "",
-      ensureRuntime: h.ensureRuntime,
-      storedMode: () => "full_access",
-    });
-    await expect(transport.chatWorkingDir(BUILTIN_CHAT_ID)).rejects.toThrow(/Open a workspace/);
+    await expect(transportFor(h).chatWorkingDir("", BUILTIN_CHAT_ID)).rejects.toThrow(/Open a workspace/);
     expect(h.api.workingDir).not.toHaveBeenCalled();
   });
 
