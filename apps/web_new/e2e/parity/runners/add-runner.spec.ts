@@ -91,19 +91,16 @@ test(
       await closeModal(driver);
     });
 
-    // Gate note (NEWFRONT-543): the new app mounts the entry on the
-    // runners overview here; NEWFRONT-555 owns the dev-machines page
-    // mount and re-enables this step when that slice lands.
-    if (driver.target === "web") {
-      await test.step("machines-page entry opens the same form", async () => {
-        await driver.addRunnerOpenFromMachines(seed.workspaceSlug);
-        expect(await driver.addRunnerLayout()).toBe("form");
-        const form = await driver.addRunnerForm();
-        expect(form.projectLocked).toBe(false);
-        expect(form.project).toBe("Select a project");
-        await closeModal(driver);
-      });
-    }
+    // Both apps mount the entry on the runners overview and on the
+    // dev-machines page (NEWFRONT-555 landed the machines mount).
+    await test.step("machines-page entry opens the same form", async () => {
+      await driver.addRunnerOpenFromMachines(seed.workspaceSlug);
+      expect(await driver.addRunnerLayout()).toBe("form");
+      const form = await driver.addRunnerForm();
+      expect(form.projectLocked).toBe(false);
+      expect(form.project).toBe("Select a project");
+      await closeModal(driver);
+    });
 
     await test.step("project route prefills and locks the project", async () => {
       await driver.addRunnerOpenFromRunners(seed.workspaceSlug, seed.projectId);

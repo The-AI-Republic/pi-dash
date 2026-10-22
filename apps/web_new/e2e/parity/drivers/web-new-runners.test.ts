@@ -2151,6 +2151,71 @@ describe("dev machines and runner detail (NEWFRONT-555, RUN-037–043)", () => {
     await expect(driver.runnerActivityAgingObserved()).resolves.toBe(true);
   });
 
+  it("reads the runner metadata grid from dt/dd pairs", async () => {
+    const list = stubLocator({
+      count: vi.fn(async () => 1),
+      evaluate: vi.fn(async () => [
+        { label: "Status", value: "Online" },
+        { label: "Last seen", value: "Jan 2, 10:00" },
+      ]),
+    });
+    const section = stubLocator({
+      count: vi.fn(async () => 1),
+      locator: vi.fn(() => list),
+    });
+    const page = pageStub({
+      locator: vi.fn(() => stubLocator({ first: () => section })),
+    });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.runnerDetailMeta()).resolves.toEqual([
+      { label: "Status", value: "Online" },
+      { label: "Last seen", value: "Jan 2, 10:00" },
+    ]);
+    expect(page.locator).toHaveBeenCalledWith("section", { hasText: "Metadata" });
+    expect(section.locator).toHaveBeenCalledWith("dl");
+  });
+
+  it("returns an empty metadata grid without a section or list", async () => {
+    const missingSection = new WebNewDriver(
+      pageStub({ locator: vi.fn(() => stubLocator({ first: () => stubLocator({ count: vi.fn(async () => 0) }) })) })
+    );
+    await expect(missingSection.runnerDetailMeta()).resolves.toEqual([]);
+
+    const missingList = new WebNewDriver(
+      pageStub({
+        locator: vi.fn(() =>
+          stubLocator({
+            first: () =>
+              stubLocator({
+                count: vi.fn(async () => 1),
+                locator: vi.fn(() => stubLocator({ count: vi.fn(async () => 0) })),
+              }),
+          })
+        ),
+      })
+    );
+    await expect(missingList.runnerDetailMeta()).resolves.toEqual([]);
+  });
+
+  it("counts detail GET polls inside the window and unroutes afterwards", async () => {
+    const page = pageStub();
+    const driver = new WebNewDriver(page);
+    const count = driver.runnerDetailPollCount("r-1", 250);
+    const calls = (page.route as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls[0]![0]).toBe("**/api/runners/r-1/*");
+    const handler = calls[0]![1] as (route: Route) => Promise<void>;
+    const get = stubRoute("GET");
+    await handler(get as unknown as Route);
+    const post = stubRoute("POST");
+    await handler(post as unknown as Route);
+    await expect(count).resolves.toBe(1);
+    expect(get.continue).toHaveBeenCalledTimes(1);
+    expect(post.continue).toHaveBeenCalledTimes(1);
+    expect(page.waitForTimeout).toHaveBeenCalledWith(250);
+    expect(page.unroute).toHaveBeenCalledWith("**/api/runners/r-1/*", handler);
+  });
+
   it("shapes runner detail requests and delays/fails only detail GETs", async () => {
     const page = pageStub();
     const driver = new WebNewDriver(page);
