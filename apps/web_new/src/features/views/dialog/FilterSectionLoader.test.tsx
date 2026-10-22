@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -83,7 +83,9 @@ describe("FilterSectionLoader", () => {
     gate.resolve(fakeModule(useRichFilterBuilder));
     expect(await screen.findByTestId("fake-filter-control")).toBeInTheDocument();
     expect(screen.getByTestId("fake-filter-row")).toBeInTheDocument();
-    expect(registryRef.current).toBeInstanceOf(RealRegistry);
+    // The ref lands in the host's passive effect, which can trail the
+    // commit findBy observes under parallel load; poll for it.
+    await waitFor(() => expect(registryRef.current).toBeInstanceOf(RealRegistry));
     expect(useRichFilterBuilder).toHaveBeenCalledWith({
       workspaceSlug: "acme",
       projectId: PROJECT,
@@ -119,7 +121,8 @@ describe("FilterSectionLoader", () => {
     );
     gate.resolve(fakeModule(fakeBuilder()));
     expect(await screen.findByTestId("fake-filter-control")).toBeInTheDocument();
-    expect(registryRef.current).toBeInstanceOf(RealRegistry);
+    // Same commit/effect race as above; poll for the ref before unmounting.
+    await waitFor(() => expect(registryRef.current).toBeInstanceOf(RealRegistry));
     view.unmount();
     expect(registryRef.current).toBeNull();
   });
