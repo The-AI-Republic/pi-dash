@@ -7,11 +7,39 @@
 // sort, the skeleton until both reads settle, the centered no-match note,
 // and a failed read that toasts without clearing the table.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ProjectMemberList, WorkspaceMemberList } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const routerMocks = vi.hoisted(() => ({ navigate: vi.fn(), pathname: "/acme/settings/projects/p/members/" }));
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => routerMocks.navigate,
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) =>
+    select({ location: { pathname: routerMocks.pathname } }),
+}));
+
+const writeMocks = vi.hoisted(() => {
+  const mutation = () => ({ mutate: vi.fn(), isPending: false, args: [] as unknown[] });
+  return {
+    add: mutation(),
+    role: mutation(),
+    remove: mutation(),
+    leave: mutation(),
+    defaults: mutation(),
+    editor: { userId: "123e4567-e89b-12d3-a456-42661417400a", workspaceRole: 20, projectRole: 20, ready: true },
+    project: { data: undefined, isPending: true, isSuccess: false, isError: false, error: null } as {
+      data: unknown;
+      isPending: boolean;
+      isSuccess: boolean;
+      isError: boolean;
+      error: unknown;
+    },
+  };
+});
 
 vi.mock("./api.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api.js")>();
@@ -20,6 +48,16 @@ vi.mock("./api.js", async (importOriginal) => {
     useProjectMemberships: vi.fn(),
     useWorkspaceDirectory: vi.fn(),
     notifyMembersLoadFailure: vi.fn(),
+    useAddProjectMembers: () => writeMocks.add,
+    useUpdateProjectMemberRole: (...args: unknown[]) => {
+      writeMocks.role.args = args;
+      return writeMocks.role;
+    },
+    useRemoveProjectMember: () => writeMocks.remove,
+    useLeaveProject: () => writeMocks.leave,
+    useSaveProjectDefaults: () => writeMocks.defaults,
+    useMemberEditor: () => writeMocks.editor,
+    useProjectDefaults: () => writeMocks.project,
   };
 });
 
@@ -36,6 +74,7 @@ const ADA = "123e4567-e89b-12d3-a456-42661417400a";
 const GRACE = "123e4567-e89b-12d3-a456-42661417400b";
 const LINUS = "123e4567-e89b-12d3-a456-42661417400c";
 const BOT = "123e4567-e89b-12d3-a456-42661417400d";
+const OUTSIDER = "123e4567-e89b-12d3-a456-42661417400e";
 
 const MEMBERSHIPS: ProjectMemberList = [
   { id: "m-ada", role: 20, member: ADA, project: PROJECT, original_role: 20, created_at: "2025-01-10T09:00:00Z" },
@@ -107,6 +146,18 @@ function happyPath(): void {
 
 beforeEach(() => {
   clearMemberFilters();
+  routerMocks.navigate.mockClear();
+  writeMocks.add.mutate.mockReset();
+  writeMocks.role.mutate.mockReset();
+  writeMocks.remove.mutate.mockReset();
+  writeMocks.leave.mutate.mockReset();
+  writeMocks.defaults.mutate.mockReset();
+  writeMocks.editor.userId = ADA;
+  writeMocks.editor.workspaceRole = 20;
+  writeMocks.editor.projectRole = 20;
+  writeMocks.editor.ready = true;
+  writeMocks.project.data = undefined;
+  writeMocks.project.isPending = true;
   vi.mocked(notifyMembersLoadFailure).mockClear();
   vi.mocked(useProjectMemberships).mockReset();
   vi.mocked(useWorkspaceDirectory).mockReset();
@@ -397,5 +448,220 @@ describe("MembersSettings states", () => {
       </QueryClientProvider>
     );
     expect(notifyMembersLoadFailure).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("MembersSettings writes (PSET-022–026)", () => {
+  const PROJECT_ROW = {
+    id: PROJECT,
+    project_lead: null,
+    default_assignee: null,
+    guest_view_all_features: false,
+  };
+
+  it("shows the add control to admins only", () => {
+    happyPath();
+    renderSection();
+    expect(screen.getByRole("button", { name: "Add member" })).toBeInTheDocument();
+    cleanup();
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    expect(screen.queryByRole("button", { name: "Add member" })).not.toBeInTheDocument();
+  });
+
+  it("admits a workspace admin through the workspace role even on a member project role", () => {
+    happyPath();
+    writeMocks.editor.workspaceRole = 20;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    expect(screen.getByRole("button", { name: "Add member" })).toBeInTheDocument();
+  });
+
+  it("opens the invite dialog and bulk-adds its rows", async () => {
+    happyPath();
+    vi.mocked(useWorkspaceDirectory).mockReturnValue(
+      resolved([
+        ...DIRECTORY,
+        directoryMember(OUTSIDER, "Phoebe", "Outsider", "Phoebe", { email: "p@example.test" }),
+      ]) as never
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    expect(await screen.findByRole("heading", { name: "Invite members" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select co-worker" }));
+    await user.click(await screen.findByRole("option", { name: /Phoebe Outsider/ }));
+    await user.click(screen.getByRole("button", { name: "Add members" }));
+    expect(writeMocks.add.mutate).toHaveBeenCalledWith(
+      { members: [{ member_id: OUTSIDER, role: 15 }] },
+      expect.objectContaining({ onSuccess: expect.any(Function) })
+    );
+  });
+
+  it("offers a role editor on rows the rule admits and patches the membership id", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" }));
+    await user.click(await screen.findByRole("option", { name: "Admin" }));
+    expect(writeMocks.role.mutate).toHaveBeenCalledWith({ memberId: "m-grace", role: 20 });
+  });
+
+  it("shows the picked role at once and puts the old word back when the write rolls back", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" }));
+    await user.click(await screen.findByRole("option", { name: "Admin" }));
+    expect(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" })).toHaveTextContent("Admin");
+    // A refusal reaches the hook's rollback callback with the row it touched.
+    const rollback = writeMocks.role.args[2] as (result: { memberId: string }) => void;
+    act(() => rollback({ memberId: "m-unknown" }));
+    expect(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" })).toHaveTextContent("Admin");
+    act(() => rollback({ memberId: "m-grace" }));
+    expect(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" })).toHaveTextContent("Member");
+  });
+
+  it("caps a guest row's editor at Guest even for an admin", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const linusRow = screen.getAllByTestId("member-roster-row")[2]!;
+    await user.click(within(linusRow).getByRole("button", { name: "Change Linus Torvalds's role" }));
+    expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual(["Guest"]);
+  });
+
+  it("treats a member missing from the directory as having no workspace role", () => {
+    happyPath();
+    vi.mocked(useWorkspaceDirectory).mockReturnValue(
+      resolved(DIRECTORY.filter((entry) => entry.member.id !== GRACE)) as never
+    );
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    // An unknown workspace role offers nothing to an editor and blocks it.
+    expect(within(graceRow).queryByRole("button", { name: "Change Grace Hopper's role" })).not.toBeInTheDocument();
+    expect(within(graceRow).queryByRole("button", { name: "Actions for Grace Hopper" })).not.toBeInTheDocument();
+  });
+
+  it("leaves the role cell as text for a plain member", () => {
+    happyPath();
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    expect(within(graceRow).queryByRole("button", { name: "Change Grace Hopper's role" })).not.toBeInTheDocument();
+    expect(within(graceRow).getByText("Member")).toBeInTheDocument();
+  });
+
+  it("offers Leave on the caller's own row and routes to the project list", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    writeMocks.editor.userId = GRACE;
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    writeMocks.leave.mutate.mockImplementation((_input: unknown, options: { onSuccess?: () => void }) => {
+      options.onSuccess?.();
+    });
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Actions for Grace Hopper" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Leave" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Leave" }));
+    expect(writeMocks.leave.mutate).toHaveBeenCalled();
+    expect(routerMocks.navigate).toHaveBeenCalledWith({ to: "/$ws/projects", params: { ws: SLUG } });
+  });
+
+  it("removes another member through the row menu for an admin", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Actions for Grace Hopper" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+    expect(within(await screen.findByRole("dialog")).getByText("Remove Grace Hopper?")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Remove" }));
+    expect(writeMocks.remove.mutate).toHaveBeenCalledWith(
+      { memberId: "m-grace" },
+      expect.objectContaining({ onSettled: expect.any(Function) })
+    );
+  });
+
+  it("offers no row menu to a plain member on someone else's row", () => {
+    happyPath();
+    writeMocks.editor.userId = LINUS;
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    expect(within(graceRow).queryByRole("button", { name: "Actions for Grace Hopper" })).not.toBeInTheDocument();
+  });
+
+  it("closes the invite dialog once the bulk add lands", async () => {
+    happyPath();
+    vi.mocked(useWorkspaceDirectory).mockReturnValue(
+      resolved([
+        ...DIRECTORY,
+        directoryMember(OUTSIDER, "Phoebe", "Outsider", "Phoebe", { email: "p@example.test" }),
+      ]) as never
+    );
+    const user = userEvent.setup();
+    renderSection();
+    await user.click(screen.getByRole("button", { name: "Add member" }));
+    await user.click(screen.getByRole("button", { name: "Select co-worker" }));
+    await user.click(await screen.findByRole("option", { name: /Phoebe Outsider/ }));
+    await user.click(screen.getByRole("button", { name: "Add members" }));
+    const options = writeMocks.add.mutate.mock.calls[0]?.[1] as { onSuccess?: () => void };
+    act(() => options.onSuccess?.());
+    expect(screen.queryByRole("heading", { name: "Invite members" })).not.toBeInTheDocument();
+  });
+
+  it("withdraws the remove confirmation once the write settles", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Actions for Grace Hopper" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Remove" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Remove" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    const options = writeMocks.remove.mutate.mock.calls[0]?.[1] as { onSettled?: () => void };
+    act(() => options.onSettled?.());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("withdraws the leave confirmation once the write settles without a refusal", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    writeMocks.editor.userId = GRACE;
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    const graceRow = screen.getAllByTestId("member-roster-row")[1]!;
+    await user.click(within(graceRow).getByRole("button", { name: "Actions for Grace Hopper" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Leave" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Leave" }));
+    const options = writeMocks.leave.mutate.mock.calls[0]?.[1] as { onSettled?: () => void };
+    act(() => options.onSettled?.());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(routerMocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("saves defaults for admins and disables them for members", async () => {
+    happyPath();
+    const user = userEvent.setup();
+    writeMocks.project.data = PROJECT_ROW;
+    writeMocks.project.isPending = false;
+    renderSection();
+    await user.click(screen.getByRole("button", { name: "Project lead" }));
+    await user.click(await screen.findByRole("option", { name: "Grace H" }));
+    expect(writeMocks.defaults.mutate).toHaveBeenCalledWith({ project_lead: GRACE });
+    cleanup();
+    writeMocks.editor.workspaceRole = 15;
+    writeMocks.editor.projectRole = 15;
+    renderSection();
+    expect(screen.getByRole("button", { name: "Project lead" })).toBeDisabled();
   });
 });

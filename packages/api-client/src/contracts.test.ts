@@ -91,7 +91,6 @@ import {
 } from "./contracts/project-management.js";
 import { getProjectSettingsDetail, updateProjectSettings } from "./contracts/project-settings-general.js";
 import {
-  completeTour,
   createQuickLink,
   deleteQuickLink,
   getQuickLink,
@@ -102,6 +101,7 @@ import {
   updateHomePreference,
   updateQuickLink,
 } from "./contracts/home.js";
+import { completeTour } from "./contracts/tour.js";
 import { listLabels, listMembers, listStates } from "./contracts/reference.js";
 import {
   getIssue,
@@ -2417,6 +2417,18 @@ describe("project lifecycle contracts", () => {
     const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
     expect(patchCall?.init.method).toBe("PATCH");
     expect(patchCall?.init.body).toBe(JSON.stringify({ description: "Updated" }));
+  });
+
+  it("patches the default assignee and guest visibility, clearing the assignee with null", async () => {
+    const transport = stubbedApi(() => ({ status: 200, body: { ...details, guest_view_all_features: true } }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const updated = await updateProject(client, "acme", UUID2, {
+      default_assignee: null,
+      guest_view_all_features: true,
+    });
+    expect(updated.guest_view_all_features).toBe(true);
+    const patchCall = transport.calls.find((call) => call.url.endsWith(`/projects/${UUID2}/`));
+    expect(patchCall?.init.body).toBe(JSON.stringify({ default_assignee: null, guest_view_all_features: true }));
   });
 
   it("patches the automations fields the settings page owns", async () => {

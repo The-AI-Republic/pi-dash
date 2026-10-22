@@ -8,10 +8,11 @@
 // directions and a clear entry once sorted, and only the active header
 // paints a direction marker.
 
-import { Avatar, Button, Menu, cn, type MenuEntry } from "@pidash/kit";
+import { Avatar, Button, Combobox, Menu, cn, type MenuEntry } from "@pidash/kit";
 import { ArrowDown, ArrowUp, ArrowUpDown, Check, RotateCcw } from "lucide-react";
 import * as React from "react";
 
+import { MemberRowMenu } from "./MemberRowMenu.js";
 import {
   formatJoiningDate,
   MEMBER_COLUMNS,
@@ -19,6 +20,24 @@ import {
   type MemberRosterRow,
   type MemberSort,
 } from "./roster.js";
+import { memberRoleLabel } from "./roster.js";
+import type { MemberRoleOption } from "./roster.js";
+import type { MemberRowAction } from "./writes.js";
+
+/** One row's write affordances, resolved by the settings body. */
+export interface MemberRowControls {
+  /** Whether the account-type cell opens an editor for this row. */
+  canEditRole: (row: MemberRosterRow) => boolean;
+  /** Menu entry the row offers, if any. */
+  action: (row: MemberRosterRow) => MemberRowAction;
+  /** Optimistic role word, when a write is in flight. */
+  roleOverride: (row: MemberRosterRow) => number | null;
+  /** Roles the row's editor offers, after the workspace-guest cap. */
+  roleOptions: (row: MemberRosterRow) => readonly MemberRoleOption[];
+  onPickRole: (row: MemberRosterRow, role: number) => void;
+  onRowAction: (row: MemberRosterRow, action: Exclude<MemberRowAction, "none">) => void;
+  pendingMembershipId: string | null;
+}
 
 export interface MemberTableProps {
   workspaceSlug: string;
@@ -27,6 +46,8 @@ export interface MemberTableProps {
   onSortChange: (sort: MemberSort | null) => void;
   /** Resolves a stored avatar path to a renderable URL. */
   resolveAvatar: (path: string | null) => string | null;
+  /** Write affordances resolved by the settings body. */
+  controls: MemberRowControls;
 }
 
 const CLEAR_SORT_LABEL = "Clear sorting";
@@ -143,12 +164,47 @@ function ProfileAvatar({
   );
 }
 
+function RoleCell({ row, controls }: { row: MemberRosterRow; controls: MemberRowControls }): React.ReactElement {
+  const override = controls.roleOverride(row);
+  const current = override ?? row.role;
+  const label = override === null ? row.roleLabel : memberRoleLabel(override);
+  if (!controls.canEditRole(row)) return <>{label}</>;
+  const pick = controls.onPickRole;
+  return (
+    <Combobox
+      trigger={
+        <Button
+          variant="ghost"
+          size="small"
+          aria-label={`Change ${row.fullName}'s role`}
+          aria-haspopup="listbox"
+          data-testid="member-role-cell"
+          className="font-normal -ml-(--space-2)"
+        >
+          {label}
+        </Button>
+      }
+      options={controls.roleOptions(row).map((option) => ({ id: String(option.role), label: option.label }))}
+      value={String(current)}
+      onSelect={(id) => {
+        const role = Number(id);
+        if (role !== current) pick(row, role);
+      }}
+      listLabel={`${row.fullName}'s role`}
+      searchEnabled={false}
+      emptyText="No roles available"
+      className="w-48"
+    />
+  );
+}
+
 export function MemberTable({
   workspaceSlug,
   rows,
   sort,
   onSortChange,
   resolveAvatar,
+  controls,
 }: MemberTableProps): React.ReactElement {
   return (
     <div className="overflow-x-auto">
@@ -169,14 +225,29 @@ export function MemberTable({
               className="border-b border-(--border) last:border-b-0"
             >
               <td className="py-(--space-2) pr-(--space-4)">
-                <span className="flex items-center gap-(--space-2)">
+                <span className="group flex items-center gap-(--space-2)">
                   <ProfileAvatar workspaceSlug={workspaceSlug} row={row} resolveAvatar={resolveAvatar} />
                   <span className="truncate">{row.fullName}</span>
+                  <span className="invisible inline-flex group-focus-within:visible group-hover:visible">
+                    {controls.action(row) === "none" ? null : (
+                      <MemberRowMenu
+                        action={controls.action(row)}
+                        name={row.fullName}
+                        pending={controls.pendingMembershipId === row.membershipId}
+                        onConfirm={() => {
+                          const action = controls.action(row);
+                          if (action !== "none") controls.onRowAction(row, action);
+                        }}
+                      />
+                    )}
+                  </span>
                 </span>
               </td>
               <td className="py-(--space-2) pr-(--space-4)">{row.displayName}</td>
               <td className="py-(--space-2) pr-(--space-4)">{row.email}</td>
-              <td className="py-(--space-2) pr-(--space-4)">{row.roleLabel}</td>
+              <td className="py-(--space-2) pr-(--space-4)">
+                <RoleCell row={row} controls={controls} />
+              </td>
               <td className="py-(--space-2) pr-(--space-4)">
                 <JoiningCell row={row} />
               </td>

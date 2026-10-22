@@ -19303,82 +19303,228 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
   }
   async settingsMembersAddVisible(): Promise<boolean> {
-    return todo("settingsMembersAddVisible");
+    return this.isShown(this.page.getByRole("button", { name: "Add member", exact: true }));
+  }
+  private settingsMembersDialog(): Locator {
+    return this.page.locator("[role='dialog']").first();
+  }
+  /** Colleague and role pickers in the invite dialog, in DOM order. */
+  private settingsMembersInvitePickers(): Locator {
+    return this.settingsMembersDialog().locator("button[aria-haspopup='listbox']");
+  }
+  private settingsMembersListbox(): Locator {
+    return this.page.locator("[role='listbox']").first();
+  }
+  private async settingsMembersOpenListbox(): Promise<void> {
+    if ((await this.settingsMembersListbox().count()) > 0) return;
+    await this.settingsMembersListbox().waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+  }
+  private async settingsMembersListboxTexts(): Promise<string[]> {
+    const box = this.settingsMembersListbox();
+    return box
+      .locator("[role='option']")
+      .evaluateAll((options) =>
+        options
+          .map((option) => ((option as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim())
+          .filter((text) => text !== "")
+      );
   }
   async settingsMembersOpenInvite(): Promise<void> {
-    return todo("settingsMembersOpenInvite");
+    await this.page.getByRole("button", { name: "Add member", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: "Select co-worker" })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersInviteOpen(): Promise<boolean> {
-    return todo("settingsMembersInviteOpen");
+    return this.isShown(this.settingsMembersDialog().getByRole("heading", { name: "Invite members" }));
   }
   async settingsMembersInviteRowCount(): Promise<number> {
-    return todo("settingsMembersInviteRowCount");
+    return this.settingsMembersDialog().locator('[data-testid="invite-row"]').count();
   }
   async settingsMembersInviteAddRow(): Promise<void> {
-    return todo("settingsMembersInviteAddRow");
+    const before = await this.settingsMembersInviteRowCount();
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: "Add more", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.settingsMembersInviteRowCount(), { timeout: WebNewDriver.WAIT_MS }).toBe(before + 1);
   }
-  async settingsMembersInviteRemoveRow(_index: number): Promise<void> {
-    return todo("settingsMembersInviteRemoveRow");
+  async settingsMembersInviteRemoveRow(index: number): Promise<void> {
+    const before = await this.settingsMembersInviteRowCount();
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: `Remove row ${index + 1}`, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.settingsMembersInviteRowCount(), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(Math.max(before - 1, 1));
   }
-  async settingsMembersInviteOpenMemberPicker(_index: number): Promise<void> {
-    return todo("settingsMembersInviteOpenMemberPicker");
+  async settingsMembersInviteOpenMemberPicker(index: number): Promise<void> {
+    if ((await this.settingsMembersListbox().count()) > 0) return;
+    await this.settingsMembersInvitePickers()
+      .nth(index * 2)
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersOpenListbox();
+  }
+  async settingsMembersInviteCloseMemberPicker(index: number): Promise<void> {
+    if ((await this.settingsMembersListbox().count()) === 0) return;
+    await this.settingsMembersInvitePickers()
+      .nth(index * 2)
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersListbox()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
   async settingsMembersInviteMemberOptions(): Promise<string[]> {
-    return todo("settingsMembersInviteMemberOptions");
+    await this.settingsMembersOpenListbox();
+    return this.settingsMembersListboxTexts();
   }
-  async settingsMembersInvitePickMember(_index: number, _text: string): Promise<void> {
-    return todo("settingsMembersInvitePickMember");
+  async settingsMembersInvitePickMember(index: number, text: string): Promise<void> {
+    await this.settingsMembersInviteOpenMemberPicker(index);
+    await this.settingsMembersListbox()
+      .locator("[role='option']")
+      .filter({ hasText: text })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersListbox()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
-  async settingsMembersInviteRoleOptions(_index: number): Promise<string[]> {
-    return todo("settingsMembersInviteRoleOptions");
+  async settingsMembersInviteRoleOptions(index: number): Promise<string[]> {
+    const picker = this.settingsMembersInvitePickers().nth(index * 2 + 1);
+    if ((await this.settingsMembersListbox().count()) === 0) {
+      await picker.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.settingsMembersOpenListbox();
+    }
+    const texts = await this.settingsMembersListboxTexts();
+    await picker.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersListbox()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
+    return texts;
   }
-  async settingsMembersInvitePickRole(_index: number, _label: string): Promise<void> {
-    return todo("settingsMembersInvitePickRole");
+  async settingsMembersInvitePickRole(index: number, label: string): Promise<void> {
+    if ((await this.settingsMembersListbox().count()) === 0) {
+      await this.settingsMembersInvitePickers()
+        .nth(index * 2 + 1)
+        .click({ timeout: WebNewDriver.WAIT_MS });
+      await this.settingsMembersOpenListbox();
+    }
+    await this.settingsMembersListbox()
+      .getByRole("option", { name: label, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersListbox()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
-  async settingsMembersInviteRowError(_index: number): Promise<string> {
-    return todo("settingsMembersInviteRowError");
+  async settingsMembersInviteRowError(index: number): Promise<string> {
+    const error = this.settingsMembersDialog().locator(`[data-testid="invite-row-error-${index}"]`);
+    if ((await error.count()) === 0) return "";
+    return (
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async settingsMembersInviteSubmit(): Promise<void> {
-    return todo("settingsMembersInviteSubmit");
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: /^Add members?$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersInviteAttemptSubmit(): Promise<void> {
-    return todo("settingsMembersInviteAttemptSubmit");
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: /^Add members?$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersInviteCancel(): Promise<void> {
-    return todo("settingsMembersInviteCancel");
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersDialog()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
-  async settingsMembersRoleEditable(_displayName: string): Promise<boolean> {
-    return todo("settingsMembersRoleEditable");
+  private settingsMembersRow(displayName: string): Locator {
+    return this.settingsMembersTable().locator("tbody tr").filter({ hasText: displayName }).first();
   }
-  async settingsMembersRoleText(_displayName: string): Promise<string> {
-    return todo("settingsMembersRoleText");
+  private settingsMembersRoleCell(displayName: string): Locator {
+    return this.settingsMembersRow(displayName).locator("td").nth(3);
   }
-  async settingsMembersRoleEditorOpen(_displayName: string): Promise<void> {
-    return todo("settingsMembersRoleEditorOpen");
+  async settingsMembersRoleEditable(displayName: string): Promise<boolean> {
+    return (await this.settingsMembersRoleCell(displayName).locator("button[aria-haspopup='listbox']").count()) > 0;
+  }
+  async settingsMembersRoleText(displayName: string): Promise<string> {
+    return (
+      (await this.settingsMembersRoleCell(displayName)
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  async settingsMembersRoleEditorOpen(displayName: string): Promise<void> {
+    if ((await this.settingsMembersListbox().count()) > 0) return;
+    await this.settingsMembersRoleCell(displayName)
+      .locator("button[aria-haspopup='listbox']")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersOpenListbox();
   }
   async settingsMembersRoleEditorOptions(): Promise<string[]> {
-    return todo("settingsMembersRoleEditorOptions");
+    await this.settingsMembersOpenListbox();
+    return this.settingsMembersListboxTexts();
   }
-  async settingsMembersRoleEditorPick(_label: string): Promise<void> {
-    return todo("settingsMembersRoleEditorPick");
+  async settingsMembersRoleEditorPick(label: string): Promise<void> {
+    await this.settingsMembersListbox()
+      .getByRole("option", { name: label, exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersListbox()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
-  async settingsMembersOpenRowMenu(_displayName: string): Promise<void> {
-    return todo("settingsMembersOpenRowMenu");
+  async settingsMembersOpenRowMenu(displayName: string): Promise<void> {
+    const row = this.settingsMembersRow(displayName);
+    await row.hover();
+    await row.locator("button[aria-haspopup='menu']").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersRowMenuItems(): Promise<string[]> {
-    return todo("settingsMembersRowMenuItems");
+    return this.page
+      .getByRole("menuitem")
+      .evaluateAll((items) =>
+        items.map((item) => ((item as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim()).filter((t) => t !== "")
+      );
   }
-  async settingsMembersRowMenuPick(_text: string): Promise<void> {
-    return todo("settingsMembersRowMenuPick");
+  async settingsMembersRowMenuPick(text: string): Promise<void> {
+    await this.page.getByRole("menuitem", { name: text, exact: true }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersConfirmText(): Promise<string> {
-    return todo("settingsMembersConfirmText");
+    return (
+      (await this.settingsMembersDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async settingsMembersConfirmSubmit(): Promise<void> {
-    return todo("settingsMembersConfirmSubmit");
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: /^(Remove|Leave)$/ })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersDialog()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
   async settingsMembersConfirmCancel(): Promise<void> {
-    return todo("settingsMembersConfirmCancel");
+    await this.settingsMembersDialog()
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersDialog()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
   async settingsMembersSkeletonVisible(): Promise<boolean> {
     return this.isShown(this.page.locator('[data-testid="members-skeleton"]'));
@@ -19404,34 +19550,65 @@ export class WebNewDriver implements ParityDriver {
     });
   }
   async settingsMembersDefaultsVisible(): Promise<boolean> {
-    return todo("settingsMembersDefaultsVisible");
+    return this.isShown(this.page.locator('[data-testid="members-defaults"]'));
   }
   async settingsMembersLeadText(): Promise<string> {
-    return todo("settingsMembersLeadText");
+    return (
+      (await this.page
+        .locator('[data-testid="members-lead"]')
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
-  async settingsMembersLeadPick(_displayName: string): Promise<void> {
-    return todo("settingsMembersLeadPick");
+  async settingsMembersLeadPick(displayName: string): Promise<void> {
+    await this.settingsMembersDefaultPick("members-lead", displayName);
   }
   async settingsMembersAssigneeText(): Promise<string> {
-    return todo("settingsMembersAssigneeText");
+    return (
+      (await this.page
+        .locator('[data-testid="members-assignee"]')
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
-  async settingsMembersAssigneePick(_displayName: string): Promise<void> {
-    return todo("settingsMembersAssigneePick");
+  async settingsMembersAssigneePick(displayName: string): Promise<void> {
+    await this.settingsMembersDefaultPick("members-assignee", displayName);
+  }
+  private async settingsMembersDefaultPick(testId: string, displayName: string): Promise<void> {
+    if ((await this.settingsMembersListbox().count()) === 0) {
+      await this.page.locator(`[data-testid="${testId}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+      await this.settingsMembersOpenListbox();
+    }
+    await this.settingsMembersListbox()
+      .locator("[role='option']")
+      .filter({ hasText: displayName })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.settingsMembersListbox()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {});
   }
   async settingsMembersLeadDisabled(): Promise<boolean> {
-    return todo("settingsMembersLeadDisabled");
+    return this.page.locator('[data-testid="members-lead"]').isDisabled();
   }
   async settingsMembersGuestToggleState(): Promise<boolean> {
-    return todo("settingsMembersGuestToggleState");
+    return this.page
+      .locator('[data-testid="members-guest-visibility"]')
+      .evaluate(
+        (node) =>
+          (node as HTMLElement).getAttribute("aria-checked") === "true" ||
+          (node as HTMLElement).getAttribute("data-checked") !== null
+      );
   }
   async settingsMembersGuestToggle(): Promise<void> {
-    return todo("settingsMembersGuestToggle");
+    await this.page.locator('[data-testid="members-guest-visibility"]').click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsMembersGuestToggleDisabled(): Promise<boolean> {
-    return todo("settingsMembersGuestToggleDisabled");
-  }
-  async settingsMembersInviteCloseMemberPicker(_index: number): Promise<void> {
-    return todo("settingsMembersInviteCloseMemberPicker");
+    return this.page.locator('[data-testid="members-guest-visibility"]').isDisabled();
   }
   async settingsMembersSortMarker(column: string): Promise<"ascending" | "descending" | "none"> {
     const header = this.page.getByRole("button", { name: `Sort by ${column}`, exact: true });

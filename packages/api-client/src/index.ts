@@ -130,7 +130,8 @@ export type {
   WorkspaceInviteRoleInput,
   WorkspaceInvitee,
 } from "./contracts/invitations.js";
-export { Project, ProjectList, ProjectLite, listProjects } from "./contracts/projects.js";
+export { Project, ProjectList, listProjects } from "./contracts/projects.js";
+export { ProjectLite } from "./contracts/project-lite.js";
 export {
   AgentExecutorOption,
   ProjectDetail,
@@ -192,9 +193,7 @@ export {
   QuickLinkList,
   RecentVisit,
   RecentVisitList,
-  TourCompletedResponse,
   WorkspaceDashboard,
-  completeTour,
   createQuickLink,
   deleteQuickLink,
   getQuickLink,
@@ -206,6 +205,7 @@ export {
   updateQuickLink,
 } from "./contracts/home.js";
 export type { HomePreferencePatch, HomeWidgetKey, QuickLinkInput } from "./contracts/home.js";
+export { TourCompletedResponse, completeTour } from "./contracts/tour.js";
 export {
   Label,
   LabelList,

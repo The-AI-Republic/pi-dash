@@ -10,7 +10,16 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Transport, TransportResponse } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const routerMocks = vi.hoisted(() => ({ navigate: vi.fn(), pathname: "/acme/settings/projects/p/members/" }));
+
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  useNavigate: () => routerMocks.navigate,
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) =>
+    select({ location: { pathname: routerMocks.pathname } }),
+}));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { clearMemberFilters } from "./filters.js";
