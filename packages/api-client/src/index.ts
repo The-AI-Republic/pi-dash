@@ -498,6 +498,28 @@ export {
 } from "./contracts/issue-versions.js";
 export { IssueSearchHit, IssueSearchResults, searchIssues } from "./contracts/issue-search.js";
 export type { IssueSearchQuery } from "./contracts/issue-search.js";
+export {
+  INTAKE_STATUS,
+  IntakeIssueDetail,
+  IntakeIssueDetailItem,
+  IntakeIssueListResponse,
+  IntakeIssueRow,
+  IntakeWorkItemSummary,
+  createIntakeIssue,
+  deleteIntakeIssue,
+  getIntakeIssue,
+  intakeIssueListQueryParams,
+  listIntakeIssues,
+  updateIntakeIssue,
+} from "./contracts/intake-issues.js";
+export type {
+  IntakeIssueCreateInput,
+  IntakeIssueCreateIssue,
+  IntakeIssueListQuery,
+  IntakeIssueUpdateInput,
+  IntakeIssueUpdateIssue,
+  IntakeStatus,
+} from "./contracts/intake-issues.js";
 export { MentionPerson, MentionSearchResponse, searchMentionPeople } from "./contracts/entity-search.js";
 export type { MentionSearchQuery } from "./contracts/entity-search.js";
 export {

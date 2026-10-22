@@ -60,8 +60,11 @@ def seed():
     from django.contrib.auth.hashers import make_password  # noqa: E402
     from pi_dash.db.models import (  # noqa: E402
         APIToken,
+        Intake,
+        IntakeIssue,
         Issue,
         IssueActivity,
+        IssueDescriptionVersion,
         DeployBoard,
         Label,
         Project,
@@ -551,6 +554,51 @@ def seed():
             defaults={"actor": user, "created_by": user, "updated_by": user},
         )
         note("issue-activity", f"{first_issue.name}/{verb}/{field or '-'}", activity_created)
+
+    # Intake area (NEWFRONT-688): the intake-issues list 404s and create
+    # crashes when the project has no intake row, so the seeded project
+    # carries its default intake. Found by name (unique per project), so
+    # enabling the intake view on a probe project never collides with it.
+    intake, intake_created = Intake.objects.get_or_create(
+        project=project,
+        name="Contract Intake",
+        defaults={"workspace": workspace, "is_default": True, "created_by": user, "updated_by": user},
+    )
+    note("intake", "Contract Intake", intake_created)
+
+    # The versions suite reads an intake work item's history through the
+    # shared work-items contract (INT-029): celery writes live version
+    # rows and no worker runs in contract tests, so the intake row and
+    # its version are seeded directly. Accepted status keeps it out of
+    # every pending-list assertion; the fixed name keeps the probe sweep
+    # (intake-probe- prefix) from touching it.
+    version_issue, version_issue_created = Issue.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        name="Contract intake version probe",
+        defaults={"state": first_state, "priority": "medium", "created_by": user, "updated_by": user},
+    )
+    note("issue", version_issue.name, version_issue_created)
+    _, version_intake_created = IntakeIssue.objects.get_or_create(
+        intake=intake,
+        issue=version_issue,
+        defaults={"project": project, "workspace": workspace, "status": 1, "source": "IN_APP"},
+    )
+    note("intake-issue", version_issue.name, version_intake_created)
+    _, version_version_created = IssueDescriptionVersion.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        issue=version_issue,
+        owned_by=user,
+        description_html="<p>Contract intake version probe</p>",
+        defaults={
+            "description_stripped": "Contract intake version probe",
+            "description_json": {},
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    note("description-version", version_issue.name, version_version_created)
 
     # Profile area (NEWFRONT-570): the segregation/stats reads count the
     # seed user's assigned, created and subscribed work, and the profile
