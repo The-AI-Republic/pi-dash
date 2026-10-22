@@ -9,6 +9,8 @@ for every error branch, and session establishment on success (``session-id``
 cookie, ``sessions`` row, ``GET /api/users/me/`` 200).
 """
 
+from urllib.parse import quote_plus
+
 import httpx
 import pytest
 
@@ -27,6 +29,16 @@ from .conftest import (
 
 SIGN_IN = "/auth/magic-sign-in/"
 GENERATE = "/auth/magic-generate/"
+
+# (raw next_path, iri_to_uri-encoded form): Django's HttpResponseRedirect
+# percent-encodes the composed URL (django/http/response.py via
+# django.utils.encoding.iri_to_uri) before storing Location.
+NEXT_PATH_ENCODING_CASES = [
+    ("/ws/issues?q=a b", "/ws/issues?q=a%20b"),
+    ("/ws/search?q=日本", "/ws/search?q=%E6%97%A5%E6%9C%AC"),
+    ("/ws/café", "/ws/caf%C3%A9"),
+    ("/ws/x?q=a\nb", "/ws/x?q=a%0Ab"),
+]
 
 
 def _seed_token(client, rdb, email: str) -> str:
@@ -112,3 +124,36 @@ class TestMagicSignIn:
         query = location_query(resp)
         assert "error_code" not in query
         assert query["next_path"] == "/workspaces"
+
+    @pytest.mark.parametrize("next_path,encoded", NEXT_PATH_ENCODING_CASES)
+    def test_error_redirect_percent_encodes_next_path(self, seed, rdb, next_path, encoded):
+        """The 302 Location carries the iri_to_uri-encoded next_path (PIDASHCONV-1356).
+
+        No magic token is seeded, so the wrong code takes the expired branch
+        deterministically on both backends. The raw Location (not the
+        parse_qs-decoded query) must equal Django's percent-encoded URL:
+        spaces, non-ASCII and newlines never reach the wire raw, and CR/LF
+        never becomes a 500.
+        """
+        user = seed.user(email=fresh_email())
+        redis_helper.clear_magic(rdb, user["email"])
+        client = csrf_client()
+
+        control = post_form(client, SIGN_IN, {"email": user["email"], "code": "000000"})
+        assert control.status_code == 302, control.text
+        base_slash = control.headers["location"].split("?")[0]
+        assert base_slash.endswith("/"), control.headers["location"]
+
+        resp = post_form(
+            client,
+            SIGN_IN,
+            {"email": user["email"], "code": "000000", "next_path": next_path},
+        )
+
+        assert resp.status_code == 302, resp.text
+        expected = (
+            f"{base_slash}?next_path={encoded}"
+            f"&error_code=5095&error_message=EXPIRED_MAGIC_CODE_SIGN_IN"
+            f"&email={quote_plus(user['email'])}"
+        )
+        assert resp.headers["location"] == expected
