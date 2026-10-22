@@ -28,14 +28,14 @@ export interface ModuleContextInput {
   /** Module name shown in the chip. */
   moduleName: string;
   archived: boolean;
-  status: string;
+  status: ModuleStatus;
   memberIds: string[];
   favorite: boolean;
   standing: ProjectStanding;
   members: NamedProjectMember[];
   membersLoading: boolean;
   toggleMember: (userId: string, member: boolean) => void;
-  setStatus: (status: string) => void;
+  setStatus: (status: ModuleStatus) => void;
   toggleFavorite: () => void;
   copyUrl: () => void;
   /**

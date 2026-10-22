@@ -8,7 +8,7 @@
 // hooks (shared/ never imports features/) and render the returned
 // delete dialog beside their content.
 
-import type { IssuePatch } from "@pidash/api-client";
+import type { IssuePatch, ModuleStatus } from "@pidash/api-client";
 import * as React from "react";
 
 import { registerCommands, registerPalettePages } from "../../commands/registry.js";
@@ -311,7 +311,7 @@ export interface ModulePaletteInput {
   moduleId: string;
   moduleName: string;
   archived: boolean;
-  status: string;
+  status: ModuleStatus;
   memberIds: string[];
   favorite: boolean;
   standing: ProjectStanding;
@@ -345,7 +345,7 @@ export function useModulePaletteContext(input: ModulePaletteInput): void {
     [mutations, input.moduleId, input.memberIds]
   );
   const setStatus = React.useCallback(
-    (status: string) => mutations.updateModuleFields.mutate({ moduleId: input.moduleId, patch: { status } }),
+    (status: ModuleStatus) => mutations.updateModuleFields.mutate({ moduleId: input.moduleId, patch: { status } }),
     [mutations, input.moduleId]
   );
   const toggleFavorite = React.useCallback(() => {

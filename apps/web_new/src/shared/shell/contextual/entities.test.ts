@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { selectCycleContext } from "./cycles.js";
 import { selectModuleContext } from "./modules.js";
+import type { ModuleContextInput } from "./modules.js";
 import { selectPageCapabilities, selectPageContext } from "./pages.js";
 
 describe("selectCycleContext", () => {
@@ -62,7 +63,7 @@ describe("selectCycleContext", () => {
 });
 
 describe("selectModuleContext", () => {
-  function moduleInput(overrides = {}) {
+  function moduleInput(overrides: Partial<ModuleContextInput> = {}): ModuleContextInput {
     return {
       moduleId: "module-1",
       moduleName: "Auth",
