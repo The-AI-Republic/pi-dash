@@ -19,13 +19,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { RouterContext } from "../../../__root.js";
 import { Route } from "./index.js";
 
-vi.mock("../../../../features/assistant/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../../features/assistant/index.js")>();
-  return {
-    ...actual,
-    AssistantLanding: (props: { workspaceSlug: string }) => <div data-testid="landing-slot">{props.workspaceSlug}</div>,
-  };
-});
+vi.mock("../../../../features/assistant/components/AssistantLanding.js", () => ({
+  AssistantLanding: (props: { workspaceSlug: string }) => <div data-testid="landing-slot">{props.workspaceSlug}</div>,
+}));
 
 describe("assistant landing route", () => {
   it("renders the feature landing for the workspace param", async () => {

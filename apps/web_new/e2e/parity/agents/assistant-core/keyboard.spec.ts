@@ -8,7 +8,8 @@
 // composer textarea, the widget input and the mic button itself — so
 // there are no global hotkeys by construction.) bug: NEWFRONT-195 —
 // modified Enter (Control+Enter) also submits; intended is unmodified
-// Enter only. Row: AGT-049.
+// Enter only, which is what the new app ships (the gate asserts both
+// targets in that step). Row: AGT-049.
 import { test, expect } from "../../fixtures";
 import {
   serverAssistantConfigDelete,
@@ -74,9 +75,18 @@ test(
       expect(messages.filter((row) => row.role === "user").length).toBe(1);
     });
 
-    await test.step("bug: NEWFRONT-195 modified Enter submits", async () => {
+    await test.step("modified Enter: the old app submits, the new app holds", async () => {
       await driver.assistantFillDraft(`modified ${tag}`);
       await driver.assistantPressControlEnter();
+      if (driver.target === "web_new") {
+        // The new app ships the intended contract (AGT-049): a chord is
+        // never a send, and the draft is kept for the reader.
+        expect(await driver.assistantDraftValue()).toBe(`modified ${tag}`);
+        expect((await driver.assistantApiCounts()).send).toBe(1);
+        await driver.assistantStopApiSpy();
+        return;
+      }
+      // bug: NEWFRONT-195 — the old app gates only on Shift and sends.
       // The full shape: the first turn's error row can trail the second
       // user row through a slow refetch, so the poll waits for all three.
       const bubbles = await expectBubbles(

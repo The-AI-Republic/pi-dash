@@ -20,17 +20,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { RouterContext } from "../../../__root.js";
 import { Route } from "./$threadId.js";
 
-vi.mock("../../../../features/assistant/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../../features/assistant/index.js")>();
-  return {
-    ...actual,
-    ConversationGate: (props: { workspaceSlug: string; threadId: string; state: unknown }) => (
-      <div data-testid="gate-slot" data-slug={props.workspaceSlug} data-thread={props.threadId}>
-        {String((props.state as { pendingMessage?: unknown } | null)?.pendingMessage ?? "")}
-      </div>
-    ),
-  };
-});
+vi.mock("../../../../features/assistant/components/ConversationGate.js", () => ({
+  ConversationGate: (props: { workspaceSlug: string; threadId: string; state: unknown }) => (
+    <div data-testid="gate-slot" data-slug={props.workspaceSlug} data-thread={props.threadId}>
+      {String((props.state as { pendingMessage?: unknown } | null)?.pendingMessage ?? "")}
+    </div>
+  ),
+}));
 
 describe("conversation route", () => {
   it("passes the params and the handoff state to the gate", async () => {

@@ -820,6 +820,9 @@ importers:
       lucide-react:
         specifier: ^1.49.0
         version: 1.49.0(@types/react@19.3.0)(react@19.3.0)
+      markdown-it:
+        specifier: 14.1.1
+        version: 14.1.1
       react:
         specifier: ^19.2.0
         version: 19.3.0
@@ -854,6 +857,9 @@ importers:
       '@testing-library/user-event':
         specifier: ^14.5.2
         version: 14.6.1(@testing-library/dom@10.4.0)
+      '@types/markdown-it':
+        specifier: ^14.1.2
+        version: 14.1.2
       '@types/node':
         specifier: 'catalog:'
         version: 22.12.0

@@ -18947,6 +18947,18 @@ export class WebDriver implements ParityDriver {
     return this.assistantListColumn().locator(":scope > div").nth(index).innerHTML();
   }
 
+  async assistantErrorTint(index: number): Promise<string> {
+    // The rendered colour, not the class name: both apps tint error rows
+    // with their own danger token, and this reads what the reader sees.
+    return this.assistantListColumn()
+      .locator(":scope > div")
+      .nth(index)
+      .evaluate((node) => {
+        const box = node.firstElementChild as HTMLElement | null;
+        return getComputedStyle(box ?? (node as HTMLElement)).color;
+      });
+  }
+
   async assistantToolActivities(): Promise<AssistantToolActivity[]> {
     const rows = this.assistantListColumn().locator(":scope > div:has(svg.lucide-wrench)");
     const total = await rows.count();

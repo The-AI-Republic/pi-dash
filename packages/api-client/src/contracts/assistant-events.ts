@@ -99,8 +99,12 @@ const TurnCancelledEvent = z.object({
   payload: z.object({ turn_id: uuid() }),
 });
 
-/** Every event kind the backend emits, narrowed by kind. */
-export const KnownAssistantEvent = z.discriminatedUnion("kind", [
+// Every event kind the backend emits, narrowed by kind. A plain union,
+// not a discriminated one: both wrap the same schema instances, so parsing
+// and the narrowed `kind` results are identical, but a discriminated union
+// would add its runtime to every bundle that mentions this contract — the
+// web shell only re-exports the module, and the size gate caught it there.
+export const KnownAssistantEvent = z.union([
   TurnStartedEvent,
   AssistantDeltaEvent,
   MessageCreatedEvent,

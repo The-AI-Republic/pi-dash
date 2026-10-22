@@ -30,6 +30,11 @@ import { DEAD_MCP_URL, DUMMY_PROVIDER, expectBubbles, expectNoticeLines } from "
 
 const ROWS = ["AGT-046"];
 
+// The event contract types these as UUIDs (the server only ever emits UUIDs).
+const STUB_TURN = "46000000-0000-4000-8000-000000000001";
+const STUB_CALL = "46000000-0000-4000-8000-000000000002";
+const STUB_RESULT = "46000000-0000-4000-8000-000000000003";
+
 function skippedFrame(seq: number, servers: { name: string; reason: string }[]): AssistantStreamFrame {
   return { seq, kind: "tool_servers_skipped", payload: { servers } };
 }
@@ -124,16 +129,16 @@ test(
       const call: AssistantStreamFrame = {
         seq: 401,
         kind: "tool_call",
-        message: "stub-call1",
+        message: STUB_CALL,
         payload: {
-          turn_id: "stub-turn",
+          turn_id: STUB_TURN,
           message: {
-            id: "stub-call1",
+            id: STUB_CALL,
             role: "tool_call",
             content: `Searching ${tag}`,
             status: "completed",
             seq: 1,
-            turn_id: "stub-turn",
+            turn_id: STUB_TURN,
             payload: {},
             created_at: "2026-01-01T00:00:00Z",
             completed_at: "2026-01-01T00:00:00Z",
@@ -143,16 +148,16 @@ test(
       const result: AssistantStreamFrame = {
         seq: 402,
         kind: "tool_result",
-        message: "stub-result1",
+        message: STUB_RESULT,
         payload: {
-          turn_id: "stub-turn",
+          turn_id: STUB_TURN,
           message: {
-            id: "stub-result1",
+            id: STUB_RESULT,
             role: "tool_result",
             content: `Found ${tag}`,
             status: "completed",
             seq: 2,
-            turn_id: "stub-turn",
+            turn_id: STUB_TURN,
             payload: { links: [{ url_path: `/${workspaceSlug}/assistant/${thread.id}`, label: "Open thread" }] },
             created_at: "2026-01-01T00:00:00Z",
             completed_at: "2026-01-01T00:00:00Z",

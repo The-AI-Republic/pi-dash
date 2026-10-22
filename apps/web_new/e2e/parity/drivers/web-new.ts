@@ -10232,6 +10232,17 @@ export class WebNewDriver implements ParityDriver {
   private assistantThreadCreateFailRemaining = 0;
   private assistantThreadCreateDelayMs = 0;
   private assistantThreadCreateDelayRemaining = 0;
+  /** Canned event frames per thread, served by the stubbed channel. */
+  private assistantStreamFrames = new Map<string, AssistantStreamFrame[]>();
+  /** Event-stream request URLs observed per thread (replay proofs). */
+  private assistantStreamUrls = new Map<string, string[]>();
+  /** Threads whose channel stub is installed. */
+  private assistantStreamInstalled = new Set<string>();
+  /** Threads whose channel stub refuses every request (poll proofs). */
+  private assistantStreamBlocked = new Set<string>();
+  /** Send stubs: delay (ms) applied to the next message POST. */
+  private assistantSendDelayMs = 0;
+  private assistantSendDelayRemaining = 0;
 
   /** The shared composer textarea (landing and conversation share it). */
   private assistantComposerBox() {
@@ -10268,6 +10279,26 @@ export class WebNewDriver implements ParityDriver {
   /** The dashboard card root: the card shell around the entry input. */
   private assistantHomeCard() {
     return this.page.locator("#home-assistant-card").first();
+  }
+
+  /** The conversation's scrolling body that holds the transcript. */
+  private assistantThreadBody() {
+    return this.page.locator('[data-testid="assistant-thread-body"]').first();
+  }
+
+  /** The transcript list; absent while the thread is empty. */
+  private assistantTranscript() {
+    return this.page.locator('[data-testid="assistant-transcript"]').first();
+  }
+
+  /** One transcript row in display order. */
+  private assistantTranscriptRow(index: number) {
+    return this.assistantTranscript().locator(":scope > li").nth(index);
+  }
+
+  /** The stop control shown while a turn runs. */
+  private assistantStopButton() {
+    return this.page.locator('button[aria-label="Stop response"]').first();
   }
 
   // --- Assistant chat core (NEWFRONT-187). Throwing stubs per the shared
@@ -10375,7 +10406,7 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.locator('button[aria-label="Stop response"]'));
   }
   async assistantClickStop(): Promise<void> {
-    return todo("assistantClickStop");
+    await this.assistantStopButton().click();
   }
   async assistantComposerReason(): Promise<string | null> {
     const reason = this.page.locator('[data-testid="assistant-composer-reason"]').first();
@@ -10392,7 +10423,12 @@ export class WebNewDriver implements ParityDriver {
       );
   }
   async assistantErrorLine(): Promise<string | null> {
-    return todo("assistantErrorLine");
+    // The inline line is a live region above the composer; the transcript's
+    // own error rows are bubble content, not this line.
+    const line = this.page.locator('[data-testid="assistant-error-line"]').first();
+    if ((await line.count()) === 0 || !(await this.isShown(line))) return null;
+    const text = (await line.innerText().catch(() => "")).trim();
+    return text === "" ? null : text;
   }
   async assistantMicLabel(): Promise<string | null> {
     return todo("assistantMicLabel");
@@ -10404,10 +10440,39 @@ export class WebNewDriver implements ParityDriver {
     return todo("assistantDictationHint");
   }
   async assistantBubbles(): Promise<AssistantBubble[]> {
-    return todo("assistantBubbles");
+    const list = this.assistantTranscript();
+    if ((await list.count()) === 0) return [];
+    const rows = list.locator(":scope > li");
+    const total = await rows.count();
+    const bubbles: AssistantBubble[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const row = rows.nth(index);
+      const bubble = row.locator("[data-role]").first();
+      const raw = (await bubble.getAttribute("data-role").catch(() => null)) ?? "assistant";
+      // Tool calls and their results are one kind of row to a reader, and the
+      // parity contract names it `tool` whatever the row's stored role is.
+      const role = raw === "tool_call" || raw === "tool_result" ? "tool" : raw;
+      const text = ((await bubble.innerText().catch(() => "")) ?? "").trim();
+      if (text === "") continue;
+      bubbles.push({ role, text });
+    }
+    return bubbles;
   }
-  async assistantBubbleHtml(_index: number): Promise<string> {
-    return todo("assistantBubbleHtml");
+  async assistantBubbleHtml(index: number): Promise<string> {
+    // The bubble's own element carries the role and the error tint, so read
+    // its outer HTML; innerHTML would hide the classes on the bubble itself.
+    const bubble = this.assistantTranscriptRow(index).locator("[data-role]").first();
+    return bubble.evaluate((node) => node.outerHTML);
+  }
+  async assistantErrorTint(index: number): Promise<string> {
+    // Read the rendered colour rather than a class name: the two apps spell
+    // their danger token differently, and the tint the reader sees is what
+    // the oracle asserts (AGT-047).
+    const bubble = this.assistantTranscriptRow(index).locator('[data-role="error"]').first();
+    return bubble.evaluate((node) => {
+      const view = (node as Element).ownerDocument.defaultView;
+      return view === null ? "" : view.getComputedStyle(node as Element).color;
+    });
   }
   async assistantToolActivities(): Promise<AssistantToolActivity[]> {
     return todo("assistantToolActivities");
@@ -10416,10 +10481,21 @@ export class WebNewDriver implements ParityDriver {
     return todo("assistantNoticeLines");
   }
   async assistantEmptyState(): Promise<string | null> {
-    return todo("assistantEmptyState");
+    if ((await this.assistantTranscript().count()) > 0) return null;
+    const body = this.assistantThreadBody();
+    if ((await body.count()) === 0) return null;
+    const text = ((await body.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
   async assistantIsScrolledToBottom(): Promise<boolean> {
-    return todo("assistantIsScrolledToBottom");
+    const body = this.assistantThreadBody();
+    if ((await body.count()) === 0) return false;
+    return body.evaluate((element) => {
+      const node = element as HTMLElement;
+      // The tail anchor leaves the list's bottom padding visible; anything
+      // within one line of the end counts as following the tail.
+      return Math.abs(node.scrollHeight - node.scrollTop - node.clientHeight) < 24;
+    });
   }
   async assistantClickToolLink(_activityIndex: number, _linkIndex: number): Promise<void> {
     return todo("assistantClickToolLink");
@@ -10500,20 +10576,60 @@ export class WebNewDriver implements ParityDriver {
   async assistantCardClickRecent(index: number): Promise<void> {
     await this.assistantHomeCard().locator("ul a").nth(index).click();
   }
-  async assistantStubStream(_threadId: string, _frames: AssistantStreamFrame[]): Promise<void> {
-    return todo("assistantStubStream");
+  async assistantStubStream(threadId: string, frames: AssistantStreamFrame[]): Promise<void> {
+    this.assistantStreamFrames.set(threadId, frames);
+    if (this.assistantStreamInstalled.has(threadId)) return;
+    this.assistantStreamInstalled.add(threadId);
+    this.assistantStreamUrls.set(threadId, []);
+    // One handler per thread: re-stubbing swaps the frames it serves and the
+    // client's own reconnect replays them. The response ends after the
+    // frames (like a proxy timeout), which is what drives that reconnect.
+    await this.page.route(`**/ai-assistant/threads/${threadId}/events**`, async (route) => {
+      this.assistantStreamUrls.get(threadId)?.push(route.request().url());
+      if (this.assistantStreamBlocked.has(threadId)) {
+        await route.abort();
+        return;
+      }
+      const served = this.assistantStreamFrames.get(threadId) ?? [];
+      const body =
+        served.length === 0
+          ? ": keepalive\n\n"
+          : served
+              .map((frame) => {
+                const payload = {
+                  id: frame.seq,
+                  thread: threadId,
+                  message: frame.message ?? null,
+                  seq: frame.seq,
+                  kind: frame.kind,
+                  payload: frame.payload,
+                  created_at: new Date().toISOString(),
+                };
+                return `event: chat.event\ndata: ${JSON.stringify(payload)}\n\n`;
+              })
+              .join("");
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+        body,
+      });
+    });
   }
-  async assistantClearStreamStub(_threadId: string): Promise<void> {
-    return todo("assistantClearStreamStub");
+  async assistantClearStreamStub(threadId: string): Promise<void> {
+    this.assistantStreamFrames.delete(threadId);
+    await this.page.unroute(`**/ai-assistant/threads/${threadId}/events**`);
+    this.assistantStreamInstalled.delete(threadId);
+    this.assistantStreamBlocked.delete(threadId);
   }
-  async assistantStreamRequestUrls(_threadId: string): Promise<string[]> {
-    return todo("assistantStreamRequestUrls");
+  async assistantStreamRequestUrls(threadId: string): Promise<string[]> {
+    return [...(this.assistantStreamUrls.get(threadId) ?? [])];
   }
-  async assistantBlockStream(_threadId: string): Promise<void> {
-    return todo("assistantBlockStream");
+  async assistantBlockStream(threadId: string): Promise<void> {
+    this.assistantStreamBlocked.add(threadId);
+    await this.assistantStubStream(threadId, this.assistantStreamFrames.get(threadId) ?? []);
   }
-  async assistantClearStreamBlock(_threadId: string): Promise<void> {
-    return todo("assistantClearStreamBlock");
+  async assistantClearStreamBlock(threadId: string): Promise<void> {
+    this.assistantStreamBlocked.delete(threadId);
   }
   async assistantStartApiSpy(): Promise<void> {
     this.assistantSpyCounts = { threadCreate: 0, send: 0, cancel: 0, threadList: 0, messageList: 0 };
@@ -10574,11 +10690,21 @@ export class WebNewDriver implements ParityDriver {
     this.assistantThreadCreateDelayRemaining = 0;
     await this.page.unroute("**/api/workspaces/*/ai-assistant/threads/");
   }
-  async assistantDelaySend(_ms: number): Promise<void> {
-    return todo("assistantDelaySend");
+  async assistantDelaySend(ms: number): Promise<void> {
+    this.assistantSendDelayMs = ms;
+    this.assistantSendDelayRemaining = 1;
+    await this.page.route("**/api/workspaces/*/ai-assistant/threads/*/messages/", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST" && this.assistantSendDelayRemaining > 0) {
+        this.assistantSendDelayRemaining -= 1;
+        await new Promise((resolve) => setTimeout(resolve, this.assistantSendDelayMs));
+      }
+      await route.fallback();
+    });
   }
   async assistantClearSendDelay(): Promise<void> {
-    return todo("assistantClearSendDelay");
+    this.assistantSendDelayRemaining = 0;
+    await this.page.unroute("**/api/workspaces/*/ai-assistant/threads/*/messages/");
   }
   async assistantLastToast(): Promise<{ title: string; message: string } | null> {
     const candidates = this.page.locator('[data-testid="toast-notification"]');

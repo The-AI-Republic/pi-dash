@@ -15,7 +15,6 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import { render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import type { AssistantMessage, AssistantSendResponse, LlmConfig } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -67,7 +66,6 @@ function renderGate(
     config?: LlmConfig;
     state?: unknown;
     threadId?: string;
-    hasTranscript?: boolean;
     /** Leave the config read pending forever (the cold-open paint). */
     pendingConfig?: boolean;
     /** Skip the seeded config so the read has to resolve on its own. */
@@ -98,12 +96,7 @@ function renderGate(
     getParentRoute: () => rootRoute,
     path: "/$ws",
     component: () => (
-      <ConversationGate
-        workspaceSlug="acme"
-        threadId={options.threadId ?? THREAD_ID}
-        state={options.state}
-        {...(options.hasTranscript === true ? { hasTranscript: true, transcript: <p>transcript</p> } : {})}
-      />
+      <ConversationGate workspaceSlug="acme" threadId={options.threadId ?? THREAD_ID} state={options.state} />
     ),
   });
   const router = createRouter({
@@ -160,10 +153,10 @@ describe("ConversationGate", () => {
     expect(screen.queryByTestId("assistant-composer-reason")).not.toBeInTheDocument();
   });
 
-  it("lets the thread-view slice render its transcript instead of the empty hint", async () => {
-    renderGate({ config: KEYED, hasTranscript: true });
-    expect(await screen.findByText("transcript")).toBeInTheDocument();
-    expect(screen.queryByTestId("assistant-empty-hint")).not.toBeInTheDocument();
+  it("hands the body to the thread view, which owns the empty hint", async () => {
+    renderGate({ config: KEYED });
+    expect(await screen.findByTestId("assistant-thread-body")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message the assistant" })).toBeEnabled();
   });
 
   it("delivers the handed-off first message once and clears the state", async () => {
@@ -178,14 +171,6 @@ describe("ConversationGate", () => {
   it("does not deliver when the state carries no message", async () => {
     renderGate({ config: KEYED, state: {} });
     await screen.findByTestId("assistant-empty-hint");
-    expect(sends).toEqual([]);
-  });
-
-  it("holds a typed draft without sending it from the shell", async () => {
-    renderGate({ config: KEYED });
-    const box = await screen.findByRole("textbox", { name: "Message the assistant" });
-    await userEvent.type(box, "hello{Enter}");
-    expect(box).toHaveValue("hello");
     expect(sends).toEqual([]);
   });
 

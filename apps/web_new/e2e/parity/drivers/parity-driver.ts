@@ -3600,6 +3600,8 @@ export interface ParityDriver {
   assistantBubbles(): Promise<AssistantBubble[]>;
   /** Rendered HTML of the transcript bubble at `index` (markdown proof). */
   assistantBubbleHtml(index: number): Promise<string>;
+  /** Computed text colour of an error row (AGT-047's tint probe). */
+  assistantErrorTint(index: number): Promise<string>;
   /** Tool-activity rows with their deep links. */
   assistantToolActivities(): Promise<AssistantToolActivity[]>;
   /** Skipped-server notice lines in display order. */

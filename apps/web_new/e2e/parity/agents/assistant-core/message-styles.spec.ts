@@ -23,6 +23,13 @@ import { DUMMY_PROVIDER, PROVIDER_UNREACHABLE, expectBubbles } from "./support";
 
 const ROWS = ["AGT-047"];
 
+// The event contract types these as UUIDs (the server only ever emits UUIDs);
+// a readable stub id would be rejected before it reached the view.
+const STUB_TURN = "47000000-0000-4000-8000-000000000001";
+const STUB_MD = "47000000-0000-4000-8000-000000000002";
+const STUB_STREAM = "47000000-0000-4000-8000-000000000003";
+const scrollId = (seq: number): string => `47000000-0000-4000-8000-${String(seq).padStart(12, "0")}`;
+
 function doneMessage(id: string, role: string, content: string, seq: number): Record<string, unknown> {
   return {
     id,
@@ -30,7 +37,7 @@ function doneMessage(id: string, role: string, content: string, seq: number): Re
     content,
     status: "completed",
     seq,
-    turn_id: "stub-turn",
+    turn_id: STUB_TURN,
     payload: {},
     created_at: "2026-01-01T00:00:00Z",
     completed_at: "2026-01-01T00:00:00Z",
@@ -71,8 +78,14 @@ test(
         { role: "user", text: `style seed ${tag}` },
         { role: "error", text: PROVIDER_UNREACHABLE },
       ]);
-      const errorHtml = await driver.assistantBubbleHtml(1);
-      expect(errorHtml).toContain("text-danger");
+      // Error turns are tinted: the probe reads the rendered colour, so it
+      // holds for either app's own danger token instead of one class spelling.
+      const tint = await driver.assistantErrorTint(1);
+      const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(tint);
+      expect(rgb).not.toBeNull();
+      const [red, green, blue] = [Number(rgb?.[1]), Number(rgb?.[2]), Number(rgb?.[3])];
+      expect(red).toBeGreaterThan(green + 40);
+      expect(red).toBeGreaterThan(blue + 40);
     });
 
     await test.step("assistant markdown renders (stubbed)", async () => {
@@ -81,8 +94,8 @@ test(
       const reply: AssistantStreamFrame = {
         seq: 501,
         kind: "message_completed",
-        message: "stub-md1",
-        payload: { turn_id: "stub-turn", message: doneMessage("stub-md1", "assistant", body, 1) },
+        message: STUB_MD,
+        payload: { turn_id: STUB_TURN, message: doneMessage(STUB_MD, "assistant", body, 1) },
       };
       await driver.assistantStubStream(thread.id, [reply]);
       await driver.assistantOpenThread(workspaceSlug, thread.id);
@@ -100,11 +113,11 @@ test(
       const open: AssistantStreamFrame = {
         seq: 502,
         kind: "message_created",
-        message: "stub-stream1",
+        message: STUB_STREAM,
         payload: {
-          turn_id: "stub-turn",
+          turn_id: STUB_TURN,
           message: {
-            ...doneMessage("stub-stream1", "assistant", "", 1),
+            ...doneMessage(STUB_STREAM, "assistant", "", 1),
             status: "streaming",
             completed_at: null,
           },
@@ -124,10 +137,10 @@ test(
         frames.push({
           seq: 600 + seq,
           kind: "message_completed",
-          message: `stub-scroll${seq}`,
+          message: scrollId(seq),
           payload: {
-            turn_id: "stub-turn",
-            message: doneMessage(`stub-scroll${seq}`, seq % 2 === 1 ? "user" : "assistant", `Row ${seq}`, seq),
+            turn_id: STUB_TURN,
+            message: doneMessage(scrollId(seq), seq % 2 === 1 ? "user" : "assistant", `Row ${seq}`, seq),
           },
         });
       }

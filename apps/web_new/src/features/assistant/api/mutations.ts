@@ -8,13 +8,7 @@
 // the send path revalidates it and picks up the server-assigned title.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import {
-  createAssistantThread,
-  isApiError,
-  sendAssistantMessage,
-  type AssistantSendResponse,
-  type AssistantThread,
-} from "@pidash/api-client";
+import { createAssistantThread, isApiError, type AssistantThread } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { assistantKeys } from "./keys.js";
@@ -43,19 +37,6 @@ export function useStartConversation() {
         thread,
         ...(previous ?? []).filter((row) => row.id !== thread.id),
       ]);
-    },
-  });
-}
-
-/** Deliver the landing/card handoff once per thread; the thread slice streams the answer. */
-export function useDeliverFirstMessage() {
-  const queryClient = useQueryClient();
-  return useMutation<AssistantSendResponse, Error, { workspaceSlug: string; threadId: string; content: string }>({
-    mutationFn: ({ workspaceSlug, threadId, content }) =>
-      sendAssistantMessage(getAppClient(), workspaceSlug, threadId, content),
-    onSettled: (_data, _error, { workspaceSlug }) => {
-      // The send titles an untitled thread; refresh so the rail follows.
-      void queryClient.invalidateQueries({ queryKey: assistantKeys.threads(workspaceSlug) });
     },
   });
 }

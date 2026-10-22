@@ -13,6 +13,7 @@
     "@tiptap/starter-kit",
     "dompurify",
     "lucide-react",
+    "markdown-it",
     "react",
     "react-dom",
     "zod",
