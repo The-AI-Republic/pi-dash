@@ -563,6 +563,7 @@ export function WorkItemCreateDialog({
     setGitOpen(next.gitWorkBranch.trim() !== "");
     setGitError(null);
     setFieldError(null);
+    setExecutionError(null);
     setParentHit(seededParent);
     setDiscardOpen(false);
     setDraftError(null);
@@ -692,6 +693,7 @@ export function WorkItemCreateDialog({
     // pinned to its row's project instead.
     setForm(seededForm(nextProjectId, form.name));
     setFieldError(null);
+    setExecutionError(null);
     setParentHit(seededParent);
     setEditorGeneration((current) => current + 1);
     if (!editing) storeWorkItemDraft(workspaceSlug, { title: form.name, projectId: nextProjectId });
@@ -841,6 +843,7 @@ export function WorkItemCreateDialog({
               : { ...resetForCreateMore(named), parentId: seededParent.id }
           );
           setFieldError(null);
+          setExecutionError(null);
           setParentHit(seededParent);
           setAssetIds([]);
           setEditorGeneration((current) => current + 1);

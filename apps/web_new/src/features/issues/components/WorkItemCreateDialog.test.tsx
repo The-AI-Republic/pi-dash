@@ -1013,6 +1013,27 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     await user.click(await screen.findByRole("option", { name: /Local pod/ }));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("clears the execution refusal when the project changes", async () => {
+    const user = userEvent.setup();
+    setup({
+      createStatus: 400,
+      createErrorBody: {
+        assigned_runner_id: ["That runner belongs to another project."],
+        code: "runner_wrong_project",
+      },
+      runners: [DIALOG_RUNNER],
+    });
+    await user.type(titleField(), "Needs a runner");
+    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
+    save();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Atlas" }));
+    await user.click(await screen.findByRole("option", { name: "Beacon" }));
+    await waitFor(() => expect(screen.getByText("Beacon")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 });
 
 describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
