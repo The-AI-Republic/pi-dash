@@ -12,7 +12,11 @@ vi.mock("../../issues/index.js", async (importOriginal) => ({
   loadRichFilterBuilder: loader.loadRichFilterBuilder,
 }));
 
-import { FieldConfigRegistry, type IssuesEntity, type RichFilterBuilderModule } from "../../issues/index.js";
+import type { FieldConfigRegistry, IssuesEntity, RichFilterBuilderModule } from "../../issues/index.js";
+// Test-only deep imports (checks skip test files): the registry class
+// and snapshot helpers the mocked module carries for the host.
+import { buildViewCreate, savedViewKeys } from "../../issues/filters/rich/views.js";
+import { FieldConfigRegistry as RealRegistry } from "../../issues/filters/rich/temporary.js";
 // Test-only deep type import (checks skip test files).
 import type { RichFilterBuilderParts } from "../../issues/filters/rich/RichFilterBuilder.js";
 import { FilterSectionLoader } from "./FilterSectionLoader.js";
@@ -30,37 +34,56 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject };
 }
 
+function fakeModule(useRichFilterBuilder: ReturnType<typeof vi.fn>): RichFilterBuilderModule {
+  return {
+    useRichFilterBuilder,
+    serializeRichExpression: () => ({}),
+    FieldConfigRegistry: RealRegistry,
+    buildViewCreate,
+    savedViewKeys,
+  };
+}
+
+function fakeBuilder(): ReturnType<typeof vi.fn> {
+  return vi.fn(
+    (): RichFilterBuilderParts => ({
+      control: <span data-testid="fake-filter-control" />,
+      row: <span data-testid="fake-filter-row" />,
+      instanceId: "TEMP-9",
+    })
+  );
+}
+
+function renderLoader(registryRef: { current: FieldConfigRegistry | null }): void {
+  render(
+    <FilterSectionLoader
+      workspaceSlug="acme"
+      projectId={PROJECT}
+      entity={ENTITY}
+      hideCycle={false}
+      hideModule={false}
+      registryRef={registryRef}
+    />
+  );
+}
+
 afterEach(() => {
   loader.loadRichFilterBuilder.mockReset();
 });
 
 describe("FilterSectionLoader", () => {
-  it("shows a loading note while the chunk loads, then the builder", async () => {
+  it("shows a loading note while the chunk loads, then the builder with its registry", async () => {
     const gate = deferred<RichFilterBuilderModule>();
-    const useRichFilterBuilder = vi.fn(
-      (): RichFilterBuilderParts => ({
-        control: <span data-testid="fake-filter-control" />,
-        row: <span data-testid="fake-filter-row" />,
-        instanceId: "TEMP-9",
-      })
-    );
+    const useRichFilterBuilder = fakeBuilder();
     loader.loadRichFilterBuilder.mockReturnValue(gate.promise);
-    const registry = new FieldConfigRegistry();
-    render(
-      <FilterSectionLoader
-        workspaceSlug="acme"
-        projectId={PROJECT}
-        entity={ENTITY}
-        hideCycle={false}
-        hideModule={false}
-        registry={registry}
-      />
-    );
+    const registryRef: { current: FieldConfigRegistry | null } = { current: null };
+    renderLoader(registryRef);
     expect(screen.getByText("Loading filters…")).toBeInTheDocument();
     expect(loader.loadRichFilterBuilder).toHaveBeenCalledTimes(1);
-    gate.resolve({ useRichFilterBuilder, serializeRichExpression: () => ({}) });
+    gate.resolve(fakeModule(useRichFilterBuilder));
     expect(await screen.findByTestId("fake-filter-control")).toBeInTheDocument();
     expect(screen.getByTestId("fake-filter-row")).toBeInTheDocument();
+    expect(registryRef.current).toBeInstanceOf(RealRegistry);
     expect(useRichFilterBuilder).toHaveBeenCalledWith({
       workspaceSlug: "acme",
       projectId: PROJECT,
@@ -68,28 +91,43 @@ describe("FilterSectionLoader", () => {
       hideCycle: false,
       hideModule: false,
       temporary: true,
-      temporaryRegistry: registry,
+      temporaryRegistry: registryRef.current,
     });
   });
 
-  it("shows an error note when the chunk fails", async () => {
+  it("shows an error note when the chunk fails and leaves the ref empty", async () => {
     loader.loadRichFilterBuilder.mockRejectedValue(new Error("chunk gone"));
-    render(
+    const registryRef: { current: FieldConfigRegistry | null } = { current: null };
+    renderLoader(registryRef);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Filters could not be loaded.");
+    expect(registryRef.current).toBeNull();
+  });
+
+  it("releases the registry on unmount", async () => {
+    const gate = deferred<RichFilterBuilderModule>();
+    loader.loadRichFilterBuilder.mockReturnValue(gate.promise);
+    const registryRef: { current: FieldConfigRegistry | null } = { current: null };
+    const view = render(
       <FilterSectionLoader
         workspaceSlug="acme"
         projectId={PROJECT}
         entity={ENTITY}
         hideCycle={false}
         hideModule={false}
-        registry={new FieldConfigRegistry()}
+        registryRef={registryRef}
       />
     );
-    expect(await screen.findByRole("alert")).toHaveTextContent("Filters could not be loaded.");
+    gate.resolve(fakeModule(fakeBuilder()));
+    expect(await screen.findByTestId("fake-filter-control")).toBeInTheDocument();
+    expect(registryRef.current).toBeInstanceOf(RealRegistry);
+    view.unmount();
+    expect(registryRef.current).toBeNull();
   });
 
   it("ignores a settled load after unmount", async () => {
     const resolveGate = deferred<RichFilterBuilderModule>();
     loader.loadRichFilterBuilder.mockReturnValueOnce(resolveGate.promise);
+    const resolveRef: { current: FieldConfigRegistry | null } = { current: null };
     const first = render(
       <FilterSectionLoader
         workspaceSlug="acme"
@@ -97,25 +135,21 @@ describe("FilterSectionLoader", () => {
         entity={ENTITY}
         hideCycle={false}
         hideModule={false}
-        registry={new FieldConfigRegistry()}
+        registryRef={resolveRef}
       />
     );
     first.unmount();
-    const useRichFilterBuilder = vi.fn(
-      (): RichFilterBuilderParts => ({
-        control: <span data-testid="late-filter-control" />,
-        row: null,
-        instanceId: "TEMP-9",
-      })
-    );
-    resolveGate.resolve({ useRichFilterBuilder, serializeRichExpression: () => ({}) });
+    const useRichFilterBuilder = fakeBuilder();
+    resolveGate.resolve(fakeModule(useRichFilterBuilder));
     await resolveGate.promise;
     await new Promise((done) => setTimeout(done, 0));
     expect(useRichFilterBuilder).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("late-filter-control")).not.toBeInTheDocument();
+    expect(resolveRef.current).toBeNull();
+    expect(screen.queryByTestId("fake-filter-control")).not.toBeInTheDocument();
 
     const rejectGate = deferred<RichFilterBuilderModule>();
     loader.loadRichFilterBuilder.mockReturnValueOnce(rejectGate.promise);
+    const rejectRef: { current: FieldConfigRegistry | null } = { current: null };
     const second = render(
       <FilterSectionLoader
         workspaceSlug="acme"
@@ -123,7 +157,7 @@ describe("FilterSectionLoader", () => {
         entity={ENTITY}
         hideCycle={false}
         hideModule={false}
-        registry={new FieldConfigRegistry()}
+        registryRef={rejectRef}
       />
     );
     second.unmount();

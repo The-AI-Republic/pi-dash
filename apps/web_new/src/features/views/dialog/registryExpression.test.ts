@@ -3,9 +3,11 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { FieldConfigRegistry, type RichCondition } from "../../issues/index.js";
-// Test-only deep import (checks skip test files): the serializer the
-// dialog receives from the lazily loaded builder module.
+import type { RichCondition } from "../../issues/index.js";
+// Test-only deep imports (checks skip test files): the registry class
+// and the serializer the dialog receives from the lazily loaded
+// builder module.
+import { FieldConfigRegistry } from "../../issues/filters/rich/temporary.js";
 import { serializeRichExpression } from "../../issues/filters/rich/expression.js";
 import { readRegistryExpression } from "./registryExpression.js";
 
@@ -18,6 +20,10 @@ const CONDITION: RichCondition = {
 };
 
 describe("readRegistryExpression", () => {
+  it("reads the empty expression before the builder chunk has loaded", () => {
+    expect(readRegistryExpression(null, serializeRichExpression)).toEqual({});
+  });
+
   it("reads the empty expression from an untouched registry", () => {
     expect(readRegistryExpression(new FieldConfigRegistry(), serializeRichExpression)).toEqual({});
   });

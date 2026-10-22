@@ -20,15 +20,13 @@ import { getAppClient } from "../../../core/api/client.js";
 import { edition, type ViewAccessValue } from "../../../core/edition/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import {
-  buildViewCreate,
   DisplayControl,
-  FieldConfigRegistry,
   IssuesLoaderProvider,
   LayoutPicker,
   loadRichFilterBuilder,
   mergeDisplayPrefs,
-  savedViewKeys,
   type DisplayPrefs,
+  type FieldConfigRegistry,
   type IssuesEntity,
 } from "../../issues/index.js";
 import { defaultCreateDisplay, normalizeCreateDisplay, serializeCreateDisplay } from "./createDisplay.js";
@@ -80,7 +78,7 @@ function CreateViewForm({
   const [access, setAccess] = React.useState<ViewAccessValue>(SHARED_ACCESS);
   const [submitting, setSubmitting] = React.useState(false);
   const titleRef = React.useRef<HTMLInputElement | null>(null);
-  const registry = React.useMemo(() => new FieldConfigRegistry(), []);
+  const registryRef = React.useRef<FieldConfigRegistry | null>(null);
   const entity = React.useMemo<IssuesEntity>(() => ({ scope: "project", projectId }), [projectId]);
 
   // The title takes focus on every open; the form remounts per session and
@@ -104,19 +102,24 @@ function CreateViewForm({
     }
     setPending(true);
     try {
-      // The builder module is already loaded (its section rendered), so
-      // this reuses the cached request; a failed load keeps the dialog
-      // open through the same failure path as a failed write.
-      const { serializeRichExpression } = await loadRichFilterBuilder();
-      const expression = readRegistryExpression(registry, serializeRichExpression);
+      // The builder module is usually already loaded (its section
+      // rendered), so this reuses the cached request; a failed load
+      // keeps the dialog open through the same failure path as a
+      // failed write. The registry may still be null on an early
+      // submit; that reads as the empty expression.
+      const builder = await loadRichFilterBuilder();
+      const expression = readRegistryExpression(registryRef.current, builder.serializeRichExpression);
       const settings = normalizeCreateDisplay(display);
       const { displayFilters, displayProperties } = serializeCreateDisplay(settings);
       const payload: SavedViewCreate = {
-        ...buildViewCreate({ expression, displayFilters, displayProperties }, { name: title.trim(), description }),
+        ...builder.buildViewCreate(
+          { expression, displayFilters, displayProperties },
+          { name: title.trim(), description }
+        ),
         ...(logo === null ? {} : { logo_props: logo }),
       };
       const created = await createProjectView(getAppClient(), workspaceSlug, projectId, payload);
-      queryClient.setQueryData(savedViewKeys.project(workspaceSlug, projectId, created.id), created);
+      queryClient.setQueryData(builder.savedViewKeys.project(workspaceSlug, projectId, created.id), created);
       const slot = edition.slots?.viewAccess;
       if (slot !== undefined && access !== SHARED_ACCESS) {
         try {
@@ -206,7 +209,7 @@ function CreateViewForm({
             entity={entity}
             hideCycle={hideCycle}
             hideModule={hideModule}
-            registry={registry}
+            registryRef={registryRef}
           />
         </section>
       </div>

@@ -4,7 +4,8 @@
 // Read the dialog's filter expression (parity/specs/views.md §5,
 // VIEW-013). The dialog hosts a temporary builder instance that reports
 // its live conditions into a registry; submitting serializes whatever it
-// holds (an untouched builder reads as the empty expression). The
+// holds (an untouched builder reads as the empty expression, as does a
+// submit that lands before the builder chunk has loaded). The
 // serializer arrives with the lazily loaded builder module, so it is a
 // parameter here rather than a static import (size gate).
 
@@ -12,9 +13,11 @@ import type { FieldConfigRegistry, RichCondition, RichExpression } from "../../i
 
 /** The builder's live conditions as the stored expression tree. */
 export function readRegistryExpression(
-  registry: FieldConfigRegistry,
+  registry: FieldConfigRegistry | null,
   serialize: (conditions: readonly RichCondition[]) => RichExpression
 ): RichExpression {
+  // No registry yet (the chunk is still loading) means no conditions.
+  if (registry === null) return {};
   // Every field entry holds the same full conditions array; one read is
   // the whole expression. No mounted field means no conditions at all.
   const first = registry.activeProperties()[0];

@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Lazy filter section for the view dialog (parity/specs/views.md §5,
-// VIEW-013). The temporary builder arrives through the issues lazy
-// loader, never a static barrel re-export (which would pin the filter
-// subtree into the initial bundle): while its chunk loads the section
-// shows a loading note, and a failed load surfaces an error note
-// instead of the builder.
+// VIEW-013). The temporary builder and its registry arrive through the
+// issues lazy loader, never a static barrel re-export (which would pin
+// the filter subtree into the initial bundle): while its chunk loads
+// the section shows a loading note, and a failed load surfaces an
+// error note instead of the builder. The host owns the registry the
+// temporary instance reports into and hands it to the dialog through
+// the ref, so submitting reads whatever the builder holds.
 
 import * as React from "react";
 
@@ -24,8 +26,8 @@ export interface FilterSectionLoaderProps {
   /** Cycle/module properties hide while their project features are off. */
   hideCycle: boolean;
   hideModule: boolean;
-  /** Registry the temporary instance reports its conditions into. */
-  registry: FieldConfigRegistry;
+  /** Receives the temporary registry once the builder chunk has loaded. */
+  registryRef: { current: FieldConfigRegistry | null };
 }
 
 interface FilterSectionHostProps extends FilterSectionLoaderProps {
@@ -40,8 +42,15 @@ function FilterSectionHost({
   entity,
   hideCycle,
   hideModule,
-  registry,
+  registryRef,
 }: FilterSectionHostProps): React.ReactElement {
+  const registry = React.useMemo(() => new module.FieldConfigRegistry(), [module]);
+  React.useEffect(() => {
+    registryRef.current = registry;
+    return () => {
+      registryRef.current = null;
+    };
+  }, [registry, registryRef]);
   const { control, row } = module.useRichFilterBuilder({
     workspaceSlug,
     projectId,

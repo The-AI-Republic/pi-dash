@@ -45,7 +45,7 @@ vi.mock("../../../core/edition/index.js", () => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import type { ViewAccessFieldProps } from "../../../core/edition/index.js";
-import { savedViewKeys } from "../../issues/index.js";
+import { loadRichFilterBuilder } from "../../issues/index.js";
 import { CreateViewDialog } from "../index.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -284,6 +284,7 @@ describe("CreateViewDialog submit", () => {
       to: "/$ws/projects/$projectId/views/$viewId",
       params: { ws: "acme", projectId: PROJECT, viewId: VIEW_ID },
     });
+    const { savedViewKeys } = await loadRichFilterBuilder();
     expect(queryClient.getQueryData(savedViewKeys.project("acme", PROJECT, VIEW_ID))).toMatchObject({ id: VIEW_ID });
   });
 
