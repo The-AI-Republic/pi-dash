@@ -49,19 +49,43 @@ store). `src/core/` holds `api` (the singleton HTTP client), `query`,
 
 ## Coexistence (F-09)
 
-- `apps/web_new/migrated-routes.json` is the one list of path prefixes the
-  proxy serves from web_new; everything else goes to the old app on the
-  same origin (session cookie shared, no origin/cookie change). Empty until
-  area gates append their prefixes.
+- `apps/web_new/migrated-routes.json` is the one list of routes the proxy
+  serves from web_new; everything else goes to the old app on the same
+  origin (session cookie shared, no origin/cookie change).
+- `entries` is a list of segment patterns:
+  - `/sign-in`, `/auth/device` — a literal path. Serves that path and its
+    whole subtree (the original behavior).
+  - `/{ws}` — one variable segment, **exactly that depth**. A workspace
+    home; not a subtree, or it would claim every workspace page.
+  - `/{ws}/projects`, `/{ws}/browse/{workItem}` — variable plus literal
+    segments at their exact depth.
+  - `/{ws}/projects/*` — the same, plus every path below it. Use a
+    trailing `*` only when the area owns the whole subtree; otherwise
+    unbuilt pages would move to web_new early.
+  - `/` — the catch-all; only when everything has moved.
+- A variable first segment never matches `reservedTopLevel` (reserved
+  workspace slugs, the app's own top-level routes such as `profile` and
+  `settings`, backend paths such as `api`, `auth`, `static`, `live` and
+  `ws`, admin `/god-mode`, and public boards `/spaces`), never matches a
+  name that has a literal entry, and never matches a segment containing a
+  dot (workspace slugs cannot contain one). The exclusion is
+  case-insensitive, which matches Caddy's `path` matcher.
 - After editing the list, run `pnpm --filter web_new coexistence:generate`
   to rewrite the marked blocks in `apps/proxy/Caddyfile.ce` and
   `Caddyfile.aio.ce`; never edit those blocks by hand. CI enforces
-  freshness with `pnpm --filter web_new check:coexistence`.
+  freshness with `pnpm --filter web_new check:coexistence`. Literal
+  entries render as an exact-path redirect plus a subtree proxy; workspace
+  entries render as a named Caddy matcher (`path_regexp` plus
+  `not path`). The AIO build serves those with `handle`, not
+  `handle_path`, so the workspace segment is not stripped before the SPA
+  sees it.
 - Links to not-yet-migrated screens use
   `src/shared/coexistence/CrossAppLink.tsx`: unmigrated paths render as
   plain `<a href>` (full-page load into the old app), migrated paths as
   router links. Both read the same list, so a link flips the moment its
-  prefix lands — no call site changes.
+  route lands — no call site changes. `isMigratedPath` applies the same
+  rules as the generator; `migrated-routes.test.ts` runs both over one
+  path matrix so they cannot drift.
 
 ## Queries and session
 
