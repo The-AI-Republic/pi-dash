@@ -1,10 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Marketing copy and destinations (CLOUD-003/004, parity/specs/cloud.md
-// §1). Copy is ours; only the destinations are fixed by the oracle
-// (hero actions /login, /downloads, /docs; closing action /login; the
-// repository, terms and privacy leave the app).
+// Marketing copy and destinations (CLOUD-003/004/006–009,
+// parity/specs/cloud.md §1–§2). Copy is ours; only the destinations,
+// counts and pinned names are fixed by the oracle (hero actions /login,
+// /downloads, /docs; closing action /login; the repository, terms and
+// privacy leave the app; the stable release URLs; the pricing tier names
+// and prices).
 
 /** Public repository the open-source panel and frame link to. */
 export const REPOSITORY_URL = "https://github.com/The-AI-Republic/pi-dash";
@@ -146,3 +148,228 @@ export const MARKETING_META: Readonly<Record<string, MarketingPageMeta>> = {
 export function metaFor(pathname: string): MarketingPageMeta {
   return MARKETING_META[pathname] ?? MARKETING_META["/home"]!;
 }
+
+// --- Docs page (CLOUD-006, parity/specs/cloud.md §2) ---
+
+/** The three parts of the model the docs page teaches, in order. */
+export const DOCS_CONCEPTS: readonly { title: string; body: string }[] = [
+  {
+    title: "The cloud",
+    body: "Hosted projects, issues and boards: where work is scoped, handed to agents and reviewed to done.",
+  },
+  {
+    title: "The command line",
+    body: "The local CLI that signs a machine in and carries commands, context and results both ways.",
+  },
+  {
+    title: "The runner",
+    body: "One agent bound to one project on a machine you control: where delegated work actually runs.",
+  },
+];
+
+/** The four quick-start steps, in order. Commands render inside their step. */
+export const DOCS_STEPS: readonly { title: string; body: string }[] = [
+  {
+    title: "Create a project",
+    body: "Sign in, create a workspace and a project, and add at least one well-scoped issue so the first run has something concrete to drive.",
+  },
+  {
+    title: "Install the CLI",
+    body: "One command per platform downloads the installer, verifies it and drops the CLI on the path.",
+  },
+  {
+    title: "Sign the machine in",
+    body: "Device login pairs the host with the cloud. The installers start this step for you; run it by hand after an MSI install, on a headless host, or when re-authenticating.",
+  },
+  {
+    title: "Enroll a runner",
+    body: "Pick the project and the agent in the product, then run the enrollment commands on the host and check the diagnostics.",
+  },
+];
+
+export interface DocsCommand {
+  /** Short caption naming the platform or purpose. */
+  label: string;
+  /** Shell text, transcribed from the runner install guide. */
+  command: string;
+}
+
+/** Per-OS installer one-liners (both reference the stable release-download address). */
+export const DOCS_INSTALL_COMMANDS: readonly DocsCommand[] = [
+  {
+    label: "macOS and Linux",
+    command:
+      "curl --proto '=https' --tlsv1.2 -LsSf \\\n  https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.sh | sh",
+  },
+  {
+    label: "Windows (PowerShell)",
+    command: "irm https://github.com/The-AI-Republic/pi-dash/releases/latest/download/install.ps1 | iex",
+  },
+];
+
+/** Device login against the hosted origin. */
+export const DOCS_DEVICE_LOGIN_COMMAND = "pidash auth login";
+
+/** Runner enrollment plus the diagnostics check, run on the host. */
+export const DOCS_ENROLL_COMMAND = "pidash runner add --project <PROJECT_ID>\npidash doctor";
+
+/** Optional agent skill installer: one command installs the skill into the coding agent. */
+export const DOCS_SKILL_COMMAND = "npx @airepublic/pidash-skill-installer";
+
+/** Managed Windows deployments can skip the PowerShell one-liner. */
+export const DOCS_MSI_NOTE = "Managed Windows deployments can use the MSI installer instead.";
+
+/** A Linux-subsystem install stays inside that subsystem. */
+export const DOCS_WSL_NOTE =
+  "A Linux-subsystem install only drives agents inside that subsystem; when the coding agents live on the Windows side, use the PowerShell command instead.";
+
+/** The four phases of the operating loop, in order. */
+export const DOCS_LOOP_PHASES: readonly { title: string; body: string }[] = [
+  { title: "Delegate", body: "Scope an issue and hand it to a runner." },
+  { title: "Execute", body: "The agent implements on its own machine." },
+  { title: "Validate", body: "The project's checks prove the change." },
+  { title: "Review", body: "A second pass takes it to done." },
+];
+
+/** The three trust notes closing the page. */
+export const DOCS_TRUST_NOTES: readonly { title: string; body: string }[] = [
+  {
+    title: "Stays on your host",
+    body: "Source checkouts and credentials never leave the runner machine.",
+  },
+  {
+    title: "Access you grant",
+    body: "Machine access is explicit, scoped and revocable at any time.",
+  },
+  {
+    title: "Open at the core",
+    body: "The core is open source and self-hostable; the cloud is optional.",
+  },
+];
+
+// --- Downloads page (CLOUD-007/008, parity/specs/cloud.md §2) ---
+
+/**
+ * Stable desktop-release download base (CLOUD-007): per-format filenames
+ * under one latest address, so the page needs no per-release edits.
+ */
+export const DESKTOP_RELEASE_BASE = "https://pidash-desktop-releases.s3.us-west-2.amazonaws.com/downloads/latest";
+
+/** Standalone Windows CLI installer (CLOUD-006 MSI alternative, CLOUD-008 CLI card). */
+export const CLI_MSI_URL =
+  "https://github.com/The-AI-Republic/pi-dash/releases/latest/download/pidash-x86_64-pc-windows-msvc.msi";
+
+export interface DownloadFormat {
+  label: string;
+  href: string;
+}
+
+export interface DownloadCard {
+  /** Operating system, exactly as the oracle names it. */
+  os: string;
+  /** Architecture and format note. */
+  arch: string;
+  primary: DownloadFormat;
+  /** Second format where one exists; macOS ships one. */
+  secondary: DownloadFormat | null;
+}
+
+/** One card per supported OS, in oracle order. */
+export const DOWNLOAD_CARDS: readonly DownloadCard[] = [
+  {
+    os: "macOS",
+    arch: "Universal disk image · Apple silicon and Intel",
+    primary: { label: "Download for macOS", href: `${DESKTOP_RELEASE_BASE}/pidash-macos-universal.dmg` },
+    secondary: null,
+  },
+  {
+    os: "Windows",
+    arch: "x64 installer · MSI available",
+    primary: { label: "Download for Windows", href: `${DESKTOP_RELEASE_BASE}/pidash-windows-x64-setup.exe` },
+    secondary: { label: "MSI installer", href: `${DESKTOP_RELEASE_BASE}/pidash-windows-x64.msi` },
+  },
+  {
+    os: "Linux",
+    arch: "x64 AppImage · Debian package available",
+    primary: { label: "Download for Linux", href: `${DESKTOP_RELEASE_BASE}/pidash-linux-x64.AppImage` },
+    secondary: { label: "Debian package", href: `${DESKTOP_RELEASE_BASE}/pidash-linux-x64.deb` },
+  },
+];
+
+/** Unsigned-installer notice (CLOUD-007): pinned wording, matched by the parity read. */
+export const DOWNLOADS_SIGNING_NOTICE =
+  "These installers are not yet publisher-signed, so your operating system may warn about an unverified publisher.";
+
+/** Post-install sign-in hint for the CLI card (CLOUD-008): pinned command, matched by the parity read. */
+export const CLI_SIGNIN_HINT = "Open a fresh terminal after installing, then run pidash auth login to finish setup.";
+
+// --- Pricing page (CLOUD-009, parity/specs/cloud.md §2) ---
+
+/** External membership checkout and enterprise contact destinations. */
+export const MEMBERSHIP_CHECKOUT_URL = "https://airepublic.com/pricing";
+export const ENTERPRISE_CONTACT_URL = "https://airepublic.com/contact";
+
+export interface PricingTier extends MarketingLink {
+  /** Tier name, exactly as the oracle names it. */
+  name: string;
+  /** Price line, exactly as the oracle renders it. */
+  price: string;
+  /** Billing mechanics under the price. */
+  billing: string;
+  /** Feature bullets: five per tier. */
+  features: readonly string[];
+}
+
+/** The two tiers, free first, in oracle order. */
+export const PRICING_TIERS: readonly PricingTier[] = [
+  {
+    name: "Free + pay as you go",
+    price: "$0",
+    billing: "No platform fee",
+    features: [
+      "Up to 500 created issues",
+      "Unlimited machines and agents",
+      "Wallet-funded metered AI usage",
+      "The full loop, delegate to review",
+      "Community support",
+    ],
+    label: "Start for free",
+    href: SIGN_IN_PATH,
+  },
+  {
+    name: "AI Republic membership",
+    price: "$7.99",
+    billing: "Per month, billed annually plus tax",
+    features: [
+      "Uncapped issue creation",
+      "Larger included AI usage quotas",
+      "Everything in Free, included",
+      "Pay-as-you-go past the included quotas",
+      "Annual billing through secure checkout",
+    ],
+    label: "Become a member",
+    href: MEMBERSHIP_CHECKOUT_URL,
+    external: true,
+  },
+];
+
+/** The four FAQ entries, in page order. */
+export const PRICING_FAQ: readonly { question: string; answer: string }[] = [
+  {
+    question: "What counts toward the free cap?",
+    answer:
+      "Each created issue or work item counts once. Hitting the cap stops new creation; everything already created stays available.",
+  },
+  {
+    question: "What does the wallet cover?",
+    answer: "Metered model and connected-app usage. The product itself stays free within the cap.",
+  },
+  {
+    question: "Do members still pay beyond their quotas?",
+    answer: "Yes. Usage past the included quotas continues pay-as-you-go from the same wallet.",
+  },
+  {
+    question: "Are self-hosted deployments affected?",
+    answer: "No. Hosted-plan limits never apply to self-hosted deployments.",
+  },
+];

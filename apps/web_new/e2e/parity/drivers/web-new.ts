@@ -25241,9 +25241,9 @@ export class WebNewDriver implements ParityDriver {
     return todo("spaceCommentEmbedReactions");
   }
 
-  // --- Cloud marketing + public surface (NEWFRONT-645, CLOUD-001–005).
-  // The frame, home and public entry landed in NEWFRONT-645; the docs,
-  // downloads and pricing bodies remain NEWFRONT-648 stubs.
+  // --- Cloud marketing + public surface (NEWFRONT-645, CLOUD-001–005;
+  // NEWFRONT-648, CLOUD-006–009). The frame, home and public entry landed
+  // in NEWFRONT-645; the docs, downloads and pricing bodies in NEWFRONT-648.
 
   private cloudMain(): Locator {
     return this.page.locator("main").first();
@@ -25345,35 +25345,117 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cloudDocsFacts(): Promise<CloudDocsFacts> {
-    return todo("cloudDocsFacts");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const concepts = await main.locator("article").count();
+    const steps = await main.locator("ol > li").count();
+    const blocks = main.locator("pre");
+    const codeBlocks = await blocks.count();
+    let installRefsReleaseDownload = false;
+    for (let index = 0; index < codeBlocks; index++) {
+      const text = (await blocks.nth(index).innerText()) ?? "";
+      if (text.includes("releases/latest/download")) installRefsReleaseDownload = true;
+    }
+    const msi = main.locator('a[href$=".msi"]').first();
+    const msiHref = (await msi.count()) > 0 ? ((await msi.getAttribute("href")) ?? null) : null;
+    const signIn = main.locator('a[href="/login"]').first();
+    const signInHref = (await signIn.count()) > 0 ? ((await signIn.getAttribute("href")) ?? null) : null;
+    const repo = main.locator('a[href*="github.com/The-AI-Republic/pi-dash"]').first();
+    const repoHref = (await repo.count()) > 0 ? ((await repo.getAttribute("href")) ?? null) : null;
+    const sections = main.locator("section");
+    const footerItems = await sections.last().locator(":scope > div > div").count();
+    return {
+      concepts,
+      steps,
+      codeBlocks,
+      installRefsReleaseDownload,
+      msiHref,
+      signInHref,
+      repoHref,
+      footerItems,
+    };
   }
 
   async cloudDownloadCards(): Promise<CloudDownloadCardFacts[]> {
-    return todo("cloudDownloadCards");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const cards = main.locator("article");
+    const count = await cards.count();
+    const out: CloudDownloadCardFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const os = ((await card.locator("h3").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const arch = ((await card.locator("p").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const links = card.getByRole("link");
+      const linkCount = await links.count();
+      const primaryHref = linkCount > 0 ? ((await links.first().getAttribute("href")) ?? "") : "";
+      const secondaryHref = linkCount > 1 ? ((await links.nth(1).getAttribute("href")) ?? null) : null;
+      out.push({ os, arch, primaryHref, secondaryHref });
+    }
+    return out;
   }
 
   async cloudDownloadsSigningNoticeVisible(): Promise<boolean> {
-    return todo("cloudDownloadsSigningNoticeVisible");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    return (await main.getByText(/not yet publisher-signed/).count()) > 0;
   }
 
   async cloudCliCardFacts(): Promise<CloudCliCardFacts> {
-    return todo("cloudCliCardFacts");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const cli = main.locator("#cli-heading").locator("xpath=ancestor::section[1]").first();
+    const installer = cli.locator('a[href$=".msi"]').first();
+    const installerHref = (await installer.count()) > 0 ? ((await installer.getAttribute("href")) ?? "") : "";
+    const docs = cli.locator('a[href="/docs"]').first();
+    const docsHref = (await docs.count()) > 0 ? ((await docs.getAttribute("href")) ?? null) : null;
+    const sections = main.locator("section");
+    const closing = sections.last();
+    const web = closing.locator('a[href="/login"]').first();
+    const webHref = (await web.count()) > 0 ? ((await web.getAttribute("href")) ?? null) : null;
+    const signinHintVisible = (await cli.getByText(/pidash auth login/).count()) > 0;
+    return { installerHref, docsHref, webHref, signinHintVisible };
   }
 
   async cloudPricingTiers(): Promise<CloudPricingTierFacts[]> {
-    return todo("cloudPricingTiers");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const tiers = main.getByTestId("pricing-tier");
+    const count = await tiers.count();
+    const out: CloudPricingTierFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const tier = tiers.nth(index);
+      const name = ((await tier.locator("p").first().innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const price = ((await tier.getByTestId("tier-price").innerText()) ?? "").replace(/\s+/g, " ").trim();
+      const cta = tier.locator("a").last();
+      const ctaHref = (await cta.count()) > 0 ? ((await cta.getAttribute("href")) ?? "") : "";
+      const ctaExternal = (await cta.count()) > 0 && (await cta.getAttribute("target")) === "_blank";
+      const features = await tier.locator("ul > li").count();
+      out.push({ name, price, ctaHref, ctaExternal, features });
+    }
+    return out;
   }
 
   async cloudPricingEnterpriseHref(): Promise<string | null> {
-    return todo("cloudPricingEnterpriseHref");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const contact = main.locator('a[href*="airepublic.com/contact"]').first();
+    if ((await contact.count()) === 0) return null;
+    return (await contact.getAttribute("href")) ?? null;
   }
 
   async cloudPricingFaqCount(): Promise<number> {
-    return todo("cloudPricingFaqCount");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    return main.locator("section").last().locator("article").count();
   }
 
   async cloudPricingFreeCapMentioned(): Promise<boolean> {
-    return todo("cloudPricingFreeCapMentioned");
+    const main = this.cloudMain();
+    await main.waitFor({ timeout: 60_000 });
+    const free = main.getByTestId("pricing-tier").first();
+    if ((await free.count()) === 0) return false;
+    return /500/.test((await free.innerText()) ?? "");
   }
 
   // --- Cloud paywall prompt (NEWFRONT-653, CLOUD-010). The new app
