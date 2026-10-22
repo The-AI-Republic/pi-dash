@@ -97,7 +97,7 @@ export function OwnActivityTab({ now = new Date() }: OwnActivityTabProps): React
                   ) : (
                     <CrossAppLink
                       to={row.href}
-                      className="flex flex-col gap-(--space-1) rounded-(--radius-control) text-(--text) hover:bg-(--surface-hover) focus-visible:outline-2 focus-visible:outline-(--accent)"
+                      className="flex flex-col gap-(--space-1) rounded-(--radius-control) text-(--text) hover:bg-(--subtle) focus-visible:outline-2 focus-visible:outline-(--accent)"
                     >
                       {body}
                     </CrossAppLink>

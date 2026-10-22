@@ -40,7 +40,7 @@ export function OriginChips({ origins, onRemove, onClearAll }: OriginChipsProps)
               aria-label={`Remove filter ${label}`}
               data-testid={`inbox-origin-chip-remove-${origin}`}
               onClick={() => onRemove(origin)}
-              className="shrink-0 cursor-pointer rounded-full p-0.5 text-(--text-muted) hover:bg-(--bg-hover) hover:text-(--text)"
+              className="shrink-0 cursor-pointer rounded-full p-0.5 text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
             >
               <X size={12} aria-hidden="true" />
             </button>

@@ -254,7 +254,7 @@ export function FilterSection({
                   }}
                   aria-label={`Search ${title}`}
                   placeholder={`Search ${title.toLowerCase()}`}
-                  className="text-body w-full bg-transparent py-(--space-1) text-(--text) outline-none placeholder:text-(--text-placeholder)"
+                  className="text-body w-full bg-transparent py-(--space-1) text-(--text) outline-none placeholder:text-(--text-muted)"
                 />
               </label>
               {errorText !== undefined ? (

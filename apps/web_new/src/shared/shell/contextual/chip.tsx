@@ -31,7 +31,7 @@ export function ContextChip({ indicator, subject, onClear }: ContextChipProps): 
           aria-label="Clear context (Backspace)"
           tabIndex={-1}
           onClick={onClear}
-          className="shrink-0 rounded-full p-0.5 text-(--text-muted) hover:bg-(--bg-hover) hover:text-(--text)"
+          className="shrink-0 rounded-full p-0.5 text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
         >
           <X aria-hidden size={12} />
         </button>

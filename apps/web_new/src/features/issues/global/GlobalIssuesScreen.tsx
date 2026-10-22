@@ -59,7 +59,7 @@ function GlobalRow({
     <Link
       to="/$ws/browse/$issueKey"
       params={{ ws: workspaceSlug, issueKey: key }}
-      className="text-body flex h-full items-center gap-(--space-2) border-b border-(--border) px-(--space-3) text-(--text) hover:bg-(--surface-raised)"
+      className="text-body flex h-full items-center gap-(--space-2) border-b border-(--border) px-(--space-3) text-(--text) hover:bg-(--subtle)"
     >
       <span className="text-meta w-20 shrink-0 text-(--text-muted)">{key}</span>
       <span className="min-w-0 truncate">{row.name}</span>

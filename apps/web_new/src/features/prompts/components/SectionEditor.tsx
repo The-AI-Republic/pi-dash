@@ -144,7 +144,7 @@ export function SectionEditor({ workspaceSlug, section, scope, onClose }: Sectio
                   onClick={() => setPreviewKind(kind)}
                   className={`text-meta rounded-(--radius-control) px-(--space-2) py-(--space-1) ${
                     kind === previewKind
-                      ? "bg-(--accent) text-(--accent-contrast)"
+                      ? "bg-(--accent) text-(--on-accent)"
                       : "bg-(--subtle) text-(--text-muted) hover:text-(--text)"
                   }`}
                 >

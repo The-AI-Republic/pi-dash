@@ -83,14 +83,14 @@ export function TransferIssuesDialog({
                 aria-selected={false}
                 disabled={transfer.isPending}
                 onClick={() => pick(cycle.id)}
-                className="text-body flex w-full items-center justify-between gap-(--space-3) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-left text-(--text) hover:bg-(--surface-raised) disabled:opacity-60"
+                className="text-body flex w-full items-center justify-between gap-(--space-3) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-left text-(--text) hover:bg-(--subtle) disabled:opacity-60"
               >
                 <span className="flex min-w-0 items-center gap-(--space-2)">
                   <RefreshCw size={16} strokeWidth={1.5} aria-hidden="true" />
                   <span className="truncate">{cycle.name}</span>
                 </span>
                 {cycle.status ? (
-                  <span className="text-meta shrink-0 rounded-full bg-(--surface-raised) px-(--space-2) text-(--text-muted) lowercase">
+                  <span className="text-meta shrink-0 rounded-full bg-(--subtle) px-(--space-2) text-(--text-muted) lowercase">
                     {cycle.status.toLowerCase()}
                   </span>
                 ) : null}

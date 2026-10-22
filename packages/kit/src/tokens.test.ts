@@ -127,7 +127,22 @@ describe("tokens.css", () => {
     expect(light.get("--text-base-size")).toBe("13px");
     expect(light.get("--text-base-height")).toBe("20px");
     expect(light.get("--text-h1-size")).toBe("24px");
+    // Full spacing ladder, pinned so a slice referencing a step that was
+    // never defined (NEWFRONT-683) fails here instead of collapsing to 0.
+    expect(light.get("--space-0")).toBe("0");
+    expect(light.get("--space-1")).toBe("2px");
+    expect(light.get("--space-2")).toBe("4px");
+    expect(light.get("--space-3")).toBe("6px");
+    expect(light.get("--space-4")).toBe("8px");
+    expect(light.get("--space-5")).toBe("10px");
+    expect(light.get("--space-6")).toBe("12px");
+    expect(light.get("--space-7")).toBe("14px");
     expect(light.get("--space-8")).toBe("16px");
+    expect(light.get("--space-10")).toBe("20px");
+    expect(light.get("--space-12")).toBe("24px");
+    expect(light.get("--space-16")).toBe("32px");
+    expect(light.get("--space-20")).toBe("40px");
+    expect(light.get("--space-24")).toBe("48px");
     expect(light.get("--radius-control")).toBe("4px");
     expect(light.get("--radius-popover")).toBe("6px");
     expect(light.get("--radius-dialog")).toBe("8px");
