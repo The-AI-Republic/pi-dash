@@ -24,6 +24,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from pi_dash.app.views.scheduler.views import (
     ProjectSchedulerBindingDetailEndpoint,
+    ProjectSchedulerBindingListEndpoint,
     ProjectSchedulerBindingRunsEndpoint,
 )
 from pi_dash.db.models import Project, ProjectMember, Scheduler, SchedulerBinding, WorkspaceMember
@@ -303,13 +304,50 @@ def test_binding_detail_exposes_resolved_prompt_and_run_count(
         binding_id=str(binding.id),
     )
     assert res.status_code == 200
-    # Composed exactly like a dispatched run: scheduler prompt, extra
-    # context, then the outcome-mode directive.
-    assert res.data["resolved_prompt"].startswith("Audit the project.\n\nFocus on the API.")
-    assert len(res.data["resolved_prompt"]) > len("Audit the project.\n\nFocus on the API.")
+    # Composed exactly like a dispatched run: scheduler prompt, then extra
+    # context — nothing platform-added.
+    assert res.data["resolved_prompt"] == "Audit the project.\n\nFocus on the API."
+    assert "outcome_mode" not in res.data
     assert res.data["run_count"] == 1
     assert res.data["scheduler_source"] == scheduler.source
     assert res.data["scheduler_is_enabled"] is True
+
+
+@pytest.mark.unit
+def test_binding_write_ignores_a_stale_outcome_mode(db, workspace, project, scheduler, binding, create_user):
+    """PDASHOSS01-281: the field is gone, but a client built before the
+    removal still sends it. That must be ignored, not rejected."""
+    factory = APIRequestFactory()
+    base = f"/api/workspaces/{workspace.slug}/projects/{project.id}/scheduler-bindings/"
+
+    request = factory.patch(
+        f"{base}{binding.id}/", {"outcome_mode": "apply_fix", "extra_context": "Fix it."}, format="json"
+    )
+    force_authenticate(request, user=create_user)
+    res = ProjectSchedulerBindingDetailEndpoint.as_view()(
+        request, slug=workspace.slug, project_id=str(project.id), binding_id=str(binding.id)
+    )
+    assert res.status_code == 200, res.data
+    assert res.data["extra_context"] == "Fix it."
+    assert "outcome_mode" not in res.data
+
+    with impersonate(create_user):
+        other = Scheduler.objects.create(workspace=workspace, slug="stale-client", name="Stale", prompt="Scan.")
+    request = factory.post(
+        base,
+        {
+            "scheduler": str(other.id),
+            "project": str(project.id),
+            "dtstart": timezone.now().isoformat(),
+            "rrule": "FREQ=DAILY",
+            "outcome_mode": "fix_and_review",
+        },
+        format="json",
+    )
+    force_authenticate(request, user=create_user)
+    res = ProjectSchedulerBindingListEndpoint.as_view()(request, slug=workspace.slug, project_id=str(project.id))
+    assert res.status_code == 201, res.data
+    assert "outcome_mode" not in res.data
 
 
 # ---------------------------------------------------------------------------

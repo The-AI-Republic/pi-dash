@@ -648,17 +648,15 @@ def build_scheduler_task_body(binding) -> str:
 
     Injected into the ``scheduler-task`` section as the ``scheduler_task_body``
     context variable — it is **never parsed as Jinja**, matching how issue
-    descriptions / comments flow through the renderer. Order preserves the
-    legacy dispatch concatenation: scheduler prompt, per-install extra context,
-    then the per-binding outcome-mode work directive.
+    descriptions / comments flow through the renderer. The body is exactly what
+    the operator wrote: scheduler prompt, then per-install extra context. The
+    platform adds no work-mode section — what a run does with its results is
+    the prompt's to say.
     """
-    from pi_dash.db.models.scheduler import outcome_mode_directive
-
     scheduler = binding.scheduler
     parts = [
         ((getattr(scheduler, "prompt", "") or "").strip()),
         ((binding.extra_context or "").strip()),
-        outcome_mode_directive(binding.outcome_mode),
     ]
     return "\n\n".join(p for p in parts if p)
 
@@ -673,20 +671,6 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
     project = binding.project
     workspace = binding.workspace
     scheduler = binding.scheduler
-    scheduler_task_body = build_scheduler_task_body(binding)
-    if getattr(run, "executor_kind", "local_runner") == "cloud_agent":
-        scheduler_task_body = "\n\n".join(
-            part
-            for part in [
-                (getattr(scheduler, "prompt", "") or "").strip(),
-                (binding.extra_context or "").strip(),
-                (
-                    "Search for duplicates and create at most one Pi Dash backlog issue "
-                    "for the most important new finding."
-                ),
-            ]
-            if part
-        )
     return {
         "workspace": {
             "slug": getattr(workspace, "slug", ""),
@@ -714,7 +698,7 @@ def build_scheduler_context(binding, run: AgentRun) -> Dict[str, Any]:
         "unavailable_capabilities": (getattr(run, "tool_plan", {}) or {}).get("unavailable_capabilities", []),
         **extra_toolsets_vars(run),
         "limits": (getattr(run, "tool_plan", {}) or {}).get("limits", {}),
-        "scheduler_task_body": scheduler_task_body,
+        "scheduler_task_body": build_scheduler_task_body(binding),
     }
 
 

@@ -178,6 +178,11 @@ export function SchedulerDefinitionFields<T extends FieldValues>({
             "The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic."
           )}
         </p>
+        <p className="text-12 text-secondary">
+          {t(
+            "Nothing is added to this prompt. It must say what the run should do with what it finds (for example file issues or open a pull request), and how; otherwise the run only reports in its final message."
+          )}
+        </p>
         {promptErr?.message && <p className="text-12 text-danger-primary">{String(promptErr.message)}</p>}
       </div>
 
