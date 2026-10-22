@@ -4,11 +4,6 @@
 name: rust-api contract tests — v1 work items
 
 on:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-contract-tests-v1-work-items.yml"
   push:
     branches: [rust-dev]
     paths:

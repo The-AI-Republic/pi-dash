@@ -5,11 +5,6 @@ name: rust-api contract tests
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-contract-tests.yml"
   push:
     branches: [rust-dev]
     paths:
