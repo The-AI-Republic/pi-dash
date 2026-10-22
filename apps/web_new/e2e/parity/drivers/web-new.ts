@@ -7441,7 +7441,7 @@ export class WebNewDriver implements ParityDriver {
     return this.isShown(this.page.getByTestId("kanban-board").first());
   }
 
-  /** Name and count from one column header or lane header. */
+  /** Name and count from one swimlane group header or lane header. */
   private async kanbanHeaderFacts(
     root: Locator,
     nameTestId: string,
@@ -7456,27 +7456,61 @@ export class WebNewDriver implements ParityDriver {
     )
       .trim()
       .replace(/\s+/g, " ");
-    const count = root.getByTestId(countTestId).first();
-    const countText = (await count.innerText().catch(() => null)) ?? "";
-    const parsed = Number.parseInt(countText.trim(), 10);
     return {
       id: (await root.getAttribute(keyAttribute).catch(() => null)) ?? name,
       name,
-      count: Number.isNaN(parsed) ? 0 : parsed,
+      count: await this.kanbanHeaderCount(root, countTestId),
+      rendered: await this.isShown(root),
+    };
+  }
+
+  /** One header's count marker as a number, zero when unreadable. */
+  private async kanbanHeaderCount(root: Locator, countTestId: string): Promise<number> {
+    const count = root.getByTestId(countTestId).first();
+    const countText = (await count.innerText().catch(() => null)) ?? "";
+    const parsed = Number.parseInt(countText.trim(), 10);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+
+  /**
+   * Name and count from one flat column. Flat columns carry no labeled
+   * header children: the name rides the column's own marker and the
+   * count the header's count marker.
+   */
+  private async kanbanFlatColumnFacts(root: Locator): Promise<KanbanColumn> {
+    const name = ((await root.getAttribute("data-column-name").catch(() => null)) ?? "")
+      .trim()
+      .replace(/\s+/g, " ");
+    return {
+      id: (await root.getAttribute("data-column-key").catch(() => null)) ?? name,
+      name,
+      count: await this.kanbanHeaderCount(root, "kanban-column-count"),
       rendered: await this.isShown(root),
     };
   }
 
   async kanbanColumns(): Promise<KanbanColumn[]> {
-    const roots =
-      (await this.page.getByTestId("kanban-group-header").count()) > 0
-        ? this.page.getByTestId("kanban-group-header")
-        : this.page.getByTestId("kanban-column");
-    const total = await roots.count();
+    const headers = this.page.getByTestId("kanban-group-header");
+    if ((await headers.count()) > 0) {
+      const total = await headers.count();
+      const out: KanbanColumn[] = [];
+      for (let index = 0; index < total; index += 1) {
+        out.push(
+          await this.kanbanHeaderFacts(
+            headers.nth(index),
+            "kanban-group-name",
+            "kanban-group-count",
+            "data-column-key"
+          )
+        );
+      }
+      return out;
+    }
+    const columns = this.page.getByTestId("kanban-column");
+    const total = await columns.count();
     const out: KanbanColumn[] = [];
     for (let index = 0; index < total; index += 1) {
-      const root = roots.nth(index);
-      out.push(await this.kanbanHeaderFacts(root, "kanban-group-name", "kanban-group-count", "data-column-key"));
+      out.push(await this.kanbanFlatColumnFacts(columns.nth(index)));
     }
     return out;
   }

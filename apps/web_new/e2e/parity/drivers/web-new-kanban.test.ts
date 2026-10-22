@@ -199,19 +199,20 @@ function boardPage(options: {
 }
 
 describe("kanbanColumns", () => {
-  it("reads each column's key, name and live count", async () => {
+  it("reads each flat column's key, name and live count", async () => {
+    // Flat columns carry no labeled header children: the name rides the
+    // column's own marker and the count the header's count marker, exactly
+    // as KanbanColumn renders them.
     const todo = element(
       { "data-column-key": "todo", "data-column-name": "Todo", "data-collapsed": null },
       {
-        "kanban-group-name": locator({ getAttribute: async () => "Todo" }),
-        "kanban-group-count": locator({ innerText: async () => "2" }),
+        "kanban-column-count": locator({ innerText: async () => "2" }),
       }
     );
     const done = element(
       { "data-column-key": "done", "data-column-name": "Done", "data-collapsed": "true" },
       {
-        "kanban-group-name": locator({ getAttribute: async () => "Done" }),
-        "kanban-group-count": locator({ innerText: async () => "0" }),
+        "kanban-column-count": locator({ innerText: async () => "0" }),
       }
     );
     const page = boardPage({ columns: list([todo, done]) });
@@ -264,8 +265,17 @@ describe("kanbanSwimlanes", () => {
 });
 
 describe("header fallbacks", () => {
+  // Title/inner-text fallbacks belong to the labeled header children the
+  // swimlane group headers render; flat columns read the column markers.
+  function groupHeaderPage(header: Locator) {
+    return pageOf({
+      getByTestId: (id: string) =>
+        id === "kanban-group-header" ? list([header]) : id === "kanban-column" ? list([]) : locator(),
+    });
+  }
+
   it("falls back to inner text when a header carries no title attribute", async () => {
-    const column = element(
+    const header = element(
       { "data-column-key": "todo" },
       {
         "kanban-group-name": locator({
@@ -275,14 +285,14 @@ describe("header fallbacks", () => {
         "kanban-group-count": locator({ innerText: async () => "" }),
       }
     );
-    const page = boardPage({ columns: list([column]) });
+    const page = groupHeaderPage(header);
     await expect(new WebNewDriver(page).kanbanColumns()).resolves.toEqual([
       { id: "todo", name: "Todo list", count: 0, rendered: true },
     ]);
   });
 
   it("keeps the header text when no name or title reads back", async () => {
-    const column = element(
+    const header = element(
       {},
       {
         "kanban-group-name": locator({
@@ -292,9 +302,26 @@ describe("header fallbacks", () => {
         "kanban-group-count": locator({ innerText: async () => "7" }),
       }
     );
-    const page = boardPage({ columns: list([column]) });
+    const page = groupHeaderPage(header);
     await expect(new WebNewDriver(page).kanbanColumns()).resolves.toEqual([
       { id: "", name: "", count: 7, rendered: true },
+    ]);
+  });
+
+  it("reads a flat column's markers as rendered, ignoring group children", async () => {
+    // A flat column never renders group-header children; the reader must
+    // not consult them even when stray markers exist.
+    const column = element(
+      { "data-column-key": "todo", "data-column-name": "  Todo \n" },
+      {
+        "kanban-column-count": locator({ innerText: async () => "4" }),
+        "kanban-group-name": locator({ getAttribute: async () => "Decoy" }),
+        "kanban-group-count": locator({ innerText: async () => "9" }),
+      }
+    );
+    const page = boardPage({ columns: list([column]) });
+    await expect(new WebNewDriver(page).kanbanColumns()).resolves.toEqual([
+      { id: "todo", name: "Todo", count: 4, rendered: true },
     ]);
   });
 });
@@ -344,8 +371,7 @@ describe("lane lookups", () => {
     const column = element(
       {},
       {
-        "kanban-group-name": locator({ getAttribute: async () => "Todo" }),
-        "kanban-group-count": locator({
+        "kanban-column-count": locator({
           innerText: async () => {
             throw new Error("detached");
           },
@@ -361,7 +387,7 @@ describe("lane lookups", () => {
     }) as Locator["getAttribute"];
     const page = boardPage({ columns: list([column]), cards: list([card]) });
     const driver = new WebNewDriver(page);
-    await expect(driver.kanbanColumns()).resolves.toEqual([{ id: "Todo", name: "Todo", count: 0, rendered: true }]);
+    await expect(driver.kanbanColumns()).resolves.toEqual([{ id: "", name: "", count: 0, rendered: true }]);
     await expect(driver.kanbanCards()).resolves.toEqual([
       { issueId: "", name: "Fix login", groupId: "", subGroupId: "" },
     ]);
