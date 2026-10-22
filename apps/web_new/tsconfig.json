@@ -24,6 +24,16 @@
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
+      // Pin every `react` type import in this program to web_new's own
+      // @types/react (v19). Without this, .d.ts files inside pnpm's virtual
+      // store (e.g. @tanstack/*) resolve `react` through the hoisted
+      // node_modules/.pnpm/node_modules/@types/react copy (v18, kept for the
+      // old React 18 apps), loading two @types/react copies into one program
+      // and making JSX.Element vs React.ReactElement flip red/green by
+      // environment (NEWFRONT-854). Vite/vitest ignore tsconfig paths, so
+      // this affects tsc only.
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
       "@pidash/edition": ["./src/core/edition/oss.ts"],
       "@pidash/platform-target": ["./src/core/platform/web.ts"],
       "@pidash/api-client": ["../../packages/api-client/src/index.ts"],
