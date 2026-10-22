@@ -884,3 +884,354 @@ describe("settings account reads (NEWFRONT-586, PROF-011..015)", () => {
     expect(unroute).toHaveBeenCalledWith("**/api/users/me/profile/");
   });
 });
+
+describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
+  function responseOf(url: string, method: string): unknown {
+    return { request: () => ({ method: () => method }), url: () => url };
+  }
+
+  it("maps the theme trigger label to its value and nulls unknowns", async () => {
+    const driver = new WebNewDriver(
+      pageOf({ getByRole: () => locator({ textContent: async () => "Dark high contrast" }) })
+    );
+    expect(await driver.settingsProfileThemeValue()).toBe("dark-contrast");
+    const unknown = new WebNewDriver(pageOf({ getByRole: () => locator({ textContent: async () => "Mystery" }) }));
+    expect(await unknown.settingsProfileThemeValue()).toBeNull();
+  });
+
+  it("picks a theme through the combobox and settles on the saved pick", async () => {
+    let current = "Light";
+    const fill = vi.fn(async () => undefined);
+    const seen: Array<Record<string, unknown>> = [];
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        seen.push({ role, ...(options ?? {}) });
+        if (role === "combobox") return locator({ fill });
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              current = "Dark";
+            },
+          });
+        }
+        return locator({ textContent: async () => current });
+      },
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetTheme("dark");
+    expect(fill).toHaveBeenCalledWith("Dark");
+    expect(seen).toContainEqual({ role: "option", name: "Dark", exact: true });
+    expect(waitForResponse).toHaveBeenCalledTimes(1);
+    const matches = waitForResponse.mock.calls[0]![0] as (response: unknown) => boolean;
+    expect(matches(responseOf("https://app.test/api/users/me/profile/", "PATCH"))).toBe(true);
+    expect(matches(responseOf("https://app.test/api/users/me/profile/", "GET"))).toBe(false);
+    expect(await driver.settingsProfileThemeValue()).toBe("dark");
+  });
+
+  it("settles a rejected theme save back on the previous theme", async () => {
+    const page = pageOf({
+      getByRole: (role: string) => {
+        if (role === "combobox") return locator({ fill: async () => undefined });
+        if (role === "option") return locator({ click: async () => undefined });
+        return locator({ textContent: async () => "Light" });
+      },
+      waitForResponse: async () => ({ ok: () => false }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetTheme("dark");
+    expect(await driver.settingsProfileThemeValue()).toBe("light");
+  });
+
+  it("reads the applied theme and custom vars from the document", async () => {
+    const applied = new WebNewDriver(pageOf({ evaluate: async () => "dark" }));
+    expect(await applied.settingsProfileAppliedTheme()).toBe("dark");
+    const vars = new WebNewDriver(pageOf({ evaluate: async () => true }));
+    expect(await vars.settingsProfileCustomVarsApplied()).toBe(true);
+    const bare = new WebNewDriver(pageOf({ evaluate: async () => false }));
+    expect(await bare.settingsProfileCustomVarsApplied()).toBe(false);
+  });
+
+  it("reads designer visibility and values with absent twins", async () => {
+    const shown = new WebNewDriver(
+      pageOf({
+        locator: (selector: string) =>
+          locator({ inputValue: async () => (selector === 'input[name="primary"]' ? "#ff5151" : "#1a2b3c") }),
+        getByRole: () => locator({ isChecked: async () => true }),
+      })
+    );
+    expect(await shown.settingsProfileCustomDesignerVisible()).toBe(true);
+    expect(await shown.settingsProfileCustomDesignerValues()).toEqual({
+      primary: "#ff5151",
+      background: "#1a2b3c",
+      darkPalette: true,
+    });
+    const hidden = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 0 }) }));
+    expect(await hidden.settingsProfileCustomDesignerVisible()).toBe(false);
+  });
+
+  it("previews a typed color on its swatch", async () => {
+    const fill = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const page = pageOf({
+      locator: () => locator({ fill }),
+      getByLabel: (label: string) => locator({ waitFor, evaluate: async () => `swatch:${label}` }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfilePreviewCustomColor("primary", "#ff5151")).toBe("swatch:Primary preview");
+    expect(fill).toHaveBeenCalledWith("#ff5151");
+    expect(waitFor).toHaveBeenCalledWith({ state: "attached", timeout: 30_000 });
+    expect(await driver.settingsProfilePreviewCustomColor("background", "#1a2b3c")).toBe("swatch:Background preview");
+  });
+
+  it("sets the palette and saves the custom theme past the reload", async () => {
+    const click = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const page = pageOf({
+      getByRole: () => locator({ click }),
+      getByTestId: () => locator({ waitFor }),
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetCustomPalette(true);
+    expect(click).toHaveBeenCalledTimes(1);
+    await driver.settingsProfileSaveCustomTheme();
+    expect(waitForResponse).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenNthCalledWith(1, { state: "detached", timeout: 30_000 });
+    expect(waitFor).toHaveBeenNthCalledWith(2, { state: "visible", timeout: 60_000 });
+  });
+
+  it("reads the locale trigger labels", async () => {
+    const labels: Record<string, string> = {
+      Language: "English",
+      Timezone: "(UTC+14:00) Kiritimati",
+      "First day of the week": "Monday",
+    };
+    const page = pageOf({
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({ textContent: async () => labels[options?.["name"] as string] ?? "" }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileLocaleValues()).toEqual({
+      language: "English",
+      timezone: "(UTC+14:00) Kiritimati",
+      weekStart: "Monday",
+    });
+  });
+
+  it("picks a timezone by its catalog label and settles on it", async () => {
+    let current = "(UTC-11:00) Midway";
+    const fill = vi.fn(async () => undefined);
+    const seen: Array<Record<string, unknown>> = [];
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const page = pageOf({
+      evaluate: async () => [{ value: "Pacific/Kiritimati", label: "(UTC+14:00) Kiritimati" }],
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        seen.push({ role, ...(options ?? {}) });
+        if (role === "combobox") return locator({ fill });
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              current = "(UTC+14:00) Kiritimati";
+            },
+          });
+        }
+        return locator({ textContent: async () => current });
+      },
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetTimezone("Pacific/Kiritimati");
+    expect(fill).toHaveBeenCalledWith("Pacific/Kiritimati");
+    expect(seen).toContainEqual({ role: "option", name: "(UTC+14:00) Kiritimati", exact: true });
+    const matches = waitForResponse.mock.calls[0]![0] as (response: unknown) => boolean;
+    expect(matches(responseOf("https://app.test/api/users/me/", "PATCH"))).toBe(true);
+    expect(await driver.settingsProfileLocaleValues()).toMatchObject({ timezone: "(UTC+14:00) Kiritimati" });
+  });
+
+  it("picks a language and a week start through their comboboxes", async () => {
+    const triggers: Record<string, string> = { Language: "fr", "First day of the week": "Sunday" };
+    const fills: string[] = [];
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        if (role === "combobox") {
+          return locator({
+            fill: async (value: string) => {
+              fills.push(value);
+            },
+          });
+        }
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              if (fills[fills.length - 1] === "English") triggers["Language"] = "English";
+              else triggers["First day of the week"] = fills[fills.length - 1]!;
+            },
+          });
+        }
+        return locator({ textContent: async () => triggers[options?.["name"] as string] ?? "" });
+      },
+      waitForResponse: async () => ({ ok: () => true }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSetLanguage("English");
+    await driver.settingsProfileSetWeekStart("Wednesday");
+    expect(fills).toEqual(["English", "Wednesday"]);
+    expect(await driver.settingsProfileLocaleValues()).toEqual({
+      language: "English",
+      timezone: "",
+      weekStart: "Wednesday",
+    });
+  });
+
+  it("pads the greeting clock and reads the sidebar clock with absent twins", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        locator({
+          textContent: async () =>
+            selector === "#home-date-line" ? "Thursday, October 23 3:45 PM" : " 15:04 Pacific/Kiritimati ",
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileGreetingClockText()).toBe("03:45");
+    expect(await driver.settingsProfileSidebarClockText()).toBe("15:04 Pacific/Kiritimati");
+    const bare = new WebNewDriver(pageOf({ locator: () => locator({ textContent: async () => "" }) }));
+    expect(await bare.settingsProfileGreetingClockText()).toBeNull();
+    expect(await bare.settingsProfileSidebarClockText()).toBeNull();
+  });
+
+  it("reads the calendar header order and drops blanks", async () => {
+    const order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    const seen: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({
+          count: async () => order.length,
+          nth: (index: number) => locator({ textContent: async () => ` ${order[index]!} ` }),
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileCalendarDayOrder()).toEqual(order);
+    expect(seen).toEqual(['[data-testid="issues-calendar"] .sticky > div > div']);
+  });
+
+  it("switches project layouts through data-layout and detects the calendar", async () => {
+    const click = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const seen: string[] = [];
+    const page = pageOf({
+      getByRole: () => locator({ count: async () => 0 }),
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({
+          filter: () => locator({ first: () => locator({ click }) }),
+          first: () => locator({ waitFor }),
+        });
+      },
+      getByTestId: () => locator({ waitFor, isVisible: async () => true }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsSwitchTo("calendar");
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+    expect(await driver.layoutsCalendarVisible()).toBe(true);
+    await driver.layoutsSwitchTo("list");
+    // The list settle matches any labelled box: rows, empty and error
+    // twins use different elements.
+    expect(seen).toContain('[aria-label="Issue list"], [aria-label="Issues"]');
+    const bare = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
+    expect(await bare.layoutsCalendarVisible()).toBe(false);
+  });
+
+  it("keeps the profile-tab layout path when its trigger is present", async () => {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByRole: () => locator({ filter: () => locator({ first: () => locator({ click: async () => undefined }) }) }),
+      locator: (selector: string) =>
+        locator({
+          click: async () => {
+            clicks.push(selector);
+          },
+        }),
+      getByTestId: () => locator({ waitFor: async () => undefined }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.layoutsSwitchTo("kanban");
+    expect(clicks).toEqual(['[data-profile-layout-choice="kanban"]']);
+  });
+
+  it("opens the cycle page on the shared list section", async () => {
+    const goto = vi.fn(async () => undefined);
+    const waitFor = vi.fn(async () => undefined);
+    const page = pageOf({
+      goto,
+      waitForLoadState: async () => undefined,
+      locator: () => locator({ first: () => locator({ waitFor }) }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.openCyclePage("acme", "p-1", "c-1");
+    expect(goto).toHaveBeenCalledWith("/acme/projects/p-1/cycles/c-1", { timeout: 60_000 });
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+  });
+
+  it("leaves the cycle timezone dates to the area that renders them", async () => {
+    const driver = new WebNewDriver(pageOf({}));
+    await expect(driver.settingsProfileCycleUserTimezoneDates()).rejects.toThrow(
+      "drivers/web_new has no settingsProfileCycleUserTimezoneDates yet"
+    );
+  });
+});
+
+describe("settings own activity (NEWFRONT-586, PROF-019)", () => {
+  it("counts entries and detects the load-more control with absent twins", async () => {
+    const page = pageOf({
+      getByTestId: () => locator({ count: async () => 100 }),
+      getByRole: () => locator({ count: async () => 1, isVisible: async () => true }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileOwnActivityEntryCount()).toBe(100);
+    expect(await driver.settingsProfileOwnActivityLoadMoreVisible()).toBe(true);
+    const bare = new WebNewDriver(
+      pageOf({
+        getByTestId: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+      })
+    );
+    expect(await bare.settingsProfileOwnActivityEntryCount()).toBe(0);
+    expect(await bare.settingsProfileOwnActivityLoadMoreVisible()).toBe(false);
+  });
+
+  it("loads more until the row count grows", async () => {
+    let rows = 100;
+    const click = vi.fn(async () => {
+      rows = 105;
+    });
+    const page = pageOf({
+      getByTestId: () => locator({ count: async () => rows }),
+      getByRole: () => locator({ click }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOwnActivityLoadMore();
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(await driver.settingsProfileOwnActivityEntryCount()).toBe(105);
+  });
+
+  it("reads the empty illustration art with absent twins", async () => {
+    const seen: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) => {
+        seen.push(selector);
+        return locator({ getAttribute: async () => "/empty-state/activity/activity-dark.svg" });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileOwnActivityEmptyIllustration()).toBe("/empty-state/activity/activity-dark.svg");
+    expect(seen).toEqual(['section[aria-labelledby="own-activity-heading"] img']);
+    const bare = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 0 }) }));
+    expect(await bare.settingsProfileOwnActivityEmptyIllustration()).toBeNull();
+  });
+});

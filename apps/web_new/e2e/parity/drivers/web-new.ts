@@ -281,6 +281,18 @@ const WEB_NEW_LAYOUTS_WAIT_MS = 300_000;
 
 /** Navigation budget for god-mode pages (cold Vite compiles included). */
 const ADMIN_NAV_WAIT_MS = 180_000;
+/**
+ * Theme trigger labels per stored value (the picker's THEME_OPTIONS; kept
+ * beside the driver so the mapping stays explicit in parity prose).
+ */
+const WEB_NEW_THEME_TRIGGER_LABELS: Record<SettingsProfileTheme, string> = {
+  system: "System preference",
+  light: "Light",
+  dark: "Dark",
+  "light-contrast": "Light high contrast",
+  "dark-contrast": "Dark high contrast",
+  custom: "Custom theme",
+};
 
 /** Literal text for a RegExp built around a caller-provided label. */
 function escapeRegExp(value: string): string {
@@ -2197,8 +2209,16 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByPlaceholder("Title").first().focus();
   }
 
-  async openCyclePage(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("openCyclePage");
+  async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    // The cycle page hosts the shared list layout; settle on its labelled
+    // box the way project issues do (tag-agnostic: rows, empty and error
+    // twins use different elements).
+    await this.page
+      .locator('[aria-label="Issue list"], [aria-label="Issues"]')
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
 
   async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {
@@ -6613,13 +6633,44 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
-    const trigger = this.page
+    const profileTrigger = this.page
       .getByRole("button", { name: /^Issue layout, current / })
       .filter({ visible: true })
       .first();
-    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.locator(`[data-profile-layout-choice="${layout}"]`).click({ timeout: WebNewDriver.WAIT_MS });
-    await this.layoutsWaitForProfileLayout(layout);
+    if ((await profileTrigger.count()) > 0) {
+      await profileTrigger.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.locator(`[data-profile-layout-choice="${layout}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+      await this.layoutsWaitForProfileLayout(layout);
+      return;
+    }
+    // Project, cycle and module pages share the segmented header switcher
+    // (data-layout per kind); the choice marks itself active on switch.
+    await this.page
+      .locator(`[data-layout="${layout}"]`)
+      .filter({ visible: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.layoutsWaitForProjectLayout(layout);
+  }
+
+  private async layoutsWaitForProjectLayout(layout: LayoutsLayoutKey): Promise<void> {
+    if (layout === "calendar") {
+      await this.page.getByTestId("issues-calendar").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    if (layout === "list") {
+      // Tag-agnostic: rows render in the virtual list's labelled box while
+      // the empty and error twins are sections.
+      await this.page
+        .locator('[aria-label="Issue list"], [aria-label="Issues"]')
+        .first()
+        .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.page
+      .locator(`[data-layout="${layout}"][data-active="true"]`)
+      .first()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async layoutsReloadIssues(): Promise<void> {
@@ -6636,7 +6687,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async layoutsCalendarVisible(): Promise<boolean> {
-    return todo("layoutsCalendarVisible");
+    // The profile tab offers list and board only; the calendar lives on the
+    // project, cycle and module pages under one test id.
+    return this.isShown(this.page.getByTestId("issues-calendar"));
   }
 
   async layoutsSpreadsheetVisible(): Promise<boolean> {
@@ -30856,32 +30909,91 @@ export class WebNewDriver implements ParityDriver {
       .getByTestId("own-activity-loading")
       .waitFor({ state: "detached", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
-  async settingsProfileThemeValue(): Promise<SettingsProfileTheme | null> {
-    return todo("settingsProfileThemeValue");
+  private settingsProfileThemeTrigger(): Locator {
+    return this.page.getByRole("button", { name: "Theme", exact: true }).first();
   }
-  async settingsProfileSetTheme(_theme: SettingsProfileTheme): Promise<void> {
-    return todo("settingsProfileSetTheme");
+
+  private settingsProfileThemeLabel(theme: SettingsProfileTheme): string {
+    return WEB_NEW_THEME_TRIGGER_LABELS[theme];
+  }
+
+  async settingsProfileThemeValue(): Promise<SettingsProfileTheme | null> {
+    // The trigger reads the current label; an unknown label is null (the
+    // spec restores through the API then).
+    const text = ((await this.settingsProfileThemeTrigger().textContent()) ?? "").trim();
+    const entries = Object.entries(WEB_NEW_THEME_TRIGGER_LABELS) as Array<[SettingsProfileTheme, string]>;
+    return entries.find(([, label]) => label === text)?.[0] ?? null;
+  }
+  async settingsProfileSetTheme(theme: SettingsProfileTheme): Promise<void> {
+    const before = await this.settingsProfileThemeValue();
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileThemeTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(this.settingsProfileThemeLabel(theme));
+    await this.page
+      .getByRole("option", { name: this.settingsProfileThemeLabel(theme), exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const saved = await saveWait;
+    // A rejected save rolls the switcher back (NEWFRONT-434 target), so the
+    // settle target follows the save outcome instead of the pick.
+    const settled = saved.ok() ? theme : before;
+    await expect.poll(() => this.settingsProfileThemeValue(), { timeout: WebNewDriver.WAIT_MS }).toBe(settled);
   }
   async settingsProfileAppliedTheme(): Promise<string | null> {
-    return todo("settingsProfileAppliedTheme");
+    return this.page.evaluate(() => document.documentElement.getAttribute("data-theme"));
   }
   async settingsProfileCustomVarsApplied(): Promise<boolean> {
-    return todo("settingsProfileCustomVarsApplied");
+    return this.page.evaluate(() => {
+      const style = document.documentElement.style;
+      return (
+        style.getPropertyValue("--theme-custom-primary") !== "" &&
+        style.getPropertyValue("--theme-custom-background") !== "" &&
+        style.getPropertyValue("--theme-custom-mode") !== ""
+      );
+    });
   }
   async settingsProfileCustomDesignerVisible(): Promise<boolean> {
-    return todo("settingsProfileCustomDesignerVisible");
+    return this.isShown(this.page.locator('input[name="primary"]').first());
   }
   async settingsProfileCustomDesignerValues(): Promise<SettingsProfileCustomTheme> {
-    return todo("settingsProfileCustomDesignerValues");
+    const primary = await this.page.locator('input[name="primary"]').first().inputValue();
+    const background = await this.page.locator('input[name="background"]').first().inputValue();
+    const darkPalette = await this.page.getByRole("radio", { name: "Dark mode", exact: true }).first().isChecked();
+    return { primary, background, darkPalette };
   }
-  async settingsProfilePreviewCustomColor(_field: "primary" | "background", _hex: string): Promise<string | null> {
-    return todo("settingsProfilePreviewCustomColor");
+  async settingsProfilePreviewCustomColor(field: "primary" | "background", hex: string): Promise<string | null> {
+    await this.page.locator(`input[name="${field}"]`).first().fill(hex);
+    // The swatches render once both fields hold valid colors; the typed
+    // field always qualifies, and the untouched one keeps its valid value.
+    const swatch = this.page.getByLabel(field === "primary" ? "Primary preview" : "Background preview").first();
+    await swatch.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    return swatch.evaluate((node) => getComputedStyle(node).backgroundColor);
   }
-  async settingsProfileSetCustomPalette(_dark: boolean): Promise<void> {
-    return todo("settingsProfileSetCustomPalette");
+  async settingsProfileSetCustomPalette(dark: boolean): Promise<void> {
+    await this.page
+      .getByRole("radio", { name: dark ? "Dark mode" : "Light mode", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async settingsProfileSaveCustomTheme(): Promise<void> {
-    return todo("settingsProfileSaveCustomTheme");
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.page
+      .getByRole("button", { name: "Set theme", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    // The save reloads to re-enter every cached surface from the stored
+    // colors; the preview detaching marks the reload, then the tab paints
+    // again with the designer showing the saved values.
+    await this.page.getByTestId("custom-theme-preview").waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("preferences-settings")
+      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileFailProfileSaves(status: number): Promise<void> {
     await this.page.route("**/api/users/me/profile/", async (route) => {
@@ -30891,17 +31003,66 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileClearProfileSaveFailure(): Promise<void> {
     await this.page.unroute("**/api/users/me/profile/");
   }
+  private settingsProfileLocaleTrigger(label: string): Locator {
+    return this.page.getByRole("button", { name: label, exact: true }).first();
+  }
+
+  private async settingsProfileLocaleTriggerText(label: string): Promise<string> {
+    return ((await this.settingsProfileLocaleTrigger(label).textContent()) ?? "").trim();
+  }
+
   async settingsProfileLocaleValues(): Promise<SettingsProfileLocale> {
-    return todo("settingsProfileLocaleValues");
+    const language = await this.settingsProfileLocaleTriggerText("Language");
+    const timezone = await this.settingsProfileLocaleTriggerText("Timezone");
+    const weekStart = await this.settingsProfileLocaleTriggerText("First day of the week");
+    return { language, timezone, weekStart };
   }
-  async settingsProfileSetTimezone(_timezone: string): Promise<void> {
-    return todo("settingsProfileSetTimezone");
+  async settingsProfileSetTimezone(timezone: string): Promise<void> {
+    // The catalog labels the option; the IANA value rides as search text,
+    // so typing it narrows the list to the one match.
+    const catalog = await this.page.evaluate(async () => {
+      const response = await fetch("/api/timezones/");
+      const body = (await response.json()) as { timezones?: Array<{ value: string; label: string }> };
+      return body.timezones ?? [];
+    });
+    const label = catalog.find((zone) => zone.value === timezone)?.label ?? timezone;
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileLocaleTrigger("Timezone").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(timezone);
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    await expect
+      .poll(() => this.settingsProfileLocaleTriggerText("Timezone"), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(label);
   }
-  async settingsProfileSetLanguage(_language: string): Promise<void> {
-    return todo("settingsProfileSetLanguage");
+  async settingsProfileSetLanguage(language: string): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileLocaleTrigger("Language").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(language);
+    await this.page.getByRole("option", { name: language, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    await expect
+      .poll(() => this.settingsProfileLocaleTriggerText("Language"), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(language);
   }
-  async settingsProfileSetWeekStart(_day: string): Promise<void> {
-    return todo("settingsProfileSetWeekStart");
+  async settingsProfileSetWeekStart(day: string): Promise<void> {
+    const saveWait = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/profile/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.settingsProfileLocaleTrigger("First day of the week").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search" }).fill(day);
+    await this.page.getByRole("option", { name: day, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await saveWait;
+    await expect
+      .poll(() => this.settingsProfileLocaleTriggerText("First day of the week"), { timeout: WebNewDriver.WAIT_MS })
+      .toBe(day);
   }
   async settingsProfileOpenHome(workspaceSlug: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}`, { timeout: 60_000 });
@@ -30912,7 +31073,12 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileGreetingClockText(): Promise<string | null> {
-    return todo("settingsProfileGreetingClockText");
+    // The date line renders a 12-hour clock ("3:45 PM"); the contract is a
+    // two-digit HH:MM reading, so the hour is padded to match.
+    const line = await this.page.locator("#home-date-line").first().textContent();
+    const match = line === null ? null : /(\d{1,2}):(\d{2})/.exec(line);
+    if (match === null) return null;
+    return `${match[1]!.padStart(2, "0")}:${match[2]!}`;
   }
   async settingsProfileOpenMemberProfile(workspaceSlug: string, userId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/profile/${userId}`, { timeout: 60_000 });
@@ -30924,24 +31090,49 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileSidebarClockText(): Promise<string | null> {
-    return todo("settingsProfileSidebarClockText");
+    const text = await this.page.locator("[data-profile-clock]").first().textContent();
+    return text === null || text.trim() === "" ? null : text.trim();
   }
   async settingsProfileCalendarDayOrder(): Promise<string[]> {
-    return todo("settingsProfileCalendarDayOrder");
+    // The sticky header row carries one cell per weekday, abbreviations in
+    // week order ("Mon" .. "Sun"); the grid body below holds dated cells.
+    const cells = this.page.locator('[data-testid="issues-calendar"] .sticky > div > div');
+    const count = await cells.count();
+    const order: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      order.push(((await cells.nth(index).textContent()) ?? "").trim());
+    }
+    return order.filter((label) => label !== "");
   }
   async settingsProfileOwnActivityEntryCount(): Promise<number> {
-    return todo("settingsProfileOwnActivityEntryCount");
+    return this.page.getByTestId("own-activity-row").count();
   }
   async settingsProfileOwnActivityLoadMoreVisible(): Promise<boolean> {
-    return todo("settingsProfileOwnActivityLoadMoreVisible");
+    // The control renders only while the server reports a further page.
+    return this.isShown(this.page.getByRole("button", { name: "Load more", exact: true }));
   }
   async settingsProfileOwnActivityLoadMore(): Promise<void> {
-    return todo("settingsProfileOwnActivityLoadMore");
+    const before = await this.settingsProfileOwnActivityEntryCount();
+    await this.page
+      .getByRole("button", { name: "Load more", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The spec reads the grown count right after this returns, so the
+    // next page's rows landing is the settle condition.
+    await expect
+      .poll(() => this.settingsProfileOwnActivityEntryCount(), { timeout: WebNewDriver.WAIT_MS })
+      .toBeGreaterThan(before);
   }
   async settingsProfileOwnActivityEmptyIllustration(): Promise<string | null> {
-    return todo("settingsProfileOwnActivityEmptyIllustration");
+    const art = this.page.locator('section[aria-labelledby="own-activity-heading"] img').first();
+    if ((await art.count()) === 0) return null;
+    return art.getAttribute("src");
   }
   async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
+    // Unimplemented on purpose: no web_new surface renders the cycle
+    // start/end pair in the member timezone yet (the cycle page hosts the
+    // bare list). The gate files a fix sub-issue for the stored-dates
+    // scenario instead of guessing at another area's UI.
     return todo("settingsProfileCycleUserTimezoneDates");
   }
 
