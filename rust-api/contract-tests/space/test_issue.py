@@ -217,6 +217,25 @@ def test_issue_reaction_create_and_delete(user_client, world, db):
     assert str(row["updated_by_id"]) == world["owner"]["id"]
 
 
+def test_issue_reaction_public_member_stamps_creator(other_client, other_user, world, db):
+    # PIDASHCONV-1259: a non-member's write auto-creates a
+    # ProjectPublicMember row via get_or_create(member=request.user), and
+    # BaseModel.save stamps created_by to the request user while updated_by
+    # stays NULL on create (db/models/base.py:23-43). The Rust port
+    # inserted the row without created_by_id.
+    url = f"{BASE}/anchor/{world['anchor']}/issues/{world['issue']['id']}/reactions/"
+    created = other_client.post(url, json={"reaction": "rocket"})
+    assert created.status_code == 201
+    row = db.fetchone(
+        "SELECT created_by_id, updated_by_id FROM project_public_members"
+        " WHERE project_id = %s AND member_id = %s AND deleted_at IS NULL",
+        (world["project"]["id"], other_user["id"]),
+    )
+    assert row is not None
+    assert str(row["created_by_id"]) == other_user["id"]
+    assert row["updated_by_id"] is None
+
+
 def test_issue_reaction_list_requires_auth(anon_client, world):
     response = anon_client.get(f"{BASE}/anchor/{world['anchor']}/issues/{world['issue']['id']}/reactions/")
     assert response.status_code in (401, 403)
