@@ -84,12 +84,14 @@ describe("root runtime sign-out lifecycle", () => {
   });
 
   // The barrel pulls the whole feature into a cold module graph, which takes
-  // several seconds on a loaded suite host; the default budget is too tight.
+  // several seconds on a loaded suite host. It runs under the shared 30 s
+  // full-run budget (src/testing/testBudget.ts): the old 20 s override
+  // predates that budget and became the binding constraint (NEWFRONT-861).
   it("exposes the command-line setup surface from the feature barrel", async () => {
     const feature = await import("./index.js");
     expect(feature.CLI_SETUP_HEADING).toBe("Command-line tool");
     expect(typeof feature.createSetupLock).toBe("function");
     expect(typeof feature.setUpCli).toBe("function");
     expect(feature.CliSetupPanel).toBeTypeOf("function");
-  }, 20_000);
+  });
 });
