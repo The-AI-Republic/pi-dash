@@ -63,7 +63,7 @@ export const VIEW_SORT_DIRECTION_OPTIONS: ReadonlyArray<{ direction: ViewSortDir
 
 /** Trigger label: the active key, never the direction. */
 export function viewSortLabel(key: ViewSortKey): string {
-  return VIEW_SORT_KEY_OPTIONS.find((option) => option.key === key)?.label ?? "";
+  return VIEW_SORT_KEY_OPTIONS.find((option) => option.key === key)?.label as string;
 }
 
 /**
@@ -277,17 +277,17 @@ export const VIEW_FILTER_DIMENSION_LABELS: Record<ViewFilterDimension, string> =
   creators: "Created by",
 };
 
-function accessLabel(value: number): string {
-  return VIEW_ACCESS_OPTIONS.find((option) => option.value === value)?.label ?? "";
+function accessLabel(value: number): string | undefined {
+  return VIEW_ACCESS_OPTIONS.find((option) => option.value === value)?.label;
 }
 
 function createdLabels(created: ViewCreatedFilter): ViewFilterChipValue[] {
   const chips: ViewFilterChipValue[] = created.presets.map((preset) => ({
     value: preset,
-    label: VIEW_CREATED_PRESETS.find((option) => option.value === preset)?.label ?? "",
+    label: VIEW_CREATED_PRESETS.find((option) => option.value === preset)?.label as string,
   }));
   if (created.custom !== null) chips.push({ value: VIEW_CREATED_CUSTOM_VALUE, label: VIEW_CREATED_CUSTOM_LABEL });
-  return chips.filter((chip) => chip.label !== "");
+  return chips;
 }
 
 function creatorChips(
@@ -295,7 +295,10 @@ function creatorChips(
   members: readonly WorkspaceMember[] | undefined,
   selfId: string | null
 ): ViewFilterChipValue[] {
-  return creators.flatMap((id) => {
+  // Filter values and roster ids compare as strings: a UUID string is the
+  // same creator however the caller spelled it.
+  return creators.flatMap((rawId) => {
+    const id = `${rawId}`;
     const member = members?.find((entry) => entry.member.id === id)?.member;
     // A creator who left the roster still narrows the list; the chip shows
     // the raw id rather than dropping the dimension silently.
@@ -304,7 +307,7 @@ function creatorChips(
       {
         value: id,
         label: selfId !== null && id === selfId ? "You" : member.display_name,
-        avatarUrl: member.avatar_url ?? undefined,
+        avatarUrl: member.avatar_url === "" || member.avatar_url === null ? undefined : member.avatar_url,
       },
     ];
   });
@@ -328,9 +331,10 @@ export function selectViewFilterChipGroups(
     groups.push({
       dimension: "access",
       label: VIEW_FILTER_DIMENSION_LABELS.access,
-      values: filters.access.flatMap((value) =>
-        accessLabel(value) === "" ? [] : [{ value: `${value}`, label: accessLabel(value) }]
-      ),
+      values: filters.access.flatMap((value) => {
+        const label = accessLabel(value);
+        return label === undefined ? [] : [{ value: `${value}`, label }];
+      }),
     });
   }
   const created = createdLabels(filters.created);

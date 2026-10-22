@@ -112,6 +112,7 @@ function resetHarness(): Harness {
     members: [makeMember(VIEWS_OWNER_ID)],
     workspaces: [workspaceRow()],
     me: meRow(),
+    meStatus: 200,
   };
 }
 
@@ -159,7 +160,8 @@ beforeEach(() => {
       return jsonResponse(url, harness.viewsStatus, harness.views);
     }
     if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, harness.members);
-    if (url.endsWith("/api/users/me/")) return jsonResponse(url, 200, harness.me);
+    if (url.endsWith("/api/users/me/"))
+      return jsonResponse(url, harness.meStatus, harness.meStatus === 200 ? harness.me : { detail: "nope" });
     if (url.endsWith("/api/users/me/workspaces/")) return jsonResponse(url, 200, harness.workspaces);
     throw new Error(`unexpected request: ${url}`);
   }) as never);
@@ -371,6 +373,17 @@ describe("ProjectViewsListScreen", () => {
       fireEvent.change(screen.getByRole("textbox"), { target: { value: "zzz" } });
       await waitFor(() => expect(screen.getByTestId("project-views-no-match")).toBeInTheDocument());
       expect(screen.queryByTestId("project-views-zero")).not.toBeInTheDocument();
+    });
+
+    it("still lists and filters when the caller row does not resolve", async () => {
+      harness.meStatus = 500;
+      harness.views = [alpha, beta];
+      await openList();
+
+      fireEvent.click(screen.getByTestId("project-views-filter-trigger"));
+      fireEvent.click(screen.getByRole("checkbox", { name: "Favorites" }));
+      await waitFor(() => expect(names()).toHaveLength(1));
+      expect(screen.getByTestId("project-views-applied-filters")).toHaveTextContent("Starred");
     });
 
     it("re-orders on a sort pick and resets on a remount", async () => {

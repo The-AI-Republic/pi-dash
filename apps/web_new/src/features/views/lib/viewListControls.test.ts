@@ -26,6 +26,7 @@ import {
   toggleViewFavoriteFilter,
   UNTITLED_VIEW_NAME,
   VIEW_ACCESS_OPTIONS,
+  VIEW_ACCESS_PRIVATE,
   viewCreatorId,
   viewDisplayName,
   viewSortLabel,
@@ -92,6 +93,15 @@ describe("ordering (VIEW-005)", () => {
     expect(sortProjectViews(rows, { key: "updated_at", direction: "ascending" })).toEqual([apple, zebra, mango]);
   });
 
+  it("treats names that differ only in case as equal", () => {
+    const upper = makeView({ id: "a", name: "Alpha" });
+    const lower = makeView({ id: "b", name: "alpha" });
+    expect(sortProjectViews([upper, lower], { key: "name", direction: "descending" }).map((v) => v.id)).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
   it("never mutates the input and keeps ties stable", () => {
     const first = makeView({ id: "a", name: "Same", updated_at: "2026-01-01T00:00:00Z" });
     const second = makeView({ id: "b", name: "Same", updated_at: "2026-01-01T00:00:00Z" });
@@ -146,6 +156,14 @@ describe("filters (VIEW-006)", () => {
     expect(month.created.presets).toEqual(["1_week_ago", "1_month_ago"]);
     expect([old, mid, fresh].filter((v) => matchesViewFilters(v, month, NOW))).toEqual([old]);
     expect(toggleViewCreatedPreset(month, "1_week_ago").created.presets).toEqual(["1_month_ago"]);
+  });
+
+  it("ignores a created preset the options do not define", () => {
+    const unknown = {
+      ...EMPTY_VIEW_LIST_FILTERS,
+      created: { presets: ["3_years_ago" as "1_week_ago"], custom: null },
+    };
+    expect(matchesViewFilters(old, unknown, NOW)).toBe(false);
   });
 
   it("keeps an unparseable stamp out of every preset", () => {
@@ -222,6 +240,20 @@ describe("applied chips (VIEW-007)", () => {
     expect(groups[3]?.values).toEqual([
       { value: "user-2", label: "Ada Lovelace", avatarUrl: "https://cdn.example/ada.png" },
     ]);
+  });
+
+  it("omits the avatar when the member has none", () => {
+    const bare = makeMember("user-3");
+    bare.member.avatar_url = "";
+    const filters = toggleViewCreatorFilter(EMPTY_VIEW_LIST_FILTERS, "user-3");
+    expect(selectViewFilterChipGroups(filters, [bare], null)[0]?.values).toEqual([
+      { value: "user-3", label: "Ada Lovelace" },
+    ]);
+  });
+
+  it("drops an access value the filter does not offer", () => {
+    const filters = { ...EMPTY_VIEW_LIST_FILTERS, access: [VIEW_ACCESS_PRIVATE, 7] };
+    expect(selectViewFilterChipGroups(filters, members, null)[0]?.values).toEqual([{ value: "0", label: "Private" }]);
   });
 
   it("labels the caller You and shows the custom window", () => {
