@@ -245,6 +245,7 @@ export type {
 } from "./contracts/project-settings-writes.js";
 export {
   ISSUE_PRIORITIES,
+  ArchivedIssue,
   GlobalIssueListResponse,
   GlobalIssueRow,
   GroupedIssueListResponse,
@@ -256,6 +257,7 @@ export {
   IssueRelationsSummary,
   SubGroupedIssueBucket,
   SubGroupedIssueListResponse,
+  getArchivedIssue,
   getIssue,
   listArchivedIssues,
   listGlobalIssues,
@@ -263,8 +265,10 @@ export {
   listGroupedIssues,
   listGroupedModuleIssues,
   listCycleIssues,
+  listGroupedArchivedIssues,
   listIssues,
   listModuleIssues,
+  listSubGroupedArchivedIssues,
   listSubGroupedIssues,
 } from "./contracts/issues.js";
 export type { IssueListQuery } from "./contracts/issues.js";
@@ -759,13 +763,23 @@ export type {
   NotificationPreferencePatch,
 } from "./contracts/notifications.js";
 export {
+  ArchivedCycleDetail,
+  ArchivedCycleList,
+  ArchivedCycleListItem,
+  ArchivedDistribution,
+  ArchivedEstimateDistribution,
+  CycleArchiveStamp,
   CycleList,
   CycleListItem,
   CycleProgress,
   CycleTransferResult,
   CycleUpdate,
+  archiveCycle,
+  getArchivedCycle,
   getCycleProgress,
+  listArchivedCycles,
   listCycles,
+  restoreCycle,
   transferCycleIssues,
   updateCycle,
 } from "./contracts/cycles.js";
@@ -804,10 +818,19 @@ export type { AppApiKeyInput, MarketplaceQuery } from "./contracts/openhub.js";
 export type { CyclePatch } from "./contracts/cycles.js";
 export {
   MODULE_STATUSES,
+  ArchivedModuleDetail,
+  ArchivedModuleLink,
+  ArchivedModuleList,
+  ArchivedModuleListItem,
+  ModuleArchiveStamp,
   ModuleList,
   ModuleListItem,
   ModuleUpdate,
+  archiveModule,
+  getArchivedModule,
+  listArchivedModules,
   listModules,
+  restoreModule,
   updateModule,
 } from "./contracts/modules.js";
 export type { ModulePatch, ModuleStatus } from "./contracts/modules.js";
