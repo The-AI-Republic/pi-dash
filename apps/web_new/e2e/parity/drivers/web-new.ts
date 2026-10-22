@@ -25287,22 +25287,94 @@ export class WebNewDriver implements ParityDriver {
     masterPaused: boolean | null;
     jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[];
   }> {
-    return todo("settingsProfileUpkeepFacts");
+    // The page holds a loader until the switches land; never read mid-load.
+    await this.page.getByTestId("upkeep-settings-page").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const empty = this.page.getByText("Nothing is scheduled on this instance yet.", { exact: false });
+    if ((await empty.count()) > 0) {
+      return { emptyExplanation: ((await empty.first().innerText()) ?? "").trim(), masterPaused: null, jobs: [] };
+    }
+    const master = this.page.getByTestId("upkeep-master-switch");
+    if ((await master.count()) === 0) return { emptyExplanation: null, masterPaused: null, jobs: [] };
+    const items = this.page.getByTestId("upkeep-job");
+    const total = await items.count();
+    const jobs: { name: string; interval: string; description: string; enabled: boolean; toggleDisabled: boolean }[] =
+      [];
+    for (let index = 0; index < total; index += 1) {
+      const row = items.nth(index);
+      const toggle = row.getByRole("switch").first();
+      jobs.push({
+        name: ((await row.locator("span").nth(0).innerText()) ?? "").trim(),
+        interval: ((await row.locator("span").nth(1).innerText()) ?? "").trim(),
+        description: ((await row.locator("span").nth(2).innerText()) ?? "").trim(),
+        enabled: (await toggle.getAttribute("aria-checked")) === "true",
+        toggleDisabled: await toggle.isDisabled(),
+      });
+    }
+    return {
+      emptyExplanation: null,
+      masterPaused: (await master.first().getAttribute("aria-checked")) === "true",
+      jobs,
+    };
   }
-  async settingsProfileUpkeepToggleMaster(_paused: boolean): Promise<void> {
-    return todo("settingsProfileUpkeepToggleMaster");
+  async settingsProfileUpkeepToggleMaster(paused: boolean): Promise<void> {
+    const facts = await this.settingsProfileUpkeepFacts();
+    if (facts.masterPaused === null) throw new Error("[parity] upkeep master switch not rendered.");
+    if (facts.masterPaused === paused) return;
+    // Master writes hit the bare settings endpoint; exclude the per-job
+    // path so the settle wait cannot catch a job write instead.
+    const settled = this.page.waitForResponse(
+      (response) =>
+        response.request().method() === "PATCH" &&
+        response.url().includes("/api/users/me/auto-pm/") &&
+        !response.url().includes("/jobs/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.page.getByTestId("upkeep-master-switch").click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
-  async settingsProfileUpkeepToggleJob(_name: string, _enabled: boolean): Promise<void> {
-    return todo("settingsProfileUpkeepToggleJob");
+  async settingsProfileUpkeepToggleJob(name: string, enabled: boolean): Promise<void> {
+    const facts = await this.settingsProfileUpkeepFacts();
+    const index = facts.jobs.findIndex((job) => job.name === name);
+    if (index < 0) throw new Error(`[parity] upkeep job ${name} not found.`);
+    if (facts.jobs[index]!.enabled === enabled) return;
+    const settled = this.page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/api/users/me/auto-pm/jobs/"),
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.page
+      .getByTestId("upkeep-job")
+      .nth(index)
+      .getByRole("switch")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
   async settingsProfileUpkeepFailWrites(): Promise<void> {
-    return todo("settingsProfileUpkeepFailWrites");
+    // Fail the PATCH writes only: GET reads keep passing so the tab still
+    // renders its switches and the rollback half stays observable.
+    await this.page.route("**/api/users/me/auto-pm/**", (route) => {
+      if (route.request().method() === "PATCH") {
+        void route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' });
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileUpkeepClearRoutes(): Promise<void> {
-    return todo("settingsProfileUpkeepClearRoutes");
+    await this.page.unroute("**/api/users/me/auto-pm/**");
   }
-  async settingsProfileUpkeepDelayWrites(_ms: number): Promise<void> {
-    return todo("settingsProfileUpkeepDelayWrites");
+  async settingsProfileUpkeepDelayWrites(ms: number): Promise<void> {
+    // Hold the PATCH writes before passing them through, so the optimistic
+    // flip is observable while the write is still in flight.
+    await this.page.route("**/api/users/me/auto-pm/**", (route) => {
+      if (route.request().method() === "PATCH") {
+        setTimeout(() => {
+          void route.continue();
+        }, ms);
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileIntegrationsFacts(): Promise<{
     loading: boolean;
@@ -25321,19 +25393,150 @@ export class WebNewDriver implements ParityDriver {
     suspendedBanner: string | null;
     lastCheckError: string | null;
   }> {
-    return todo("settingsProfileIntegrationsFacts");
+    // The content renders from its data read; never read mid-loader. Any
+    // one of the settled twins (picker, panel, no-admin) proves the read.
+    await this.page
+      .locator('#integrations-workspace, [data-testid="github-app-panel"], [data-testid="integrations-no-admin"]')
+      .first()
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    const loading = await this.isShown(this.page.getByTestId("integrations-settings-loading"));
+    const noAdmin = (await this.page.getByTestId("integrations-no-admin").count()) > 0;
+    const panel = this.page.getByTestId("github-app-panel");
+    const hasPanel = (await panel.count()) > 0;
+    if (loading || (!noAdmin && !hasPanel)) {
+      return {
+        loading: true,
+        noAdmin: false,
+        configuredWarning: null,
+        workspaceOptions: [],
+        selectedSlug: null,
+        panelHeading: null,
+        panelLead: null,
+        connected: null,
+        installLabel: null,
+        installDisabled: null,
+        refreshVisible: false,
+        statusFields: [],
+        unconnectedCopy: null,
+        suspendedBanner: null,
+        lastCheckError: null,
+      };
+    }
+    const select = this.page.locator("#integrations-workspace");
+    const hasSelect = (await select.count()) > 0;
+    const install = panel.getByRole("button", { name: "Install", exact: true });
+    const reconnect = panel.getByRole("button", { name: "Reconnect", exact: true });
+    const installButton =
+      (await install.count()) > 0 ? install.first() : (await reconnect.count()) > 0 ? reconnect.first() : null;
+    const refresh = panel.getByRole("button", { name: "Refresh", exact: true });
+    const refreshVisible = await this.isShown(refresh);
+    const statusGrid = panel.getByTestId("github-app-status");
+    const statusFields =
+      (await statusGrid.count()) === 0
+        ? []
+        : await statusGrid.first().evaluate((grid) =>
+            [...grid.children].map((cell) => {
+              const parts = [...cell.children].map((part) => (part.textContent ?? "").replace(/\s+/g, " ").trim());
+              return { label: parts[0] ?? "", value: parts[1] ?? "" };
+            })
+          );
+    const heading = panel.locator("h3");
+    const warning = panel.getByText("GitHub App configuration is missing", { exact: false });
+    const unconnected = panel.getByText("No GitHub App installation is connected", { exact: false });
+    const suspended = panel.getByText("suspended or removed in GitHub", { exact: false });
+    const lastFailed = panel.getByText("Last check failed:", { exact: false });
+    const panelHeading = !hasPanel ? null : ((await heading.first().innerText()) ?? "").trim() || null;
+    return {
+      loading: false,
+      noAdmin,
+      configuredWarning:
+        (await warning.count()) > 0 ? ((await warning.first().innerText()) ?? "").replace(/\s+/g, " ").trim() : null,
+      workspaceOptions: hasSelect
+        ? await select.first().evaluate((node) =>
+            [...(node as HTMLSelectElement).options].map((option) => ({
+              slug: option.value,
+              name: (option.textContent ?? "").trim(),
+            }))
+          )
+        : [],
+      selectedSlug: hasSelect ? await select.first().inputValue() : null,
+      panelHeading,
+      panelLead: !hasPanel
+        ? null
+        : ((await panel.locator("p").first().innerText()) ?? "").replace(/\s+/g, " ").trim() || null,
+      connected: !hasPanel ? null : refreshVisible,
+      installLabel:
+        installButton === null ? null : ((await installButton.innerText()) ?? "").replace(/\s+/g, " ").trim() || null,
+      installDisabled: installButton === null ? null : await installButton.isDisabled(),
+      refreshVisible,
+      statusFields,
+      unconnectedCopy:
+        (await unconnected.count()) > 0
+          ? ((await unconnected.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+      suspendedBanner:
+        (await suspended.count()) > 0
+          ? ((await suspended.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+      lastCheckError:
+        (await lastFailed.count()) > 0
+          ? ((await lastFailed.first().innerText()) ?? "").replace(/\s+/g, " ").trim()
+          : null,
+    };
   }
-  async settingsProfileIntegrationsSelect(_slug: string): Promise<void> {
-    return todo("settingsProfileIntegrationsSelect");
+  async settingsProfileIntegrationsSelect(slug: string): Promise<void> {
+    // The picker swap is client-side (one status read backs every option),
+    // so settle on the panel copy naming the picked workspace.
+    const select = this.page.locator("#integrations-workspace");
+    const name = await select.evaluate((node, want: string) => {
+      const hit = [...(node as HTMLSelectElement).options].find((option) => option.value === want);
+      return hit === undefined ? "" : (hit.textContent ?? "").trim();
+    }, slug);
+    if (name === "") throw new Error(`[parity] integrations picker has no option ${slug}.`);
+    await select.selectOption(slug, { timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .waitForFunction((want: string) => (document.body.innerText ?? "").includes(want), name, {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(() => null);
   }
   async settingsProfileIntegrationsRefresh(): Promise<void> {
-    return todo("settingsProfileIntegrationsRefresh");
+    // The check dials GitHub; on the seeded stack the unreachable host
+    // answers in seconds, but allow the full budget before the spec's
+    // toast poll takes over.
+    const settled = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/integrations/github/app/refresh/") &&
+          response.request().method() === "POST",
+        { timeout: 120_000 }
+      )
+      .catch(() => null);
+    await this.page
+      .getByTestId("github-app-panel")
+      .getByRole("button", { name: "Refresh", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await settled;
   }
   async settingsProfileIntegrationsFailRefresh(): Promise<void> {
-    return todo("settingsProfileIntegrationsFailRefresh");
+    // Fail the refresh check with the exact body the seeded stack returns
+    // live (502 config-missing): the live check burns ~120s in network
+    // timeouts, so the suite pins the client contract against the observed
+    // payload instead of the wait. Reads pass through untouched.
+    await this.page.route("**/api/users/me/integrations/github/app/refresh/", (route) => {
+      if (route.request().method() === "POST") {
+        void route.fulfill({
+          status: 502,
+          contentType: "application/json",
+          body: '{"error":"GitHub App config missing: app_id, app_slug, private_key"}',
+        });
+      } else {
+        void route.continue();
+      }
+    });
   }
   async settingsProfileIntegrationsClearRoutes(): Promise<void> {
-    return todo("settingsProfileIntegrationsClearRoutes");
+    await this.page.unroute("**/api/users/me/integrations/github/app/refresh/");
   }
   async settingsProfilePressKeys(_keys: string[]): Promise<void> {
     return todo("settingsProfilePressKeys");

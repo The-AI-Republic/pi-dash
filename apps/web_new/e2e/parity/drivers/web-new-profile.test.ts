@@ -27,6 +27,7 @@ interface StubLocator {
   nth?: (index: number) => StubLocator;
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByTestId?: (id: string) => StubLocator;
+  getByText?: (text: string, options?: unknown) => StubLocator;
   locator?: (selector: string) => StubLocator;
   filter?: (options?: unknown) => StubLocator;
   [key: string]: unknown;
@@ -50,6 +51,7 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     nth: () => node,
     getByRole: () => node,
     getByTestId: () => node,
+    getByText: () => node,
     locator: () => node,
     filter: () => node,
   };
@@ -1511,5 +1513,268 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
     expect(clicks).toContain("Add server");
     expect(clicks).toContain("Disable probe-mcp-a");
     expect(clicks).toContain("Remove");
+  });
+});
+
+describe("settings upkeep and integrations (NEWFRONT-586, PROF-024..025)", () => {
+  function upkeepPage(
+    jobs: { name: string; interval: string; description: string; enabled: boolean; disabled: boolean }[]
+  ): {
+    page: Page;
+    clicks: string[];
+  } {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "upkeep-job") {
+          return locator({
+            count: async () => jobs.length,
+            nth: (index: number) => {
+              const job = jobs[index]!;
+              return locator({
+                locator: () =>
+                  locator({
+                    nth: (span: number) =>
+                      locator({ innerText: async () => [job.name, job.interval, job.description][span]! }),
+                  }),
+                getByRole: () =>
+                  locator({
+                    first: () =>
+                      locator({
+                        getAttribute: async () => (job.enabled ? "true" : "false"),
+                        isDisabled: async () => job.disabled,
+                        click: async () => {
+                          clicks.push(`job:${job.name}`);
+                        },
+                      }),
+                  }),
+              });
+            },
+          });
+        }
+        return locator({
+          getAttribute: async () => "false",
+          click: async () => {
+            clicks.push("master");
+          },
+        });
+      },
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    return { page, clicks };
+  }
+
+  it("reads upkeep facts with an empty twin", async () => {
+    const { page } = upkeepPage([
+      {
+        name: "Close issues when their PR merges",
+        interval: "daily",
+        description: "marks an issue Done",
+        enabled: true,
+        disabled: false,
+      },
+    ]);
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileUpkeepFacts()).toEqual({
+      emptyExplanation: null,
+      masterPaused: false,
+      jobs: [
+        {
+          name: "Close issues when their PR merges",
+          interval: "daily",
+          description: "marks an issue Done",
+          enabled: true,
+          toggleDisabled: false,
+        },
+      ],
+    });
+    const empty = new WebNewDriver(
+      pageOf({
+        getByTestId: () => locator(),
+        getByText: () => locator({ innerText: async () => "Nothing is scheduled on this instance yet." }),
+      })
+    );
+    expect(await empty.settingsProfileUpkeepFacts()).toEqual({
+      emptyExplanation: "Nothing is scheduled on this instance yet.",
+      masterPaused: null,
+      jobs: [],
+    });
+  });
+
+  it("toggles the master and jobs past their write settles", async () => {
+    const waitForResponse = vi.fn(async () => ({ ok: () => true }));
+    const { page, clicks } = upkeepPage([
+      {
+        name: "Close issues when their PR merges",
+        interval: "daily",
+        description: "d",
+        enabled: true,
+        disabled: false,
+      },
+    ]);
+    const driver = new WebNewDriver(pageOf({ ...(page as unknown as Record<string, unknown>), waitForResponse }));
+    await driver.settingsProfileUpkeepToggleMaster(true);
+    await driver.settingsProfileUpkeepToggleJob("Close issues when their PR merges", false);
+    expect(clicks).toEqual(["master", "job:Close issues when their PR merges"]);
+    expect(waitForResponse).toHaveBeenCalledTimes(2);
+    const masterMatches = waitForResponse.mock.calls[0]![0] as (response: unknown) => boolean;
+    const jobMatches = waitForResponse.mock.calls[1]![0] as (response: unknown) => boolean;
+    const response = (url: string, method: string): unknown => ({
+      request: () => ({ method: () => method }),
+      url: () => url,
+    });
+    expect(masterMatches(response("https://app.test/api/users/me/auto-pm/", "PATCH"))).toBe(true);
+    expect(masterMatches(response("https://app.test/api/users/me/auto-pm/jobs/x/", "PATCH"))).toBe(false);
+    expect(jobMatches(response("https://app.test/api/users/me/auto-pm/jobs/x/", "PATCH"))).toBe(true);
+    await expect(driver.settingsProfileUpkeepToggleJob("missing", true)).rejects.toThrow("not found");
+  });
+
+  it("fails and delays upkeep writes through routes", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route, unroute }));
+    await driver.settingsProfileUpkeepFailWrites();
+    expect(route).toHaveBeenCalledWith("**/api/users/me/auto-pm/**", expect.any(Function));
+    const fail = route.mock.calls[0]![1] as (route: unknown) => void;
+    const fulfilled: unknown[] = [];
+    fail({
+      request: () => ({ method: () => "PATCH", url: () => "https://app.test/api/users/me/auto-pm/" }),
+      fulfill: async (body: unknown) => {
+        fulfilled.push(body);
+      },
+      continue: async () => undefined,
+    });
+    expect(fulfilled).toEqual([{ status: 500, contentType: "application/json", body: '{"error":"probe_boom"}' }]);
+    await driver.settingsProfileUpkeepDelayWrites(3000);
+    expect(route).toHaveBeenCalledTimes(2);
+    await driver.settingsProfileUpkeepClearRoutes();
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/auto-pm/**");
+  });
+
+  it("reads integrations facts across the settled twins", async () => {
+    const panel = locator({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string;
+        if (role === "button" && name === "Reconnect")
+          return locator({
+            count: async () => 1,
+            first: () => locator({ innerText: async () => "Reconnect", isDisabled: async () => true }),
+          });
+        if (role === "button" && name === "Refresh")
+          return locator({ count: async () => 1, isVisible: async () => true, first: () => locator({}) });
+        return locator({ count: async () => 0 });
+      },
+      getByTestId: () => locator({ first: () => locator({ evaluate: async () => [] }) }),
+      getByText: (text: string) =>
+        locator({
+          count: async () => (String(text).includes("No GitHub App installation") ? 1 : 0),
+          first: () => locator({ innerText: async () => "No GitHub App installation is connected yet." }),
+        }),
+      locator: (selector: string) =>
+        selector === "h3"
+          ? locator({ first: () => locator({ innerText: async () => "GitHub App" }) })
+          : locator({ first: () => locator({ innerText: async () => "Install the Pi Dash GitHub App for Acme." }) }),
+    });
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === "#integrations-workspace") {
+          return locator({
+            first: () =>
+              locator({
+                evaluate: async () => [{ slug: "acme", name: "Acme" }],
+                inputValue: async () => "acme",
+              }),
+          });
+        }
+        return locator();
+      },
+      getByTestId: (id: string) => {
+        if (id === "integrations-settings-loading") return locator({ count: async () => 0 });
+        if (id === "integrations-no-admin") return locator({ count: async () => 0 });
+        return panel;
+      },
+    });
+    const driver = new WebNewDriver(page);
+    const facts = await driver.settingsProfileIntegrationsFacts();
+    expect(facts).toMatchObject({
+      loading: false,
+      noAdmin: false,
+      connected: true,
+      installLabel: "Reconnect",
+      refreshVisible: true,
+      panelHeading: "GitHub App",
+      selectedSlug: "acme",
+    });
+    expect(facts.workspaceOptions).toEqual([{ slug: "acme", name: "Acme" }]);
+    expect(facts.unconnectedCopy).toBe("No GitHub App installation is connected yet.");
+  });
+
+  it("reports the loading and no-admin twins", async () => {
+    const loading = new WebNewDriver(
+      pageOf({
+        getByTestId: (id: string) =>
+          id === "integrations-settings-loading"
+            ? locator({ isVisible: async () => true })
+            : locator({ count: async () => 0 }),
+      })
+    );
+    expect(await loading.settingsProfileIntegrationsFacts()).toMatchObject({ loading: true });
+    const noAdmin = new WebNewDriver(
+      pageOf({
+        locator: () => locator({ count: async () => 0 }),
+        getByTestId: (id: string) => {
+          if (id === "integrations-settings-loading") return locator({ count: async () => 0 });
+          if (id === "integrations-no-admin") return locator({});
+          return locator({ count: async () => 0 });
+        },
+      })
+    );
+    expect(await noAdmin.settingsProfileIntegrationsFacts()).toMatchObject({
+      loading: false,
+      noAdmin: true,
+      panelHeading: null,
+    });
+  });
+
+  it("selects workspaces, refreshes and fails the refresh through routes", async () => {
+    const selected: string[] = [];
+    const clicks: string[] = [];
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const page = pageOf({
+      locator: () =>
+        locator({
+          evaluate: async () => "Acme",
+          selectOption: async (slug: string) => {
+            selected.push(slug);
+          },
+        }),
+      getByTestId: () =>
+        locator({
+          getByRole: () =>
+            locator({
+              click: async () => {
+                clicks.push("refresh");
+              },
+            }),
+        }),
+      waitForFunction: async () => undefined,
+      waitForResponse: async () => ({ ok: () => true }),
+      route,
+      unroute,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileIntegrationsSelect("acme");
+    expect(selected).toEqual(["acme"]);
+    await driver.settingsProfileIntegrationsRefresh();
+    expect(clicks).toEqual(["refresh"]);
+    await driver.settingsProfileIntegrationsFailRefresh();
+    await driver.settingsProfileIntegrationsClearRoutes();
+    expect(route).toHaveBeenCalledWith("**/api/users/me/integrations/github/app/refresh/", expect.any(Function));
+    expect(unroute).toHaveBeenCalledWith("**/api/users/me/integrations/github/app/refresh/");
+    const missing = new WebNewDriver(
+      pageOf({ locator: () => locator({ evaluate: async () => "" }), waitForFunction: async () => undefined })
+    );
+    await expect(missing.settingsProfileIntegrationsSelect("nope")).rejects.toThrow("has no option");
   });
 });
