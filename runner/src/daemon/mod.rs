@@ -1,3 +1,5 @@
+mod activity_watchdog;
+pub mod drain_journal;
 pub mod machine_control;
 pub mod observability;
 mod run_event_mirror;

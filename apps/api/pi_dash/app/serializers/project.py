@@ -22,9 +22,23 @@ from pi_dash.db.models import (
     ProjectPublicMember,
     IssueSequence,
 )
+from pi_dash.db.models.issue_agent_ticker import INFINITE_MAX_TICKS
 from pi_dash.utils.content_validator import (
     validate_html_content,
 )
+
+# Agent ticking policy bounds. ``INFINITE_MAX_TICKS`` (``-1``) is the
+# infinite-pool sentinel, imported from the ticker model so the two can never
+# drift; the floor on cadence keeps a project from arming a clock that re-runs
+# an agent faster than the ticker's own one-minute scan can service it.
+MIN_CADENCE_SECONDS = 60
+
+
+def _validate_cadence_seconds(interval):
+    if interval < MIN_CADENCE_SECONDS:
+        raise serializers.ValidationError(detail="AGENT_CADENCE_TOO_SHORT")
+
+    return interval
 
 
 class ProjectSerializer(BaseSerializer):
@@ -81,6 +95,28 @@ class ProjectSerializer(BaseSerializer):
             )
 
         return identifier
+
+    def validate_agent_default_max_ticks(self, max_ticks):
+        """Guard the per-work-item run pool.
+
+        ``-1`` is the infinite sentinel (``IssueAgentTicker.INFINITE_MAX_TICKS``);
+        anything else must leave at least one run in the pool. ``0`` would arm a
+        clock that can never fire, and other negatives would read as infinite in
+        some code paths and as exhausted in others.
+        """
+        if max_ticks != INFINITE_MAX_TICKS and max_ticks < 1:
+            raise serializers.ValidationError(detail="AGENT_MAX_TICKS_MUST_BE_POSITIVE_OR_INFINITE")
+
+        return max_ticks
+
+    def validate_agent_default_interval_seconds(self, interval):
+        return _validate_cadence_seconds(interval)
+
+    def validate_agent_review_default_interval_seconds(self, interval):
+        return _validate_cadence_seconds(interval)
+
+    def validate_agent_test_default_interval_seconds(self, interval):
+        return _validate_cadence_seconds(interval)
 
     def validate(self, data):
         if data.get("default_agent_executor") == "cloud_agent":

@@ -42,9 +42,9 @@ class TickerDisarmReason(models.TextChoices):
     """Why the ticker is currently disarmed.
 
     ``maybe_apply_deferred_pause`` only auto-Pauses the issue when
-    ``disarm_reason == CAP_HIT``. Terminal-signal disarms (``done`` /
-    ``blocked`` / ``waiting_on_human``) leave the issue in place for the
-    human to act. See ``.ai_design/ticking_relevance/design.md`` §5.2 / §7.
+    ``disarm_reason == CAP_HIT``. A stop-signal disarm (the run's explicit
+    ``stop_ticking`` on its yield) leaves the issue in place for the human
+    to act. See ``.ai_design/ticking_relevance/design.md`` §5.2 / §7.
     """
 
     NONE = "", "None"
@@ -57,7 +57,15 @@ class TickerDisarmReason(models.TextChoices):
     #: Never auto-pauses — the human is expected to Re-tick from here, and
     #: Re-tick needs the issue to stay in the bucket.
     POOL_SPENT = "pool_spent", "Pool Spent"
+    #: Legacy rows only: outcomes (``done`` / ``blocked`` /
+    #: ``waiting_on_human``) used to stop the clock by inference
+    #: (PDASHOSS01-247). Kept so history stays readable; ``reconcile`` no
+    #: longer writes it.
     TERMINAL_SIGNAL = "terminal_signal", "Terminal Signal"
+    #: The run explicitly asked to stop the clock (``pidash run yield
+    #: --stop-ticking`` → ``done_payload.stop_ticking``). Cleared by the
+    #: same human levers that cleared ``TERMINAL_SIGNAL``.
+    STOP_SIGNAL = "stop_signal", "Stop Signal"
     USER_DISABLED = "user_disabled", "User Disabled"
 
 
@@ -97,8 +105,16 @@ class IssueAgentTicker(BaseModel):
     used = models.IntegerField(default=0)
     #: Extra budget added by Re-tick. Each press grants a fresh project-sized
     #: pool (``Project.agent_default_max_ticks``), so ``granted`` accumulates in
-    #: pool-size steps. Cap = project pool + ``granted``.
+    #: pool-size steps. Cap = project pool + ``granted`` + ``waited``.
     granted = models.IntegerField(default=0)
+    #: Ticks bought back by ``pidash issue wait`` — the agent read its open
+    #: blockers, decided it could not proceed, and yielded. Each call raises
+    #: the cap by one, so the run that ends by waiting costs no net budget.
+    #: A wait run is a run: it is included in ``used`` and in the displayed
+    #: cap (PDASHOSS01-211). ``waited`` is reported alongside them, because a
+    #: high wait count is how a human tells a stuck issue from a busy one.
+    #: Bounded by :meth:`wait_allowance` (PDASHOSS01-204).
+    waited = models.IntegerField(default=0)
 
     user_disabled = models.BooleanField(default=False)
 
@@ -195,11 +211,28 @@ class IssueAgentTicker(BaseModel):
         return getattr(self.issue.project, "agent_default_max_ticks", DEFAULT_MAX_TICKS)
 
     def effective_max_ticks(self) -> int:
-        """Cap = project pool + ``granted``. ``-1`` means infinite."""
+        """Cap = project pool + ``granted`` + ``waited``. ``-1`` is infinite.
+
+        ``scan_due_tickers`` reproduces this sum in SQL; change one and you
+        must change the other.
+        """
         pool = self.pool_size()
         if pool == INFINITE_MAX_TICKS:
             return INFINITE_MAX_TICKS
-        return pool + self.granted
+        return pool + self.granted + self.waited
+
+    def wait_allowance(self) -> int:
+        """How many more ``pidash issue wait`` calls this issue may make.
+
+        The allowance is one extra project pool, so with the default 10 an
+        issue tops out at 20 runs — 10 of work and 10 of waiting. ``0`` once
+        spent (and on an infinite pool, where waiting is meaningless: there
+        is no budget to buy back).
+        """
+        pool = self.pool_size()
+        if pool == INFINITE_MAX_TICKS:
+            return 0
+        return max(0, pool - self.waited)
 
     def remaining(self) -> int | None:
         """Runs left in the pool, or ``None`` when the cap is infinite."""

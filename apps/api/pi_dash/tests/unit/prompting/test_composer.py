@@ -401,22 +401,32 @@ def test_session_framing_renders_tick_guidance_and_schedule():
         "coding-task", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
-    assert "used 5 of 10 agent runs" in out
-    assert "(5 remaining)" in out
-    # The lifecycle section carries the budget line and the pool rules.
-    assert "Runs used on this issue: **5 of 10** (5 remaining)" in out
+    # The sample carries two waits, and a wait run is a run (PDASHOSS01-211):
+    # the cap is the pool plus those two, so 5 of 12 with 7 remaining.
+    assert "used 5 of 12 agent runs (7 remaining)" in out
+    # The lifecycle section carries the budget line and the pool rules, and
+    # must agree with the framing line above — that consistency is the point
+    # of PDASHOSS01-211.
+    assert "Runs used on this issue: **5 of 12** (7 remaining)" in out
+    # Waits are named alongside the count, not excluded from it.
+    assert "counted above and cost no net budget" in out
     assert "about every 3 hours" in out
 
 
 @pytest.mark.unit
-def test_session_framing_review_tick_reports_done_not_noop():
+def test_session_framing_review_tick_routes_nothing_changed_by_cause():
+    """A "nothing changed" tick reports *why* nothing changed (PDASHOSS01-250):
+    waiting on CI / a dependency keeps ticking via `waiting_on_external`; only
+    a human-only wait carries `--stop-ticking`. The old text prescribed a bare
+    `done`, which used to stop the clock by inference."""
     ctx = _ctx("review")
     out = compose(
         "review", workspace=None, project=None, user=None, context=ctx
     ).text
     assert "automatically by the issue's ticker" in out
     assert "emit `noop`" not in out
-    assert "pidash run yield --outcome done" in out
+    assert "report the outcome that says *why* nothing changed" in out
+    assert "keep the clock ticking so a later run re-checks" in out
 
 
 @pytest.mark.unit
@@ -743,7 +753,7 @@ def test_coding_task_split_gate_creates_child_issues():
     assert "do **not** split a child further (depth 1)" in body
     # Parent is parked (not left In Progress on waiting_on_external, which keeps ticking).
     assert "Move the parent to **Todo**" in body
-    assert "keeps ticking for In Progress and would burn the parent's budget" in body
+    assert "the clock would keep ticking and burn the parent's budget" in body
     # The child list goes into the parent's description: that is the signal a child's
     # run reads to recognise a tracking parent (the child only ever sees the parent's
     # description, never its comments).
@@ -963,7 +973,9 @@ def test_relationships_section_renders_open_blocker_with_warning():
     assert "- SAMPLE-b0: Blocker SAMPLE-b0 (In Progress)" in body
     assert "- Warning: SAMPLE-b0 is still open" in body
     assert "Open blockers (SAMPLE-b0) are information, not a hard stop" in body
-    assert "`Waiting on: <IDs>`" in body
+    # The agent decides and asks explicitly; the platform reads no marker.
+    assert "`pidash issue wait SAMPLE-1`" in body
+    assert "Waiting on: <IDs>" not in body
     assert REQUIRED_READING_DIRECTIVE in body
     assert "Blocking (waiting on this item):" not in body
     assert "Other relations:" not in body
@@ -1019,3 +1031,84 @@ def test_relationships_section_warning_pluralizes():
     body = compose("coding-task", workspace=None, project=None, user=None, context=ctx).text
 
     assert "- Warning: SAMPLE-b0, SAMPLE-b1 are still open" in body
+
+
+# ----------------------------------------------------------------------
+# Ticking semantics: outcomes are informational; only --stop-ticking stops
+# the clock (PDASHOSS01-250)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_ending_run_outcomes_never_stop_the_clock(kind):
+    """`done` means "this run's turn is done". No outcome stops the clock;
+    the prompt must say so and document `--stop-ticking` as the only
+    run-side stop signal (PDASHOSS01-250)."""
+    body = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "No outcome stops the issue's ticking clock" in body
+    assert "**this run's turn is done**" in body
+    assert "--stop-ticking" in body
+    # The stop signal has its own block with the send / never-send rules.
+    assert "### Stopping the clock — `--stop-ticking`" in body
+    assert "Never send it while work remains that a later run could pick up." in body
+    # The legacy inference lines are gone: no outcome text may claim the
+    # clock stops on its own, and "approved / verified and stays where it
+    # is" is no longer a stop reason.
+    assert "the clock stops until a human acts" not in body
+    assert "The clock for this stage stops" not in body
+    assert "it is approved / verified and stays where it is" not in body
+    assert "Without it the clock guesses" not in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_waiting_on_external_applies_in_every_stage(kind):
+    """`waiting_on_external` used to be documented as In Progress only —
+    it now applies in every stage (waiting on CI, a merge, or a
+    dependency issue) and keeps the clock ticking."""
+    body = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "applies in **every** stage" in body
+    assert "In Progress is waiting on CI or a merge" not in body
+
+
+@pytest.mark.unit
+def test_review_kind_splits_external_wait_from_human_wait():
+    """Review Step 3: waiting on CI / the PR keeps ticking via
+    `waiting_on_external`; waiting on a human reviewer stays put with
+    `waiting_on_human --stop-ticking`. The old single "waiting / nothing
+    changed → yield done, clock stops" bullet must be gone."""
+    body = compose("review", workspace=None, project=None, user=None, context=_ctx("review")).text
+    assert "**waiting on CI or the PR**" in body
+    assert "**keep the clock ticking**" in body
+    assert "`waiting_on_human --stop-ticking`" in body
+    # An approved review with no test state parks explicitly, not by inference.
+    assert "`done --stop-ticking`" in body
+    assert "waiting on a human reviewer / nothing changed" not in body
+
+
+@pytest.mark.unit
+def test_test_kind_pass_stops_clock_explicitly_or_moves_on():
+    """Test Step 3: a human-gated pass leaves In Test with
+    `done --stop-ticking`; only a project that explicitly lets agents
+    merge and close moves to Done (the move leaves the ticking states).
+    The runner still never offers `--state "Done"` as a command."""
+    body = compose("test", workspace=None, project=None, user=None, context=_ctx("test")).text
+    assert "`done --stop-ticking`" in body
+    assert "explicitly lets agents merge and close" in body
+    assert '--state "Done"' not in body
+    # Waiting splits by cause, as in review.
+    assert "**nothing changed, waiting on CI or a dependency**" in body
+    assert "**nothing changed, waiting on a human**" in body
+    assert "`waiting_on_external`" in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["coding-task", "review", "test"])
+def test_blocking_flow_stops_clock_for_humans_not_issues(kind):
+    """Blocking on a human sends `blocked --stop-ticking`; blocking on
+    another issue waits via `pidash issue wait` + `waiting_on_external`
+    and keeps ticking."""
+    body = compose(kind, workspace=None, project=None, user=None, context=_ctx(kind)).text
+    assert "--outcome blocked --stop-ticking" in body
+    assert "When what blocks you is **another issue**, do not stop the clock" in body

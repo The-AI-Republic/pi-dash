@@ -24,6 +24,8 @@ export default {
   "{count, plural, one {Work item} other {Work items}}": "{count, plural, one {Work item} other {Work items}}",
   "{count, plural, one{# member} other{# members}}": "{count, plural, one{# member} other{# members}}",
   "{count} run is done": "{count} run is done",
+  "{count} run(s) already on this runner will still finish.":
+    "{count} run(s) already on this runner will still finish.",
   "{count} runner(s)": "{count} runner(s)",
   "{count} runs are done": "{count} runs are done",
   "{count}d": "{count}d",
@@ -147,6 +149,7 @@ export default {
   "AI agent is starting on this issue": "AI agent is starting on this issue",
   "AI agent is waiting for approval": "AI agent is waiting for approval",
   "AI agent is waiting for input": "AI agent is waiting for input",
+  "AI agent has gone quiet": "AI agent has gone quiet",
   "AI agent is working on this issue": "AI agent is working on this issue",
   "AI agent needs re-auth": "AI agent needs re-auth",
   "AI agent run completed": "AI agent run completed",
@@ -158,6 +161,7 @@ export default {
   "AI agent ticking is disabled": "AI agent ticking is disabled",
   "AI agent ticking is off": "AI agent ticking is off",
   "AI agent ticking is scheduled": "AI agent ticking is scheduled",
+  "AI agent ticking stopped by the agent": "AI agent ticking stopped by the agent",
   "AI Agents": "AI Agents",
   "AI Dev Machines": "AI Dev Machines",
   "AI Prompt Templates": "AI Prompt Templates",
@@ -196,6 +200,7 @@ export default {
   "Are you sure you want to leave the workspace? You will no longer have access to this workspace. This action cannot be undone.":
     "Are you sure you want to leave the workspace? You will no longer have access to this workspace. This action cannot be undone.",
   Ascending: "Ascending",
+  "Ask a workspace admin to add schedulers to the catalog.": "Ask a workspace admin to add schedulers to the catalog.",
   "Asset upload failed. Please try again later.": "Asset upload failed. Please try again later.",
   Assets: "Assets",
   "Assign to": "Assign to",
@@ -386,6 +391,7 @@ export default {
     "Couldn't remove the project from favorites. Please try again.",
   "Cover image upload skipped — using a default cover.": "Cover image upload skipped — using a default cover.",
   Create: "Create",
+  "Create & install": "Create & install",
   "Create a draft": "Create a draft",
   "Create and edit free-form content; notes, docs, anything.":
     "Create and edit free-form content; notes, docs, anything.",
@@ -432,6 +438,7 @@ export default {
   "Created date": "Created date",
   "Created on": "Created on",
   "Created vs Resolved": "Created vs Resolved",
+  "Creating & installing…": "Creating & installing…",
   Creating: "Creating",
   "Creating theme": "Creating theme",
   "Creating…": "Creating…",
@@ -528,6 +535,7 @@ export default {
   "Draft a work item": "Draft a work item",
   "Draft created": "Draft created",
   "Draft creation failed": "Draft creation failed",
+  "Draft published to project.": "Draft published to project.",
   "Draft deleted": "Draft deleted",
   Drafts: "Drafts",
   "Drag and drop anywhere to upload": "Drag and drop anywhere to upload",
@@ -553,8 +561,8 @@ export default {
   "Edit work item": "Edit work item",
   "Edited by": "Edited by",
   "Editor is not ready to discard changes": "Editor is not ready to discard changes",
-  "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.":
-    "Either every workspace scheduler is already installed on this project, or your workspace admin hasn't enabled any. Visit Workspace → Schedulers to manage the catalog.",
+  "Either every workspace scheduler is already installed on this project, or none are enabled. Ask a workspace admin to add schedulers to the catalog.":
+    "Either every workspace scheduler is already installed on this project, or none are enabled. Ask a workspace admin to add schedulers to the catalog.",
   Email: "Email",
   "Email address": "Email address",
   "Email already exists. Please use a different one.": "Email already exists. Please use a different one.",
@@ -621,6 +629,8 @@ export default {
   "Estimates have been disabled.": "Estimates have been disabled.",
   "Estimates have been enabled.": "Estimates have been enabled.",
   "Events ({count})": "Events ({count})",
+  "Every enabled workspace scheduler is already installed on this project. Create a new one instead.":
+    "Every enabled workspace scheduler is already installed on this project. Create a new one instead.",
   Excel: "Excel",
   Execution: "Execution",
   "Expand sidebar": "Expand sidebar",
@@ -649,8 +659,10 @@ export default {
   "Failed to load pods": "Failed to load pods",
   "Failed to load runner": "Failed to load runner",
   "Failed to move favorite": "Failed to move favorite",
+  "Failed to pause runner": "Failed to pause runner",
   "Failed to record decision": "Failed to record decision",
   "Failed to reorder favorite": "Failed to reorder favorite",
+  "Failed to resume runner": "Failed to resume runner",
   "Failed to revoke runner": "Failed to revoke runner",
   "Failed to sign out. Please try again.": "Failed to sign out. Please try again.",
   "Failed to start agent run": "Failed to start agent run",
@@ -707,6 +719,8 @@ export default {
     "Waiting for the dev machine to report back. This usually takes a few seconds.",
   "is now running on": "is now running on",
   "Runner creation failed": "Runner creation failed",
+  "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it.":
+    "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it.",
   "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.":
     "The dev machine did not report back in time. The runner may still appear shortly — check the runners list, or run the command manually.",
   "Show manual command": "Show manual command",
@@ -794,7 +808,7 @@ export default {
   "Install a scheduler from the List tab to see it here.": "Install a scheduler from the List tab to see it here.",
   "Install a scheduler from the List tab to see its occurrences on the calendar.":
     "Install a scheduler from the List tab to see its occurrences on the calendar.",
-  "Install scheduler": "Install scheduler",
+  "Install existing": "Install existing",
   "Install the pidash CLI": "Install the pidash CLI",
   "Install the pidash CLI and register dev machines as AI agent runners":
     "Install the pidash CLI and register dev machines as AI agent runners",
@@ -988,6 +1002,7 @@ export default {
   "New password must be different from old password": "New password must be different from old password",
   "New project": "New project",
   "New scheduler": "New scheduler",
+  "New Scheduler": "New Scheduler",
   "New to Pi Dash?": "New to Pi Dash?",
   "New view": "New view",
   "New work item": "New work item",
@@ -1042,8 +1057,8 @@ export default {
   "No schedulers in this workspace yet. Click “New scheduler” to create one.":
     "No schedulers in this workspace yet. Click “New scheduler” to create one.",
   "No schedulers installed": "No schedulers installed",
-  "No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.":
-    "No schedulers installed on this project yet. Click “Install scheduler” to add one from the workspace catalog.",
+  "No schedulers installed on this project yet. Click “New Scheduler” to install one from the workspace catalog or create your own.":
+    "No schedulers installed on this project yet. Click “New Scheduler” to install one from the workspace catalog or create your own.",
   "No states available for the {groupKey} group": "No states available for the {groupKey} group",
   "No Views yet": "No Views yet",
   "No Webhook added yet": "No Webhook added yet",
@@ -1154,7 +1169,10 @@ export default {
   "Paste an issue id and click Preview to render the template against a real issue.":
     "Paste an issue id and click Preview to render the template against a real issue.",
   "Paste the code sent to your email": "Paste the code sent to your email",
+  Pause: "Pause",
   Paused: "Paused",
+  "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.":
+    "Paused: this runner stays connected but takes no new work. Any in-flight run finishes.",
   "paused awaiting input": "paused awaiting input",
   "Payload URL": "Payload URL",
   Pending: "Pending",
@@ -1257,6 +1275,7 @@ export default {
   "Property changes": "Property changes",
   "Protocol version": "Protocol version",
   Public: "Public",
+  "Publish issue": "Publish issue",
   "Publish project": "Publish project",
   Quarter: "Quarter",
   queued: "queued",
@@ -1303,6 +1322,7 @@ export default {
   "Resend in {seconds} seconds": "Resend in {seconds} seconds",
   Restore: "Restore",
   "Restore success": "Restore success",
+  Resume: "Resume",
   Retry: "Retry",
   "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.":
     "Reusable scheduler definitions for this workspace. Install one on a project to run its prompt against the project on a cron.",
@@ -1327,6 +1347,7 @@ export default {
   "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.":
     "Run an installer on the machine that will host your AI agent. The wrapper commands download the latest signed binary, drop `pidash` on your PATH, and walk you through the device-code login.",
   "Run this on the machine that will host the runner:": "Run this on the machine that will host the runner:",
+  "Runner paused": "Runner paused",
   "Runner {name}": "Runner {name}",
   "Runner detail": "Runner detail",
   "Runner ID": "Runner ID",
@@ -1353,6 +1374,8 @@ export default {
   Scheduled: "Scheduled",
   Scheduler: "Scheduler",
   "Scheduler created": "Scheduler created",
+  "Scheduler created and installed": "Scheduler created and installed",
+  "Scheduler created but not installed": "Scheduler created but not installed",
   "Scheduler deleted": "Scheduler deleted",
   "Scheduler disabled — it will not fire until re-enabled.": "Scheduler disabled — it will not fire until re-enabled.",
   "Scheduler enabled — it will fire on the next scheduled tick.":
@@ -1374,6 +1397,7 @@ export default {
   "security-audit": "security-audit",
   "Seems like you don’t have access to this Project": "Seems like you don’t have access to this Project",
   "Select a project": "Select a project",
+  "Select a project before publishing this draft.": "Select a project before publishing this draft.",
   "Select a range": "Select a range",
   "Select a run on the left.": "Select a run on the left.",
   "Select all": "Select all",
@@ -1475,6 +1499,7 @@ export default {
   "Sticky not removed": "Sticky not removed",
   "Sticky not updated": "Sticky not updated",
   "Sticky removed": "Sticky removed",
+  Stopped: "Stopped",
   "Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.":
     "Stored with the binding. Future PRs honour it for wall-clock-aware DST semantics.",
   "Student / Professor": "Student / Professor",
@@ -1522,6 +1547,8 @@ export default {
     "The base prompt the agent runs each tick. Per-project context is appended at install time, so keep this prompt project-agnostic.",
   "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).":
     "The command-line tool installed on each dev machine. Handles authentication with the cloud, manages local config (`~/.pidash/config.toml`), and exposes commands for issues, comments, and runner management (`pidash auth login`, `pidash runner add`, `pidash doctor`, …).",
+  "The definition is in the workspace catalog — install it from the “Install existing” tab.":
+    "The definition is in the workspace catalog — install it from the “Install existing” tab.",
   "The cycle could not be restored. Please try again.": "The cycle could not be restored. Please try again.",
   "The cycle has been restored.": "The cycle has been restored.",
   "The estimate has been created successfully": "The estimate has been created successfully",
@@ -1587,6 +1614,8 @@ export default {
   "This workspace is back on the shared default template.": "This workspace is back on the shared default template.",
   "{count} of {max} runs used": "{count} of {max} runs used",
   "{count} runs used, no cap": "{count} runs used, no cap",
+  "{count} wait": "{count} wait",
+  "{count} waits": "{count} waits",
   "Agent run queued": "Agent run queued",
   "A run is already active on this work item. The next run starts as soon as it ends.":
     "A run is already active on this work item. The next run starts as soon as it ends.",
@@ -1657,6 +1686,7 @@ export default {
   "Un-assign from me": "Un-assign from me",
   Unassigned: "Unassigned",
   "Unfold comment": "Unfold comment",
+  Unhealthy: "Unhealthy",
   Uninstall: "Uninstall",
   "Uninstall scheduler?": "Uninstall scheduler?",
   "Unique code": "Unique code",
@@ -1878,4 +1908,44 @@ export default {
   "Use Pi Dash Cloud Agent by default": "Use Pi Dash Cloud Agent by default",
   "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.":
     "New work items run on the Cloud Agent — no machine required. Turn this off to default to this project's pod instead. Either way both remain selectable per work item.",
+  "AI agent ticking": "AI agent ticking",
+  "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work.":
+    "When off, no work item in this project is re-run on a timer. Human-started runs (Run AI, Comment & Run) still work.",
+  "Run budget per work item": "Run budget per work item",
+  "No cap": "No cap",
+  "Enter a whole number of 1 or more, or tick No cap.": "Enter a whole number of 1 or more, or tick No cap.",
+  "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them.":
+    "How many automatic runs a work item gets across In Progress, In Review and In Test before it pauses. Re-tick grants more. A new budget applies from the next tick — work items already paused stay paused until you Re-tick them.",
+  Cadence: "Cadence",
+  "30 minutes": "30 minutes",
+  "1 hour": "1 hour",
+  "3 hours": "3 hours",
+  "6 hours": "6 hours",
+  "12 hours": "12 hours",
+  "24 hours": "24 hours",
+  "Custom ({duration})": "Custom ({duration})",
+  "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.":
+    "How long Pi Dash waits between automatic runs. One rhythm covers In Progress, In Review and In Test. A new cadence applies from the next tick — a work item already waiting keeps its scheduled time.",
+  // Scheduler binding detail page (config + run history drilldown).
+  "Back to schedulers": "Back to schedulers",
+  Configuration: "Configuration",
+  "Disabled for the whole workspace": "Disabled for the whole workspace",
+  Ended: "Ended",
+  "Extra dates": "Extra dates",
+  "Hide resolved prompt": "Hide resolved prompt",
+  "Installed by": "Installed by",
+  "Last error": "Last error",
+  "No runs yet — next run at {ts}": "No runs yet — next run at {ts}",
+  "Outcome mode": "Outcome mode",
+  "Queued {ts}": "Queued {ts}",
+  "Run history": "Run history",
+  "Scheduler is disabled — it will not fire until re-enabled.":
+    "Scheduler is disabled — it will not fire until re-enabled.",
+  "Show resolved prompt": "Show resolved prompt",
+  "Skipped dates": "Skipped dates",
+  "This scheduler install is not available. It may have been uninstalled.":
+    "This scheduler install is not available. It may have been uninstalled.",
+  "View scheduler": "View scheduler",
+  "View workspace definition": "View workspace definition",
+  "{count} runs": "{count} runs",
 } as const;

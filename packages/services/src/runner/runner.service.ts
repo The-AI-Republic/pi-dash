@@ -16,6 +16,7 @@ import type {
   ICreateRunnerOnMachineStatus,
   IDevMachine,
   IRunner,
+  IRunnerPauseResult,
   TApprovalDecision,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
@@ -150,6 +151,27 @@ export class RunnerService extends APIService {
    * via the model's ``revoke()``. Idempotent. */
   async revokeRunner(runnerId: string): Promise<IRunner> {
     return this.post(`/api/runners/${runnerId}/revoke/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``POST /api/runners/<id>/pause/`` — stop assigning new work. The
+   * daemon stays connected and finishes any in-flight run, which the
+   * response lists as ``in_flight_runs``. Idempotent. */
+  async pauseRunner(runnerId: string): Promise<IRunnerPauseResult> {
+    return this.post(`/api/runners/${runnerId}/pause/`, {})
+      .then((r) => r?.data)
+      .catch((e) => {
+        throw e?.response?.data;
+      });
+  }
+
+  /** ``POST /api/runners/<id>/resume/`` — clear the pause and immediately
+   * try to hand the runner queued work. Idempotent. */
+  async resumeRunner(runnerId: string): Promise<IRunner> {
+    return this.post(`/api/runners/${runnerId}/resume/`, {})
       .then((r) => r?.data)
       .catch((e) => {
         throw e?.response?.data;
