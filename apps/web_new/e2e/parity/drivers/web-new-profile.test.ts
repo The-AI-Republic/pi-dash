@@ -1228,11 +1228,36 @@ describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
     expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
   });
 
-  it("leaves the cycle timezone dates to the area that renders them", async () => {
-    const driver = new WebNewDriver(pageOf({}));
-    await expect(driver.settingsProfileCycleUserTimezoneDates()).rejects.toThrow(
-      "drivers/web_new has no settingsProfileCycleUserTimezoneDates yet"
-    );
+  it("reads the cycle member-timezone date pair from its labelled section", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const texts: Record<string, string | null> = {
+      "cycle-member-start-date": "Nov 19, 2026",
+      "cycle-member-end-date": "Nov 26, 2026",
+    };
+    const page = pageOf({
+      getByTestId: (id: string) =>
+        id === "cycle-member-dates" ? locator({ waitFor }) : locator({ textContent: async () => texts[id] ?? null }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileCycleUserTimezoneDates()).toEqual({
+      start: "Nov 19, 2026",
+      end: "Nov 26, 2026",
+    });
+    expect(waitFor).toHaveBeenCalledWith({ timeout: 30_000 });
+  });
+
+  it("treats a missing or blank cycle date side as null", async () => {
+    const page = (sides: Record<string, { count: number; text: string | null }>): Page =>
+      pageOf({
+        getByTestId: (id: string) => {
+          const canned = sides[id] ?? { count: 0, text: null };
+          return locator({ count: async () => canned.count, textContent: async () => canned.text });
+        },
+      });
+    const missing = new WebNewDriver(page({ "cycle-member-end-date": { count: 1, text: null } }));
+    expect(await missing.settingsProfileCycleUserTimezoneDates()).toEqual({ start: null, end: null });
+    const blank = new WebNewDriver(page({ "cycle-member-start-date": { count: 1, text: "  " } }));
+    expect(await blank.settingsProfileCycleUserTimezoneDates()).toEqual({ start: null, end: null });
   });
 });
 

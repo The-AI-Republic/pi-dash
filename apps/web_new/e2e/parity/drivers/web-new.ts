@@ -31905,11 +31905,19 @@ export class WebNewDriver implements ParityDriver {
     return art.getAttribute("src");
   }
   async settingsProfileCycleUserTimezoneDates(): Promise<{ start: string | null; end: string | null }> {
-    // Unimplemented on purpose: no web_new surface renders the cycle
-    // start/end pair in the member timezone yet (the cycle page hosts the
-    // bare list). The gate files a fix sub-issue for the stored-dates
-    // scenario instead of guessing at another area's UI.
-    return todo("settingsProfileCycleUserTimezoneDates");
+    // NEWFRONT-859 renders the stored pair in a labelled section (each
+    // side its own span, "MMM dd, yyyy" in the member timezone). The
+    // section settles with the cycle detail query, which can land after
+    // the issue list openCyclePage waits on, so the read waits itself.
+    // A side is absent when that stored date is null.
+    await this.page.getByTestId("cycle-member-dates").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const readSide = async (side: "cycle-member-start-date" | "cycle-member-end-date"): Promise<string | null> => {
+      const span = this.page.getByTestId(side).first();
+      if ((await span.count()) === 0) return null;
+      const text = await span.textContent();
+      return text === null || text.trim() === "" ? null : text.trim();
+    };
+    return { start: await readSide("cycle-member-start-date"), end: await readSide("cycle-member-end-date") };
   }
 
   // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012; landed by
