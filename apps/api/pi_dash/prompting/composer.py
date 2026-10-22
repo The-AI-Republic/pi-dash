@@ -482,6 +482,7 @@ def build_direct_turn(raw_prompt: str, run, issue=None) -> str:
                 "identifier": project.identifier,
                 "name": project.name,
                 "description": project.description or "",
+                "context": project.context or "",
             },
             "run": {
                 "id": str(run.id),

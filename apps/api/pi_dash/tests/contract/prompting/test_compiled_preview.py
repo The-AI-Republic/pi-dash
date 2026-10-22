@@ -177,8 +177,9 @@ def test_preview_review_kind_against_issue(session_client, workspace, issue):
 def test_preview_review_and_test_show_project_block(
     session_client, workspace, project, create_user, kind, state_name, group
 ):
-    project.description = "Reject stubs; run two independent review passes."
-    project.save(update_fields=["description"])
+    project.description = "Human-facing summary of the web project."
+    project.context = "Reject stubs; run two independent review passes."
+    project.save(update_fields=["description", "context"])
     with impersonate(create_user):
         state = State.objects.create(name=state_name, project=project, group=group)
         issue = Issue.objects.create(
@@ -196,9 +197,10 @@ def test_preview_review_and_test_show_project_block(
     assert "This issue belongs to the Project: Web (WEB)" in prompt
     assert "Reject stubs; run two independent review passes." in prompt
     assert (
-        f"Project-level instructions in the description apply to this {kind} pass"
+        f"Project-level instructions in the project context apply to this {kind} pass"
         in prompt
     )
+    assert "Human-facing summary of the web project." not in prompt
 
 
 @pytest.mark.contract
