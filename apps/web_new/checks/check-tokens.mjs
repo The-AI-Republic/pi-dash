@@ -108,13 +108,15 @@ function checkFile(full, scanRoot, defined, failures, seen) {
   // Tailwind arbitrary-value shorthand: `p-(--space-4)` compiles to
   // `padding: var(--space-4)` with no fallback, so the token must exist.
   for (const match of text.matchAll(/-\(--[\w-]+\)/g)) {
-    candidates.push({ name: match[0].slice(2, -1), index: match.index ?? 0 });
+    // matchAll always sets index for a global regex, so no fallback is needed.
+    candidates.push({ name: match[0].slice(2, -1), index: match.index });
   }
   // A `var()` with a fallback stays valid when the property is missing, so
   // only the fallback-less form is checked.
   for (const match of text.matchAll(/var\(\s*(--[\w-]+)\s*([,)])/g)) {
     if (match[2] === ",") continue;
-    candidates.push({ name: match[1], index: match.index ?? 0 });
+    // matchAll always sets index for a global regex, so no fallback is needed.
+    candidates.push({ name: match[1], index: match.index });
   }
   // File order, so the report reads top to bottom.
   candidates.sort((a, b) => a.index - b.index);

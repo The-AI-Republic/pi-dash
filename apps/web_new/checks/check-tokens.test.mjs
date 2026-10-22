@@ -6,7 +6,7 @@
 // tokens, var() fallbacks, block comments, and `@theme` tokens pass.
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,6 +126,97 @@ describe("runTokenCheck", () => {
 
     expect(runTokenCheck(options(root))).toEqual([]);
     expect(runTokenCheck({ ...options(root), trees: ["apps/web_new/src"] })).toEqual([]);
+  });
+
+  it("walks nested directories and skips generated and non-source files", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": TOKENS_CSS,
+      "packages/kit/src/kit.css": KIT_CSS,
+      "apps/web_new/src/features/deep/bad.tsx": 'const a = "gap-(--space-5)";\n',
+      "apps/web_new/src/routeTree.gen.ts": 'const a = "p-(--space-5)";\n',
+      "apps/web_new/node_modules/dep/bad.tsx": 'const a = "p-(--space-5)";\n',
+      "apps/web_new/src/notes.txt": "p-(--space-5)\n",
+    });
+
+    const failures = runTokenCheck(options(root));
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("apps/web_new/src/features/deep/bad.tsx:1");
+  });
+
+  it("reports an ENOENT below the tree root instead of skipping the whole tree", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": TOKENS_CSS,
+      "packages/kit/src/kit.css": KIT_CSS,
+      "apps/web_new/src/ok.tsx": 'const a = "p-(--space-4)";\n',
+    });
+    symlinkSync(join(root, "apps/web_new/src/does-not-exist.tsx"), join(root, "apps/web_new/src/dangling.tsx"));
+
+    expect(() => runTokenCheck(options(root))).toThrow(/ENOENT/);
+  });
+
+  it("surfaces a non-ENOENT error while probing the tree root", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": TOKENS_CSS,
+      "packages/kit/src/kit.css": KIT_CSS,
+      "apps/web_new/src": "not a directory",
+    });
+
+    expect(() => runTokenCheck({ ...options(root), trees: ["apps/web_new/src/child"] })).toThrow(/ENOTDIR/);
+  });
+
+  it("surfaces a non-ENOENT error while reading kit.css", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": TOKENS_CSS,
+      "apps/web_new/src/ok.tsx": 'const a = "p-(--space-4)";\n',
+    });
+
+    expect(() =>
+      runTokenCheck({ ...options(root), kitCss: join(root, "apps/web_new", "src", "ok.tsx", "sub") })
+    ).toThrow(/ENOTDIR/);
+  });
+
+  it("treats a tokens.css without a :root block as defining nothing", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": ".scoped {\n  --space-4: 8px;\n}\n",
+      "packages/kit/src/kit.css": KIT_CSS,
+      "apps/web_new/src/bad.tsx": 'const a = "p-(--space-4)";\n',
+    });
+
+    const failures = runTokenCheck(options(root));
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("--space-4");
+  });
+
+  it("treats an unterminated :root block as defining nothing", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": ":root {\n  --space-4: 8px;\n",
+      "packages/kit/src/kit.css": KIT_CSS,
+      "apps/web_new/src/bad.tsx": 'const a = "p-(--space-4)";\n',
+    });
+
+    const failures = runTokenCheck(options(root));
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toContain("--space-4");
+  });
+
+  it("ignores @theme blocks without a body instead of crashing", () => {
+    const root = makeRepo({
+      "packages/kit/src/tokens.css": TOKENS_CSS,
+      "packages/kit/src/kit.css": "@theme\n",
+      "apps/web_new/src/ok.tsx": 'const a = "p-(--space-4)";\n',
+    });
+    const unterminated = makeRepo({
+      "packages/kit/src/tokens.css": TOKENS_CSS,
+      "packages/kit/src/kit.css": "@theme {\n  --animate-shimmer: shimmer 1.6s linear infinite;\n",
+      "apps/web_new/src/ok.tsx": 'const a = "p-(--space-4)";\n',
+    });
+
+    expect(runTokenCheck(options(root))).toEqual([]);
+    // The unterminated block contributes no tokens, but the scan completes.
+    expect(runTokenCheck(options(unterminated))).toEqual([]);
   });
 
   it("main returns 0 for a clean tree and 1 for an undefined token", () => {
