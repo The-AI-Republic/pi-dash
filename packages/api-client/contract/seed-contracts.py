@@ -35,6 +35,7 @@ SEED_PASSWORD = os.environ.get("PIDASH_CONTRACT_PASSWORD", "Contract123!")
 SEED_WORKSPACE_SLUG = "contract-acme"
 SEED_DEV_WORKSPACE_SLUG = "contract-dev"
 SEED_PROJECT_IDENTIFIER = "CT"
+SEED_BOARD_ANCHOR = "contract-board-anchor"
 SEED_DESKTOP_SESSION_KEY = os.environ.get("PIDASH_CONTRACT_DESKTOP_SESSION_KEY", "contractdesktopsession000001")
 
 
@@ -61,6 +62,7 @@ def seed():
         APIToken,
         Issue,
         IssueActivity,
+        DeployBoard,
         Label,
         Project,
         ProjectMember,
@@ -192,6 +194,46 @@ def seed():
         defaults={"role": 20, "is_active": True},
     )
     note("project-member", f"{project.identifier}/{user.email}", project_membership_created)
+
+    # Public board anchor (NEWFRONT-752): the space contracts resolve a
+    # published board by its anchor. The board is created here rather than
+    # by a publish call so its anchor is stable across runs; re-seeding
+    # repairs its flags and layout in case a suite flipped them.
+    board, board_created = DeployBoard.objects.get_or_create(
+        workspace=workspace,
+        project=project,
+        entity_name="project",
+        defaults={
+            "entity_identifier": str(project.id),
+            "anchor": SEED_BOARD_ANCHOR,
+            "view_props": {"list": True, "kanban": True},
+            "is_comments_enabled": True,
+            "is_reactions_enabled": True,
+            "is_votes_enabled": True,
+            "created_by": user,
+            "updated_by": user,
+        },
+    )
+    desired_flags = {
+        "entity_identifier": str(project.id),
+        "anchor": SEED_BOARD_ANCHOR,
+        "view_props": {"list": True, "kanban": True},
+        "is_comments_enabled": True,
+        "is_reactions_enabled": True,
+        "is_votes_enabled": True,
+    }
+    changed = [field for field, value in desired_flags.items() if getattr(board, field) != value]
+    if changed:
+        for field in changed:
+            setattr(board, field, desired_flags[field])
+        board.save(update_fields=changed)
+    # Non-destructive guard: another suite publishes throwaway boards by
+    # anchor, so never delete one here. A collision means a crashed run
+    # left a board behind; the note makes that visible instead.
+    collision = DeployBoard.objects.filter(anchor=SEED_BOARD_ANCHOR).exclude(pk=board.pk).first()
+    if collision is not None:
+        note("deploy-board-anchor-collision", collision.pk, True)
+    note("deploy-board", board.anchor, board_created)
 
     # Second project (NEWFRONT-611): the move-to-project contract moves a
     # probe issue here and back, so it needs membership plus a default

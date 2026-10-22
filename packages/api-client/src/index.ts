@@ -1168,3 +1168,103 @@ export {
   billingPlanPrice,
 } from "./contracts/billing-plans.js";
 export type { BillingFrequency, BillingPlan } from "./contracts/billing-plans.js";
+// Space area (NEWFRONT-752): the public board surface — resolution,
+// grouped issue reads, engagement, comments, display data and assets —
+// plus the spaces sign-in flows. Lazy-route code should import these
+// named exports so the space subtree stays out of the shell bundle.
+export {
+  SpaceBoardMeta,
+  SpaceBoardProject,
+  SpaceBoardSettings,
+  SpaceBoardWorkspace,
+  getSpaceBoardMeta,
+  getSpaceBoardSettings,
+  resolveSpaceBoardAnchor,
+} from "./contracts/space-board.js";
+export {
+  SPACE_ISSUE_PRIORITIES,
+  SPACE_ISSUE_STATE_GROUPS,
+  SpaceBoardIssue,
+  SpaceBoardIssueDetail,
+  SpaceBoardIssueGroup,
+  SpaceBoardIssuePage,
+  SpaceEngagementActor,
+  SpaceIssueReactionItem,
+  SpaceIssueVoteItem,
+  getSpaceBoardIssue,
+  listSpaceBoardIssues,
+} from "./contracts/space-issues.js";
+export type { SpaceBoardIssueQuery } from "./contracts/space-issues.js";
+export {
+  SPACE_VOTE_VALUES,
+  SpaceIssueReaction,
+  SpaceVote,
+  addSpaceIssueReaction,
+  removeSpaceIssueReaction,
+  removeSpaceIssueVote,
+  setSpaceIssueVote,
+} from "./contracts/space-engagement.js";
+export type { SpaceVoteValue } from "./contracts/space-engagement.js";
+export {
+  SPACE_COMMENT_SPEAKERS,
+  SpaceComment,
+  SpaceCommentList,
+  SpaceCommentReaction,
+  addSpaceCommentReaction,
+  createSpaceComment,
+  deleteSpaceComment,
+  listSpaceComments,
+  removeSpaceCommentReaction,
+  updateSpaceComment,
+} from "./contracts/space-comments.js";
+export type { SpaceCommentCreate, SpaceCommentPatch } from "./contracts/space-comments.js";
+export {
+  SpaceBoardCycle,
+  SpaceBoardLabel,
+  SpaceBoardMember,
+  SpaceBoardModule,
+  SpaceBoardState,
+  listSpaceBoardCycles,
+  listSpaceBoardLabels,
+  listSpaceBoardMembers,
+  listSpaceBoardModules,
+  listSpaceBoardStates,
+} from "./contracts/space-display.js";
+export {
+  SPACE_COMMENT_IMAGE_ENTITY_TYPE,
+  SpaceAssetGrant,
+  completeSpaceAssetUpload,
+  linkSpaceAssets,
+  requestSpaceAssetUpload,
+  restoreSpaceAsset,
+  spaceAssetReadPath,
+  uploadSpaceAssetBytes,
+} from "./contracts/space-assets.js";
+export type {
+  SpaceAssetByteUpload,
+  SpaceAssetUploadInput,
+  SpaceAssetUploadResponse,
+} from "./contracts/space-assets.js";
+export {
+  SPACE_AUTH_ERROR_CODES,
+  SPACE_BASE_PATH,
+  SpaceAuthError,
+  SpaceEmailCheck,
+  SpaceMagicGenerate,
+  checkSpaceEmail,
+  generateSpaceMagicCode,
+  parseSpaceAuthRedirect,
+  signInToSpace,
+  signInToSpaceWithMagicCode,
+  signOutOfSpace,
+  signUpToSpace,
+  signUpToSpaceWithMagicCode,
+} from "./contracts/space-auth.js";
+export type {
+  SpaceAuthErrorCode,
+  SpaceAuthResult,
+  SpaceMagicSignInInput,
+  SpaceMagicSignUpInput,
+  SpaceSignInInput,
+  SpaceSignUpInput,
+} from "./contracts/space-auth.js";

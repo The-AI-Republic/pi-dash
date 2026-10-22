@@ -20,6 +20,12 @@ export const CONTRACT_WORKSPACE = process.env["PIDASH_CONTRACT_WORKSPACE"] ?? "c
  */
 export const CONTRACT_DEV_WORKSPACE = process.env["PIDASH_CONTRACT_DEV_WORKSPACE"] ?? "contract-dev";
 export const CONTRACT_PROJECT_IDENTIFIER = "CT";
+/**
+ * The published board the space suites read (NEWFRONT-752). The seed mints
+ * one board on the seeded project with this fixed anchor, so the public
+ * board endpoints resolve without a publish round-trip.
+ */
+export const CONTRACT_BOARD_ANCHOR = process.env["PIDASH_CONTRACT_BOARD_ANCHOR"] ?? "contract-board-anchor";
 export const CONTRACT_SECONDARY_EMAIL = process.env["PIDASH_CONTRACT_SECONDARY_EMAIL"] ?? "contract.probe@example.com";
 export const CONTRACT_AUTOSET_EMAIL = process.env["PIDASH_CONTRACT_AUTOSET_EMAIL"] ?? "contract.autoset@example.com";
 export const CONTRACT_ADMIN_EMAIL = process.env["PIDASH_CONTRACT_ADMIN_EMAIL"] ?? "contract.admin@example.com";
@@ -56,7 +62,19 @@ function storeCookies(jar: Map<string, string>, headers: Headers): void {
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-export function contractTransport(jar = new Map<string, string>()): Transport {
+export interface ContractTransportOptions {
+  /**
+   * Walk 3xx responses to their final hop. Defaults to true, which is what
+   * a browser does. The spaces auth suites turn it off: their success and
+   * failure redirects both land on `/spaces/...`, a frontend path the
+   * Django-only contract stack does not serve, so following it would turn a
+   * correct 302 into a 404 before the suite could read the Location.
+   */
+  followRedirects?: boolean;
+}
+
+export function contractTransport(jar = new Map<string, string>(), options: ContractTransportOptions = {}): Transport {
+  const followRedirects = options.followRedirects ?? true;
   return async (url, init) => {
     // Walk redirects manually: fetch hides intermediate Set-Cookie headers
     // when it follows them itself, which would drop the session cookie the
@@ -81,6 +99,7 @@ export function contractTransport(jar = new Map<string, string>()): Transport {
         redirect: "manual",
       });
       storeCookies(jar, response.headers);
+      if (!followRedirects) return response;
       const location = response.headers.get("location");
       if (!REDIRECT_STATUSES.has(response.status) || !location || hops >= 10) return response;
       hops += 1;
