@@ -12,6 +12,8 @@ import type {
   IAssistantThread,
   IUserLLMConfig,
   IUserLLMConfigInput,
+  IUserSTTConfig,
+  IUserSTTConfigInput,
 } from "@pi-dash/types";
 import { APIService } from "../api.service";
 
@@ -120,6 +122,59 @@ export class AssistantService extends APIService {
       .then((res) => res?.data)
       .catch((err) => {
         throw err?.response?.data;
+      });
+  }
+
+  // --- BYO speech-to-text (dictation) config (user-level) ---
+
+  async getSTTConfig(): Promise<IUserSTTConfig> {
+    return this.get(`/api/users/me/ai-assistant/stt-config/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async putSTTConfig(data: IUserSTTConfigInput): Promise<IUserSTTConfig> {
+    return this.put(`/api/users/me/ai-assistant/stt-config/`, data)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async deleteSTTConfig(): Promise<void> {
+    return this.delete(`/api/users/me/ai-assistant/stt-config/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  async testSTTConfig(): Promise<{ ok: boolean; error_code?: string; detail?: string }> {
+    return this.post(`/api/users/me/ai-assistant/stt-config/test/`)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data;
+      });
+  }
+
+  /**
+   * Transcribe a recorded audio blob via the user's configured STT endpoint.
+   * The blob is uploaded as multipart/form-data; the backend injects the model
+   * and forwards to the provider's `/v1/audio/transcriptions` route, returning
+   * the recognized text. The upload field is `file`, matching both the backend
+   * (`request.FILES["file"]`) and the OpenAI-compatible transcription contract.
+   * On failure the rejected value is the API error body
+   * (e.g. `{ error: "stt_config_missing", detail: "…" }`) so callers can branch on it.
+   */
+  async transcribeAudio(audio: Blob, filename = "dictation.webm"): Promise<{ text: string }> {
+    const form = new FormData();
+    form.append("file", audio, filename);
+    return this.post(`/api/users/me/ai-assistant/transcribe/`, form)
+      .then((res) => res?.data)
+      .catch((err) => {
+        throw err?.response?.data ?? err;
       });
   }
 

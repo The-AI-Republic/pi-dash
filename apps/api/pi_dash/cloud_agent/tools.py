@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from pi_dash.assistant.runtime.markdown import to_safe_html
 from pi_dash.cloud_agent import events
+from pi_dash.cloud_agent.policy import REPEATABLE_WRITE_TOOLS
 from pi_dash.core.permissions import ROLE_ADMIN, ROLE_GUEST, ROLE_MEMBER, check_project_role, is_workspace_member
 from pi_dash.db.models import GitCodeReviewLink, GitRepositoryBinding, Issue, IssueComment, Project, State
 from pi_dash.runner.models import AgentRun, AgentRunToolCall, ToolCallStatus
@@ -100,7 +101,10 @@ def _audit(run_id, tool_name, risk, args, operation, *, source="internal", serve
                 >= settings.CLOUD_AGENT_WRITE_CALL_LIMIT
             ):
                 raise ToolDenied("write_limit")
-            if run.tool_calls.filter(tool_name=tool_name, risk="write", status=ToolCallStatus.SUCCEEDED).exists():
+            if (
+                tool_name not in REPEATABLE_WRITE_TOOLS
+                and run.tool_calls.filter(tool_name=tool_name, risk="write", status=ToolCallStatus.SUCCEEDED).exists()
+            ):
                 raise ToolDenied("write_tool_already_used")
             ledger = AgentRunToolCall.objects.create(
                 agent_run=run,
@@ -312,17 +316,27 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
             # orchestration transition handler. A bare queryset .update()
             # would skip the signal-driven phase machinery entirely — no
             # ticker arm/disarm, no follow-up phase run.
-            locked = Issue.objects.select_for_update().select_related("state").get(pk=run.work_item_id)
+            # ``of=("self",)``: ``state`` is a nullable FK, so the join is an
+            # outer join and Postgres refuses ``FOR UPDATE`` on its nullable
+            # side (the same trap the move endpoint hit).
+            locked = Issue.objects.select_for_update(of=("self",)).select_related("state").get(pk=run.work_item_id)
             from_state = locked.state
             if from_state is not None and from_state.pk == state.pk:
                 return {"updated": False, "state": state.name, "state_id": str(state.id)}
             locked.state = state
+            # This move is made from inside an agent run: the ticker must
+            # treat it as an agent move (queued entry that counts against
+            # the pool; parks when the pool is spent), not as a free human
+            # move. Same carrier the local runner's CLI header sets.
+            from pi_dash.orchestration.signals import MOVED_BY_RUN_ATTR
+
+            setattr(locked, MOVED_BY_RUN_ATTR, run)
             with impersonate(run.created_by):
                 locked.save(update_fields=["state", "updated_at", "updated_by"])
             from pi_dash.orchestration import service as orchestration
 
             orchestration.handle_issue_state_transition(
-                locked, from_state, state, actor=run.created_by, dispatch_immediate=True
+                locked, from_state, state, actor=run.created_by, dispatch_immediate=True, moved_by_run=run
             )
             return {"updated": True, "state": state.name, "state_id": str(state.id)}
 
@@ -355,6 +369,83 @@ def build_tools(run_id, allowed_names, *, source="internal", server_key=""):
             return {"created": True, **_issue_data(issue)}
 
         return audit("pidash_create_project_issue", "write", {"title": title, "description": description}, op)
+
+    # Relations (PDASHOSS01-199): same names, arguments and output shape as
+    # ``pidash issue relate|unrelate|relations`` and the MCP connector. The
+    # source issue must be in this run's project (the write role checked by
+    # ``_scope``); the related issues may be anywhere the run's creator is an
+    # active project member.
+
+    def _relation_scope(run):
+        from pi_dash.core.querysets import member_project_issues
+
+        visible = member_project_issues(run.created_by, run.workspace.slug)
+        return visible, visible.filter(project_id=_project_id(run))
+
+    def _resolve_relation_refs(pool, refs):
+        from pi_dash.orchestration import relations
+
+        found, unresolved = relations.resolve_refs(refs, pool)
+        if unresolved:
+            raise ValueError("issues not found or not accessible: " + ", ".join(unresolved))
+        return found
+
+    def _relation_write(tool_name, operation, issue, relation_type, related_issues):
+        from pi_dash.orchestration import relations
+
+        if not isinstance(related_issues, list) or not related_issues or len(related_issues) > 50:
+            raise ValueError("related_issues must list 1-50 issues")
+        relation_type = relations.validate_relation_type(relation_type)
+
+        def op(run):
+            visible, own_project = _relation_scope(run)
+            (source,) = _resolve_relation_refs(own_project, [issue])
+            targets = _resolve_relation_refs(visible, related_issues)
+            with impersonate(run.created_by):
+                result = operation(source, relation_type, targets, run.created_by)
+            result["relations"] = relations.grouped_relations(source, visible)
+            return result
+
+        return audit(
+            tool_name,
+            "write",
+            {"issue": issue, "relation_type": relation_type, "related_issues": related_issues},
+            op,
+        )
+
+    def pidash_relate_issues(issue: str, relation_type: str, related_issues: list[str]):
+        """Record `issue <relation_type> each related issue` (identifiers like PROJ-12 or UUIDs).
+        relation_type is read from `issue`'s side: blocked_by, blocking, relates_to, duplicate,
+        start_before, start_after, finish_before, finish_after, implemented_by, implements.
+        Idempotent: existing pairs come back under `unchanged`, pairs with a different relation
+        under `conflicts` (left as is). `issue` must be in this run's project."""
+        from pi_dash.orchestration import relations
+
+        return _relation_write("pidash_relate_issues", relations.relate, issue, relation_type, related_issues)
+
+    def pidash_unrelate_issues(issue: str, relation_type: str, related_issues: list[str]):
+        """Remove the `relation_type` relation between `issue` and each related issue. Pairs
+        without it come back under `not_related`. `issue` must be in this run's project."""
+        from pi_dash.orchestration import relations
+
+        return _relation_write("pidash_unrelate_issues", relations.unrelate, issue, relation_type, related_issues)
+
+    def pidash_list_issue_relations(issue: str = ""):
+        """List an issue's relations grouped by type from its side (blocked_by, blocking,
+        relates_to, ...), each with identifier, name and state. Defaults to the current issue."""
+        from pi_dash.orchestration import relations
+
+        def op(run):
+            visible, _ = _relation_scope(run)
+            if issue:
+                (source,) = _resolve_relation_refs(visible, [issue])
+            elif run.work_item_id:
+                source = run.work_item
+            else:
+                raise ValueError("issue is required when the run has no current issue")
+            return {"issue": relations.identifier(source), "relations": relations.grouped_relations(source, visible)}
+
+        return audit("pidash_list_issue_relations", "read", {"issue": issue}, op)
 
     def github_get_file(path: str, ref: str = ""):
         """Read a UTF-8 repository file from the verified GitHub binding."""

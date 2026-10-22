@@ -10,9 +10,9 @@ Use this when completion is blocked by missing required tools or missing auth/pe
 1. **Update the workpad** (`pidash workpad update --body-file <path>`):
    - `### Phase` left at the phase you were in, not "completed".
    - `### Autonomy / Escalation` updated: `score`, `type`, `safe_to_continue: false`, `Reason:` explaining the blocker in your own words.
-   - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is a self-note for the *next* run — it isn't read by any code on the cloud side, but reading it as part of your workpad reconciliation in Step 1 tells you immediately that you're resuming a clarification thread (so you check the most recent human comments first) rather than starting a fresh investigation.
+   - `Awaiting human reply:` set to a one-line note about the comment you're about to post (gist + today's date). This is a self-note for the *next* run — it isn't read by any code on the cloud side, but reading it as part of your workpad reconciliation{% if run.kind == "coding-task" %} in Step 1{% endif %} tells you immediately that you're resuming a clarification thread (so you check the most recent human comments first) rather than starting a fresh investigation.
 
-2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague (see Step 0.5 step 7 for tone). Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
+2. **Post a comment to the human** via `pidash comment add {{ issue.identifier }} --body-file <path>`. Write as a colleague{% if run.kind == "coding-task" %} (see Step 0.5 step 7 for tone){% endif %}. Lead with what's blocking, then what you need from them. Don't use a `Blocked:` prefix or any other template — just write it.
 
    Example (missing access):
 
@@ -26,4 +26,6 @@ Use this when completion is blocked by missing required tools or missing auth/pe
    `pidash issue patch {{ issue.identifier }} --state "Blocked"`
    If no "Blocked" state exists in this project, leave the issue in its current state. The comment is the signal.
 
-4. **Stop.** Do not continue into implementation. Exit the run cleanly. The next agent tick fires automatically when the human replies (the cloud's `handle_issue_comment` listener queues a follow-up run on any non-bot comment); that run will start fresh, read the full comment thread via `pidash comment list`, see the human's reply, see your `Awaiting human reply` self-note in the workpad, and continue from where you left off.
+4. **Stop.** Do not continue into implementation. End the run with `pidash run yield --outcome blocked --stop-ticking` — you are parked on a human, so no further agent run is useful until they act — and exit cleanly. A follow-up run fires automatically when the human replies (the cloud's `handle_issue_comment` listener queues one on any non-bot comment, and their reply re-arms the clock); that run will start fresh, read the full comment thread via `pidash comment list`, see the human's reply, see your `Awaiting human reply` self-note in the workpad, and continue from where you left off.
+
+This flow is for blockers only a **human** can clear. When what blocks you is **another issue**, do not stop the clock: record which issue and why in the workpad, call `pidash issue wait {{ issue.identifier }}`{% if run.kind == "coding-task" %} (see "Work item relationships"){% endif %}, and yield `waiting_on_external` — the clock keeps ticking and a later run re-reads the blocker and decides afresh.

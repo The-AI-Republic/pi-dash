@@ -7,15 +7,9 @@ use uuid::Uuid;
 
 use crate::util::paths::RunnerPaths;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunSummary {
-    pub run_id: Uuid,
-    pub work_item_id: Option<Uuid>,
-    pub status: String,
-    pub started_at: DateTime<Utc>,
-    pub ended_at: Option<DateTime<Utc>>,
-    pub title: Option<String>,
-}
+// `RunSummary` moved to the shared `pidash-ipc` crate (PDASHOSS01-158);
+// re-exported here so `history::index::RunSummary` call sites are unchanged.
+pub use pidash_ipc::dto::RunSummary;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunsIndex {

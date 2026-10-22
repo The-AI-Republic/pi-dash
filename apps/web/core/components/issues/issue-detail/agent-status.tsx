@@ -94,10 +94,39 @@ function formatRunDone(count: number, t: TranslationFn): string {
   });
 }
 
-function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
+/** Exported for tests — the wait arithmetic below is easy to get subtly wrong. */
+export function formatTickBudget(ticker: TIssueAgentTicker | null | undefined, t: TranslationFn): string | null {
   if (!ticker) return null;
-  if (ticker.max_ticks === -1) return t("Tick {count}, no cap", { count: ticker.tick_count });
-  return t("Tick {count} of {max}", { count: ticker.tick_count, max: ticker.max_ticks });
+  // One pool per issue, spent in any stage; ``used`` falls back to the
+  // pre-pool ``tick_count`` spelling for older payloads.
+  const used = ticker.used ?? ticker.tick_count;
+  const waited = ticker.waited ?? 0;
+  if (ticker.max_ticks === -1) return t("{count} runs used, no cap", { count: used });
+  // A wait run is a run: report the counters as they stand rather than
+  // netting waits out of them (PDASHOSS01-211). `max_ticks` already carries
+  // the ticks waits bought back, so 3 runs of which 3 waited read "3 of 13
+  // runs used, 3 waits" — no clamp, and nothing can disagree with the
+  // remaining count the prompt renders from the same numbers.
+  const budget = t("{count} of {max} runs used", { count: used, max: ticker.max_ticks });
+  if (waited === 0) return budget;
+  // Same singular/plural shape as formatRunDone above.
+  return `${budget}, ${t(waited === 1 ? "{count} wait" : "{count} waits", { count: waited })}`;
+}
+
+/** Exported for tests — `_stop_clock` retains `next_run_at`, so a disarmed
+ * clock still carries a timestamp; the tile must gate on the clock being
+ * armed (or an entry being queued), not on the timestamp existing. */
+export function formatNextTick(
+  ticker: TIssueAgentTicker | null | undefined,
+  now: number,
+  t: TranslationFn
+): string | null {
+  if (!ticker) return null;
+  // A queued entry (design §4.5) is due now and starts the moment the
+  // active run ends — say so instead of "due now".
+  if (ticker.pending_entry) return t("queued");
+  if (!ticker.enabled) return null;
+  return formatUntil(ticker.next_run_at, now, t);
 }
 
 function getPayloadString(payload: Record<string, unknown> | null | undefined, key: string): string | null {
@@ -128,7 +157,8 @@ function getPayloadStringList(payload: Record<string, unknown> | null | undefine
 function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn): string | null {
   const liveState = run.live_state;
   if (!liveState) return null;
-  const lastActivity = formatRelativePast(liveState.last_event_at, now, t);
+  // With observability off only the watchdog's activity stamp is reported.
+  const lastActivity = formatRelativePast(liveState.last_event_at ?? liveState.agent_last_activity_at, now, t);
   if (liveState.last_event_summary && lastActivity) {
     return `${truncate(liveState.last_event_summary)} (${lastActivity})`;
   }
@@ -137,7 +167,9 @@ function getLiveDetail(run: TIssueAgentRunSummary, now: number, t: TranslationFn
   return null;
 }
 
-function getRunView(
+/** Exported for tests — the run view always outranks getTickerOnlyView on
+ * the detail page, so the stop_signal precedence lives here. */
+export function getRunView(
   run: TIssueAgentRunSummary,
   ticker: TIssueAgentTicker | null | undefined,
   runCount: number,
@@ -191,6 +223,18 @@ function getRunView(
         iconClassName: "animate-spin text-accent-primary",
       };
     case "running":
+      // The runner's passive-kill watchdog has seen no agent event for its
+      // unhealthy threshold; the run is still going until the kill threshold.
+      if (run.live_state?.agent_health === "unhealthy") {
+        return {
+          title: t("AI agent has gone quiet"),
+          detail: liveDetail ?? runnerDetail,
+          badge: t("Unhealthy"),
+          badgeVariant: "warning",
+          icon: CircleAlert,
+          iconClassName: "text-warning-primary",
+        };
+      }
       return {
         title: t("AI agent is working on this issue"),
         detail:
@@ -281,6 +325,21 @@ function getRunView(
         iconClassName: "text-danger-primary",
       };
     case "completed":
+      // A stop_signal disarm is always produced by a run, so this run view —
+      // not getTickerOnlyView — is what renders after the agent stops its own
+      // clock (`active_run ?? latest_run` wins). Surface the stop here.
+      if (ticker && !ticker.enabled && ticker.disarm_reason === "stop_signal") {
+        return {
+          title: t("AI agent ticking stopped by the agent"),
+          detail: `${formatRunDone(runCount, t)} — ${t(
+            "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it."
+          )}`,
+          badge: t("Stopped"),
+          badgeVariant: "neutral",
+          icon: CirclePause,
+          iconClassName: "text-tertiary",
+        };
+      }
       return {
         title: t("AI agent run completed"),
         detail: doneDetail,
@@ -333,7 +392,20 @@ function getTickerOnlyView(ticker: TIssueAgentTicker, now: number, t: Translatio
     };
   }
 
-  if (ticker.disarm_reason === "cap_hit") {
+  if (ticker.disarm_reason === "stop_signal") {
+    return {
+      title: t("AI agent ticking stopped by the agent"),
+      detail: t(
+        "The agent decided no further automatic run would help here. A comment, state change or Run AI re-arms it."
+      ),
+      badge: t("Stopped"),
+      badgeVariant: "neutral",
+      icon: CirclePause,
+      iconClassName: "text-tertiary",
+    };
+  }
+
+  if (ticker.disarm_reason === "cap_hit" || ticker.disarm_reason === "pool_spent") {
     return {
       title: t("AI agent run limit reached"),
       detail: formatTickBudget(ticker, t),
@@ -423,7 +495,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
   if (!view) return null;
 
   const Icon = view.icon;
-  const nextTick = formatUntil(ticker?.next_run_at, now, t);
+  const nextTick = formatNextTick(ticker, now, t);
   const tickBudget = formatTickBudget(ticker, t);
 
   return (
@@ -486,7 +558,7 @@ export function IssueAgentStatusPanel({ workspaceSlug, projectId, issueId, issue
             <span className="text-body-xs-medium">{t("Re-tick")}</span>
           </Button>
           <p className="text-caption-sm-regular text-tertiary">
-            {t("Grant a fresh ticking budget so the AI agent resumes on its schedule.")}
+            {t("Add more runs to this issue's budget and start the AI agent now.")}
           </p>
         </div>
       )}

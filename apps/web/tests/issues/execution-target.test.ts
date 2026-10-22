@@ -40,6 +40,7 @@ describe("managed runner reason copy", () => {
     const codes = [
       "desktop_not_connected",
       "managed_runner_disabled",
+      "managed_runner_paused",
       "llm_config_missing",
       "gateway_scopes_missing",
       "byok_not_supported_on_desktop",

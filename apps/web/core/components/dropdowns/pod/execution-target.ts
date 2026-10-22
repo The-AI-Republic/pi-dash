@@ -82,6 +82,8 @@ export function managedRunnerReasonCopy(reasonCode: string, t: TranslateFn): str
       );
     case "managed_runner_disabled":
       return t("Pi Dash Agent is not enabled on this server.");
+    case "managed_runner_paused":
+      return t("Pi Dash Agent is paused for this project. Resume it to run here.");
     case "llm_config_missing":
       return t("Configure your AI provider in Pi Dash AI settings to run on your desktop.");
     case "gateway_scopes_missing":

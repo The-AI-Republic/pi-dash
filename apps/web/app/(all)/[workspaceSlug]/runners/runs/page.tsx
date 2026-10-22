@@ -6,7 +6,7 @@
 
 import { Fragment, useState } from "react";
 import { observer } from "mobx-react";
-import { useNavigate, useParams, useSearchParams } from "react-router";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 import useSWR from "swr";
 import { useTranslation } from "@pi-dash/i18n";
 import { TOAST_TYPE, setToast } from "@pi-dash/propel/toast";
@@ -17,53 +17,13 @@ import type { TBadgeVariant } from "@pi-dash/ui";
 import { AlertModalCore, Badge, Button, Spinner } from "@pi-dash/ui";
 import { PageHead } from "@/components/core/page-title";
 import { executorKindLabel } from "@/components/dropdowns/pod/execution-target";
+import { RunStatusBadge, statusLabel } from "@/components/runners/run-status-badge";
 import { RunnersTabs } from "@/components/runners/runners-tabs";
 import { useWorkspace } from "@/hooks/store/use-workspace";
 
 const service = new RunnerService();
 
-const STATUS_BADGE_VARIANT: Record<TAgentRunStatus, TBadgeVariant> = {
-  queued: "accent-neutral",
-  assigned: "accent-primary",
-  running: "primary",
-  cancel_requested: "accent-warning",
-  awaiting_approval: "accent-warning",
-  awaiting_reauth: "accent-warning",
-  paused_awaiting_input: "accent-warning",
-  blocked: "accent-warning",
-  completed: "accent-success",
-  failed: "accent-destructive",
-  cancelled: "accent-neutral",
-  refused: "accent-destructive",
-};
-
-const RUN_STATUS_I18N_LABELS: Record<TAgentRunStatus, string> = {
-  queued: "queued",
-  assigned: "assigned",
-  running: "running",
-  cancel_requested: "cancellation requested",
-  awaiting_approval: "awaiting approval",
-  awaiting_reauth: "awaiting reauth",
-  paused_awaiting_input: "paused awaiting input",
-  blocked: "blocked",
-  completed: "completed",
-  failed: "failed",
-  cancelled: "cancelled",
-  refused: "refused",
-};
-
 type TranslationFn = ReturnType<typeof useTranslation>["t"];
-
-// Historical runs can still carry a status that is no longer in the union
-// (e.g. the retired `waiting_for_worktree`). Fall back so those rows render
-// with a neutral badge and their raw status label instead of crashing.
-function statusBadgeVariant(status: TAgentRunStatus): TBadgeVariant {
-  return (STATUS_BADGE_VARIANT as Partial<Record<string, TBadgeVariant>>)[status] ?? "accent-neutral";
-}
-
-function statusLabel(status: TAgentRunStatus, t: TranslationFn): string {
-  return t((RUN_STATUS_I18N_LABELS as Partial<Record<string, string>>)[status] ?? status);
-}
 
 // A managed run that is queued because the owner's desktop is closed is not
 // "queued" in the capacity sense — it is waiting for that one machine to come
@@ -225,9 +185,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                   >
                     <td className="px-3 py-2 whitespace-nowrap">{new Date(r.created_at).toLocaleString()}</td>
                     <td className="px-3 py-2">
-                      <Badge variant={statusBadgeVariant(r.status)} size="sm">
-                        {runStatusLabel(r, t)}
-                      </Badge>
+                      <RunStatusBadge status={r.status} label={runStatusLabel(r, t)} t={t} />
                     </td>
                     <td className="font-mono max-w-[180px] truncate px-3 py-2 text-11">{r.prompt}</td>
                   </tr>
@@ -280,9 +238,7 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                 <div>
                   <div className="font-mono text-11">{detail.id}</div>
                   <div className="mt-1 flex items-center gap-2">
-                    <Badge variant={statusBadgeVariant(detail.status)} size="sm">
-                      {runStatusLabel(detail, t)}
-                    </Badge>
+                    <RunStatusBadge status={detail.status} label={runStatusLabel(detail, t)} t={t} />
                     <Badge
                       variant={detail.executor_kind === "cloud_agent" ? "accent-primary" : "accent-neutral"}
                       size="sm"
@@ -297,6 +253,17 @@ export const RunnerRunsPage = observer(function RunnerRunsPage() {
                   </Button>
                 )}
               </div>
+              {detail.scheduler_binding && detail.scheduler_binding_detail && (
+                <div className="text-13">
+                  <span className="text-secondary">{t("Scheduler")}: </span>
+                  <Link
+                    to={`/${workspaceSlug}/projects/${detail.scheduler_binding_detail.project}/schedulers/${detail.scheduler_binding}`}
+                    className="font-medium text-primary hover:underline"
+                  >
+                    {detail.scheduler_binding_detail.scheduler_name}
+                  </Link>
+                </div>
+              )}
               <div className="text-13">
                 <div className="text-secondary">{t("Prompt")}</div>
                 <pre className="mt-1 rounded bg-layer-1 p-2 text-11 whitespace-pre-wrap">{detail.prompt}</pre>

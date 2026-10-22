@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde_json::json;
 use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
@@ -9,14 +8,19 @@ use uuid::Uuid;
 // existing integration tests and any downstream callers that imported them
 // from here keep compiling. The canonical definitions live in `agent::`.
 pub use crate::agent::{BridgeEvent, RunPayload};
+use crate::agent::ENGINE_STARTUP_TIMEOUT;
+use crate::approval::EngineThreadSettings;
 use crate::cloud::protocol::{ApprovalDecision, ApprovalKind, FailureReason};
 use crate::codex::app_server::AppServer;
 use crate::util::shell::AgentEnv;
 use crate::codex::jsonrpc::{self, Incoming};
 use crate::codex::schema::{
     ApprovalResponseParams, ClientInfo, InitializeParams, NotificationKind, ThreadStartParams,
-    TurnInputItem, TurnStartParams,
+    TurnInputItem, TurnInterruptParams, TurnStartParams,
 };
+
+/// How long a new turn waits for an interrupted one to report its end.
+const INTERRUPT_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Bridge {
     pub server: AppServer,
@@ -25,8 +29,21 @@ pub struct Bridge {
     /// `high`/`xhigh`). `None` omits the field so codex uses the model's
     /// default effort. Sourced from `[runner.codex].effort_default`.
     pub effort_default: Option<String>,
+    /// The `sandbox` / `approval_policy` this bridge stamps on every thread it
+    /// starts. Defaults to the historical full-access posture; the local chat
+    /// lane overrides it per session from the user's chosen approval mode.
+    pub engine_settings: EngineThreadSettings,
     initialized: bool,
     thread_id: Option<String>,
+    /// Request id of a `turn/start` whose response (carrying the turn id) has
+    /// not been read yet.
+    turn_start_request: Option<u64>,
+    /// Id of the turn in flight. `turn/interrupt` is rejected without it.
+    turn_id: Option<String>,
+    /// An interrupt was asked for; the turn has not reported its end yet. The
+    /// next turn settles this first, so the interrupted turn's remaining
+    /// frames are not read as its own.
+    interrupting: bool,
     /// Notifications that arrived while we were waiting for an RPC response
     /// (e.g. an early `account/reauthRequired` during `initialize`). Drained
     /// by [`Bridge::next_frame`] before reading from the live stream so the
@@ -41,15 +58,25 @@ impl Bridge {
         model_default: Option<String>,
         effort_default: Option<String>,
     ) -> Result<Self> {
-        Self::spawn_with_env(binary, cwd, model_default, effort_default, &AgentEnv::default()).await
+        Self::spawn_with_env(
+            binary,
+            cwd,
+            model_default,
+            effort_default,
+            EngineThreadSettings::default(),
+            &AgentEnv::default(),
+        )
+        .await
     }
 
-    /// [`Bridge::spawn`] with a Pi Dash-controlled agent environment.
+    /// [`Bridge::spawn`] with a Pi Dash-controlled agent environment and the
+    /// per-thread engine posture derived from the caller's approval mode.
     pub async fn spawn_with_env(
         binary: &str,
         cwd: &Path,
         model_default: Option<String>,
         effort_default: Option<String>,
+        engine_settings: EngineThreadSettings,
         env: &AgentEnv,
     ) -> Result<Self> {
         let server = AppServer::spawn_with_env(binary, cwd, env).await?;
@@ -57,8 +84,12 @@ impl Bridge {
             server,
             model_default,
             effort_default,
+            engine_settings,
             initialized: false,
             thread_id: None,
+            turn_start_request: None,
+            turn_id: None,
+            interrupting: false,
             pending: std::collections::VecDeque::new(),
         })
     }
@@ -70,8 +101,12 @@ impl Bridge {
             server,
             model_default,
             effort_default: None,
+            engine_settings: EngineThreadSettings::default(),
             initialized: false,
             thread_id: None,
+            turn_start_request: None,
+            turn_id: None,
+            interrupting: false,
             pending: std::collections::VecDeque::new(),
         }
     }
@@ -79,10 +114,49 @@ impl Bridge {
     /// Returns the next frame from Codex, consulting the pending buffer first
     /// so notifications stashed during `await_response` are not lost.
     pub async fn next_frame(&mut self) -> Option<Incoming> {
-        if let Some(f) = self.pending.pop_front() {
-            return Some(f);
+        let frame = match self.pending.pop_front() {
+            Some(f) => f,
+            None => self.server.inbound.recv().await?,
+        };
+        self.track_turn(&frame);
+        Some(frame)
+    }
+
+    /// Follow the turn in flight from the frames going past.
+    fn track_turn(&mut self, frame: &Incoming) {
+        match frame {
+            Incoming::Response { id, result, .. } if self.turn_start_request == Some(*id) => {
+                self.turn_start_request = None;
+                self.turn_id = result.as_ref().and_then(turn_id_of);
+                // The turn never started, so there is nothing to wait out.
+                if self.turn_id.is_none() {
+                    self.interrupting = false;
+                }
+            }
+            Incoming::Notification { method, .. } if method == "turn/completed" => {
+                self.turn_start_request = None;
+                self.turn_id = None;
+                self.interrupting = false;
+            }
+            _ => {}
         }
-        self.server.inbound.recv().await
+    }
+
+    /// Wait for an interrupted turn to end, discarding what is left of it.
+    /// Without this the next turn would read the old turn's frames as its own.
+    async fn settle_interrupted_turn(&mut self) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + INTERRUPT_SETTLE_TIMEOUT;
+        while self.interrupting {
+            // The interrupt could not be sent before the turn id was known.
+            if self.turn_id.is_some() {
+                self.send_interrupt().await?;
+            }
+            tokio::time::timeout_at(deadline, self.next_frame())
+                .await
+                .context("interrupted codex turn did not end")?
+                .context("codex stdout closed while interrupting a turn")?;
+        }
+        Ok(())
     }
 
     /// Prepare the app-server for a chat turn without sending user input.
@@ -102,6 +176,7 @@ impl Bridge {
 
     pub async fn run(&mut self, payload: &RunPayload, cwd: &Path) -> Result<BridgeCursor> {
         let thread_id = self.warm(cwd).await?;
+        self.settle_interrupted_turn().await?;
         self.start_turn(&thread_id, payload).await?;
         Ok(BridgeCursor {
             run_id: payload.run_id,
@@ -131,7 +206,7 @@ impl Bridge {
         )?;
         self.server.send_raw(&line).await?;
         // Wait for init response.
-        let _ = self.await_response(id, Duration::from_secs(15)).await?;
+        let _ = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
         let line = jsonrpc::notification("initialized", &serde_json::Value::Null)?;
         self.server.send_raw(&line).await?;
         self.initialized = true;
@@ -146,13 +221,17 @@ impl Bridge {
             &ThreadStartParams {
                 cwd: cwd.to_string_lossy().to_string(),
                 model: self.model_default.clone(),
-                // Match Claude Code's MVP `bypassPermissions` posture.
-                sandbox: "danger-full-access".into(),
-                approval_policy: "never".into(),
+                // Per-thread posture. Defaults to the historical full-access
+                // stance; the local chat lane overrides it from the user's
+                // chosen approval mode (see `approval::mode`). The managed
+                // config's own `sandbox_mode`/`approval_policy` are shadowed by
+                // these per-thread values, which is why they must be set here.
+                sandbox: self.engine_settings.sandbox.into(),
+                approval_policy: self.engine_settings.approval_policy.into(),
             },
         )?;
         self.server.send_raw(&line).await?;
-        let resp = self.await_response(id, Duration::from_secs(30)).await?;
+        let resp = self.await_response(id, ENGINE_STARTUP_TIMEOUT).await?;
         resp.get("threadId")
             .or_else(|| resp.get("thread").and_then(|t| t.get("id")))
             .or_else(|| resp.get("thread_id"))
@@ -176,7 +255,9 @@ impl Bridge {
                 effort: self.effort_default.clone(),
             },
         )?;
-        self.server.send_raw(&line).await
+        self.server.send_raw(&line).await?;
+        self.turn_start_request = Some(id);
+        Ok(())
     }
 
     pub async fn send_approval(
@@ -199,8 +280,25 @@ impl Bridge {
     }
 
     pub async fn interrupt(&mut self) -> Result<()> {
+        if self.turn_start_request.is_none() && self.turn_id.is_none() {
+            return Ok(());
+        }
+        self.interrupting = true;
+        self.send_interrupt().await
+    }
+
+    /// Send `turn/interrupt` for the turn in flight. A no-op until its id is
+    /// known; [`Bridge::settle_interrupted_turn`] retries once it is.
+    async fn send_interrupt(&mut self) -> Result<()> {
+        let (Some(thread_id), Some(turn_id)) = (self.thread_id.clone(), self.turn_id.take()) else {
+            return Ok(());
+        };
         let id = self.server.alloc_id();
-        let line = jsonrpc::request(id, "turn/interrupt", &json!({}))?;
+        let line = jsonrpc::request(
+            id,
+            "turn/interrupt",
+            &TurnInterruptParams { thread_id, turn_id },
+        )?;
         self.server.send_raw(&line).await
     }
 
@@ -233,6 +331,14 @@ impl Bridge {
             }
         }
     }
+}
+
+fn turn_id_of(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("turn")
+        .and_then(|turn| turn.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|id| id.to_string())
 }
 
 pub struct BridgeCursor {

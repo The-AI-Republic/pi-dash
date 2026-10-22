@@ -200,7 +200,13 @@ def test_attach_fills_snapshot_when_app_installed(api_key_client, workspace, pr_
     """When the workspace has an App installation covering the account, attach
     best-effort fetches the PR to pre-fill the display snapshot."""
     _install_app(workspace, create_user, account_login="acme")
-    fake_pr = {"title": "Make the button blue", "state": "open", "draft": True, "merged": False, "updated_at": "2026-06-17T09:00:00Z"}
+    fake_pr = {
+        "title": "Make the button blue",
+        "state": "open",
+        "draft": True,
+        "merged": False,
+        "updated_at": "2026-06-17T09:00:00Z",
+    }
 
     with patch(
         "pi_dash.utils.github_pr_links.GithubClient.for_installation",
