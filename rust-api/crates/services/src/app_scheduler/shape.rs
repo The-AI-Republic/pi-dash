@@ -88,6 +88,7 @@ pub const SCHEDULER_SERIALIZER_FIELDS: &[&str] = &[
     "prompt",
     "color",
     "source",
+    "is_builtin",
     "is_enabled",
     "active_binding_count",
     "created_at",
@@ -99,6 +100,7 @@ pub const SCHEDULER_READ_ONLY_FIELDS: &[&str] = &[
     "id",
     "workspace",
     "source",
+    "is_builtin",
     "active_binding_count",
     "created_at",
     "updated_at",
@@ -256,6 +258,19 @@ pub const COLOR_ERROR: &str = "color must be a 7-character hex string like '#3b8
 /// scheduler in the workspace. The EXISTS decision needs the database
 /// (queries R7 + handlers); only the message lives here.
 pub const SLUG_UNIQUE_ERROR: &str = "This slug is already in use in this workspace.";
+
+/// `validate_slug` rejection for a built-in (PDASHOSS01-282): on update,
+/// a different slug on a row whose current slug is in `BUILTIN_SLUGS`.
+/// Raised before the uniqueness check, so it is the lone slug message.
+pub const BUILTIN_SLUG_LOCKED_ERROR: &str = "The slug of a built-in scheduler cannot be changed.";
+
+/// The PATCH half of `validate_slug` that needs no database
+/// (PDASHOSS01-282): `Some(BUILTIN_SLUG_LOCKED_ERROR)` when `current` is a
+/// built-in slug and `candidate` differs from it.
+pub fn builtin_slug_change_error(current: &str, candidate: &str) -> Option<&'static str> {
+    (candidate != current && crate::scheduler::builtins::is_builtin_slug(current))
+        .then_some(BUILTIN_SLUG_LOCKED_ERROR)
+}
 
 /// Cross-field pod/project mismatch (`scheduler.py:264-267`).
 pub const POD_PROJECT_ERROR: &str = "pod must belong to the same project as this scheduler install";
@@ -1509,7 +1524,7 @@ mod tests {
     fn scheduler_fields_match_f36_01_in_order() {
         let parsed = golden(F36_01);
         let expected = str_list(&parsed["fields"]);
-        assert_eq!(SCHEDULER_SERIALIZER_FIELDS.len(), 12);
+        assert_eq!(SCHEDULER_SERIALIZER_FIELDS.len(), 13);
         assert_eq!(SCHEDULER_SERIALIZER_FIELDS, expected.as_slice());
     }
 
@@ -1518,7 +1533,7 @@ mod tests {
         let parsed = golden(F36_01);
         let guards = str_list(&parsed["read_only_fields"]);
         assert_eq!(SCHEDULER_READ_ONLY_FIELDS, guards.as_slice());
-        // The render example carries exactly the 12 keys (order is pinned
+        // The render example carries exactly the 13 keys (order is pinned
         // by the `fields` array above — `serde_json` maps do not preserve
         // document order).
         let mut rendered: Vec<&str> = parsed["render_example"]
@@ -1531,6 +1546,28 @@ mod tests {
         let mut fields = SCHEDULER_SERIALIZER_FIELDS.to_vec();
         fields.sort_unstable();
         assert_eq!(rendered, fields);
+    }
+
+    /// PDASHOSS01-282: a built-in's slug is locked on update; an unchanged
+    /// slug and any slug on a user-created row pass through.
+    #[test]
+    fn builtin_slug_change_is_rejected_only_for_builtins() {
+        assert_eq!(
+            builtin_slug_change_error("security-audit", "something-else"),
+            Some(BUILTIN_SLUG_LOCKED_ERROR)
+        );
+        assert_eq!(
+            builtin_slug_change_error("fable-security-audit", "x"),
+            Some(BUILTIN_SLUG_LOCKED_ERROR)
+        );
+        assert_eq!(
+            builtin_slug_change_error("security-audit", "security-audit"),
+            None
+        );
+        assert_eq!(builtin_slug_change_error("nightly", "daily"), None);
+        // Renaming a user scheduler onto a built-in slug is a uniqueness
+        // question (the EXISTS check), not this lock.
+        assert_eq!(builtin_slug_change_error("nightly", "security-audit"), None);
     }
 
     #[test]

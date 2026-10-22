@@ -10,7 +10,8 @@ def sched_list(world):
 
 SCHEDULER_KEYS = {
     "id", "workspace", "slug", "name", "description", "prompt", "color",
-    "source", "is_enabled", "active_binding_count", "created_at",
+    "source", "is_builtin", "is_enabled", "active_binding_count",
+    "created_at",
     "updated_at",
 }
 
@@ -41,6 +42,8 @@ def test_create_shape(org):
     assert body["prompt"] == "Scan."
     assert body["color"] == "#10b981"  # canonicalised to lowercase
     assert body["source"] == "builtin"
+    # PDASHOSS01-282: catalog membership of the slug, not `source`.
+    assert body["is_builtin"] is False
     assert body["is_enabled"] is True
     assert body["active_binding_count"] == 0
     assert body["created_at"].endswith("Z")

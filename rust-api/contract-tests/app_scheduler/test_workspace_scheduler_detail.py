@@ -111,6 +111,79 @@ def test_patch_keep_own_slug(org):
     assert r.json()["name"] == "Renamed"
 
 
+# PDASHOSS01-282: a built-in's slug is locked on PATCH (the built-in sync
+# matches rows by slug); built-ins are told apart by slug membership in
+# the catalog because user-created rows are `source=builtin` too.
+BUILTIN_SLUG_LOCKED = {
+    "slug": ["The slug of a built-in scheduler cannot be changed."],
+}
+
+
+def _builtin(org):
+    return seed_s.create_scheduler(
+        org.conn, workspace_id=org.workspace["id"], slug="security-audit",
+        name="Security Audit",
+    )
+
+
+def test_patch_rename_user_scheduler_slug(org):
+    created = _create(org, slug="nightly-digest", name="Nightly")
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"slug": "daily-digest"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == "daily-digest"
+    assert r.json()["is_builtin"] is False
+    r = org.request("GET", sched_detail(org, created["id"]), "admin")
+    assert r.json()["slug"] == "daily-digest"
+
+
+def test_builtin_renders_is_builtin(org):
+    sched = _builtin(org)
+    r = org.request("GET", sched_detail(org, sched["id"]), "admin")
+    assert r.status_code == 200, r.text
+    assert r.json()["is_builtin"] is True
+    assert r.json()["source"] == "builtin"
+
+
+def test_patch_builtin_slug_change_rejected(org):
+    sched = _builtin(org)
+    r = org.request(
+        "PATCH", sched_detail(org, sched["id"]), "admin",
+        json={"slug": "something-else", "is_builtin": False},
+    )
+    assert r.status_code == 400
+    assert r.json() == BUILTIN_SLUG_LOCKED
+    r = org.request("GET", sched_detail(org, sched["id"]), "admin")
+    assert r.json()["slug"] == "security-audit"
+
+
+def test_patch_builtin_slug_lock_accumulates_with_other_errors(org):
+    sched = _builtin(org)
+    r = org.request(
+        "PATCH", sched_detail(org, sched["id"]), "admin",
+        json={"slug": "something-else", "name": "   "},
+    )
+    assert r.status_code == 400
+    assert list(r.json().keys()) == ["slug", "name"]
+    assert r.json() == {
+        **BUILTIN_SLUG_LOCKED,
+        "name": ["This field may not be blank."],
+    }
+
+
+def test_patch_builtin_unchanged_slug_accepted(org):
+    sched = _builtin(org)
+    r = org.request(
+        "PATCH", sched_detail(org, sched["id"]), "admin",
+        json={"slug": "security-audit", "description": "edited"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["slug"] == "security-audit"
+    assert r.json()["description"] == "edited"
+
+
 def test_delete(org):
     created = _create(org)
     r = org.request("DELETE", sched_detail(org, created["id"]), "admin")

@@ -81,15 +81,16 @@ pub mod queries;
 pub mod shape;
 
 pub use shape::{
-    binding_detail_read_only_fields, binding_read_only_fields, extra_context_error,
-    field_error_body, iso_item_parse_error, iso_item_type_error, iso_list_too_long, json_type_name,
-    last_run_ended_at, last_run_status, lock_error, nested_field_error_body,
-    normalize_iso_datetime, pod_display_name, resolve_active_binding_count, resolved_prompt_for,
-    tzid_unknown_error, validate_color, validate_cross_rrule, validate_extra_context,
-    validate_iso_datetime_list, validate_locked_field, validate_pod_project, validate_rrule,
-    validate_tzid, IsoListError, TzidError, BINDING_DECLARED_READ_ONLY_FIELDS,
-    BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS, BINDING_DETAIL_FIELDS, BINDING_META_READ_ONLY_FIELDS,
-    BINDING_SERIALIZER_FIELDS, COLOR_ERROR, EXTRA_CONTEXT_MAX_LENGTH, ISO_LIST_NOT_ARRAY,
+    binding_detail_read_only_fields, binding_read_only_fields, builtin_slug_change_error,
+    extra_context_error, field_error_body, iso_item_parse_error, iso_item_type_error,
+    iso_list_too_long, json_type_name, last_run_ended_at, last_run_status, lock_error,
+    nested_field_error_body, normalize_iso_datetime, pod_display_name,
+    resolve_active_binding_count, resolved_prompt_for, tzid_unknown_error, validate_color,
+    validate_cross_rrule, validate_extra_context, validate_iso_datetime_list,
+    validate_locked_field, validate_pod_project, validate_rrule, validate_tzid, IsoListError,
+    TzidError, BINDING_DECLARED_READ_ONLY_FIELDS, BINDING_DETAIL_EXTRA_READ_ONLY_FIELDS,
+    BINDING_DETAIL_FIELDS, BINDING_META_READ_ONLY_FIELDS, BINDING_SERIALIZER_FIELDS,
+    BUILTIN_SLUG_LOCKED_ERROR, COLOR_ERROR, EXTRA_CONTEXT_MAX_LENGTH, ISO_LIST_NOT_ARRAY,
     POD_PROJECT_ERROR, RDATE_EXDATE_MAX_LENGTH, SCHEDULER_READ_ONLY_FIELDS,
     SCHEDULER_SERIALIZER_FIELDS,
 };

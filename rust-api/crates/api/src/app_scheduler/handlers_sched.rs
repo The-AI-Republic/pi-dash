@@ -561,41 +561,75 @@ async fn slug_in_use(
     Ok(row.is_some())
 }
 
-/// The `{"slug": [...]}` conflict body, merged ahead of any other field
-/// errors (slug is the first declared field, so DRF lists it first).
-fn slug_conflict_body(prior: Map<String, Value>) -> Value {
+/// The `{"slug": [...]}` `validate_slug` body, merged ahead of any other
+/// field errors (slug is the first declared field, so DRF lists it first).
+fn slug_conflict_body(message: &str, prior: Map<String, Value>) -> Value {
     let mut body = Map::with_capacity(prior.len() + 1);
     body.insert(
         "slug".to_owned(),
-        Value::Array(vec![Value::String(shape::SLUG_UNIQUE_ERROR.to_owned())]),
+        Value::Array(vec![Value::String(message.to_owned())]),
     );
     body.extend(prior);
     Value::Object(body)
 }
 
-/// Run R7 after pure validation. On `Ok` a conflict denies with the
-/// lone slug body; on `Err` a conflict prepends `slug` to the field
-/// errors. The check runs only when the slug's `CharField` half passed
+/// `validate_slug` for one `CharField`-valid slug: on PATCH
+/// (`current_slug` set) the built-in lock runs first (PDASHOSS01-282),
+/// then the R7 EXISTS check. `Some(message)` is the lone slug error.
+async fn validate_slug(
+    pool: &PgPool,
+    workspace_id: &uuid::Uuid,
+    slug: &str,
+    exclude_scheduler: Option<&uuid::Uuid>,
+    current_slug: Option<&str>,
+) -> Result<Option<&'static str>, Denial> {
+    if let Some(message) =
+        current_slug.and_then(|current| shape::builtin_slug_change_error(current, slug))
+    {
+        return Ok(Some(message));
+    }
+    if slug_in_use(pool, workspace_id, slug, exclude_scheduler).await? {
+        return Ok(Some(shape::SLUG_UNIQUE_ERROR));
+    }
+    Ok(None)
+}
+
+/// Run `validate_slug` after pure validation. On `Ok` a rejection denies
+/// with the lone slug body; on `Err` it prepends `slug` to the field
+/// errors. The hook runs only when the slug's `CharField` half passed
 /// (that's when DRF calls `validate_slug`), so missing/invalid slugs
-/// and non-dict bodies pass through untouched.
+/// and non-dict bodies pass through untouched. `current_slug` is the
+/// row's slug on PATCH (`None` on create).
 async fn enforce_slug_unique(
     pool: &PgPool,
     workspace_id: &uuid::Uuid,
     body: &Value,
     exclude_scheduler: Option<&uuid::Uuid>,
+    current_slug: Option<&str>,
     validated: Result<SchedulerWrite, Value>,
 ) -> Result<SchedulerWrite, Denial> {
     match validated {
         Ok(write) => {
-            if slug_in_use(pool, workspace_id, &write.slug, exclude_scheduler).await? {
-                return Err(Denial::BadJson(slug_conflict_body(Map::new())));
+            if let Some(message) = validate_slug(
+                pool,
+                workspace_id,
+                &write.slug,
+                exclude_scheduler,
+                current_slug,
+            )
+            .await?
+            {
+                return Err(Denial::BadJson(slug_conflict_body(message, Map::new())));
             }
             Ok(write)
         }
         Err(Value::Object(prior)) => {
             if let Some(slug) = candidate_slug(body) {
-                if slug_in_use(pool, workspace_id, &slug, exclude_scheduler).await? {
-                    return Err(Denial::BadJson(slug_conflict_body(prior)));
+                if let Some(message) =
+                    validate_slug(pool, workspace_id, &slug, exclude_scheduler, current_slug)
+                        .await?
+                {
+                    return Err(Denial::BadJson(slug_conflict_body(message, prior)));
                 }
             }
             Err(Denial::BadJson(Value::Object(prior)))
@@ -629,6 +663,14 @@ pub fn render_scheduler_row(row: &SchedulerRow, active_binding_count: i64, tz: &
     rendered.insert("prompt".to_owned(), Value::String(row.prompt.clone()));
     rendered.insert("color".to_owned(), Value::String(row.color.clone()));
     rendered.insert("source".to_owned(), Value::String(row.source.clone()));
+    // PDASHOSS01-282 `get_is_builtin`: catalog membership of the slug
+    // (`source` is `builtin` for user-created rows too).
+    rendered.insert(
+        "is_builtin".to_owned(),
+        Value::Bool(pidash_services::scheduler::builtins::is_builtin_slug(
+            &row.slug,
+        )),
+    );
     rendered.insert("is_enabled".to_owned(), Value::Bool(row.is_enabled));
     rendered.insert(
         "active_binding_count".to_owned(),
@@ -748,10 +790,11 @@ pub async fn scheduler_create(
         Err(denial) => return denial.into_response(),
     };
     let validated = validate_create_body(&body);
-    let write = match enforce_slug_unique(pool, &gate.workspace_id, &body, None, validated).await {
-        Ok(write) => write,
-        Err(denial) => return denial.into_response(),
-    };
+    let write =
+        match enforce_slug_unique(pool, &gate.workspace_id, &body, None, None, validated).await {
+            Ok(write) => write,
+            Err(denial) => return denial.into_response(),
+        };
     // R3 (`:79-84`): auto id/timestamps, `created_by` the request user
     // (crum), `updated_by`/`deleted_at` NULL, `source` the `'builtin'`
     // literal. One `:now` sample feeds both timestamps (queries-layer
@@ -917,6 +960,7 @@ pub async fn scheduler_patch(
         &gate.workspace_id,
         &body,
         Some(&scheduler_id),
+        Some(&record.slug),
         validated,
     )
     .await
@@ -1682,7 +1726,8 @@ mod tests {
     #[test]
     fn slug_conflict_body_is_wire_exact() {
         let rendered =
-            serde_json::to_string(&slug_conflict_body(Map::new())).expect("conflict JSON");
+            serde_json::to_string(&slug_conflict_body(shape::SLUG_UNIQUE_ERROR, Map::new()))
+                .expect("conflict JSON");
         assert_eq!(
             rendered,
             r#"{"slug":["This slug is already in use in this workspace."]}"#
@@ -1691,6 +1736,36 @@ mod tests {
             rendered,
             shape::field_error_body("slug", shape::SLUG_UNIQUE_ERROR)
         );
+    }
+
+    /// PDASHOSS01-282: the built-in lock body is the Django wire body.
+    #[test]
+    fn builtin_slug_lock_body_is_wire_exact() {
+        let rendered = serde_json::to_string(&slug_conflict_body(
+            shape::BUILTIN_SLUG_LOCKED_ERROR,
+            Map::new(),
+        ))
+        .expect("lock JSON");
+        assert_eq!(
+            rendered,
+            r#"{"slug":["The slug of a built-in scheduler cannot be changed."]}"#
+        );
+    }
+
+    /// PDASHOSS01-282 `is_builtin`: catalog membership of the slug, not
+    /// `source` (the sample row is `source=builtin` but user-created).
+    #[test]
+    fn render_is_builtin_follows_catalog_slug() {
+        let row = sample_row();
+        assert_eq!(row.source, "builtin");
+        let rendered = render_scheduler_row(&row, 0, &chrono_tz::UTC);
+        assert_eq!(rendered["is_builtin"], json!(false));
+        let builtin = SchedulerRow {
+            slug: "security-audit".to_owned(),
+            ..sample_row()
+        };
+        let rendered = render_scheduler_row(&builtin, 0, &chrono_tz::UTC);
+        assert_eq!(rendered["is_builtin"], json!(true));
     }
 
     /// A conflict merges ahead of other field errors: slug is declared
@@ -1703,7 +1778,7 @@ mod tests {
             vec!["name"],
             "only name fails; slug reached R7"
         );
-        let merged = slug_conflict_body(prior);
+        let merged = slug_conflict_body(shape::SLUG_UNIQUE_ERROR, prior);
         let keys: Vec<&String> = merged.as_object().expect("object").keys().collect();
         assert_eq!(keys, vec!["slug", "name"]);
         assert_eq!(
@@ -1718,7 +1793,7 @@ mod tests {
     fn duplicate_slug_bodies_match_f36_10() {
         let fixture = fixture_json(FIXTURE_SCHEDULER_IO);
         let actions = fixture["actions"].as_array().expect("actions array");
-        let expected = slug_conflict_body(Map::new());
+        let expected = slug_conflict_body(shape::SLUG_UNIQUE_ERROR, Map::new());
         let mut checked = 0;
         for action in actions {
             if let Some(duplicate) = action.get("duplicate_slug") {

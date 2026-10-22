@@ -170,6 +170,14 @@ pub const BUILTINS: [BuiltinScheduler; 2] = [
     },
 ];
 
+/// `BUILTIN_SLUGS` membership (`builtins/__init__.py`, PDASHOSS01-282):
+/// the catalog owns these slugs. `ensure_builtin_schedulers` matches rows
+/// by slug, so this is also how the API tells a built-in apart from a
+/// user-created scheduler (`source` is `builtin` for both).
+pub fn is_builtin_slug(slug: &str) -> bool {
+    BUILTINS.iter().any(|builtin| builtin.slug == slug)
+}
+
 /// What `ensure_builtin_schedulers` does with one catalog entry
 /// (`builtins/__init__.py:158-187`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,6 +274,16 @@ mod tests {
     use serde_json::Value;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
+
+    #[test]
+    fn is_builtin_slug_matches_the_catalog_only() {
+        for builtin in &BUILTINS {
+            assert!(is_builtin_slug(builtin.slug));
+        }
+        assert!(!is_builtin_slug("nightly-digest"));
+        assert!(!is_builtin_slug(""));
+        assert!(!is_builtin_slug("Security-Audit"));
+    }
 
     fn fixture() -> Value {
         let path = format!(
