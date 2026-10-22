@@ -1006,6 +1006,7 @@ export function WorkItemCreateDialog({
       setDraftError("The draft didn't save. Check your connection and try again.");
       return;
     }
+    notifySuccess(DRAFT_SAVED_INLINE_TITLE, "Find it in your drafts when you're ready to finish it.");
     clearWorkItemDraft(workspaceSlug);
     finishClose();
   }
