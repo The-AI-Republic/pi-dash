@@ -284,6 +284,12 @@ describe("applied chips (VIEW-007)", () => {
     expect(removed.access).toEqual([0]);
   });
 
+  it("removing a creator keeps the other creators", () => {
+    let filters = toggleViewCreatorFilter(EMPTY_VIEW_LIST_FILTERS, "user-1");
+    filters = toggleViewCreatorFilter(filters, "user-2");
+    expect(removeViewFilterValue(filters, "creators", "user-1").creators).toEqual(["user-2"]);
+  });
+
   it("removing an access value keeps the other access values", () => {
     let filters = toggleViewAccessFilter(EMPTY_VIEW_LIST_FILTERS, 0);
     filters = toggleViewAccessFilter(filters, 1);

@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
+import type { WorkspaceMember } from "@pidash/api-client";
+
 import { makeMember } from "../testing.js";
 import { EMPTY_VIEW_LIST_FILTERS, type ViewListFilters } from "../lib/viewListControls.js";
 import { jsonResponse } from "../testing.js";
@@ -38,10 +40,23 @@ afterEach(() => {
   delete edition.flags["view-access-filter"];
 });
 
-function renderMenu(initial?: ViewListFilters): void {
+function renderMenu(
+  initial?: ViewListFilters,
+  // null stands for the roster that has not resolved yet.
+  members: readonly WorkspaceMember[] | undefined | null = MEMBERS
+): void {
   render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
-      <Harness {...(initial === undefined ? {} : { initial })} />
+      {members === MEMBERS ? (
+        <Harness {...(initial === undefined ? {} : { initial })} />
+      ) : (
+        <ProjectViewsFilterMenu
+          filters={initial ?? EMPTY_VIEW_LIST_FILTERS}
+          members={members === null ? undefined : members}
+          selfId={null}
+          onFiltersChange={onFiltersChange}
+        />
+      )}
     </QueryClientProvider>
   );
 }
@@ -221,6 +236,14 @@ describe("ProjectViewsFilterMenu", () => {
 
     fireEvent.change(within(panel()).getByPlaceholderText("Search"), { target: { value: "no such person" } });
     expect(section("Created by")).toHaveTextContent("No matches found");
+  });
+
+  it("says the people are loading while the roster is unresolved", () => {
+    renderMenu(undefined, null);
+    open();
+
+    expect(section("Created by")).toHaveTextContent("Loading people");
+    expect(within(section("Created by")).queryAllByRole("checkbox")).toHaveLength(0);
   });
 
   it("offers the access dimension only where the edition opts in", () => {
