@@ -19,10 +19,55 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { IssuesLoaderProvider } from "../loaders/loaderContext.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
+import { edition } from "../../../core/edition/index.js";
+import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
 import { buildDisplayRows, focusSheetCell, SpreadsheetLayout, useViewportWindow } from "./SpreadsheetLayout.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { SHEET_COLUMNS } from "./model.js";
 
+const bulkMocks = vi.hoisted(() => ({
+  update: vi.fn(),
+  remove: vi.fn(),
+  archive: vi.fn(),
+  subscribe: vi.fn(),
+}));
+
+vi.mock("../bulk/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../bulk/index.js")>()),
+  useBulkMutations: () => ({
+    update: { mutateAsync: bulkMocks.update, isPending: false },
+    remove: { mutateAsync: bulkMocks.remove, isPending: false },
+    archive: { mutateAsync: bulkMocks.archive, isPending: false },
+    subscribe: { mutateAsync: bulkMocks.subscribe, isPending: false },
+  }),
+  BulkToolbar: (props: {
+    count: number;
+    onUpdate: (properties: unknown) => void;
+    onDelete: () => void;
+    onArchive: () => void;
+    onSubscribe: () => void;
+    onClear: () => void;
+  }) => (
+    <div data-testid="bulk-toolbar">
+      <span>{props.count} selected</span>
+      <button type="button" onClick={() => props.onUpdate({ priority: "high" })}>
+        Update
+      </button>
+      <button type="button" onClick={props.onDelete}>
+        Delete
+      </button>
+      <button type="button" onClick={props.onArchive}>
+        Archive
+      </button>
+      <button type="button" onClick={props.onSubscribe}>
+        Subscribe
+      </button>
+      <button type="button" onClick={props.onClear}>
+        Clear
+      </button>
+    </div>
+  ),
+}));
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
@@ -184,6 +229,7 @@ function renderSheet(
     hideEstimate?: boolean;
     highlightedId?: string | null;
     weekStart?: number;
+    enableSelection?: boolean;
   } = {}
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -216,6 +262,7 @@ function renderSheet(
         hideEstimate={props.hideEstimate ?? false}
         highlightedId={props.highlightedId ?? null}
         weekStart={props.weekStart ?? 0}
+        enableSelection={props.enableSelection ?? true}
       />
     ),
   });
@@ -268,6 +315,7 @@ function setViewport(width: number, height: number): void {
 }
 
 beforeEach(() => {
+  for (const action of Object.values(bulkMocks)) action.mockResolvedValue(undefined);
   document.body.innerHTML = `<div id="${FULL_SCREEN_PORTAL_ID}"></div><div id="menu-portal"></div>`;
   // Runners without a storage backend (Node's bare localStorage global)
   // still mount the sheet; the sort persistence cases opt into jsdom's.
@@ -276,6 +324,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete edition.flags[BULK_OPERATIONS_FLAG];
   resetAppClient();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
@@ -928,5 +977,110 @@ describe("spreadsheet row helpers", () => {
     expect(document.activeElement?.id).toBe(`sheet-cell-${ID1}-state`);
     expect(focusSheetCell(document, rows, SHEET_COLUMNS, { row: 1, column: 1 })).toBe(false);
     expect(focusSheetCell(document, rows, SHEET_COLUMNS, { row: 5, column: 1 })).toBe(false);
+  });
+});
+
+describe("SpreadsheetLayout selection", () => {
+  it("selects rows from the leading cell and shows the OSS upgrade banner", async () => {
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    const boxes = screen.getAllByRole("checkbox", { name: /^Select / });
+    expect(boxes.length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
+    expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument();
+  });
+
+  it("selects every row from the header control", async () => {
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all work items" }));
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("2 work items selected.");
+  });
+
+  it("replaces the banner with the cloud toolbar when the edition enables bulk operations", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    expect(await screen.findByTestId("bulk-toolbar")).toHaveTextContent("1 selected");
+    expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["Update", bulkMocks.update, { issueIds: [ID1], properties: { priority: "high" } }],
+    ["Delete", bulkMocks.remove, [ID1]],
+    ["Archive", bulkMocks.archive, [ID1]],
+    ["Subscribe", bulkMocks.subscribe, [ID1]],
+  ] as const)("runs the cloud %s action and clears on success", async (label, action, expected) => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    fireEvent.click(within(await screen.findByTestId("bulk-toolbar")).getByRole("button", { name: label }));
+    await waitFor(() => expect(action).toHaveBeenCalledWith(expected));
+    await waitFor(() => expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument());
+  });
+
+  it("keeps the selection when a cloud action fails", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    bulkMocks.archive.mockRejectedValueOnce(new Error("refused"));
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    fireEvent.click(within(await screen.findByTestId("bulk-toolbar")).getByRole("button", { name: "Archive" }));
+    await waitFor(() => expect(bulkMocks.archive).toHaveBeenCalled());
+    expect(screen.getByTestId("bulk-toolbar")).toBeInTheDocument();
+  });
+
+  it("keeps a foreign-project row visible but out of the selection", async () => {
+    const FOREIGN = "923e4567-e89b-12d3-a456-426614174009";
+    stub({
+      pages: [
+        page([
+          issue(ID1, "Fix login", 1),
+          issue(FOREIGN, "Other project", 9, { project_id: "823e4567-e89b-12d3-a456-426614174008" }),
+        ]),
+      ],
+    });
+    renderSheet();
+    await screen.findByRole("table");
+    expect(screen.getByRole("img", { name: "Cannot select WEB-9" })).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
+  });
+
+  it("renders no selection controls when selectability is off", async () => {
+    stub();
+    renderSheet({ enableSelection: false });
+    await screen.findByRole("table");
+    expect(screen.queryByRole("checkbox", { name: /^Select / })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Select all work items" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument();
+  });
+
+  it("keeps a foreign row without a hint when selectability is off", async () => {
+    const FOREIGN = "923e4567-e89b-12d3-a456-426614174009";
+    stub({
+      pages: [page([issue(FOREIGN, "Other project", 9, { project_id: "823e4567-e89b-12d3-a456-426614174008" })])],
+    });
+    renderSheet({ enableSelection: false });
+    await screen.findByRole("table");
+    expect(screen.queryByRole("img", { name: /Cannot select/ })).not.toBeInTheDocument();
+  });
+
+  it("clears the selection from the banner only", async () => {
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    await waitFor(() => expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument());
   });
 });

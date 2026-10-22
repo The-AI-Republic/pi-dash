@@ -16,6 +16,8 @@ import { getAppClient } from "../../../core/api/client.js";
 import { subIssuesQueryOptions } from "../api/queries.js";
 import { isRowHighlighted, isTempRowId, rowDomId } from "../freshness/fresh.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
+import { ForeignRowSelectionHint, RowSelectionCheckbox } from "../bulk/SelectionCheckbox.js";
+import { SELECTION_ROW_ATTR } from "../bulk/useBulkSelection.js";
 // The strip brings the property pickers. Its chunk request starts after the
 // rows commit, so the list chunk stays cheap to evaluate and rows paint
 // before the picker code arrives (desktop warm-start budget). Suspending the
@@ -93,6 +95,12 @@ export interface ListRowProps {
   showSubIssues?: boolean;
   /** Project timezone for the overdue due-date check. */
   timeZone?: string | null;
+  /** Selection control, when the list enables bulk selection. */
+  selected?: boolean | undefined;
+  active?: boolean | undefined;
+  onSelectionToggle?: ((id: string, shiftKey: boolean) => void) | undefined;
+  /** Enables the checkbox; a foreign-project row gets a disabled hint. */
+  selectionAvailable?: boolean | undefined;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -180,6 +188,10 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     compact = false,
     showSubIssues = true,
     timeZone = null,
+    selected = false,
+    active = false,
+    onSelectionToggle,
+    selectionAvailable = true,
   } = props;
   const temp = isTempRowId(issue.id);
   const highlighted = isRowHighlighted(issue, highlightedId);
@@ -200,13 +212,25 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     <article id={rowBlockId(issue.id)} data-temprow={temp ? "true" : undefined} className="flex flex-col">
       <div
         data-testid="list-row"
+        {...{ [SELECTION_ROW_ATTR]: issue.id }}
         data-highlight={highlighted ? "true" : undefined}
+        data-active={active ? "true" : undefined}
         className={[
           compact ? "h-8" : "h-11",
           "flex items-center gap-(--space-2) border-b border-(--border) px-(--space-3)",
           highlighted ? "bg-(--accent-subtle)" : "",
+          active ? "ring-1 ring-inset ring-(--accent)" : "",
         ].join(" ")}
       >
+        {onSelectionToggle === undefined || depth !== 1 ? null : selectionAvailable ? (
+          <RowSelectionCheckbox
+            checked={selected}
+            label={`Select ${key}`}
+            onChange={(event) => onSelectionToggle(issue.id, event.shiftKey)}
+          />
+        ) : (
+          <ForeignRowSelectionHint label={`Cannot select ${key}`} />
+        )}
         <SubIssueToggle
           issue={issue}
           expanded={expanded}

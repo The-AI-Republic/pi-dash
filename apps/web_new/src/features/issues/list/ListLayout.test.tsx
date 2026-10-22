@@ -4,10 +4,17 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const bulkMocks = vi.hoisted(() => ({
+  update: vi.fn(),
+  remove: vi.fn(),
+  archive: vi.fn(),
+  subscribe: vi.fn(),
+}));
 
 const mocks = vi.hoisted(() => ({
   pages: vi.fn(),
@@ -22,6 +29,42 @@ const mocks = vi.hoisted(() => ({
   permissions: { canEdit: true },
 }));
 
+vi.mock("../bulk/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../bulk/index.js")>()),
+  useBulkMutations: () => ({
+    update: { mutateAsync: bulkMocks.update, isPending: false },
+    remove: { mutateAsync: bulkMocks.remove, isPending: false },
+    archive: { mutateAsync: bulkMocks.archive, isPending: false },
+    subscribe: { mutateAsync: bulkMocks.subscribe, isPending: false },
+  }),
+  BulkToolbar: (props: {
+    count: number;
+    onUpdate: (properties: unknown) => void;
+    onDelete: () => void;
+    onArchive: () => void;
+    onSubscribe: () => void;
+    onClear: () => void;
+  }) => (
+    <div data-testid="bulk-toolbar">
+      <span>{props.count} selected</span>
+      <button type="button" onClick={() => props.onUpdate({ priority: "high" })}>
+        Update
+      </button>
+      <button type="button" onClick={props.onDelete}>
+        Delete
+      </button>
+      <button type="button" onClick={props.onArchive}>
+        Archive
+      </button>
+      <button type="button" onClick={props.onSubscribe}>
+        Subscribe
+      </button>
+      <button type="button" onClick={props.onClear}>
+        Clear
+      </button>
+    </div>
+  ),
+}));
 vi.mock("./pages.js", () => ({ useListPages: mocks.pages }));
 vi.mock("./reference.js", () => ({ useListReferences: mocks.refs }));
 vi.mock("./collapse.js", async (importOriginal) => ({
@@ -97,10 +140,23 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
   ListRow: (props: {
     issue: IssueListItem;
     compact?: boolean;
+    selected?: boolean;
+    selectionAvailable?: boolean;
+    onSelectionToggle?: (id: string, shiftKey: boolean) => void;
     onOpenPeek: (key: string, title: string) => void;
     hrefFor: (row: IssueListItem) => string;
   }) => (
     <div data-testid="row-probe" data-compact={String(props.compact ?? false)} data-href={props.hrefFor(props.issue)}>
+      {props.onSelectionToggle === undefined ? null : props.selectionAvailable === false ? (
+        <span role="img" aria-label={`Cannot select ${props.issue.sequence_id}`} />
+      ) : (
+        <input
+          type="checkbox"
+          aria-label={`Select ${props.issue.sequence_id}`}
+          checked={props.selected ?? false}
+          onChange={() => props.onSelectionToggle?.(props.issue.id, false)}
+        />
+      )}
       <button type="button" onClick={() => props.onOpenPeek(`WEB-${props.issue.sequence_id}`, props.issue.name)}>
         {props.issue.name}
       </button>
@@ -132,6 +188,8 @@ import { entityListsKeyPart } from "../prefs/entities.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import type { IssuesEntity, PrefsRecord } from "../prefs/entities.js";
 import { groupedSections } from "./grouping.js";
+import { edition } from "../../../core/edition/index.js";
+import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
 import { ListLayout, type ListLayoutProps } from "./ListLayout.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -342,6 +400,7 @@ const realHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offse
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const action of Object.values(bulkMocks)) action.mockResolvedValue(undefined);
   Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
     configurable: true,
     get(this: HTMLElement) {
@@ -364,6 +423,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  delete edition.flags[BULK_OPERATIONS_FLAG];
   if (realHeight) Object.defineProperty(HTMLElement.prototype, "offsetHeight", realHeight);
   resetAppClient();
   vi.unstubAllGlobals();
@@ -702,5 +762,93 @@ describe("ListLayout", () => {
         queryKey: issueKeys.lists("acme", ...entityListsKeyPart({ scope: "project", projectId: PROJECT })),
       })
     );
+  });
+});
+
+describe("ListLayout selection", () => {
+  it("selects a row and shows the OSS upgrade banner without a toolbar", async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
+    expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument();
+  });
+
+  it("toggles a group from its tri-state header control", async () => {
+    const sections = groupedSections(
+      { results: { [STATE]: { results: [row()], total_results: 1 } } },
+      new Map([[STATE, "Todo"]]),
+      { showEmptyGroups: false, dimension: "state" }
+    );
+    mocks.pages.mockReturnValue(pageState({ sections, total: 1, grouped: true }));
+    renderLayout({ prefs: prefs({ groupBy: "state" }) });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all work items in Todo" }));
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all work items in Todo" }));
+    await waitFor(() => expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument());
+  });
+
+  it("replaces the banner with the cloud toolbar when the edition enables bulk operations", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    renderLayout();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
+    expect(await screen.findByTestId("bulk-toolbar")).toHaveTextContent("1 selected");
+    expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["Update", bulkMocks.update, { issueIds: [ISSUE], properties: { priority: "high" } }],
+    ["Delete", bulkMocks.remove, [ISSUE]],
+    ["Archive", bulkMocks.archive, [ISSUE]],
+    ["Subscribe", bulkMocks.subscribe, [ISSUE]],
+  ] as const)("runs the cloud %s action and clears on success", async (label, action, expected) => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    renderLayout();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
+    fireEvent.click(within(await screen.findByTestId("bulk-toolbar")).getByRole("button", { name: label }));
+    await waitFor(() => expect(action).toHaveBeenCalledWith(expected));
+    await waitFor(() => expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument());
+  });
+
+  it("keeps the selection when a cloud action fails", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    bulkMocks.remove.mockRejectedValueOnce(new Error("refused"));
+    renderLayout();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(bulkMocks.remove).toHaveBeenCalled());
+    expect(screen.getByTestId("bulk-toolbar")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument();
+  });
+
+  it("keeps foreign-project rows out of the selection range", async () => {
+    const FOREIGN = "923e4567-e89b-12d3-a456-426614174009";
+    mocks.pages.mockReturnValue(
+      pageState({
+        sections: [
+          {
+            key: "all",
+            title: "All work items",
+            rows: [row(), row({ id: FOREIGN, sequence_id: 77, project_id: "823e4567-e89b-12d3-a456-426614174008" })],
+            total: 2,
+            value: null,
+          },
+        ],
+        total: 2,
+      })
+    );
+    renderLayout();
+    expect(screen.getByRole("img", { name: "Cannot select 77" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
+    expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
+  });
+
+  it("keeps the cloud toolbar hidden for readers without edit permission", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    mocks.permissions = { canEdit: false };
+    renderLayout();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select 42" }));
+    await waitFor(() => expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument();
   });
 });

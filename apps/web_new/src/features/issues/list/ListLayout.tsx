@@ -22,6 +22,13 @@ import { creationDisabledForGroup, quickAddDisabledReason, sectionPrefill } from
 import { GroupHeader } from "./GroupHeader.js";
 
 import { ListRow } from "./ListRow.js";
+import {
+  BulkToolbar,
+  BulkUpgradeBanner,
+  isBulkOperationsEnabled,
+  useBulkMutations,
+  useBulkSelection,
+} from "../bulk/index.js";
 import { useListPages } from "./pages.js";
 
 import { useListReferences } from "./reference.js";
@@ -108,6 +115,10 @@ export interface ListLayoutProps {
    * the cloud workflow layer injects its reason here.
    */
   creationBlockedReason?: string | undefined;
+  /** Whether this list offers multi-select (ISS-108); defaults on. */
+  enableSelection?: boolean | undefined;
+  /** Profile week start for the bulk date pickers. */
+  weekStart?: number | undefined;
 }
 
 /** Entries the empty card can reach through this layout. */
@@ -183,6 +194,8 @@ export function ListLayout({
   enableQuickAdd = true,
   canEdit,
   creationBlockedReason,
+  enableSelection = true,
+  weekStart = 0,
 }: ListLayoutProps): React.ReactElement {
   const client = getAppClient();
   const permissions = usePermissions(workspaceSlug);
@@ -223,6 +236,17 @@ export function ListLayout({
   };
 
   const allRows = pages.sections.flatMap((section) => section.rows);
+  const selectionItems = React.useMemo(
+    () =>
+      pages.sections.flatMap((section) =>
+        section.rows.filter((row) => row.project_id === projectId).map((row) => ({ id: row.id, groupKey: section.key }))
+      ),
+    [pages.sections, projectId]
+  );
+  const selection = useBulkSelection(selectionItems, enableSelection);
+  const bulk = useBulkMutations({ workspaceSlug, projectId });
+  const bulkEnabled = isBulkOperationsEnabled();
+  const selectedCount = selection.selectedIds.size;
   const peekIssue =
     peekKey === null ? null : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ?? null);
   const peekTitle = peekIssue?.name ?? peekTitleHint;
@@ -339,6 +363,10 @@ export function ListLayout({
         highlightedId={null}
         onOpenPeek={openPeek}
         hrefFor={hrefFor}
+        selected={selection.isSelected(issue.id)}
+        active={selection.isActive(issue.id)}
+        onSelectionToggle={enableSelection ? selection.onRowToggle : undefined}
+        selectionAvailable={issue.project_id === projectId}
         compact={compact}
         deferPickers={!pages.grouped}
         showSubIssues={prefs.showSubIssues}
@@ -374,6 +402,8 @@ export function ListLayout({
               menu={menu}
               onCreate={() => openCreate({ ...sectionPrefill(prefs.groupBy, section) })}
               onAddExisting={() => setAddExistingOpen(true)}
+              selection={enableSelection ? selection.groupState(section.key) : undefined}
+              onSelectionToggle={() => selection.onGroupToggle(section.key)}
             />
             {sectionCollapsed ? null : (
               <>
@@ -433,6 +463,45 @@ export function ListLayout({
           </section>
         );
       })}
+      {selectedCount === 0 ? null : bulkEnabled && editAllowed ? (
+        <BulkToolbar
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          count={selectedCount}
+          hideCycle={flags.hideCycle}
+          hideModule={flags.hideModule}
+          hideEstimate={!estimateEnabled}
+          weekStart={weekStart}
+          busy={bulk.update.isPending || bulk.remove.isPending || bulk.archive.isPending || bulk.subscribe.isPending}
+          onClear={selection.clear}
+          onUpdate={(properties) => {
+            void bulk.update
+              .mutateAsync({ issueIds: [...selection.selectedIds], properties })
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onDelete={() => {
+            void bulk.remove
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onArchive={() => {
+            void bulk.archive
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onSubscribe={() => {
+            void bulk.subscribe
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+        />
+      ) : bulkEnabled ? null : (
+        <BulkUpgradeBanner count={selectedCount} />
+      )}
       {addExistingOpen ? (
         <React.Suspense fallback={null}>
           <LazyAddExistingModal

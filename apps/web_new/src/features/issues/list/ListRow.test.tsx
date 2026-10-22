@@ -198,3 +198,31 @@ describe("ListRow", () => {
     expect(rowBlockId("issue-1")).toBe("issue_issue-1");
   });
 });
+
+describe("ListRow selection", () => {
+  it("renders no selection control without a toggle handler", () => {
+    render(<ListRow {...props()} />);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("toggles selection with the shift state from the row control", () => {
+    const onSelectionToggle = vi.fn();
+    render(<ListRow {...props({ onSelectionToggle, selected: true, active: true })} />);
+    const box = screen.getByRole("checkbox", { name: "Select WEB-42" });
+    expect(box).toBeChecked();
+    expect(screen.getByTestId("list-row")).toHaveAttribute("data-active", "true");
+    fireEvent.click(box, { shiftKey: true });
+    expect(onSelectionToggle).toHaveBeenCalledWith(ISSUE, true);
+  });
+
+  it("hides the control on nested rows", () => {
+    render(<ListRow {...props({ depth: 2, onSelectionToggle: vi.fn() })} />);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("replaces the control with a disabled hint for a foreign-project row", () => {
+    render(<ListRow {...props({ onSelectionToggle: vi.fn(), selectionAvailable: false })} />);
+    expect(screen.queryByRole("checkbox", { name: "Select WEB-42" })).not.toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Cannot select WEB-42" })).toBeInTheDocument();
+  });
+});
