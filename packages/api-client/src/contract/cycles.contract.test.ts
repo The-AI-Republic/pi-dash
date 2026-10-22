@@ -104,7 +104,12 @@ describe.skipIf(!contractEnabled)("cycles list and detail contract", () => {
       expect(thin.find((row) => row.id === created.id)?.name).toBe(PROBE);
 
       const workspaceRows = await listWorkspaceCycles(client, CONTRACT_WORKSPACE);
-      expect(workspaceRows.map((row) => row.id)).toContain(created.id);
+      const workspaceProbe = workspaceRows.find((row) => row.id === created.id);
+      expect(workspaceProbe).toBeDefined();
+      expect(workspaceProbe?.name).toBe(PROBE);
+      expect(workspaceProbe?.total_issues).toBe(0);
+      expect("is_favorite" in (workspaceProbe ?? {})).toBe(false);
+      expect("status" in (workspaceProbe ?? {})).toBe(false);
     } finally {
       await deleteCycle(client, CONTRACT_WORKSPACE, projectId, created.id);
     }

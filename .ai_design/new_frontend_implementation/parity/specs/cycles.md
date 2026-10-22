@@ -1285,7 +1285,7 @@ slice that owns it. Nothing here is an import from the old frontend.
 
 ## 23. Data shapes and API calls
 
-**Cycle row** (list, detail, archived list). The UI relies on: `id`,
+**Cycle row** (project list, detail, archived list). The UI relies on: `id`,
 `name`, `description`, `project_id`, `workspace_id`, `status`
 (current, upcoming, completed, draft; compare case-insensitively),
 `start_date` and `end_date` (instant or null), `sort_order`,
@@ -1294,9 +1294,14 @@ slice that owns it. Nothing here is an import from the old frontend.
 counters for total, completed, backlog, started, unstarted, cancelled
 work items and the same for estimate points, `distribution` (assignees,
 labels and the completion chart), `estimate_distribution`, `progress`
-(series), and `version`. `GET BASE/cycles/` and `GET WS/cycles/` both
-answer a **bare array** of cycle rows in this checkout — read them as
-arrays, not as `{results}` envelopes. Only `GET WS/active-cycles/` is a
+(series), and `version`. `GET BASE/cycles/` answers a **bare array** of
+these cycle rows. `GET WS/cycles/` also answers a bare array, but with a
+narrower projection: `id`, `workspace_id`, `project_id`, `name`,
+`description`, dates, `owned_by_id`, `view_props`, `sort_order`, the
+external ids, `progress_snapshot`, `logo_props` and the six work-item
+counters — no `status`, `is_favorite`, `assignee_ids`, `version` or
+`created_by`. Read both as arrays, not as `{results}` envelopes. Only
+`GET WS/active-cycles/` is a
 cursor-paged envelope (`per_page`, `next_cursor`); nothing else in this
 area is paged, so the UI never assumes a fixed page size.
 
@@ -1465,7 +1470,7 @@ or wrongly. Slices must build exactly these:
 | CYC-014                            | The palette's "New cycle" command is an entry point (project in context, `cycle_view` on, member+); the work-item create modal is **not**. §6, §25.                                                                                                                                                                                                                                                                                                  |
 | CYC-029                            | The star and palette write `POST WS/user-favorites/` `{entity_type:"cycle", entity_identifier, project_id, entity_data:{name}}` and `DELETE WS/user-favorites/{favoriteId}/`; the sidebar reads the same collection. §11.                                                                                                                                                                                                                            |
 | CYC-007                            | The end-date filter section is labelled **"Due date"** (the oracle picks by that label); it filters the cycle's end date. §4.                                                                                                                                                                                                                                                                                                                        |
-| CYC-001                            | `GET BASE/cycles/` and `GET WS/cycles/` answer **bare arrays**; only `GET WS/active-cycles/` is cursor-paged. §23.                                                                                                                                                                                                                                                                                                                                   |
+| CYC-001                            | `GET BASE/cycles/` and `GET WS/cycles/` answer **bare arrays**; the workspace route is a narrower projection without lifecycle, favorite, assignee, version or creator fields. Only `GET WS/active-cycles/` is cursor-paged. §23.                                                                                                                                                                                                                    |
 | CYC-002                            | Rows: current row shows exactly one avatar (the creator) and no count; every other row shows creator **and** assignee avatars (members icon when none). Draft/upcoming show the count. Group headings are `Active cycle` / `Upcoming cycle` / `Completed cycle`; the last two carry their count inside the disclosure button, Active does not. §2.                                                                                                   |
 | CYC-004, CYC-005                   | The live search box opens **unfocused** (no deferred focus "fix"); the archived box opens focused. The expanded input's placeholder is exactly `Search`. §3, §9.                                                                                                                                                                                                                                                                                     |
 | CYC-006, CYC-007, CYC-008          | Filter labels are fixed: `Status of the cycle` with `In progress` / `Yet to start` / `Completed` / `Draft`; both date sections use `1 week from now` … `2 months from now` plus `Custom`; chips row has a `clear all` action. §4.                                                                                                                                                                                                                    |
