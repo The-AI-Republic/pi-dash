@@ -81,7 +81,7 @@ export function ForeignRowSelectionHint({ label }: ForeignRowSelectionHintProps)
         aria-label={label}
         role="img"
         tabIndex={0}
-        className="inline-flex size-4 shrink-0 cursor-not-allowed items-center justify-center rounded-(--radius-control) border border-(--border-strong) opacity-50"
+        className="inline-flex size-4 shrink-0 cursor-not-allowed items-center justify-center rounded-(--radius-control) border border-(--border) opacity-50"
       >
         <span className="size-1.5 rounded-full bg-(--text-muted)" aria-hidden="true" />
       </span>

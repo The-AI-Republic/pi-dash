@@ -81,14 +81,14 @@ const FIELD_LABELS: Record<BulkPropertyKey, string> = {
 };
 
 const FIELD_ICONS: Record<BulkPropertyKey, React.ReactNode> = {
-  state_id: <span className="size-4 rounded-full border border-(--border-strong)" aria-hidden="true" />,
+  state_id: <span className="size-4 rounded-full border border-(--border)" aria-hidden="true" />,
   priority: <span className="size-4 rounded-(--radius-control) bg-(--warning)" aria-hidden="true" />,
   assignee_ids: <UserRound size={16} strokeWidth={1.5} aria-hidden="true" />,
   label_ids: <Tag size={16} strokeWidth={1.5} aria-hidden="true" />,
   start_date: <CalendarDays size={16} strokeWidth={1.5} aria-hidden="true" />,
   target_date: <CalendarDays size={16} strokeWidth={1.5} aria-hidden="true" />,
   cycle_id: <Repeat size={16} strokeWidth={1.5} aria-hidden="true" />,
-  module_ids: <span className="size-4 rounded-(--radius-control) border border-(--border-strong)" aria-hidden="true" />,
+  module_ids: <span className="size-4 rounded-(--radius-control) border border-(--border)" aria-hidden="true" />,
   estimate_point: (
     <span className="text-caption font-medium" aria-hidden="true">
       #
