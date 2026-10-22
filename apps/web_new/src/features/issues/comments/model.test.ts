@@ -137,6 +137,34 @@ describe("comment header", () => {
     );
   });
 
+  it("marks bot accounts while a human with bot in their name stays as stored", () => {
+    const bot = comment({
+      actor_detail: { ...comment().actor_detail!, display_name: "Sync Helper", is_bot: true },
+    });
+    expect(commentAuthorName(bot)).toBe("Sync Helper Bot");
+    expect(commentAuthorName(bot)).toMatch(/bot/i);
+    const alreadyMarked = comment({
+      actor_detail: { ...comment().actor_detail!, display_name: "Sync Bot", is_bot: true },
+    });
+    expect(commentAuthorName(alreadyMarked)).toBe("Sync Bot");
+    const human = comment({
+      actor_detail: { ...comment().actor_detail!, display_name: "Botanist Bo", is_bot: false },
+    });
+    expect(commentAuthorName(human)).toBe("Botanist Bo");
+  });
+
+  it("keeps the agent speaker label even when the actor is a bot account", () => {
+    expect(
+      commentAuthorName(
+        comment({
+          speaker_type: "agent",
+          speaker_label: "Reviewer",
+          actor_detail: { ...comment().actor_detail!, display_name: "Runner", is_bot: true },
+        })
+      )
+    ).toBe("Reviewer");
+  });
+
   it("reads the avatar address only when the server has one", () => {
     expect(commentAuthorAvatar(comment())).toBeUndefined();
     expect(

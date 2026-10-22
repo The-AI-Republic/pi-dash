@@ -88,14 +88,19 @@ function comment(overrides: Partial<IssueComment> = {}): IssueComment {
   };
 }
 
-function renderCard(props: Partial<React.ComponentProps<typeof CommentCard>> = {}) {
+function renderCard(
+  props: Partial<React.ComponentProps<typeof CommentCard>> = {},
+  bodies: (url: string) => unknown = () => []
+) {
   // The card now mounts the reaction cluster in its header and footer;
-  // both read through the app client, so give them an empty answer.
+  // both read through the app client, so give them an empty answer
+  // unless the test seeds one.
   createAppClient("https://api.test", async (url: string) => ({
     status: 200,
     url,
     headers: { get: () => null },
-    text: async () => (url.endsWith("/auth/get-csrf-token/") ? JSON.stringify({ csrf_token: "x" }) : "[]"),
+    text: async () =>
+      url.endsWith("/auth/get-csrf-token/") ? JSON.stringify({ csrf_token: "x" }) : JSON.stringify(bodies(url)),
   }));
   const handlers = {
     onEdit: vi.fn(async () => undefined),
@@ -157,6 +162,19 @@ describe("CommentCard", () => {
     renderCard({ comment: comment({ edited_at: "2026-10-17T10:00:00Z" }) });
     const age = screen.getByRole("button", { name: /Commented .*, edited/ });
     expect(age).toHaveTextContent("(edited)");
+  });
+
+  it("labels a bot account in the header while humans stay plain", () => {
+    const { view } = renderCard({
+      comment: comment({
+        actor_detail: { ...comment().actor_detail!, display_name: "Sync Helper", is_bot: true },
+      }),
+    });
+    expect(screen.getByText("Sync Helper Bot")).toBeInTheDocument();
+    view.unmount();
+    renderCard();
+    expect(screen.getByText("Ada L")).toBeInTheDocument();
+    expect(screen.getByText("Ada L").textContent).not.toMatch(/bot/i);
   });
 
   it("offers edit, copy link, access, fold and delete to the author", async () => {
@@ -264,7 +282,11 @@ describe("CommentCard", () => {
     renderCard({ onEdit });
     await openMenu(user);
     fireEvent.click(screen.getByRole("menuitem", { name: "Edit" }));
-    await screen.findByLabelText("Edit comment");
+    const editable = (await screen.findByLabelText("Edit comment")) as HTMLTextAreaElement;
+    editable.focus();
+    editable.setSelectionRange(editable.value.length, editable.value.length);
+    await user.keyboard(" changed");
+    await waitFor(() => expect(editable.value).toMatch(/changed/));
     await user.click(screen.getByRole("button", { name: "Save comment" }));
     await waitFor(() => expect(onEdit).toHaveBeenCalled());
     expect(await screen.findByLabelText("Edit comment")).toBeInTheDocument();
@@ -290,6 +312,30 @@ describe("CommentCard", () => {
     expect(Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent)).toContain(
       "Unfold comment"
     );
+  });
+
+  it("hides the reaction cluster while folded and reveals it on expand", async () => {
+    const user = userEvent.setup();
+    const row = {
+      id: "723e4567-e89b-12d3-a456-426614174007",
+      actor: ADA,
+      comment: comment().id,
+      reaction: "127881",
+      display_name: "Ada L",
+      project: "323e4567-e89b-12d3-a456-426614174002",
+      workspace: "423e4567-e89b-12d3-a456-426614174003",
+      created_at: "2026-10-16T22:00:00Z",
+      updated_at: "2026-10-16T22:00:00Z",
+      created_by: ADA,
+      updated_by: null,
+      deleted_at: null,
+    };
+    renderCard({ comment: comment({ labels: ["fold"] }) }, (url) => (url.includes("/reactions/") ? [row] : []));
+    expect(screen.queryByRole("region", { name: "Reactions on this comment" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Folded comment · Click to expand" }));
+    expect(
+      await screen.findByRole("region", { name: "Reactions on this comment" }, { timeout: 5000 })
+    ).toBeInTheDocument();
   });
 
   it("shows an empty-body note", () => {
