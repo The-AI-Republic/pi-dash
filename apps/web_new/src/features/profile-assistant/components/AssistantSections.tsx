@@ -12,13 +12,15 @@ export interface SectionFrameProps {
   heading: string;
   description: string;
   testId: string;
+  /** Deep-link anchor for the section, when one links at it. */
+  id?: string | undefined;
   children: React.ReactNode;
 }
 
-export function SectionFrame({ heading, description, testId, children }: SectionFrameProps): React.ReactElement {
+export function SectionFrame({ heading, description, testId, id, children }: SectionFrameProps): React.ReactElement {
   const headingId = `${testId}-heading`;
   return (
-    <section aria-labelledby={headingId} data-testid={testId} className="flex flex-col gap-(--space-4)">
+    <section aria-labelledby={headingId} data-testid={testId} id={id} className="flex flex-col gap-(--space-4)">
       <div className="flex flex-col gap-(--space-1)">
         <h3 id={headingId} className="text-emphasis font-medium text-(--text)">
           {heading}

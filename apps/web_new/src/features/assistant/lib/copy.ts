@@ -28,6 +28,31 @@ export const SETUP_CARD_BODY =
 export const SETUP_CARD_ACTION = "Configure provider";
 /** Where the setup card sends the user; the profile area owns that page. */
 export const PROVIDER_SETTINGS_HREF = "/settings/profile/ai-assistant";
+/** Deep-link anchor of the voice section inside the assistant settings page (AGT-051). */
+export const VOICE_DICTATION_HASH = "voice-dictation";
+/** Mic label when dictation is ready, matched exactly by the AGT-050/051/052/057 scenarios. */
+export const MIC_READY_LABEL = "Hold to dictate";
+/** Mic label while a recording runs, matched exactly by the AGT-050 scenario. */
+export const MIC_RECORDING_LABEL = "Release to transcribe";
+/** Mic label with no speech key stored, matched exactly by the AGT-051/057 scenarios. */
+export const MIC_SETUP_LABEL = "Set up voice dictation";
+/** Recording hint lead; the elapsed readout follows. Matched by the AGT-050 scenario. */
+export const MIC_RECORDING_HINT = "Recording — release to transcribe";
+/** Hint while an utterance uploads. */
+export const MIC_TRANSCRIBING_HINT = "Transcribing…";
+/** Hint for a refused microphone, matched exactly by the AGT-050 scenario. */
+export const MIC_DENIED_HINT =
+  "Microphone access is blocked. Enable it in your browser's site settings, then try again.";
+/** Hint when the host has no microphone, matched exactly by the AGT-050 scenario. */
+export const MIC_MISSING_HINT = "No microphone found.";
+/** Hint when capture fails for any other reason, matched exactly by the AGT-050 scenario. */
+export const MIC_FAILED_HINT = "Couldn't access the microphone.";
+/** Fallback when an upload failure carries no message of its own. */
+export const MIC_FAILED_FALLBACK = "Voice input failed";
+/** Keyless hint lead, matched exactly by the AGT-051/057 scenarios; the setup link follows. */
+export const MIC_SETUP_HINT = "Voice dictation isn't set up.";
+/** Keyless hint action, matched exactly by the AGT-051/057 scenarios. */
+export const MIC_SETUP_ACTION = "Configure it";
 /** Reminder line for a composer that cannot send without a key (AGT-040). */
 export const API_KEY_REMINDER = "Please set your API key in Settings first to start using AI Assistant.";
 /** Failure notice title for a conversation that could not start. */

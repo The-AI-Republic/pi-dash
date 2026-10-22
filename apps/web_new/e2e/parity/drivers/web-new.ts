@@ -3850,8 +3850,20 @@ export class WebNewDriver implements ParityDriver {
   // --- Create-issue modal project picker (NEWFRONT-122, ISS-211). Stubs
   // --- until the matching area lands in apps/web_new.
 
-  async issueModalOpenCreate(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("issueModalOpenCreate");
+  async issueModalOpenCreate(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.openProjectIssues(workspaceSlug, projectId);
+    await this.page.getByRole("button", { name: "Add work item" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create new work item" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // Hydration gate: the title field claims focus on mount, so a focused
+    // title proves React attached the trigger handlers; clicks before that
+    // land on dead DOM under dev-server load.
+    await this.page.waitForFunction(
+      () => {
+        const el = document.querySelector("input#name");
+        return el !== null && document.activeElement === el;
+      },
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
 
   async issueModalProjectValue(): Promise<string> {
@@ -10811,6 +10823,23 @@ export class WebNewDriver implements ParityDriver {
   /** Send stubs: delay (ms) applied to the next message POST. */
   private assistantSendDelayMs = 0;
   private assistantSendDelayRemaining = 0;
+  /** Canned transcription text served to transcribe POSTs (AGT-050). */
+  private assistantTranscribeTextStub: string | null = null;
+  /** Forced transcribe failure served to transcribe POSTs (AGT-050). */
+  private assistantTranscribeFailure: { status: number; body: Record<string, string> } | null = null;
+  /** Transcribe uploads observed since the driver started. */
+  private assistantTranscribeSeen: { contentType: string; hasFilePart: boolean; byteLength: number }[] = [];
+  /** Desktop-gated endpoint calls observed since the watch started (AGT-059). */
+  private assistantDesktopCalls: { method: string; url: string }[] = [];
+  private assistantDesktopWatchHandler: ((request: { method(): string; url(): string }) => void) | null = null;
+  /** Canned instance LLM flag; the route serves the patched payload (AGT-063). */
+  private assistantInstanceLlmStub: boolean | null = null;
+  /** Canned GPT-editor answer served to project task POSTs (AGT-063). */
+  private assistantGptAnswerStub: { response: string; response_html: string } | null = null;
+  /** Forced GPT-editor failure served to project task POSTs (AGT-063). */
+  private assistantGptFailure: { status: number; body: Record<string, string> } | null = null;
+  /** GPT-editor request bodies observed since the driver started. */
+  private assistantGptSeen: { prompt: string; task: string }[] = [];
 
   /** The shared composer textarea (landing and conversation share it). */
   private assistantComposerBox() {
@@ -10998,14 +11027,24 @@ export class WebNewDriver implements ParityDriver {
     const text = (await line.innerText().catch(() => "")).trim();
     return text === "" ? null : text;
   }
+  /** The composer's microphone, a button when keyed and a settings link when not. */
+  private assistantMicControl(): Locator {
+    return this.page.locator('[data-testid="assistant-mic"]').first();
+  }
+
   async assistantMicLabel(): Promise<string | null> {
-    return todo("assistantMicLabel");
+    const mic = this.assistantMicControl();
+    if ((await mic.count()) === 0) return null;
+    return mic.getAttribute("aria-label");
   }
   async assistantClickMic(): Promise<void> {
-    return todo("assistantClickMic");
+    await this.assistantMicControl().click();
   }
   async assistantDictationHint(): Promise<string | null> {
-    return todo("assistantDictationHint");
+    const hint = this.page.locator('[data-testid="assistant-dictation-hint"]').first();
+    if ((await hint.count()) === 0) return null;
+    const text = (await hint.innerText()).trim();
+    return text === "" ? null : text;
   }
   async assistantBubbles(): Promise<AssistantBubble[]> {
     const list = this.assistantTranscript();
@@ -11286,43 +11325,114 @@ export class WebNewDriver implements ParityDriver {
     return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
   }
   async assistantCurrentHash(): Promise<string> {
-    return todo("assistantCurrentHash");
+    return new URL(this.page.url()).hash;
   }
   async assistantMicDisabled(): Promise<boolean> {
-    return todo("assistantMicDisabled");
+    // The keyless control is a settings link and never disables; only the
+    // button halves (locked composer, running upload) can lock.
+    return this.assistantMicControl()
+      .isDisabled()
+      .then(
+        (disabled) => disabled,
+        () => false
+      );
   }
-  async assistantMicHold(_ms: number): Promise<void> {
-    return todo("assistantMicHold");
+  async assistantMicHold(ms: number): Promise<void> {
+    // Push-to-talk rides on pointer down/up (a click's fast up lands under
+    // the tap floor and discards), so hold through the mouse explicitly.
+    const mic = this.assistantMicControl();
+    await mic.hover();
+    await this.page.mouse.down();
+    await this.page.waitForTimeout(ms);
+    await this.page.mouse.up();
   }
   async assistantMicDown(): Promise<void> {
-    return todo("assistantMicDown");
+    await this.assistantMicControl().hover();
+    await this.page.mouse.down();
   }
   async assistantMicUp(): Promise<void> {
-    return todo("assistantMicUp");
+    await this.page.mouse.up();
   }
-  async assistantMicUpAfter(_ms: number): Promise<void> {
-    return todo("assistantMicUpAfter");
+  async assistantMicUpAfter(ms: number): Promise<void> {
+    // The tap floor counts from recorder start, so a down/poll/up cycle
+    // can release inside it; holding past the observation clears it.
+    await this.page.waitForTimeout(ms);
+    await this.page.mouse.up();
   }
-  async assistantSetMicrophonePermission(_state: "granted" | "denied"): Promise<void> {
-    return todo("assistantSetMicrophonePermission");
+  async assistantSetMicrophonePermission(state: "granted" | "denied"): Promise<void> {
+    if (state === "granted") await this.page.context().grantPermissions(["microphone"]);
+    else await this.page.context().clearPermissions();
   }
   async assistantSimulateUnsupportedCapture(): Promise<void> {
-    return todo("assistantSimulateUnsupportedCapture");
+    // A capture-less browser: the composer hides the mic and all hints.
+    await this.page.addInitScript(() => {
+      Object.defineProperty(window, "MediaRecorder", { value: undefined, configurable: true });
+      Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
+    });
   }
   async assistantSimulateMicDenial(): Promise<void> {
-    return todo("assistantSimulateMicDenial");
+    // Headless prompts never surface a real NotAllowedError, so reject
+    // with the spec's denial name and prove the hook's mapping of it.
+    await this.page.addInitScript(() => {
+      const media = navigator.mediaDevices;
+      if (media === undefined) return;
+      const denial = () => Promise.reject(Object.assign(new Error("Permission denied"), { name: "NotAllowedError" }));
+      try {
+        Object.defineProperty(media, "getUserMedia", { value: denial, configurable: true });
+      } catch {
+        media.getUserMedia = denial;
+      }
+    });
   }
-  async assistantStubTranscribeText(_text: string): Promise<void> {
-    return todo("assistantStubTranscribeText");
+  async assistantStubTranscribeText(text: string): Promise<void> {
+    this.assistantTranscribeTextStub = text;
+    this.assistantTranscribeFailure = null;
+    await this.routeTranscribeStub();
   }
-  async assistantFailTranscribe(_status: number, _body: Record<string, string>): Promise<void> {
-    return todo("assistantFailTranscribe");
+  async assistantFailTranscribe(status: number, body: Record<string, string>): Promise<void> {
+    this.assistantTranscribeTextStub = null;
+    this.assistantTranscribeFailure = { status, body };
+    await this.routeTranscribeStub();
+  }
+  private async routeTranscribeStub(): Promise<void> {
+    await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
+    await this.page.route("**/api/users/me/ai-assistant/transcribe/", async (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const buffer = request.postDataBuffer();
+      const raw = buffer === null ? "" : buffer.toString("latin1");
+      this.assistantTranscribeSeen.push({
+        contentType: (await request.headerValue("content-type")) ?? "",
+        hasFilePart: raw.includes("filename="),
+        byteLength: buffer === null ? 0 : buffer.length,
+      });
+      const failure = this.assistantTranscribeFailure;
+      if (failure !== null) {
+        await route.fulfill({
+          status: failure.status,
+          contentType: "application/json",
+          body: JSON.stringify(failure.body),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        // Installed only by the text stub, which always sets the answer.
+        body: JSON.stringify({ text: this.assistantTranscribeTextStub as string }),
+      });
+    });
   }
   async assistantClearTranscribeStubs(): Promise<void> {
-    return todo("assistantClearTranscribeStubs");
+    this.assistantTranscribeTextStub = null;
+    this.assistantTranscribeFailure = null;
+    await this.page.unroute("**/api/users/me/ai-assistant/transcribe/");
   }
   async assistantTranscribeRequests(): Promise<{ contentType: string; hasFilePart: boolean; byteLength: number }[]> {
-    return todo("assistantTranscribeRequests");
+    return [...this.assistantTranscribeSeen];
   }
   async assistantSidebarButtons(): Promise<string[]> {
     return todo("assistantSidebarButtons");
@@ -11340,61 +11450,160 @@ export class WebNewDriver implements ParityDriver {
     return todo("assistantSkippedNoticeActions");
   }
   async assistantChatSettingsLinks(): Promise<string[]> {
-    return todo("assistantChatSettingsLinks");
+    // Registry chrome lives in settings: a fully keyed chat surface must
+    // not link there (the keyless dictation hint may link while unsetup).
+    const out: string[] = [];
+    for (const root of ['[data-testid="assistant-thread"]', '[data-testid="assistant-landing"]']) {
+      const scope = this.page.locator(root).first();
+      if ((await scope.count()) === 0) continue;
+      const links = scope.locator('a[href*="/settings"]');
+      const total = await links.count();
+      for (let i = 0; i < total; i += 1) out.push((await links.nth(i).getAttribute("href")) ?? "");
+    }
+    return out;
   }
   async assistantStartDesktopCallWatch(): Promise<void> {
-    return todo("assistantStartDesktopCallWatch");
+    await this.assistantStopDesktopCallWatch();
+    this.assistantDesktopCalls = [];
+    const handler = (request: { method(): string; url(): string }) => {
+      const url = request.url();
+      if (url.includes("/ai-assistant/agent-profile/") || url.includes("/ai-assistant/agent-token/")) {
+        this.assistantDesktopCalls.push({ method: request.method(), url });
+      }
+    };
+    this.assistantDesktopWatchHandler = handler;
+    this.page.on("request", handler as (request: never) => void);
   }
   async assistantDesktopCallsObserved(): Promise<{ method: string; url: string }[]> {
-    return todo("assistantDesktopCallsObserved");
+    return [...this.assistantDesktopCalls];
   }
   async assistantStopDesktopCallWatch(): Promise<void> {
-    return todo("assistantStopDesktopCallWatch");
+    if (this.assistantDesktopWatchHandler !== null) {
+      this.page.off("request", this.assistantDesktopWatchHandler as (request: never) => void);
+      this.assistantDesktopWatchHandler = null;
+    }
   }
-  async assistantStubInstanceLlm(_configured: boolean): Promise<void> {
-    return todo("assistantStubInstanceLlm");
+  async assistantStubInstanceLlm(configured: boolean): Promise<void> {
+    this.assistantInstanceLlmStub = configured;
+    // Eagerly read the real payload once (same origin, same session) and
+    // serve the patched copy: patching inside the handler stalls app boot.
+    const live = await this.page.request.get("/api/instances/");
+    const payload = (await live.json()) as Record<string, unknown>;
+    // The app reads the nested config object, not the top level.
+    const nested = payload["config"] as Record<string, unknown> | undefined;
+    if (nested !== undefined) nested["has_llm_configured"] = configured;
+    else payload["has_llm_configured"] = configured;
+    const status = live.status();
+    await this.page.unroute("**/api/instances/");
+    await this.page.route("**/api/instances/", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({ status, contentType: "application/json", json: payload });
+    });
   }
   async assistantClearInstanceStub(): Promise<void> {
-    return todo("assistantClearInstanceStub");
+    this.assistantInstanceLlmStub = null;
+    await this.page.unroute("**/api/instances/");
   }
-  async assistantStubGptAnswer(_response: { response: string; response_html: string }): Promise<void> {
-    return todo("assistantStubGptAnswer");
+  async assistantStubGptAnswer(response: { response: string; response_html: string }): Promise<void> {
+    this.assistantGptAnswerStub = response;
+    this.assistantGptFailure = null;
+    await this.routeGptStub();
   }
-  async assistantFailGptAnswer(_status: number, _body: Record<string, string>): Promise<void> {
-    return todo("assistantFailGptAnswer");
+  async assistantFailGptAnswer(status: number, body: Record<string, string>): Promise<void> {
+    this.assistantGptAnswerStub = null;
+    this.assistantGptFailure = { status, body };
+    await this.routeGptStub();
+  }
+  private async routeGptStub(): Promise<void> {
+    // The issue modal posts the project task endpoint; nothing else on
+    // the page shares its trailing segments, so the glob stays exact.
+    await this.page.unroute("**/api/workspaces/*/projects/*/ai-assistant/");
+    await this.page.route("**/api/workspaces/*/projects/*/ai-assistant/", async (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      const body = (request.postDataJSON() ?? {}) as { prompt?: unknown; task?: unknown };
+      this.assistantGptSeen.push({
+        prompt: typeof body["prompt"] === "string" ? body["prompt"] : "",
+        task: typeof body["task"] === "string" ? body["task"] : "",
+      });
+      const failure = this.assistantGptFailure;
+      if (failure !== null) {
+        await route.fulfill({
+          status: failure.status,
+          contentType: "application/json",
+          body: JSON.stringify(failure.body),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        // Installed only by the answer stub, which always sets the answer.
+        body: JSON.stringify(this.assistantGptAnswerStub as { response: string; response_html: string }),
+      });
+    });
   }
   async assistantClearGptStubs(): Promise<void> {
-    return todo("assistantClearGptStubs");
+    this.assistantGptAnswerStub = null;
+    this.assistantGptFailure = null;
+    await this.page.unroute("**/api/workspaces/*/projects/*/ai-assistant/");
   }
   async assistantGptRequests(): Promise<{ prompt: string; task: string }[]> {
-    return todo("assistantGptRequests");
+    return [...this.assistantGptSeen];
   }
+  /** The create dialog's scope: the dialog hosting the heading. */
+  private issueModalScope(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Create new work item" }).first();
+  }
+
+  /** The AI helper's popover panel. */
+  private issueModalAiPanel(): Locator {
+    return this.page.locator('[data-testid="modal-ai-panel"]').first();
+  }
+
   async issueModalAiEntryVisible(): Promise<boolean> {
-    return todo("issueModalAiEntryVisible");
+    const entry = this.issueModalScope().getByRole("button", { name: "AI", exact: true });
+    return (await entry.count()) > 0 && (await entry.first().isVisible());
   }
   async issueModalAiOpen(): Promise<void> {
-    return todo("issueModalAiOpen");
+    await this.issueModalScope().getByRole("button", { name: "AI", exact: true }).first().click();
+    await this.page.locator("#modal-ai-prompt").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async issueModalAiFillTask(_text: string): Promise<void> {
-    return todo("issueModalAiFillTask");
+  async issueModalAiFillTask(text: string): Promise<void> {
+    await this.page.locator("#modal-ai-prompt").first().fill(text);
   }
   async issueModalAiGenerate(): Promise<void> {
-    return todo("issueModalAiGenerate");
+    await this.issueModalAiPanel()
+      .getByRole("button", { name: /Generate (response|again)/ })
+      .first()
+      .click();
   }
   async issueModalAiResponse(): Promise<string | null> {
-    return todo("issueModalAiResponse");
+    const review = this.issueModalAiPanel().locator('[data-testid="modal-ai-response"]').first();
+    if ((await review.count()) === 0) return null;
+    const text = (await review.innerText()).trim();
+    return text === "" ? null : text;
   }
   async issueModalAiInvalidVisible(): Promise<boolean> {
-    return todo("issueModalAiInvalidVisible");
+    const invalid = this.issueModalAiPanel().locator('[data-testid="modal-ai-invalid"]');
+    return (await invalid.count()) > 0 && (await invalid.first().isVisible());
   }
   async issueModalAiUseResponse(): Promise<void> {
-    return todo("issueModalAiUseResponse");
+    await this.issueModalAiPanel().getByRole("button", { name: "Use this response", exact: true }).first().click();
   }
   async issueModalAiClose(): Promise<void> {
-    return todo("issueModalAiClose");
+    await this.issueModalAiPanel().getByRole("button", { name: "Close", exact: true }).first().click();
   }
   async issueModalDescriptionText(): Promise<string | null> {
-    return todo("issueModalDescriptionText");
+    const editor = this.issueModalScope().locator('[contenteditable="true"]').first();
+    if ((await editor.count()) === 0) return null;
+    return ((await editor.textContent()) ?? "").trim();
   }
   async pageEditorOpen(_workspaceSlug: string, _projectId: string, _pageId: string): Promise<void> {
     return todo("pageEditorOpen");

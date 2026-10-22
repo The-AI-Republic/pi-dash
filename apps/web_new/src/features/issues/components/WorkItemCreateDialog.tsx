@@ -40,6 +40,7 @@ import {
 } from "../../../shared/pickers/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { isAssistantConfigured, useAssistantConfig } from "../../home/index.js";
+import { useAppInstanceBootstrap } from "../../instance/index.js";
 import { useCreateWorkItem } from "../api/create.js";
 import { executionTargetFieldError } from "../api/executionTarget.js";
 import { DiscardDraftDialog } from "../create/DiscardDraftDialog.js";
@@ -383,6 +384,7 @@ export function WorkItemCreateDialog({
   const publish = usePublishDraft(workspaceSlug);
   const attachAssets = useAttachDescriptionAssets(workspaceSlug);
   const assistant = useAssistantConfig(workspaceSlug, open);
+  const instance = useAppInstanceBootstrap();
   // An issue edit opens from a list snapshot, which carries no body: the
   // stored description comes from the detail read (ISS-126). A draft's
   // snapshot already holds it.
@@ -619,6 +621,10 @@ export function WorkItemCreateDialog({
   }, [open, focusRequest]);
 
   const configured = isAssistantConfigured(assistant.data);
+  // The description's writing helper (and its feeling-lucky draft) read
+  // the instance's LLM key, not the member's provider key; title naming
+  // below keeps the member key (AGT-063).
+  const writingHelp = instance.data?.bootstrap?.config.has_llm_configured === true;
   const canGenerate = canGenerateTitle({
     name: form.name,
     descriptionHtml: form.descriptionHtml,
@@ -1140,7 +1146,7 @@ export function WorkItemCreateDialog({
             onChange={(html) => patch({ descriptionHtml: html })}
             disabled={busy}
             title={form.name}
-            assistantConfigured={configured}
+            assistantConfigured={writingHelp}
             assetScope={assetScope}
             onAssetUploaded={(assetId) => setAssetIds((current) => [...current, assetId])}
             generation={editorGeneration}

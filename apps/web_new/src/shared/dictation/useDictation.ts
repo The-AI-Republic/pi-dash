@@ -16,6 +16,14 @@ import { getAppClient } from "../../core/api/client.js";
 /** What the control is doing. */
 export type DictationStatus = "idle" | "requesting" | "recording" | "transcribing" | "error" | "denied";
 
+/**
+ * Why capture failed, when the failure was the device rather than the
+ * upload: no microphone on the host, or any other capture-side failure.
+ * Callers map this onto their own hint words; a failed upload leaves it
+ * null and reads through `errorMessage` instead.
+ */
+export type DictationCaptureFailure = "missing-hardware" | "capture-failed";
+
 /** Longest single utterance kept: well inside every provider's upload cap. */
 export const DICTATION_MAX_MS = 60_000;
 /** A tap shorter than this holds no useful speech and is dropped. */
@@ -47,6 +55,8 @@ export interface DictationHandle {
   elapsedSeconds: number;
   /** A message for the error state, when the failure has one. */
   errorMessage: string | null;
+  /** The capture-side failure kind, or null when capture did not fail. */
+  captureFailure: DictationCaptureFailure | null;
   /** True when this browser can capture audio at all. */
   supported: boolean;
   /** Begin capture; a press while busy is ignored. */
@@ -96,10 +106,20 @@ function errorMessageOf(error: unknown): string {
 
 function isPermissionDenial(error: unknown): boolean {
   const name = (error as { name?: unknown } | null)?.name;
-  return name === "NotAllowedError" || name === "SecurityError";
+  return name === "NotAllowedError" || name === "SecurityError" || name === "PermissionDeniedError";
 }
 
-async function defaultTranscribe(audio: Blob): Promise<string> {
+function isMissingHardware(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name;
+  return name === "NotFoundError" || name === "DevicesNotFoundError";
+}
+
+/**
+ * Transcribe an utterance through the saved speech endpoint. The hook
+ * uses this when the caller injects no transcriber; callers that need
+ * the refusal (the kill-switch 404) wrap it and rethrow.
+ */
+export async function uploadDictationAudio(audio: Blob): Promise<string> {
   const answer = await transcribeAudio(getAppClient(), audio);
   return answer.text;
 }
@@ -113,14 +133,15 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
   const [status, setStatus] = React.useState<DictationStatus>("idle");
   const [elapsedMs, setElapsedMs] = React.useState(0);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [captureFailure, setCaptureFailure] = React.useState<DictationCaptureFailure | null>(null);
 
   const liveDevices = devices ?? browserDictationDevices();
   const supported = liveDevices.getUserMedia !== undefined && liveDevices.createRecorder !== undefined;
 
   const onResultRef = React.useRef(onResult);
   onResultRef.current = onResult;
-  const transcribeRef = React.useRef<DictationTranscriber>(transcribe ?? defaultTranscribe);
-  transcribeRef.current = transcribe ?? defaultTranscribe;
+  const transcribeRef = React.useRef<DictationTranscriber>(transcribe ?? uploadDictationAudio);
+  transcribeRef.current = transcribe ?? uploadDictationAudio;
   const devicesRef = React.useRef(liveDevices);
   devicesRef.current = liveDevices;
 
@@ -206,17 +227,20 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
     cancelledRef.current = false;
     releasedRef.current = false;
     setErrorMessage(null);
+    setCaptureFailure(null);
     setPhase("requesting");
     let stream: MediaStream;
     try {
       stream = await devicesRef.current.getUserMedia!({ audio: true });
     } catch (error) {
-      setErrorMessage(
-        isPermissionDenial(error)
-          ? "Microphone access is blocked. Allow it in the browser's site settings, then try again."
-          : errorMessageOf(error)
-      );
-      setPhase(isPermissionDenial(error) ? "denied" : "error");
+      if (isPermissionDenial(error)) {
+        setErrorMessage("Microphone access is blocked. Allow it in the browser's site settings, then try again.");
+        setPhase("denied");
+        return;
+      }
+      setErrorMessage(errorMessageOf(error));
+      setCaptureFailure(isMissingHardware(error) ? "missing-hardware" : "capture-failed");
+      setPhase("error");
       return;
     }
     // Released before the microphone answered: hand the device straight back.
@@ -235,6 +259,7 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
     } catch (error) {
       releaseStream();
       setErrorMessage(errorMessageOf(error));
+      setCaptureFailure("capture-failed");
       setPhase("error");
       return;
     }
@@ -252,6 +277,7 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
       recorderRef.current = null;
       releaseStream();
       setErrorMessage(errorMessageOf(error));
+      setCaptureFailure("capture-failed");
       setPhase("error");
       return;
     }
@@ -291,6 +317,7 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
   const reset = React.useCallback(() => {
     if (statusRef.current !== "error" && statusRef.current !== "denied") return;
     setErrorMessage(null);
+    setCaptureFailure(null);
     setPhase("idle");
   }, [setPhase]);
 
@@ -314,6 +341,7 @@ export function useDictation({ onResult, devices, transcribe }: UseDictationOpti
     status,
     elapsedSeconds: Math.floor(elapsedMs / 1000),
     errorMessage,
+    captureFailure,
     supported,
     start,
     stop,

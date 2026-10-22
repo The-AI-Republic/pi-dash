@@ -14,6 +14,8 @@ export const ASSISTANT_TAB_INTRO =
 export const LLM_SECTION_HEADING = "Language model";
 export const VOICE_SECTION_HEADING = "Voice dictation";
 export const TOOLS_SECTION_HEADING = "Tool servers (MCP)";
+/** Deep-link anchor on the voice section; the assistant mic links here (AGT-051). */
+export const VOICE_SECTION_ANCHOR = "voice-dictation";
 
 export const PROVIDER_LABEL = "Provider";
 export const BASE_URL_LABEL = "Base URL";

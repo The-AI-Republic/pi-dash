@@ -14,13 +14,14 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AssistantThread, LlmConfig } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
+import { sttConfigKeys } from "../../../shared/dictation/index.js";
 import { assistantKeys } from "../api/keys.js";
 import { AssistantLanding } from "./AssistantLanding.js";
 
@@ -65,7 +66,7 @@ function deferred<T>(): Deferred<T> {
 const posts: string[] = [];
 let createResponse: (() => Promise<unknown>) | null = null;
 
-function renderLanding(options: { config?: LlmConfig; role?: number; seedConfig?: boolean } = {}) {
+function renderLanding(options: { config?: LlmConfig; role?: number; seedConfig?: boolean; sttSeed?: unknown } = {}) {
   setSessionClient({
     getJson: () => new Promise<never>(() => {}),
     parse: (_schema: unknown, data: unknown) => data,
@@ -81,6 +82,14 @@ function renderLanding(options: { config?: LlmConfig; role?: number; seedConfig?
         url,
         headers: { get: () => "application/json" },
         text: async () => JSON.stringify(body),
+      };
+    }
+    if (url.endsWith("/transcribe/") && init.method === "POST") {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify({ text: "landing words" }),
       };
     }
     return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
@@ -100,6 +109,7 @@ function renderLanding(options: { config?: LlmConfig; role?: number; seedConfig?
     queryClient.setQueryData(assistantKeys.config("acme"), options.config ?? KEYED);
     queryClient.setQueryData(assistantKeys.threads("acme"), []);
   }
+  if (options.sttSeed !== undefined) queryClient.setQueryData(sttConfigKeys.all(), options.sttSeed);
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
   const layout = createRoute({
     getParentRoute: () => rootRoute,
@@ -241,4 +251,67 @@ describe("AssistantLanding", () => {
     });
     expect(routerRef?.state.location.pathname).toBe("/acme/assistant");
   });
+});
+
+describe("AssistantLanding dictation", () => {
+  const STT_KEYED = {
+    base_url: "https://stt.test",
+    model_name: "whisper",
+    has_api_key: true,
+    last_verified_at: null,
+    enabled: true,
+  };
+
+  class FakeRecorder {
+    state: RecordingState = "inactive";
+    mimeType = "audio/webm";
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onstop: (() => void) | null = null;
+
+    start(): void {
+      this.state = "recording";
+    }
+
+    stop(): void {
+      this.state = "inactive";
+      this.ondataavailable?.({ data: new Blob(["audio-bytes"], { type: this.mimeType }) });
+      this.onstop?.();
+    }
+  }
+
+  function stubDevices(): void {
+    const track = { stop: vi.fn() };
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) },
+    });
+    vi.stubGlobal("MediaRecorder", FakeRecorder);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("hides the microphone while speech is unconfigured", async () => {
+    stubDevices();
+    renderLanding();
+    await screen.findByRole("textbox", { name: "Message the assistant" });
+    expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
+  });
+
+  it("transcribes a hold into the landing draft", async () => {
+    stubDevices();
+    renderLanding({ sttSeed: STT_KEYED });
+    const mic = await screen.findByTestId("assistant-mic");
+    expect(mic).toHaveAttribute("aria-label", "Hold to dictate");
+    fireEvent.pointerDown(mic);
+    await waitFor(() =>
+      expect(screen.getByTestId("assistant-mic")).toHaveAttribute("aria-label", "Release to transcribe")
+    );
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 600));
+    });
+    fireEvent.pointerUp(mic);
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    await waitFor(() => expect(box).toHaveValue("landing words"));
+  }, 15000);
 });

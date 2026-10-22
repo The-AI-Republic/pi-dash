@@ -361,18 +361,67 @@ export async function requestDescription(
   return answer.response_html.trim();
 }
 
-/** Run an assistant writing prompt and keep the markup it answers. */
+/** A writing-helper answer: the plain text plus the review-ready markup. */
+export interface EditorAnswer {
+  text: string;
+  html: string;
+}
+
+/**
+ * Run an assistant writing prompt and keep the text plus the markup it
+ * answers. The caller passes no prompt: the wire carries the typed task
+ * only, and the draft stays out of the request (AGT-063).
+ */
 export async function requestEditorAnswer(
   client: ApiClient,
   workspaceSlug: string,
   projectId: string,
   prompt: string
-): Promise<string> {
+): Promise<EditorAnswer> {
   const answer = await withTimeout(
-    runProjectEditorTask(client, workspaceSlug, projectId, { task: prompt }),
+    runProjectEditorTask(client, workspaceSlug, projectId, { task: prompt, prompt: "" }),
     TITLE_GENERATION_TIMEOUT_MS
   );
-  return answer.response_html.trim();
+  return { text: answer.response.trim(), html: answer.response_html.trim() };
+}
+
+/** Toast title for a writing-helper failure (AGT-063 pins the title). */
+export const EDITOR_FAILED_TITLE = "Error!";
+/** Toast when the task box is submitted empty (AGT-063 pins the line). */
+export const EDITOR_EMPTY_TASK_BODY = "Please enter some task to get AI assistance.";
+/** Toast when the monthly assistant quota is spent (AGT-063 pins the line). */
+export const EDITOR_QUOTA_EXCEEDED_BODY =
+  "You have reached the maximum number of requests of 50 requests per month per user.";
+/** Toast when a writing prompt fails without a server message. */
+export const EDITOR_FAILED_BODY = "The assistant couldn't answer that. Try again in a moment.";
+/** Marker when the answer comes back empty. */
+export const EDITOR_EMPTY_ANSWER = "The assistant came back empty. Describe the task with more detail and try again.";
+
+/** 429 means the member's monthly assistant quota is spent. */
+export function isAssistantRateLimited(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const status = (error as { status?: unknown }).status;
+  return status === 429;
+}
+
+/** One server line off an error body, when the body carries a real line. */
+function serverLine(error: unknown, field: "detail" | "error"): string | null {
+  const body = (error as { body?: unknown } | null)?.body;
+  if (typeof body !== "object" || body === null) return null;
+  const line = (body as Record<string, unknown>)[field];
+  return typeof line === "string" && line !== "" ? line : null;
+}
+
+/**
+ * The message a failed writing prompt toasts: the server's detail or
+ * code when the body carries one, the quota line for a bare 429, else
+ * the generic line (AGT-063).
+ */
+export function editorFailureMessage(error: unknown): string {
+  const detail = serverLine(error, "detail");
+  const code = serverLine(error, "error");
+  if (isAssistantRateLimited(error)) return detail ?? code ?? EDITOR_QUOTA_EXCEEDED_BODY;
+  return detail ?? code ?? EDITOR_FAILED_BODY;
 }
 
 export function useDescribeFromTitle(workspaceSlug: string) {
@@ -382,7 +431,7 @@ export function useDescribeFromTitle(workspaceSlug: string) {
 }
 
 export function useEditorAnswer(workspaceSlug: string) {
-  return useMutation<string, Error, { projectId: string; prompt: string }>({
+  return useMutation<EditorAnswer, Error, { projectId: string; prompt: string }>({
     mutationFn: ({ projectId, prompt }) => requestEditorAnswer(getAppClient(), workspaceSlug, projectId, prompt),
   });
 }

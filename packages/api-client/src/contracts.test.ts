@@ -780,6 +780,33 @@ describe("auth contracts", () => {
     expect(parsed.file_size_limit).toBeUndefined();
   });
 
+  it("reads the editor-AI gate flag when the instance reports it", async () => {
+    const configOf = (flag: unknown) => ({
+      enable_signup: false,
+      is_workspace_creation_disabled: false,
+      is_google_enabled: false,
+      is_github_enabled: false,
+      is_gitlab_enabled: false,
+      is_gitea_enabled: false,
+      is_magic_login_enabled: true,
+      is_email_password_enabled: true,
+      is_smtp_configured: true,
+      is_self_managed: true,
+      instance_changelog_url: "",
+      ...(flag === undefined ? {} : { has_llm_configured: flag }),
+    });
+    const readFlag = async (flag: unknown) => {
+      const client = createClient({
+        baseUrl: "https://api.test",
+        transport: json({ config: configOf(flag), instance: { id: UUID, workspaces_exist: true } }),
+      });
+      return (await getInstanceConfig(client)).has_llm_configured;
+    };
+    expect(await readFlag(true)).toBe(true);
+    expect(await readFlag(false)).toBe(false);
+    expect(await readFlag(undefined)).toBeUndefined();
+  });
+
   it("rejects an instance answer without the config flags", async () => {
     const client = createClient({
       baseUrl: "https://api.test",

@@ -6,12 +6,13 @@
 // failed write keeps the form exactly as typed; the cached read is
 // replaced by the server's answer (or re-read after a removal).
 
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import {
   createMcpServer,
   deleteLlmConfig,
   deleteMcpServer,
   deleteSttConfig,
+  dictationDisabledFrom,
   patchMcpServer,
   putLlmConfig,
   putSttConfig,
@@ -29,6 +30,7 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../../core/api/client.js";
+import { sttConfigKeys } from "../../../shared/dictation/index.js";
 import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/toaster.js";
 import {
   CONNECTION_FAILED_TITLE,
@@ -104,6 +106,16 @@ export function useRemoveAssistantLlm() {
   });
 }
 
+/**
+ * Re-read the speech config everywhere it is cached: this tab's read
+ * and the composers' shared read. A kill-switch refusal calls this so
+ * the section narrows and the microphones hide (AGT-064).
+ */
+function rereadSpeechConfig(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: assistantSettingsKeys.voice });
+  void queryClient.invalidateQueries({ queryKey: sttConfigKeys.all() });
+}
+
 /** Save the dictation config; success clears the typed key in the caller. */
 export function useSaveAssistantVoice() {
   const queryClient = useQueryClient();
@@ -114,6 +126,7 @@ export function useSaveAssistantVoice() {
       notifySuccess(LLM_SAVED_TITLE, STT_SAVED_MESSAGE);
     },
     onError: (error) => {
+      if (dictationDisabledFrom(error) !== null) rereadSpeechConfig(queryClient);
       notifyError(SAVE_FAILED_TITLE, saveFailureMessage(error));
     },
   });
@@ -133,6 +146,7 @@ export function useTestAssistantVoice() {
       void queryClient.invalidateQueries({ queryKey: assistantSettingsKeys.voice });
     },
     onError: (error) => {
+      if (dictationDisabledFrom(error) !== null) rereadSpeechConfig(queryClient);
       notifyError(CONNECTION_FAILED_TITLE, saveFailureMessage(error));
     },
   });

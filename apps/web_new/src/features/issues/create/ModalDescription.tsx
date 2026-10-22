@@ -5,11 +5,12 @@
 // The rich description the create and edit forms share: a lazy Tiptap
 // surface with person mentions and image upload, plus the assistant
 // footer. "I'm feeling lucky" drafts a body from the title; the AI
-// popover answers a prompt and inserts the reply at the caret. The
-// panel leaves Enter to the editor (it starts a new line) and Escape to
-// the dialog, which asks before discarding. A panel-side upload is not
-// the dialog's write state, so the panel reports when it is still
-// processing and the dialog refuses to close until it settles (ISS-125).
+// popover answers a typed task, shows the markup for review, and inserts
+// it on confirmation (AGT-063). The panel leaves Enter to the editor
+// (it starts a new line) and Escape to the dialog, which asks before
+// discarding. A panel-side upload is not the dialog's write state, so
+// the panel reports when it is still processing and the dialog refuses
+// to close until it settles (ISS-125).
 
 import { Button, Popover, cn } from "@pidash/kit";
 import { Sparkle } from "lucide-react";
@@ -29,10 +30,16 @@ import {
   DESCRIBE_FAILED_BODY,
   DESCRIBE_FAILED_TITLE,
   DESCRIBE_RATE_LIMITED_BODY,
+  EDITOR_EMPTY_ANSWER,
+  EDITOR_EMPTY_TASK_BODY,
+  EDITOR_FAILED_TITLE,
+  editorFailureMessage,
+  isAssistantRateLimited,
   useDescribeFromTitle,
   useEditorAnswer,
   useMentionSearch,
   useUploadDescriptionAsset,
+  type EditorAnswer,
   type MentionSearchResults,
 } from "./createApi.js";
 import type { DescriptionAssetScope } from "@pidash/api-client";
@@ -43,7 +50,12 @@ export const DESCRIBE_BUTTON_LABEL = "I'm feeling lucky";
 export const DESCRIBE_BUSY_LABEL = "Writing…";
 export const AI_BUTTON_LABEL = "AI";
 export const AI_PROMPT_LABEL = "Ask the assistant";
-export const AI_INSERT_LABEL = "Insert";
+export const AI_RESPONSE_LABEL = "Response";
+export const AI_GENERATE_LABEL = "Generate response";
+export const AI_REGENERATE_LABEL = "Generate again";
+export const AI_GENERATING_LABEL = "Generating response…";
+export const AI_USE_RESPONSE_LABEL = "Use this response";
+export const AI_CLOSE_LABEL = "Close";
 export const UPLOAD_FAILED_TITLE = "Couldn't upload the image";
 export const UPLOAD_FAILED_BODY = "Check your connection and try again.";
 
@@ -97,8 +109,10 @@ export function ModalDescription({
   const [mentionQuery, setMentionQuery] = React.useState<string | null>(null);
   const [aiOpen, setAiOpen] = React.useState(false);
   const [aiPrompt, setAiPrompt] = React.useState("");
+  const [aiAnswer, setAiAnswer] = React.useState<EditorAnswer | null>(null);
+  const [aiInvalid, setAiInvalid] = React.useState(false);
   const describe = useDescribeFromTitle(workspaceSlug);
-  const answer = useEditorAnswer(workspaceSlug);
+  const answerMutation = useEditorAnswer(workspaceSlug);
   const upload = useUploadDescriptionAsset(workspaceSlug);
   const mentions = useMentionSearch(workspaceSlug, projectId, mentionQuery ?? "", mentionQuery !== null);
   const fileRef = React.useRef<HTMLInputElement>(null);
@@ -153,36 +167,56 @@ export function ModalDescription({
       // adopt the generated body.
       setRemount((current) => current + 1);
     } catch (error) {
-      const rateLimited = isRateLimited(error);
+      const rateLimited = isAssistantRateLimited(error);
       notifyError(DESCRIBE_FAILED_TITLE, rateLimited ? DESCRIBE_RATE_LIMITED_BODY : DESCRIBE_FAILED_BODY);
     }
   }
 
-  async function insertAnswer(): Promise<void> {
-    const prompt = aiPrompt.trim();
-    if (prompt === "") return;
-    try {
-      const html = await withPanelWork(() => answer.mutateAsync({ projectId, prompt }));
-      if (html === "") {
-        notifyError(DESCRIBE_FAILED_TITLE, DESCRIBE_FAILED_BODY);
-        return;
-      }
-      const handle = handleRef.current;
-      if (handle !== null) {
-        // The old editor inserts at `selection.anchor`; appending would
-        // always land the answer at the end of the body (ISS-127).
-        handle.insertHtml(html);
-      } else {
-        onChange(value.trim() === "" ? html : `${value}${html}`);
-        setRemount((currentKey) => currentKey + 1);
-      }
-      setAiOpen(false);
-      setAiPrompt("");
-      notifySuccess("Inserted", "The assistant's answer is in the description.");
-    } catch (error) {
-      const rateLimited = isRateLimited(error);
-      notifyError(DESCRIBE_FAILED_TITLE, rateLimited ? DESCRIBE_RATE_LIMITED_BODY : DESCRIBE_FAILED_BODY);
+  // Closing discards the draft request: task, answer and marker alike.
+  function closeAi(): void {
+    setAiOpen(false);
+    setAiPrompt("");
+    setAiAnswer(null);
+    setAiInvalid(false);
+  }
+
+  async function generateAnswer(): Promise<void> {
+    const task = aiPrompt.trim();
+    if (task === "") {
+      notifyError(EDITOR_FAILED_TITLE, EDITOR_EMPTY_TASK_BODY);
+      return;
     }
+    try {
+      // The markup is cleaned before it is ever shown or inserted; the
+      // cleaner loads on demand so the dialog never carries it eagerly.
+      const [{ sanitizeHtml }, answer] = await withPanelWork(() =>
+        Promise.all([
+          import("../../../shared/editor/sanitize.js"),
+          answerMutation.mutateAsync({ projectId, prompt: task }),
+        ])
+      );
+      const html = sanitizeHtml(answer.html);
+      setAiAnswer({ text: answer.text, html });
+      setAiInvalid(answer.text === "");
+    } catch (error) {
+      notifyError(EDITOR_FAILED_TITLE, editorFailureMessage(error));
+    }
+  }
+
+  // The insert button only renders once an answer with markup exists,
+  // so the answer arrives as an argument instead of a guarded read.
+  function useAnswer(answer: EditorAnswer): void {
+    const handle = handleRef.current;
+    if (handle !== null) {
+      // The old editor inserts at `selection.anchor`; appending would
+      // always land the answer at the end of the body (ISS-127).
+      handle.insertHtml(answer.html);
+    } else {
+      onChange(value.trim() === "" ? answer.html : `${value}${answer.html}`);
+      setRemount((currentKey) => currentKey + 1);
+    }
+    closeAi();
+    notifySuccess("Inserted", "The assistant's answer is in the description.");
   }
 
   async function uploadImage(file: File): Promise<void> {
@@ -201,7 +235,7 @@ export function ModalDescription({
   }
 
   const [remount, setRemount] = React.useState(0);
-  const busy = disabled || describe.isPending || answer.isPending || upload.isPending;
+  const busy = disabled || describe.isPending || answerMutation.isPending || upload.isPending;
   React.useEffect(() => {
     reportReadiness();
   }, [disabled, reportReadiness]);
@@ -258,7 +292,10 @@ export function ModalDescription({
         {assistantConfigured ? (
           <Popover
             open={aiOpen}
-            onOpenChange={setAiOpen}
+            onOpenChange={(open) => {
+              if (open) setAiOpen(true);
+              else closeAi();
+            }}
             trigger={
               <Button variant="ghost" size="small" disabled={busy}>
                 <Sparkle size={14} strokeWidth={1.5} aria-hidden="true" />
@@ -267,7 +304,22 @@ export function ModalDescription({
             }
             title="Assistant writing"
           >
-            <div className="flex w-72 flex-col gap-(--space-2)">
+            <div data-testid="modal-ai-panel" className="flex w-72 flex-col gap-(--space-2)">
+              {aiAnswer !== null && aiAnswer.html !== "" ? (
+                <div className="flex flex-col gap-(--space-1)">
+                  <p className="text-meta font-medium text-(--text)">{AI_RESPONSE_LABEL}</p>
+                  <div
+                    data-testid="modal-ai-response"
+                    className="text-body max-h-40 overflow-y-auto rounded-(--radius-control) border border-(--border) bg-(--bg) p-(--space-2) text-(--text)"
+                    dangerouslySetInnerHTML={{ __html: aiAnswer.html }}
+                  />
+                </div>
+              ) : null}
+              {aiInvalid ? (
+                <p data-testid="modal-ai-invalid" role="alert" className="text-meta text-(--danger)">
+                  {EDITOR_EMPTY_ANSWER}
+                </p>
+              ) : null}
               <label className="text-meta text-(--text-muted)" htmlFor="modal-ai-prompt">
                 {AI_PROMPT_LABEL}
               </label>
@@ -275,18 +327,53 @@ export function ModalDescription({
                 id="modal-ai-prompt"
                 value={aiPrompt}
                 onChange={(event) => setAiPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    closeAi();
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void generateAnswer();
+                  }
+                }}
                 className="text-body min-h-20 w-full rounded-(--radius-control) border border-(--border) bg-(--bg) p-(--space-2) text-(--text)"
               />
-              <div className="flex justify-end">
+              <div className="flex justify-end gap-(--space-2)">
+                {aiAnswer !== null && aiAnswer.html !== "" ? (
+                  <Button
+                    variant="primary"
+                    size="small"
+                    onClick={() => {
+                      useAnswer(aiAnswer);
+                    }}
+                  >
+                    {AI_USE_RESPONSE_LABEL}
+                  </Button>
+                ) : null}
+                <Button
+                  variant="secondary"
+                  size="small"
+                  onClick={() => {
+                    closeAi();
+                  }}
+                >
+                  {AI_CLOSE_LABEL}
+                </Button>
                 <Button
                   variant="primary"
                   size="small"
-                  disabled={answer.isPending || aiPrompt.trim() === ""}
+                  disabled={answerMutation.isPending}
                   onClick={() => {
-                    void insertAnswer();
+                    void generateAnswer();
                   }}
                 >
-                  {AI_INSERT_LABEL}
+                  {answerMutation.isPending
+                    ? AI_GENERATING_LABEL
+                    : aiAnswer !== null
+                      ? AI_REGENERATE_LABEL
+                      : AI_GENERATE_LABEL}
                 </Button>
               </div>
             </div>
@@ -295,13 +382,6 @@ export function ModalDescription({
       </div>
     </div>
   );
-}
-
-/** 429 means the member's monthly assistant quota is spent. */
-function isRateLimited(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const status = (error as { status?: unknown }).status;
-  return status === 429;
 }
 
 /** The @ popup: people the lookup returned, or a quiet empty note. */
