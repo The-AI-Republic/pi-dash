@@ -27,8 +27,9 @@ const UNSAFE_TARGETS = [
 /**
  * Encoded spellings the old app does not reject (bug NEWFRONT-777): the
  * parser normalizes them to protocol-relative or encoded paths and the old
- * guard never looks again. The new app rejects them; the oracle pins the
- * old behavior so the row records the defect instead of failing on it.
+ * guard never looks again. The new app rejects them after normalization;
+ * the oracle pins the old result on the old leg and the intended discard
+ * on the new leg so the row records the defect instead of failing on it.
  */
 const OLD_APP_ACCEPTS = ["/%2e%2e//evil.example/x", "/a/%2e%2e/%2f/evil.example", "/%5c%5cevil.example/steal"];
 
@@ -74,6 +75,14 @@ for (const accepted of OLD_APP_ACCEPTS) {
     async ({ driver }) => {
       await driver.cloudArmSignInCapture();
       await driver.openPath(`/login?next_path=${encodeURIComponent(accepted)}`);
+      if (driver.target === "web_new") {
+        // Intended behavior: the target is discarded after normalization,
+        // so the card renders and no handoff leaves.
+        const card = await driver.cloudLoginCardFacts();
+        expect(card.continueActions).toBe(1);
+        expect(await driver.cloudSignInRequests()).toHaveLength(0);
+        return;
+      }
       // Observed old behavior: the handoff leaves with the normalized value.
       const handoff = new URL(await driver.cloudAwaitSignInRequest(0));
       expect(handoff.searchParams.get("return_to")).not.toBe("/");
