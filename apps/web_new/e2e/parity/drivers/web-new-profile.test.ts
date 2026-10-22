@@ -2153,3 +2153,70 @@ describe("workspace settings api tokens (NEWFRONT-586, PROF-020)", () => {
     expect(actions).toEqual(["hover", "Delete doomed", "Cancel", "hover", "Delete doomed", "Delete"]);
   });
 });
+
+describe("settings cross-cutting probes (NEWFRONT-586, PROF-027..028)", () => {
+  it("presses keys against the blurred body", async () => {
+    const pressed: string[] = [];
+    const page = pageOf({
+      evaluate: async () => undefined,
+      keyboard: {
+        press: async (key: string) => {
+          pressed.push(key);
+        },
+      },
+      waitForTimeout: async () => undefined,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfilePressKeys(["?", "Enter"]);
+    expect(pressed).toEqual(["?", "Enter"]);
+  });
+
+  it("counts tab reads and sockets from watchers", async () => {
+    const handlers: Record<string, (...args: never[]) => void> = {};
+    const page = pageOf({
+      on: (event: string, handler: (...args: never[]) => void) => {
+        handlers[event] = handler;
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileWatchReads();
+    await driver.settingsProfileWatchSockets();
+    handlers["request"]?.({
+      method: () => "GET",
+      url: () => "https://app.test/api/users/me/ai-assistant/config/",
+    } as never);
+    handlers["request"]?.({
+      method: () => "POST",
+      url: () => "https://app.test/api/users/me/ai-assistant/config/",
+    } as never);
+    handlers["request"]?.({ method: () => "GET", url: () => "https://app.test/api/users/api-tokens/" } as never);
+    handlers["websocket"]?.();
+    expect(await driver.settingsProfileReadCount()).toBe(1);
+    expect(await driver.settingsProfileSocketCount()).toBe(1);
+    await driver.settingsProfileWatchReads();
+    await driver.settingsProfileWatchSockets();
+    expect(await driver.settingsProfileReadCount()).toBe(0);
+    expect(await driver.settingsProfileSocketCount()).toBe(0);
+  });
+
+  it("counts draggables, file inputs and member controls from the document", async () => {
+    const driver = new WebNewDriver(pageOf({ evaluate: async () => 3 }));
+    expect(await driver.settingsProfileDraggableCount()).toBe(3);
+    expect(await driver.settingsProfileMemberControlCount()).toBe(3);
+    const files = new WebNewDriver(pageOf({ locator: () => locator({ count: async () => 2 }) }));
+    expect(await files.settingsProfileFileInputCount()).toBe(2);
+  });
+
+  it("collects import/export mentions from the body text", async () => {
+    const page = pageOf({
+      locator: () =>
+        locator({
+          innerText: async () => "Settings\nExport the workspace\nimport wizard\nExport the workspace\nplain line",
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileImportExportMentions()).toEqual(["Export the workspace", "import wizard"]);
+    const bare = new WebNewDriver(pageOf({ locator: () => locator({ innerText: async () => "Settings\nplain" }) }));
+    expect(await bare.settingsProfileImportExportMentions()).toEqual([]);
+  });
+});

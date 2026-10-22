@@ -25538,8 +25538,21 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileIntegrationsClearRoutes(): Promise<void> {
     await this.page.unroute("**/api/users/me/integrations/github/app/refresh/");
   }
-  async settingsProfilePressKeys(_keys: string[]): Promise<void> {
-    return todo("settingsProfilePressKeys");
+  private settingsProfileReadsSeen = 0;
+  private settingsProfileReadHandler: ((request: { url(): string; method(): string }) => void) | null = null;
+  private settingsProfileSocketsSeen = 0;
+  private settingsProfileSocketHandler: (() => void) | null = null;
+
+  async settingsProfilePressKeys(keys: string[]): Promise<void> {
+    // Blur first so keys land on the page body, never inside a control;
+    // no click, so the probe itself cannot flip a switch or open a menu.
+    await this.page.evaluate(() => {
+      (document.activeElement as HTMLElement | null)?.blur?.();
+    });
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(300);
+    }
   }
   async settingsProfileDialogOpen(): Promise<boolean> {
     // Toasts render as dialogs inside the Notifications region; only a
@@ -25554,28 +25567,87 @@ export class WebNewDriver implements ParityDriver {
     });
   }
   async settingsProfileWatchReads(): Promise<void> {
-    return todo("settingsProfileWatchReads");
+    if (this.settingsProfileReadHandler) {
+      this.settingsProfileReadsSeen = 0;
+      return;
+    }
+    this.settingsProfileReadsSeen = 0;
+    this.settingsProfileReadHandler = (request: { url(): string; method(): string }) => {
+      if (request.method() === "GET" && /\/api\/users\/me\/(ai-assistant|auto-pm|integrations)/.test(request.url())) {
+        this.settingsProfileReadsSeen += 1;
+      }
+    };
+    this.page.on("request", this.settingsProfileReadHandler as (request: never) => void);
   }
   async settingsProfileReadCount(): Promise<number> {
-    return todo("settingsProfileReadCount");
+    return this.settingsProfileReadsSeen;
   }
   async settingsProfileWatchSockets(): Promise<void> {
-    return todo("settingsProfileWatchSockets");
+    if (this.settingsProfileSocketHandler) {
+      this.settingsProfileSocketsSeen = 0;
+      return;
+    }
+    this.settingsProfileSocketsSeen = 0;
+    this.settingsProfileSocketHandler = () => {
+      this.settingsProfileSocketsSeen += 1;
+    };
+    this.page.on("websocket", this.settingsProfileSocketHandler);
   }
   async settingsProfileSocketCount(): Promise<number> {
-    return todo("settingsProfileSocketCount");
+    return this.settingsProfileSocketsSeen;
   }
   async settingsProfileDraggableCount(): Promise<number> {
-    return todo("settingsProfileDraggableCount");
+    return this.page.evaluate(() => {
+      const nodes = [...document.querySelectorAll('[draggable="true"]')];
+      return nodes.filter((el) => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }).length;
+    });
   }
   async settingsProfileFileInputCount(): Promise<number> {
-    return todo("settingsProfileFileInputCount");
+    return this.page.locator('input[type="file"]').count();
   }
   async settingsProfileImportExportMentions(): Promise<string[]> {
-    return todo("settingsProfileImportExportMentions");
+    const text = (
+      (await this.page
+        .locator("body")
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .split("\n")
+      .map((line) => line.trim().replace(/\s+/g, " "))
+      .filter((line) => /import|export/i.test(line));
+    return [...new Set(text)].slice(0, 10);
   }
   async settingsProfileMemberControlCount(): Promise<number> {
-    return todo("settingsProfileMemberControlCount");
+    // Controls that pick a user or member: selects, inputs, comboboxes, and
+    // buttons whose accessible name or label mentions one. The workspace
+    // picker ("Workspace") and the provider/api-key fields never match.
+    return this.page.evaluate(() => {
+      const labelled = (el: Element): string => {
+        const aria = el.getAttribute("aria-label") ?? "";
+        const labelledBy = el.getAttribute("aria-labelledby") ?? "";
+        const labelledText =
+          labelledBy === ""
+            ? ""
+            : labelledBy
+                .split(" ")
+                .map((id) => document.getElementById(id)?.textContent ?? "")
+                .join(" ");
+        const placeholder = el.getAttribute("placeholder") ?? "";
+        const wrap = (el as HTMLElement).closest("label")?.textContent ?? "";
+        const text = (el.textContent ?? "").slice(0, 80);
+        return `${aria} ${labelledText} ${placeholder} ${wrap} ${text}`;
+      };
+      const visible = (el: Element): boolean => {
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const nodes = [...document.querySelectorAll('select, input, [role="combobox"], [role="listbox"], button')];
+      return nodes.filter((el) => visible(el) && /\b(member|user|assignee|reviewer|owner)\b/i.test(labelled(el)))
+        .length;
+    });
   }
 
   // ---------------------------------------------------------------------------
