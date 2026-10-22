@@ -89,8 +89,8 @@ use pidash_services::app_issues::serializers_assoc::{
 use pidash_services::app_issues::{
     issue_detail_base_to_representation, issue_detail_to_representation, issue_is_actively_synced,
     order_sql, AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow,
-    IssueDetailRow, ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, GITHUB_ISSUE_SYNC_PROBE_SQL,
-    GIT_ISSUE_SYNC_PROBE_SQL, LATEST_AGENT_RUN_SQL,
+    IssueDetailRow, ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, AGENT_RUN_TOTAL_TOKENS_SQL,
+    GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL, LATEST_AGENT_RUN_SQL,
 };
 use pidash_services::orchestration::blockers::{
     blockers_sql, dependents_sql, has_open_blockers_sql, relations_summary, BlockerRow,
@@ -2052,9 +2052,13 @@ async fn render_full(
     let is_synced = full_is_synced(pool, row, issue_id).await?;
     let latest = fetch_agent_run(pool, LATEST_AGENT_RUN_SQL, issue_id).await?;
     let active = fetch_agent_run(pool, ACTIVE_AGENT_RUN_SQL, issue_id).await?;
-    let mut count_binder = Binder::new();
-    count_binder.bind_uuid(*issue_id);
-    let run_count = fetch_count(pool, AGENT_RUN_COUNT_SQL, count_binder.values()).await?;
+    let issue_binder = || {
+        let mut binder = Binder::new();
+        binder.bind_uuid(*issue_id);
+        binder.values()
+    };
+    let run_count = fetch_count(pool, AGENT_RUN_COUNT_SQL, issue_binder()).await?;
+    let run_total_tokens = fetch_count(pool, AGENT_RUN_TOTAL_TOKENS_SQL, issue_binder()).await?;
     let blockers = fetch_relations_summary(pool, issue_id).await?;
     let ticker_row = decode_ticker(row)?;
     let policy = ProjectClockPolicy {
@@ -2128,6 +2132,7 @@ async fn render_full(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
     };
     let view = issue_detail_to_representation(&detail);

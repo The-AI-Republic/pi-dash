@@ -2543,8 +2543,7 @@ pub async fn render_agent_status(
                   ru.name,
                   r.created_at, r.assigned_at, r.started_at, r.ended_at,
                   r.done_payload, r.error, r.error_code, r.llm_model,
-                  (r.usage->>'input_tokens')::bigint, (r.usage->>'output_tokens')::bigint,
-                  (r.usage->>'total_tokens')::bigint
+                  r.input_tokens, r.output_tokens, r.total_tokens
            FROM agent_run r LEFT JOIN runner ru ON ru.id = r.runner_id
            WHERE r.work_item_id = $1 ORDER BY r.created_at DESC"#,
     )
@@ -2607,6 +2606,9 @@ pub async fn render_agent_status(
         "active_run": active_render,
         "latest_run": latest_render,
         "run_count": runs.len(),
+        // `runs.aggregate(total=Sum("total_tokens"))["total"] or 0`
+        // (`serializers/issue.py:1415-1421`): NULL rows are skipped.
+        "total_tokens": runs.iter().filter_map(|run| run.total_tokens).sum::<i64>(),
     }))
 }
 

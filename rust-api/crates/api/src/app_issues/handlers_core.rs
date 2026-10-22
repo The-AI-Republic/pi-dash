@@ -118,7 +118,7 @@ use pidash_services::app_issues::serializers_create::{
 use pidash_services::app_issues::serializers_detail::{
     issue_detail_to_representation, serialize_drf_datetime, serialize_iso_datetime,
     AgentLiveStateRow, AgentRunDetailRow, AgentTickerInput, IssueDetailBaseRow, IssueDetailRow,
-    ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, LATEST_AGENT_RUN_SQL,
+    ACTIVE_AGENT_RUN_SQL, AGENT_RUN_COUNT_SQL, AGENT_RUN_TOTAL_TOKENS_SQL, LATEST_AGENT_RUN_SQL,
 };
 use pidash_services::app_issues::serializers_engage::{
     GITHUB_ISSUE_SYNC_PROBE_SQL, GIT_ISSUE_SYNC_PROBE_SQL,
@@ -4312,8 +4312,8 @@ fn rendered_run_from_pg(
             (Some(updated), observed) if observed.is_none_or(|seen| seen == id) => {
                 let usage: Value = row.try_get("usage")?;
                 // The projection carries TWO `llm_model` columns (run at
-                // 12, live-state at 25): by-name reads take the run's, so
-                // the live one reads positionally.
+                // 12, live-state at 25). A by-name read resolves to the
+                // live-state one, so both read positionally.
                 let live_llm: Option<String> = row.try_get(25usize)?;
                 Some(RenderedLive {
                     observed_run_id: observed.map(|seen| seen.to_string()),
@@ -4335,7 +4335,9 @@ fn rendered_run_from_pg(
         None
     };
     let created: DateTime<Utc> = row.try_get("created_at")?;
-    let run_llm: String = row.try_get("llm_model")?;
+    // Positional: by name this is the live-state `llm_model` (index 25),
+    // NULL whenever the run has no runner or the runner no live state.
+    let run_llm: String = row.try_get(12usize)?;
     Ok(RenderedRun {
         id: id.to_string(),
         status: row.try_get("status")?,
@@ -4358,10 +4360,11 @@ fn rendered_run_from_pg(
     })
 }
 
-async fn fetch_agent_runs(
-    pool: &sqlx::PgPool,
-    issue_id: &Uuid,
-) -> Result<(Option<RenderedRun>, Option<RenderedRun>, i64), Denial> {
+/// The latest + active runs, the run count and the cumulative token total
+/// (`get_agent_status`, `issue.py:1376-1421`).
+type AgentRunsRead = (Option<RenderedRun>, Option<RenderedRun>, i64, i64);
+
+async fn fetch_agent_runs(pool: &sqlx::PgPool, issue_id: &Uuid) -> Result<AgentRunsRead, Denial> {
     let latest: Option<sqlx::postgres::PgRow> = sqlx::query(LATEST_AGENT_RUN_SQL)
         .bind(issue_id)
         .fetch_optional(pool)
@@ -4377,6 +4380,11 @@ async fn fetch_agent_runs(
         .fetch_one(pool)
         .await
         .map_err(|_| Denial::ServerError)?;
+    let total_tokens: (i64,) = sqlx::query_as(AGENT_RUN_TOTAL_TOKENS_SQL)
+        .bind(issue_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|_| Denial::ServerError)?;
     let active = active
         .map(|row| rendered_run_from_pg(&row, true))
         .transpose()
@@ -4387,7 +4395,7 @@ async fn fetch_agent_runs(
         .map(|row| rendered_run_from_pg(&row, active.is_none()))
         .transpose()
         .map_err(|_| Denial::ServerError)?;
-    Ok((latest, active, count.0))
+    Ok((latest, active, count.0, total_tokens.0))
 }
 
 /// The cached blocker summary (`relations_summary(obj)`): both direction
@@ -4453,7 +4461,8 @@ async fn render_detail_map(
         (Some(group), Some(name)) => Some(StateRef { group, name }),
         _ => None,
     };
-    let (latest, active, run_count) = fetch_agent_runs(pool, &row.save.id).await?;
+    let (latest, active, run_count, run_total_tokens) =
+        fetch_agent_runs(pool, &row.save.id).await?;
     let blockers = fetch_blocker_summary(pool, &row.save.id).await?;
     let synced = if row
         .save
@@ -4608,6 +4617,7 @@ async fn render_detail_map(
         latest_run: latest_row,
         active_run: active_row,
         run_count,
+        run_total_tokens,
         blockers: &blockers,
     };
     let view = issue_detail_to_representation(&detail);
