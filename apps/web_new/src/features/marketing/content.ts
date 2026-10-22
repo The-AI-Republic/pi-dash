@@ -213,8 +213,8 @@ export const DOCS_DEVICE_LOGIN_COMMAND = "pidash auth login";
 /** Runner enrollment plus the diagnostics check, run on the host. */
 export const DOCS_ENROLL_COMMAND = "pidash runner add --project <PROJECT_ID>\npidash doctor";
 
-/** Optional agent skill: project context for coding sessions through the same CLI. */
-export const DOCS_SKILL_COMMAND = "pidash context init --project <PROJECT_ID>";
+/** Optional agent skill installer: one command installs the skill into the coding agent. */
+export const DOCS_SKILL_COMMAND = "npx @airepublic/pidash-skill-installer";
 
 /** Managed Windows deployments can skip the PowerShell one-liner. */
 export const DOCS_MSI_NOTE = "Managed Windows deployments can use the MSI installer instead.";

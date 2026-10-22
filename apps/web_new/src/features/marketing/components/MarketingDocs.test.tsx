@@ -48,7 +48,7 @@ describe("MarketingDocs", () => {
     expect(blocks[1]?.textContent).toContain("releases/latest/download/install.ps1");
     expect(blocks[2]?.textContent).toContain("pidash auth login");
     expect(blocks[3]?.textContent).toContain("pidash runner add");
-    expect(blocks[4]?.textContent).toContain("pidash context init");
+    expect(blocks[4]?.textContent).toContain("npx @airepublic/pidash-skill-installer");
   });
 
   it("links the MSI alternative and notes the subsystem boundary", () => {
