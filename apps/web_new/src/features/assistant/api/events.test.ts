@@ -8,7 +8,7 @@ import type { ApiClient } from "@pidash/api-client";
 import { describe, expect, it, vi } from "vitest";
 
 import type { EventStream, StreamMessage } from "../../../core/platform/index.js";
-import { readAssistantEvents, subscribeAssistantEvents } from "./events.js";
+import { ASSISTANT_RECONNECT_MS, readAssistantEvents, subscribeAssistantEvents } from "./events.js";
 
 const client = { baseUrl: "https://api.test" } as ApiClient;
 
@@ -170,6 +170,47 @@ describe("subscribeAssistantEvents", () => {
     subscription.close();
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it("never reopens a channel the caller closed while it was ending", async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      let release: (() => void) | undefined;
+      const feed: EventStream = {
+        messages: () => ({
+          [Symbol.asyncIterator]() {
+            return {
+              async next(): Promise<IteratorResult<StreamMessage>> {
+                await new Promise<void>((resolve) => {
+                  release = resolve;
+                });
+                // The abort lands after close(): silent, and no reconnect follows.
+                throw new Error("aborted");
+              },
+            };
+          },
+        }),
+        close: vi.fn(() => release?.()),
+        error: undefined,
+      };
+      const openStream = vi.fn((_url: string, _init: unknown) => feed);
+      const subscription = subscribeAssistantEvents(
+        "acme",
+        "t1",
+        0,
+        { onEvent: vi.fn(), onError },
+        () => client,
+        openStream
+      );
+      subscription.close();
+      await vi.advanceTimersByTimeAsync(ASSISTANT_RECONNECT_MS * 3);
+      expect(feed.close).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
+      expect(openStream).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes once and does not report a close it caused itself", async () => {
