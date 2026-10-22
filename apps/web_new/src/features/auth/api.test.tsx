@@ -33,7 +33,6 @@ import {
   useSendWorkspaceInvites,
   useSetPassword,
   useUpdateMe,
-  useUpdateProfile,
   useUploadUserAvatar,
 } from "./api.js";
 
@@ -401,31 +400,6 @@ describe("useUpdateMe", () => {
     expect((updated as { display_name: string }).display_name).toBe("Ada Byron");
     expect(seen).toContain("PATCH https://api.test/api/users/me/");
     expect(queryClient.getQueryState(["session", "me"])?.isInvalidated).toBe(true);
-  });
-});
-
-describe("useUpdateProfile", () => {
-  it("patches the profile and refreshes the cached profile", async () => {
-    const seen: string[] = [];
-    createAppClient(
-      "https://api.test",
-      stubTransport(async (url, init) => {
-        seen.push(`${init.method} ${url}`);
-        if (url.endsWith("/auth/get-csrf-token/")) return { status: 200, body: CSRF, url };
-        return { status: 200, body: JSON.stringify({ ...PROFILE_FIXTURE, role: "developer" }), url };
-      })
-    );
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(["session", "profile"], { ...PROFILE_FIXTURE });
-    const { result } = renderHook(() => useUpdateProfile(), { wrapper: wrapper(queryClient) });
-
-    let updated: unknown;
-    await act(async () => {
-      updated = await result.current.mutateAsync({ role: "developer" });
-    });
-    expect((updated as { role: string }).role).toBe("developer");
-    expect(seen).toContain("PATCH https://api.test/api/users/me/profile/");
-    expect(queryClient.getQueryState(["session", "profile"])?.isInvalidated).toBe(true);
   });
 });
 

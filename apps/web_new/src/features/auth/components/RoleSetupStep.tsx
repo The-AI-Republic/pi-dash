@@ -11,7 +11,7 @@ import * as React from "react";
 
 import { useProfile } from "../../../core/session/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
-import { useUpdateProfile } from "../api.js";
+import { useUpdateProfile } from "../profile.js";
 import { ONBOARDING_ROLES } from "../onboarding.js";
 
 export const ROLE_REQUIRED_MESSAGE = "Choose the role that fits you best.";

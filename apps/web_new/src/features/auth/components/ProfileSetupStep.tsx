@@ -13,7 +13,8 @@ import * as React from "react";
 
 import { useInstanceConfig, useMe } from "../../../core/session/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import { useSetPassword, useUpdateMe, useUpdateProfile, useUploadUserAvatar } from "../api.js";
+import { useSetPassword, useUpdateMe, useUploadUserAvatar } from "../api.js";
+import { useUpdateProfile } from "../profile.js";
 import { avatarFileError, validateProfileName } from "../onboarding.js";
 import { canSubmitNewPassword, passwordMismatchError, weakSecretHint } from "../recovery.js";
 

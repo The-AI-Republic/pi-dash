@@ -12,7 +12,7 @@ import * as React from "react";
 
 import { useProfile } from "../../../core/session/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
-import { useUpdateProfile } from "../api.js";
+import { useUpdateProfile } from "../profile.js";
 import { combineUseCases, ONBOARDING_USE_CASES, parseUseCases } from "../onboarding.js";
 
 export const USE_CASE_REQUIRED_MESSAGE = "Choose at least one use case.";

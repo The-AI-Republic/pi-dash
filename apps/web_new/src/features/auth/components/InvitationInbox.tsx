@@ -16,7 +16,8 @@ import type { WorkspaceInvitationList } from "@pidash/api-client";
 import * as React from "react";
 
 import { notifyError, useDocumentHead } from "../../../shared/shell/index.js";
-import { useAcceptWorkspaceInvitations, useUpdateProfile } from "../api.js";
+import { useAcceptWorkspaceInvitations } from "../api.js";
+import { useUpdateProfile } from "../profile.js";
 import { selectBatchLandingTarget, selectInvitationRoleLabel, toggleInvitationSelection } from "../invitations.js";
 import { useMyWorkspaceInvitations } from "../invitations.js";
 import { authKeys } from "../queries.js";
