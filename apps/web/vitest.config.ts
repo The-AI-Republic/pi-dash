@@ -21,6 +21,11 @@ export default defineConfig({
     // First match wins and "@" also matches "@/<anything>", so the specific
     // prefixes must come before it (same mapping as tsconfig.json paths).
     alias: {
+      // Next.js compatibility shims (mirrors vite.config.ts) so components that
+      // import from next/* resolve under the test runner too.
+      "next/link": path.resolve(__dirname, "./app/compat/next/link.tsx"),
+      "next/navigation": path.resolve(__dirname, "./app/compat/next/navigation.ts"),
+      "next/script": path.resolve(__dirname, "./app/compat/next/script.tsx"),
       "@/app": path.resolve(__dirname, "./app"),
       "@/helpers": path.resolve(__dirname, "./helpers"),
       "@/styles": path.resolve(__dirname, "./styles"),

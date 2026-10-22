@@ -14,12 +14,12 @@ import type { TReTickResponse } from "@/services/runner";
 const agentRunService = new AgentRunService();
 
 /**
- * Drives the "re-tick" affordance on the issue AgentRun card: re-grants a
- * fresh ticking budget to an exhausted issue ticker so the periodic agent
- * runs resume. The server enforces the guardrails (ticking state +
- * exhausted budget); a ``granted: false`` response is a normal outcome, not
- * an error, so we surface it as an informational toast rather than a
- * failure.
+ * Drives the "re-tick" affordance on the issue AgentRun card: adds the
+ * project's Re-tick grant to an issue whose run pool is spent and starts a
+ * run now (or queues it if one is active). The server enforces the
+ * guardrails (ticking state + spent pool); a ``granted: false`` response is
+ * a normal outcome, not an error, so we surface it as an informational
+ * toast rather than a failure.
  */
 export function useReTick() {
   const { t } = useTranslation();
@@ -34,13 +34,15 @@ export function useReTick() {
           setToast({
             type: TOAST_TYPE.SUCCESS,
             title: t("Ticking restarted"),
-            message: t("Granted a fresh ticking budget. The AI agent will resume on its schedule."),
+            message: result.run_id
+              ? t("Added more runs to this issue's budget. The AI agent is starting now.")
+              : t("Added more runs to this issue's budget. The next run starts as soon as the active run ends."),
           });
         } else {
           setToast({
             type: TOAST_TYPE.INFO,
             title: t("Nothing to re-tick"),
-            message: t("Re-ticking only applies while the issue is ticking and its budget is used up."),
+            message: t("Re-ticking only applies while the issue is ticking and its run budget is used up."),
           });
         }
         return result;

@@ -23,7 +23,7 @@ permissions — nothing more.
 
 ## Operating rules
 1. INVESTIGATE FIRST. Before creating or updating anything, query the current \
-state (search_issues / get_issue / list_projects / list_states) so your \
+state (search_issues / list_issues / get_issue / list_projects / list_states) so your \
 changes fit what already exists. Never invent project, state, label, or user \
 identifiers — only use ids returned by tools in this conversation.
 2. ACT, THEN REPORT. Writes execute immediately; there is no undo. After every \

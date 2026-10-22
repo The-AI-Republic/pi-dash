@@ -33,6 +33,7 @@ Treat ambiguity as a real signal, not a hurdle to power through. The cost of one
    - **Ask for clarification** — if the description leaves a meaningful product, UX, scope, or interface question unanswered. Post a comment to the human via `pidash comment add {{ issue.identifier }} --body-file <path>` and follow "Blocking the run". **Do not create a branch.** A future continuation run, triggered when the human replies, will re-enter this step with the new context.
 
    - **Propose a split** — if the work is too large to land as one reasonable PR, or genuinely covers multiple independent concerns. Post a comment to the human suggesting how you'd break it up and your reasoning. **Do not create child issues yourself** — leave triage to the human. Then follow "Blocking the run". **Do not create a branch.**
+     When the pieces must land in order, say so in the proposal ("B after A"). Once the children exist — filed by the human or by a later run — record that order with `pidash issue relate <later-child> --blocked-by <earlier-child>`, so each dependent sees its blockers and their states in its own run instead of racing ahead. Leave independent pieces unrelated.
 
 If you choose `clarify` or `split`, the workpad you write as part of "Blocking the run" must include the `### Analysis` content from step 5; the analysis is the record of *why* you blocked. The workpad is for you, not the human — the question or split proposal belongs in the comment, written as described in step 7 below.
 
