@@ -185,6 +185,12 @@ describe("BoardScreen", () => {
     );
   });
 
+  it("omits the project key prefix when settings carry no project details", async () => {
+    renderBoard({ settings: () => reply(200, { ...settings, project_details: null }) });
+    expect(await screen.findByText("Anonymous visitors can read this")).toBeInTheDocument();
+    expect(screen.getByText("-7")).toBeInTheDocument();
+  });
+
   it("drops empty state groups instead of rendering empty sections", async () => {
     renderBoard({
       issues: () =>

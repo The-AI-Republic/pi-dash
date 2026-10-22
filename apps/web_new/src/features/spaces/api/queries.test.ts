@@ -11,6 +11,7 @@ import {
   spaceIssuesQueryOptions,
   spaceSettingsQueryOptions,
   spaceStatesQueryOptions,
+  spaceViewerQueryOptions,
 } from "./queries.js";
 
 function transportOf(status: number, body: unknown): Transport {
@@ -49,6 +50,14 @@ describe("space query options", () => {
   it("reads the viewer as anonymous on 401 and on any other failure", async () => {
     await expect(readSpaceViewer(clientWith(transportOf(401, { detail: "no session" })))).resolves.toBeNull();
     await expect(readSpaceViewer(clientWith(transportOf(500, { detail: "down" })))).resolves.toBeNull();
+  });
+
+  it("keys the viewer read under the public root and resolves anonymously", async () => {
+    const options = spaceViewerQueryOptions(clientWith(transportOf(401, { detail: "no session" })));
+    expect(options.queryKey).toEqual(["spaces", "viewer"]);
+    expect(options.retry).toBe(false);
+    expect(options.staleTime).toBe(60_000);
+    await expect(options.queryFn!({} as never)).resolves.toBeNull();
   });
 
   it("returns the signed-in viewer", async () => {
