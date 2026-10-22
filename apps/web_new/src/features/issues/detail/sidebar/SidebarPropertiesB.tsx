@@ -281,10 +281,12 @@ export interface LabelsRowProps {
  * Labels row: the selected chips (removable without opening the picker)
  * plus the shared searchable picker, which handles inline create for
  * project admins. Every change PATCHes the full label id list.
+ * Archived issues render chips only with no picker trigger (ISS-220).
  */
 export function LabelsRow({ workspaceSlug, projectId, issue, disabled }: LabelsRowProps): React.ReactElement {
   const update = useIssueWrite(workspaceSlug, projectId, issue.id);
   const labels = useLabels(workspaceSlug, projectId, true);
+  const archived = issue.archived_at !== null;
   return (
     <SidebarRow label="Labels">
       <div className="flex min-w-0 flex-col gap-(--space-2)">
@@ -297,13 +299,15 @@ export function LabelsRow({ workspaceSlug, projectId, issue, disabled }: LabelsR
               : (labelId) => update.mutate({ label_ids: issue.label_ids.filter((id) => id !== labelId) })
           }
         />
-        <LabelPicker
-          workspaceSlug={workspaceSlug}
-          projectId={projectId}
-          value={issue.label_ids}
-          disabled={disabled}
-          onChange={(ids) => update.mutate({ label_ids: ids })}
-        />
+        {archived ? null : (
+          <LabelPicker
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            value={issue.label_ids}
+            disabled={disabled}
+            onChange={(ids) => update.mutate({ label_ids: ids })}
+          />
+        )}
       </div>
     </SidebarRow>
   );

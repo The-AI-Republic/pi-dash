@@ -497,12 +497,8 @@ describe("SidebarPropertiesB rows", () => {
     expect(writes[0]!.body).toEqual({ label_ids: [LABEL] });
   });
 
-  it("disables every editable control for guests, archived and synced items", () => {
-    for (const overrides of [
-      { editable: false },
-      { issue: issueFixture({ archived_at: "2026-01-01" }) },
-      { issue: issueFixture({ is_synced: true }) },
-    ] as const) {
+  it("disables every editable control for guests and synced items", () => {
+    for (const overrides of [{ editable: false }, { issue: issueFixture({ is_synced: true }) }] as const) {
       const { client, queryClient } = harness();
       const view = renderRows(client, queryClient, overrides);
       expect(within(screen.getByRole("group", { name: "Start date" })).getByRole("button")).toBeDisabled();
@@ -512,6 +508,16 @@ describe("SidebarPropertiesB rows", () => {
       ).toBeDisabled();
       view.unmount();
     }
+  });
+
+  it("renders archived rows disabled with a triggerless labels row (ISS-220)", async () => {
+    const { client, queryClient } = harness();
+    renderRows(client, queryClient, { issue: issueFixture({ archived_at: "2026-01-01", label_ids: [LABEL] }) });
+    expect(within(screen.getByRole("group", { name: "Start date" })).getByRole("button")).toBeDisabled();
+    expect(within(screen.getByRole("group", { name: "Due date" })).getByRole("button")).toBeDisabled();
+    const labels = screen.getByRole("group", { name: "Labels" });
+    expect(within(labels).queryByRole("button")).not.toBeInTheDocument();
+    expect(await within(labels).findByText("Bug")).toBeInTheDocument();
   });
 });
 
