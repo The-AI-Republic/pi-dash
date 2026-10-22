@@ -40,6 +40,7 @@ from psycopg.rows import dict_row
 from _harness import redis as redis_helper
 from _harness import rust_queue
 from _harness import seed as seed_helpers
+from _harness.db import insert_row
 from _harness.db import wait_for_condition as wait_for
 
 RUN_TURN = "assistant.run_turn"
@@ -205,11 +206,18 @@ class _StubProvider:
     ``interval`` seconds (``["Hello", " world"]`` by default) ending with
     ``data: [DONE]``. Every request body is recorded so the wire shape
     (tools, instructions, stream flag) can be asserted.
+
+    ``tool_call`` (``(name, args)``) makes the *first* streaming request emit
+    a single tool call instead of text (PIDASHCONV-1250): one delta carrying
+    the complete call, closed by a ``tool_calls`` finish. Later requests
+    stream ``chunks`` as usual, so the turn completes after the tool runs.
     """
 
-    def __init__(self, chunks=("Hello", " world"), interval=0.2):
+    def __init__(self, chunks=("Hello", " world"), interval=0.2, tool_call=None):
         self.chunks = list(chunks)
         self.interval = interval
+        self.tool_call = tool_call
+        self._tool_call_sent = False
         self.requests = []
         self._server = None
         self._thread = None
@@ -235,6 +243,40 @@ class _StubProvider:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
+                    if stub.tool_call is not None and not stub._tool_call_sent:
+                        stub._tool_call_sent = True
+                        name, args = stub.tool_call
+                        call_delta = {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_stateless_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(args),
+                                    },
+                                }
+                            ],
+                        }
+                        for delta, finish in ((call_delta, None), ({}, "tool_calls")):
+                            time.sleep(stub.interval)
+                            self.wfile.write(
+                                (
+                                    'data: {"id":"stub","object":"chat.completion.chunk",'
+                                    '"created":0,"model":"oracle-stub","choices":[{"index":0,'
+                                    '"delta":'
+                                    + json.dumps(delta)
+                                    + ',"finish_reason":'
+                                    + json.dumps(finish)
+                                    + "}]}\n\n"
+                                ).encode()
+                            )
+                            self.wfile.flush()
+                        self.wfile.write(b"data: [DONE]\n\n")
+                        self.wfile.flush()
+                        return
                     for chunk in stub.chunks:
                         time.sleep(stub.interval)
                         self.wfile.write(
@@ -541,5 +583,94 @@ def test_slow_stream_fails_at_soft_limit(db_conn):
         assert "turn_completed" not in kinds, "turn_completed followed turn_failed"
         assert _turn_row(db_conn, turn_id)["status"] == "failed"
         assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        stub.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Stateless-issue tool visibility (PIDASHCONV-1250)
+# --------------------------------------------------------------------------- #
+
+
+def _seed_stateless_issue(db_conn, user, workspace):
+    """Project (the turn user is an admin member of) + one ``state_id`` NULL issue.
+
+    Column sets mirror ``issue_chain`` (every NOT NULL projects/issues column
+    without a database default); the issue simply carries no state.
+    """
+    project = seed_helpers.project(db_conn, workspace["id"], "Stateless Tools")
+    seed_helpers.project_member(
+        db_conn, project["id"], workspace["id"], user["id"], role=20
+    )
+    issue = insert_row(
+        db_conn,
+        "issues",
+        {
+            "workspace_id": str(workspace["id"]),
+            "project_id": str(project["id"]),
+            "state_id": None,
+            "name": "stateless tool-target issue",
+            "description_json": {},
+            "description_html": "<p></p>",
+            "priority": "none",
+            "complexity_score": 0,
+            "sequence_id": 1,
+            "is_draft": False,
+            "sort_order": 65535,
+            "git_work_branch": "",
+            "workpad": "",
+        },
+    )
+    return project, issue
+
+
+def _tool_returns(model_messages, tool_name):
+    """``tool-return`` parts for ``tool_name`` across the stored messages."""
+    found = []
+    for message in model_messages or []:
+        for part in (message.get("parts") or []):
+            if part.get("part_kind") == "tool-return" and part.get("tool_name") == tool_name:
+                found.append(part)
+    return found
+
+
+def test_turn_tools_see_stateless_issue(db_conn):
+    """A turn calling ``get_issue`` on a ``state_id`` NULL issue gets it back.
+
+    Django renders the ``issue_objects`` triage exclusion null-safely (``NOT
+    (group = 'triage' AND group IS NOT NULL)``), so stateless rows stay
+    visible to every read tool. The Django oracle of this test lives in
+    ``assistant/test_tasks_turn.py``.
+    """
+    user, workspace = _seed_member(db_conn, "stateless")
+    _project, issue = _seed_stateless_issue(db_conn, user, workspace)
+    stub = _StubProvider(
+        chunks=("done",),
+        interval=0.1,
+        tool_call=("get_issue", {"issue_id": str(issue["id"])}),
+    )
+    base = stub.start()
+    try:
+        _configure_llm(db_conn, user["id"], base)
+        _thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        _run_and_settle(db_conn, turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "completed"
+            else None,
+            what="stateless-issue turn completed",
+        )
+        returns = _tool_returns(row["model_messages"], "get_issue")
+        assert returns, (
+            "no get_issue tool-return in model_messages: "
+            f"{json.dumps(row['model_messages'])[:2000]}"
+        )
+        content = returns[0]["content"]
+        if isinstance(content, str):
+            content = json.loads(content)
+        assert content["id"] == str(issue["id"]), (
+            f"get_issue missed the stateless issue: {str(content)[:500]}"
+        )
     finally:
         stub.stop()
