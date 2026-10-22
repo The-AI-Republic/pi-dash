@@ -53,6 +53,13 @@ vi.mock("../../../../../../features/runners/area.js", () => ({
 
 const { sessionKeys, setSessionClient } = await import("../../../../../../core/session/index.js");
 const { createAppClient, resetAppClient } = await import("../../../../../../core/api/client.js");
+const detailProps: Array<Record<string, unknown>> = [];
+vi.mock("../../../../../../features/runners/detail/RunnerDetailContainer.js", () => ({
+  RunnerDetailContainer: (props: Record<string, unknown>) => {
+    detailProps.push(props);
+    return <div data-testid="runner-detail-container" />;
+  },
+}));
 vi.mock("../../../../../../features/runners/components/RunnersOverviewScreen.js", () => ({
   RunnersOverviewScreen: (props: Record<string, unknown>) => {
     screenProps.push(props);
@@ -99,6 +106,7 @@ beforeEach(() => {
   shellProps.length = 0;
   screenProps.length = 0;
   runsProps.length = 0;
+  detailProps.length = 0;
   for (const route of [LayoutRoute, IndexRoute]) vi.spyOn(route, "useParams").mockReturnValue(params);
   vi.spyOn(RunsRoute, "useSearch").mockReturnValue({ page: 2 });
   vi.spyOn(RunsRoute, "useParams").mockReturnValue({ ws: "acme", projectId: "p-1" });
@@ -144,7 +152,6 @@ describe("project runners section routes", () => {
   it.each([
     ["Runs", RunsRoute],
     ["Approvals", ApprovalsRoute],
-    ["Runner details", DetailRoute],
   ])("mounts the %s section", (heading, route) => {
     mount(route.options.component);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
@@ -167,6 +174,11 @@ describe("project runners section routes", () => {
   it("passes the run id from the address to the same screen", () => {
     mount(RunDetailRoute.options.component);
     expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
+  it("mounts the project runner detail screen with the scope from the address (RUN-042)", () => {
+    vi.spyOn(DetailRoute, "useParams").mockReturnValue({ ws: "acme", projectId: "p-1", runnerId: "r-7" });
+    mount(DetailRoute.options.component);
+    expect(detailProps[0]).toMatchObject({ workspaceSlug: "acme", projectId: "p-1", runnerId: "r-7" });
+    expect(screen.getByTestId("runner-detail-container")).toBeInTheDocument();
   });
 
   it("mounts the chat page inside the project scope", () => {
