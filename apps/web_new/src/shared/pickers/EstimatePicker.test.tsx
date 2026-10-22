@@ -141,6 +141,30 @@ describe("EstimatePicker", () => {
     expect(screen.getByRole("status")).toHaveTextContent("No matching results");
   });
 
+  it("lists values in key order, not wire order", async () => {
+    const { queryClient } = harness([system({ points: [point(POINT_3, 2, "3"), point(POINT_1, 1, "1")] })]);
+    renderPicker({}, queryClient);
+    fireEvent.click(screen.getByRole("button", { name: "None" }));
+    await screen.findByRole("option", { name: "1" });
+    expect(optionNames()).toEqual(["No estimate", "1", "3"]);
+  });
+
+  it("searches the displayed time labels, not the stored values", async () => {
+    // Deliberate divergence from the old picker (bug NEWFRONT-820):
+    // the query matches what the rows show, like the palette page.
+    const { queryClient } = harness(TIME_SYSTEM);
+    const user = userEvent.setup();
+    renderPicker({}, queryClient);
+    await user.click(screen.getByRole("button", { name: "None" }));
+    await screen.findByRole("option", { name: "1h 30m" });
+    await user.type(screen.getByRole("combobox", { name: "Search estimates" }), "1h");
+    expect(optionNames()).toEqual(["1h 30m"]);
+    await user.clear(screen.getByRole("combobox", { name: "Search estimates" }));
+    await user.type(screen.getByRole("combobox", { name: "Search estimates" }), "90");
+    expect(screen.queryByRole("option")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("No matching results");
+  });
+
   it("shows one disabled row without an active system", async () => {
     const { queryClient } = harness(INACTIVE_SYSTEM);
     renderPicker({}, queryClient);

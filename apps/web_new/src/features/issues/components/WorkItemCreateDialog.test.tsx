@@ -1093,7 +1093,11 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const h = setup({
       estimateSystem: true,
       projects: {
-        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }),
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          cycle_view: true,
+          module_view: true,
+          estimate: STATE_ID,
+        }),
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
@@ -1134,7 +1138,11 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     const h = setup({
       estimateSystem: true,
       projects: {
-        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", { cycle_view: true, module_view: true }),
+        [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas", {
+          cycle_view: true,
+          module_view: true,
+          estimate: STATE_ID,
+        }),
         [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
       },
     });
@@ -1665,6 +1673,13 @@ describe("WorkItemCreateDialog project selector (ISS-123)", () => {
     await waitFor(() => expect(screen.getByText("Atlas")).toBeInTheDocument());
     expect(screen.queryByText("Cycle")).not.toBeInTheDocument();
     expect(screen.queryByText("Modules")).not.toBeInTheDocument();
+    expect(screen.queryByText("Estimate")).not.toBeInTheDocument();
+  });
+
+  it("hides the estimate field without a project link, even when systems exist", async () => {
+    // EST-018: gating reads the project link, not the systems list.
+    setup({ estimateSystem: true });
+    await waitFor(() => expect(screen.getByText("Atlas")).toBeInTheDocument());
     expect(screen.queryByText("Estimate")).not.toBeInTheDocument();
   });
 

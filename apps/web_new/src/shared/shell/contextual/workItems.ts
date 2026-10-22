@@ -11,6 +11,7 @@
 
 import {
   ISSUE_PRIORITIES,
+  orderEstimatePoints,
   selectActiveEstimate,
   type CycleList,
   type EstimateList,
@@ -226,7 +227,7 @@ export function selectWorkItemContext(input: WorkItemContextInput): WorkItemCont
       const active = selectActiveEstimate(input.pickers.estimates);
       const current =
         input.estimatePoint === undefined || input.estimatePoint === null ? null : String(input.estimatePoint);
-      const pointOptions: PalettePageOption[] = (active?.points ?? []).map((point) => ({
+      const pointOptions: PalettePageOption[] = orderEstimatePoints(active?.points ?? []).map((point) => ({
         id: point.id,
         title: formatEstimatePoint(point.value, active?.type ?? ""),
         selected: point.id === current,
