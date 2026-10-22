@@ -24,6 +24,13 @@ export interface VirtualListProps<T> {
    * immediately and would page through the whole list on mount.
    */
   footer?: React.ReactNode;
+  /** Handle for revealing a row by index when it is outside the window. */
+  listRef?: React.Ref<VirtualListHandle> | undefined;
+}
+
+export interface VirtualListHandle {
+  /** Scroll a row into view; indexes outside the list are clamped. */
+  scrollToIndex: (index: number) => void;
 }
 
 const containerClasses = "relative overflow-auto";
@@ -37,6 +44,7 @@ export function VirtualList<T>({
   label,
   className,
   footer,
+  listRef,
 }: VirtualListProps<T>): React.ReactElement {
   const parentRef = React.useRef<HTMLDivElement>(null);
   const estimate = React.useCallback(
@@ -50,6 +58,11 @@ export function VirtualList<T>({
     overscan,
   });
   const virtualItems = virtualizer.getVirtualItems();
+  React.useImperativeHandle(
+    listRef,
+    () => ({ scrollToIndex: (index: number) => virtualizer.scrollToIndex(index, { align: "auto" }) }),
+    [virtualizer]
+  );
   return (
     <div ref={parentRef} role="region" aria-label={label} className={cn(containerClasses, className)}>
       <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>

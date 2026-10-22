@@ -918,6 +918,42 @@ describe("ListLayout selection", () => {
     await waitFor(() => expect(screen.queryByText(/work item selected/)).not.toBeInTheDocument());
   });
 
+  it("reveals an active row beyond the virtualized window", async () => {
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      row({
+        id: `123e4567-e89b-12d3-a456-${String(426614174000 + index)}`,
+        sequence_id: index + 1,
+        name: `Row ${index + 1}`,
+      })
+    );
+    mocks.pages.mockReturnValue(
+      pageState({ sections: [{ key: "all", title: "All work items", rows, total: rows.length, value: null }] })
+    );
+    renderLayout();
+    const boxes = await screen.findAllByRole("checkbox", { name: /^Select \d+$/ });
+    const lastRendered = boxes.at(-1)!;
+    const lastName = lastRendered.getAttribute("aria-label")!;
+    const lastSequence = Number(lastName.replace("Select ", ""));
+    const nextSequence = lastSequence + 1;
+    fireEvent.click(lastRendered);
+    expect(screen.queryByRole("checkbox", { name: `Select ${nextSequence}` })).not.toBeInTheDocument();
+    const region = screen.getByRole("region", { name: "Issues" });
+    Object.defineProperty(region, "scrollHeight", { configurable: true, value: rows.length * 44 });
+    Object.defineProperty(region, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(region, "scrollTo", {
+      configurable: true,
+      value: ({ top }: { top: number }) => {
+        region.scrollTop = top;
+        fireEvent.scroll(region);
+      },
+    });
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(await screen.findByRole("checkbox", { name: `Select ${nextSequence}` })).toBeInTheDocument();
+    expect(region.scrollTop).toBeGreaterThan(0);
+  });
+
   it("ignores repeated expand and collapse reports and waits for child rows", async () => {
     renderLayout();
     fireEvent.click(screen.getByRole("button", { name: "Expand without children" }));

@@ -107,4 +107,17 @@ describe("useBulkSelection", () => {
     expect(node.scrollIntoView).toHaveBeenCalled();
     node.remove();
   });
+
+  it("delegates reveal to the surface when one is supplied", () => {
+    const reveal = vi.fn();
+    renderHook(() => useBulkSelection(ITEMS, true, reveal));
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(reveal).toHaveBeenCalledWith("a");
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(reveal).toHaveBeenLastCalledWith("b");
+  });
 });

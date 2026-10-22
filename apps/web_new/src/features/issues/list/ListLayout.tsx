@@ -10,7 +10,7 @@
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
-import { Skeleton, VirtualList } from "@pidash/kit";
+import { Skeleton, VirtualList, type VirtualListHandle } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -143,11 +143,13 @@ function FlatRows({
   renderRow,
   rowHeight,
   footer,
+  listRef,
 }: {
   rows: IssueListItem[];
   renderRow: (issue: IssueListItem) => React.ReactNode;
   rowHeight: number;
   footer?: React.ReactNode;
+  listRef: React.Ref<VirtualListHandle>;
 }): React.ReactElement {
   return (
     <VirtualList
@@ -157,6 +159,7 @@ function FlatRows({
       getKey={(issue) => issue.id}
       overscan={4}
       className="h-full"
+      listRef={listRef}
       renderRow={(issue) => renderRow(issue)}
       footer={footer}
     />
@@ -279,7 +282,31 @@ export function ListLayout({
     () => flattenSectionSelection(pages.sections, projectId, expandedSelectionIds, childrenByParent),
     [pages.sections, projectId, expandedSelectionIds, childrenByParent]
   );
-  const selection = useBulkSelection(selectionItems, enableSelection);
+  const listRef = React.useRef<VirtualListHandle | null>(null);
+  const selectionRowIndex = React.useMemo(() => {
+    const indexes = new Map<string, number>();
+    let rowIndex = 0;
+    const visit = (issue: IssueListItem): void => {
+      indexes.set(issue.id, rowIndex);
+      if (expandedSelectionIds.has(issue.id)) {
+        for (const child of childrenByParent.get(issue.id) ?? []) visit(child);
+      }
+    };
+    for (const section of pages.sections) {
+      for (const issue of section.rows) {
+        visit(issue);
+        rowIndex += 1;
+      }
+    }
+    return indexes;
+  }, [pages.sections, expandedSelectionIds, childrenByParent]);
+  const revealSelectionRow = React.useCallback(
+    (id: string) => {
+      if (listRef.current !== null) listRef.current.scrollToIndex(selectionRowIndex.get(id)!);
+    },
+    [selectionRowIndex]
+  );
+  const selection = useBulkSelection(selectionItems, enableSelection, pages.grouped ? undefined : revealSelectionRow);
   const bulk = useBulkMutations({ workspaceSlug, projectId });
   const bulkEnabled = isBulkOperationsEnabled();
   const selectedCount = selection.selectedIds.size;
@@ -460,6 +487,7 @@ export function ListLayout({
                     rows={section.rows}
                     renderRow={renderListRow}
                     rowHeight={compact ? 32 : 44}
+                    listRef={listRef}
                     footer={
                       pages.hasMore ? (
                         <div

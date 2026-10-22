@@ -1103,4 +1103,27 @@ describe("SpreadsheetLayout selection", () => {
     expect(header.indeterminate).toBe(true);
     expect(document.querySelector("[data-selection-id]")).not.toBeNull();
   });
+
+  it("reveals an active row beyond the windowed spreadsheet slice", async () => {
+    const rows = Array.from({ length: 30 }, (_, index) =>
+      issue(`123e4567-e89b-12d3-a456-${String(426614174000 + index)}`, `Row ${index + 1}`, index + 1)
+    );
+    stub({ pages: [page(rows)] });
+    renderSheet();
+    await screen.findByRole("table");
+    const boxes = await screen.findAllByRole("checkbox", { name: /^Select WEB-\d+$/ });
+    const lastRendered = boxes.at(-1)!;
+    const lastSequence = Number(lastRendered.getAttribute("aria-label")!.replace("Select WEB-", ""));
+    const next = rows[lastSequence];
+    fireEvent.click(lastRendered);
+    expect(document.querySelector(`[data-selection-id="${next!.id}"]`)).toBeNull();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    const scroller = screen.getByTestId("spreadsheet-scroller");
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(document.querySelector(`[data-selection-id="${next!.id}"]`)).toHaveAttribute("data-active", "true")
+    );
+  });
 });

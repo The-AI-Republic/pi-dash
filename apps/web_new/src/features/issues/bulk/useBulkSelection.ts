@@ -52,15 +52,26 @@ function isFormTarget(target: EventTarget | null): boolean {
 }
 
 /** Scroll the active row into view without moving the page. */
-function revealRow(id: string): void {
+function revealRow(id: string, reveal?: ((id: string) => void) | undefined): void {
+  if (reveal !== undefined) {
+    reveal(id);
+    return;
+  }
   const node = document.querySelector(`[${SELECTION_ROW_ATTR}="${CSS.escape(id)}"]`);
   if (node !== null && typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
 }
 
-export function useBulkSelection(items: readonly SelectionItem[], enabled = true): BulkSelection {
+export function useBulkSelection(
+  items: readonly SelectionItem[],
+  enabled = true,
+  /** Surface-owned reveal for rows outside a virtualized window. */
+  reveal?: ((id: string) => void) | undefined
+): BulkSelection {
   const [selectedIds, setSelectedIds] = React.useState<ReadonlySet<string>>(() => new Set());
   const [activeId, setActiveId] = React.useState<string | null>(null);
   const anchorRef = React.useRef<string | null>(null);
+  const revealRef = React.useRef(reveal);
+  revealRef.current = reveal;
   const itemsRef = React.useRef(items);
   itemsRef.current = items;
 
@@ -84,11 +95,11 @@ export function useBulkSelection(items: readonly SelectionItem[], enabled = true
         setSelectedIds((current) => extendSelection(current, activeId, itemsRef.current, direction));
         setActiveId((current) => moveActive(current, itemsRef.current, direction));
         const target = moveActive(activeId, itemsRef.current, direction);
-        if (target !== null) revealRow(target);
+        if (target !== null) revealRow(target, revealRef.current);
       } else {
         const target = moveActive(activeId, itemsRef.current, direction);
         setActiveId(target);
-        if (target !== null) revealRow(target);
+        if (target !== null) revealRow(target, revealRef.current);
       }
       event.preventDefault();
     };

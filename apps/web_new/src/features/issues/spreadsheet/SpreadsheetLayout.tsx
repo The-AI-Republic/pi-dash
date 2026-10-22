@@ -149,22 +149,25 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
   }, [expandedIds, childrenQueries]);
 
   const roots = flattenSheetPages(query.data);
-  const selectionItems = React.useMemo(
-    () =>
-      buildDisplayRows(roots, expanded, childrenByParent)
-        .filter((row) => row.issue.project_id === projectId)
-        .map((row) => ({ id: row.issue.id, groupKey: "all" })),
-    [roots, expanded, childrenByParent, projectId]
-  );
-  const selection = useBulkSelection(selectionItems, enableSelection);
-  const bulk = useBulkMutations({ workspaceSlug, projectId });
-  const bulkEnabled = isBulkOperationsEnabled();
-  const selectedCount = selection.selectedIds.size;
   const rows = React.useMemo(
     () => buildDisplayRows(roots, expanded, childrenByParent),
     [roots, expanded, childrenByParent]
   );
   const viewport = useViewportWindow(scrollNode, ROW_HEIGHT, rows.length);
+  const rowIndexById = React.useMemo(() => new Map(rows.map((row, index) => [row.issue.id, index])), [rows]);
+  const revealSelectionRow = React.useCallback(
+    (id: string) => viewport.revealRow(rowIndexById.get(id)!),
+    [rowIndexById, viewport]
+  );
+  const selectionItems = React.useMemo(
+    () =>
+      rows.filter((row) => row.issue.project_id === projectId).map((row) => ({ id: row.issue.id, groupKey: "all" })),
+    [rows, projectId]
+  );
+  const selection = useBulkSelection(selectionItems, enableSelection, revealSelectionRow);
+  const bulk = useBulkMutations({ workspaceSlug, projectId });
+  const bulkEnabled = isBulkOperationsEnabled();
+  const selectedCount = selection.selectedIds.size;
   const visibleRows = rows.slice(viewport.start, viewport.end);
   const pendingFocus = React.useRef<{ row: number; column: number } | null>(null);
 
@@ -211,6 +214,9 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     const direction = arrowDirection(event.key);
     if (direction === null) return;
     event.preventDefault();
+    // Grid navigation owns arrows while a cell has focus; the selection
+    // hook's window listener must not also move the bulk-active row.
+    event.stopPropagation();
     const rowIndex = Number(event.currentTarget.dataset["rowIndex"]);
     const columnIndex = Number(event.currentTarget.dataset["columnIndex"]);
     const next = moveSheetFocus({ row: rowIndex, column: columnIndex }, direction, rows.length, columns.length + 1);

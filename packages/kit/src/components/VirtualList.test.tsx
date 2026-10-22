@@ -3,7 +3,7 @@
 // See the LICENSE file for details.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VirtualList } from "./VirtualList";
+import { VirtualList, type VirtualListHandle } from "./VirtualList";
 
 const items = Array.from({ length: 1000 }, (_, index) => `Issue ${index + 1}`);
 
@@ -73,6 +73,36 @@ describe("VirtualList", () => {
     const region = screen.getByRole("region", { name: "Issues" });
     region.scrollTop = 28 * 500;
     fireEvent.scroll(region);
+    expect(await screen.findByText("Issue 501")).toBeInTheDocument();
+    expect(screen.queryByText("Issue 1")).not.toBeInTheDocument();
+  });
+
+  it("reveals a row by index through its handle", async () => {
+    const listRef = { current: null as VirtualListHandle | null };
+    render(
+      <VirtualList
+        label="Issues"
+        items={items}
+        estimateSize={28}
+        overscan={2}
+        getKey={(item) => item}
+        listRef={listRef}
+        renderRow={(item) => <div>{item}</div>}
+        className="h-56"
+      />
+    );
+    expect(await screen.findByText("Issue 1")).toBeInTheDocument();
+    expect(screen.queryByText("Issue 501")).not.toBeInTheDocument();
+    const region = screen.getByRole("region", { name: "Issues" });
+    Object.defineProperty(region, "scrollHeight", { configurable: true, value: items.length * 28 });
+    Object.defineProperty(region, "clientHeight", { configurable: true, value: 224 });
+    const scrollTo = vi.fn(({ top }: { top: number }) => {
+      region.scrollTop = top;
+      fireEvent.scroll(region);
+    });
+    Object.defineProperty(region, "scrollTo", { configurable: true, value: scrollTo });
+    listRef.current?.scrollToIndex(500);
+    expect(scrollTo).toHaveBeenCalled();
     expect(await screen.findByText("Issue 501")).toBeInTheDocument();
     expect(screen.queryByText("Issue 1")).not.toBeInTheDocument();
   });
