@@ -357,7 +357,7 @@ function BoardBody({
           key={group.id}
           aria-label={group.title}
           data-profile-board-column={group.title}
-          className="flex w-64 shrink-0 flex-col gap-(--space-2) rounded-(--radius-panel) bg-(--subtle) p-(--space-2)"
+          className="flex w-64 shrink-0 flex-col gap-(--space-2) rounded-(--radius-card) bg-(--subtle) p-(--space-2)"
         >
           <h3 className="text-caption flex items-center justify-between px-(--space-1) font-medium text-(--text-muted)">
             <span>{group.title}</span>
@@ -372,7 +372,7 @@ function BoardBody({
               onClick={() => {
                 context.onSelect(issue);
               }}
-              className="text-body flex flex-col gap-(--space-1) rounded-(--radius-panel) border border-(--border) bg-(--surface) p-(--space-2) text-left text-(--text)"
+              className="text-body flex flex-col gap-(--space-1) rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-2) text-left text-(--text)"
             >
               <span className="text-caption font-[family-name:var(--font-mono)] text-(--text-muted)">
                 {rowKey(context.identifier(issue), issue)}

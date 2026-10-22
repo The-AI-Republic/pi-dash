@@ -42,7 +42,7 @@ function CardSkeleton(): React.ReactElement {
   return (
     <div
       data-testid="profile-card-placeholder"
-      className="rounded-(--radius-panel) border border-(--border) p-(--space-4)"
+      className="rounded-(--radius-card) border border-(--border) p-(--space-4)"
     >
       <Skeleton className="mb-(--space-2) h-4 w-32" />
       <Skeleton className="h-8 w-16" />
@@ -66,7 +66,7 @@ function CountCards({
           key={card.tab}
           to={`${profileBase(workspaceSlug, userId)}${card.tab}/`}
           data-profile-card={card.tab}
-          className="flex flex-col gap-(--space-1) rounded-(--radius-panel) border border-(--border) bg-(--surface) p-(--space-4) hover:border-(--accent)"
+          className="flex flex-col gap-(--space-1) rounded-(--radius-card) border border-(--border) bg-(--surface) p-(--space-4) hover:border-(--accent)"
         >
           <span className="text-caption text-(--text-muted)">{card.title}</span>
           <span className="text-h2 text-(--text)" data-profile-card-value={card.tab}>
@@ -87,7 +87,7 @@ function Workload({ stats }: { stats: UserProfileStats }): React.ReactElement {
           <div
             key={group.group}
             data-profile-workload-group={group.group}
-            className="flex flex-col gap-(--space-1) rounded-(--radius-panel) border border-(--border) p-(--space-3)"
+            className="flex flex-col gap-(--space-1) rounded-(--radius-card) border border-(--border) p-(--space-3)"
           >
             <span className="text-caption text-(--text-muted)">{group.label}</span>
             <span className="text-h3 text-(--text)">{group.count}</span>
@@ -178,7 +178,7 @@ function ChartEmpty(): React.ReactElement {
   return (
     <div
       data-testid="profile-chart-empty"
-      className="flex flex-1 flex-col items-center justify-center gap-(--space-1) rounded-(--radius-panel) border border-dashed border-(--border) p-(--space-6) text-center"
+      className="flex flex-1 flex-col items-center justify-center gap-(--space-1) rounded-(--radius-card) border border-dashed border-(--border) p-(--space-6) text-center"
     >
       <CircleSlash size={20} strokeWidth={1.5} aria-hidden="true" className="text-(--text-muted)" />
       <p className="text-caption text-(--text-muted)">No work item assigned yet</p>
@@ -206,7 +206,7 @@ function RecentActivity({
       ) : activity.length === 0 ? (
         <div
           data-testid="profile-overview-activity-empty"
-          className="flex flex-col items-center gap-(--space-1) rounded-(--radius-panel) border border-dashed border-(--border) p-(--space-6) text-center"
+          className="flex flex-col items-center gap-(--space-1) rounded-(--radius-card) border border-dashed border-(--border) p-(--space-6) text-center"
         >
           <Activity size={20} strokeWidth={1.5} aria-hidden="true" className="text-(--text-muted)" />
           <p className="text-caption text-(--text-muted)">{PROFILE_OVERVIEW_ACTIVITY_EMPTY}</p>
