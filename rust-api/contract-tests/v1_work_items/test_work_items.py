@@ -230,3 +230,42 @@ def test_advanced_search_shape(api, world):
     body = response.json()
     assert set(body) == {"query", "count", "results"}
     assert body["count"] >= 1
+
+
+# PIDASHCONV-1331: ammonia's default per-tag attributes (align, scope,
+# hreflang, cite, datetime, ...) must be stripped like nh3 does — Django
+# passes ATTRIBUTES as the complete per-tag table, so anything outside it
+# goes. Expected output captured from nh3 0.2.18 via validate_html_content.
+SANITIZER_PROBE_HTML = (
+    '<table><tr><th align="left" scope="col">a</th>'
+    '<td align="right">b</td></tr></table>'
+    '<a href="https://x" hreflang="en">l</a>'
+    '<blockquote cite="https://c">q</blockquote>'
+    '<img src="https://i" align="left">'
+    '<ins datetime="2020">i</ins>'
+)
+# Note: the api-v1 serializer lxml round-trips before sanitizing
+# (api/serializers/issue.py), so the fragment gains a `<div>` wrapper.
+SANITIZER_PROBE_CLEAN = (
+    '<div><table><tbody><tr><th>a</th><td>b</td></tr></tbody></table>'
+    '<a href="https://x" rel="noopener noreferrer">l</a>'
+    '<blockquote>q</blockquote><img src="https://i"><ins>i</ins></div>'
+)
+
+
+def test_issue_create_strips_ammonia_default_tag_attributes(api, world):
+    response = api.post(
+        issue_url(world),
+        json={"name": "Sanitized", "description_html": SANITIZER_PROBE_HTML},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["description_html"] == SANITIZER_PROBE_CLEAN
+
+
+def test_issue_patch_strips_ammonia_default_tag_attributes(api, world):
+    response = api.patch(
+        issue_url(world, world["issue"]["id"]),
+        json={"description_html": SANITIZER_PROBE_HTML},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["description_html"] == SANITIZER_PROBE_CLEAN
