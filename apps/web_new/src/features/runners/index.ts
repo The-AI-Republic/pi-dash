@@ -103,6 +103,32 @@ export type { RunnersWorkspaceShellProps } from "./RunnersWorkspaceShell.js";
 // directly by the runs routes.
 export { RunStatusBadge } from "./runs/RunStatusBadge.js";
 export type { RunStatusBadgeProps } from "./runs/RunStatusBadge.js";
+// RUN-046/RUN-048: run dispatch is consumed outside this area (the issue
+// mounts live in the issues area), so the service and its hooks belong
+// on the public barrel. The approvals screens stay internal like runs.
+export {
+  abortAgentRun,
+  isQueuedDispatch,
+  requestReTick,
+  triggerAgentRun,
+  type DispatchMode,
+  type TriggerAgentRunInput,
+} from "./dispatch/dispatch.js";
+export {
+  RE_TICK_FAILED_TITLE,
+  RE_TICK_GRANTED_TITLE,
+  RE_TICK_REFUSED_TITLE,
+  RUN_ABORT_FAILED_TITLE,
+  RUN_QUEUED_TITLE,
+  RUN_START_FAILED_TITLE,
+  RUN_STARTED_TITLE,
+  useAbortAgentRun,
+  useReTick,
+  useTriggerAgentRun,
+  type AbortRunArgs,
+  type DispatchRefreshOptions,
+  type TriggerRunArgs,
+} from "./dispatch/useDispatch.js";
 export { runnersBase, runnersPath } from "./scope.js";
 export type { RunnersScopeInput } from "./scope.js";
 export { RUNNER_STATUS_LABELS, RUNNER_STATUS_TONES, runnerDisplayStatus, type RunnerStatus } from "./status.js";
