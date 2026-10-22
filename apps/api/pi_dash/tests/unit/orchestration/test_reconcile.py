@@ -258,30 +258,46 @@ def test_left_bucket_without_ticker_is_a_noop(seeded, issue, states):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("outcome", ["done", "blocked", "waiting_on_human"])
-def test_stopping_outcome_stops_the_clock_in_place(seeded, issue, states, runner_for_workspace, outcome):
-    _move(issue, states, "in_review")
-    _ticker(issue, enabled=True, next_run_at=timezone.now())
-    run = _run(
-        issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
-        done_payload={"status": outcome},
-    )
-    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
-    assert decision.reason == f"{outcome}:stopped"
-    assert decision.ticker.enabled is False
-    assert decision.ticker.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("outcome", ["progressed", "waiting_on_external"])
-def test_continuing_outcome_keeps_ticking(seeded, issue, states, runner_for_workspace, outcome):
-    _move(issue, states, "in_progress")
+@pytest.mark.parametrize("stage", ["in_progress", "in_review", "in_test"])
+@pytest.mark.parametrize("outcome", ["progressed", "waiting_on_external", "done", "blocked", "waiting_on_human"])
+def test_every_outcome_without_the_flag_keeps_ticking(seeded, issue, states, runner_for_workspace, stage, outcome):
+    """Outcomes are informational (PDASHOSS01-247): none of them stops the
+    clock in any stage — only an explicit ``stop_ticking`` does."""
+    kind = {"in_progress": "coding-task", "in_review": "review", "in_test": "test"}[stage]
+    _move(issue, states, stage)
     _ticker(issue, enabled=True, next_run_at=None)
-    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, done_payload={"status": outcome})
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind=kind,
+               done_payload={"status": outcome})
     decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
     assert decision.reason == f"{outcome}:keep-ticking"
     assert decision.ticker.enabled is True
     assert decision.ticker.next_run_at > timezone.now()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("outcome", ["progressed", "waiting_on_external", "done", "blocked", "waiting_on_human"])
+def test_stop_ticking_stops_the_clock_with_any_outcome(seeded, issue, states, runner_for_workspace, outcome):
+    _move(issue, states, "in_review")
+    _ticker(issue, enabled=True, next_run_at=timezone.now())
+    run = _run(
+        issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
+        done_payload={"status": outcome, "stop_ticking": True},
+    )
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == f"{outcome}:stopped"
+    assert decision.ticker.enabled is False
+    assert decision.ticker.disarm_reason == TickerDisarmReason.STOP_SIGNAL
+
+
+@pytest.mark.unit
+def test_stop_ticking_false_is_not_a_stop(seeded, issue, states, runner_for_workspace):
+    _move(issue, states, "in_progress")
+    _ticker(issue, enabled=True, next_run_at=None)
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED,
+               done_payload={"status": "done", "stop_ticking": False})
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    assert decision.reason == "done:keep-ticking"
+    assert decision.ticker.enabled is True
 
 
 @pytest.mark.unit
@@ -290,10 +306,10 @@ def test_done_after_a_forward_move_leaves_the_next_stage_clock_alone(
 ):
     """The §7 guard: the run was rendered for In Progress, moved the issue to
     In Review (the clock now holds the queued review entry), then yielded
-    ``done``. The review clock must survive."""
+    ``done`` — even with ``stop_ticking``. The review clock must survive."""
     _move(issue, states, "in_progress")
     run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="coding-task",
-               done_payload={"status": "done"})
+               done_payload={"status": "done", "stop_ticking": True})
     _move(issue, states, "in_review")
     scheduling.reconcile(issue, TickerEvent.moved_stage(moved_by_run=run))
     t = IssueAgentTicker.objects.get(issue=issue)
@@ -307,31 +323,25 @@ def test_done_after_a_forward_move_leaves_the_next_stage_clock_alone(
 
 
 @pytest.mark.unit
-def test_run_without_a_yield_uses_the_per_kind_default(seeded, issue, states, runner_for_workspace):
-    # coding-task → progressed (keep ticking); review/test → done (stop).
-    _move(issue, states, "in_progress")
+@pytest.mark.parametrize("stage,kind", [("in_progress", "coding-task"), ("in_review", "review"), ("in_test", "test")])
+def test_run_without_a_yield_keeps_ticking_in_every_stage(seeded, issue, states, runner_for_workspace, stage, kind):
+    # No report means keep ticking (PDASHOSS01-247); the budget bounds it.
+    _move(issue, states, stage)
     t = _ticker(issue, enabled=True, next_run_at=timezone.now())
-    impl = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="coding-task",
-                done_payload={"conclusion": "success"})
-    assert scheduling.reconcile(issue, TickerEvent.run_ended(impl)).reason == "progressed:keep-ticking"
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind=kind,
+               done_payload={"conclusion": "success"})
+    assert scheduling.reconcile(issue, TickerEvent.run_ended(run)).reason == "progressed:keep-ticking"
     t.refresh_from_db()
     assert t.enabled is True
-
-    _move(issue, states, "in_review")
-    review = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
-                  done_payload={"conclusion": "success"})
-    assert scheduling.reconcile(issue, TickerEvent.run_ended(review)).reason == "done:stopped"
-    t.refresh_from_db()
-    assert t.enabled is False
 
 
 @pytest.mark.unit
 def test_run_ended_does_not_override_a_pending_entry(seeded, issue, states, runner_for_workspace):
-    """A human's queued follow-up outranks the finished run's ``done``."""
+    """A human's queued follow-up outranks the finished run's stop signal."""
     _move(issue, states, "in_review")
     _ticker(issue, enabled=True, next_run_at=timezone.now(), pending_entry=True, pending_entry_free=True)
     run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
-               done_payload={"status": "done"})
+               done_payload={"status": "done", "stop_ticking": True})
     decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
     assert decision.reason == "done:pending-entry-kept"
     assert decision.ticker.enabled is True
@@ -340,11 +350,12 @@ def test_run_ended_does_not_override_a_pending_entry(seeded, issue, states, runn
 
 @pytest.mark.unit
 def test_run_ended_preserves_a_prior_cap_hit(seeded, issue, states, runner_for_workspace):
-    """A ``done`` must not overwrite ``cap_hit`` — that reason gates the
+    """A stop signal must not overwrite ``cap_hit`` — that reason gates the
     deferred auto-pause."""
     _move(issue, states, "in_progress")
     _ticker(issue, used=10, enabled=False, disarm_reason=TickerDisarmReason.CAP_HIT)
-    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, done_payload={"status": "done"})
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED,
+               done_payload={"status": "done", "stop_ticking": True})
     decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
     assert decision.reason == "done:already-stopped"
     assert decision.ticker.disarm_reason == TickerDisarmReason.CAP_HIT
@@ -354,8 +365,51 @@ def test_run_ended_preserves_a_prior_cap_hit(seeded, issue, states, runner_for_w
 def test_run_ended_outside_the_bucket_is_ignored(seeded, issue, states, runner_for_workspace):
     _move(issue, states, "done")
     _ticker(issue, enabled=False)
-    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, done_payload={"status": "done"})
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED,
+               done_payload={"status": "done", "stop_ticking": True})
     assert scheduling.reconcile(issue, TickerEvent.run_ended(run)).reason == "not-in-bucket"
+
+
+@pytest.mark.unit
+def test_state_move_after_a_stop_signal_re_arms(seeded, issue, states, runner_for_workspace):
+    """A human state move clears ``stop_signal`` exactly as it cleared
+    ``terminal_signal``."""
+    _move(issue, states, "in_review")
+    _ticker(issue, enabled=False, disarm_reason=TickerDisarmReason.STOP_SIGNAL)
+    decision = scheduling.reconcile(issue, TickerEvent.moved_stage(want_run=False))
+    assert decision.ticker.enabled is True
+    assert decision.ticker.disarm_reason == TickerDisarmReason.NONE
+
+
+@pytest.mark.unit
+def test_run_ai_after_a_stop_signal_re_arms(seeded, issue, states):
+    _move(issue, states, "in_progress")
+    _ticker(issue, enabled=False, disarm_reason=TickerDisarmReason.STOP_SIGNAL)
+    decision = scheduling.reconcile(issue, TickerEvent.human_run_requested())
+    assert decision.dispatch_now is True
+    assert decision.ticker.enabled is True
+    assert decision.ticker.disarm_reason == TickerDisarmReason.NONE
+
+
+@pytest.mark.unit
+def test_budget_still_caps_a_review_issue_whose_runs_never_stop(seeded, issue, states, runner_for_workspace):
+    """A review issue whose runs keep yielding ``done`` without the flag
+    ticks until the pool is spent — then the clock stops on budget, not on
+    outcome inference."""
+    _move(issue, states, "in_review")
+    t = _ticker(issue, enabled=True, next_run_at=None, used=10)  # pool of 10 spent
+    run = _run(issue, runner_for_workspace, status=AgentRunStatus.COMPLETED, phase_kind="review",
+               done_payload={"status": "done"})
+    decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
+    # Informational outcome: no stop — but the spent pool means no re-time.
+    assert decision.reason == "done:keep-ticking"
+    t.refresh_from_db()
+    assert t.next_run_at is None  # nothing left to fire on
+    # And the next human lever routes through the pool guard: retiming a
+    # spent pool stops the clock with POOL_SPENT (design §5).
+    decision = scheduling.reconcile(issue, TickerEvent.human_run_requested(want_run=False))
+    assert decision.ticker.enabled is False
+    assert decision.ticker.disarm_reason == TickerDisarmReason.POOL_SPENT
 
 
 # ---------------------------------------------------------------------------
@@ -553,12 +607,12 @@ def test_outcome_normalization():
     assert n("done") == "done"
     assert n(" DONE ") == "done"
     assert n("completed") == "done"
-    # "nothing changed" follows the kind: an implementation run keeps
-    # ticking (CI may still be running); a satisfied review / test stops.
+    # "nothing changed" is ``progressed`` in every stage — outcomes are
+    # informational and never stop the clock (PDASHOSS01-247).
     assert n("noop") == "progressed"
     assert n("noop", "coding-task") == "progressed"
-    assert n("noop", "review") == "done"
-    assert n("noop", "test") == "done"
+    assert n("noop", "review") == "progressed"
+    assert n("noop", "test") == "progressed"
     assert n("paused") == "waiting_on_human"
     assert n("blocked") == "blocked"
     assert n("progressed") == "progressed"
@@ -587,7 +641,9 @@ def test_a_crashed_review_run_keeps_the_clock_ticking(seeded, issue, states, run
 
 
 @pytest.mark.unit
-def test_a_paused_run_without_a_yield_waits_on_the_human(seeded, issue, states, runner_for_workspace):
+def test_a_paused_run_without_a_yield_keeps_ticking(seeded, issue, states, runner_for_workspace):
+    """A paused run reads as ``waiting_on_human`` — informational only; the
+    clock keeps ticking (a human reply re-engages sooner via Comment & Run)."""
     _move(issue, states, "in_progress")
     _ticker(issue, enabled=True, next_run_at=timezone.now())
     run = _run(
@@ -595,17 +651,19 @@ def test_a_paused_run_without_a_yield_waits_on_the_human(seeded, issue, states, 
         done_payload={"autonomy": {"question_for_human": "which DB?"}},
     )
     decision = scheduling.reconcile(issue, TickerEvent.run_ended(run))
-    assert decision.reason == "waiting_on_human:stopped"
+    assert decision.reason == "waiting_on_human:keep-ticking"
+    assert decision.ticker.enabled is True
 
 
 @pytest.mark.unit
 def test_a_yield_survives_a_crash(seeded, issue, states, runner_for_workspace):
-    """The agent yielded, then the process died: honour the yield."""
+    """The agent yielded with a stop signal, then the process died: honour
+    the yield."""
     _move(issue, states, "in_review")
     _ticker(issue, enabled=True, next_run_at=timezone.now())
     run = _run(
         issue, runner_for_workspace, status=AgentRunStatus.FAILED, phase_kind="review",
-        done_payload={"status": "done", "yielded_at": "2026-09-13T00:00:00Z"},
+        done_payload={"status": "done", "stop_ticking": True, "yielded_at": "2026-09-13T00:00:00Z"},
     )
     assert scheduling.reconcile(issue, TickerEvent.run_ended(run)).reason == "done:stopped"
 

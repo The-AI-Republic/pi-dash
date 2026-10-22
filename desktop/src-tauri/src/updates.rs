@@ -8,7 +8,8 @@
 //! stays open it checks again once a day, just after 00:00 UTC; an update
 //! found then is not prompted for — it is announced to the web UI as
 //! [`UPDATE_AVAILABLE_EVENT`], which shows a small update button beside the
-//! sidebar's user menu. Clicking it calls [`desktop_install_update`].
+//! sidebar's user menu. Clicking it calls [`desktop_install_update`]. The
+//! same button shows, busy, while an update accepted at launch downloads.
 //!
 //! Only runs when the build configures `plugins.updater` (see `main`). All
 //! check failures (network down, malformed manifest, signature mismatch) log
@@ -37,13 +38,38 @@ const JITTER_SECS: u64 = 15 * 60;
 /// laptop wakes. Short naps re-read the wall clock instead.
 const MAX_NAP: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Default)]
-pub struct UpdateState {
+/// The versions the sidebar button shows. [`Update`] can only be built by
+/// the updater plugin, so the state below is generic over this for tests.
+trait Versions {
+    fn version(&self) -> &str;
+    fn current_version(&self) -> &str;
+}
+
+impl Versions for Update {
+    fn version(&self) -> &str {
+        &self.version
+    }
+
+    fn current_version(&self) -> &str {
+        &self.current_version
+    }
+}
+
+pub struct UpdateState<U = Update> {
     /// The update the user deferred or was never prompted for.
-    pending: Mutex<Option<Update>>,
+    pending: Mutex<Option<U>>,
     /// Set while an update downloads and installs, so a second install (or
     /// a daily check swapping `pending` underneath it) can't start.
     installing: AtomicBool,
+}
+
+impl<U> Default for UpdateState<U> {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(None),
+            installing: AtomicBool::new(false),
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -58,10 +84,10 @@ pub struct PendingUpdate {
 }
 
 impl PendingUpdate {
-    fn of(update: &Update, installing: bool) -> Self {
+    fn of(update: &impl Versions, installing: bool) -> Self {
         Self {
-            version: update.version.clone(),
-            current_version: update.current_version.clone(),
+            version: update.version().to_owned(),
+            current_version: update.current_version().to_owned(),
             installing,
         }
     }
@@ -85,7 +111,7 @@ async fn check(handle: &AppHandle) -> Option<Update> {
 }
 
 /// The update waiting for the sidebar button, if any.
-fn pending_update(state: &UpdateState) -> Option<PendingUpdate> {
+fn pending_update<U: Versions>(state: &UpdateState<U>) -> Option<PendingUpdate> {
     let installing = state.installing.load(Ordering::SeqCst);
     state
         .pending
@@ -117,6 +143,14 @@ fn remember(handle: &AppHandle, update: Update) {
     announce(handle);
 }
 
+/// Mark the update accepted in the launch prompt as installing. It is kept
+/// as the pending update too: the sidebar button only shows for a pending
+/// update, and without it the download would run with no sign of progress.
+fn begin_launch_install<U>(state: &UpdateState<U>, update: U) {
+    state.installing.store(true, Ordering::SeqCst);
+    *state.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(update);
+}
+
 /// Check at startup. If a newer version is available, ask the user via a
 /// native dialog; install + restart on confirmation. "Later" keeps the
 /// update for the sidebar button.
@@ -144,7 +178,8 @@ pub async fn prompt_at_launch(handle: AppHandle) {
         return;
     }
     let state = handle.state::<UpdateState>();
-    state.installing.store(true, Ordering::SeqCst);
+    begin_launch_install(&state, update.clone());
+    announce(&handle);
     if let Err(e) = update
         .download_and_install(|_chunk, _total| {}, || {})
         .await
@@ -154,7 +189,8 @@ pub async fn prompt_at_launch(handle: AppHandle) {
         // The user explicitly opted in to the install — staying silent on
         // failure leaves them wondering whether anything happened. Surface
         // the error in a dialog so they know they're still on the old
-        // version, and keep the update so the sidebar button can retry.
+        // version. The update is still pending, so announce it again to
+        // put the sidebar button back in its clickable state for a retry.
         handle
             .dialog()
             .message(format!(
@@ -163,7 +199,7 @@ pub async fn prompt_at_launch(handle: AppHandle) {
             .title("Pi Dash update failed")
             .kind(MessageDialogKind::Error)
             .show(|_| {});
-        remember(&handle, update);
+        announce(&handle);
         return;
     }
     handle.restart();
@@ -249,6 +285,29 @@ mod tests {
     const MIDDAY: u64 = 1_789_911_900;
     // 2026-09-21T00:00:00Z
     const NEXT_MIDNIGHT: u64 = 1_789_948_800;
+
+    struct FakeUpdate;
+
+    impl Versions for FakeUpdate {
+        fn version(&self) -> &str {
+            "0.4.0"
+        }
+
+        fn current_version(&self) -> &str {
+            "0.3.3"
+        }
+    }
+
+    #[test]
+    fn an_update_accepted_at_launch_is_pending_and_installing() {
+        let state = UpdateState::<FakeUpdate>::default();
+        begin_launch_install(&state, FakeUpdate);
+        let pending =
+            pending_update(&state).expect("the sidebar button needs the update while it downloads");
+        assert!(pending.installing);
+        assert_eq!(pending.version, "0.4.0");
+        assert_eq!(pending.current_version, "0.3.3");
+    }
 
     #[test]
     fn daily_check_is_due_at_the_next_utc_midnight_plus_jitter() {
