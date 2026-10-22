@@ -93,6 +93,7 @@ interface Harness {
   viewsCalls: number;
   members: ReturnType<typeof makeMember>[];
   workspaces: ReturnType<typeof workspaceRow>[];
+  me: Record<string, unknown>;
 }
 
 let harness: Harness;
@@ -110,6 +111,30 @@ function resetHarness(): Harness {
     viewsCalls: 0,
     members: [makeMember(VIEWS_OWNER_ID)],
     workspaces: [workspaceRow()],
+    me: meRow(),
+  };
+}
+
+function meRow() {
+  return {
+    id: VIEWS_OWNER_ID,
+    email: "ada@example.test",
+    username: "ada",
+    first_name: "Ada",
+    last_name: "Lovelace",
+    display_name: "Ada Lovelace",
+    avatar: "",
+    avatar_url: "https://cdn.example/ada.png",
+    cover_image: null,
+    cover_image_url: null,
+    date_joined: "2026-01-01T00:00:00Z",
+    user_timezone: "UTC",
+    is_active: true,
+    is_bot: false,
+    is_email_verified: true,
+    is_password_autoset: false,
+    last_login_medium: "email",
+    last_login_time: null,
   };
 }
 
@@ -134,6 +159,7 @@ beforeEach(() => {
       return jsonResponse(url, harness.viewsStatus, harness.views);
     }
     if (url.endsWith("/api/workspaces/acme/members/")) return jsonResponse(url, 200, harness.members);
+    if (url.endsWith("/api/users/me/")) return jsonResponse(url, 200, harness.me);
     if (url.endsWith("/api/users/me/workspaces/")) return jsonResponse(url, 200, harness.workspaces);
     throw new Error(`unexpected request: ${url}`);
   }) as never);
@@ -306,6 +332,100 @@ describe("ProjectViewsListScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.getByTestId("project-views-list")).toBeInTheDocument());
     expect(screen.getByTestId("project-views-list")).toHaveTextContent("Recovered");
+  });
+
+  describe("list controls (VIEW-004-007)", () => {
+    const alpha = makeView({
+      id: "223e4567-e89b-12d3-a456-426614174021",
+      name: "V4 Alpha",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      is_favorite: true,
+    });
+    const beta = makeView({
+      id: "223e4567-e89b-12d3-a456-426614174022",
+      name: "V4 Beta",
+      created_at: "2026-02-01T00:00:00Z",
+      updated_at: "2026-03-01T00:00:00Z",
+    });
+
+    async function openList(): Promise<void> {
+      renderScreen();
+      await waitFor(() => expect(screen.getByTestId("project-views-list")).toBeInTheDocument());
+    }
+
+    function names(): string[] {
+      return screen.queryAllByTestId("project-views-row").map((row) => row.textContent ?? "");
+    }
+
+    it("narrows by name search and shows the no-match state, keeping the chips strip", async () => {
+      harness.views = [alpha, beta];
+      await openList();
+      expect(names()).toHaveLength(2);
+
+      fireEvent.click(screen.getByRole("button", { name: "Search views" }));
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "alpha" } });
+      await waitFor(() => expect(names()).toHaveLength(1));
+      expect(names()[0]).toContain("V4 Alpha");
+
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "zzz" } });
+      await waitFor(() => expect(screen.getByTestId("project-views-no-match")).toBeInTheDocument());
+      expect(screen.queryByTestId("project-views-zero")).not.toBeInTheDocument();
+    });
+
+    it("re-orders on a sort pick and resets on a remount", async () => {
+      harness.views = [alpha, beta];
+      await openList();
+      expect(screen.getByTestId("project-views-sort-trigger")).toHaveTextContent("Updated at");
+      expect(names()[0]).toContain("V4 Beta");
+
+      fireEvent.click(screen.getByTestId("project-views-sort-trigger"));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Name" }));
+      await waitFor(() => expect(screen.getByTestId("project-views-sort-trigger")).toHaveTextContent("Name"));
+      fireEvent.click(screen.getByTestId("project-views-sort-trigger"));
+      fireEvent.click(screen.getByRole("menuitem", { name: "Ascending" }));
+      await waitFor(() => expect(names()[0]).toContain("V4 Alpha"));
+      expect(harness.viewsCalls).toBe(1);
+    });
+
+    it("filters by favorites and combines with the name search", async () => {
+      harness.views = [alpha, beta];
+      await openList();
+
+      fireEvent.click(screen.getByTestId("project-views-filter-trigger"));
+      fireEvent.click(screen.getByRole("checkbox", { name: "Favorites" }));
+      await waitFor(() => expect(names()).toHaveLength(1));
+      expect(names()[0]).toContain("V4 Alpha");
+      expect(screen.getByTestId("project-views-applied-filters")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Search views" }));
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "beta" } });
+      await waitFor(() => expect(screen.getByTestId("project-views-no-match")).toBeInTheDocument());
+      expect(screen.getByTestId("project-views-applied-filters")).toBeInTheDocument();
+    });
+
+    it("removes one chip value while siblings survive", async () => {
+      harness.views = [alpha, beta];
+      await openList();
+
+      fireEvent.click(screen.getByTestId("project-views-filter-trigger"));
+      fireEvent.click(screen.getByRole("checkbox", { name: "Favorites" }));
+      // Favorites is a single-value pick and closes the panel.
+      fireEvent.click(screen.getByTestId("project-views-filter-trigger"));
+      fireEvent.click(screen.getByRole("checkbox", { name: "1 month ago" }));
+      await waitFor(() => expect(screen.getAllByTestId("project-views-row")).toHaveLength(1));
+      expect(screen.getAllByText("Favorites").length).toBeGreaterThan(0);
+      expect(screen.getByText("Created at")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Clear Created at filters" }));
+      await waitFor(() => expect(names()).toHaveLength(1));
+      expect(names()[0]).toContain("V4 Alpha");
+      expect(screen.getByTestId("project-views-applied-filters")).toHaveTextContent("Favorites");
+
+      fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+      await waitFor(() => expect(names()).toHaveLength(2));
+      expect(screen.queryByTestId("project-views-applied-filters")).not.toBeInTheDocument();
+    });
   });
 
   it("retries a failed project read from the error state", async () => {
