@@ -76,12 +76,15 @@ describe("ProfileSidebarFrame", () => {
   });
 
   it("falls back to an uppercase initial and renders a set photo as an image", () => {
-    const { unmount } = renderFrame();
+    const { unmount, container } = renderFrame();
     expect(screen.getByRole("img", { name: "Opal Whelan" })).toHaveTextContent("O");
+    expect(container.querySelector('[data-profile-avatar="initial"]')).not.toBeNull();
     unmount();
-    renderFrame({ avatar: "/files/avatar/u-1.png" });
+    const photo = renderFrame({ avatar: "/files/avatar/u-1.png" });
     const frame = screen.getByRole("img", { name: "Opal Whelan" });
     expect(frame.querySelector("img")?.getAttribute("src")).toBe("https://api.test/files/avatar/u-1.png");
+    const marker = photo.container.querySelector('[data-profile-avatar="image"]');
+    expect(marker?.getAttribute("data-profile-avatar-src")).toBe("https://api.test/files/avatar/u-1.png");
   });
 
   it("hides a blank display name", () => {

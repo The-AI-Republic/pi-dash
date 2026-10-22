@@ -21060,8 +21060,16 @@ export class WebNewDriver implements ParityDriver {
 
   async profileActivityOpen(workspaceSlug: string, userId: string, cookies: ParityBrowserCookie[]): Promise<void> {
     await this.openAuthenticated(this.profilePath(workspaceSlug, userId, "activity"), cookies);
-    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
-    await this.page.getByTestId("profile-activity").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("profile-page")
+      .waitFor({ state: "visible", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
+    // Attached, not visible: guests (and empty feeds) render the container
+    // with no rows, which is zero-size and reads hidden. The specs assert
+    // the download control and entries separately; like the oracle
+    // driver's either-view settle, any mounted container is settled.
+    await this.page
+      .getByTestId("profile-activity")
+      .waitFor({ state: "attached", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
     await this.page
       .locator('[data-profile-activity-row], [data-testid="profile-activity-load-more"]')
       .first()
@@ -21079,26 +21087,47 @@ export class WebNewDriver implements ParityDriver {
     return (await button.first().innerText()).trim();
   }
 
-  private profileExportStall: { pattern: string; handler: (route: Route) => Promise<void>; held: Route | null } | null =
-    null;
+  private profileExportStall: {
+    pattern: string;
+    handler: (route: Route) => Promise<void>;
+    mode: "pass" | "stall";
+    gates: Array<() => void>;
+  } | null = null;
 
   async profileActivityStallExport(): Promise<void> {
-    if (this.profileExportStall !== null) return;
-    const pattern = "**/api/workspaces/*/user-activity/*/export/**";
-    const stall = { pattern, handler: async (_route: Route): Promise<void> => undefined, held: null as Route | null };
+    if (this.profileExportStall !== null) {
+      this.profileExportStall.mode = "stall";
+      return;
+    }
+    const stall: NonNullable<WebNewDriver["profileExportStall"]> = {
+      pattern: "**/api/workspaces/*/user-activity/*/export/**",
+      handler: async (): Promise<void> => undefined,
+      mode: "stall",
+      gates: [],
+    };
+    // The handler stays installed for the page's life: stalled POSTs wait
+    // on a gate, everything else falls through. Releasing resolves the
+    // gates instead of unrouting (unroute drops the held route, so a
+    // later continue() throws "already handled").
     stall.handler = async (route: Route): Promise<void> => {
-      stall.held = route;
+      if (route.request().method() === "POST" && stall.mode === "stall") {
+        await new Promise<void>((resolve) => {
+          stall.gates.push(resolve);
+        });
+      }
+      await route.fallback();
     };
     this.profileExportStall = stall;
-    await this.page.route(pattern, stall.handler);
+    await this.page.route(stall.pattern, stall.handler);
   }
 
   async profileActivityReleaseExport(): Promise<void> {
     const stall = this.profileExportStall;
     if (stall === null) return;
-    this.profileExportStall = null;
-    await this.page.unroute(stall.pattern, stall.handler);
-    await stall.held?.continue();
+    const gates = stall.gates;
+    stall.gates = [];
+    stall.mode = "pass";
+    gates.forEach((release) => release());
   }
 
   async profileActivityDownload(): Promise<{ file: LocalFileDownload; requestBody: { date: string } }> {
@@ -25329,6 +25358,14 @@ export class WebNewDriver implements ParityDriver {
   // untouched per the shared contract.
   // ---------------------------------------------------------------------------
 
+  /**
+   * First-paint wait for profile navigations. The suite runs web_new from
+   * its dev server, which serves the page as ~900 unbundled modules (~30s
+   * on a loaded host, measured NEWFRONT-586); the API answers in
+   * milliseconds, so the wait is all module throughput, not app latency.
+   */
+  private static readonly PROFILE_FIRST_PAINT_WAIT_MS = 60_000;
+
   /** Path of the profile page for one member. */
   private profilePath(workspaceSlug: string, userId: string, tab?: string): string {
     const base = `/${workspaceSlug}/profile/${userId}/`;
@@ -25346,7 +25383,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private async profileSettle(tab?: string): Promise<void> {
-    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("profile-page")
+      .waitFor({ state: "visible", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
     if (tab === "assigned" || tab === "created" || tab === "subscribed") {
       // The list, board or inline denial is the tab's settled state.
       await this.page
@@ -25391,7 +25430,9 @@ export class WebNewDriver implements ParityDriver {
     cookies: ParityBrowserCookie[]
   ): Promise<void> {
     await this.openAuthenticated(this.profilePath(workspaceSlug, userId, tab), cookies);
-    await this.page.getByTestId("profile-page").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("profile-page")
+      .waitFor({ state: "visible", timeout: WebNewDriver.PROFILE_FIRST_PAINT_WAIT_MS });
     // Unknown tab ids render no body; give either outcome a bounded moment.
     await this.page
       .locator(
@@ -25645,10 +25686,14 @@ export class WebNewDriver implements ParityDriver {
     if ((await initial.count()) > 0) {
       return { kind: "initial", initial: (await initial.first().innerText()).trim() };
     }
-    const image = sidebar.getByRole("img").first().locator("img");
-    const src = await image.getAttribute("src");
-    if (src === null) throw new Error("[parity] profile sidebar rendered neither an avatar image nor an initial.");
-    return { kind: "image", src };
+    // The photo branch exposes its resolved src as an attribute: like the
+    // oracle read, this never depends on the bytes loading (a failed load
+    // unmounts the kit img, leaving only the glyph behind).
+    const photo = sidebar.locator('[data-profile-avatar="image"]');
+    if ((await photo.count()) === 0) {
+      throw new Error("[parity] profile sidebar rendered neither an avatar image nor an initial.");
+    }
+    return { kind: "image", src: (await photo.first().getAttribute("data-profile-avatar-src")) ?? "" };
   }
 
   async profileSidebarName(): Promise<{ full: string; display: string }> {

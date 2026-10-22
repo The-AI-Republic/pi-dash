@@ -217,31 +217,61 @@ describe("profileOverviewCards", () => {
 });
 
 describe("profileActivityStallExport / release", () => {
-  it("installs one route, holds the export request, then releases it", async () => {
-    const held: Route = { continue: vi.fn(async () => undefined) } as unknown as Route;
+  function stalledDriver(): {
+    driver: WebNewDriver;
+    installed: () => ((route: Route) => Promise<void>) | null;
+    route: ReturnType<typeof vi.fn>;
+  } {
     let installed: ((route: Route) => Promise<void>) | null = null;
     const route = vi.fn(async (_pattern: string, handler: (route: Route) => Promise<void>) => {
       installed = handler;
     });
-    const unroute = vi.fn(async () => undefined);
-    // The stall uses `expect.poll`; give it a passing target by resolving now.
-    const page = pageOf({ route, unroute });
-    const driver = new WebNewDriver(page);
+    const driver = new WebNewDriver(pageOf({ route }));
+    return { driver, installed: () => installed, route };
+  }
+
+  function exportRoute(method: string, fallback: () => Promise<void>): Route {
+    return { request: () => ({ method: () => method }), fallback } as unknown as Route;
+  }
+
+  it("installs one route, holds stalled POSTs on a gate, then releases them", async () => {
+    const { driver, installed, route } = stalledDriver();
     await driver.profileActivityStallExport();
     await driver.profileActivityStallExport();
     expect(route).toHaveBeenCalledTimes(1);
     expect(route.mock.calls[0][0]).toBe("**/api/workspaces/*/user-activity/*/export/**");
-    await installed!(held);
+
+    const fallback = vi.fn(async () => undefined);
+    let held = false;
+    const pending = installed()!(exportRoute("POST", fallback)).then(() => {
+      held = true;
+    });
+    await Promise.resolve();
+    expect(held).toBe(false);
+    expect(fallback).not.toHaveBeenCalled();
     await driver.profileActivityReleaseExport();
-    expect(unroute).toHaveBeenCalledWith("**/api/workspaces/*/user-activity/*/export/**", expect.anything());
-    expect(held.continue).toHaveBeenCalled();
+    await pending;
+    expect(held).toBe(true);
+    expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets non-POST requests and post-release POSTs fall through", async () => {
+    const { driver, installed } = stalledDriver();
+    await driver.profileActivityStallExport();
+    const getFallback = vi.fn(async () => undefined);
+    await installed()!(exportRoute("GET", getFallback));
+    expect(getFallback).toHaveBeenCalledTimes(1);
+    await driver.profileActivityReleaseExport();
+    const postFallback = vi.fn(async () => undefined);
+    await installed()!(exportRoute("POST", postFallback));
+    expect(postFallback).toHaveBeenCalledTimes(1);
   });
 
   it("releases nothing when no stall was installed", async () => {
-    const unroute = vi.fn(async () => undefined);
-    const driver = new WebNewDriver(pageOf({ unroute }));
+    const route = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route }));
     await driver.profileActivityReleaseExport();
-    expect(unroute).not.toHaveBeenCalled();
+    expect(route).not.toHaveBeenCalled();
   });
 });
 
@@ -513,5 +543,38 @@ describe("shared layout methods on the profile tab", () => {
     const page = pageOf({ url: () => "https://app.test/acme/profile/u-1/" });
     const driver = new WebNewDriver(page);
     expect(await driver.layoutsCurrentUrl()).toBe("https://app.test/acme/profile/u-1/");
+  });
+});
+
+describe("profileSidebarAvatar", () => {
+  function sidebarPage(initial: StubLocator | null, photo: StubLocator | null): Page {
+    const sidebar = locator({
+      locator: (selector: string) => {
+        if (selector === '[data-profile-avatar="initial"]' && initial !== null) return initial;
+        if (selector === '[data-profile-avatar="image"]' && photo !== null) return photo;
+        return locator({ count: async () => 0 });
+      },
+    });
+    return pageOf({ getByTestId: () => sidebar });
+  }
+
+  it("reads the initial fallback", async () => {
+    const page = sidebarPage(locator({ innerText: async () => " O " }), null);
+    const driver = new WebNewDriver(page);
+    expect(await driver.profileSidebarAvatar()).toEqual({ kind: "initial", initial: "O" });
+  });
+
+  it("reads the photo src attribute without depending on the load", async () => {
+    const page = sidebarPage(null, locator({ getAttribute: async () => "https://api.test/api/assets/v2/static/a-1/" }));
+    const driver = new WebNewDriver(page);
+    expect(await driver.profileSidebarAvatar()).toEqual({
+      kind: "image",
+      src: "https://api.test/api/assets/v2/static/a-1/",
+    });
+  });
+
+  it("refuses a sidebar with neither marker", async () => {
+    const driver = new WebNewDriver(sidebarPage(null, null));
+    await expect(driver.profileSidebarAvatar()).rejects.toThrow("neither an avatar image nor an initial");
   });
 });
