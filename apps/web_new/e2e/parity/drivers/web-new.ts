@@ -25044,19 +25044,91 @@ export class WebNewDriver implements ParityDriver {
   // --- Profile-settings assistant/upkeep/integrations stubs (NEWFRONT-428,
   // --- PROF-021..025, PROF-027, PROF-028). The area gate implements these
   // --- against apps/web_new; until then every method throws todo().
+  /** Mount reads per assistant-family tab (PROF-027 settle). */
+  private static readonly SETTINGS_TAB_MOUNT: Record<
+    "ai-assistant" | "auto-project-management" | "integrations",
+    { reads: RegExp; count: number }
+  > = {
+    // LLM config, dictation config, tool-server registry.
+    "ai-assistant": { reads: /\/api\/users\/me\/ai-assistant\//, count: 3 },
+    // Upkeep switches.
+    "auto-project-management": { reads: /\/api\/users\/me\/auto-pm\//, count: 1 },
+    // GitHub-app status.
+    integrations: { reads: /\/api\/users\/me\/integrations\//, count: 1 },
+  };
+
+  /** Lenient cap on the mount-read wait; the content markers are the hard gate. */
+  private static readonly SETTINGS_TAB_READ_WAIT_MS = 15_000;
+
   async settingsProfileOpenTab(
     tab: "ai-assistant" | "auto-project-management" | "integrations",
     cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    // Shell settle only; the tab-content actions carry their own waits.
-    await this.settingsProfileGoto(`/settings/profile/${tab}`, cookies);
+    await this.settingsProfileOpenTabSettled(tab, cookies);
   }
   async settingsProfileOpenTabWithQuery(
     tab: "ai-assistant" | "auto-project-management" | "integrations",
     query: string,
     cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    await this.settingsProfileGoto(`/settings/profile/${tab}?${query}`, cookies);
+    await this.settingsProfileOpenTabSettled(tab, cookies, query);
+  }
+
+  private async settingsProfileOpenTabSettled(
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[],
+    query?: string
+  ): Promise<void> {
+    // Mirror the oracle's openSettled: the idle-read probe starts its
+    // watch the moment OpenTab returns, so OpenTab must return only after
+    // the tab's mount reads have resolved — shell paint alone catches
+    // them mid-flight (the assistant tab fires three). The counter
+    // attaches before navigation; the content markers are the hard gate
+    // and the read wait is lenient, as on the oracle side.
+    const { reads, count } = WebNewDriver.SETTINGS_TAB_MOUNT[tab];
+    let seen = 0;
+    let release!: () => void;
+    const mountReads = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onResponse = (response: { url(): string; request(): { method(): string } }): void => {
+      if (response.request().method() === "GET" && reads.test(response.url())) {
+        seen += 1;
+        if (seen >= count) release();
+      }
+    };
+    this.page.on("response", onResponse as (response: never) => void);
+    try {
+      await this.settingsProfileGoto(
+        query === undefined ? `/settings/profile/${tab}` : `/settings/profile/${tab}?${query}`,
+        cookies
+      );
+      await this.settingsProfileAwaitTabContent(tab);
+      await Promise.race([
+        mountReads,
+        this.page.waitForTimeout(WebNewDriver.SETTINGS_TAB_READ_WAIT_MS).then(() => undefined),
+      ]);
+    } finally {
+      this.page.removeListener("response", onResponse as (response: never) => void);
+    }
+  }
+
+  /** Content markers proving a tab's mount reads resolved (shared with the Facts waits). */
+  private async settingsProfileAwaitTabContent(
+    tab: "ai-assistant" | "auto-project-management" | "integrations"
+  ): Promise<void> {
+    if (tab === "ai-assistant") {
+      const section = this.page.getByTestId("assistant-llm");
+      await section.locator("#assistant-llm-model").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+      await this.page.getByTestId("assistant-tools").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    } else if (tab === "auto-project-management") {
+      await this.page.getByTestId("upkeep-settings-page").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await this.page
+        .locator('#integrations-workspace, [data-testid="github-app-panel"], [data-testid="integrations-no-admin"]')
+        .first()
+        .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    }
   }
   async settingsProfileCurrentPath(): Promise<string> {
     return new URL(this.page.url()).pathname;
@@ -25065,16 +25137,20 @@ export class WebNewDriver implements ParityDriver {
     return new URL(this.page.url()).search.replace(/^\?/, "");
   }
   async settingsProfileLastToast(): Promise<{ title: string; message: string } | null> {
-    // Cards append in arrival order, so the last one is the newest; its
-    // lines are the title first, then the body.
+    // Toasts prepend newest-first (same as the oracle stack), so the
+    // first non-blank card is the latest; its lines are the title first,
+    // then the body.
     const cards = this.page.getByTestId("toast-notification");
-    if ((await cards.count()) === 0) return null;
-    const lines = ((await cards.last().innerText()) ?? "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    if (lines.length === 0) return null;
-    return { title: lines[0]!, message: lines.slice(1).join(" ") };
+    const total = await cards.count();
+    for (let index = 0; index < total; index += 1) {
+      const lines = ((await cards.nth(index).innerText()) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (lines.length === 0) continue;
+      return { title: lines[0]!, message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
   async settingsProfileAssistantFacts(): Promise<{
     provider: string;

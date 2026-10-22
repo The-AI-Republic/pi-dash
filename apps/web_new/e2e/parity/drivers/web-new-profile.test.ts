@@ -71,6 +71,8 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
     locator: () => locator(),
     keyboard: { press: async () => undefined },
     waitForTimeout: async () => undefined,
+    on: () => undefined,
+    removeListener: () => undefined,
     viewportSize: () => ({ width: 1280, height: 720 }),
     ...overrides,
   } as unknown as Page;
@@ -640,6 +642,49 @@ describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
     await driver.settingsProfileOpenTabWithQuery("ai-assistant", "keep=1", []);
     expect(goto).toHaveBeenNthCalledWith(1, "/settings/profile/integrations", { waitUntil: "domcontentloaded" });
     expect(goto).toHaveBeenNthCalledWith(2, "/settings/profile/ai-assistant?keep=1", { waitUntil: "domcontentloaded" });
+  });
+
+  it("returns only after the tab mount reads resolve, then detaches the counter", async () => {
+    const handlers: Record<string, (...args: never[]) => void> = {};
+    const removeListener = vi.fn();
+    let releaseFallback!: () => void;
+    const fallback = new Promise<void>((resolve) => {
+      releaseFallback = resolve;
+    });
+    const { page } = settingsPage({
+      on: (event: string, handler: (...args: never[]) => void) => {
+        handlers[event] = handler;
+      },
+      removeListener,
+      waitForTimeout: () => fallback,
+    });
+    const driver = new WebNewDriver(page);
+    const opened = driver.settingsProfileOpenTab("ai-assistant", []);
+    await Promise.resolve();
+    const respond = handlers["response"];
+    expect(respond).toBeDefined();
+    const get = (url: string) => ({ url: () => url, request: () => ({ method: () => "GET" }) }) as never;
+    // Non-matching traffic never advances the counter.
+    respond!(get("https://app.test/api/users/me/") as never);
+    respond!({
+      url: () => "https://app.test/api/users/me/ai-assistant/config/",
+      request: () => ({ method: () => "PUT" }),
+    } as never);
+    respond!(get("https://app.test/api/users/me/ai-assistant/config/") as never);
+    respond!(get("https://app.test/api/users/me/ai-assistant/stt-config/") as never);
+    respond!(get("https://app.test/api/users/me/ai-assistant/mcp-servers/") as never);
+    // The third mount read releases OpenTab without the fallback.
+    await opened;
+    expect(removeListener).toHaveBeenCalledWith("response", respond);
+    releaseFallback();
+  });
+
+  it("releases through the fallback when mount reads never arrive", async () => {
+    const removeListener = vi.fn();
+    const { page } = settingsPage({ removeListener, waitForTimeout: async () => undefined });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpenTab("auto-project-management", []);
+    expect(removeListener).toHaveBeenCalledTimes(1);
   });
 
   it("reads the shell, loader, path and query", async () => {
@@ -1247,8 +1292,11 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
   }
 
   it("reads the newest toast as title plus body with absent twins", async () => {
+    // Newest-first: the first card wins even with an older twin behind it.
+    const texts = [" Saved \n AI provider configuration updated. \n", " Save failed \n Invalid configuration \n"];
     const cards = locator({
-      last: () => locator({ innerText: async () => " Saved \n AI provider configuration updated. \n" }),
+      count: async () => texts.length,
+      nth: (index: number) => locator({ innerText: async () => texts[index] ?? "" }),
     });
     const driver = new WebNewDriver(pageOf({ getByTestId: () => cards }));
     expect(await driver.settingsProfileLastToast()).toEqual({
@@ -1257,8 +1305,18 @@ describe("settings assistant (NEWFRONT-586, PROF-021..023)", () => {
     });
     const bare = new WebNewDriver(pageOf({ getByTestId: () => locator({ count: async () => 0 }) }));
     expect(await bare.settingsProfileLastToast()).toBeNull();
+    const blankFirst = locator({
+      count: async () => 2,
+      nth: (index: number) =>
+        locator({ innerText: async () => (index === 0 ? "  " : " Saved \n AI provider configuration updated. \n") }),
+    });
+    const skipped = new WebNewDriver(pageOf({ getByTestId: () => blankFirst }));
+    expect(await skipped.settingsProfileLastToast()).toEqual({
+      title: "Saved",
+      message: "AI provider configuration updated.",
+    });
     const blank = new WebNewDriver(
-      pageOf({ getByTestId: () => locator({ last: () => locator({ innerText: async () => "  " }) }) })
+      pageOf({ getByTestId: () => locator({ nth: () => locator({ innerText: async () => "  " }) }) })
     );
     expect(await blank.settingsProfileLastToast()).toBeNull();
   });
