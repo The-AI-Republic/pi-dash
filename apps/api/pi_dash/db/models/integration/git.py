@@ -282,7 +282,11 @@ class GitWebhookDelivery(BaseModel):
     event = models.CharField(max_length=100)
     action = models.CharField(max_length=100, blank=True, default="")
     repository = models.ForeignKey(
-        "db.GitRepository", related_name="webhook_deliveries", null=True, blank=True, on_delete=models.SET_NULL
+        "db.GitRepository",
+        related_name="webhook_deliveries",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
     )
     raw_headers = models.JSONField(default=dict)
     payload = models.JSONField(default=dict)

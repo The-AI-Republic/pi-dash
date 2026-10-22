@@ -77,7 +77,8 @@ class GitProviderAccountListCreateEndpoint(BaseAPIView):
             return Response({"error": "token is required"}, status=status.HTTP_400_BAD_REQUEST)
         auth_type = (request.data.get("auth_type") or "pat").strip()
         host_url = (
-            request.data.get("host_url") or ("https://github.com" if provider == "github" else _gitlab_host())
+            request.data.get("host_url")
+            or ("https://github.com" if provider == "github" else _gitlab_host())
         ).rstrip("/")
         try:
             account = create_provider_account(

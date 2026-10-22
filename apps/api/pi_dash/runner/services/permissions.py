@@ -86,13 +86,26 @@ def filter_runs_usable_by_runner(qs, runner):
     Private runners can process work initiated by their owner, work already
     billed to their owner, issue work involving their owner, or project
     scheduler work explicitly authored by their owner.
+
+    The assignee clause traverses the ``IssueAssignee`` through-model
+    explicitly rather than the ``Issue.assignees`` M2M. ``IssueAssignee`` is
+    a ``SoftDeleteModel`` and the un-assign path (issue serializer) only
+    stamps ``deleted_at``; a plain M2M join ignores that column, so going
+    through the M2M would keep granting execution rights to every user ever
+    assigned to the issue. ``deleted_at__isnull=True`` sits in the same
+    ``Q``/``filter()`` call as the owner match so both conditions bind to the
+    same joined row.
     """
     if runner.visibility == Visibility.PRIVATE:
         from pi_dash.db.models.issue import Issue
         from pi_dash.db.models.scheduler import SchedulerBinding
 
         visible_issue = Issue.objects.filter(pk=OuterRef("work_item_id")).filter(
-            Q(created_by_id=runner.owner_id) | Q(assignees__id=runner.owner_id)
+            Q(created_by_id=runner.owner_id)
+            | Q(
+                issue_assignee__assignee_id=runner.owner_id,
+                issue_assignee__deleted_at__isnull=True,
+            )
         )
         visible_scheduler = SchedulerBinding.objects.filter(
             pk=OuterRef("scheduler_binding_id"),

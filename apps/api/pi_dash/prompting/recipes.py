@@ -30,8 +30,11 @@ KIND_DIRECT = "direct"
 RECIPES: dict[str, tuple[str, ...]] = {
     KIND_CODING_TASK: (
         "intro",
+        "repo-context",
+        "relationships",
         "session-framing",
         "pidash-cli",
+        "task-lifecycle",
         "default-posture",
         "autonomy",
         "state-routing",
@@ -43,19 +46,30 @@ RECIPES: dict[str, tuple[str, ...]] = {
         "workpad-template",
         "ending-run",
     ),
+    # Review and test share the lifecycle, the repo/PR block, the inlined
+    # workpad, and the blocking flow with the coding task — every section
+    # their own text cross-references (design §8.2).
     KIND_REVIEW: (
         "review-intro",
+        "repo-context",
         "session-framing",
         "pidash-cli",
+        "task-lifecycle",
+        "workpad-context",
         "review-cycle",
+        "blocking",
         "guardrails",
         "ending-run",
     ),
     KIND_TEST: (
         "test-intro",
+        "repo-context",
         "session-framing",
         "pidash-cli",
+        "task-lifecycle",
+        "workpad-context",
         "test-cycle",
+        "blocking",
         "guardrails",
         "ending-run",
     ),
@@ -98,6 +112,7 @@ CLOUD_RECIPES: dict[str, tuple[str, ...]] = {
     ),
     KIND_SCHEDULER: (
         "cloud-scheduler-intro",
+        "cloud-project-context",
         "cloud-capabilities",
         "cloud-scheduler-task",
         "cloud-scheduler-loop",

@@ -22,7 +22,14 @@ class S3Storage(S3Boto3Storage):
 
     """S3 storage class to generate presigned URLs for S3 objects"""
 
-    def __init__(self, request=None):
+    def __init__(self, request=None, is_server=False):
+        # ``is_server`` selects the MinIO endpoint used to sign requests.
+        # When True, sign against the internal ``AWS_S3_ENDPOINT_URL`` (e.g.
+        # ``http://pi-dash-minio:9000``) for server-to-server access. When
+        # False (the default, and what browser/CLI clients need), sign against
+        # the public host the client reached us on so the presigned URL is
+        # reachable from outside the container network.
+        self.is_server = is_server
         # Get the AWS credentials and bucket name from config (env-sourced).
         self.aws_access_key_id = get_config("AWS_ACCESS_KEY_ID", None)
         # Use the AWS_SECRET_ACCESS_KEY environment variable for the secret key
@@ -42,13 +49,20 @@ class S3Storage(S3Boto3Storage):
                 endpoint_protocol = "https"
             else:
                 endpoint_protocol = request.scheme if request else "http"
+            # Sign against the internal endpoint for server-to-server callers,
+            # otherwise against the public host the client reached us on so the
+            # presigned URL is usable from outside the container network.
+            if request is not None and not is_server:
+                minio_endpoint_url = f"{endpoint_protocol}://{request.get_host()}"
+            else:
+                minio_endpoint_url = self.aws_s3_endpoint_url
             # Create an S3 client for MinIO
             self.s3_client = boto3.client(
                 "s3",
                 aws_access_key_id=self.aws_access_key_id,
                 aws_secret_access_key=self.aws_secret_access_key,
                 region_name=self.aws_region,
-                endpoint_url=(f"{endpoint_protocol}://{request.get_host()}" if request else self.aws_s3_endpoint_url),
+                endpoint_url=minio_endpoint_url,
                 config=boto3.session.Config(signature_version="s3v4"),
             )
         else:

@@ -240,3 +240,53 @@ def test_dispatch_coding_run(world, member_ctx, mocker):
     assert res["dispatched"] is True
     assert res["run_id"] == str(fake_run.id)
     assert res["new_state"] == "In Progress"
+
+
+@pytest.fixture
+def child_issue(world):
+    from pi_dash.tests.contract.assistant.conftest import _issue
+
+    child = _issue(world.proj_a, world.admin, "Child task", seq=3, state=world.in_progress)
+    child.parent = world.issue_a
+    child.priority = "high"
+    child.save(created_by_id=world.admin.id)
+    return child
+
+
+def test_list_issues_unfiltered_is_project_scoped(world, member_ctx, child_issue):
+    ctx, *_ = member_ctx
+    result = issues.list_issues(ctx, project_id=str(world.proj_a.id))
+    ids = {r["id"] for r in result["results"]}
+    assert ids == {str(world.issue_a.id), str(world.guest_issue.id), str(child_issue.id)}
+    assert str(world.issue_b.id) not in ids
+
+
+def test_list_issues_filters(world, member_ctx, child_issue):
+    ctx, *_ = member_ctx
+    pid = str(world.proj_a.id)
+
+    def ids(**kw):
+        return {r["id"] for r in issues.list_issues(ctx, project_id=pid, **kw)["results"]}
+
+    assert ids(state="in progress") == {str(child_issue.id)}
+    assert ids(state=str(world.todo.id)) == {str(world.issue_a.id), str(world.guest_issue.id)}
+    assert ids(state_group="unstarted") == {str(world.issue_a.id), str(world.guest_issue.id)}
+    assert ids(parent_issue_id=str(world.issue_a.id)) == {str(child_issue.id)}
+    assert ids(parent_issue_id=f"ALP-{world.issue_a.sequence_id}") == {str(child_issue.id)}
+    assert ids(parent_issue_id="null") == {str(world.issue_a.id), str(world.guest_issue.id)}
+    assert ids(priority="high") == {str(child_issue.id)}
+    assert ids(state="Todo", priority="high") == set()
+
+
+def test_list_issues_unknown_state_name_retries(world, member_ctx):
+    ctx, *_ = member_ctx
+    with pytest.raises(ModelRetry, match="Valid states: In Progress, Todo"):
+        issues.list_issues(ctx, project_id=str(world.proj_a.id), state="Nope")
+
+
+def test_list_issues_denied_for_unseen_project_with_or_without_filters(world, member_ctx):
+    ctx, *_ = member_ctx  # member is not in project B
+    with pytest.raises(_scoping.ToolNotFound):
+        issues.list_issues(ctx, project_id=str(world.proj_b.id))
+    with pytest.raises(_scoping.ToolNotFound):
+        issues.list_issues(ctx, project_id=str(world.proj_b.id), state_group="backlog", priority="none")

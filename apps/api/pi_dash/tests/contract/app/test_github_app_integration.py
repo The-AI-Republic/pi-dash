@@ -124,7 +124,8 @@ def test_github_app_install_start_creates_session(session_client, workspace):
     url = reverse("github-app-install-start")
 
     with patch(
-        "pi_dash.app.views.integration.github.require_github_app_config", return_value=_github_app_config()
+        "pi_dash.app.views.integration.github.require_github_app_config",
+        return_value=_github_app_config(),
     ) as require_config:
         response = session_client.post(url, {"workspace_slug": workspace.slug}, format="json")
 
