@@ -686,15 +686,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async visibleIssueNames(): Promise<string[]> {
-    // Scaffold-tier selector: each row is an article whose second span
-    // carries the issue name (key first, priority badge last).
-    const rows = this.page.locator('section[aria-label="Issue list"] article');
-    const count = await rows.count();
-    const names: string[] = [];
-    for (let i = 0; i < count; i++) {
-      names.push(((await rows.nth(i).locator("span").nth(1).innerText()) ?? "").trim());
-    }
-    return names;
+    // Mirror the oracle reader (drivers/web): every non-blank paragraph
+    // in the content area, in order. On the issues page those are the
+    // row titles (link paragraphs); headings, counts and controls are
+    // headings, buttons and generics, never paragraphs (NEWFRONT-662).
+    const texts = await this.page.getByRole("main").locator("p").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
