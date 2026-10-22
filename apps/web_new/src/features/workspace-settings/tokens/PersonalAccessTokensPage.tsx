@@ -12,6 +12,7 @@ import { Button, EmptyState, Spinner } from "@pidash/kit";
 import { KeyRound } from "lucide-react";
 import * as React from "react";
 
+import { useMe } from "../../../core/session/index.js";
 import { usePersonalTokens } from "./api.js";
 import { CreateTokenDialog } from "./CreateTokenDialog.js";
 import {
@@ -44,6 +45,8 @@ export interface PersonalAccessTokensPageProps {
 export function PersonalAccessTokensPage({ now = new Date() }: PersonalAccessTokensPageProps): React.ReactElement {
   const [createOpen, setCreateOpen] = React.useState(false);
   const tokens = usePersonalTokens();
+  const me = useMe();
+  const timeZone = me.data?.user_timezone ?? "UTC";
 
   const add = (
     <Button variant="primary" onClick={() => setCreateOpen(true)}>
@@ -84,10 +87,10 @@ export function PersonalAccessTokensPage({ now = new Date() }: PersonalAccessTok
           </Button>
         </div>
       ) : (
-        <TokenList tokens={tokens.data} now={now} />
+        <TokenList tokens={tokens.data} now={now} timeZone={timeZone} />
       )}
 
-      <CreateTokenDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <CreateTokenDialog open={createOpen} onClose={() => setCreateOpen(false)} timeZone={timeZone} />
     </section>
   );
 }

@@ -30993,104 +30993,391 @@ export class WebNewDriver implements ParityDriver {
   // --- Personal access tokens oracle (NEWFRONT-413, WSET-025..028).
   // --- Appended; existing methods above are untouched per the shared
   // --- driver contract.
-  async wsSettingsApiTokenOpenTokens(_cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsApiTokenOpenTokens");
+  private wsSettingsApiTokenDialog(): Locator {
+    return this.page.getByRole("dialog").first();
   }
-  async wsSettingsApiTokenOpenViaSidebar(_cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsApiTokenOpenViaSidebar");
+
+  private async wsSettingsApiTokenWaitForCreateForm(): Promise<void> {
+    // The title field, not the dialog shell: only the field proves the
+    // form is back after a reveal close.
+    await this.page.getByPlaceholder("Title", { exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private wsSettingsApiTokenExpiryTrigger(): Locator {
+    // The expiry select renders first among the dialog buttons in every
+    // form state (before the custom-date button when one shows).
+    return this.wsSettingsApiTokenDialog().getByRole("button").first();
+  }
+
+  private wsSettingsApiTokenRowScope(label: string): Locator {
+    // Token labels render as level-5 headings, unique to token rows on
+    // this page; the heading's grandparent is the row container.
+    return this.page.getByRole("heading", { level: 5, name: label, exact: true }).locator("xpath=../..");
+  }
+
+  private static wsSettingsApiTokenDayLabel(date: Date): string {
+    // Day-picker day buttons carry full-date accessible names ("Tuesday,
+    // October 20th, 2026").
+    const weekday = date.toLocaleString("en-US", { weekday: "long" });
+    const month = date.toLocaleString("en-US", { month: "long" });
+    const day = date.getDate();
+    const ordinal =
+      day % 100 >= 11 && day % 100 <= 13
+        ? `${day}th`
+        : day % 10 === 1
+          ? `${day}st`
+          : day % 10 === 2
+            ? `${day}nd`
+            : day % 10 === 3
+              ? `${day}rd`
+              : `${day}th`;
+    return `${weekday}, ${month} ${ordinal}, ${date.getFullYear()}`;
+  }
+
+  private async wsSettingsApiTokenWaitForContent(): Promise<void> {
+    // Settle on content, not the header: the header (with its Add button)
+    // paints while the list is still resolving.
+    await this.page
+      .getByRole("heading", { level: 5 })
+      .first()
+      .or(this.page.getByText("No Personal token yet", { exact: true }))
+      .waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async wsSettingsApiTokenOpenTokens(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/api-tokens", cookies);
+    await this.wsSettingsApiTokenWaitForContent();
+  }
+  async wsSettingsApiTokenOpenViaSidebar(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated("/settings/profile/general", cookies);
+    const entry = this.page
+      .getByTestId("profile-settings-sidebar")
+      .getByRole("link", { name: "Personal Access Tokens", exact: true });
+    await entry.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    // Poll, not waitForURL: the tab switch is a same-document push that
+    // usually lands before a navigation wait attaches.
+    await expect
+      .poll(() => this.page.url(), { timeout: WebNewDriver.WAIT_MS })
+      .toMatch(/\/settings\/profile\/api-tokens\/?$/);
+    await this.wsSettingsApiTokenWaitForContent();
   }
   async wsSettingsApiTokenHeading(): Promise<string | null> {
-    return todo("wsSettingsApiTokenHeading");
+    const heading = this.page.getByRole("heading", { name: "Personal Access Tokens", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = (((await heading.textContent().catch(() => null)) ?? "").trim() || null) as string | null;
+    return text;
   }
   async wsSettingsApiTokenAddVisible(): Promise<boolean> {
-    return todo("wsSettingsApiTokenAddVisible");
+    const add = this.page.getByRole("button", { name: "Add personal access token", exact: true }).first();
+    return (await add.count()) > 0 && (await add.isVisible().catch(() => false));
   }
   async wsSettingsApiTokenLoaderSeen(): Promise<boolean> {
-    return todo("wsSettingsApiTokenLoaderSeen");
+    // Call after OpenTokens: the session cookies the earlier navigation
+    // planted carry this reload, and the route hold keeps the loader up
+    // long enough to observe.
+    const pattern = "**/api/users/api-tokens/";
+    // Hold the list read behind a gate instead of a fixed window: the
+    // loader stays up until the observation below releases it, so a slow
+    // chunk load cannot slip the whole pending phase past the wait.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await this.page.route(pattern, (route) => {
+      if (route.request().method() === "GET") {
+        // The lazy chunk load can remount the page and abort a held read,
+        // so a released-after-abort continue is ignored, never reported.
+        void gate.then(() => route.continue().catch(() => undefined));
+      } else {
+        void route.continue().catch(() => undefined);
+      }
+    });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await this.page.goto("/settings/profile/api-tokens", { timeout: 60_000 });
+        const seen = await this.page
+          .getByTestId("api-tokens-loader")
+          .first()
+          .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS })
+          .then(
+            () => true,
+            () => false
+          );
+        if (seen) {
+          release();
+          await this.wsSettingsApiTokenWaitForContent();
+          return true;
+        }
+        // No loader: content without one is an honest false, but a blank
+        // page means the boot itself stalled under load — reload once and
+        // re-observe rather than verdicting on a page that never booted.
+        const booted =
+          (await this.page
+            .getByRole("heading", { level: 5 })
+            .first()
+            .or(this.page.getByText("No Personal token yet", { exact: true }))
+            .count()
+            .catch(() => 0)) > 0;
+        if (booted || attempt === 1) {
+          release();
+          if (booted) await this.wsSettingsApiTokenWaitForContent();
+          return false;
+        }
+      }
+      release();
+      return false;
+    } finally {
+      release();
+      await this.page.unroute(pattern);
+    }
   }
   async wsSettingsApiTokenEmptyVisible(): Promise<boolean> {
-    return todo("wsSettingsApiTokenEmptyVisible");
+    const title = this.page.getByText("No Personal token yet", { exact: true }).first();
+    const action = this.page.getByRole("button", { name: "Add API token", exact: true }).first();
+    return (
+      (await title.count()) > 0 &&
+      (await action.count()) > 0 &&
+      (await title.isVisible().catch(() => false)) &&
+      (await action.isVisible().catch(() => false))
+    );
   }
   async wsSettingsApiTokenEmptyCreate(): Promise<void> {
-    return todo("wsSettingsApiTokenEmptyCreate");
+    await this.page
+      .getByRole("button", { name: "Add API token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsApiTokenWaitForCreateForm();
   }
   async wsSettingsApiTokenOpenCreate(): Promise<void> {
-    return todo("wsSettingsApiTokenOpenCreate");
+    await this.page
+      .getByRole("button", { name: "Add personal access token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsApiTokenWaitForCreateForm();
   }
   async wsSettingsApiTokenRows(): Promise<WsSettingsApiTokenRow[]> {
-    return todo("wsSettingsApiTokenRows");
+    await this.wsSettingsApiTokenWaitForContent();
+    const heads = this.page.getByRole("heading", { level: 5 });
+    const count = await heads.count();
+    const rows: WsSettingsApiTokenRow[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const head = heads.nth(index);
+      const label = ((await head.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+      const scope = head.locator("xpath=../..");
+      const spans = (await scope.locator("span").allTextContents()).map((t) => t.trim());
+      const active = spans.includes("Active");
+      const paras = (await scope.locator("p").allTextContents()).map((t) => t.trim().replace(/\s+/g, " "));
+      const expiryLine = paras.find((t) => /^(Expires |Never expires|Expired )/.test(t)) ?? "";
+      const description = paras.find((t) => t !== "" && t !== expiryLine) ?? null;
+      rows.push({ label, active, expiryLine, description });
+    }
+    return rows;
   }
   async wsSettingsApiTokenPageText(): Promise<string> {
-    return todo("wsSettingsApiTokenPageText");
+    return (
+      (await this.page
+        .locator("main")
+        .last()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
   async wsSettingsApiTokenDialogOpen(): Promise<boolean> {
-    return todo("wsSettingsApiTokenDialogOpen");
+    const title = this.page.getByPlaceholder("Title", { exact: true }).first();
+    return (await title.count()) > 0 && (await title.isVisible().catch(() => false));
   }
-  async wsSettingsApiTokenFillTitle(_title: string): Promise<void> {
-    return todo("wsSettingsApiTokenFillTitle");
+  async wsSettingsApiTokenFillTitle(title: string): Promise<void> {
+    await this.page.getByPlaceholder("Title", { exact: true }).fill(title);
   }
-  async wsSettingsApiTokenFillDescription(_text: string): Promise<void> {
-    return todo("wsSettingsApiTokenFillDescription");
+  async wsSettingsApiTokenFillDescription(text: string): Promise<void> {
+    await this.page.getByPlaceholder("Description", { exact: true }).fill(text);
   }
   async wsSettingsApiTokenTitleError(): Promise<string | null> {
-    return todo("wsSettingsApiTokenTitleError");
+    const error = this.wsSettingsApiTokenDialog()
+      .getByText(/Title (is required|should be less than 255 characters)/)
+      .first();
+    if ((await error.count()) === 0) return null;
+    const text = ((await error.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
   }
   async wsSettingsApiTokenPresetOptions(): Promise<string[]> {
-    return todo("wsSettingsApiTokenPresetOptions");
+    await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const options = this.page.getByRole("option");
+    await options.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const labels = (await options.allTextContents()).map((t) => t.trim().replace(/\s+/g, " "));
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    return labels;
   }
-  async wsSettingsApiTokenPickPreset(_label: string): Promise<void> {
-    return todo("wsSettingsApiTokenPickPreset");
+  async wsSettingsApiTokenPickPreset(label: string): Promise<void> {
+    await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
   }
   async wsSettingsApiTokenExpiryTriggerText(): Promise<string> {
-    return todo("wsSettingsApiTokenExpiryTriggerText");
+    return (
+      (await this.wsSettingsApiTokenExpiryTrigger()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
   }
   async wsSettingsApiTokenExpiryTriggerDisabled(): Promise<boolean> {
-    return todo("wsSettingsApiTokenExpiryTriggerDisabled");
+    return this.wsSettingsApiTokenExpiryTrigger().isDisabled();
   }
   async wsSettingsApiTokenExpiryPreview(): Promise<string | null> {
-    return todo("wsSettingsApiTokenExpiryPreview");
+    const preview = this.wsSettingsApiTokenDialog()
+      .getByText(/^Expires /)
+      .first();
+    if ((await preview.count()) === 0) return null;
+    const text = ((await preview.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
   }
   async wsSettingsApiTokenToggleNeverExpires(): Promise<void> {
-    return todo("wsSettingsApiTokenToggleNeverExpires");
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Never expires", { exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async wsSettingsApiTokenPickCustomDayNextMonth(_day: string): Promise<void> {
-    return todo("wsSettingsApiTokenPickCustomDayNextMonth");
+  async wsSettingsApiTokenPickCustomDayNextMonth(day: string): Promise<void> {
+    await this.wsSettingsApiTokenPickPreset("Custom");
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Set date", { exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const cells = this.page.locator('[role="gridcell"]');
+    await cells.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Go to the Next Month" }).click({ timeout: WebNewDriver.WAIT_MS });
+    const now = new Date();
+    const target = new Date(now.getFullYear(), now.getMonth() + 1, Number(day));
+    await this.page
+      .getByRole("button", { name: WebNewDriver.wsSettingsApiTokenDayLabel(target) })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    await this.wsSettingsApiTokenDialog()
+      .getByText(/^Expires /)
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async wsSettingsApiTokenCustomFloor(): Promise<{ todayDisabled: boolean; tomorrowEnabled: boolean }> {
-    return todo("wsSettingsApiTokenCustomFloor");
+    await this.wsSettingsApiTokenPickPreset("Custom");
+    await this.wsSettingsApiTokenDialog()
+      .getByText("Set date", { exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const cells = this.page.locator('[role="gridcell"]');
+    await cells.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const today = new Date();
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    const todayDisabled = await this.page
+      .getByRole("button", { name: WebNewDriver.wsSettingsApiTokenDayLabel(today) })
+      .isDisabled();
+    const tomorrowEnabled = !(await this.page
+      .getByRole("button", { name: WebNewDriver.wsSettingsApiTokenDayLabel(tomorrow) })
+      .isDisabled());
+    await this.page.keyboard.press("Escape");
+    await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
+    return { todayDisabled, tomorrowEnabled };
   }
   async wsSettingsApiTokenSubmit(): Promise<void> {
-    return todo("wsSettingsApiTokenSubmit");
+    await this.page
+      .getByRole("button", { name: "Generate token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async wsSettingsApiTokenSubmitAndCaptureBackup(): Promise<WsSettingsApiTokenBackup> {
-    return todo("wsSettingsApiTokenSubmitAndCaptureBackup");
+    const [download] = await Promise.all([
+      this.page.waitForEvent("download", { timeout: 60_000 }),
+      this.page.getByRole("button", { name: "Generate token", exact: true }).click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const stream = await download.createReadStream();
+    if (!stream) throw new Error("[parity] token backup download produced no bytes.");
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+    return { fileName: download.suggestedFilename(), content: Buffer.concat(chunks).toString("utf8") };
   }
   async wsSettingsApiTokenCancelCreate(): Promise<void> {
-    return todo("wsSettingsApiTokenCancelCreate");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("button", { name: "Generate token", exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
   async wsSettingsApiTokenRevealHeading(): Promise<string | null> {
-    return todo("wsSettingsApiTokenRevealHeading");
+    const heading = this.page.getByRole("heading", { name: "Key created", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
+    return text === "" ? null : text;
   }
   async wsSettingsApiTokenRevealValue(): Promise<string | null> {
-    return todo("wsSettingsApiTokenRevealValue");
+    const secret = this.page.getByTestId("token-secret").first();
+    if ((await secret.count()) === 0) return null;
+    const text = ((await secret.innerText().catch(() => null)) ?? "").trim() ?? "";
+    return /pi_dash_api_[0-9a-f]+/.exec(text)?.[0] ?? null;
   }
   async wsSettingsApiTokenRevealExpiryLine(): Promise<string | null> {
-    return todo("wsSettingsApiTokenRevealExpiryLine");
+    const text =
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? "";
+    const line = text
+      .split("\n")
+      .map((part) => part.trim().replace(/\s+/g, " "))
+      .find((part) => /^(Expires |Never expires$)/.test(part));
+    return line ?? null;
   }
   async wsSettingsApiTokenRevealCopy(): Promise<string> {
-    return todo("wsSettingsApiTokenRevealCopy");
+    // Copying writes to the clipboard, which headless Chromium denies
+    // without an explicit grant; arrange it before the click.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.wsSettingsApiTokenDialog()
+      .getByRole("button", { name: "Copy token", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), { timeout: WebNewDriver.WAIT_MS })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
   async wsSettingsApiTokenRevealClose(): Promise<void> {
-    return todo("wsSettingsApiTokenRevealClose");
+    await this.page.getByRole("button", { name: "Close", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("heading", { name: "Key created", exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
-  async wsSettingsApiTokenDeleteDialogText(_label: string): Promise<string> {
-    return todo("wsSettingsApiTokenDeleteDialogText");
+  private async wsSettingsApiTokenOpenDeleteDialog(label: string): Promise<void> {
+    // The delete control renders only while its row is hovered.
+    const scope = this.wsSettingsApiTokenRowScope(label);
+    await scope.hover({ timeout: WebNewDriver.WAIT_MS });
+    await scope.getByRole("button", { name: `Delete ${label}`, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("button", { name: "Delete", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+  async wsSettingsApiTokenDeleteDialogText(label: string): Promise<string> {
+    await this.wsSettingsApiTokenOpenDeleteDialog(label);
+    return (
+      (await this.wsSettingsApiTokenDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
   }
   async wsSettingsApiTokenDeleteCancel(): Promise<void> {
-    return todo("wsSettingsApiTokenDeleteCancel");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("button", { name: "Delete", exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
-  async wsSettingsApiTokenDeleteConfirm(_label: string): Promise<void> {
-    return todo("wsSettingsApiTokenDeleteConfirm");
+  async wsSettingsApiTokenDeleteConfirm(label: string): Promise<void> {
+    await this.wsSettingsApiTokenOpenDeleteDialog(label);
+    await this.page.getByRole("button", { name: "Delete", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect
+      .poll(() => this.page.getByRole("heading", { level: 5, name: label, exact: true }).count(), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .toBe(0);
   }
 
   // --- Project settings General tab (NEWFRONT-389, PSET-005–012). Throwing

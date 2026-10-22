@@ -18,9 +18,11 @@ import { isExpiredToken, rowDescription, rowExpiryLine, TOKEN_DELETE_TITLE } fro
 export interface TokenListProps {
   tokens: readonly PersonalApiToken[];
   now?: Date | undefined;
+  /** Member timezone for the expiry lines (UTC until the member picks one). */
+  timeZone?: string | undefined;
 }
 
-export function TokenList({ tokens, now = new Date() }: TokenListProps): React.ReactElement {
+export function TokenList({ tokens, now = new Date(), timeZone = "UTC" }: TokenListProps): React.ReactElement {
   const [pendingDelete, setPendingDelete] = React.useState<PersonalApiToken | null>(null);
   const remove = useDeletePersonalToken();
 
@@ -51,7 +53,7 @@ export function TokenList({ tokens, now = new Date() }: TokenListProps): React.R
             {rowDescription(token) === null ? null : (
               <p className="text-meta col-start-1 text-(--text-muted)">{rowDescription(token)}</p>
             )}
-            <p className="text-meta col-start-1 text-(--text-muted)">{rowExpiryLine(token, now)}</p>
+            <p className="text-meta col-start-1 text-(--text-muted)">{rowExpiryLine(token, now, timeZone)}</p>
           </li>
         ))}
       </ul>

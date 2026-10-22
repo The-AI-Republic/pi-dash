@@ -40,6 +40,8 @@ export interface CreateTokenDialogProps {
   open: boolean;
   onClose: () => void;
   now?: Date | undefined;
+  /** Member timezone for the reveal and preview lines (UTC until the member picks one). */
+  timeZone?: string | undefined;
 }
 
 async function writeClipboard(text: string): Promise<void> {
@@ -49,7 +51,12 @@ async function writeClipboard(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
-export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps): React.ReactElement {
+export function CreateTokenDialog({
+  open,
+  onClose,
+  now,
+  timeZone = "UTC",
+}: CreateTokenDialogProps): React.ReactElement {
   const create = useCreatePersonalToken();
   const queryClient = useQueryClient();
   const [draft, setDraft] = React.useState<TokenDraft>(emptyTokenDraft);
@@ -106,7 +113,7 @@ export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps
               tokenBackupCsv({
                 title: created.label,
                 description: created.description,
-                expiry: revealExpiryLine(created.expired_at),
+                expiry: revealExpiryLine(created.expired_at, timeZone),
                 secret: created.token,
               })
             );
@@ -120,7 +127,7 @@ export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps
   }
 
   if (phase.kind === "reveal") {
-    return <RevealTokenDialog created={phase.created} onClose={close} />;
+    return <RevealTokenDialog created={phase.created} onClose={close} timeZone={timeZone} />;
   }
 
   return (
@@ -158,7 +165,12 @@ export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps
           value={draft.description}
           onChange={(event) => setDraft({ ...draft, description: event.target.value })}
         />
-        <TokenExpiryControls draft={draft} onChange={setDraft} {...(now === undefined ? {} : { now })} />
+        <TokenExpiryControls
+          draft={draft}
+          onChange={setDraft}
+          timeZone={timeZone}
+          {...(now === undefined ? {} : { now })}
+        />
       </div>
     </Dialog>
   );
@@ -167,10 +179,11 @@ export function CreateTokenDialog({ open, onClose, now }: CreateTokenDialogProps
 interface RevealTokenDialogProps {
   created: CreatedPersonalApiToken;
   onClose: () => void;
+  timeZone: string;
 }
 
 /** The one-time secret step: copy first, then explicit Close. */
-function RevealTokenDialog({ created, onClose }: RevealTokenDialogProps): React.ReactElement {
+function RevealTokenDialog({ created, onClose, timeZone }: RevealTokenDialogProps): React.ReactElement {
   const [copied, setCopied] = React.useState(false);
   const copy = (): void => {
     writeClipboard(created.token)
@@ -207,7 +220,7 @@ function RevealTokenDialog({ created, onClose }: RevealTokenDialogProps): React.
             {copied ? <Check size={16} strokeWidth={1.5} /> : <Copy size={16} strokeWidth={1.5} />}
           </IconButton>
         </div>
-        <p className="text-body text-(--text-muted)">{revealExpiryLine(created.expired_at)}</p>
+        <p className="text-body text-(--text-muted)">{revealExpiryLine(created.expired_at, timeZone)}</p>
         <p className="text-meta text-(--text-muted)">A backup file has been downloaded for you.</p>
       </div>
     </Dialog>

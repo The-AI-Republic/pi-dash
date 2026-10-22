@@ -102,15 +102,22 @@ describe("calendar floor", () => {
 
 describe("expiry wording", () => {
   it("renders a human line for an instant and the never fallback", () => {
-    expect(expiryLine("2030-06-15T12:00:00Z")).toMatch(/^Expires Jun 15, 2030 at \d{2}:00$/);
+    expect(expiryLine("2030-06-15T12:00:00Z")).toBe("Expires Jun 15, 2030 at 12:00");
     expect(expiryLine(null)).toBe("Never expires");
     expect(expiryLine(undefined)).toBe("Never expires");
     expect(expiryLine("not-a-date")).toBe("Never expires");
   });
 
+  it("renders the line in the member timezone, defaulting to UTC", () => {
+    expect(expiryLine("2030-06-15T12:00:00Z", "Pacific/Kiritimati")).toBe("Expires Jun 16, 2030 at 02:00");
+    expect(expiryLine("2030-06-15T12:00:00Z", "Pacific/Midway")).toBe("Expires Jun 15, 2030 at 01:00");
+    expect(expiryLine("2031-03-10T09:30:00Z")).toBe("Expires Mar 10, 2031 at 09:30");
+  });
+
   it("uses the same line for the reveal", () => {
     expect(revealExpiryLine(null)).toBe("Never expires");
     expect(revealExpiryLine("2030-06-15T12:00:00Z")).toBe(expiryLine("2030-06-15T12:00:00Z"));
+    expect(revealExpiryLine("2030-06-15T12:00:00Z", "Pacific/Kiritimati")).toBe("Expires Jun 16, 2030 at 02:00");
   });
 
   it("describes how long ago an expired token lapsed", () => {

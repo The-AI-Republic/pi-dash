@@ -28,6 +28,7 @@ interface StubLocator {
   getByRole?: (role: string, options?: unknown) => StubLocator;
   getByTestId?: (id: string) => StubLocator;
   getByText?: (text: string, options?: unknown) => StubLocator;
+  or?: (other: StubLocator) => StubLocator;
   locator?: (selector: string) => StubLocator;
   filter?: (options?: unknown) => StubLocator;
   [key: string]: unknown;
@@ -52,6 +53,7 @@ function locator(overrides: Partial<StubLocator> = {}): Locator {
     getByRole: () => node,
     getByTestId: () => node,
     getByText: () => node,
+    or: () => node,
     locator: () => node,
     filter: () => node,
   };
@@ -65,6 +67,7 @@ function pageOf(overrides: Partial<Record<string, unknown>> = {}): Page {
   return {
     getByTestId: () => locator(),
     getByRole: () => locator(),
+    getByText: () => locator(),
     locator: () => locator(),
     keyboard: { press: async () => undefined },
     waitForTimeout: async () => undefined,
@@ -1776,5 +1779,377 @@ describe("settings upkeep and integrations (NEWFRONT-586, PROF-024..025)", () =>
       pageOf({ locator: () => locator({ evaluate: async () => "" }), waitForFunction: async () => undefined })
     );
     await expect(missing.settingsProfileIntegrationsSelect("nope")).rejects.toThrow("has no option");
+  });
+});
+
+describe("workspace settings api tokens (NEWFRONT-586, PROF-020)", () => {
+  const COOKIES = [{ name: "session", value: "s", domain: "app.test", path: "/" }];
+
+  function authedPage(overrides: Record<string, unknown> = {}): { page: Page; goto: ReturnType<typeof vi.fn> } {
+    const goto = vi.fn(async () => undefined);
+    const page = pageOf({
+      context: () => ({ addCookies: async () => undefined }),
+      goto,
+      waitForLoadState: async () => undefined,
+      url: () => "https://app.test/settings/profile/api-tokens",
+      ...overrides,
+    });
+    return { page, goto };
+  }
+
+  it("opens tokens directly and via the sidebar entry", async () => {
+    const click = vi.fn(async () => undefined);
+    const { page, goto } = authedPage({
+      getByTestId: () => locator({ getByRole: () => locator({ click }) }),
+      getByRole: () => locator({ click }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsApiTokenOpenTokens(COOKIES);
+    expect(goto).toHaveBeenCalledWith("/settings/profile/api-tokens", { waitUntil: "domcontentloaded" });
+    await driver.wsSettingsApiTokenOpenViaSidebar(COOKIES);
+    expect(goto).toHaveBeenCalledWith("/settings/profile/general", { waitUntil: "domcontentloaded" });
+    expect(click).toHaveBeenCalled();
+  });
+
+  it("reads the heading and add control with absent twins", async () => {
+    const page = pageOf({
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({ textContent: async () => (options?.["name"] as string) ?? "" }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenHeading()).toBe("Personal Access Tokens");
+    expect(await driver.wsSettingsApiTokenAddVisible()).toBe(true);
+    const bare = new WebNewDriver(pageOf({ getByRole: () => locator({ count: async () => 0 }) }));
+    expect(await bare.wsSettingsApiTokenHeading()).toBeNull();
+    expect(await bare.wsSettingsApiTokenAddVisible()).toBe(false);
+  });
+
+  it("observes the loader behind a held list read", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const { page, goto } = authedPage({
+      route,
+      unroute,
+      getByTestId: () => locator(),
+      getByRole: () => locator(),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenLoaderSeen()).toBe(true);
+    expect(route).toHaveBeenCalledWith("**/api/users/api-tokens/", expect.any(Function));
+    expect(goto).toHaveBeenCalledWith("/settings/profile/api-tokens", { timeout: 60_000 });
+    expect(unroute).toHaveBeenCalledWith("**/api/users/api-tokens/");
+  });
+
+  it("reloads once on a stalled boot before verdicting no loader", async () => {
+    const route = vi.fn(async () => undefined);
+    const unroute = vi.fn(async () => undefined);
+    const { page, goto } = authedPage({
+      route,
+      unroute,
+      getByTestId: () =>
+        locator({ first: () => locator({ waitFor: async () => Promise.reject(new Error("missed")) }) }),
+      getByRole: () => locator({ count: async () => 0, first: () => locator({ count: async () => 0 }) }),
+      getByText: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenLoaderSeen()).toBe(false);
+    expect(goto).toHaveBeenCalledTimes(2);
+    expect(unroute).toHaveBeenCalledWith("**/api/users/api-tokens/");
+  });
+
+  it("detects the empty state and opens the create form from both actions", async () => {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByText: () => locator(),
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push(options?.["name"] as string);
+              },
+            }),
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+        }),
+      getByPlaceholder: () => locator(),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenEmptyVisible()).toBe(true);
+    await driver.wsSettingsApiTokenEmptyCreate();
+    await driver.wsSettingsApiTokenOpenCreate();
+    expect(clicks).toEqual(["Add API token", "Add personal access token"]);
+    const bare = new WebNewDriver(pageOf({ getByText: () => locator({ count: async () => 0 }) }));
+    expect(await bare.wsSettingsApiTokenEmptyVisible()).toBe(false);
+  });
+
+  it("reads rows with liveness, expiry and description", async () => {
+    const rows = [
+      { label: "a", spans: ["a", "Active"], paras: ["first token", "Expires Mar 10, 2031 at 09:30"] },
+      { label: "b", spans: ["b"], paras: ["Never expires"] },
+    ];
+    const page = pageOf({
+      getByRole: () =>
+        locator({
+          count: async () => rows.length,
+          nth: (index: number) => {
+            const row = rows[index]!;
+            const scope = locator({
+              locator: (selector: string) =>
+                locator({
+                  allTextContents: async () => (selector === "span" ? row.spans : row.paras),
+                }),
+            });
+            return locator({
+              textContent: async () => row.label,
+              locator: () => scope,
+            });
+          },
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenRows()).toEqual([
+      { label: "a", active: true, expiryLine: "Expires Mar 10, 2031 at 09:30", description: "first token" },
+      { label: "b", active: false, expiryLine: "Never expires", description: null },
+    ]);
+    expect(await driver.wsSettingsApiTokenPageText()).toBe("");
+  });
+
+  it("drives the create form fields and reads title errors", async () => {
+    const fills: Array<[string, string]> = [];
+    const page = pageOf({
+      getByPlaceholder: (text: string) =>
+        locator({
+          fill: async (value: string) => {
+            fills.push([text, value]);
+          },
+        }),
+      getByRole: () =>
+        locator({
+          getByText: () => locator({ textContent: async () => "Title is required" }),
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenDialogOpen()).toBe(true);
+    await driver.wsSettingsApiTokenFillTitle("t");
+    await driver.wsSettingsApiTokenFillDescription("d");
+    expect(fills).toEqual([
+      ["Title", "t"],
+      ["Description", "d"],
+    ]);
+    expect(await driver.wsSettingsApiTokenTitleError()).toBe("Title is required");
+    const bare = new WebNewDriver(
+      pageOf({
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ getByText: () => locator({ count: async () => 0 }) }),
+      })
+    );
+    expect(await bare.wsSettingsApiTokenDialogOpen()).toBe(false);
+    expect(await bare.wsSettingsApiTokenTitleError()).toBeNull();
+  });
+
+  it("lists presets, picks one and reads the trigger with its preview", async () => {
+    const clicks: string[] = [];
+    const options = ["1 week", "1 month", "3 months", "1 year", "Custom"];
+    const page = pageOf({
+      keyboard: { press: async () => undefined },
+      getByRole: (role: string, opts?: Record<string, unknown>) => {
+        if (role === "option" && opts === undefined) {
+          return locator({
+            allTextContents: async () => options,
+            first: () => locator(),
+            count: async () => (clicks.length === 0 ? 5 : 0),
+          });
+        }
+        if (role === "option") {
+          return locator({
+            click: async () => {
+              clicks.push(opts?.["name"] as string);
+            },
+          });
+        }
+        return locator({
+          first: () =>
+            locator({
+              click: async () => {
+                clicks.push("trigger");
+              },
+              innerText: async () => "1 week",
+              isDisabled: async () => false,
+              getByText: () => locator({ textContent: async () => "Expires Oct 29, 2026 at 07:21" }),
+            }),
+          getByText: () => locator({ textContent: async () => "Expires Oct 29, 2026 at 07:21" }),
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenPresetOptions()).toEqual(options);
+    await driver.wsSettingsApiTokenPickPreset("1 week");
+    expect(clicks).toContain("1 week");
+    expect(await driver.wsSettingsApiTokenExpiryTriggerText()).toBe("1 week");
+    expect(await driver.wsSettingsApiTokenExpiryTriggerDisabled()).toBe(false);
+    expect(await driver.wsSettingsApiTokenExpiryPreview()).toBe("Expires Oct 29, 2026 at 07:21");
+    await driver.wsSettingsApiTokenToggleNeverExpires();
+    const bare = new WebNewDriver(
+      pageOf({ getByRole: () => locator({ getByText: () => locator({ count: async () => 0 }) }) })
+    );
+    expect(await bare.wsSettingsApiTokenExpiryPreview()).toBeNull();
+  });
+
+  it("labels calendar days with ordinals and floors custom picks at tomorrow", async () => {
+    const picked: string[] = [];
+    const disabled: Record<string, boolean> = {};
+    const today = new Date();
+    const fmt = (date: Date): string => {
+      const day = date.getDate();
+      const suffix =
+        day % 100 >= 11 && day % 100 <= 13
+          ? "th"
+          : day % 10 === 1
+            ? "st"
+            : day % 10 === 2
+              ? "nd"
+              : day % 10 === 3
+                ? "rd"
+                : "th";
+      return `${date.toLocaleString("en-US", { weekday: "long" })}, ${date.toLocaleString("en-US", { month: "long" })} ${day}${suffix}, ${date.getFullYear()}`;
+    };
+    disabled[fmt(today)] = true;
+    const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+    disabled[fmt(tomorrow)] = false;
+    const page = pageOf({
+      keyboard: { press: async () => undefined },
+      locator: () => locator({ count: async () => 0, first: () => locator() }),
+      getByRole: (role: string, opts?: Record<string, unknown>) => {
+        const name = opts?.["name"] as string | undefined;
+        if (role === "option" && opts === undefined) return locator({ first: () => locator(), count: async () => 0 });
+        return locator({
+          first: () => locator({ click: async () => undefined }),
+          click: async () => {
+            picked.push(name ?? role);
+          },
+          isDisabled: async () => disabled[name ?? ""] ?? false,
+        });
+      },
+      getByText: () => locator({ click: async () => undefined }),
+    });
+    const driver = new WebNewDriver(page);
+    const floor = await driver.wsSettingsApiTokenCustomFloor();
+    expect(floor).toEqual({ todayDisabled: true, tomorrowEnabled: true });
+    await driver.wsSettingsApiTokenPickCustomDayNextMonth("15");
+    const target = new Date(today.getFullYear(), today.getMonth() + 1, 15);
+    expect(picked).toContain(fmt(target));
+  });
+
+  it("submits, captures the backup download and cancels the form", async () => {
+    const clicks: string[] = [];
+    const download = {
+      suggestedFilename: () => "secret-key-123.csv",
+      createReadStream: async () =>
+        (async function* () {
+          yield Buffer.from("Title,Description,Expiry,Secret key\nt,d,Never expires,pi_dash_api_abc\n");
+        })(),
+    };
+    const page = pageOf({
+      waitForEvent: async () => download,
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+          count: async () => 0,
+        }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.wsSettingsApiTokenSubmit();
+    const backup = await driver.wsSettingsApiTokenSubmitAndCaptureBackup();
+    expect(backup.fileName).toBe("secret-key-123.csv");
+    expect(backup.content).toContain("pi_dash_api_abc");
+    await driver.wsSettingsApiTokenCancelCreate();
+    expect(clicks).toEqual(["Generate token", "Generate token", "Cancel"]);
+  });
+
+  it("reads the reveal, copies the secret and closes it", async () => {
+    const granted: string[][] = [];
+    const clicks: string[] = [];
+    let closed = false;
+    const dialog = locator({
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            clicks.push(options?.["name"] as string);
+          },
+        }),
+      innerText: async () => "Key created\npi_dash_api_abc\nExpires Jun 15, 2030 at 12:00\n",
+    });
+    const page = pageOf({
+      context: () => ({ grantPermissions: async (perms: string[]) => granted.push(perms) }),
+      evaluate: async () => "pi_dash_api_abc",
+      getByTestId: () => locator({ innerText: async () => "pi_dash_api_abc" }),
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        const name = options?.["name"] as string | undefined;
+        if (role === "heading")
+          return locator({ textContent: async () => "Key created", count: async () => (closed ? 0 : 1) });
+        if (role === "dialog") return dialog;
+        return locator({
+          click: async () => {
+            if (name === "Close") closed = true;
+            clicks.push(name ?? role);
+          },
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.wsSettingsApiTokenRevealHeading()).toBe("Key created");
+    expect(await driver.wsSettingsApiTokenRevealValue()).toBe("pi_dash_api_abc");
+    expect(await driver.wsSettingsApiTokenRevealExpiryLine()).toBe("Expires Jun 15, 2030 at 12:00");
+    expect(await driver.wsSettingsApiTokenRevealCopy()).toBe("pi_dash_api_abc");
+    expect(granted).toEqual([["clipboard-read", "clipboard-write"]]);
+    await driver.wsSettingsApiTokenRevealClose();
+    expect(clicks).toContain("Copy token");
+    expect(clicks).toContain("Close");
+    const bare = new WebNewDriver(
+      pageOf({
+        getByTestId: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0, innerText: async () => "" }),
+      })
+    );
+    expect(await bare.wsSettingsApiTokenRevealHeading()).toBeNull();
+    expect(await bare.wsSettingsApiTokenRevealValue()).toBeNull();
+    expect(await bare.wsSettingsApiTokenRevealExpiryLine()).toBeNull();
+  });
+
+  it("confirms and cancels deletion behind the row hover", async () => {
+    const actions: string[] = [];
+    const row = locator({
+      hover: async () => {
+        actions.push("hover");
+      },
+      getByRole: (_role: string, options?: Record<string, unknown>) =>
+        locator({
+          click: async () => {
+            actions.push(options?.["name"] as string);
+          },
+        }),
+    });
+    const page = pageOf({
+      getByRole: (role: string, options?: Record<string, unknown>) => {
+        if (role === "heading") return locator({ locator: () => row, count: async () => 0 });
+        return locator({
+          click: async () => {
+            actions.push(options?.["name"] as string);
+          },
+          count: async () => 0,
+          innerText: async () => "Delete personal access token\nThis cannot be undone.\n",
+        });
+      },
+    });
+    const driver = new WebNewDriver(page);
+    const text = await driver.wsSettingsApiTokenDeleteDialogText("doomed");
+    expect(text).toContain("cannot be undone");
+    await driver.wsSettingsApiTokenDeleteCancel();
+    await driver.wsSettingsApiTokenDeleteConfirm("doomed");
+    expect(actions).toEqual(["hover", "Delete doomed", "Cancel", "hover", "Delete doomed", "Delete"]);
   });
 });

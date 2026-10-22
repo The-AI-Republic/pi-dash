@@ -183,6 +183,7 @@ export interface TokenExpiryControlsProps {
   draft: TokenDraft;
   onChange: (next: TokenDraft) => void;
   now?: Date | undefined;
+  timeZone?: string | undefined;
 }
 
 /** The complete expiry block: select, custom day, toggle and preview. */
@@ -190,6 +191,7 @@ export function TokenExpiryControls({
   draft,
   onChange,
   now = new Date(),
+  timeZone = "UTC",
 }: TokenExpiryControlsProps): React.ReactElement {
   const [presetOpen, setPresetOpen] = React.useState(false);
   const [customOpen, setCustomOpen] = React.useState(false);
@@ -274,7 +276,7 @@ export function TokenExpiryControls({
       </div>
 
       {expiry === undefined || draft.neverExpires ? null : (
-        <p className="text-meta text-(--text-muted)">{expiryLine(expiry)}</p>
+        <p className="text-meta text-(--text-muted)">{expiryLine(expiry, timeZone)}</p>
       )}
     </div>
   );
