@@ -628,3 +628,90 @@ def posthog_sink():
     sink.start(config.POSTHOG_SINK_BASE)
     yield sink
     sink.stop()
+
+
+class HostileLengthSink:
+    """Raw-socket sink answering a huge Content-Length, then closing (PIDASHCONV-1273).
+
+    ``BaseHTTPRequestHandler`` cannot emit a malformed framing (it always
+    pairs Content-Length with a body), so this sink speaks bare TCP: it
+    reads one request's headers, replies with the configured status line
+    plus ``Content-Length: 1000000000000`` and no body, and closes.
+    A bounded client reports a transport error (EOF before the promised
+    bytes); a client that preallocates from the header aborts instead.
+
+    Ephemeral port, context-manager scoped (one hostile URL per test);
+    the accept loop serves connections until closed so a retried
+    delivery hits the same hostile framing.
+    """
+
+    def __init__(self, length: int = 1_000_000_000_000, status: str = "200 OK"):
+        self._length = length
+        self._status = status
+        self.requests: list[bytes] = []
+        self._lock = threading.Lock()
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind(("127.0.0.1", 0))
+        self._server.listen(16)
+        self._server.settimeout(0.5)
+        self.host, self.port = self._server.getsockname()[:2]
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def _serve(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                conn, _ = self._server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(5)
+                    raw = b""
+                    while b"\r\n\r\n" not in raw:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        raw += chunk
+                    with self._lock:
+                        self.requests.append(raw)
+                    conn.sendall(
+                        f"HTTP/1.1 {self._status}\r\n"
+                        f"Content-Length: {self._length}\r\n"
+                        "Connection: close\r\n\r\n".encode("ascii")
+                    )
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def connection_count(self) -> int:
+        with self._lock:
+            return len(self.requests)
+
+    def wait_for_count(self, n: int, what: str = "hostile deliveries") -> int:
+        return wait_for_condition(
+            lambda: self.connection_count() if self.connection_count() >= n else None,
+            what=what,
+        )
+
+    def close(self) -> None:
+        self._stopped.set()
+        try:
+            self._server.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=10)
+
+    def __enter__(self) -> "HostileLengthSink":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()

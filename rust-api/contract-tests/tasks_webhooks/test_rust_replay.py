@@ -109,7 +109,7 @@ from _harness import config, rust_queue
 from _harness import seed as seed_helpers
 from _harness.db import insert_row
 from _harness.db import snapshot, wait_for_condition as wait_for
-from _harness.sinks import WildcardHttpProbe
+from _harness.sinks import HostileLengthSink, WildcardHttpProbe
 from psycopg.types.json import Json
 
 M = "pi_dash.bgtasks"
@@ -230,6 +230,97 @@ def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink
     )
     assert row["retry_count"] == 0
     assert str(row["response_status"]) == "500"
+
+
+def test_rust_webhook_send_hostile_content_length_retries_locally(
+    db_conn, broker_url, webhook_sink
+):
+    """Hostile Content-Length, Rust side: failure row + requeue, worker alive (PIDASHCONV-1273).
+
+    Mirrors ``test_webhook_send_hostile_content_length_logs_failure_and_retries``:
+    the sink answers ``Content-Length: 1000000000000`` and closes. The
+    client must report a transport error (EOF before the promised
+    bytes) — not abort the worker on a 1 TB preallocation — so the
+    handler logs the failure row (500, ``retry_count`` 0) and the
+    worker requeues with the Celery backoff (the row returns to
+    ``queued`` with ``attempts`` bumped). A follow-up send to the
+    healthy sink proves the worker survived. The requeued row is
+    deleted at teardown so its jittered refire (up to 600s out) cannot
+    pollute later tests. A fast jitter draw may refire before the
+    delete lands, so the requeue poll accepts ``attempts >= 1`` and
+    the row assertions pin the first attempt.
+    """
+    with HostileLengthSink() as hostile:
+        owner = seed_helpers.user(db_conn, "rust-replay-hostile-owner")
+        workspace = seed_helpers.workspace(db_conn, "rustreplayhostile", owner["id"])
+        hook = seed_helpers.webhook(
+            db_conn,
+            workspace["id"],
+            f"{hostile.url}/hook/{uuid.uuid4().hex}",
+            issue=True,
+        )
+        hook = dict(hook)
+        hook["workspace_slug"] = workspace["slug"]
+        before = snapshot(db_conn, ["webhook_logs"])
+        celery_id = rust_queue.publish(
+            WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-hostile")
+        )
+        hostile.wait_for_count(1, what="hostile webhook POST")
+        rows = wait_for(
+            lambda: [
+                row
+                for row in _log_diff_rows(db_conn, before)
+                if "rust-replay-hostile" in row["request_body"]
+            ]
+            or None,
+            what="hostile-length webhook_logs row",
+        )
+        first = min(rows, key=lambda row: row["retry_count"])
+        assert first["retry_count"] == 0
+        assert str(first["response_status"]) == "500"
+        assert first["response_headers"] == ""
+        assert first["response_body"]
+
+        def _requeued():
+            with db_conn.cursor() as cur:
+                cur.execute(
+                    "SELECT status, attempts FROM rust_job_queue WHERE celery_id = %s",
+                    (celery_id,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                return None
+            status, attempts = row
+            if status == "queued" and attempts >= 1:
+                return (status, attempts)
+            return None
+
+        assert wait_for(_requeued, what="requeued retry row") is not None
+        with db_conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM rust_job_queue WHERE celery_id = %s", (celery_id,)
+            )
+
+    # The worker survived the hostile delivery: a follow-up send to the
+    # healthy sink executes end to end.
+    hook = _seed_sink_hook(db_conn)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-hostile-liveness")
+    )
+    rust_queue.wait_for_settled(celery_id, what="post-hostile send settled")
+    webhook_sink.wait_for_count(1, what="post-hostile webhook POST")
+    alive = wait_for(
+        lambda: [
+            row
+            for row in _log_diff_rows(db_conn, before)
+            if "rust-replay-hostile-liveness" in row["request_body"]
+        ]
+        or None,
+        what="post-hostile webhook_logs row",
+    )
+    assert str(alive[0]["response_status"]) == "200"
 
 
 def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_sink):
