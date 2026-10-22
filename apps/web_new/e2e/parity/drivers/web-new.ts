@@ -19138,109 +19138,330 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Analytics shell, scoping, permissions (NEWFRONT-375, ANL-001..004 + ANL-018). ---
 
-  async analyticsOpenTab(_workspaceSlug: string, _tabId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("analyticsOpenTab");
+  /** Settle the analytics shell: tabs render, or the no-project empty view does. */
+  private async analyticsAwaitShell(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          if (document.querySelector("[role='tab']") !== null) return true;
+          return document.querySelector('[data-testid="analytics-empty"]') !== null;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics shell settled on neither tabs nor the empty view.");
+      });
   }
 
-  async analyticsOpenRoot(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("analyticsOpenRoot");
+  async analyticsOpenTab(workspaceSlug: string, tabId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/analytics/${tabId}`, cookies);
+    await this.analyticsAwaitShell();
+  }
+
+  async analyticsOpenRoot(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.openAuthenticated(`/${workspaceSlug}/analytics`, cookies);
+    await this.page.waitForURL("**/analytics/**", { timeout: WebNewDriver.WAIT_MS });
+    await this.analyticsAwaitShell();
   }
 
   async analyticsCurrentPath(): Promise<string> {
-    return todo("analyticsCurrentPath");
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
   }
 
   async analyticsTabIds(): Promise<string[]> {
-    return todo("analyticsTabIds");
+    const triggers = this.page.getByRole("tab");
+    const count = await triggers.count();
+    const ids: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const id = await triggers.nth(index).getAttribute("data-tab-id");
+      if (id !== null && id !== "") ids.push(id);
+    }
+    return ids;
   }
 
   async analyticsSelectedTab(): Promise<string | null> {
-    return todo("analyticsSelectedTab");
+    return this.page.evaluate(() => {
+      const tabs = [...document.querySelectorAll("[role='tab']")];
+      const selected = tabs.find((tab) => tab.getAttribute("aria-selected") === "true");
+      return selected?.getAttribute("data-tab-id") ?? null;
+    });
   }
 
-  async analyticsSelectTab(_tabId: string): Promise<void> {
-    return todo("analyticsSelectTab");
+  async analyticsSelectTab(tabId: string): Promise<void> {
+    const trigger = this.page.getByTestId(`analytics-tab-${tabId}`);
+    if ((await trigger.count()) === 0) throw new Error(`[parity] analytics has no tab ${JSON.stringify(tabId)}.`);
+    await trigger.first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(`**/analytics/${tabId}**`, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async analyticsPanelVisible(_tabId: string): Promise<boolean> {
-    return todo("analyticsPanelVisible");
+  async analyticsPanelVisible(tabId: string): Promise<boolean> {
+    return this.page.evaluate((id) => {
+      const panel = document.getElementById(`analytics-panel-${id}`);
+      if (panel === null || (panel as HTMLElement).hidden) return false;
+      const style = window.getComputedStyle(panel);
+      return style.display !== "none" && style.visibility !== "hidden";
+    }, tabId);
   }
 
   async analyticsBreadcrumb(): Promise<string[]> {
-    return todo("analyticsBreadcrumb");
+    const crumbs = this.page.locator('[data-testid="analytics-screen"] nav[aria-label="Breadcrumb"] li');
+    const texts = await crumbs.allTextContents();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
 
   async analyticsPageTitle(): Promise<string> {
-    return todo("analyticsPageTitle");
+    return this.page.title();
   }
 
   async analyticsEmptyFacts(): Promise<AnalyticsEmptyFacts | null> {
-    return todo("analyticsEmptyFacts");
+    if ((await this.page.locator('[data-testid="analytics-empty"]').count()) === 0) return null;
+    // The creation action mounts with the view; waiting keeps the read
+    // from racing it (the null-action path below is preserved for empty
+    // views that genuinely render no action).
+    await this.page
+      .getByRole("button", { name: /create a project/i })
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return this.page.evaluate(() => {
+      const root = document.querySelector('[data-testid="analytics-empty"]');
+      if (!root) return null;
+      const heading = root.querySelector("h3");
+      const lines = heading ? [...heading.querySelectorAll(":scope > span")] : [];
+      const action = [...root.querySelectorAll("button")].find((entry) =>
+        /create a project/i.test(entry.textContent ?? "")
+      ) as HTMLButtonElement | undefined;
+      return {
+        title: (lines[0]?.textContent ?? "").trim(),
+        description: (lines[1]?.textContent ?? "").trim(),
+        actionLabel: action ? (action.textContent ?? "").trim() : null,
+        actionDisabled: action ? action.disabled : false,
+      };
+    });
   }
 
   async analyticsEmptyCreateProject(): Promise<void> {
-    return todo("analyticsEmptyCreateProject");
+    await this.page
+      .locator('[data-testid="analytics-empty"]')
+      .getByRole("button", { name: /create a project/i })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async analyticsCreateAffordances(): Promise<string[]> {
-    return todo("analyticsCreateAffordances");
+    return this.page.evaluate(() => {
+      const matches = [...document.querySelectorAll("button")].filter((entry) =>
+        /create a project/i.test(entry.textContent ?? "")
+      );
+      return matches
+        .filter((entry) => !(entry as HTMLButtonElement).disabled)
+        .map((entry) => (entry.textContent ?? "").trim())
+        .filter((text) => text !== "");
+    });
   }
 
   async analyticsPickerLabel(): Promise<string> {
-    return todo("analyticsPickerLabel");
+    const trigger = this.page.getByTestId("analytics-picker-trigger");
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await trigger.innerText({ timeout: WebNewDriver.WAIT_MS })).trim();
   }
 
   async analyticsPickerOpen(): Promise<void> {
-    return todo("analyticsPickerOpen");
+    if ((await this.page.getByRole("listbox").count()) > 0) return;
+    await this.page.getByTestId("analytics-picker-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("listbox").waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("combobox", { name: "Search projects" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async analyticsPickerClose(): Promise<void> {
-    return todo("analyticsPickerClose");
+    if ((await this.page.getByRole("listbox").count()) === 0) return;
+    await this.page.getByTestId("analytics-picker-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .waitForFunction(() => document.querySelectorAll("[role='listbox']").length === 0, {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .catch(async () => {
+        await this.page.keyboard.press("Escape");
+        await this.page.waitForFunction(() => document.querySelectorAll("[role='listbox']").length === 0, {
+          timeout: WebNewDriver.WAIT_MS,
+        });
+      });
   }
 
   async analyticsPickerOptions(): Promise<string[]> {
-    return todo("analyticsPickerOptions");
+    return this.page.evaluate(() => {
+      const listbox = document.querySelector("[role='listbox']");
+      if (!listbox) return [];
+      return [...listbox.querySelectorAll("[role='option']")]
+        .map((option) => {
+          const label = option.querySelector(":scope > span.truncate");
+          return ((label?.textContent ?? option.textContent ?? "") as string).trim();
+        })
+        .filter((text) => text !== "");
+    });
   }
 
-  async analyticsPickerSearch(_text: string): Promise<void> {
-    return todo("analyticsPickerSearch");
+  async analyticsPickerSearch(text: string): Promise<void> {
+    await this.analyticsPickerOpen();
+    await this.page.getByRole("combobox", { name: "Search projects" }).fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async analyticsPickerToggle(_name: string): Promise<void> {
-    return todo("analyticsPickerToggle");
+  async analyticsPickerToggle(name: string): Promise<void> {
+    await this.analyticsPickerOpen();
+    const option = this.page.getByRole("listbox").getByRole("option", { name, exact: true });
+    if ((await option.count()) === 0) {
+      throw new Error(`[parity] analytics picker has no option named ${JSON.stringify(name)}.`);
+    }
+    const selectedBefore = await option.first().getAttribute("aria-selected");
+    await option.first().click({ timeout: WebNewDriver.WAIT_MS });
+    // The toggle navigates the scope into the address; the label and the
+    // checked set derive from that address, so settle here rather than
+    // leaving the next read to race the router.
+    const expectSelected = selectedBefore !== "true";
+    await this.page
+      .waitForFunction(
+        (expectation: { name: string; selected: boolean }) => {
+          const options = [...document.querySelectorAll("[role='listbox'] [role='option']")];
+          const match = options.find((entry) => {
+            const label = entry.querySelector(":scope > span.truncate");
+            return ((label?.textContent ?? entry.textContent ?? "") as string).trim() === expectation.name;
+          });
+          return match?.getAttribute("aria-selected") === (expectation.selected ? "true" : "false");
+        },
+        { name, selected: expectSelected },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error(`[parity] analytics picker toggle never settled for ${JSON.stringify(name)}.`);
+      });
   }
 
   async analyticsPickerChecked(): Promise<string[]> {
-    return todo("analyticsPickerChecked");
+    return this.page.evaluate(() => {
+      const listbox = document.querySelector("[role='listbox']");
+      if (!listbox) return [];
+      return [...listbox.querySelectorAll("[role='option']")]
+        .filter((option) => option.getAttribute("aria-selected") === "true")
+        .map((option) => {
+          const label = option.querySelector(":scope > span.truncate");
+          return ((label?.textContent ?? option.textContent ?? "") as string).trim();
+        })
+        .filter((text) => text !== "");
+    });
   }
 
+  private analyticsSpyHandler: ((request: { url(): string }) => void) | null = null;
+  private analyticsSpySeen: AnalyticsApiRequest[] = [];
+
   async analyticsStartRequestSpy(): Promise<void> {
-    return todo("analyticsStartRequestSpy");
+    await this.analyticsStopRequestSpy();
+    this.analyticsSpySeen = [];
+    this.analyticsSpyHandler = (request: { url(): string }) => {
+      const raw = request.url();
+      if (!raw.includes("/advance-analytics")) return;
+      const parsed = new URL(raw);
+      this.analyticsSpySeen.push({ path: parsed.pathname, query: parsed.search.replace(/^\?/, "") });
+    };
+    this.page.on("request", this.analyticsSpyHandler as (request: never) => void);
   }
 
   async analyticsStopRequestSpy(): Promise<void> {
-    return todo("analyticsStopRequestSpy");
+    if (this.analyticsSpyHandler) {
+      this.page.off("request", this.analyticsSpyHandler as (request: never) => void);
+      this.analyticsSpyHandler = null;
+    }
   }
 
   async analyticsSpyRequests(): Promise<AnalyticsApiRequest[]> {
-    return todo("analyticsSpyRequests");
+    return [...this.analyticsSpySeen];
   }
 
-  // --- Analytics overview and work-items headline charts (NEWFRONT-376, ANL-005..009). Appended stubs.
+  // --- Analytics overview and work-items headline totals (NEWFRONT-376, ANL-005/008). ---
+
+  /** Wait until the visible headline grid shows values, not placeholders. */
+  private async analyticsAwaitHeadlines(): Promise<void> {
+    await this.page
+      .waitForFunction(
+        () => {
+          const grid = document.querySelector('[data-testid="analytics-headline-grid"]');
+          if (!grid || grid.children.length === 0) return false;
+          return grid.querySelector('[data-testid="analytics-headline-placeholder"]') === null;
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => {
+        throw new Error("[parity] analytics headline cards never settled.");
+      });
+  }
+
+  /** Cards of the visible tab's settled headline grid, in display order. */
+  private async analyticsHeadlineCards(): Promise<AnalyticsHeadlineCard[]> {
+    await this.analyticsAwaitHeadlines();
+    return this.page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="analytics-headline-card"]')].map((card) => ({
+        label: (card.querySelector('[data-testid="analytics-headline-label"]')?.textContent ?? "").trim(),
+        value: (card.querySelector('[data-testid="analytics-headline-value"]')?.textContent ?? "").trim(),
+      }))
+    );
+  }
+
   async analyticsOverviewCards(): Promise<AnalyticsHeadlineCard[]> {
-    return todo("analyticsOverviewCards");
+    return this.analyticsHeadlineCards();
   }
   async analyticsWorkItemsCards(): Promise<AnalyticsHeadlineCard[]> {
-    return todo("analyticsWorkItemsCards");
+    return this.analyticsHeadlineCards();
   }
   async analyticsHeadlinePlaceholders(): Promise<number> {
-    return todo("analyticsHeadlinePlaceholders");
+    return this.page.evaluate(() => {
+      const grid = document.querySelector('[data-testid="analytics-headline-grid"]');
+      if (!grid) return 0;
+      return grid.querySelectorAll('[data-testid="analytics-headline-placeholder"]').length;
+    });
   }
-  async analyticsTotalsStall(_tab: "overview" | "work-items"): Promise<void> {
-    return todo("analyticsTotalsStall");
+
+  /**
+   * Single route hook serving the analytics read stall gates. Slice A
+   * gates the totals reads; later slices extend this hook with their
+   * own stall sets (charts, project-stats), never a second hook.
+   */
+  private analyticsReadHookInstalled = false;
+  private analyticsTotalsStalled = new Set<string>();
+  private analyticsTotalsGates: Array<() => void> = [];
+
+  private async analyticsReadHook(): Promise<void> {
+    if (this.analyticsReadHookInstalled) return;
+    this.analyticsReadHookInstalled = true;
+    await this.page.route("**/api/workspaces/**", async (route) => {
+      const request = route.request();
+      if (request.method() === "GET") {
+        try {
+          const url = new URL(request.url());
+          const totalsPath =
+            url.pathname.endsWith("/advance-analytics/") || url.pathname.endsWith("/advance-analytics");
+          if (totalsPath && this.analyticsTotalsStalled.has(url.searchParams.get("tab") ?? "")) {
+            await new Promise<void>((resolve) => {
+              this.analyticsTotalsGates.push(resolve);
+            });
+          }
+        } catch {
+          // Unparseable URLs fall through untouched.
+        }
+      }
+      await route.fallback();
+    });
+  }
+
+  async analyticsTotalsStall(tab: "overview" | "work-items"): Promise<void> {
+    this.analyticsTotalsStalled.add(tab);
+    await this.analyticsReadHook();
   }
   async analyticsTotalsRelease(): Promise<void> {
-    return todo("analyticsTotalsRelease");
+    this.analyticsTotalsStalled.clear();
+    const gates = this.analyticsTotalsGates;
+    this.analyticsTotalsGates = [];
+    gates.forEach((release) => release());
   }
   async analyticsChartsStall(_chart: "projects" | "work-items"): Promise<void> {
     return todo("analyticsChartsStall");

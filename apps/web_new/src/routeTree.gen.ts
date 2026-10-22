@@ -53,6 +53,7 @@ import { Route as SettingsProfileIndexRouteImport } from './routes/settings/prof
 import { Route as SettingsProfileTabRouteImport } from './routes/settings/profile/$tab'
 import { Route as WsGatedAiDevMachinesIndexRouteImport } from './routes/$ws/_gated/ai-dev-machines/index'
 import { Route as WsGatedAnalyticsIndexRouteImport } from './routes/$ws/_gated/analytics/index'
+import { Route as WsGatedAnalyticsTabIdRouteImport } from './routes/$ws/_gated/analytics/$tabId'
 import { Route as WsGatedAppsIndexRouteImport } from './routes/$ws/_gated/apps/index'
 import { Route as WsGatedAssistantIndexRouteImport } from './routes/$ws/_gated/assistant/index'
 import { Route as WsGatedAssistantThreadIdRouteImport } from './routes/$ws/_gated/assistant/$threadId'
@@ -354,6 +355,11 @@ const WsGatedAiDevMachinesIndexRoute =
 const WsGatedAnalyticsIndexRoute = WsGatedAnalyticsIndexRouteImport.update({
   id: '/analytics/',
   path: '/analytics/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
+const WsGatedAnalyticsTabIdRoute = WsGatedAnalyticsTabIdRouteImport.update({
+  id: '/analytics/$tabId',
+  path: '/analytics/$tabId',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
 const WsGatedAppsIndexRoute = WsGatedAppsIndexRouteImport.update({
@@ -874,6 +880,7 @@ export interface FileRoutesByFullPath {
   '/$ws/profile/$userId': typeof WsGatedProfileUserIdRouteRouteWithChildren
   '/$ws/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/settings': typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
+  '/$ws/analytics/$tabId': typeof WsGatedAnalyticsTabIdRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/drafts/$': typeof WsGatedDraftsSplatRoute
@@ -987,6 +994,7 @@ export interface FileRoutesByTo {
   '/god-mode/runners': typeof GodModeDashboardRunnersRoute
   '/settings/profile/$tab': typeof SettingsProfileTabRoute
   '/settings/profile': typeof SettingsProfileIndexRoute
+  '/$ws/analytics/$tabId': typeof WsGatedAnalyticsTabIdRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/drafts/$': typeof WsGatedDraftsSplatRoute
@@ -1113,6 +1121,7 @@ export interface FileRoutesById {
   '/$ws/_gated/profile/$userId': typeof WsGatedProfileUserIdRouteRouteWithChildren
   '/$ws/_gated/projects/$projectId': typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   '/$ws/_gated/settings/_workspace': typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
+  '/$ws/_gated/analytics/$tabId': typeof WsGatedAnalyticsTabIdRoute
   '/$ws/_gated/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
   '/$ws/_gated/drafts/$': typeof WsGatedDraftsSplatRoute
@@ -1239,6 +1248,7 @@ export interface FileRouteTypes {
     | '/$ws/profile/$userId'
     | '/$ws/projects/$projectId'
     | '/$ws/settings'
+    | '/$ws/analytics/$tabId'
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
     | '/$ws/drafts/$'
@@ -1352,6 +1362,7 @@ export interface FileRouteTypes {
     | '/god-mode/runners'
     | '/settings/profile/$tab'
     | '/settings/profile'
+    | '/$ws/analytics/$tabId'
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
     | '/$ws/drafts/$'
@@ -1477,6 +1488,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/profile/$userId'
     | '/$ws/_gated/projects/$projectId'
     | '/$ws/_gated/settings/_workspace'
+    | '/$ws/_gated/analytics/$tabId'
     | '/$ws/_gated/assistant/$threadId'
     | '/$ws/_gated/browse/$issueKey'
     | '/$ws/_gated/drafts/$'
@@ -1891,6 +1903,13 @@ declare module '@tanstack/react-router' {
       path: '/analytics'
       fullPath: '/$ws/analytics/'
       preLoaderRoute: typeof WsGatedAnalyticsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/analytics/$tabId': {
+      id: '/$ws/_gated/analytics/$tabId'
+      path: '/analytics/$tabId'
+      fullPath: '/$ws/analytics/$tabId'
+      preLoaderRoute: typeof WsGatedAnalyticsTabIdRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/$ws/_gated/apps/': {
@@ -2675,6 +2694,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedProfileUserIdRouteRoute: typeof WsGatedProfileUserIdRouteRouteWithChildren
   WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   WsGatedSettingsWorkspaceRouteRoute: typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
+  WsGatedAnalyticsTabIdRoute: typeof WsGatedAnalyticsTabIdRoute
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
   WsGatedDraftsSplatRoute: typeof WsGatedDraftsSplatRoute
   WsGatedSettingsApiTokensRoute: typeof WsGatedSettingsApiTokensRoute
@@ -2716,6 +2736,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
     WsGatedProjectsProjectIdRouteRouteWithChildren,
   WsGatedSettingsWorkspaceRouteRoute:
     WsGatedSettingsWorkspaceRouteRouteWithChildren,
+  WsGatedAnalyticsTabIdRoute: WsGatedAnalyticsTabIdRoute,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
   WsGatedDraftsSplatRoute: WsGatedDraftsSplatRoute,
   WsGatedSettingsApiTokensRoute: WsGatedSettingsApiTokensRoute,
