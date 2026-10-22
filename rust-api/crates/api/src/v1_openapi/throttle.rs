@@ -67,6 +67,8 @@
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+use super::negotiate::{content_type, Renderer};
+
 /// DRF `scope` of the ported class (`settings/common.py:92-94`).
 pub const ANON_SCOPE: &str = "anon";
 
@@ -196,85 +198,21 @@ pub const RATE_LIMIT_CODE: u16 = 5900;
 /// See [`RATE_LIMIT_CODE`].
 pub const RATE_LIMIT_MESSAGE: &str = "RATE_LIMIT_EXCEEDED";
 
-/// Exact bytes of the 429 on `GET /api/schema/` (default YAML renderer):
-/// the rewritten dict through the OpenAPI YAML renderer (FX-OPENAPI-05
-/// `denial_renderers.yaml_429`).
-pub const DENIAL_BODY_YAML: &str = "error_code: 5900\nerror_message: RATE_LIMIT_EXCEEDED\n";
-
-/// Exact bytes of the 429 on `GET /api/schema/?format=json`: the rewritten
-/// dict through the OpenAPI JSON renderer, 4-space indent, no trailing
-/// newline (FX-OPENAPI-05 `denial_renderers.json_429`).
-pub const DENIAL_BODY_JSON: &str =
-    "{\n    \"error_code\": 5900,\n    \"error_message\": \"RATE_LIMIT_EXCEEDED\"\n}";
-
-/// Exact bytes of the 429 on the UI pages (swagger-ui, redoc): the
-/// `TemplateHTMLRenderer.get_exception_template` fallback (`'%d %s' % (429,
-/// 'Too Many Requests')`, `renderers.py:191-202`) — no `429.html` or
-/// `api_exception.html` template exists (FX-OPENAPI-05 `denial_body`).
-pub const DENIAL_BODY_UI: &str = "429 Too Many Requests";
-
-/// Content-Type of the YAML denial (FX-OPENAPI-05
-/// `denial_renderers.yaml_429`).
-pub const DENIAL_CONTENT_TYPE_YAML: &str = "application/vnd.oai.openapi; charset=utf-8";
-
-/// Content-Type of the JSON denial (FX-OPENAPI-05
-/// `denial_renderers.json_429`).
-pub const DENIAL_CONTENT_TYPE_JSON: &str = "application/vnd.oai.openapi+json";
-
-/// Content-Type of the UI-page denial: `text/html; charset=utf-8`, from
-/// `TemplateHTMLRenderer.media_type` via `Response.rendered_content`
-/// (`response.py:54-72`) — the same accepted renderer as the 200s and the
-/// 405s on these pages (FX-OPENAPI-05 `method_denials` pins the UI 405s at
-/// this content type).
-pub const DENIAL_CONTENT_TYPE_UI: &str = "text/html; charset=utf-8";
-
-/// Which renderer serializes the 429: the doc view's YAML (default) or JSON
-/// (`?format=json`) renderer, or a UI page's template renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DenialRenderer {
-    /// `GET /api/schema/` — OpenAPI YAML renderer.
-    Yaml,
-    /// `GET /api/schema/?format=json` — OpenAPI JSON renderer.
-    Json,
-    /// `GET /api/schema/swagger-ui/` and `/api/schema/redoc/`.
-    UiPage,
-}
-
-impl DenialRenderer {
-    /// The denial Content-Type for this renderer.
-    pub fn content_type(self) -> &'static str {
-        match self {
-            DenialRenderer::Yaml => DENIAL_CONTENT_TYPE_YAML,
-            DenialRenderer::Json => DENIAL_CONTENT_TYPE_JSON,
-            DenialRenderer::UiPage => DENIAL_CONTENT_TYPE_UI,
-        }
-    }
-
-    /// The exact denial body bytes for this renderer.
-    pub fn body(self) -> &'static str {
-        match self {
-            DenialRenderer::Yaml => DENIAL_BODY_YAML,
-            DenialRenderer::Json => DENIAL_BODY_JSON,
-            DenialRenderer::UiPage => DENIAL_BODY_UI,
-        }
-    }
-}
-
 /// Rejection for a throttled schema request: answers 429 with the
-/// renderer-appropriate denial bytes plus `Retry-After` (absent when `wait`
+/// negotiated renderer's denial bytes plus `Retry-After` (absent when `wait`
 /// is `None`). The view shell (`Allow`, `Vary`) is the handler layer's —
 /// see the module docs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SchemaThrottled {
-    /// Which renderer serializes the denial.
-    pub renderer: DenialRenderer,
+    /// Which renderer serializes the denial (the negotiated renderer).
+    pub renderer: Renderer,
     /// The [`throttle_wait`] output driving `Retry-After`.
     pub wait: Option<f64>,
 }
 
 impl SchemaThrottled {
     /// Build a denial for `renderer` with the given throttle wait.
-    pub fn new(renderer: DenialRenderer, wait: Option<f64>) -> Self {
+    pub fn new(renderer: Renderer, wait: Option<f64>) -> Self {
         SchemaThrottled { renderer, wait }
     }
 }
@@ -283,12 +221,12 @@ impl IntoResponse for SchemaThrottled {
     fn into_response(self) -> Response {
         let mut builder = Response::builder()
             .status(StatusCode::TOO_MANY_REQUESTS)
-            .header(header::CONTENT_TYPE, self.renderer.content_type());
+            .header(header::CONTENT_TYPE, content_type(self.renderer));
         if let Some(secs) = retry_after_secs(self.wait) {
             builder = builder.header(header::RETRY_AFTER, secs.to_string());
         }
         builder
-            .body(axum::body::Body::from(self.renderer.body()))
+            .body(axum::body::Body::from(self.renderer.denial_body()))
             .expect("static throttled response")
     }
 }
@@ -296,6 +234,7 @@ impl IntoResponse for SchemaThrottled {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v1_openapi::negotiate::{DENIAL_BODY_JSON, DENIAL_BODY_UI, DENIAL_BODY_YAML};
     use axum::body::to_bytes;
     use sha2::{Digest, Sha256};
 
@@ -511,20 +450,17 @@ mod tests {
     #[test]
     fn denial_content_types_match_fixture() {
         assert_eq!(
-            DenialRenderer::Yaml.content_type(),
+            content_type(Renderer::Yaml),
             "application/vnd.oai.openapi; charset=utf-8"
         );
         assert_eq!(
-            DenialRenderer::Json.content_type(),
+            content_type(Renderer::Json),
             "application/vnd.oai.openapi+json"
         );
-        assert_eq!(
-            DenialRenderer::UiPage.content_type(),
-            "text/html; charset=utf-8"
-        );
-        assert_eq!(DenialRenderer::Yaml.body(), DENIAL_BODY_YAML);
-        assert_eq!(DenialRenderer::Json.body(), DENIAL_BODY_JSON);
-        assert_eq!(DenialRenderer::UiPage.body(), DENIAL_BODY_UI);
+        assert_eq!(content_type(Renderer::Html), "text/html; charset=utf-8");
+        assert_eq!(Renderer::Yaml.denial_body(), DENIAL_BODY_YAML);
+        assert_eq!(Renderer::Json.denial_body(), DENIAL_BODY_JSON);
+        assert_eq!(Renderer::Html.denial_body(), DENIAL_BODY_UI);
     }
 
     /// The YAML 429 answers 429 + YAML content type + YAML body +
@@ -532,7 +468,7 @@ mod tests {
     /// handler-layer contract, see the module docs).
     #[tokio::test]
     async fn yaml_denial_response_is_byte_identical() {
-        let response = SchemaThrottled::new(DenialRenderer::Yaml, Some(58.8)).into_response();
+        let response = SchemaThrottled::new(Renderer::Yaml, Some(58.8)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 1024)
@@ -561,7 +497,7 @@ mod tests {
     /// `Retry-After`.
     #[tokio::test]
     async fn json_denial_response_is_byte_identical() {
-        let response = SchemaThrottled::new(DenialRenderer::Json, Some(31.0)).into_response();
+        let response = SchemaThrottled::new(Renderer::Json, Some(31.0)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 1024)
@@ -589,7 +525,7 @@ mod tests {
     /// `get_exception_template` fallback text + `Retry-After`.
     #[tokio::test]
     async fn ui_denial_response_is_byte_identical() {
-        let response = SchemaThrottled::new(DenialRenderer::UiPage, Some(60.0)).into_response();
+        let response = SchemaThrottled::new(Renderer::Html, Some(60.0)).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 1024)
@@ -617,7 +553,7 @@ mod tests {
     /// `Retry-After` header (`views.py:90-91`).
     #[tokio::test]
     async fn denial_without_wait_omits_retry_after() {
-        let response = SchemaThrottled::new(DenialRenderer::Yaml, None).into_response();
+        let response = SchemaThrottled::new(Renderer::Yaml, None).into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().get(header::RETRY_AFTER).is_none());
     }

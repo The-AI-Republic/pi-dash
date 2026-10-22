@@ -310,21 +310,48 @@ async fn worker(concurrency: u32) -> MainResult {
             tracing::info!("worker shutting down");
             let _ = shutdown_tx.send(true);
             // Grace period for in-flight jobs to settle and the
-            // scheduler to release its lock.
-            tokio::select! {
-                _ = &mut worker_fut => {}
-                _ = &mut scheduler_fut => {}
-                _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    tracing::warn!("shutdown grace period expired");
-                }
+            // scheduler to release its lock. Both loops must finish: a
+            // select! here would resolve when the first loop stops (the
+            // scheduler stops at once) and abort in-flight jobs with the
+            // runtime (PIDASHCONV-1326).
+            let drained = tokio::time::timeout(
+                Duration::from_secs(30),
+                async {
+                    tokio::join!(&mut worker_fut, &mut scheduler_fut);
+                },
+            )
+            .await;
+            if drained.is_err() {
+                tracing::warn!("shutdown grace period expired");
             }
         }
     }
     Ok(())
 }
 
+/// Graceful-shutdown trigger for `serve` and `worker`: SIGINT or SIGTERM.
+///
+/// `ctrl_c()` alone listens for SIGINT only, but containers stop with
+/// SIGTERM — without a SIGTERM arm the drain paths never run on redeploy
+/// (PIDASHCONV-1326): as PID 1 the kernel ignores the bare SIGTERM until
+/// SIGKILL, otherwise the default action kills the process at once. Celery
+/// (warm shutdown) and gunicorn (graceful timeout) both drain on SIGTERM;
+/// this future matches them.
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("SIGTERM handler installs");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 type MainResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -630,7 +657,9 @@ mod tests {
         tasks_cleanup::assets::register_assets(
             &mut registry,
             pool.clone(),
-            std::sync::Arc::new(tasks_cleanup::assets::UnavailableObjectStore),
+            std::sync::Arc::new(tasks_cleanup::assets::LiveS3ObjectStore::from_settings(
+                &pidash_db::config::Settings::test_defaults(),
+            )),
             std::sync::Arc::new(tasks_cleanup::assets::NoopLiveConvert),
         );
         tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());

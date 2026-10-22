@@ -209,8 +209,11 @@ pub const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 // ---------------------------------------------------------------------------
 
 /// 302 with a `Location`, mirroring `HttpResponseRedirect(url)`.
+/// Django percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`).
 pub fn redirect_response(location: &str) -> Response {
-    let Some(value) = crate::response_headers::header_value(location) else {
+    let encoded = crate::response_headers::iri_to_uri(location);
+    let Some(value) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
     let mut response = StatusCode::FOUND.into_response();

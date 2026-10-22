@@ -151,9 +151,12 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-/// `HttpResponseRedirect(url)`: 302 with a `Location` header.
+/// `HttpResponseRedirect(url)`: 302 with a `Location` header. Django
+/// percent-encodes the URL first (`iri_to_uri`,
+/// `django/http/response.py:620`).
 fn redirect_response(location: String) -> Response {
-    let Some(location) = crate::response_headers::header_value(&location) else {
+    let encoded = crate::response_headers::iri_to_uri(&location);
+    let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
     Response::builder()

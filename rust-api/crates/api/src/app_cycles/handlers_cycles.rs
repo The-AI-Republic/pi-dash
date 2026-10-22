@@ -137,7 +137,10 @@ fn owned(
 /// JSON stays DRF-unmatched — its messages carry parser positions serde
 /// cannot reproduce — documented, never hit by the suite).
 #[allow(clippy::result_large_err)]
-async fn detail_body(state: &AppState, req: axum::extract::Request) -> Result<Value, Response> {
+pub(crate) async fn detail_body(
+    state: &AppState,
+    req: axum::extract::Request,
+) -> Result<Value, Response> {
     use axum::extract::FromRequest;
     let (parts, body) = req.into_parts();
     // Same default limit as axum's `Json` (2 MiB).
@@ -501,18 +504,6 @@ async fn is_cycle_creator(
 /// body for defense in depth.
 fn parse_pk(raw: &str) -> Option<uuid::Uuid> {
     raw.parse::<uuid::Uuid>().ok()
-}
-
-/// `base_host(request, is_app=True)` (`utils/host.py:17`): `WEB_URL`
-/// else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
-fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
-        .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
-        .ok_or(Denial::ServerError)
 }
 
 /// Best-effort deferred publish (the space intake precedent): without
@@ -1927,7 +1918,7 @@ async fn cycle_create(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &id, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
-    if let Ok(origin) = request_origin(&state) {
+    if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
             model_activity_message(&id, Value::Object(object), None, &user_id, &slug, &origin),
@@ -1950,7 +1941,7 @@ async fn cycle_partial_update(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2027,7 +2018,7 @@ async fn cycle_partial_update(
     let row = fetch_cycle_by_pk(&pool, &slug, &project_id, &user_id, &now, &pk, false, false)
         .await?
         .ok_or(Denial::ServerError)?;
-    if let Ok(origin) = request_origin(&state) {
+    if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
             model_activity_message(
@@ -2194,7 +2185,7 @@ async fn cycle_retrieve(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2240,7 +2231,7 @@ async fn cycle_destroy(
     extension: Option<axum::Extension<SessionHandle>>,
     req: axum::extract::Request,
 ) -> Result<Response, Denial> {
-    if pk.parse::<uuid::Uuid>().is_err() {
+    if !super::is_canonical_uuid(&pk) {
         return Ok(crate::edge::proxy(State(state), req).await);
     }
     let resolved = actor(&state, extension).await?;
@@ -2285,7 +2276,7 @@ async fn cycle_destroy(
     .map_err(|_| Denial::ServerError)?;
     let issue_ids: Vec<uuid::Uuid> = issue_rows.into_iter().map(|row| row.0).collect();
     let now = chrono::Utc::now();
-    if let Ok(origin) = request_origin(&state) {
+    if let Some(origin) = super::activity_origin(&state) {
         enqueue_message(
             &pool,
             issue_activity_message(

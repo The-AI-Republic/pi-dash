@@ -44,7 +44,6 @@
 
 use std::collections::HashMap;
 
-use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
@@ -713,7 +712,11 @@ async fn cycle_issue_list(
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     Query(query): Query<QueryMap>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_list(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
@@ -1156,9 +1159,11 @@ async fn cycle_issue_create(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    headers: HeaderMap,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_create(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
@@ -1166,7 +1171,11 @@ async fn cycle_issue_create(
     // (DRF parses lazily), so body errors never preempt auth/gate. A
     // non-object body has no `.get` (AttributeError → 500); objects fall
     // through to the truthiness check below.
-    let data = decode_request_body(&headers, &body)?;
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 2 * 1024 * 1024)
+        .await
+        .map_err(|_| Denial::ServerError)?;
+    let data = decode_request_body(&parts.headers, &bytes)?;
     let issues_value = match data.as_object() {
         Some(_) => data.get("issues").cloned().unwrap_or(Value::Null),
         None => return Err(Denial::ServerError),
@@ -1292,12 +1301,7 @@ async fn cycle_issue_create(
         }
     }
     // `issue_activity.delay(type="cycle.activity.created", ...)` (`:281-295`).
-    let origin = state
-        .settings()
-        .urls
-        .app_base_url
-        .clone()
-        .ok_or(Denial::ServerError)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
     let updated_activity: Vec<Value> = moved
         .iter()
         .map(|(old_cycle_id, issue_id)| {
@@ -1388,17 +1392,16 @@ async fn cycle_issue_destroy(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    req: axum::extract::Request,
 ) -> HandlerResult {
+    if super::is_noncanonical_uuid(&cycle_raw) || super::is_noncanonical_uuid(&issue_raw) {
+        return Ok(crate::edge::proxy(State(state), req).await);
+    }
     let (pool, user_id, project_id) =
         cycle_issue_context(&state, &slug, &project_raw, gate_for_destroy(), extension).await?;
     let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
     let issue_id = parse_uuid_or_invalid(&issue_raw)?;
-    let origin = state
-        .settings()
-        .urls
-        .app_base_url
-        .clone()
-        .ok_or(Denial::ServerError)?;
+    let origin = super::activity_origin(&state).ok_or(Denial::ServerError)?;
     let mut kwargs = Map::new();
     kwargs.insert(
         "type".to_owned(),

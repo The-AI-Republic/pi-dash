@@ -25,9 +25,10 @@
 //! membership resolution), the SQL text for the handler-owned
 //! lookups/writes, the `convert_to_utc` mirror, the snapshot math, and
 //! the row rendering. The request-context plumbing (`Actor`, `Tenant`,
-//! `Membership`, `Denial`, [`actor`], [`resolve_tenant`],
-//! [`load_membership`]) mirrors the D-32 `app_intake` layout so sibling
-//! handler issues (PIDASHCONV-321/323/377/410) can reuse it through
+//! `Membership`, `Denial`, [`actor`], [`resolve_project_id`],
+//! [`load_project_tenant`], [`load_membership`]) mirrors the D-32
+//! `app_intake` layout so sibling handler issues
+//! (PIDASHCONV-321/323/377/410) can reuse it through
 //! `super::handlers_misc` instead of copying it.
 //!
 //! Ported bugs (translate, don't redesign):
@@ -70,7 +71,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -81,6 +82,8 @@ use uuid::Uuid;
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::state::AppState;
+use crate::v1_cycles_modules::body as shared_body;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_types::WorkspaceId;
 
@@ -160,6 +163,10 @@ pub enum Denial {
     InvalidDetail,
     /// 400, Django `IntegrityError` branch.
     InvalidPayload,
+    /// 400, `{"detail": ...}` (DRF body `ParseError`).
+    BadDetail(String),
+    /// 415, unsupported request content type.
+    UnsupportedMediaType(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -181,6 +188,14 @@ impl Denial {
             ),
             Denial::InvalidDetail => (StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY.to_owned()),
             Denial::InvalidPayload => (StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()),
+            Denial::BadDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -326,39 +341,24 @@ fn normalize_resolve_identifier(raw: &str) -> String {
     raw.trim_matches(is_py_strip_ws).to_uppercase()
 }
 
-/// Resolve `slug` + `project_id` the way the view kwargs do:
-/// `_rewrite_project_kwarg` (`app/views/base.py:49-79`) accepts a UUID
-/// or a workspace-scoped project identifier (upper-cased, like
-/// `Project.save` normalizes it). An unresolvable identifier answers
-/// `Http404("Project not found")` (`db/models/project.py:218`); a missing project row answers the
-/// `ObjectDoesNotExist` branch (which is what `convert_to_utc`'s
-/// `Project.objects.get` raises on the date-check path).
-pub async fn resolve_tenant(
+/// Resolve `slug` + `project_id` to the id the permission gate scopes on,
+/// mirroring `_rewrite_project_kwarg` (`app/views/base.py:49-79`): a UUID
+/// `project_id` is returned untouched with NO row lookup (Django returns
+/// early there, before any project query), an identifier is resolved via
+/// `Project.resolve` (`db/models/project.py:192-220`) — upper-cased like
+/// `Project.save` normalizes it — and an unresolvable identifier answers
+/// `Http404("Project not found")` (`db/models/project.py:218`).
+pub async fn resolve_project_id(
     pool: &PgPool,
     slug: &str,
     project_raw: &str,
-) -> Result<Tenant, Denial> {
+) -> Result<Uuid, Denial> {
     if let Ok(id) = project_raw.parse::<Uuid>() {
-        let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-            r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|_| Denial::ServerError)?;
-        let Some((project_id, workspace_id, timezone, estimate_id)) = row else {
-            return Err(Denial::NotFound);
-        };
-        return Ok(Tenant {
-            workspace_id,
-            project_id,
-            timezone,
-            estimate_id,
-        });
+        return Ok(id);
     }
     let upper = normalize_resolve_identifier(project_raw);
-    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
            WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
     )
     .bind(slug)
@@ -366,15 +366,33 @@ pub async fn resolve_tenant(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    match row {
-        Some((project_id, workspace_id, timezone, estimate_id)) => Ok(Tenant {
+    row.map(|row| row.0).ok_or(Denial::NotFoundDetail)
+}
+
+/// Load the project row facts the downstream view needs (`timezone`,
+/// `estimate_id`) — but only AFTER the permission gate has run, so a
+/// caller without access never learns whether the project exists.
+/// `None` when the row is missing or soft-deleted; each caller decides
+/// what a miss means (date-check 404s on it, transfer reads no estimate).
+pub async fn load_project_tenant(
+    pool: &PgPool,
+    project_id: &Uuid,
+) -> Result<Option<Tenant>, Denial> {
+    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT p.id, p.workspace_id, p.timezone, p.estimate_id FROM projects p WHERE p.id = $1 AND p.deleted_at IS NULL"#,
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(
+        row.map(|(project_id, workspace_id, timezone, estimate_id)| Tenant {
             workspace_id,
             project_id,
             timezone,
             estimate_id,
         }),
-        None => Err(Denial::NotFoundDetail),
-    }
+    )
 }
 
 /// Membership facts for the guards layer, resolved with the same row
@@ -495,24 +513,55 @@ pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
     }
 }
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17-28`):
-/// `WEB_URL` else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
-pub fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
-        .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
-        .ok_or(Denial::ServerError)
-}
+/// DRF request-body shape for the three cycle write routes: no key is
+/// list-shaped and no scalar treats a present-but-empty form value as
+/// absent (every route only ever `.get`s a scalar).
+const CYCLE_WRITE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
+    list_fields: &[],
+    skip_blank_fields: &[],
+};
 
-/// Parse the JSON request body the way DRF does: a non-object (or
-/// unparseable) body has no `.get`, so attribute access dies with
-/// `AttributeError` → generic 500 on the paths below.
-pub fn parse_object_body(body: &Bytes) -> Result<Map<String, Value>, Denial> {
-    let value: Value = serde_json::from_slice(body).map_err(|_| Denial::ServerError)?;
-    value.as_object().cloned().ok_or(Denial::ServerError)
+/// Decode the request body exactly as DRF's default parsers do
+/// (`Request._parse` + `select_parser` over `JSONParser`, `FormParser`,
+/// `MultiPartParser`), following the merged license work
+/// (PIDASHCONV-1117/1128) through the shared D-20 pipeline:
+///
+/// * an empty body (by Content-Length) or no content type is `{}`;
+/// * JSON media types parse through the shared CPython layer, so a
+///   malformed body is the 400 `{"detail":"JSON parse error - <CPython
+///   message>"}`, and a valid non-object value (whose `.get` Django's
+///   `AttributeError` turns into the generic 500) stays a 500;
+/// * urlencoded/multipart bodies arrive as their `QueryDict` text map
+///   (last value wins on `.get`);
+/// * any other content type is the 415 `Unsupported media type` detail.
+pub fn parse_object_body(headers: &HeaderMap, body: &[u8]) -> Result<Map<String, Value>, Denial> {
+    let map_error = |error: shared_body::BodyError| match error {
+        shared_body::BodyError::UnsupportedMediaType(message) => {
+            Denial::UnsupportedMediaType(message)
+        }
+        shared_body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+        shared_body::BodyError::ServerError => Denial::ServerError,
+    };
+    match shared_body::negotiate_body(headers, body, &CYCLE_WRITE_BODY_SPEC).map_err(map_error)? {
+        shared_body::NegotiatedBody::Empty => Ok(Map::new()),
+        shared_body::NegotiatedBody::JsonText { text, surr } => {
+            let value =
+                json_cpython::parse_request_data_spans(text.as_bytes(), &surr).map_err(|fail| {
+                    match fail {
+                        JsonFail::Message(detail) => Denial::BadDetail(format!(
+                            "{}{detail}",
+                            json_cpython::JSON_PARSE_PREFIX
+                        )),
+                        JsonFail::Recursion => Denial::ServerError,
+                    }
+                })?;
+            match json_cpython::to_serde_publish(&value) {
+                Value::Object(map) => Ok(map),
+                _ => Err(Denial::ServerError),
+            }
+        }
+        shared_body::NegotiatedBody::Form { map, .. } => Ok(map),
+    }
 }
 
 /// Python truthiness for a JSON body value (`request.data.get(...)`
@@ -617,6 +666,7 @@ pub async fn date_check(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let actor = match actor(&state, extension).await {
@@ -627,11 +677,11 @@ pub async fn date_check(
         Ok(pool) => pool,
         Err(denial) => return denial.into_response(),
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_raw).await {
-        Ok(tenant) => tenant,
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -642,7 +692,7 @@ pub async fn date_check(
     if let Err(denial) = check_gate(&gate, &slug, &membership) {
         return denial.into_response();
     }
-    let data = match parse_object_body(&body) {
+    let data = match parse_object_body(&headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -652,6 +702,14 @@ pub async fn date_check(
         return Denial::BadError("Start date and end date both are required".to_owned())
             .into_response();
     }
+    // After the required check (`base.py:526-530`), `convert_to_utc`
+    // loads the project row (`Project.objects.get(id=project_id)`): a
+    // miss is the `ObjectDoesNotExist` branch -> 404 NOT_FOUND_BODY.
+    let tenant = match load_project_tenant(pool, &project_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return Denial::NotFound.into_response(),
+        Err(denial) => return denial.into_response(),
+    };
     // `str(...)` of the raw value, exactly like `convert_to_utc(date=str(...))`.
     let start_raw = py_str(data.get("start_date"));
     let end_raw = py_str(data.get("end_date"));
@@ -672,19 +730,11 @@ pub async fn date_check(
         Ok(exclude) => exclude,
         Err(denial) => return denial.into_response(),
     };
-    let overlap = match overlap_exists(
-        pool,
-        &slug,
-        &tenant.project_id,
-        &start_date,
-        &end_date,
-        exclude,
-    )
-    .await
-    {
-        Ok(overlap) => overlap,
-        Err(denial) => return denial.into_response(),
-    };
+    let overlap =
+        match overlap_exists(pool, &slug, &project_id, &start_date, &end_date, exclude).await {
+            Ok(overlap) => overlap,
+            Err(denial) => return denial.into_response(),
+        };
     if overlap {
         raw_json_response(DATE_CHECK_CONFLICT_BODY.to_owned())
     } else {
@@ -861,8 +911,19 @@ pub async fn transfer_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404
+    // via `parse_id` below (out of scope here).
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let actor = match actor(&state, extension).await {
         Ok(actor) => actor,
         Err(denial) => return denial.into_response(),
@@ -875,11 +936,11 @@ pub async fn transfer_issues(
         Ok(id) => id,
         Err(response) => return response,
     };
-    let tenant = match resolve_tenant(pool, &slug, &project_raw).await {
-        Ok(tenant) => tenant,
+    let project_id = match resolve_project_id(pool, &slug, &project_raw).await {
+        Ok(project_id) => project_id,
         Err(denial) => return denial.into_response(),
     };
-    let membership = match load_membership(pool, &slug, &tenant.project_id, &actor.id).await {
+    let membership = match load_membership(pool, &slug, &project_id, &actor.id).await {
         Ok(membership) => membership,
         Err(denial) => return denial.into_response(),
     };
@@ -890,7 +951,7 @@ pub async fn transfer_issues(
     if let Err(denial) = check_gate(&gate, &slug, &membership) {
         return denial.into_response();
     }
-    let data = match parse_object_body(&body) {
+    let data = match parse_object_body(&parts.headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -907,11 +968,20 @@ pub async fn transfer_issues(
         NewCycleId::Id(id) => id,
         NewCycleId::InvalidDetail => return Denial::InvalidDetail.into_response(),
     };
+    // `transfer_cycle_issues` reads only the project's estimate link
+    // (`cycle_transfer_issues.py:152-157`), a filter that yields no rows for
+    // a missing project — so a miss is `None`, never a 404 beyond the gate.
+    let estimate_id = match load_project_tenant(pool, &project_id).await {
+        Ok(Some(tenant)) => tenant.estimate_id,
+        Ok(None) => None,
+        Err(denial) => return denial.into_response(),
+    };
     match run_transfer(
         &state,
         pool,
         &slug,
-        &tenant,
+        &project_id,
+        estimate_id,
         &actor,
         &cycle_id,
         &new_cycle_id,
@@ -986,11 +1056,13 @@ pub struct OldCycleCounts {
 }
 
 /// The `transfer_cycle_issues` sequence after the endpoint guards.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_transfer(
     state: &AppState,
     pool: &PgPool,
     slug: &str,
-    tenant: &Tenant,
+    project_id: &Uuid,
+    estimate_id: Option<Uuid>,
     actor: &Actor,
     cycle_id: &Uuid,
     new_cycle_id: &Uuid,
@@ -1003,7 +1075,7 @@ pub async fn run_transfer(
            WHERE w.slug = $1 AND c.project_id = $2 AND c.id = $3 AND c.deleted_at IS NULL"#,
     )
     .bind(slug)
-    .bind(tenant.project_id)
+    .bind(project_id)
     .bind(new_cycle_id)
     .fetch_optional(pool)
     .await
@@ -1020,26 +1092,25 @@ pub async fn run_transfer(
     }
     // Old-cycle counts (`:72-143`); a missing source answers 400, not
     // 404 (BUG-transfer-source-400).
-    let Some(counts) = old_cycle_counts(pool, slug, &tenant.project_id, cycle_id).await? else {
+    let Some(counts) = old_cycle_counts(pool, slug, project_id, cycle_id).await? else {
         return Err(Denial::BadError(
             pidash_services::app_cycles::queries::SOURCE_CYCLE_MISSING_ERROR.to_owned(),
         ));
     };
     // Points estimates only when the project links a points estimate
     // (`:152-157`).
-    let use_estimates = project_uses_points(pool, tenant).await?;
+    let use_estimates = project_uses_points(pool, estimate_id).await?;
     let mut assignee_estimates: Vec<EstimateRow> = Vec::new();
     let mut label_estimates: Vec<EstimateRow> = Vec::new();
     let mut points_chart: Value = Value::Object(Map::new());
     if use_estimates {
         assignee_estimates =
-            assignee_estimate_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
-        label_estimates =
-            label_estimate_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
+            assignee_estimate_distribution(pool, slug, project_id, cycle_id).await?;
+        label_estimates = label_estimate_distribution(pool, slug, project_id, cycle_id).await?;
         points_chart = burndown_points_value(
             pool,
             slug,
-            &tenant.project_id,
+            project_id,
             cycle_id,
             counts.start_date,
             counts.end_date,
@@ -1047,12 +1118,12 @@ pub async fn run_transfer(
         )
         .await?;
     }
-    let assignees = assignee_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
-    let labels = label_distribution(pool, slug, &tenant.project_id, cycle_id).await?;
+    let assignees = assignee_distribution(pool, slug, project_id, cycle_id).await?;
+    let labels = label_distribution(pool, slug, project_id, cycle_id).await?;
     let chart = burndown_issues_value(
         pool,
         slug,
-        &tenant.project_id,
+        project_id,
         cycle_id,
         counts.total,
         counts.start_date,
@@ -1079,7 +1150,7 @@ pub async fn run_transfer(
         .map_err(|_| Denial::ServerError)?;
     // Move the open-group bridges (`:435-459`, `bulk_update(["cycle_id"],
     // batch_size=100)` — one UPDATE lands the same rows).
-    let moved = movable_bridges(pool, slug, &tenant.project_id, cycle_id).await?;
+    let moved = movable_bridges(pool, slug, project_id, cycle_id).await?;
     if !moved.is_empty() {
         let ids: Vec<Uuid> = moved.iter().map(|bridge| bridge.bridge_id).collect();
         sqlx::query(r#"UPDATE cycle_issues SET cycle_id = $1 WHERE id = ANY($2)"#)
@@ -1094,7 +1165,7 @@ pub async fn run_transfer(
     // intake pattern); `requested_data` is ALWAYS `{"cycles_list": []}`
     // here, `issue_id` is null, `epoch` is `int(timezone.now()
     // .timestamp())`.
-    let origin = request_origin(state)?;
+    let origin = super::activity_origin(state).ok_or(Denial::ServerError)?;
     let updated: Vec<Value> = moved
         .iter()
         .map(|bridge| {
@@ -1132,7 +1203,7 @@ pub async fn run_transfer(
     kwargs.insert("issue_id".to_owned(), Value::Null);
     kwargs.insert(
         "project_id".to_owned(),
-        Value::String(tenant.project_id.to_string()),
+        Value::String(project_id.to_string()),
     );
     kwargs.insert(
         "current_instance".to_owned(),
@@ -1203,8 +1274,8 @@ pub async fn old_cycle_counts(
 
 /// Points-estimate check (`:152-157`): the project links an estimate of
 /// type `points`.
-pub async fn project_uses_points(pool: &PgPool, tenant: &Tenant) -> Result<bool, Denial> {
-    let Some(estimate_id) = tenant.estimate_id else {
+pub async fn project_uses_points(pool: &PgPool, estimate_id: Option<Uuid>) -> Result<bool, Denial> {
+    let Some(estimate_id) = estimate_id else {
         return Ok(false);
     };
     let row: Option<(String,)> =
@@ -2019,28 +2090,27 @@ pub async fn user_properties_context(
     let pool = pool_of(state)
         .map_err(|denial| denial.into_response())?
         .clone();
-    // The `workspace__slug` lookup: an unknown slug answers the
-    // `ObjectDoesNotExist` branch, exactly like the view filters.
-    let workspace: Option<(Uuid,)> = sqlx::query_as(
-        r#"SELECT w.id FROM workspaces w WHERE w.slug = $1 AND w.deleted_at IS NULL"#,
-    )
-    .bind(&slug)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|_| Denial::ServerError.into_response())?;
-    if workspace.is_none() {
-        return Err(Denial::NotFound.into_response());
-    }
     let cycle_id = parse_id(&cycle_raw)?;
-    let tenant = resolve_tenant(&pool, &slug, &project_raw)
+    // `_rewrite_project_kwarg` returns early for a UUID `project_id` (no row
+    // lookup) and answers `Project not found` for an unresolvable identifier;
+    // the gate then runs, so an unknown workspace slug (or a project the
+    // caller cannot see) is 403 before any project/workspace row is read.
+    let project_id = resolve_project_id(&pool, &slug, &project_raw)
         .await
         .map_err(|denial| denial.into_response())?;
-    let membership = load_membership(&pool, &slug, &tenant.project_id, &actor.id)
+    let membership = load_membership(&pool, &slug, &project_id, &actor.id)
         .await
         .map_err(|denial| denial.into_response())?;
     let gate =
         gate_for_path(method, USER_PROPERTIES_PATH).map_err(|denial| denial.into_response())?;
     check_gate(&gate, &slug, &membership).map_err(|denial| denial.into_response())?;
+    // Only now read the project row (workspace + timezone). A miss is the
+    // `ObjectDoesNotExist` branch the view raises on `get`/`get_or_create`.
+    let tenant = match load_project_tenant(&pool, &project_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => return Err(Denial::NotFound.into_response()),
+        Err(denial) => return Err(denial.into_response()),
+    };
     Ok(UserPropertiesContext {
         pool,
         tenant,
@@ -2056,7 +2126,15 @@ pub async fn get_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404.
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return super::proxy_segment(state, method, uri, headers).await;
+    }
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "GET").await
         {
@@ -2148,8 +2226,18 @@ pub async fn patch_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
-    body: Bytes,
+    req: axum::extract::Request,
 ) -> Response {
+    // Django's `<uuid:cycle_id>` never routes a non-canonical spelling;
+    // the resolver 404 precedes auth. Garbage keeps its ported JSON 404.
+    if super::is_noncanonical_uuid(&cycle_raw) {
+        return crate::edge::proxy(State(state), req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let body = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(body) => body,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let context =
         match user_properties_context(&state, slug, project_raw, cycle_raw, extension, "PATCH")
             .await
@@ -2173,7 +2261,7 @@ pub async fn patch_user_properties(
     let Some(mut row) = fetched else {
         return Denial::NotFound.into_response();
     };
-    let data = match parse_object_body(&body) {
+    let data = match parse_object_body(&parts.headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };

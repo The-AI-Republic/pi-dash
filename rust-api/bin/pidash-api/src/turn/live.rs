@@ -1455,14 +1455,22 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        sqlx::query(&rt::complete_turn_update())
+        let won = sqlx::query(&rt::complete_turn_update())
             .bind(ctx.turn_id)
             .bind(&model_messages)
             .bind(&usage)
             .bind(&model_used)
             .execute(&mut *tx)
             .await
-            .map_err(db_error)?;
+            .map_err(db_error)?
+            .rows_affected();
+        if won == 0 {
+            // Another terminal writer (sweep, timeout) already owned the
+            // row: roll back and emit nothing — Python never reaches here
+            // (its hard kill precedes the sweep), so the event stream keeps
+            // exactly one terminal event either way.
+            return Ok(());
+        }
         sqlx::query(&rt::clear_active_turn_update())
             .bind(ctx.thread_id)
             .bind(ctx.turn_id)
@@ -1512,13 +1520,20 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        sqlx::query(&rt::fail_turn_update())
+        let won = sqlx::query(&rt::fail_turn_update())
             .bind(ctx.turn_id)
             .bind(&code)
             .bind(&detail)
             .execute(&mut *tx)
             .await
-            .map_err(db_error)?;
+            .map_err(db_error)?
+            .rows_affected();
+        if won == 0 {
+            // Another terminal writer already owned the row (see
+            // `complete_turn`): roll back and emit nothing, so a lost race
+            // never writes a second terminal event.
+            return Ok(());
+        }
         sqlx::query(&rt::finalize_open_rows_update())
             .bind(ctx.turn_id)
             .bind(rt::MSG_FAILED)
@@ -1583,11 +1598,18 @@ impl TurnSeam for LiveTurnSeam {
             .execute(&mut *tx)
             .await
             .map_err(db_error)?;
-        sqlx::query(&rt::cancel_turn_update())
+        let won = sqlx::query(&rt::cancel_turn_update())
             .bind(ctx.turn_id)
             .execute(&mut *tx)
             .await
-            .map_err(db_error)?;
+            .map_err(db_error)?
+            .rows_affected();
+        if won == 0 {
+            // Another terminal writer already owned the row (see
+            // `complete_turn`): roll back and emit nothing, so a lost race
+            // never writes a second terminal event.
+            return Ok(());
+        }
         sqlx::query(&rt::finalize_open_rows_update())
             .bind(ctx.turn_id)
             .bind(rt::MSG_CANCELLED)

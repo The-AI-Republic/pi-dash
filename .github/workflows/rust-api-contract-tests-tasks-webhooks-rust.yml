@@ -15,10 +15,6 @@ on:
     paths:
       - "rust-api/**"
       - ".github/workflows/rust-api-contract-tests-tasks-webhooks-rust.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract-tests-tasks-webhooks-rust.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

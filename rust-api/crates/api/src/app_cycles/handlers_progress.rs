@@ -18,9 +18,10 @@
 //! - `cycle_id` is a `<uuid:>` converter: a non-UUID tail never reaches
 //!   the view (Django routing 404). Axum captures any segment, so the
 //!   handler proxies those tails to Django instead of inventing a 400.
-//! - The cycle lookup uses the plain `Cycle.objects` manager
-//!   (`base.py:661`): no `deleted_at` predicate — a soft-deleted cycle
-//!   still answers 200 rather than 404. Ported as-is.
+//! - The cycle lookup uses `Cycle.objects` (`base.py:661`), the
+//!   soft-deletion manager (`mixins.py:61-67`), so a soft-deleted cycle
+//!   reads as missing and the view answers 404 `{"error":"Cycle not
+//!   found"}` like an unknown id.
 //! - Estimate aggregates (`:664-711`) scope to issues whose
 //!   `estimate_point.estimate.type` is `"points"` with a live bridge
 //!   row, plus the `IssueManager` base excludes (not triage, not
@@ -44,8 +45,9 @@
 //! branch against that file so transcription drift fails the build.
 //!
 //! Ported bugs (translation, don't redesign; also listed in the PR):
-//! - B1: no `deleted_at` guard on the cycle lookup (plain manager) —
-//!   soft-deleted cycles answer 200 with live-computed data.
+//! - B1 (refuted): the lookup was ported with no `deleted_at` guard on a
+//!   false "plain manager" premise; Django's `Cycle.objects` soft-deletion
+//!   manager makes a soft-deleted cycle answer 404, not 200.
 //! - B2: the estimate aggregate and the live counts carry no
 //!   archived/is-draft guards beyond the manager excludes (differs from
 //!   the list endpoint, which counts drafts/archived differently).
@@ -125,6 +127,10 @@ pub const CYCLE_NOT_FOUND_BODY: &str = r#"{"error":"Cycle not found"}"#;
 /// ORM `ValidationError` 400 (`app/views/base.py:126-130`): a non-UUID
 /// `project_id` reaches the view through the `<str:>` converter.
 pub const VALIDATION_BODY: &str = r#"{"error":"Please provide valid detail"}"#;
+/// `Project.resolve` miss on a non-UUID identifier
+/// (`db/models/project.py:213-217`) — `_rewrite_project_kwarg`'s
+/// `Http404("Project not found")`.
+pub const PROJECT_NOT_FOUND_BODY: &str = r#"{"detail":"Project not found"}"#;
 /// `handle_exception`'s generic 500 branch.
 pub const SERVER_ERROR_BODY: &str = r#"{"error":"Something went wrong please try again later"}"#;
 
@@ -134,6 +140,7 @@ pub enum Denial {
     Forbidden,
     NotFound,
     BadValidation,
+    ProjectNotFound,
     ServerError,
 }
 
@@ -144,6 +151,7 @@ impl Denial {
             Denial::Forbidden => (StatusCode::FORBIDDEN, FORBIDDEN_BODY.to_owned()),
             Denial::NotFound => (StatusCode::NOT_FOUND, CYCLE_NOT_FOUND_BODY.to_owned()),
             Denial::BadValidation => (StatusCode::BAD_REQUEST, VALIDATION_BODY.to_owned()),
+            Denial::ProjectNotFound => (StatusCode::NOT_FOUND, PROJECT_NOT_FOUND_BODY.to_owned()),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -196,6 +204,45 @@ fn pool_of(state: &AppState) -> Result<&sqlx::PgPool, Denial> {
         .pools()
         .map(|pools| pools.primary())
         .ok_or(Denial::ServerError)
+}
+
+/// Python `str.strip()` membership (`db/models/project.py:210`): Rust
+/// `White_Space` plus U+001C-U+001F (verified by exhaustively diffing
+/// `str.strip` against `char::is_whitespace` over all code points —
+/// those four are the only differences).
+fn is_py_strip_ws(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}')
+}
+
+/// Normalize a non-UUID identifier for the equality lookup
+/// (`db/models/project.py:210`): `str(value).strip().upper()`.
+fn normalize_resolve_identifier(raw: &str) -> String {
+    raw.trim_matches(is_py_strip_ws).to_uppercase()
+}
+
+/// `_rewrite_project_kwarg` (`app/views/base.py:49-80`): authenticated
+/// callers only (anonymous already 401'd); UUIDs pass through unchecked;
+/// other identifiers resolve `UPPER(identifier)` in the workspace, else
+/// `Http404("Project not found")` (`db/models/project.py:192-219`).
+async fn resolve_project_id(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    raw: &str,
+) -> Result<uuid::Uuid, Denial> {
+    if let Ok(id) = raw.parse::<uuid::Uuid>() {
+        return Ok(id);
+    }
+    let upper = normalize_resolve_identifier(raw);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        r#"SELECT p.id FROM projects p JOIN workspaces w ON w.id = p.workspace_id
+           WHERE w.slug = $1 AND p.identifier = $2 AND p.deleted_at IS NULL"#,
+    )
+    .bind(slug)
+    .bind(upper)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    row.map(|row| row.0).ok_or(Denial::ProjectNotFound)
 }
 
 /// Membership facts for the GUEST progress gate, resolved with the same
@@ -385,15 +432,16 @@ async fn progress_get(
     // `<uuid:cycle_id>` never matches a non-UUID tail in Django: proxy
     // so the routing 404 comes from Django byte-for-byte.
     let cycle_id: uuid::Uuid = match cycle_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return Ok(crate::edge::proxy(State(state), req).await),
+        Ok(id) if super::is_canonical_uuid(&cycle_raw) => id,
+        _ => return Ok(crate::edge::proxy(State(state), req).await),
     };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     let user_id = resolved.id;
-    // `<str:project_id>` reaches the view; the ORM UUID validation
-    // raises `ValidationError` -> 400 (`app/views/base.py:126-130`).
-    let project_id: uuid::Uuid = project_raw.parse().map_err(|_| Denial::BadValidation)?;
+    // `_rewrite_project_kwarg` resolves a non-UUID project_id before the
+    // permission gate (`app/views/base.py:202-204`): a matching identifier
+    // becomes the project UUID, a miss is a 404 (`Project not found`).
+    let project_id = resolve_project_id(&pool, &slug, &project_raw).await?;
     let (workspace_role, project_role) = membership(&pool, &slug, &project_id, &user_id).await?;
     let row = gate_for("GET", PROGRESS_PATH).expect("progress route must have a gate");
     let facts = gate_facts(&slug, workspace_role, project_role, user_id);
@@ -403,12 +451,15 @@ async fn progress_get(
         GateOutcome::Unauthenticated => return Err(Denial::Unauthorized),
     }
 
-    // Plain `Cycle.objects` manager: no `deleted_at` predicate (B1).
-    // `NULL` snapshot decodes as `None` and reads falsy, like Python.
+    // `Cycle.objects` is the soft-deletion manager (`mixins.py:61-67`), so
+    // a soft-deleted cycle reads as missing: `.first()` returns None and the
+    // view answers 404 (`base.py:661-663`). `NULL` snapshot decodes as `None`
+    // and reads falsy, like Python.
     let cycle: Option<(uuid::Uuid, Option<Value>)> = sqlx::query_as(
         r#"SELECT c.id, c.progress_snapshot FROM cycles c
            JOIN workspaces w ON w.id = c.workspace_id AND w.slug = $1
-           WHERE c.project_id = $2 AND c.id = $3"#,
+           WHERE c.project_id = $2 AND c.id = $3
+             AND c.deleted_at IS NULL"#,
     )
     .bind(&slug)
     .bind(project_id)

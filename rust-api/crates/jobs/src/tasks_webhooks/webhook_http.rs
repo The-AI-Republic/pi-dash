@@ -940,7 +940,12 @@ async fn read_body(
                 body.truncate(wanted);
                 return Ok(body);
             }
-            body.reserve(wanted.saturating_sub(body.len()));
+            // Never preallocate from the header (PIDASHCONV-1273): the
+            // URL is tenant-chosen, so a hostile `Content-Length` must
+            // not size the allocation — `requests` grows its buffer as
+            // bytes arrive. EOF before `wanted` bytes stays a transport
+            // error via `read_exact_timeout`.
+            body.reserve(wanted.saturating_sub(body.len()).min(65536));
             while body.len() < wanted {
                 let mut chunk = vec![0u8; (wanted - body.len()).min(65536)];
                 read_exact_timeout(stream, &mut chunk, timeout).await?;
@@ -1398,6 +1403,39 @@ mod tests {
         assert_eq!(seen.len(), 2);
         assert!(seen[0].starts_with("POST /start "), "{}", seen[0]);
         assert!(seen[1].starts_with("GET /next "), "{}", seen[1]);
+        server.await.unwrap();
+    }
+
+    /// Hostile Content-Length must not preallocate (PIDASHCONV-1273):
+    /// a 1 TB length with an immediate close is a transport error
+    /// (`requests` raises `ConnectionError` via `IncompleteRead`), not
+    /// an allocation abort of the worker process.
+    #[tokio::test]
+    async fn hostile_content_length_is_transport_error_not_abort() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let read = socket.read(&mut buf).await.unwrap();
+            assert!(read > 0);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000000000000\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            // Close without sending the body: EOF before `wanted` bytes.
+        });
+        let result = post(
+            &format!("http://127.0.0.1:{port}/hook"),
+            &headers(&[("User-Agent", "Autopilot")]),
+            b"payload",
+            30,
+        )
+        .await;
+        assert!(result.is_err(), "hostile length must fail, got {result:?}");
         server.await.unwrap();
     }
 }

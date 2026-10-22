@@ -2320,23 +2320,24 @@ pub enum PatchRejection {
 /// value that is empty or whitespace-only validates to `""` (the
 /// serializer's own `if not value` guard then passes it through untouched).
 fn char_internal(value: &Value) -> Result<String, &'static str> {
-    match value {
-        Value::Null => Err("This field may not be null."),
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) => Err("Not a valid string."),
-        Value::Number(number) => {
-            let raw = number.to_string();
-            Ok(if raw.trim().is_empty() {
-                String::new()
-            } else {
-                raw.trim().to_owned()
-            })
-        }
-        Value::String(text) => Ok(if text.is_empty() || text.trim().is_empty() {
-            String::new()
-        } else {
-            text.trim().to_owned()
-        }),
+    let raw = match value {
+        Value::Null => return Err("This field may not be null."),
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => return Err("Not a valid string."),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => text.clone(),
+    };
+    let trimmed = raw.trim();
+    // `CharField(required=False, allow_blank=True)` has no length validator,
+    // so `ProhibitNullCharactersValidator` is the only `run_validators` step
+    // (`fields.py:746`); it runs on the trimmed internal value.
+    if trimmed.contains('\0') {
+        return Err(NULL_CHARACTERS_MESSAGE);
     }
+    Ok(if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_owned()
+    })
 }
 
 /// Mirror `validate_description_html`'s size gate plus
@@ -2883,28 +2884,48 @@ pub const WRITE_VALIDATION_ORDER: &[&str] = &[
     "description_html",
 ];
 
+pub(crate) const NULL_CHARACTERS_MESSAGE: &str = "Null characters are not allowed.";
+
 /// `PageSerializer` `CharField` coercion (`fields.py` `CharField`: bools and
 /// composites fail, numbers stringify, strings trim): `allow_blank`
 /// decides whether the trimmed-empty value passes or fails `blank`.
-fn coerce_char(value: &Value, allow_blank: bool) -> Result<String, &'static str> {
-    match value {
-        Value::Null => Err("This field may not be null."),
-        Value::Bool(_) | Value::Array(_) | Value::Object(_) => Err("Not a valid string."),
-        Value::Number(_) => {
-            let text = py_scalar(value);
-            let trimmed = text.trim().to_owned();
-            if trimmed.is_empty() && !allow_blank {
-                return Err("This field may not be blank.");
-            }
-            Ok(trimmed)
+/// `max_length` mirrors an optional `MaxLengthValidator`; when the trimmed
+/// value is too long the message is collected first, then the NUL check
+/// (`ProhibitNullCharactersValidator`) runs, matching DRF's
+/// `to_internal_value` (fail-fast type/blank) followed by `run_validators`
+/// (all validators, accumulated) order in `fields.py:731-746`.
+fn coerce_char(
+    value: &Value,
+    allow_blank: bool,
+    max_length: Option<usize>,
+) -> Result<String, Vec<String>> {
+    let text = match value {
+        Value::Null => return Err(vec!["This field may not be null.".to_owned()]),
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => {
+            return Err(vec!["Not a valid string.".to_owned()])
         }
-        Value::String(text) => {
-            let trimmed = text.trim().to_owned();
-            if trimmed.is_empty() && !allow_blank {
-                return Err("This field may not be blank.");
-            }
-            Ok(trimmed)
+        Value::Number(_) => py_scalar(value),
+        Value::String(text) => text.clone(),
+    };
+    let trimmed = text.trim().to_owned();
+    if trimmed.is_empty() && !allow_blank {
+        return Err(vec!["This field may not be blank.".to_owned()]);
+    }
+    let mut errors: Vec<String> = Vec::new();
+    if let Some(limit) = max_length {
+        if trimmed.chars().count() > limit {
+            errors.push(format!(
+                "Ensure this field has no more than {limit} characters."
+            ));
         }
+    }
+    if trimmed.contains('\0') {
+        errors.push(NULL_CHARACTERS_MESSAGE.to_owned());
+    }
+    if errors.is_empty() {
+        Ok(trimmed)
+    } else {
+        Err(errors)
     }
 }
 
@@ -3285,9 +3306,13 @@ pub async fn validate_page_fields(
     let mut errors: OrderedErrors = Vec::new();
     let mut valid = ValidPage::default();
     if let Some(value) = body.get("name") {
-        match coerce_char(value, true) {
+        match coerce_char(value, true, None) {
             Ok(name) => valid.name = Some(name),
-            Err(message) => push_flat(&mut errors, "name", message.to_owned()),
+            Err(messages) => {
+                for message in messages {
+                    push_flat(&mut errors, "name", message);
+                }
+            }
         }
     }
     if let Some(value) = body.get("access") {
@@ -3297,19 +3322,13 @@ pub async fn validate_page_fields(
         }
     }
     if let Some(value) = body.get("color") {
-        match coerce_char(value, true) {
-            Ok(color) => {
-                if color.chars().count() > 255 {
-                    push_flat(
-                        &mut errors,
-                        "color",
-                        "Ensure this field has no more than 255 characters.".to_owned(),
-                    );
-                } else {
-                    valid.color = Some(color);
+        match coerce_char(value, true, Some(255)) {
+            Ok(color) => valid.color = Some(color),
+            Err(messages) => {
+                for message in messages {
+                    push_flat(&mut errors, "color", message);
                 }
             }
-            Err(message) => push_flat(&mut errors, "color", message.to_owned()),
         }
     }
     if let Some(value) = body.get("labels") {
@@ -3370,9 +3389,13 @@ pub async fn validate_page_fields(
     }
     if detail {
         if let Some(value) = body.get("description_html") {
-            match coerce_char(value, false) {
+            match coerce_char(value, false, None) {
                 Ok(html) => valid.description_html = Some(html),
-                Err(message) => push_flat(&mut errors, "description_html", message.to_owned()),
+                Err(messages) => {
+                    for message in messages {
+                        push_flat(&mut errors, "description_html", message);
+                    }
+                }
             }
         }
     }
@@ -5234,26 +5257,54 @@ mod tests {
         // Char coercion: null fails, bools/composites fail, numbers
         // stringify, strings trim.
         assert_eq!(
-            coerce_char(&Value::Null, true),
-            Err("This field may not be null.")
+            coerce_char(&Value::Null, true, None),
+            Err(vec!["This field may not be null.".to_owned()])
         );
         assert_eq!(
-            coerce_char(&serde_json::json!(true), true),
-            Err("Not a valid string.")
+            coerce_char(&serde_json::json!(true), true, None),
+            Err(vec!["Not a valid string.".to_owned()])
         );
-        assert_eq!(coerce_char(&serde_json::json!(5), true), Ok("5".to_owned()));
         assert_eq!(
-            coerce_char(&serde_json::json!("  x  "), true),
+            coerce_char(&serde_json::json!(5), true, None),
+            Ok("5".to_owned())
+        );
+        assert_eq!(
+            coerce_char(&serde_json::json!("  x  "), true, None),
             Ok("x".to_owned())
         );
         // Detail HTML rejects blank (allow_blank=False), even whitespace.
         assert_eq!(
-            coerce_char(&serde_json::json!(""), false),
-            Err("This field may not be blank.")
+            coerce_char(&serde_json::json!(""), false, None),
+            Err(vec!["This field may not be blank.".to_owned()])
         );
         assert_eq!(
-            coerce_char(&serde_json::json!("   "), false),
-            Err("This field may not be blank.")
+            coerce_char(&serde_json::json!("   "), false, None),
+            Err(vec!["This field may not be blank.".to_owned()])
+        );
+        // NUL (`ProhibitNullCharactersValidator`) runs after any length
+        // validator, both accumulated (DRF `run_validators`).
+        assert_eq!(
+            coerce_char(&serde_json::json!("ab\u{0}cd"), true, Some(255)),
+            Err(vec!["Null characters are not allowed.".to_owned()])
+        );
+        assert_eq!(
+            coerce_char(
+                &serde_json::json!(format!("{}\u{0}", "x".repeat(256))),
+                true,
+                Some(255)
+            ),
+            Err(vec![
+                "Ensure this field has no more than 255 characters.".to_owned(),
+                "Null characters are not allowed.".to_owned(),
+            ])
+        );
+        assert_eq!(
+            char_internal(&serde_json::json!("ab\u{0}cd")),
+            Err("Null characters are not allowed.")
+        );
+        assert_eq!(
+            char_internal(&serde_json::json!("  ok  ")),
+            Ok("ok".to_owned())
         );
         // Access choices: "0"/0 pass, True renders Python-style.
         assert_eq!(coerce_access(&serde_json::json!(0)), Ok(0));

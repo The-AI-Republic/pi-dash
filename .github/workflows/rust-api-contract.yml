@@ -5,10 +5,6 @@
 name: rust-api-contract
 
 on:
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - ".github/workflows/rust-api-contract.yml"
   push:
     branches: [rust-dev]
     paths:

@@ -49,6 +49,17 @@ API_KEY = "test-key-123"
 PROVIDER_KIND = "openai_compatible"
 MODEL_NAME = "oracle-stub"
 
+#: Slow-stream turn timeout (PIDASHCONV-1253): the stub streams one chunk
+#: every 20s for ~460s — past the 300s soft limit and the 390s sweep cutoff,
+#: inside the 600s per-request client timeout.
+SLOW_CHUNKS = 23
+SLOW_INTERVAL = 20.0
+SOFT_LIMIT_SECS = 300
+SWEEP_CUTOFF_SECS = 390
+
+TIMEOUT_CODE = "turn_timeout"
+TIMEOUT_DETAIL = "The assistant took too long to respond."
+
 
 # --------------------------------------------------------------------------- #
 # Live oracle helpers (the Django oracle's shapes, minus the HTTP client)
@@ -467,5 +478,68 @@ def test_cancel_mid_stream_cancels_turn(db_conn):
 
         assert rdb.get(f"assistant:cancel:{turn_id}") is not None
         rdb.close()
+    finally:
+        stub.stop()
+
+
+def test_slow_stream_fails_at_soft_limit(db_conn):
+    """A turn streaming past 300s fails with ``turn_timeout``, and no
+    ``turn_completed`` follows (PIDASHCONV-1253).
+
+    The stub streams for ~460s, past the 390s sweep cutoff: the failure must
+    land at the soft limit (300s, not the sweep), carry Django's detail, and
+    stay failed after the stream ends.
+    """
+    stub = _StubProvider(
+        chunks=tuple(f"slow-{i}" for i in range(SLOW_CHUNKS)), interval=SLOW_INTERVAL
+    )
+    base = stub.start()
+    try:
+        user, workspace = _seed_member(db_conn, "slow")
+        _configure_llm(db_conn, user["id"], base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+
+        t0 = time.monotonic()
+        celery_id = _publish(turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="slow turn failed",
+            timeout=SWEEP_CUTOFF_SECS + 60,
+        )
+        elapsed = time.monotonic() - t0
+        assert row["error_code"] == TIMEOUT_CODE
+        assert row["error_detail"] == TIMEOUT_DETAIL
+        assert elapsed >= SOFT_LIMIT_SECS - 5, (
+            f"failed after {elapsed:.0f}s: too early to be the soft limit"
+        )
+        assert elapsed < SWEEP_CUTOFF_SECS - 5, (
+            f"failed after {elapsed:.0f}s: the sweep won, not the soft limit"
+        )
+        assert row["completed_at"] is not None
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+        rust_queue.wait_for_settled(celery_id, what="timed-out turn settled")
+
+        events = _turn_events(db_conn, turn_id)
+        kinds = [e["kind"] for e in events]
+        assert "turn_started" in kinds
+        failed = [e for e in events if e["kind"] == "turn_failed"]
+        assert len(failed) == 1, "exactly one failure event"
+        assert failed[0]["payload"] == {
+            "turn_id": turn_id,
+            "error_code": TIMEOUT_CODE,
+            "detail": TIMEOUT_DETAIL,
+        }
+
+        # Hold until the stream ends plus a settle margin, then prove no
+        # turn_completed followed the failure.
+        hold = (SLOW_CHUNKS * SLOW_INTERVAL + 60) - (time.monotonic() - t0)
+        if hold > 0:
+            time.sleep(hold)
+        kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+        assert "turn_completed" not in kinds, "turn_completed followed turn_failed"
+        assert _turn_row(db_conn, turn_id)["status"] == "failed"
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
     finally:
         stub.stop()

@@ -154,3 +154,32 @@ def test_list_ordered_by_name_with_binding_count(org):
     assert names == ["A First", "B Second", "M Middle"]
     counts = {row["name"]: row["active_binding_count"] for row in r.json()}
     assert counts == {"A First": 0, "B Second": 0, "M Middle": 1}
+
+
+def test_create_strips_python_whitespace(org):
+    # DRF CharField strips with Python str.strip(), which also removes
+    # U+001C-U+001F (FS/GS/RS/US); Rust str::trim() (char::is_whitespace)
+    # does not. Slug/name/description/prompt must be stripped the same way
+    # so candidate_slug and validate_slug see what Django sees.
+    slug = f"x-{org.tag}"
+    r = org.request(
+        "POST", sched_list(org), "admin",
+        json={"slug": f"\u001f{slug}", "name": "N", "prompt": "p"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["slug"] == slug
+    # A name that is a single control char strips to empty: DRF blank error.
+    r = org.request(
+        "POST", sched_list(org), "admin",
+        json={"slug": "s2", "name": "\u001f", "prompt": "p"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == {"name": ["This field may not be blank."]}
+    # The stripped value collides with the stored slug in validate_slug, so
+    # the uniqueness check cannot be bypassed with an invisible character.
+    r = org.request(
+        "POST", sched_list(org), "admin",
+        json={"slug": f"\u001f{slug}", "name": "N2", "prompt": "p"},
+    )
+    assert r.status_code == 400, r.text
+    assert r.json() == SLUG_TAKEN

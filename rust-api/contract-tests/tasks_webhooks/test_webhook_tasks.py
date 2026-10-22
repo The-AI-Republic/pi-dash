@@ -23,7 +23,7 @@ import pytest
 from _harness import broker_probe, celery_wire, config, taskspec
 from _harness import seed as seed_helpers
 from _harness.db import diff, snapshot, wait_for_condition as wait_for
-from _harness.sinks import WildcardHttpProbe
+from _harness.sinks import HostileLengthSink, WildcardHttpProbe
 
 M = "pi_dash.bgtasks"
 
@@ -142,10 +142,10 @@ def test_worker_registration(broker_url):
     broker_probe.wait_for_registration(set(WEBHOOK_TASKS))
 
 
-def _seed_workspace_with_hook(db_conn, webhook_sink, **flags):
+def _seed_workspace_with_hook(db_conn, webhook_sink, url=None, **flags):
     owner = seed_helpers.user(db_conn, "contract-hook-owner")
     workspace = seed_helpers.workspace(db_conn, "contracthook", owner["id"])
-    url = f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
+    url = url or f"{config.WEBHOOK_SINK_BASE}/hook/{uuid.uuid4().hex}"
     hook = seed_helpers.webhook(db_conn, workspace["id"], url, issue=True, **flags)
     hook = dict(hook)
     hook["workspace_slug"] = workspace["slug"]
@@ -233,6 +233,107 @@ def test_webhook_send_failure_logs_retry_count(db_conn, broker_url, webhook_sink
     )
     assert after[0]["retry_count"] == 0
     assert str(after[0]["response_status"]) == "500"
+
+
+def test_webhook_send_hostile_content_length_logs_failure_and_retries(
+    db_conn, broker_url, webhook_sink
+):
+    """Hostile Content-Length: failure row + scheduled retry, worker alive (PIDASHCONV-1273).
+
+    The sink answers ``Content-Length: 1000000000000`` and closes.
+    ``requests`` raises ``ConnectionError`` (``IncompleteRead``), so the
+    task logs the failure row (500, ``retry_count`` 0) and autoretries;
+    the retry waits on the worker's ETA timer (``inspect scheduled``),
+    and a follow-up send to the healthy sink proves the worker
+    survived. The scheduled retry keeps the published task id, so it is
+    revoked at teardown — its jittered refire (up to 600s out) must not
+    pollute later tests. A fast jitter draw may refire before the
+    revoke lands, so the row assertions pin the first attempt
+    (``retry_count`` 0) rather than the row count.
+    """
+    app = celery_wire.make_app(broker_url)
+    with HostileLengthSink() as hostile:
+        hook = _seed_workspace_with_hook(
+            db_conn, webhook_sink, url=f"{hostile.url}/hook/{uuid.uuid4().hex}"
+        )
+        before = snapshot(db_conn, ["webhook_logs"])
+        task_id = celery_wire.publish(
+            f"{M}.webhook_task.webhook_send_task",
+            kwargs={
+                "webhook_id": str(hook["id"]),
+                "slug": hook["workspace_slug"],
+                "event": "issue",
+                "event_data": {"id": "contract-hostile-length"},
+                "action": "POST",
+                "current_site": "example.com",
+                "activity": None,
+            },
+        )
+        hostile.wait_for_count(1, what="hostile webhook POST")
+        rows = wait_for(
+            lambda: [
+                row
+                for row in _log_diff_rows(db_conn, before)
+                if "contract-hostile-length" in row["request_body"]
+            ]
+            or None,
+            what="hostile-length webhook_logs row",
+        )
+        first = min(rows, key=lambda row: row["retry_count"])
+        assert first["retry_count"] == 0
+        assert str(first["response_status"]) == "500"
+        assert first["response_headers"] == ""
+        assert first["response_body"]
+
+        def _scheduled():
+            scheduled = app.control.inspect().scheduled() or {}
+            for entries in scheduled.values():
+                for entry in entries or []:
+                    request = (entry or {}).get("request") or {}
+                    if request.get("id") == task_id:
+                        return entry
+            return None
+
+        retry = wait_for(_scheduled, what="scheduled retry on worker ETA timer")
+        assert retry["request"]["name"] == f"{M}.webhook_task.webhook_send_task"
+        app.control.revoke(task_id)
+
+        def _revoked():
+            revoked = app.control.inspect().revoked() or {}
+            if any(task_id in (ids or []) for ids in revoked.values()):
+                return task_id
+            return None
+
+        assert wait_for(_revoked, what="revoked retry") == task_id
+
+    # The worker survived the hostile delivery: a follow-up send to the
+    # healthy sink executes end to end.
+    hook = _seed_workspace_with_hook(db_conn, webhook_sink)
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_wire.publish(
+        f"{M}.webhook_task.webhook_send_task",
+        kwargs={
+            "webhook_id": str(hook["id"]),
+            "slug": hook["workspace_slug"],
+            "event": "issue",
+            "event_data": {"id": "contract-hostile-liveness"},
+            "action": "POST",
+            "current_site": "example.com",
+            "activity": None,
+        },
+    )
+    webhook_sink.wait_for_count(1, what="post-hostile webhook POST")
+    alive = wait_for(
+        lambda: [
+            row
+            for row in _log_diff_rows(db_conn, before)
+            if "contract-hostile-liveness" in row["request_body"]
+        ]
+        or None,
+        what="post-hostile webhook_logs row",
+    )
+    assert str(alive[0]["response_status"]) == "200"
 
 
 def test_webhook_redelivery_posts_twice_with_identical_bodies(
@@ -981,3 +1082,99 @@ def _added_rows(conn, table, before):
     after = snapshot(conn, [table])[table]
     new_keys = set(after) - set(before[table])
     return [after[k] for k in new_keys]
+
+
+def _seed_closed_to_world(db_conn, slug):
+    """Issue + cancel state + one notified subscriber (PIDASHCONV-1276).
+
+    The subscriber is an active project member with a preferences row,
+    so ``notifications`` writes exactly one ``notifications`` row for
+    them (a missing preferences row raises ``.get()`` into the task's
+    broad ``except`` and nothing is written).
+    """
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    owner, workspace, project, issue = (
+        chain["owner"],
+        chain["workspace"],
+        chain["project"],
+        chain["issue"],
+    )
+    close_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], name="Cancelled", group="cancelled"
+    )
+    sub = seed_helpers.user(db_conn, f"{slug}-subscriber")
+    seed_helpers.project_member(db_conn, project["id"], workspace["id"], sub["id"])
+    seed_helpers.issue_subscriber(
+        db_conn, project["id"], workspace["id"], issue["id"], sub["id"]
+    )
+    seed_helpers.notification_preference(db_conn, sub["id"])
+    return {
+        "owner": owner,
+        "workspace": workspace,
+        "project": project,
+        "issue": issue,
+        "close_state": close_state,
+        "subscriber": sub,
+    }
+
+
+def test_issue_activity_closed_to_writes_state_row_and_notifies(db_conn, broker_url):
+    """closed_to (auto-close shape): one state row + notifications fan-out (PIDASHCONV-1276).
+
+    ``archive_and_close_old_issues`` enqueues ``issue_activity`` with
+    ``requested_data={"closed_to": <state id>}``,
+    ``current_instance=None``, ``subscriber=False``,
+    ``notification=True`` (``issue_automation_task.py``).
+    ``track_closed_to`` resolves the state via ``State.objects.get``
+    (``issue_activities_task.py:527-554``) and appends the one
+    ``"Pi Dash updated the state to "`` row (note the trailing space);
+    the dispatcher bulk-creates it and ``notifications.delay`` runs for
+    the subscribers.
+    """
+    world = _seed_closed_to_world(db_conn, "closedto")
+    issue, owner, project = world["issue"], world["owner"], world["project"]
+    close_state, sub = world["close_state"], world["subscriber"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "notifications", "email_notification_logs"])
+
+    celery_wire.publish(
+        f"{M}.issue_activities_task.issue_activity",
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"closed_to": str(close_state["id"])}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="closed_to issue_activities row",
+    )
+    assert row["field"] == "state"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "Pi Dash updated the state to "
+    assert row["new_value"] == close_state["name"]
+    assert row["new_identifier"] == str(close_state["id"])
+    assert row["old_value"] is None
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+    (note,) = wait_for(
+        lambda: _added_rows(db_conn, "notifications", before) or None,
+        what="closed_to notifications row",
+    )
+    assert note["receiver_id"] == str(sub["id"])
+    assert note["entity_identifier"] == str(issue["id"])
+    assert note["sender"] == "in_app:issue_activities:subscribed"
+    assert note["title"] == "Pi Dash updated the state to "
+    assert note["triggered_by_id"] == str(owner["id"])
+    # state_change preference + field=state sends one email log row.
+    assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1

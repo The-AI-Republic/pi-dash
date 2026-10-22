@@ -16,11 +16,6 @@ on:
       - "rust-api/**"
       - "apps/api/**"
       - ".github/workflows/rust-api-parity.yml"
-  pull_request:
-    paths:
-      - "rust-api/**"
-      - "apps/api/**"
-      - ".github/workflows/rust-api-parity.yml"
 
 permissions:
   contents: read

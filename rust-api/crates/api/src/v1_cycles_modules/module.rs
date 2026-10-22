@@ -1556,7 +1556,7 @@ pub async fn render_issue(
         map.retain(|key, _| fields.iter().any(|f| f == key));
     }
     if let Some(expand) = expand {
-        apply_issue_expand(pool, detail, &mut map, expand, timezone).await?;
+        apply_issue_expand(pool, detail, &mut map, expand, timezone, fields).await?;
     }
     // Unlike modules, the issue appends are conditional on the keys
     // surviving filtering (`serializers/issue.py:242-248`).
@@ -1611,19 +1611,40 @@ pub async fn render_issue(
     Ok(Value::Object(map))
 }
 
+/// Declared `IssueSerializer` write-only fields: present in `self.fields` so
+/// `?expand=` reaches the fallthrough (`base.py:78,116`), which sets them to
+/// `None`, yet never in the rendered body because DRF drops write-only fields.
+/// (`assignees`/`labels` are write-only too, but the dedicated append path owns
+/// them, so they are not listed here.)
+const ISSUE_EXPAND_NULL_FIELDS: &[&str] = &["description_markdown"];
+
 /// `?expand=` for scalar issue keys: map hits render the Lite shapes (null
 /// FK → `{}`); every other key falls through to
 /// `getattr(instance, f"{expand}_id", None)` — `type` resolves to the
-/// unchanged id, everything else nulls the key.
+/// unchanged id, everything else nulls the key. A declared write-only field
+/// that the body never carried is set to null when it is in `self.fields`
+/// (survives `?fields=`), and an expanded `url` is removed because Django
+/// nulls it then pops the `None` (`serializers/issue.py:437-441`).
 pub async fn apply_issue_expand(
     pool: &PgPool,
     detail: &IssueDetail,
     map: &mut serde_json::Map<String, Value>,
     expand: &[String],
     timezone: &Tz,
+    fields: Option<&[String]>,
 ) -> Result<(), Denial> {
     for name in expand {
         if !map.contains_key(name.as_str()) {
+            // `expand in self.fields` (`base.py:78`) is true for a declared
+            // write-only field, so Django's fallthrough sets it to None even
+            // though the body never rendered it.
+            let survives_fields = match fields {
+                Some(fields) => fields.iter().any(|field| field == name),
+                None => true,
+            };
+            if survives_fields && ISSUE_EXPAND_NULL_FIELDS.contains(&name.as_str()) {
+                map.insert(name.clone(), Value::Null);
+            }
             continue;
         }
         match name.as_str() {
@@ -1683,6 +1704,12 @@ pub async fn apply_issue_expand(
                     "assigned_pod".to_owned(),
                     render_uuid_opt(&detail.assigned_pod_id),
                 );
+            }
+            "url" => {
+                // Django nulls `url` via the fallthrough, then
+                // `IssueSerializer.to_representation` pops the None so the key
+                // is absent, not null (`serializers/issue.py:437-441`).
+                map.remove("url");
             }
             _ => {
                 map.insert(name.clone(), Value::Null);
