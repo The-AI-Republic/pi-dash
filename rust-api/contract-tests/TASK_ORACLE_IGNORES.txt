@@ -18,6 +18,12 @@
 #                                             a worker, static tests need the
 #                                             pinned-main worktree that job
 #                                             provisions)
+#   assistant/test_update_issue_completion.py -> worker-plane oracle job in
+#                                             rust-api-contract-tests.yml
+#                                             (PIDASHCONV-1252; needs HTTP plus
+#                                             a worker on the Django half; the
+#                                             Rust half has no serve-booting CI
+#                                             job yet and is verified locally)
 #   loop/test_worker.py                    -> no CI coverage (local gate only)
 #   orchestration/test_beat_schedule.py    -> no CI coverage (local gate only)
 #   orchestration/test_ticker_tasks.py     -> no CI coverage (local gate only)
@@ -27,6 +33,7 @@
 # the HTTP matrix job shape.)
 assistant/test_tasks_turn.py
 assistant/test_turn_errors.py
+assistant/test_update_issue_completion.py
 loop/test_worker.py
 orchestration/test_beat_schedule.py
 orchestration/test_ticker_tasks.py

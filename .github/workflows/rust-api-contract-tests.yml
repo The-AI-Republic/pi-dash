@@ -293,7 +293,7 @@ jobs:
         # rust_job_queue table and the Rust worker, neither of which exists
         # in this Django-only job — they have their own *-rust jobs. Exclude
         # by glob so future replay suites are skipped here too.
-        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py
+        run: env -u DJANGO_SETTINGS_MODULE pytest -p no:django --ignore-glob='*/test_rust_replay*.py' tasks_mail tasks_webhooks tasks_cleanup tasks_ticker assistant/test_tasks_turn.py assistant/test_turn_errors.py assistant/test_update_issue_completion.py
 
       - name: Upload service logs on failure
         if: failure()
