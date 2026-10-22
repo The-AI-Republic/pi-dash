@@ -79,6 +79,47 @@ export interface SlotComponents {
    * The name is stable across editions; a rename is a breaking change.
    */
   cloudLoginCard?: ComponentType;
+  /**
+   * Saved-view access field (VIEW-019, NEWFRONT-721; Decisions D23). The
+   * create/edit dialog's shared-vs-owner-only selector plus its write.
+   * `access` is serializer read-only on the view endpoints, so the choice
+   * cannot ride the OSS create or patch body in any edition — the slot
+   * owns its own call (`storeAccess`) against the edition's server. The
+   * OSS edition leaves it absent: no selector renders and every created
+   * view keeps the shared model default. The name is stable across
+   * editions; a rename is a breaking change.
+   */
+  viewAccess?: ViewAccessSlot;
+}
+
+/** Access values the slot trades in: 1 shared, 0 owner-only. */
+export type ViewAccessValue = 0 | 1;
+
+/** Props the edition's access selector receives inside the dialog. */
+export interface ViewAccessFieldProps {
+  /** Current choice; the dialog defaults it to shared. */
+  value: ViewAccessValue;
+  onChange: (access: ViewAccessValue) => void;
+  /** True while a submit is in flight; the selector takes no edits. */
+  disabled: boolean;
+}
+
+/** Where the edition persists an owner-only choice (VIEW-019). */
+export interface ViewAccessStoreInput {
+  workspaceSlug: string;
+  projectId: string;
+  viewId: string;
+  access: ViewAccessValue;
+}
+
+/**
+ * The cloud access seam: the selector UI plus the write that stores a
+ * non-default choice after the OSS create/patch lands. The dialog calls
+ * `storeAccess` only for a choice the model default would not produce.
+ */
+export interface ViewAccessSlot {
+  Field: ComponentType<ViewAccessFieldProps>;
+  storeAccess: (input: ViewAccessStoreInput) => Promise<unknown>;
 }
 
 export interface Edition {

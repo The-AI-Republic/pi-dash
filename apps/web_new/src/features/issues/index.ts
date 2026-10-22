@@ -408,3 +408,14 @@ export type { WidgetActionLabel, WidgetSectionSlot, SubIssuesWidgetProps } from 
 export { SubIssueSection } from "./subIssues/SubIssueSection.js";
 export type { SubIssueSectionHandle, SubIssueSectionProps } from "./subIssues/SubIssueSection.js";
 export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";
+// Saved-view dialog seam (VIEW-013, NEWFRONT-721). The views area builds
+// its create/edit dialog on the rich filter builder, the expression
+// serializers and the snapshot helpers; it never reaches past this
+// barrel into the rich/ modules.
+export { useRichFilterBuilder } from "./filters/rich/RichFilterBuilder.js";
+export type { RichFilterBuilderParts } from "./filters/rich/RichFilterBuilder.js";
+export { FieldConfigRegistry } from "./filters/rich/temporary.js";
+export { serializeRichExpression } from "./filters/rich/expression.js";
+export type { RichCondition, RichExpression } from "./filters/rich/expression.js";
+export { buildViewCreate, savedViewKeys } from "./filters/rich/views.js";
+export type { ViewSnapshot } from "./filters/rich/views.js";

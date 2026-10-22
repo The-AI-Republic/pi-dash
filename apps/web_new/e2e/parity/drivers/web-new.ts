@@ -12870,7 +12870,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("viewsHeaderAddVisible");
   }
   async viewsOpenCreateFromHeader(): Promise<void> {
-    return todo("viewsOpenCreateFromHeader");
+    // The list header's primary action (NEWFRONT-719, VIEW-003); the
+    // dialog it opens is views-owned (NEWFRONT-721).
+    await this.page.getByRole("button", { name: "Add view", exact: true }).click();
+    await this.page.getByRole("heading", { name: "Create View" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async viewsListSkeletonVisible(): Promise<boolean> {
     return todo("viewsListSkeletonVisible");
@@ -13016,71 +13019,169 @@ export class WebNewDriver implements ParityDriver {
   async viewsGateManageOpen(): Promise<void> {
     return todo("viewsGateManageOpen");
   }
-  async viewsDialogHeading(): Promise<string | null> {
-    return todo("viewsDialogHeading");
+  private viewsDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^(Create View|Update View)$/ }) });
   }
-  async viewsDialogFillTitle(_text: string): Promise<void> {
-    return todo("viewsDialogFillTitle");
+
+  async viewsDialogHeading(): Promise<string | null> {
+    const heading = this.page.getByRole("heading", { name: /^(Create View|Update View)$/ });
+    if ((await heading.count()) === 0) return null;
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+  }
+  async viewsDialogFillTitle(text: string): Promise<void> {
+    await this.viewsDialog().getByPlaceholder("Title", { exact: true }).fill(text);
   }
   async viewsDialogTitleValue(): Promise<string> {
-    return todo("viewsDialogTitleValue");
+    return this.viewsDialog().getByPlaceholder("Title", { exact: true }).inputValue();
   }
   async viewsDialogTitleError(): Promise<string> {
-    return todo("viewsDialogTitleError");
+    // Kit fields render their inline error as an alert (VIEW-013).
+    const error = this.viewsDialog().getByRole("alert");
+    if ((await error.count()) === 0) return "";
+    return (
+      (await error
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
-  async viewsDialogFillDescription(_text: string): Promise<void> {
-    return todo("viewsDialogFillDescription");
+  async viewsDialogFillDescription(text: string): Promise<void> {
+    await this.viewsDialog().getByPlaceholder("Description", { exact: true }).fill(text);
   }
   async viewsDialogDescriptionValue(): Promise<string> {
-    return todo("viewsDialogDescriptionValue");
+    return this.viewsDialog().getByPlaceholder("Description", { exact: true }).inputValue();
   }
   async viewsDialogAccessPresent(): Promise<boolean> {
-    return todo("viewsDialogAccessPresent");
+    // The seam mounts nothing on OSS (VIEW-019); a cloud edition renders
+    // its selector inside this marker.
+    return this.isShown(this.viewsDialog().getByTestId("view-access-field"));
   }
   async viewsDialogIconOpen(): Promise<void> {
-    return todo("viewsDialogIconOpen");
+    await this.viewsDialog().getByTestId("view-icon-picker").click();
+    await this.page.getByRole("tablist", { name: "Icon type" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async viewsDialogIconTabs(): Promise<string[]> {
-    return todo("viewsDialogIconTabs");
+    const tabs = this.page.getByRole("tablist", { name: "Icon type" }).getByRole("tab");
+    const texts = await tabs.allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
   async viewsDialogPickFirstIcon(): Promise<void> {
-    return todo("viewsDialogPickFirstIcon");
+    // The picker opens on Emoji; the glyph grid lives behind the Icon
+    // tab (VIEW-013). Picking closes the popover through the picker's
+    // own onChange. Scoped to the glyph grid: the tabpanel's leading
+    // buttons are color swatches, which select no icon.
+    const tabs = this.page.getByRole("tablist", { name: "Icon type" });
+    await tabs.getByRole("tab", { name: "Icon" }).click();
+    const grid = this.page.getByTestId("view-icon-glyphs");
+    await grid.getByRole("button").first().click();
+    await tabs.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async viewsDialogIconPreview(): Promise<string> {
     return todo("viewsDialogIconPreview");
   }
   async viewsDialogDisplayOpen(): Promise<void> {
-    return todo("viewsDialogDisplayOpen");
+    await this.viewsDialog().getByTestId("display-options-trigger").click();
+    await this.page.getByRole("region", { name: "Display Properties" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async viewsDialogDisplayTexts(): Promise<string[]> {
-    return todo("viewsDialogDisplayTexts");
+    // No open-wait here: the caller opens the Display panel first. The
+    // panel portals outside the dialog, so its sections read as regions
+    // (their headings carry applied counts; callers match by substring).
+    const texts: string[] = [];
+    for (const name of ["Display Properties", "Group by"]) {
+      const region = this.page.getByRole("region", { name });
+      if ((await region.count()) === 0) continue;
+      texts.push(
+        (
+          (await region
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim()
+      );
+    }
+    return texts;
   }
   async viewsDialogFiltersExpanded(): Promise<boolean> {
-    return todo("viewsDialogFiltersExpanded");
+    // The temporary builder mounts with the form (VIEW-013): an empty
+    // expression shows the Add filter control, conditions show the row.
+    const dialog = this.viewsDialog();
+    return (
+      (await this.isShown(dialog.getByTestId("rich-filter-add"))) ||
+      (await this.isShown(dialog.getByTestId("rich-filter-row")))
+    );
   }
+  private viewsDialogLayoutTrigger(): Locator {
+    return this.viewsDialog().getByRole("button", { name: /^(List|Board|Calendar|Spreadsheet|Timeline)$/ });
+  }
+
   async viewsDialogLayoutValue(): Promise<string> {
-    return todo("viewsDialogLayoutValue");
+    return (
+      (await this.viewsDialogLayoutTrigger()
+        .innerText()
+        .catch(() => "")) ?? ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
   }
-  async viewsDialogPickLayout(_label: string): Promise<void> {
-    return todo("viewsDialogPickLayout");
+  async viewsDialogPickLayout(label: string): Promise<void> {
+    await this.viewsDialogLayoutTrigger().click();
+    await this.page.getByRole("listbox").getByRole("option", { name: label, exact: true }).click();
+    await this.page
+      .getByRole("listbox")
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async viewsDialogEscape(): Promise<void> {
-    return todo("viewsDialogEscape");
+    await this.page.keyboard.press("Escape");
+    await this.page
+      .getByRole("heading", { name: /^(Create View|Update View)$/ })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async viewsDialogCancel(): Promise<void> {
-    return todo("viewsDialogCancel");
+    await this.viewsDialog().getByRole("button", { name: "Cancel", exact: true }).click();
+    await this.page
+      .getByRole("heading", { name: /^(Create View|Update View)$/ })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async viewsDialogSubmit(): Promise<void> {
-    return todo("viewsDialogSubmit");
+    await this.viewsDialog().locator('button[type="submit"]').click();
+    await this.page
+      .getByRole("heading", { name: /^(Create View|Update View)$/ })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async viewsDialogSubmitAttempt(): Promise<void> {
-    return todo("viewsDialogSubmitAttempt");
+    await this.viewsDialog().locator('button[type="submit"]').click();
   }
   async viewsDialogOpen(): Promise<boolean> {
-    return todo("viewsDialogOpen");
+    return this.isShown(this.page.getByRole("heading", { name: /^(Create View|Update View)$/ }));
   }
-  async viewsFailNextWrite(_status: number): Promise<void> {
-    return todo("viewsFailNextWrite");
+  async viewsFailNextWrite(status: number): Promise<void> {
+    // Same matcher discipline as the oracle driver: a predicate, not a
+    // glob (the glob silently never matches these URLs), no times cap
+    // (a preflight or background GET would consume it). Reads and
+    // preflights continue; unroute right after the first failed write.
+    const matches = (url: URL) => url.pathname.includes("/projects/") && url.pathname.includes("/views");
+    const handler = async (route: Route) => {
+      const method = route.request().method();
+      if (method === "GET" || method === "OPTIONS" || method === "HEAD") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status, contentType: "application/json", body: "{}" });
+      await this.page.unroute(matches, handler).catch(() => undefined);
+    };
+    await this.page.route(matches, handler);
   }
   async viewsRowMenuOpen(_name: string): Promise<void> {
     return todo("viewsRowMenuOpen");

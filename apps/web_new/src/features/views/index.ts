@@ -10,6 +10,13 @@ export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
 export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
 export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
 export type { ProjectViewsListScreenProps } from "./components/ProjectViewsListScreen.js";
+export { CreateViewDialog } from "./dialog/CreateViewDialog.js";
+export type { CreateViewDialogProps } from "./dialog/CreateViewDialog.js";
+export { ViewAccessField, OWNER_ACCESS, SHARED_ACCESS } from "./dialog/ViewAccessField.js";
+export type { ViewAccessFieldProps } from "./dialog/ViewAccessField.js";
+export { ViewIconPicker, ViewLogoMark } from "./dialog/ViewIconPicker.js";
+export type { ViewIconPickerProps, ViewLogoProps } from "./dialog/ViewIconPicker.js";
+export { validateViewTitle, VIEW_TITLE_MAX_LENGTH } from "./dialog/viewTitle.js";
 export {
   PROJECT_VIEWS_CRUMB,
   VIEW_ACCESS_SHARED,

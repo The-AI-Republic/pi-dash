@@ -38,6 +38,10 @@ describe("edition", () => {
   it("leaves the cloud login card absent (CLOUD-002: OSS keeps /login's redirect)", () => {
     expect(edition.slots?.cloudLoginCard).toBeUndefined();
   });
+
+  it("leaves the view access slot absent (VIEW-019: OSS renders no selector)", () => {
+    expect(edition.slots?.viewAccess).toBeUndefined();
+  });
 });
 
 describe("shell edition gates", () => {
