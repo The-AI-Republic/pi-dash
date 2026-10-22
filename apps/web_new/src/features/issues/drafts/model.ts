@@ -9,7 +9,6 @@
 
 import type { DraftIssue, DraftIssueCreateInput, ProjectDetails } from "@pidash/api-client";
 
-import { ROLE_ADMIN } from "../../../core/session/permissions.js";
 import { PRIORITY_LEVELS, type PriorityLevel } from "../../../shared/pickers/priorities.js";
 import { visibleDescriptionHtml } from "../create/createForm.js";
 
@@ -106,16 +105,17 @@ export function asPriority(value: string): PriorityLevel {
 }
 
 /**
- * The delete standing (ISS-140): the draft's creator or a project admin.
- * A draft without a project has no project admins, so only its creator
- * qualifies there. The server enforces the same rule.
+ * The delete standing (drafts spec §4.6, DRAFT-011): the draft's
+ * creator at any role, or a workspace admin. A project-only admin who
+ * is not a workspace admin does not qualify, and project standing is
+ * otherwise irrelevant. The server enforces the same rule.
  */
 export function canDeleteDraft(
   draft: Pick<DraftIssue, "created_by">,
-  viewer: { meId: string | null; projectRole: number | null }
+  viewer: { meId: string | null; isWorkspaceAdmin: boolean }
 ): boolean {
   if (viewer.meId !== null && draft.created_by === viewer.meId) return true;
-  return viewer.projectRole !== null && viewer.projectRole >= ROLE_ADMIN;
+  return viewer.isWorkspaceAdmin;
 }
 
 /** State groups that read as finished for the overdue flag. */

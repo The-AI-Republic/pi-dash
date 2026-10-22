@@ -193,19 +193,20 @@ describe("asPriority", () => {
 });
 
 describe("canDeleteDraft", () => {
-  it("allows the creator regardless of project standing", () => {
-    expect(canDeleteDraft({ created_by: "user-1" }, { meId: "user-1", projectRole: null })).toBe(true);
+  it("allows the creator at any role, including a non-admin", () => {
+    expect(canDeleteDraft({ created_by: "user-1" }, { meId: "user-1", isWorkspaceAdmin: false })).toBe(true);
+    expect(canDeleteDraft({ created_by: "user-1" }, { meId: "user-1", isWorkspaceAdmin: true })).toBe(true);
   });
 
-  it("allows a project admin who did not create the draft", () => {
-    expect(canDeleteDraft({ created_by: "someone" }, { meId: "user-1", projectRole: 20 })).toBe(true);
+  it("allows a workspace admin who did not create the draft", () => {
+    expect(canDeleteDraft({ created_by: "someone" }, { meId: "user-1", isWorkspaceAdmin: true })).toBe(true);
+    expect(canDeleteDraft({ created_by: null }, { meId: null, isWorkspaceAdmin: true })).toBe(true);
   });
 
-  it("refuses a member, a project-less draft, and an unknown viewer", () => {
-    expect(canDeleteDraft({ created_by: "someone" }, { meId: "user-1", projectRole: 15 })).toBe(false);
-    expect(canDeleteDraft({ created_by: "someone" }, { meId: "user-1", projectRole: null })).toBe(false);
-    expect(canDeleteDraft({ created_by: null }, { meId: null, projectRole: null })).toBe(false);
-    expect(canDeleteDraft({ created_by: null }, { meId: null, projectRole: 20 })).toBe(true);
+  it("refuses a non-creator without workspace-admin standing", () => {
+    expect(canDeleteDraft({ created_by: "someone" }, { meId: "user-1", isWorkspaceAdmin: false })).toBe(false);
+    expect(canDeleteDraft({ created_by: null }, { meId: null, isWorkspaceAdmin: false })).toBe(false);
+    expect(canDeleteDraft({ created_by: null }, { meId: "user-1", isWorkspaceAdmin: false })).toBe(false);
   });
 });
 

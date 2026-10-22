@@ -34,7 +34,7 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => ({
   }),
 }));
 
-import { identifierOf, DraftsPage, projectRoleOf } from "./DraftsPage.js";
+import { identifierOf, DraftsPage } from "./DraftsPage.js";
 import type { DraftDialogProps } from "./DraftsPage.js";
 
 const SLUG = "acme";
@@ -260,17 +260,14 @@ function openMenu(name = "One") {
 
 describe("project lookups", () => {
   it("answers nothing for a draft without a project", () => {
-    expect(projectRoleOf([project()], null)).toBeNull();
     expect(identifierOf([project()], null)).toBeNull();
   });
 
   it("answers nothing for a project the viewer cannot list", () => {
-    expect(projectRoleOf([], PROJECT)).toBeNull();
     expect(identifierOf([], PROJECT)).toBeNull();
   });
 
-  it("reads the member's role and the project's code", () => {
-    expect(projectRoleOf([project(PROJECT, "Atlas", { member_role: 15 })], PROJECT)).toBe(15);
+  it("reads the project's code", () => {
     expect(identifierOf([project(PROJECT, "Atlas")], PROJECT)).toBe("PAR");
   });
 });
@@ -413,6 +410,7 @@ describe("first-run screens", () => {
 
   it("refuses a draft the viewer has no identity for", async () => {
     session.me = { data: undefined };
+    session.canEdit = false;
     const h = renderPage({
       pages: [page([draft(DRAFT_1, "One")])],
       projects: [project(PROJECT, "Atlas", { member_role: 15 })],
@@ -465,7 +463,16 @@ describe("row flows", () => {
 
   it("opens a copy with the duplicated payload", async () => {
     const h = renderPage({
-      pages: [page([draft(DRAFT_1, "One", { label_ids: ["813e4567-e89b-42d3-8456-426614174009"] })])],
+      pages: [
+        page([
+          draft(DRAFT_1, "One", {
+            label_ids: ["813e4567-e89b-42d3-8456-426614174009"],
+            description_html: "<p>Carried body</p>",
+            state_id: "713e4567-e89b-42d3-8456-426614174007",
+            priority: "high",
+          }),
+        ]),
+      ],
     });
     await screen.findByText("One");
     fireEvent.click(openMenu().getByRole("menuitem", { name: "Make a copy" }));
@@ -475,6 +482,9 @@ describe("row flows", () => {
       input: expect.objectContaining({
         name: "One (copy)",
         project_id: PROJECT,
+        description_html: "<p>Carried body</p>",
+        state_id: "713e4567-e89b-42d3-8456-426614174007",
+        priority: "high",
         label_ids: ["813e4567-e89b-42d3-8456-426614174009"],
       }),
     });
@@ -587,7 +597,8 @@ describe("delete", () => {
     expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
   });
 
-  it("refuses a member who did not create the draft", async () => {
+  it("refuses a non-admin who did not create the draft", async () => {
+    session.canEdit = false;
     const h = renderPage({
       pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])],
       projects: [project(PROJECT, "Atlas", { member_role: 15 })],
@@ -602,8 +613,35 @@ describe("delete", () => {
     expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
   });
 
-  it("lets a project admin delete someone else's draft", async () => {
-    renderPage({ pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])] });
+  it("refuses a project admin who is not a workspace admin", async () => {
+    session.canEdit = false;
+    const h = renderPage({
+      pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])],
+      projects: [project(PROJECT, "Atlas", { member_role: 20 })],
+    });
+    await screen.findByText("One");
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
+    expect(screen.queryByRole("dialog", { name: "Delete draft" })).not.toBeInTheDocument();
+    expect(toasts.notifyError).toHaveBeenCalledWith(
+      "You don't have permission to perform this action",
+      expect.any(String)
+    );
+    expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+
+  it("lets a workspace admin delete someone else's draft from any project standing", async () => {
+    renderPage({
+      pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])],
+      projects: [project(PROJECT, "Atlas", { member_role: 15 })],
+    });
+    await screen.findByText("One");
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete draft" })).toBeInTheDocument();
+  });
+
+  it("lets a non-admin creator delete their own draft", async () => {
+    session.canEdit = false;
+    renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
     await screen.findByText("One");
     fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
     expect(screen.getByRole("dialog", { name: "Delete draft" })).toBeInTheDocument();

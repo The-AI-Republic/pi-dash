@@ -3,8 +3,10 @@
 // See the LICENSE file for details.
 // One workspace draft (parity/specs/issues.md §12, ISS-137/138/139/140).
 // A row-shaped block: project short code with click-to-copy, the draft's
-// name, its inline property strip and an ellipsis menu that repeats the
-// right-click entries (edit, make a copy, move to project, delete).
+// name, its inline property strip and a hover quick action whose menu
+// repeats the right-click entries. Both openers render the shared row
+// catalog (draftActions.ts) in pinned order (drafts spec §3.1,
+// DRAFT-009), so the two can never drift.
 // Double-clicking the block edits it. The name paragraph carries the
 // draft's title for reading surfaces; the block also carries
 // `data-draft-block` so parity hooks can find it without the old app's
@@ -16,6 +18,7 @@ import { Copy, Ellipsis, PenLine, SquareStack, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import { notifySuccess } from "../../../shared/shell/index.js";
+import { DRAFT_ROW_ACTIONS, type DraftRowActionId } from "./draftActions.js";
 import { DraftProperties } from "./DraftProperties.js";
 import type { DraftFieldPatch } from "./model.js";
 
@@ -102,7 +105,10 @@ export function DraftBlock({
             {title}
           </p>
         </Tooltip>
-        <div className="relative shrink-0" onClick={(event) => event.stopPropagation()}>
+        <div
+          className="relative shrink-0 opacity-0 transition-opacity group-hover/draft:opacity-100 focus-within:opacity-100"
+          onClick={(event) => event.stopPropagation()}
+        >
           <button
             type="button"
             aria-label={`Actions for ${title}`}
@@ -135,6 +141,13 @@ export function DraftBlock({
   );
 }
 
+const DRAFT_MENU_ICONS: Record<DraftRowActionId, typeof PenLine> = {
+  edit: PenLine,
+  copy: Copy,
+  move: SquareStack,
+  delete: Trash2,
+};
+
 function DraftMenu({
   onClose,
   onEdit,
@@ -148,37 +161,41 @@ function DraftMenu({
   onMove: () => void;
   onDelete: () => void;
 }): React.ReactElement {
-  const items = [
-    { key: "edit", label: "Edit", icon: PenLine, run: onEdit },
-    { key: "copy", label: "Make a copy", icon: Copy, run: onCopy },
-    { key: "move", label: "Move to project", icon: SquareStack, run: onMove },
-    { key: "delete", label: "Delete", icon: Trash2, run: onDelete, danger: true },
-  ] as const;
+  const runners: Record<DraftRowActionId, () => void> = {
+    edit: onEdit,
+    copy: onCopy,
+    move: onMove,
+    delete: onDelete,
+  };
   return (
     <div
       role="menu"
       aria-label="Draft actions"
       className="shadow-popover absolute right-0 z-10 mt-(--space-1) flex min-w-44 flex-col rounded-(--radius-popover) border border-(--border) bg-(--bg) p-(--space-1)"
       onMouseLeave={onClose}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onClose();
+      }}
     >
-      {items.map((item) => {
-        const Icon = item.icon;
+      {DRAFT_ROW_ACTIONS.map((action) => {
+        const Icon = DRAFT_MENU_ICONS[action.id];
+        const run = runners[action.id];
         return (
           <button
-            key={item.key}
+            key={action.id}
             type="button"
             role="menuitem"
             onClick={() => {
               onClose();
-              item.run();
+              run();
             }}
             className={cn(
               "text-body flex items-center gap-(--space-2) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-left hover:bg-(--subtle) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none",
-              "danger" in item && item.danger ? "text-(--danger)" : "text-(--text)"
+              action.danger ? "text-(--danger)" : "text-(--text)"
             )}
           >
             <Icon size={14} strokeWidth={1.5} aria-hidden="true" />
-            {item.label}
+            {action.label}
           </button>
         );
       })}
