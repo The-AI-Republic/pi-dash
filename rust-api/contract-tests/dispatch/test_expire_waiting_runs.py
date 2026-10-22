@@ -28,6 +28,7 @@ import os
 import pytest
 
 from _harness import rust_queue
+from _harness.celery import Broker, get_broker_url
 
 from .conftest import (
     CANCELLED,
@@ -54,6 +55,18 @@ NEVER_CAME_ONLINE = (
     "Pi Dash Agent never came online for this run. "
     "Open the desktop app and run the issue again."
 )
+
+
+@pytest.fixture()
+def broker():
+    """Overrides the suite's broker: the Rust replay needs none (its CI job
+    runs with an AMQP ``CELERY_BROKER_URL`` the Redis publisher rejects)."""
+    if BACKEND == "rust":
+        yield None
+        return
+    broker = Broker(get_broker_url())
+    yield broker
+    broker.close()
 
 
 def _sweep(broker):
