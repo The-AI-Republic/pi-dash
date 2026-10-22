@@ -47,8 +47,6 @@ export interface DocumentHead {
   title: string;
   /** Crawler directives while the route shows. */
   robots: string;
-  /** Canonical address; present only on crawlable marketing pages. */
-  canonical?: string;
   /** Extra crawl/social tags; present only on crawlable marketing pages. */
   tags?: readonly HeadTag[];
   /**
@@ -119,8 +117,11 @@ function applyManagedTags(claim: HeadClaim): void {
 }
 
 function applyHeadClaim(claim: HeadClaim | undefined): void {
-  stripServedMarketingTags();
+  // Managed tags first: they overlap the served selector (canonical,
+  // description, social), so stripping the served tags first would remove
+  // them before their own cleanup runs.
   removeManagedTags();
+  stripServedMarketingTags();
   if (claim === undefined) {
     document.title = bootTitle;
     const tag = document.querySelector<HTMLMetaElement>('meta[name="robots"]');

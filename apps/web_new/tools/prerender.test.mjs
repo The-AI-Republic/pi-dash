@@ -368,6 +368,31 @@ describe("prerenderThroughServer", () => {
       error.mockRestore();
     }
   });
+
+  it("falls back to the process output directory when none is passed", async () => {
+    const outDir = scratchDir();
+    const previous = process.env.PIDASH_PRERENDER_OUT_DIR;
+    process.env.PIDASH_PRERENDER_OUT_DIR = outDir;
+    try {
+      // The default is read at import time, so re-import with the override
+      // in place; the file's static imports keep the original instance.
+      vi.resetModules();
+      const entry = await import("./prerender.mjs");
+      const close = vi.fn();
+      const wrote = await entry.prerenderThroughServer({
+        createViteServer: fakeServer({ id: "cloud", routes: [{ path: "/", scope: "top-level" }] }, close),
+        siteOrigin: "https://site.test",
+        log: vi.fn(),
+      });
+      expect(wrote).toBe(true);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(readFileSync(join(outDir, "sitemap.xml"), "utf8")).toContain("https://site.test/home");
+    } finally {
+      if (previous === undefined) delete process.env.PIDASH_PRERENDER_OUT_DIR;
+      else process.env.PIDASH_PRERENDER_OUT_DIR = previous;
+      vi.resetModules();
+    }
+  });
 });
 
 describe("readShell", () => {
