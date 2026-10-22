@@ -132,11 +132,11 @@ pub const USER_COLUMNS: &str = "users.password, users.last_login, users.id, user
     users.last_login_uagent, users.token_updated_at, users.is_bot, users.bot_type, \
     users.user_timezone, users.is_email_valid, users.masked_at";
 
-/// All 46 concrete `projects` columns (`Project.objects.get` order).
+/// All 47 concrete `projects` columns (`Project.objects.get` order).
 pub const PROJECT_COLUMNS: &str = "projects.created_at, projects.updated_at, \
     projects.created_by_id, projects.updated_by_id, projects.deleted_at, projects.id, \
-    projects.name, projects.description, projects.description_text, projects.description_html, \
-    projects.network, projects.workspace_id, projects.identifier, projects.default_assignee_id, \
+    projects.name, projects.description, projects.context, projects.description_text, \
+    projects.description_html, projects.network, projects.workspace_id, projects.identifier, projects.default_assignee_id, \
     projects.project_lead_id, projects.emoji, projects.icon_prop, projects.module_view, \
     projects.cycle_view, projects.issue_views_view, projects.page_view, projects.intake_view, \
     projects.is_time_tracking_enabled, projects.is_issue_type_enabled, projects.is_default, \

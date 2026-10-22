@@ -983,6 +983,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -1044,6 +1045,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -1117,6 +1119,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -1221,6 +1224,8 @@ pub struct ProjectRead {
     pub name: String,
     /// `TextField(blank=True)`.
     pub description: String,
+    /// `TextField(blank=True, default="")` (PDASHOSS01-294).
+    pub context: String,
     /// `JSONField(blank=True, null=True)`.
     pub description_text: Option<Value>,
     /// `JSONField(blank=True, null=True)`.
@@ -1349,6 +1354,8 @@ pub struct ProjectListRead {
     pub name: String,
     /// `TextField(blank=True)`.
     pub description: String,
+    /// `TextField(blank=True, default="")` (PDASHOSS01-294).
+    pub context: String,
     /// `JSONField(blank=True, null=True)`.
     pub description_text: Option<Value>,
     /// `JSONField(blank=True, null=True)`.
@@ -1494,6 +1501,8 @@ pub struct ProjectDetailRead {
     pub name: String,
     /// `TextField(blank=True)`.
     pub description: String,
+    /// `TextField(blank=True, default="")` (PDASHOSS01-294).
+    pub context: String,
     /// `JSONField(blank=True, null=True)`.
     pub description_text: Option<Value>,
     /// `JSONField(blank=True, null=True)`.
@@ -2650,7 +2659,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 49);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 50);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2661,7 +2670,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 55);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 56);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2676,7 +2685,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 51);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 52);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(

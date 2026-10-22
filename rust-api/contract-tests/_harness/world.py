@@ -104,7 +104,7 @@ def add_workspace_member(workspace_id: str, user_id: str, role: int = ROLE_ADMIN
 def make_project(workspace_id: str, owner_id: str, identifier: str | None = None) -> tuple[str, str]:
     proj_id, ident = uid(), (identifier or f"P{secrets.token_hex(2).upper()}")
     _exec(
-        """INSERT INTO projects (id, name, description, network, identifier,
+        """INSERT INTO projects (id, name, description, context, network, identifier,
                workspace_id, cycle_view, module_view, issue_views_view, page_view,
                intake_view, archive_in, close_in, logo_props,
                is_time_tracking_enabled, is_issue_type_enabled,
@@ -113,7 +113,7 @@ def make_project(workspace_id: str, owner_id: str, identifier: str | None = None
                agent_default_max_ticks, agent_ticking_enabled, is_default,
                agent_review_default_interval_seconds, default_agent_executor,
                agent_test_default_interval_seconds, created_at, updated_at)
-           VALUES (%s,%s,'',0,%s,%s,true,true,true,true,true,365,365,'{}',
+           VALUES (%s,%s,'','',0,%s,%s,true,true,true,true,true,365,365,'{}',
                    true,false,false,'UTC',true,'','',10800,10,true,false,
                    10800,'local_runner',10800,now(),now())""",
         (proj_id, f"proj-{ident}", ident, workspace_id),

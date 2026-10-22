@@ -2977,7 +2977,7 @@ mod tests {
         assert_eq!(col_index(enroll_sql::WORKSPACES_SELECT_COLUMNS, "slug"), 10);
         let project_cols = pidash_db::app_project::models::project::COLUMNS;
         assert_eq!(col_index(project_cols, "id"), 5);
-        assert_eq!(col_index(project_cols, "identifier"), 12);
+        assert_eq!(col_index(project_cols, "identifier"), 13);
         assert_eq!(mt_cols::COLUMNS.len(), 12);
     }
 

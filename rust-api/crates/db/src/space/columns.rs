@@ -194,6 +194,7 @@ pub mod project {
         "deleted_at",
         "name",
         "description",
+        "context",
         "description_text",
         "description_html",
         "network",

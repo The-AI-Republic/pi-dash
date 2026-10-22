@@ -687,6 +687,7 @@ const READ_FIELD_ORDER: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -941,6 +942,11 @@ pub async fn render_project(
         &mut map,
         "description",
         Value::String(row_string_opt(row, "description")?.unwrap_or_default()),
+    );
+    put(
+        &mut map,
+        "context",
+        Value::String(row_string_opt(row, "context")?.unwrap_or_default()),
     );
     put(
         &mut map,
@@ -1303,6 +1309,7 @@ pub fn parse_body(raw: &[u8]) -> Result<serde_json::Map<String, Value>, Denial> 
 const PROJECT_LIST_FIELDS: &[&str] = &[
     "name",
     "description",
+    "context",
     "project_lead",
     "default_assignee",
     "identifier",
@@ -1669,6 +1676,7 @@ pub struct WriteData {
 pub const CREATE_FIELD_ORDER: &[&str] = &[
     "name",
     "description",
+    "context",
     "project_lead",
     "default_assignee",
     "identifier",
@@ -1726,7 +1734,7 @@ async fn coerce_field(
     Ok(Some(match field {
         "name" => FieldValue::Str(coerce_char(value, false, Some(255))?),
         "identifier" => FieldValue::Str(coerce_char(value, false, Some(12))?),
-        "description" => FieldValue::Str(coerce_char(value, true, None)?),
+        "description" | "context" => FieldValue::Str(coerce_char(value, true, None)?),
         "project_lead" | "default_assignee" | "default_state" | "estimate" => {
             FieldValue::Fk(coerce_fk_user(pool, field, value).await?)
         }
@@ -2775,6 +2783,7 @@ pub async fn create_project_inner(
     let now = chrono::Utc::now();
     let project_id = uuid::Uuid::new_v4();
     let description = field_str(&data, "description").unwrap_or_default();
+    let context = field_str(&data, "context").unwrap_or_default();
     // `transaction.atomic()`: unset-others + insert (`:187-194`, plus the
     // `save()` unset arm `:277-284`).
     let mut tx = pre.pool.begin().await.map_err(|_| Denial::ServerError)?;
@@ -2799,8 +2808,8 @@ pub async fn create_project_inner(
             "external_source", "external_id", "repo_url", "base_branch",
             "agent_default_interval_seconds", "agent_default_max_ticks",
             "agent_review_default_interval_seconds", "agent_test_default_interval_seconds",
-            "agent_ticking_enabled", "default_agent_executor")
-         VALUES ($1,$2,$3,$4,NULL,$5,$6,NULL,NULL,2,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NULL,NULL,$24,$25,$26,NULL,$27,$28,$29,$30,$31,10800,10,10800,10800,TRUE,$32)"#,
+            "agent_ticking_enabled", "default_agent_executor", "context")
+         VALUES ($1,$2,$3,$4,NULL,$5,$6,NULL,NULL,2,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,NULL,NULL,$24,$25,$26,NULL,$27,$28,$29,$30,$31,10800,10,10800,10800,TRUE,$32,$33)"#,
     )
     .bind(project_id)
     .bind(now)
@@ -2833,7 +2842,8 @@ pub async fn create_project_inner(
     .bind(field_opt_str(&data, "external_id").unwrap_or(None))
     .bind(field_str(&data, "repo_url").unwrap_or_default())
     .bind(field_str(&data, "base_branch").unwrap_or_else(|| "main".to_owned()))
-    .bind(&default_executor);
+    .bind(&default_executor)
+    .bind(context);
     let insert_result = insert.execute(&mut *tx).await;
     match insert_result {
         Ok(_) => {}
@@ -3316,6 +3326,9 @@ pub async fn apply_project_update(
     }
     if let Some(v) = field_str(data, "description") {
         push_str(&mut sets, &mut binds, "description", v);
+    }
+    if let Some(v) = field_str(data, "context") {
+        push_str(&mut sets, &mut binds, "context", v);
     }
     for key in [
         "project_lead_id",

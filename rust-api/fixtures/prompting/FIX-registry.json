@@ -2,8 +2,8 @@
   "bugs": [],
   "data": {
     "fragments": {
-      "assembled_len": 53594,
-      "assembled_sha256": "c4a63023bb1ca4f249017b7e99f2403b7e51cbf9bf8b9910e00bba2e6f0e3331",
+      "assembled_len": 53586,
+      "assembled_sha256": "73c67bd04707eb279471a363b8d177431952bee5dc9eb39bfcb5d25defaddaf6",
       "fragment_count": 14,
       "fragments_in_order": [
         "01_intro.md",
@@ -141,8 +141,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 333,
-          "body_sha256": "7a8ed59792700e37ea354481c700945526784bb796fa75fef031afbac7f334b8",
+          "body_len": 321,
+          "body_sha256": "f361da6a38096579264d2ea370644f2b9e48bb70b3a1526d5067ecc5ac6cb5ad",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -152,8 +152,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 495,
-          "body_sha256": "7d7f24b80c66e7614abf2d94ec5f0a41bc63a74f47dcb52de0712513d5617bb0",
+          "body_len": 491,
+          "body_sha256": "f728f73d82169595d8b86f3d39720d91c55fec9035c21cb1634c0f45fc74fe83",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -207,8 +207,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 678,
-          "body_sha256": "fcba1dc1bfcebefe4e585b0460dd77e0a3f333ef3388b4d6a3db6d632ab7e15c",
+          "body_len": 674,
+          "body_sha256": "0c8ba7b5c5b61c85730681b0e082a8fb639d47da53240bcb138b72d563668b65",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -284,8 +284,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 1276,
-          "body_sha256": "2a735d8d45ebf06192f968ae9e4a23d7434bf126232961cff9dd647733a91ce9",
+          "body_len": 1268,
+          "body_sha256": "c35f466152e2d20c2e7725822ddfa2e45960ab4b24b8931f7cad30a34ca2baee",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -339,8 +339,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 1011,
-          "body_sha256": "6173bf90263ed7787c45b49c9f9cdfccb2d5202c396c29c9b67082e6f3d9fabd",
+          "body_len": 1007,
+          "body_sha256": "401ea2db47113b19869ada266dd697592fdc7d8b15247ba5ff48e17d6f0edcc5",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -361,8 +361,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 1161,
-          "body_sha256": "71f6296b1454f1b25cf9948972239b658bbbf469dfe439e40e77d87293e249ad",
+          "body_len": 1149,
+          "body_sha256": "c7837f3b2e1a09d12fd172c6d4377482d147c5b7d8c6ef610db6ec561e56fb84",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -427,8 +427,8 @@
         {
           "allows_personal_override": false,
           "allows_workspace_override": false,
-          "body_len": 1344,
-          "body_sha256": "e79c3095617f7ca1c048a2acd6ee817a4b883cc6ba446de3d11045c4b14d072e",
+          "body_len": 1340,
+          "body_sha256": "8cd2d6ecf13e73ace394058cf29b10f45f9e25ca469355ae8f8e7c2884308d65",
           "customizable": "locked",
           "is_locked": true,
           "is_overridable": false,
@@ -498,7 +498,7 @@
   "fixture_id": "FIX-registry",
   "how_produced": "executed against the real Python under pi_dash.settings.test (Django 4.2): pure units with no DB; DB-backed units against scratch database pidash_prompt_fx (migrated from this tree). Throwaway generators: /tmp/fxP_nodb.py, /tmp/fxP_nodb2.py, /tmp/fxP_db1.py, /tmp/fxP_db2.py (+ /tmp/fxP_setup.py world). PIDASHCONV-1058 re-sync: content-derived fields regenerated from origin/main@3267ceb9 via /tmp/fx1058_gen.py (registry.py + recipes.py loaded by path; stdlib-only, no Django).",
   "notes": [],
-  "ported_from": "3267ceb9cda65c90e6cb66e4a3ef8aaa26ca3a4e",
+  "ported_from": "860c1b39b9f68f94c2777a31808f27ab47cb9006",
   "trace": [
     "prompting/registry.py:26 (SECTIONS_DIR), 28-56 (tiers), 62-66 (MAX_SECTION_BODY_LENGTH), 102-147 (_parse_front_matter), 150-161 (_load_registry), 166-178 (REGISTRY/get_section/all_sections)",
     "prompting/fragments/__init__.py:37-55 (FRAGMENT_GLOB, fragment_paths, assemble)"

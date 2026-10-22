@@ -332,7 +332,10 @@ const DIRECT_WORKSPACE_SQL: &str = "SELECT slug, name FROM workspaces WHERE id =
 
 /// The free-form cloud-context project row (`composer.py:476`).
 const DIRECT_CONTEXT_PROJECT_SQL: &str =
-    "SELECT id, identifier, name, description FROM projects WHERE id = $1 LIMIT 1";
+    "SELECT id, identifier, name, description, context FROM projects WHERE id = $1 LIMIT 1";
+
+/// One [`DIRECT_CONTEXT_PROJECT_SQL`] row: id, identifier, name, description, context.
+type DirectProjectCols = (Uuid, String, String, Option<String>, Option<String>);
 
 /// The v1 `IssueRow` for the web dispatch tails: the issue plus its
 /// state names, `all_objects` scope (no deleted guard —
@@ -960,6 +963,7 @@ async fn render_cloud_issue_prompt<'a>(
         project_id: project.id.to_string(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        project_context: project.context.clone(),
         repo,
         code_reviews: prompting_context::code_reviews_context(&bundle.reviews),
         parent: bundle.parent.clone(),
@@ -1043,13 +1047,14 @@ async fn render_cloud_free_prompt(
     let Some((workspace_slug, workspace_name)) = workspace else {
         return Err(server_error());
     };
-    let project: Option<(Uuid, String, String, Option<String>)> =
-        sqlx::query_as(DIRECT_CONTEXT_PROJECT_SQL)
-            .bind(project_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|_| server_error())?;
-    let Some((project_id, project_identifier, project_name, project_description)) = project else {
+    let project: Option<DirectProjectCols> = sqlx::query_as(DIRECT_CONTEXT_PROJECT_SQL)
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| server_error())?;
+    let Some((project_id, project_identifier, project_name, project_description, project_context)) =
+        project
+    else {
         return Err(server_error());
     };
     let extra_toolsets_enabled = tool_plan
@@ -1071,6 +1076,7 @@ async fn render_cloud_free_prompt(
         project_identifier,
         project_name,
         project_description,
+        project_context,
         trigger: Some(TRIGGER_DIRECT.to_owned()),
         available_tools: tool_plan.get("tools").cloned().unwrap_or(Value::Null),
         unavailable_capabilities: tool_plan

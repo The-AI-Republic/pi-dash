@@ -1204,6 +1204,7 @@ struct ProjectRow {
     id: uuid::Uuid,
     name: String,
     description: String,
+    context: String,
     description_text: Option<Value>,
     description_html: Option<Value>,
     network: i16,
@@ -1259,6 +1260,7 @@ impl ProjectRow {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             description: row.try_get("description")?,
+            context: row.try_get("context")?,
             description_text: row.try_get("description_text")?,
             description_html: row.try_get("description_html")?,
             network: row.try_get("network")?,
@@ -1353,7 +1355,7 @@ async fn fetch_project_row_opts(
         ""
     };
     let sql = format!(
-        r#"SELECT DISTINCT p.id, p.name, p.description, p.description_text, p.description_html,
+        r#"SELECT DISTINCT p.id, p.name, p.description, p.context, p.description_text, p.description_html,
               p.network, p.identifier, p.workspace_id,
               p.default_assignee_id, p.project_lead_id, p.emoji, p.icon_prop,
               p.module_view, p.cycle_view, p.issue_views_view, p.page_view, p.intake_view,
@@ -1802,6 +1804,7 @@ async fn render_list_row(
         is_time_tracking_enabled: row.is_time_tracking_enabled,
         is_issue_type_enabled: row.is_issue_type_enabled,
         description: row.description.clone(),
+        context: row.context.clone(),
         description_text: row.description_text.clone(),
         description_html: row.description_html.clone(),
         workspace: row.workspace_id.to_string(),
@@ -1897,6 +1900,7 @@ async fn render_current_instance(
         deleted_at: None,
         name: row.name.clone(),
         description: row.description.clone(),
+        context: row.context.clone(),
         description_text: row.description_text.clone(),
         description_html: row.description_html.clone(),
         network: i64::from(row.network),
@@ -3415,6 +3419,7 @@ enum ValidateMode {
 struct Validated {
     name: Option<String>,
     description: Option<String>,
+    context: Option<String>,
     description_text: Option<Option<Value>>,
     description_html: Option<Option<Value>>,
     network: Option<i32>,
@@ -3493,6 +3498,7 @@ const WRITE_FIELDS: &[&str] = &[
     "deleted_at",
     "name",
     "description",
+    "context",
     "description_text",
     "description_html",
     "network",
@@ -3670,6 +3676,10 @@ async fn validate_one_field(
         }
         "description" => match validate_char(value, None, true) {
             Ok(text) => out.description = Some(text),
+            Err(messages) => return fail_many(messages),
+        },
+        "context" => match validate_char(value, None, true) {
+            Ok(text) => out.context = Some(text),
             Err(messages) => return fail_many(messages),
         },
         "description_text" => {
@@ -4406,7 +4416,7 @@ async fn insert_project(
               repo_url, base_branch,
               agent_default_interval_seconds, agent_default_max_ticks,
               agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-              agent_ticking_enabled, default_agent_executor, members_can_edit_states)
+              agent_ticking_enabled, default_agent_executor, members_can_edit_states, context)
            VALUES ($1, $2, $2, $3, NULL, NULL,
               $4, $5, $6, $7, $8, $9, $10,
               $11, $12, $13, $14,
@@ -4416,7 +4426,7 @@ async fn insert_project(
               $29, $30, $31, $32, $33, $34,
               $35, $36,
               $37, $38, $39, $40,
-              $41, $42, $43)"#,
+              $41, $42, $43, $44)"#,
     )
     .bind(id)
     .bind(now)
@@ -4461,6 +4471,7 @@ async fn insert_project(
     .bind(validated.agent_ticking_enabled.unwrap_or(true))
     .bind(default_executor)
     .bind(validated.members_can_edit_states.unwrap_or(true))
+    .bind(validated.context.as_deref().unwrap_or(""))
     .execute(&mut *tx)
     .await
     .map_err(db_denial)?;
@@ -4690,7 +4701,8 @@ async fn apply_update(
              agent_ticking_enabled = $37, default_agent_executor = $38,
              members_can_edit_states = $39,
              workspace_id = $40, deleted_at = $41,
-             updated_at = $42, updated_by_id = $43, created_by_id = $44
+             updated_at = $42, updated_by_id = $43, created_by_id = $44,
+             context = $46
            WHERE id = $45"#,
     )
     .bind(validated.name.as_deref().unwrap_or(&instance.name))
@@ -4822,6 +4834,7 @@ async fn apply_update(
     // it; `save()` overwrites only `updated_by` — `models/base.py`).
     .bind(validated.created_by.unwrap_or(instance.created_by_id))
     .bind(instance.id)
+    .bind(validated.context.as_deref().unwrap_or(&instance.context))
     .execute(&mut *tx)
     .await
     .map_err(db_denial)?;
@@ -5181,7 +5194,7 @@ async fn project_list_detail(
 
 /// The shared `projects` column list for the multi-row fetches.
 fn project_columns() -> &'static str {
-    "p.id, p.name, p.description, p.description_text, p.description_html, \
+    "p.id, p.name, p.description, p.context, p.description_text, p.description_html, \
      p.network, p.identifier, p.workspace_id, \
      p.default_assignee_id, p.project_lead_id, p.emoji, p.icon_prop, \
      p.module_view, p.cycle_view, p.issue_views_view, p.page_view, p.intake_view, \
@@ -5250,6 +5263,7 @@ fn order_column(key: &str) -> Result<&'static str, Denial> {
         "id" => Ok("p.id"),
         "name" => Ok("p.name"),
         "description" => Ok("p.description"),
+        "context" => Ok("p.context"),
         "identifier" => Ok("p.identifier"),
         "network" => Ok("p.network"),
         "workspace" => Ok("p.workspace_id"),
@@ -6824,7 +6838,7 @@ mod tests {
         assert!(position("identifier") < position("workspace"));
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 43);
+        assert_eq!(WRITE_FIELDS.len(), 44);
     }
 
     #[test]

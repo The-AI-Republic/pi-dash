@@ -62,7 +62,7 @@ def _seed_followup(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO projects (created_at, updated_at, id, name, description,
+            INSERT INTO projects (created_at, updated_at, id, name, description, context,
                 network, identifier, workspace_id, cycle_view, module_view,
                 issue_views_view, page_view, intake_view, archive_in, close_in,
                 logo_props, is_time_tracking_enabled, is_issue_type_enabled,
@@ -71,7 +71,7 @@ def _seed_followup(conn) -> None:
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
                 agent_test_default_interval_seconds)
-            VALUES (now(), now(), %s, 'Replay Project 2', '', 0, 'RPJ2', %s,
+            VALUES (now(), now(), %s, 'Replay Project 2', '', '', 0, 'RPJ2', %s,
                 true, true, true, true, true, 0, 0, '{}', true, true,
                 true, 'UTC', true, '', '', 3600, 100, true, false, 10800,
                 'muse', 10800)

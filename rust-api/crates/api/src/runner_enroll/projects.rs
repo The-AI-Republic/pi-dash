@@ -163,6 +163,9 @@ struct ProjectRow {
     identifier: String,
     name: String,
     description: Option<String>,
+    /// Agent-facing instructions (PDASHOSS01-294); `description` stays for
+    /// runner builds that predate the split.
+    context: Option<String>,
     is_default: bool,
     default_pod_id: Option<String>,
     pod_count: usize,
@@ -209,8 +212,8 @@ async fn serialize_projects(
             .await
             .map_err(|_| server_error())?;
     let groups = group_pods(pod_rows);
-    // Full-row select in `project` column order; only id(5), name(6),
-    // description(7), identifier(12), and is_default(24) are read.
+    // Full-row select in `project` column order; only id, name,
+    // description, context, identifier, and is_default are read (by name).
     let project_rows = sqlx::query(&catalog_reads::workspace_projects_sql())
         .bind(workspace_id)
         .fetch_all(pool)
@@ -218,17 +221,19 @@ async fn serialize_projects(
         .map_err(|_| server_error())?;
     let mut out = Vec::with_capacity(project_rows.len());
     for row in project_rows {
-        let id: Uuid = row.try_get(5).map_err(|_| server_error())?;
-        let name: String = row.try_get(6).map_err(|_| server_error())?;
-        let description: Option<String> = row.try_get(7).map_err(|_| server_error())?;
-        let identifier: String = row.try_get(12).map_err(|_| server_error())?;
-        let is_default: bool = row.try_get(24).map_err(|_| server_error())?;
+        let id: Uuid = row.try_get("id").map_err(|_| server_error())?;
+        let name: String = row.try_get("name").map_err(|_| server_error())?;
+        let description: Option<String> = row.try_get("description").map_err(|_| server_error())?;
+        let context: Option<String> = row.try_get("context").map_err(|_| server_error())?;
+        let identifier: String = row.try_get("identifier").map_err(|_| server_error())?;
+        let is_default: bool = row.try_get("is_default").map_err(|_| server_error())?;
         let (pods, default_pod_id) = groups.get(&id).cloned().unwrap_or_default();
         out.push(ProjectRow {
             id: id.to_string(),
             identifier,
             name,
             description,
+            context,
             is_default,
             default_pod_id: default_pod_id.map(|pod| pod.to_string()),
             pod_count: pods.len(),
@@ -429,6 +434,7 @@ mod tests {
             identifier: "WEB".to_owned(),
             name: "Web".to_owned(),
             description: Some("desc".to_owned()),
+            context: Some("ctx".to_owned()),
             is_default: true,
             default_pod_id: None,
             pod_count: 0,
@@ -436,7 +442,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&row).expect("json"),
-            "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"identifier\":\"WEB\",\"name\":\"Web\",\"description\":\"desc\",\"is_default\":true,\"default_pod_id\":null,\"pod_count\":0,\"pods\":[]}"
+            "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"identifier\":\"WEB\",\"name\":\"Web\",\"description\":\"desc\",\"context\":\"ctx\",\"is_default\":true,\"default_pod_id\":null,\"pod_count\":0,\"pods\":[]}"
         );
         let pod = PodEntry {
             id: "00000000-0000-0000-0000-000000000002".to_owned(),
@@ -458,6 +464,7 @@ mod tests {
             identifier: "W".to_owned(),
             name: "n".to_owned(),
             description: None,
+            context: None,
             is_default: false,
             default_pod_id: Some("p".to_owned()),
             pod_count: 1,

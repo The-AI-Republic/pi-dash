@@ -1895,7 +1895,7 @@ async fn fetch_issue_flat(
 
 /// Column counts of the builder select lists (the join widths the
 /// positional offsets below assume).
-const PROJECT_COLS: usize = 46;
+const PROJECT_COLS: usize = 47;
 const WORKSPACE_COLS: usize = 14;
 const ISSUE_COLS: usize = 34;
 
@@ -1912,15 +1912,15 @@ const LIST_PROJECT_AT: usize = 25;
 /// `history_reactions_prefetch_sql` selects reactions 11 + user 40.
 const PREFETCH_USER_AT: usize = 11;
 
-/// Within-table offsets into `PROJECT_COLUMNS` (46).
+/// Within-table offsets into `PROJECT_COLUMNS` (47).
 const P_ID: usize = 5;
 const P_NAME: usize = 6;
 const P_DESCRIPTION: usize = 7;
-const P_IDENTIFIER: usize = 12;
-const P_IS_DEFAULT: usize = 24;
-const P_COVER_IMAGE: usize = 27;
-const P_COVER_IMAGE_ASSET_ID: usize = 28;
-const P_LOGO_PROPS: usize = 32;
+const P_IDENTIFIER: usize = 13;
+const P_IS_DEFAULT: usize = 25;
+const P_COVER_IMAGE: usize = 28;
+const P_COVER_IMAGE_ASSET_ID: usize = 29;
+const P_LOGO_PROPS: usize = 33;
 
 /// Within-table offsets into `WORKSPACE_COLUMNS` (14).
 const W_ID: usize = 5;

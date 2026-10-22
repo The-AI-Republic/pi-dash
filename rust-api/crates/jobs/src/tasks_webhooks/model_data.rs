@@ -357,6 +357,7 @@ pub struct ProjectRow {
     pub deleted_at: Option<DateTime<Utc>>,
     pub name: String,
     pub description: String,
+    pub context: String,
     pub description_text: Option<String>,
     pub description_html: Option<String>,
     pub network: i32,
@@ -400,8 +401,8 @@ pub struct ProjectRow {
 async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sqlx::Error> {
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         "SELECT id, cover_image_asset_id, cover_image, created_at, updated_at, deleted_at, \
-         name, description, description_text, description_html, network, identifier, emoji, \
-         icon_prop, module_view, cycle_view, issue_views_view, page_view, intake_view, \
+         name, description, context, description_text, description_html, network, identifier, \
+         emoji, icon_prop, module_view, cycle_view, issue_views_view, page_view, intake_view, \
          is_time_tracking_enabled, is_issue_type_enabled, is_default, guest_view_all_features, \
          members_can_edit_states, archive_in, close_in, logo_props, archived_at, timezone, \
          external_source, external_id, repo_url, base_branch, agent_default_interval_seconds, \
@@ -423,6 +424,7 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
         deleted_at: row.try_get("deleted_at").unwrap_or(None),
         name: row.get("name"),
         description: row.get("description"),
+        context: row.get("context"),
         description_text: row.try_get("description_text").unwrap_or(None),
         description_html: row.try_get("description_html").unwrap_or(None),
         network: row.get("network"),
@@ -468,7 +470,7 @@ async fn fetch_project(pool: &PgPool, id: Uuid) -> Result<Option<ProjectRow>, sq
 /// (`cover_image_url`; the annotation siblings skip per QUIRK-ND-2), then
 /// every model field in model order.
 pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<String, Value> {
-    let mut out = Map::with_capacity(47);
+    let mut out = Map::with_capacity(48);
     out.insert("id".to_owned(), uuid_value(&row.id));
     out.insert(
         "cover_image_url".to_owned(),
@@ -488,6 +490,7 @@ pub fn render_project(row: &ProjectRow, cover_image_url: Option<&str>) -> Map<St
         "description".to_owned(),
         Value::String(row.description.clone()),
     );
+    out.insert("context".to_owned(), Value::String(row.context.clone()));
     out.insert(
         "description_text".to_owned(),
         opt_str(&row.description_text),
@@ -1775,6 +1778,7 @@ mod tests {
             deleted_at: dt_opt(&g["deleted_at"]),
             name: g["name"].as_str().unwrap().to_owned(),
             description: g["description"].as_str().unwrap().to_owned(),
+            context: g["context"].as_str().unwrap().to_owned(),
             description_text: str_opt(&g["description_text"]),
             description_html: str_opt(&g["description_html"]),
             network: g["network"].as_i64().unwrap() as i32,

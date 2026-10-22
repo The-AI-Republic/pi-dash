@@ -335,6 +335,7 @@ fn twin_map_project(row: &sqlx::postgres::PgRow) -> Result<ProjectView, sqlx::Er
         identifier: row.try_get("identifier")?,
         name: row.try_get("name")?,
         description: row.try_get("description")?,
+        context: row.try_get("context")?,
         repo_url: row.try_get("repo_url")?,
         base_branch: row.try_get("base_branch")?,
         default_agent_executor: row.try_get("default_agent_executor")?,

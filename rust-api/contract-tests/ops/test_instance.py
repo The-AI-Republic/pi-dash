@@ -364,7 +364,7 @@ def seed_project(
     dbh.execute(
         db_url,
         """insert into projects
-           (created_at, updated_at, id, name, description, network, identifier,
+           (created_at, updated_at, id, name, description, context, network, identifier,
             workspace_id, default_assignee_id, project_lead_id, module_view, cycle_view,
             issue_views_view, page_view, intake_view, is_time_tracking_enabled,
             is_issue_type_enabled, is_default, guest_view_all_features,
@@ -372,7 +372,7 @@ def seed_project(
             repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,
             agent_review_default_interval_seconds, agent_test_default_interval_seconds,
             agent_ticking_enabled, default_agent_executor)
-           values (%s,%s,%s,%s,'',2,%s,%s,%s,%s,
+           values (%s,%s,%s,%s,'','',2,%s,%s,%s,%s,
              false,false,false,true,false,false,false,false,false,true,
              0,0,'{}','UTC','','main',10800,10,10800,10800,true,'local_runner')""",
         (

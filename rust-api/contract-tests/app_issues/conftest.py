@@ -70,13 +70,13 @@ PROJECT_COLUMNS = (
     " repo_url, base_branch, agent_default_interval_seconds,"
     " agent_default_max_ticks, agent_ticking_enabled, is_default,"
     " agent_review_default_interval_seconds, default_agent_executor,"
-    " agent_test_default_interval_seconds"
+    " agent_test_default_interval_seconds, context"
 )
 
 PROJECT_VALUES = (
     NOW, NOW, None, None, "", 0, None, None, True,
     True, True, True, True, 0, 0, "{}", True, True, True, "UTC",
-    True, "", "", 3600, 100, True, False, 10800, "muse", 10800,
+    True, "", "", 3600, 100, True, False, 10800, "muse", 10800, "",
 )
 
 
@@ -222,7 +222,7 @@ def seed(db_conn):
         ):
             cur.execute(
                 "INSERT INTO projects (%s) VALUES (%s)" % (
-                    PROJECT_COLUMNS, ",".join(["%s"] * 30)),
+                    PROJECT_COLUMNS, ",".join(["%s"] * 31)),
                 _project_row(ids[key], name, identifier, ids[ws_key], guest_all),
             )
         for proj_key, ws_key, user_key, role in (

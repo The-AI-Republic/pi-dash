@@ -2076,6 +2076,7 @@ type ProjectCols = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
     Option<i32>,
     Option<i32>,
     Option<i32>,
@@ -2203,6 +2204,7 @@ async fn load_issue_context(
         project_id: project.id.clone(),
         project_name: project.name.clone(),
         project_description: project.description.clone(),
+        project_context: project.context.clone(),
         repo,
         code_reviews: context::code_reviews_context(&reviews),
         parent,
@@ -2257,6 +2259,7 @@ struct ProjectRow {
     identifier: String,
     name: String,
     description: Option<String>,
+    context: Option<String>,
     repo_url: Option<String>,
     base_branch: Option<String>,
     pool: i64,
@@ -2267,7 +2270,7 @@ struct ProjectRow {
 
 async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<ProjectRow, Denial> {
     let row: Option<ProjectCols> = sqlx::query_as(
-        r#"SELECT id, identifier, name, description, repo_url, base_branch,
+        r#"SELECT id, identifier, name, description, context, repo_url, base_branch,
                   agent_default_max_ticks, agent_default_interval_seconds,
                   agent_review_default_interval_seconds, agent_test_default_interval_seconds
            FROM projects WHERE id = $1"#,
@@ -2284,12 +2287,13 @@ async fn load_project(pool: &sqlx::PgPool, project_id: &uuid::Uuid) -> Result<Pr
         identifier: row.1,
         name: row.2,
         description: row.3,
-        repo_url: row.4.filter(|s| !s.is_empty()),
-        base_branch: row.5.filter(|s| !s.is_empty()),
-        pool: row.6.map(i64::from).unwrap_or(10),
-        interval_impl: row.7.map(i64::from).unwrap_or(10800),
-        interval_review: row.8.map(i64::from).unwrap_or(10800),
-        interval_test: row.9.map(i64::from).unwrap_or(10800),
+        context: row.4,
+        repo_url: row.5.filter(|s| !s.is_empty()),
+        base_branch: row.6.filter(|s| !s.is_empty()),
+        pool: row.7.map(i64::from).unwrap_or(10),
+        interval_impl: row.8.map(i64::from).unwrap_or(10800),
+        interval_review: row.9.map(i64::from).unwrap_or(10800),
+        interval_test: row.10.map(i64::from).unwrap_or(10800),
     })
 }
 
@@ -2941,18 +2945,20 @@ async fn load_scheduler_context(
     else {
         return Err(Denial::ServerError);
     };
-    let (project_id_str, project_identifier, project_name, project_description) = match project_id {
-        Some(pid) => {
-            let project = load_project(pool, &pid).await?;
-            (
-                project.id,
-                project.identifier,
-                project.name,
-                project.description,
-            )
-        }
-        None => (String::new(), String::new(), String::new(), None),
-    };
+    let (project_id_str, project_identifier, project_name, project_description, project_context) =
+        match project_id {
+            Some(pid) => {
+                let project = load_project(pool, &pid).await?;
+                (
+                    project.id,
+                    project.identifier,
+                    project.name,
+                    project.description,
+                    project.context,
+                )
+            }
+            None => (String::new(), String::new(), String::new(), None, None),
+        };
     let outcome_directive =
         context::outcome_mode_directive(outcome_mode.as_deref().unwrap_or("")).to_owned();
     let input = context::SchedulerContextInput {
@@ -2966,6 +2972,7 @@ async fn load_scheduler_context(
         project_identifier,
         project_name,
         project_description,
+        project_context,
         scheduler_slug,
         scheduler_name,
         scheduler_description,
