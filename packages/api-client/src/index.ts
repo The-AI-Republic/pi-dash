@@ -351,16 +351,21 @@ export {
 export type { PrefsPatch } from "./contracts/issue-prefs.js";
 export {
   SavedView,
+  SavedViewList,
+  addViewFavorite,
   createProjectView,
   createWorkspaceView,
   deleteProjectView,
   deleteWorkspaceView,
   getProjectView,
   getWorkspaceView,
+  listProjectViews,
+  listWorkspaceViews,
+  removeViewFavorite,
   updateProjectView,
   updateWorkspaceView,
 } from "./contracts/issue-views.js";
-export type { SavedViewCreate, SavedViewPatch } from "./contracts/issue-views.js";
+export type { SavedViewCreate, SavedViewListQuery, SavedViewPatch } from "./contracts/issue-views.js";
 export {
   COMMENT_ACCESS,
   COMMENT_FOLD_LABEL,
