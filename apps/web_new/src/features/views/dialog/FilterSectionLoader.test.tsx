@@ -15,7 +15,7 @@ vi.mock("../../issues/index.js", async (importOriginal) => ({
 import type { FieldConfigRegistry, IssuesEntity, RichFilterBuilderModule } from "../../issues/index.js";
 // Test-only deep imports (checks skip test files): the registry class
 // and snapshot helpers the mocked module carries for the host.
-import { buildViewCreate, savedViewKeys } from "../../issues/filters/rich/views.js";
+import { buildViewCreate, buildViewPatch, savedViewKeys } from "../../issues/filters/rich/views.js";
 import { FieldConfigRegistry as RealRegistry } from "../../issues/filters/rich/temporary.js";
 // Test-only deep type import (checks skip test files).
 import type { RichFilterBuilderParts } from "../../issues/filters/rich/RichFilterBuilder.js";
@@ -41,6 +41,8 @@ function fakeModule(useRichFilterBuilder: ReturnType<typeof vi.fn>): RichFilterB
     parseRichExpression: () => [],
     FieldConfigRegistry: RealRegistry,
     buildViewCreate,
+    buildViewPatch,
+    viewDisplaySnapshot: () => ({ displayFilters: {}, displayProperties: {} }),
     savedViewKeys,
   };
 }
@@ -99,6 +101,7 @@ describe("FilterSectionLoader", () => {
       hideModule: false,
       temporary: true,
       temporaryRegistry: registryRef.current,
+      temporarySeed: undefined,
     });
   });
 
@@ -135,6 +138,33 @@ describe("FilterSectionLoader", () => {
       temporaryRegistry: registryRef.current,
       temporarySeed: [{ key: "c1", property: "priority", operator: "in", negated: false, value: ["high"] }],
     });
+  });
+
+  it("seeds the temporary builder from a stored expression", async () => {
+    const gate = deferred<RichFilterBuilderModule>();
+    const useRichFilterBuilder = fakeBuilder();
+    const seed = [{ key: "seed-1", property: "priority", operator: "in", negated: false, value: "urgent" }];
+    const module = { ...fakeModule(useRichFilterBuilder), parseRichExpression: vi.fn(() => seed) };
+    loader.loadRichFilterBuilder.mockReturnValue(gate.promise);
+    const registryRef: { current: FieldConfigRegistry | null } = { current: null };
+    render(
+      <FilterSectionLoader
+        workspaceSlug="acme"
+        projectId={PROJECT}
+        entity={ENTITY}
+        hideCycle={false}
+        hideModule={false}
+        registryRef={registryRef}
+        expression={{ and: [] }}
+      />
+    );
+    gate.resolve(module);
+    expect(await screen.findByTestId("fake-filter-control")).toBeInTheDocument();
+    await waitFor(() => expect(registryRef.current).toBeInstanceOf(RealRegistry));
+    expect(module.parseRichExpression).toHaveBeenCalledWith({ and: [] });
+    expect(useRichFilterBuilder).toHaveBeenCalledWith(
+      expect.objectContaining({ temporarySeed: seed, temporaryRegistry: registryRef.current })
+    );
   });
 
   it("shows an error note when the chunk fails and leaves the ref empty", async () => {

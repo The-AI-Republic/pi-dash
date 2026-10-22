@@ -10,8 +10,11 @@ describe("rich filter builder loader", () => {
     const first = await loadRichFilterBuilder();
     expect(typeof first.useRichFilterBuilder).toBe("function");
     expect(typeof first.serializeRichExpression).toBe("function");
+    expect(typeof first.parseRichExpression).toBe("function");
     expect(typeof first.FieldConfigRegistry).toBe("function");
     expect(typeof first.buildViewCreate).toBe("function");
+    expect(typeof first.buildViewPatch).toBe("function");
+    expect(typeof first.viewDisplaySnapshot).toBe("function");
     expect(typeof first.savedViewKeys.project).toBe("function");
     const second = await loadRichFilterBuilder();
     expect(second).toBe(first);

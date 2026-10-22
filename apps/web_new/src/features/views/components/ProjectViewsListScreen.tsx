@@ -12,7 +12,7 @@ import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { useWorkspace } from "../../../core/session/index.js";
+import { useMe, useWorkspace } from "../../../core/session/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { preloadRichFilterBuilder } from "../../issues/index.js";
@@ -57,6 +57,7 @@ export function ProjectViewsListScreen({
   const roles = useProjectRoles(workspaceSlug);
   const members = useQuery(workspaceMembersQueryOptions(getAppClient(), workspaceSlug));
   const { workspace } = useWorkspace(workspaceSlug);
+  const me = useMe();
   const [createOpen, setCreateOpen] = React.useState(false);
   // Start the dialog's filter chunk while the list data loads, so opening
   // the dialog rarely flashes its loading note (mirrors NEWFRONT-619).
@@ -141,6 +142,10 @@ export function ProjectViewsListScreen({
         members={members.data}
         workspaceSlug={workspaceSlug}
         projectId={projectId}
+        viewerId={me.data?.id ?? null}
+        projectRole={roles.data?.[projectId] ?? null}
+        hideCycle={!project.data.cycle_view}
+        hideModule={!project.data.module_view}
         onCreateView={openCreateView}
         onRetry={() => {
           void views.refetch();
