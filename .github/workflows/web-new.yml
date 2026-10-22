@@ -29,9 +29,13 @@ on:
       - "desktop/scripts/dev-prep.sh"
       - "desktop/tests/**"
 
+# A new push to a PR replaces its running CI. Pushes to web-new-dev never
+# cancel a running full suite: the next one waits, and newer merges collapse
+# into that one pending run, so every completed run covers all merges since
+# the previous one.
 concurrency:
   group: web-new-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
@@ -102,13 +106,24 @@ jobs:
     needs: install
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The PR merge commit plus its first parent, the base it merges onto.
+          fetch-depth: 2
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter web_new test
+      # A PR runs only the tests its change can affect (the whole suite when it
+      # touches test setup, configs or dependencies); web-new-dev runs them all.
+      - name: unit tests affected by the PR
+        if: github.event_name == 'pull_request'
+        working-directory: apps/web_new
+        run: node checks/test-changed.mjs --base HEAD^1
+      - name: full unit suite
+        if: github.event_name != 'pull_request'
+        run: pnpm --filter web_new test
       - run: pnpm --filter web_new test:coexistence
       - run: pnpm --filter web_new test:size-initial
       - run: pnpm --filter web_new test:parity-report
