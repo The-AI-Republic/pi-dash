@@ -99,6 +99,8 @@ from .api import APITokenSerializer, APITokenReadSerializer
 
 from .importer import ImporterSerializer
 
+from .worklog import IssueWorklogSerializer
+
 from .page import (
     PageSerializer,
     PageDetailSerializer,

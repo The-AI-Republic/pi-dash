@@ -4,6 +4,9 @@
 
 from django.urls import path
 
+# Direct module import: the worklog viewset lives outside the package
+# re-export so this issue's path scope stays to this file (NEWFRONT-672).
+from pi_dash.app.views.issue.worklog import IssueWorklogViewSet
 from pi_dash.app.views import (
     BulkCreateIssueLabelsEndpoint,
     BulkDeleteIssuesEndpoint,
@@ -194,6 +197,24 @@ urlpatterns = [
         name="project-issue-comment",
     ),
     ## End IssueComments
+    ## IssueWorklogs
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/issues/<uuid:issue_id>/worklogs/",
+        IssueWorklogViewSet.as_view({"get": "list", "post": "create"}),
+        name="project-issue-worklog",
+    ),
+    path(
+        "workspaces/<str:slug>/projects/<str:project_id>/issues/<uuid:issue_id>/worklogs/<uuid:pk>/",
+        IssueWorklogViewSet.as_view(
+            {
+                "get": "retrieve",
+                "patch": "partial_update",
+                "delete": "destroy",
+            }
+        ),
+        name="project-issue-worklog",
+    ),
+    ## End IssueWorklogs
     # Issue Subscribers
     path(
         "workspaces/<str:slug>/projects/<str:project_id>/issues/<uuid:issue_id>/issue-subscribers/",

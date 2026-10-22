@@ -282,7 +282,8 @@ function worklogSentence(verb: string, previous: string, value: string): string 
   if (verb === "updated") {
     const before = Number(previous);
     const after = Number(value);
-    if (Number.isInteger(before) && before > 0 && Number.isInteger(after) && after > 0) {
+    const bothValid = Number.isInteger(before) && before > 0 && Number.isInteger(after) && after > 0;
+    if (bothValid && before !== after) {
       return `changed logged time from ${formatMinutes(before)} to ${formatMinutes(after)}.`;
     }
     return "edited a time entry.";

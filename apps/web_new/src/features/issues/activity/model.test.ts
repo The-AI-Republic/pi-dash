@@ -461,6 +461,12 @@ describe("worklog category", () => {
     );
   });
 
+  it("reads an edit with unchanged minutes as a plain edit", () => {
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "90", new_value: "90" })).toBe(
+      "edited a time entry."
+    );
+  });
+
   it("falls back to a plain sentence for unparseable edits", () => {
     expect(activitySentence({ field: "worklog", verb: "updated", old_value: "soon", new_value: "90" })).toBe(
       "edited a time entry."
