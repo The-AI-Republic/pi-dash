@@ -3,21 +3,29 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import type { IssueListItem } from "@pidash/api-client";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 
-const queryMock = vi.hoisted(() => ({ useQuery: vi.fn() }));
+const queryMock = vi.hoisted(() => ({
+  useQuery: vi.fn(),
+  useQueryClient: vi.fn(),
+  current: { data: undefined as unknown, isFetching: false },
+}));
 
 vi.mock("@tanstack/react-query", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-query")>()),
   useQuery: queryMock.useQuery,
+  useQueryClient: queryMock.useQueryClient,
 }));
 
 vi.mock("./InlinePropertyStrip.js", () => ({
   InlinePropertyStrip: () => <div data-testid="strip" />,
 }));
+
+import type * as React from "react";
 
 import { ListRow, MAX_INLINE_DEPTH, issueKey, rowBlockId, rowLinkId, type ListRowProps } from "./ListRow.js";
 
@@ -77,17 +85,38 @@ function props(overrides: Partial<ListRowProps> = {}): ListRowProps {
   };
 }
 
+/** Rows mount the shared quick-action hook, which needs a query client. */
+function renderRow(node: React.ReactElement) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}>{node as never}</QueryClientProvider>);
+}
+
+/** The children read's answer; every other query returns idle data. */
+function respond(value: { data?: unknown; isFetching?: boolean }) {
+  queryMock.current = { data: undefined, isFetching: false, ...value };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   createAppClient("https://api.test", (() => Promise.reject(new Error("unexpected network"))) as never);
-  queryMock.useQuery.mockReturnValue({ data: undefined, isFetching: false });
+  queryMock.useQuery.mockImplementation((options: { queryKey: readonly unknown[] }) =>
+    options.queryKey[0] === "ws" && options.queryKey.includes("projects")
+      ? { data: [], isFetching: false }
+      : queryMock.current
+  );
+  respond({});
+  queryMock.useQueryClient.mockReturnValue({
+    getQueryData: vi.fn(),
+    invalidateQueries: vi.fn(),
+    setQueryData: vi.fn(),
+  });
 });
 
 afterEach(() => resetAppClient());
 
 describe("ListRow", () => {
   it("renders a real browse anchor with the identifier and title", async () => {
-    render(<ListRow {...props()} />);
+    renderRow(<ListRow {...props()} />);
     const anchor = screen.getByLabelText("WEB-42");
     expect(anchor.tagName).toBe("A");
     expect(anchor).toHaveAttribute("href", "/acme/browse/WEB-42");
@@ -99,7 +128,7 @@ describe("ListRow", () => {
   });
 
   it("hides the identifier when the display ID property is off", () => {
-    render(<ListRow {...props({ properties: { key: false } })} />);
+    renderRow(<ListRow {...props({ properties: { key: false } })} />);
     const anchor = screen.getByLabelText("WEB-42");
     expect(anchor).toHaveTextContent("Fix login");
     expect(anchor).not.toHaveTextContent("WEB-42");
@@ -107,7 +136,7 @@ describe("ListRow", () => {
 
   it("opens peek on a plain click and keeps modified clicks as links", () => {
     const onOpenPeek = vi.fn();
-    render(<ListRow {...props({ onOpenPeek })} />);
+    renderRow(<ListRow {...props({ onOpenPeek })} />);
     const anchor = screen.getByLabelText("WEB-42");
     fireEvent.click(anchor, { ctrlKey: true });
     fireEvent.click(anchor, { metaKey: true });
@@ -120,7 +149,7 @@ describe("ListRow", () => {
 
   it("marks a temp row as saving without the property strip", () => {
     const onOpenPeek = vi.fn();
-    render(<ListRow {...props({ issue: issue({ id: "temp-1", name: "Draft" }), onOpenPeek })} />);
+    renderRow(<ListRow {...props({ issue: issue({ id: "temp-1", name: "Draft" }), onOpenPeek })} />);
     const anchor = screen.getByLabelText("Draft, saving");
     expect(anchor).toHaveTextContent("…");
     expect(anchor.querySelector("p")).toHaveTextContent("Draft");
@@ -131,17 +160,17 @@ describe("ListRow", () => {
   });
 
   it("hides the expander for items without children and for epics", () => {
-    const first = render(<ListRow {...props()} />);
+    const first = renderRow(<ListRow {...props()} />);
     expect(screen.queryByRole("button", { name: /sub-work items/ })).not.toBeInTheDocument();
     first.unmount();
-    render(<ListRow {...props({ issue: issue({ is_epic: true, sub_issues_count: 2 }) })} />);
+    renderRow(<ListRow {...props({ issue: issue({ is_epic: true, sub_issues_count: 2 }) })} />);
     expect(screen.queryByRole("button", { name: /sub-work items/ })).not.toBeInTheDocument();
   });
 
   it("loads children lazily, renders them, and shows the loading glyph", () => {
     const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE, sub_issues_count: null });
-    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [child] }, isFetching: false });
-    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
+    respond({ data: { sub_issues: [child] }, isFetching: false });
+    renderRow(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
     expect(queryMock.useQuery.mock.calls[0]?.[0]).toMatchObject({ enabled: false });
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
     expect(screen.getByRole("button", { name: "Collapse sub-work items of Fix login" })).toBeInTheDocument();
@@ -155,8 +184,8 @@ describe("ListRow", () => {
 
   it("renders expanded children outside the fixed-height row so rows stack", () => {
     const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE, sub_issues_count: null });
-    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [child] }, isFetching: false });
-    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
+    respond({ data: { sub_issues: [child] }, isFetching: false });
+    renderRow(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
     const [parentRow] = screen.getAllByTestId("list-row");
     const childBlock = document.getElementById(rowBlockId("child-1"));
@@ -166,8 +195,8 @@ describe("ListRow", () => {
   });
 
   it("shows a spinner while the children request runs", () => {
-    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [] }, isFetching: true });
-    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
+    respond({ data: { sub_issues: [] }, isFetching: true });
+    renderRow(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }) })} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
     expect(
       screen.getByRole("button", { name: "Collapse sub-work items of Fix login" }).querySelector("svg")
@@ -186,8 +215,8 @@ describe("ListRow", () => {
   });
 
   it("hides the expander when the display toggle is off", () => {
-    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [] }, isFetching: false });
-    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), showSubIssues: false })} />);
+    respond({ data: { sub_issues: [] }, isFetching: false });
+    renderRow(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), showSubIssues: false })} />);
     expect(screen.queryByRole("button", { name: /sub-work items/ })).not.toBeInTheDocument();
     expect(queryMock.useQuery.mock.calls[0]?.[0]).toMatchObject({ enabled: false });
   });
@@ -196,6 +225,52 @@ describe("ListRow", () => {
     expect(issueKey("WEB", { sequence_id: 7 })).toBe("WEB-7");
     expect(rowLinkId("issue-1")).toBe("issue-issue-1");
     expect(rowBlockId("issue-1")).toBe("issue_issue-1");
+  });
+
+  it("carries the row menu on hover and on right-click (ISS-060)", async () => {
+    renderRow(<ListRow {...props()} />);
+    const trigger = screen.getByRole("button", { name: "Actions for WEB-42" });
+    expect(trigger.closest("[data-row-menu='true']")).toHaveClass("opacity-0");
+    fireEvent.contextMenu(screen.getByTestId("list-row"));
+    expect(screen.getAllByRole("menuitem", { hidden: true }).length).toBeGreaterThan(0);
+  });
+
+  it("keeps a saving row and a row without a menu target free of triggers", () => {
+    queryMock.useQuery.mockImplementation((options: { queryKey: readonly unknown[] }) =>
+      options.queryKey[0] === "ws" && options.queryKey.includes("projects")
+        ? { data: [], isFetching: false }
+        : queryMock.current
+    );
+    respond({});
+    renderRow(<ListRow {...props({ issue: issue({ id: "temp-9" }) })} />);
+    expect(screen.queryByRole("button", { name: /^Actions for/ })).not.toBeInTheDocument();
+  });
+
+  it("takes an explicit write standing and a change hook from the layout (ISS-063)", async () => {
+    const onMenuChanged = vi.fn();
+    renderRow(
+      <ListRow
+        {...props({
+          menuContext: "module",
+          menuModuleId: "523e4567-e89b-12d3-a456-426614174004",
+          menuCanWrite: false,
+          onMenuChanged,
+        })}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Actions for WEB-42" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    const titles = screen.getAllByRole("menuitem", { hidden: true }).map((item) => item.textContent ?? "");
+    // A read-only standing keeps only the free pair, even in a module.
+    expect(titles.some((title) => title.includes("Edit"))).toBe(false);
+    expect(titles.some((title) => title.includes("Open in new tab"))).toBe(true);
+    expect(onMenuChanged).not.toHaveBeenCalled();
+  });
+
+  it("opens the menu in the cycle context the layout hands it (ISS-062)", () => {
+    renderRow(<ListRow {...props({ menuContext: "cycle", menuCycleId: "423e4567-e89b-12d3-a456-426614174003" })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    expect(screen.getAllByRole("menuitem", { hidden: true }).length).toBeGreaterThan(0);
   });
 });
 

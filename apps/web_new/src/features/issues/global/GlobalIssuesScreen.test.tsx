@@ -72,8 +72,8 @@ function idFor(seed: string): string {
   return `${filled.slice(0, 8)}-${filled.slice(8, 12)}-4${filled.slice(13, 16)}-8${filled.slice(17, 20)}-${filled.slice(20, 32)}`;
 }
 
-function projectRow(id: string, identifier: string): Record<string, unknown> {
-  return { id, name: identifier, identifier, member_role: 15, archived_at: null };
+function projectRow(id: string, identifier: string, memberRole = 15): Record<string, unknown> {
+  return { id, name: identifier, identifier, member_role: memberRole, archived_at: null };
 }
 
 /** One response page, with the cursor fields the read expects. */
@@ -346,5 +346,41 @@ describe("GlobalIssuesScreen", () => {
     // With no continuation there is no footer sentinel at all, so the
     // observer list stays empty and nothing fires.
     expect(capturedObservers).toHaveLength(0);
+  });
+
+  it("gives every row its project-style menu and the page its ellipsis (ISS-065/067)", async () => {
+    const user = userEvent.setup();
+    renderScreen({ results: [row("a1", { sequence_id: 1, state__group: "started" })] });
+    await screen.findByText("Issue a1");
+    await user.click(screen.getAllByRole("button", { name: "Actions for WEB-1" })[0]!);
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.querySelector("[data-menu-title]")?.textContent ?? item.textContent)).toEqual([
+      "Edit",
+      "Make a copy",
+      "Open in new tab",
+      "Copy link",
+      "Move to project",
+      "Archive",
+      "Delete",
+    ]);
+    // A started row cannot be archived: the note explains the gate.
+    expect(items[5]?.textContent).toContain("Only completed or canceled");
+    expect(items[5]?.getAttribute("aria-disabled")).toBe("true");
+
+    expect(screen.getByRole("button", { name: "List actions" })).toBeInTheDocument();
+  });
+
+  it("hides the write entries on a project the viewer only reads", async () => {
+    const user = userEvent.setup();
+    const view = renderScreen({ results: [row("a1", { sequence_id: 1 })] });
+    // A guest standing on the row's own project hides every write entry.
+    view.queryClient.setQueryData(projectKeys.list(SLUG), [projectRow(PROJECT, "WEB", 10)]);
+    await screen.findByText("Issue a1");
+    await user.click(screen.getAllByRole("button", { name: "Actions for WEB-1" })[0]!);
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.querySelector("[data-menu-title]")?.textContent ?? item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+    ]);
   });
 });

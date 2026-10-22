@@ -11,7 +11,7 @@
 import { Button, Menu, Spinner } from "@pidash/kit";
 import { useInfiniteQuery, useQueries } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ArrowDownWideNarrow, ArrowUpNarrowWide, ChevronRight, Eraser, MoreHorizontal, Plus } from "lucide-react";
+import { ArrowDownWideNarrow, ArrowUpNarrowWide, ChevronRight, Eraser, Plus } from "lucide-react";
 import * as React from "react";
 import type { IssueListItem } from "@pidash/api-client";
 
@@ -61,6 +61,8 @@ import {
   useBulkSelection,
 } from "../bulk/index.js";
 import { SpreadsheetSkeleton } from "../loaders/skeletons.js";
+import { RowContextMenu, RowMenuButton } from "../menus/RowQuickActions.js";
+import { quickActionTarget, useQuickActions } from "../menus/useQuickActions.js";
 
 const ROW_HEIGHT = 44;
 
@@ -180,12 +182,6 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
       to: "/$ws/browse/$issueKey",
       params: { ws: workspaceSlug, issueKey: `${projectIdentifier}-${issue.sequence_id}` },
       hash: "sub-issues",
-    });
-  };
-  const openWorkItem = (issue: IssueListItem): void => {
-    void navigate({
-      to: "/$ws/browse/$issueKey",
-      params: { ws: workspaceSlug, issueKey: `${projectIdentifier}-${issue.sequence_id}` },
     });
   };
   const focusCell = (rowId: string, _columnKey: string, columnIndex: number): void => {
@@ -323,8 +319,8 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                   hasChildren={(row.issue.sub_issues_count ?? 0) > 0}
                   expanded={expanded.has(row.issue.id)}
                   onToggle={() => toggleExpanded(row)}
-                  onOpen={() => openWorkItem(row.issue)}
                   onKeyDown={onGridKeyDown}
+                  canWrite={canEdit}
                 />
               );
             })}
@@ -586,12 +582,12 @@ function SheetRow({
   hasChildren,
   expanded,
   onToggle,
-  onOpen,
   onKeyDown,
   selectionEnabled,
   selected,
   active,
   onSelectionToggle,
+  canWrite,
 }: {
   row: DisplayRow;
   columns: readonly SheetColumn[];
@@ -607,15 +603,25 @@ function SheetRow({
   hasChildren: boolean;
   expanded: boolean;
   onToggle: () => void;
-  onOpen: () => void;
   onKeyDown: (event: React.KeyboardEvent<HTMLTableCellElement>) => void;
+  canWrite: boolean;
 }): React.ReactElement {
   const { issue, depth } = row;
   const temp = issue.id.startsWith("temp-");
+  const menu = useQuickActions(
+    temp
+      ? null
+      : {
+          workspaceSlug: context.workspaceSlug,
+          target: quickActionTarget(issue, projectIdentifier),
+          context: "project",
+          canWrite,
+        }
+  );
   const key = temp ? "…" : `${projectIdentifier}-${issue.sequence_id}`;
   const href = `/${context.workspaceSlug}/browse/${key}`;
   const cellStyle = { boxShadow: scrolled ? "8px 22px 22px 10px rgba(0, 0, 0, 0.05)" : "none" };
-  return (
+  const rowNode = (
     <tr
       {...{ [SELECTION_ROW_ATTR]: issue.id }}
       data-highlight={highlighted ? "true" : undefined}
@@ -676,14 +682,7 @@ function SheetRow({
               </Link>
             )}
           </div>
-          <button
-            type="button"
-            aria-label={`Open ${issue.name}`}
-            onClick={onOpen}
-            className="grid size-5 shrink-0 cursor-pointer place-items-center rounded-(--radius-control) text-(--text-muted) hover:bg-(--subtle) hover:text-(--text)"
-          >
-            <MoreHorizontal size={14} strokeWidth={1.5} aria-hidden="true" />
-          </button>
+          {menu === null ? null : <RowMenuButton state={menu} issueKey={key} className="shrink-0" />}
         </div>
         {temp ? (
           <span aria-hidden="true" className="pointer-events-none absolute inset-0 animate-pulse bg-(--subtle)/60" />
@@ -702,6 +701,8 @@ function SheetRow({
       ))}
     </tr>
   );
+  if (menu === null) return rowNode;
+  return <RowContextMenu state={menu} trigger={rowNode} />;
 }
 
 const QUICK_ADD_PLACEHOLDER = "Work item title";

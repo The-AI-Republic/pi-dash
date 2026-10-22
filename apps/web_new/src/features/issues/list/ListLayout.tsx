@@ -444,6 +444,10 @@ export function ListLayout({
         deferPickers={!pages.grouped}
         showSubIssues={prefs.showSubIssues}
         timeZone={projectDetails?.timezone ?? null}
+        menuContext={cycleId !== undefined ? "cycle" : moduleId !== undefined ? "module" : "project"}
+        menuCycleId={cycleId ?? null}
+        menuModuleId={moduleId ?? null}
+        menuCanWrite={!readOnly}
       />
     );
   }
@@ -455,7 +459,16 @@ export function ListLayout({
     >
       {peekKey === null ? null : (
         <React.Suspense fallback={null}>
-          <LazyListPeek issueKey={peekKey ?? ""} title={peekTitle ?? ""} onClose={closePeek} />
+          <LazyListPeek
+            issueKey={peekKey ?? ""}
+            title={peekTitle ?? ""}
+            onClose={closePeek}
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            projectIdentifier={projectIdentifier}
+            issue={peekIssue}
+            canWrite={!readOnly}
+          />
         </React.Suspense>
       )}
       {sectionGroups.map((section) => {

@@ -35,6 +35,8 @@ import {
 } from "../../../../features/issues/detail/widgets/attachments/AttachmentsWidget.js";
 import { CodeReviewsWidget } from "../../../../features/issues/detail/widgets/codeReviews/CodeReviewsWidget.js";
 import { mayDeleteWorkItem } from "../../../../features/issues/lifecycle/rules.js";
+import { DetailQuickActions } from "../../../../features/issues/menus/DetailQuickActions.js";
+import { useQuickActions } from "../../../../features/issues/menus/useQuickActions.js";
 import {
   LinkActionButton,
   LinksWidget,
@@ -185,6 +187,36 @@ function BrowseIssueDetail({
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
   const writable = editable && issue.archived_at === null && !issue.is_synced;
+  const identifier = projectIdentifier(project, issueKey);
+  const queryClient = context.queryClient;
+  function refreshDetail(): void {
+    void queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) });
+    void queryClient.invalidateQueries({ queryKey: issueKeys.browse(workspaceSlug, issueKey) });
+    void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
+  }
+  const menu = useQuickActions(
+    issue.is_synced
+      ? null
+      : {
+          workspaceSlug,
+          target: {
+            id: issue.id,
+            name: issue.name,
+            sequenceId: issue.sequence_id,
+            projectId,
+            projectIdentifier: identifier,
+            stateId: issue.state_id,
+            snapshot: issue,
+            createdBy: issue.created_by ?? null,
+            archived: issue.archived_at !== null,
+            isEpic: issue.is_epic ?? false,
+          },
+          context: "detail",
+          canWrite: editable,
+          onChanged: () => refreshDetail(),
+          onRestored: () => void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey } }),
+        }
+  );
   const attachmentsRef = React.useRef<AttachmentsWidgetHandle>(null);
   const widgetSections = [
     {
@@ -287,6 +319,7 @@ function BrowseIssueDetail({
           <div className="flex items-center gap-(--space-2)">
             <span className="text-meta font-medium text-(--text-muted)">{issueKey}</span>
             <CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={issueKey} />
+            {menu === null ? null : <DetailQuickActions state={menu} />}
           </div>
         }
         activity={

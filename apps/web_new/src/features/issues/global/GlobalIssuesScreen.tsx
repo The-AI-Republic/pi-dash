@@ -7,6 +7,9 @@
 // parameters but this build deliberately does not apply them (the
 // oracle pins the unfiltered result), so the screen shows the same rows
 // either way, and the empty surface is the workspace card (ISS-073).
+// Every row carries the project-style quick-action menu (ISS-065); the
+// row's own state annotation answers the archive gate without a read,
+// and the per-project role decides which write entries appear.
 
 import { useSuspenseInfiniteQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { GlobalIssueRow } from "@pidash/api-client";
@@ -17,6 +20,10 @@ import * as React from "react";
 import { getAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { GlobalIssuesEmptyState } from "../contexts/GlobalIssuesEmptyState.js";
+import { canEditInProject } from "../../../shared/shell/contextual/index.js";
+import { ListPageQuickActions } from "../menus/ListPageQuickActions.js";
+import { RowContextMenu, RowMenuButton } from "../menus/RowQuickActions.js";
+import { quickActionTarget, useQuickActions } from "../menus/useQuickActions.js";
 import { flattenGlobalPages, globalIssuesQueryOptions, globalTotalCount } from "./queries.js";
 
 /** Stable row height for the virtual list. */
@@ -49,22 +56,39 @@ function GlobalRow({
   row,
   identifier,
   workspaceSlug,
+  canWrite,
 }: {
   row: GlobalIssueRow;
   identifier: string | undefined;
   workspaceSlug: string;
+  canWrite: boolean;
 }): React.ReactElement {
   const key = globalIssueKey(identifier, row);
-  return (
-    <Link
-      to="/$ws/browse/$issueKey"
-      params={{ ws: workspaceSlug, issueKey: key }}
-      className="text-body flex h-full items-center gap-(--space-2) border-b border-(--border) px-(--space-3) text-(--text) hover:bg-(--subtle)"
-    >
-      <span className="text-meta w-20 shrink-0 text-(--text-muted)">{key}</span>
-      <span className="min-w-0 truncate">{row.name}</span>
-    </Link>
+  const menu = useQuickActions({
+    workspaceSlug,
+    target: {
+      ...quickActionTarget(row, identifier ?? ""),
+      stateGroup: row.state__group,
+    },
+    context: "global",
+    canWrite,
+  });
+  // The menu trigger sits beside the link, not inside it: a button nested
+  // in an anchor is invalid and swallows the link's own click.
+  const body = (
+    <div className="flex h-full items-center border-b border-(--border) hover:bg-(--subtle)">
+      <Link
+        to="/$ws/browse/$issueKey"
+        params={{ ws: workspaceSlug, issueKey: key }}
+        className="text-body flex h-full min-w-0 flex-1 items-center gap-(--space-2) px-(--space-3) text-(--text)"
+      >
+        <span className="text-meta w-20 shrink-0 text-(--text-muted)">{key}</span>
+        <span className="min-w-0 flex-1 truncate">{row.name}</span>
+      </Link>
+      <RowMenuButton state={menu} issueKey={key} className="shrink-0 pr-(--space-2)" />
+    </div>
   );
+  return <RowContextMenu state={menu} trigger={body} />;
 }
 
 /**
@@ -82,6 +106,19 @@ export function GlobalIssuesScreen(): React.ReactElement {
     [projects]
   );
   const rows = React.useMemo(() => flattenGlobalPages(issues.data), [issues.data]);
+  // The visible rows span projects; a row is writable when the viewer
+  // holds a writing role on its own project (archived projects read).
+  const writableProjects = React.useMemo(
+    () =>
+      new Set(
+        projects
+          .filter((project) =>
+            canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null })
+          )
+          .map((project) => project.id)
+      ),
+    [projects]
+  );
   const total = globalTotalCount(issues.data);
   // A sentinel callback and a click can both land before the render that
   // reports the fetch state, so the latch is synchronous and the render
@@ -105,7 +142,10 @@ export function GlobalIssuesScreen(): React.ReactElement {
     <section aria-label="All issues" className="flex h-full min-h-0 flex-col">
       <header className="flex items-center justify-between border-b border-(--border) px-(--space-3) py-(--space-2)">
         <h1 className="text-h3 text-(--text)">All issues</h1>
-        <span className="text-meta text-(--text-muted)">{total}</span>
+        <div className="ml-auto flex items-center gap-(--space-3)">
+          <span className="text-meta text-(--text-muted)">{total}</span>
+          <ListPageQuickActions />
+        </div>
       </header>
       <VirtualList
         label="All issues"
@@ -115,7 +155,12 @@ export function GlobalIssuesScreen(): React.ReactElement {
         overscan={6}
         className="min-h-0 flex-1"
         renderRow={(row) => (
-          <GlobalRow row={row} identifier={identifiers.get(row.project_id)} workspaceSlug={workspaceSlug} />
+          <GlobalRow
+            row={row}
+            identifier={identifiers.get(row.project_id)}
+            workspaceSlug={workspaceSlug}
+            canWrite={writableProjects.has(row.project_id)}
+          />
         )}
         footer={
           issues.hasNextPage ? (

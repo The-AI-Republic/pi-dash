@@ -5,7 +5,7 @@ import { ContextMenu as BaseContextMenu } from "@base-ui-components/react/contex
 import * as React from "react";
 import { cn } from "../lib/cn";
 import { pickDefined } from "../lib/props";
-import { isMenuCustom, isMenuSeparator, type MenuEntry } from "./Menu";
+import { isMenuCustom, isMenuSeparator, MenuItemBody, type MenuEntry } from "./Menu";
 
 export interface ContextMenuProps {
   /**
@@ -52,7 +52,7 @@ export function ContextMenu({ trigger, items, open, onOpenChange }: ContextMenuP
                       {entry.icon}
                     </span>
                   )}
-                  {entry.label}
+                  <MenuItemBody label={entry.label} description={entry.description} content={entry.content} />
                 </BaseContextMenu.Item>
               )
             )}

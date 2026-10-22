@@ -5,7 +5,9 @@
 // anchor to the browse route; a plain click opens peek instead of
 // navigating, while modified/middle clicks keep the browser's new-tab
 // behavior. The expander lazily loads children, nests them to three
-// levels, and hands deeper levels to peek.
+// levels, and hands deeper levels to peek. Each live row carries the
+// shared quick-action menu twice: a hover ellipsis and the right-click
+// menu (ISS-060); children inherit the parent's menu context.
 
 import { useQuery } from "@tanstack/react-query";
 import type { IssueListItem, State } from "@pidash/api-client";
@@ -18,6 +20,9 @@ import { isRowHighlighted, isTempRowId, rowDomId } from "../freshness/fresh.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
 import { ForeignRowSelectionHint, RowSelectionCheckbox } from "../bulk/SelectionCheckbox.js";
 import { SELECTION_ROW_ATTR } from "../bulk/useBulkSelection.js";
+import { RowContextMenu, RowMenuButton } from "../menus/RowQuickActions.js";
+import type { QuickActionContext } from "../menus/model.js";
+import { quickActionTarget, useQuickActions } from "../menus/useQuickActions.js";
 // The strip brings the property pickers. Its chunk request starts after the
 // rows commit, so the list chunk stays cheap to evaluate and rows paint
 // before the picker code arrives (desktop warm-start budget). Suspending the
@@ -117,6 +122,15 @@ export interface ListRowProps {
         children: ReadonlyMap<string, readonly IssueListItem[]>;
       }
     | undefined;
+  /** Which menu context the row opens (project, cycle, module or archived). */
+  menuContext?: QuickActionContext | undefined;
+  /** Cycle or module the row sits in, for the remove entry and edit prefill. */
+  menuCycleId?: string | null | undefined;
+  menuModuleId?: string | null | undefined;
+  /** The viewer may write on the project; absent resolves from the read. */
+  menuCanWrite?: boolean | undefined;
+  /** Called after any menu write lands (the route refreshes its own reads). */
+  onMenuChanged?: (() => void) | undefined;
 }
 
 export function issueKey(projectIdentifier: string, issue: Pick<IssueListItem, "sequence_id">): string {
@@ -233,6 +247,19 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     enabled: showSubIssues && expanded && !atCap && canExpand,
   });
   const children = treeChildren ?? query.data?.sub_issues ?? [];
+  const menu = useQuickActions(
+    temp
+      ? null
+      : {
+          workspaceSlug: props.workspaceSlug,
+          target: quickActionTarget(issue, projectIdentifier),
+          context: props.menuContext ?? "project",
+          cycleId: props.menuCycleId ?? null,
+          moduleId: props.menuModuleId ?? null,
+          ...(props.menuCanWrite === undefined ? {} : { canWrite: props.menuCanWrite }),
+          onChanged: props.onMenuChanged,
+        }
+  );
   const toggleExpanded = (): void => {
     const next = !expanded;
     if (selectionTree === undefined) setUncontrolledExpanded(next);
@@ -243,82 +270,93 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     if (expanded && query.data !== undefined) onChildrenChange?.(issue.id, query.data.sub_issues ?? []);
   }, [expanded, issue.id, onChildrenChange, query.data]);
 
+  const rowBody = (
+    <div
+      data-testid="list-row"
+      {...{ [SELECTION_ROW_ATTR]: issue.id }}
+      data-highlight={highlighted ? "true" : undefined}
+      data-active={isActive ? "true" : undefined}
+      className={[
+        compact ? "h-8" : "h-11",
+        "group/row flex items-center gap-(--space-2) border-b border-(--border) px-(--space-3)",
+        highlighted ? "bg-(--accent-subtle)" : "",
+        isActive ? "ring-1 ring-inset ring-(--accent)" : "",
+      ].join(" ")}
+    >
+      {onSelectionToggle === undefined ? null : selectionAvailable ? (
+        <RowSelectionCheckbox
+          checked={isSelected}
+          label={`Select ${key}`}
+          onChange={(event) => onSelectionToggle(issue.id, event.shiftKey)}
+        />
+      ) : (
+        <ForeignRowSelectionHint label={`Cannot select ${key}`} />
+      )}
+      <SubIssueToggle
+        issue={issue}
+        expanded={expanded}
+        fetching={query.isFetching}
+        depth={depth}
+        projectIdentifier={projectIdentifierFor?.(issue) ?? projectIdentifier}
+        onToggle={toggleExpanded}
+        onOpenPeek={onOpenPeek}
+        showSubIssues={showSubIssues}
+      />
+      <a
+        id={rowLinkId(issue.id)}
+        data-row-anchor="true"
+        href={href}
+        aria-label={temp ? `${issue.name}, saving` : key}
+        className="flex min-w-0 flex-1 items-center gap-(--space-2) focus-visible:outline-2 focus-visible:outline-(--accent)"
+        onClick={(event) => {
+          if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+          event.preventDefault();
+          if (!temp) onOpenPeek(key, issue.name);
+        }}
+      >
+        {props.properties["key"] === false ? null : (
+          <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
+            {temp ? "…" : key}
+          </span>
+        )}
+        <p title={issue.name} className="text-body min-w-0 flex-1 truncate text-(--text)">
+          {issue.name}
+        </p>
+      </a>
+      {temp ? null : (
+        <DeferredStrip
+          workspaceSlug={props.workspaceSlug}
+          projectId={props.projectId}
+          projectIdentifier={projectIdentifier}
+          issue={issue}
+          properties={props.properties}
+          flags={props.flags}
+          readOnly={props.readOnly}
+          states={props.states}
+          stateNames={props.stateNames}
+          assigneeNames={props.assigneeNames}
+          labelNames={props.labelNames}
+          cycleNames={props.cycleNames}
+          moduleNames={props.moduleNames}
+          openCycleIds={props.openCycleIds}
+          estimateEnabled={props.estimateEnabled}
+          deferPickers={props.deferPickers ?? false}
+          timeZone={timeZone}
+        />
+      )}
+      {menu === null ? null : (
+        <RowMenuButton
+          state={menu}
+          issueKey={key}
+          className="opacity-0 transition-opacity group-hover/row:opacity-100 focus-within:opacity-100"
+        />
+      )}
+    </div>
+  );
+
   return (
     <article id={rowBlockId(issue.id)} data-temprow={temp ? "true" : undefined} className="flex flex-col">
-      <div
-        data-testid="list-row"
-        {...{ [SELECTION_ROW_ATTR]: issue.id }}
-        data-highlight={highlighted ? "true" : undefined}
-        data-active={isActive ? "true" : undefined}
-        className={[
-          compact ? "h-8" : "h-11",
-          "flex items-center gap-(--space-2) border-b border-(--border) px-(--space-3)",
-          highlighted ? "bg-(--accent-subtle)" : "",
-          isActive ? "ring-1 ring-inset ring-(--accent)" : "",
-        ].join(" ")}
-      >
-        {onSelectionToggle === undefined ? null : selectionAvailable ? (
-          <RowSelectionCheckbox
-            checked={isSelected}
-            label={`Select ${key}`}
-            onChange={(event) => onSelectionToggle(issue.id, event.shiftKey)}
-          />
-        ) : (
-          <ForeignRowSelectionHint label={`Cannot select ${key}`} />
-        )}
-        <SubIssueToggle
-          issue={issue}
-          expanded={expanded}
-          fetching={query.isFetching}
-          depth={depth}
-          projectIdentifier={projectIdentifierFor?.(issue) ?? projectIdentifier}
-          onToggle={toggleExpanded}
-          onOpenPeek={onOpenPeek}
-          showSubIssues={showSubIssues}
-        />
-        <a
-          id={rowLinkId(issue.id)}
-          data-row-anchor="true"
-          href={href}
-          aria-label={temp ? `${issue.name}, saving` : key}
-          className="flex min-w-0 flex-1 items-center gap-(--space-2) focus-visible:outline-2 focus-visible:outline-(--accent)"
-          onClick={(event) => {
-            if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
-            event.preventDefault();
-            if (!temp) onOpenPeek(key, issue.name);
-          }}
-        >
-          {props.properties["key"] === false ? null : (
-            <span className="text-caption shrink-0 font-[family-name:var(--font-mono)] text-(--text-muted)">
-              {temp ? "…" : key}
-            </span>
-          )}
-          <p title={issue.name} className="text-body min-w-0 flex-1 truncate text-(--text)">
-            {issue.name}
-          </p>
-        </a>
-        {temp ? null : (
-          <DeferredStrip
-            workspaceSlug={props.workspaceSlug}
-            projectId={props.projectId}
-            projectIdentifier={projectIdentifier}
-            issue={issue}
-            properties={props.properties}
-            flags={props.flags}
-            readOnly={props.readOnly}
-            states={props.states}
-            stateNames={props.stateNames}
-            assigneeNames={props.assigneeNames}
-            labelNames={props.labelNames}
-            cycleNames={props.cycleNames}
-            moduleNames={props.moduleNames}
-            openCycleIds={props.openCycleIds}
-            estimateEnabled={props.estimateEnabled}
-            deferPickers={props.deferPickers ?? false}
-            timeZone={timeZone}
-          />
-        )}
-      </div>
+      {menu === null ? rowBody : <RowContextMenu state={menu} trigger={rowBody} />}
       {expanded && children.length > 0 ? (
         <div data-testid="list-row-children" className="flex flex-col pl-(--space-4)">
           {children.map((child) => (

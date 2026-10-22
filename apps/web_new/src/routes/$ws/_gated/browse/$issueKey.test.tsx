@@ -724,6 +724,18 @@ describe("browse route", () => {
     clearPalettePages();
   });
 
+  it("mounts the work-item actions beside the detail header (ISS-066)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    await findStrip();
+    expect(await screen.findByRole("button", { name: "Work item actions" })).toBeInTheDocument();
+  });
+
+  it("leaves the header menu off a synced work item", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, syncedIssue: true });
+    await screen.findByTestId("issue-detail-widgets");
+    expect(screen.queryByRole("button", { name: "Work item actions" })).toBeNull();
+  });
+
   it("refreshes the detail after a state pick", async () => {
     const { calls } = renderBrowse(true, undefined, { details: "member", me: true });
     await findStrip();

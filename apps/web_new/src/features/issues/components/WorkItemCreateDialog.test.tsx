@@ -2368,6 +2368,48 @@ describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
   });
 });
 
+describe("WorkItemCreateDialog copy prefill (ISS-060)", () => {
+  it("opens on the source row's fields under the copy title and creates", async () => {
+    const h = setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas") } },
+      {
+        initialProjectId: PROJECT_ATLAS,
+        copySeed: {
+          title: "Fix login (copy)",
+          snapshot: {
+            id: "123e4567-e89b-12d3-a456-42661417400a",
+            name: "Fix login",
+            priority: "high",
+            assignee_ids: [],
+            label_ids: [PARENT_ID],
+            module_ids: [],
+          },
+        },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Fix login (copy)"));
+    save();
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({
+      name: "Fix login (copy)",
+      priority: "high",
+      label_ids: [PARENT_ID],
+    });
+  });
+
+  it("still opens under the copy title when the seed's snapshot has no row", async () => {
+    setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas") } },
+      {
+        initialProjectId: PROJECT_ATLAS,
+        copySeed: { title: "Bare (copy)", snapshot: null },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Bare (copy)"));
+    expect(screen.getByRole("textbox", { name: "Description" })).toBeInTheDocument();
+  });
+});
+
 describe("WorkItemCreateDialog context close and Create more (ISS-124/125)", () => {
   it("closes an untouched cycle-context form without offering a draft", async () => {
     const h = setup(

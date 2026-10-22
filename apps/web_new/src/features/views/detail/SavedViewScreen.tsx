@@ -44,6 +44,7 @@ import {
   type ViewSnapshot,
   type WorkItemCreateProject,
 } from "../../issues/index.js";
+import { ListPageQuickActions } from "../../issues/menus/ListPageQuickActions.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { projectViewDetailQueryOptions } from "../api/detail.js";
 import { viewKeys } from "../api/keys.js";
@@ -309,6 +310,7 @@ function SavedViewBody({
         <>
           {addWorkItem}
           {locked ? null : displayControl}
+          <ListPageQuickActions />
         </>
       }
       displayControl={locked ? undefined : displayControl}
