@@ -154,28 +154,31 @@ describe.skipIf(!contractEnabled)("cycle date-check contract", () => {
     const client = await sharedSignedIn();
     const projectId = await seededProjectId(client);
     await clearProbeCycle(client, projectId);
+    // The seeded project carries cycles from -30 through +30 days. Both
+    // windows here sit beyond that range so a collision can only come from
+    // this test's own probe, never from a fixture.
     const created = await createCycle(client, CONTRACT_WORKSPACE, projectId, {
       name: PROBE,
-      start_date: instant(-1),
-      end_date: instant(1),
+      start_date: instant(61),
+      end_date: instant(63),
     });
     try {
       const free = await checkCycleDates(client, CONTRACT_WORKSPACE, projectId, {
-        start_date: calendarDate(10),
-        end_date: calendarDate(12),
+        start_date: calendarDate(90),
+        end_date: calendarDate(92),
       });
       expect(free).toEqual({ status: true });
 
       const collision = await checkCycleDates(client, CONTRACT_WORKSPACE, projectId, {
-        start_date: calendarDate(-1),
-        end_date: calendarDate(1),
+        start_date: calendarDate(61),
+        end_date: calendarDate(63),
       });
       expect(collision.status).toBe(false);
       expect(collision.error).toContain("cycle already");
 
       const excluded = await checkCycleDates(client, CONTRACT_WORKSPACE, projectId, {
-        start_date: calendarDate(-1),
-        end_date: calendarDate(1),
+        start_date: calendarDate(61),
+        end_date: calendarDate(63),
         cycle_id: created.id,
       });
       expect(excluded.status).toBe(true);
