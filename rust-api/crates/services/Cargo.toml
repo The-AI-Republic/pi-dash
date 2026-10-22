@@ -77,6 +77,9 @@ md-5 = "0.10"
 # PIDASHCONV-862 live drains: the public drain executors log the matcher
 # info lines directly (same locked tracing 0.1.x as pidash-db, no lock churn).
 tracing = "0.1"
+# PIDASHCONV-1280 link-crawler titles: WHATWG decoding for Dammit-declared
+# charsets (shift_jis, windows-125x, utf-16, ...). Pure-Rust, no C build.
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
