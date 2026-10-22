@@ -955,6 +955,7 @@ export {
   moduleLinkPath,
   moduleLinksPath,
   modulesCollection,
+  removeIssueFromModule,
   replaceModule,
   restoreModule,
   unfavoriteModule,

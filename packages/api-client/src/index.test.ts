@@ -14,6 +14,7 @@ import {
   replaceModule,
   archiveModule,
   listArchivedModules,
+  removeIssueFromModule,
   ModuleRow,
   ModuleDetail,
 } from "./index.js";
@@ -54,6 +55,7 @@ import {
   listModules as moduleListModules,
   ModuleDetail as ModuleDetailSchema,
   ModuleRow as ModuleRowSchema,
+  removeIssueFromModule as moduleRemoveIssueFromModule,
   replaceModule as moduleReplaceModule,
 } from "./contracts/modules.js";
 import {
@@ -101,6 +103,7 @@ describe("@pidash/api-client entry", () => {
     expect(replaceModule).toBe(moduleReplaceModule);
     expect(archiveModule).toBe(moduleArchiveModule);
     expect(listArchivedModules).toBe(moduleListArchivedModules);
+    expect(removeIssueFromModule).toBe(moduleRemoveIssueFromModule);
     expect(ModuleRow).toBe(ModuleRowSchema);
     expect(ModuleDetail).toBe(ModuleDetailSchema);
   });
