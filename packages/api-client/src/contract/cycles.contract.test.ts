@@ -338,6 +338,17 @@ describe.skipIf(!contractEnabled)("cycle favourites, archive, restore and transf
     }
   });
 
+  it("404s the restore of a missing cycle", async () => {
+    const client = await sharedSignedIn();
+    const projectId = await seededProjectId(client);
+    // The NEWFRONT-244 repro: the cycle is gone under the open menu, so
+    // the backend answers 404 and the contract must reject (never
+    // resolve) so the UI reports the failure honestly.
+    await expect(
+      restoreCycle(client, CONTRACT_WORKSPACE, projectId, "123e4567-e89b-12d3-a456-4266141749ff")
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
   it("refuses to archive a cycle that has not finished", async () => {
     const client = await sharedSignedIn();
     const projectId = await seededProjectId(client);

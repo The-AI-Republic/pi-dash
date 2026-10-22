@@ -389,7 +389,7 @@ export async function listGroupedCycleIssues(
 }
 
 /**
- * Sub-grouped variant of the cycle list (the cycle page's hosts a shared
+ * Sub-grouped variant of the cycle list (the cycle page hosts a shared
  * layout with two grouping dimensions). Same envelope as the project.
  */
 export async function listSubGroupedCycleIssues(
