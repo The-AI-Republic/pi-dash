@@ -940,23 +940,46 @@ export type {
   PdfExportFailureKind,
 } from "./contracts/pages.js";
 export {
+  ANALYTICS_CHART_ESTIMATE_AXIS,
+  ANALYTICS_CHART_X_AXES,
+  AnalyticsChartResponse,
+  AnalyticsChartRow,
+  getProjectAnalyticsChart,
+} from "./contracts/analytics.js";
+export type { AnalyticsChartQuery, AnalyticsChartXAxis } from "./contracts/analytics.js";
+export {
   ESTIMATE_TYPES,
   ESTIMATE_SYSTEM_TIME,
   Estimate,
   EstimateCreateBody,
   EstimateList,
   EstimatePoint,
+  EstimatePointCreateBody,
   EstimatePointCreateInput,
+  EstimatePointUpdateRow,
+  EstimateUpdateBody,
   createEstimate,
+  createProjectEstimatePoint,
   deleteEstimate,
+  deleteProjectEstimatePoint,
   getProjectEstimate,
+  isEstimateActivityField,
   listProjectEstimatePoints,
   listProjectEstimates,
   orderEstimatePoints,
   selectActiveEstimate,
   selectArchivedEstimates,
+  selectEstimateActivities,
+  updateProjectEstimate,
+  updateProjectEstimatePoint,
 } from "./contracts/estimates.js";
-export type { EstimateCreateInput } from "./contracts/estimates.js";
+export type {
+  EstimateActivityField,
+  EstimateCreateInput,
+  EstimatePointDeleteInput,
+  EstimatePointPatch,
+  EstimateUpdateInput,
+} from "./contracts/estimates.js";
 export {
   REPOSITORY_CLONE_AUTH_MODES,
   REPOSITORY_PROVIDERS,

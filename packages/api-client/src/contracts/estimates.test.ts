@@ -2,23 +2,33 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Estimates contract against a stub client (no backend): URLs, request
-// bodies, response parses, the required create position, and the ordering
-// selectors every estimates consumer reuses.
+// bodies, response parses, the required create position, the editing
+// surface (system update, single-value create/update/delete) with its
+// client-side refusals, and the ordering and history-family selectors
+// every estimates consumer reuses.
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
 import { ApiError } from "../errors.js";
 import {
   EstimateCreateBody,
+  EstimateUpdateBody,
   createEstimate,
+  createProjectEstimatePoint,
   deleteEstimate,
+  deleteProjectEstimatePoint,
   getProjectEstimate,
+  isEstimateActivityField,
   listProjectEstimatePoints,
   listProjectEstimates,
   orderEstimatePoints,
   selectActiveEstimate,
   selectArchivedEstimates,
+  selectEstimateActivities,
+  updateProjectEstimate,
+  updateProjectEstimatePoint,
 } from "./estimates.js";
 import type { Estimate, EstimateCreateInput } from "./estimates.js";
+import type { IssueActivity } from "./issue-activity.js";
 
 const WS = "acme";
 const PROJECT = "123e4567-e89b-12d3-a456-426614174000";
@@ -244,5 +254,223 @@ describe("orderEstimatePoints", () => {
   it("leaves an already ordered list alone", () => {
     const ordered = [point(POINT_A, 1, "1"), point(POINT_B, 2, "2")];
     expect(orderEstimatePoints(ordered).map((entry) => entry.key)).toEqual([1, 2]);
+  });
+});
+
+describe("updateProjectEstimate", () => {
+  it("patches the name with the full id-carrying value set", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const updated = await updateProjectEstimate(stubClient(system({ name: "Fibonacci" }), calls), WS, PROJECT, SYSTEM, {
+      name: "Fibonacci",
+      points: [
+        { id: POINT_A, key: 1, value: "1" },
+        { id: POINT_B, key: 2, value: "2" },
+      ],
+    });
+    expect(calls.post).toEqual([
+      {
+        url: `PATCH /api/workspaces/${WS}/projects/${PROJECT}/estimates/${SYSTEM}/`,
+        body: {
+          estimate: { name: "Fibonacci" },
+          estimate_points: [
+            { id: POINT_A, key: 1, value: "1" },
+            { id: POINT_B, key: 2, value: "2" },
+          ],
+        },
+      },
+    ]);
+    expect(updated.name).toBe("Fibonacci");
+  });
+
+  it("omits the system object when neither name nor type changes", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await updateProjectEstimate(stubClient(system(), calls), WS, PROJECT, SYSTEM, {
+      points: [{ id: POINT_A, key: 2, value: "1" }],
+    });
+    expect(calls.post[0]?.body).toEqual({ estimate_points: [{ id: POINT_A, key: 2, value: "1" }] });
+  });
+
+  it("carries a type change inside the system object", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await updateProjectEstimate(stubClient(system(), calls), WS, PROJECT, SYSTEM, {
+      type: "time",
+      points: [{ id: POINT_A, key: 1, value: "1" }],
+    });
+    expect(calls.post[0]?.body).toEqual({
+      estimate: { type: "time" },
+      estimate_points: [{ id: POINT_A, key: 1, value: "1" }],
+    });
+  });
+
+  it("refuses an empty value set the server would 400", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await expect(
+      updateProjectEstimate(stubClient(system(), calls), WS, PROJECT, SYSTEM, { name: "Empty", points: [] })
+    ).rejects.toThrow();
+    expect(calls.post).toEqual([]);
+  });
+
+  it("refuses a row without an id the server would silently ignore", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const withoutId = [{ key: 1, value: "1" }] as unknown as [{ id: string; key: number; value: string }];
+    await expect(
+      updateProjectEstimate(stubClient(system(), calls), WS, PROJECT, SYSTEM, { points: withoutId })
+    ).rejects.toThrow();
+    expect(calls.post).toEqual([]);
+  });
+
+  it("cannot construct an update row without an id (type contract)", () => {
+    // @ts-expect-error — an update row always carries its point id.
+    const body: EstimateUpdateBody = { estimate_points: [{ key: 1, value: "1" }] };
+    expect(body.estimate_points).toHaveLength(1);
+  });
+});
+
+describe("createProjectEstimatePoint", () => {
+  it("posts the position and text and parses the created value", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const created = await createProjectEstimatePoint(stubClient(point(POINT_A, 3, "5"), calls), WS, PROJECT, SYSTEM, {
+      key: 3,
+      value: "5",
+    });
+    expect(calls.post).toEqual([
+      {
+        url: `POST /api/workspaces/${WS}/projects/${PROJECT}/estimates/${SYSTEM}/estimate-points/`,
+        body: { key: 3, value: "5" },
+      },
+    ]);
+    expect(created.id).toBe(POINT_A);
+  });
+
+  it.each([0, -1, 1.5])("refuses the position %s", async (key) => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await expect(
+      createProjectEstimatePoint(stubClient(point(POINT_A, 1, "1"), calls), WS, PROJECT, SYSTEM, { key, value: "1" })
+    ).rejects.toThrow();
+    expect(calls.post).toEqual([]);
+  });
+
+  it("refuses an empty value the server would 400", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await expect(
+      createProjectEstimatePoint(stubClient(point(POINT_A, 1, ""), calls), WS, PROJECT, SYSTEM, { key: 1, value: "" })
+    ).rejects.toThrow();
+    expect(calls.post).toEqual([]);
+  });
+
+  it("carries an over-long value to the server instead of capping it (NEWFRONT-347)", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const long = "x".repeat(21);
+    await createProjectEstimatePoint(stubClient(point(POINT_A, 3, long), calls), WS, PROJECT, SYSTEM, {
+      key: 3,
+      value: long,
+    });
+    expect(calls.post[0]?.body).toEqual({ key: 3, value: long });
+  });
+});
+
+describe("updateProjectEstimatePoint", () => {
+  it("patches both fields and parses the updated value", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const updated = await updateProjectEstimatePoint(
+      stubClient(point(POINT_A, 1, "3"), calls),
+      WS,
+      PROJECT,
+      SYSTEM,
+      POINT_A,
+      { key: 1, value: "3" }
+    );
+    expect(calls.post).toEqual([
+      {
+        url: `PATCH /api/workspaces/${WS}/projects/${PROJECT}/estimates/${SYSTEM}/estimate-points/${POINT_A}/`,
+        body: { key: 1, value: "3" },
+      },
+    ]);
+    expect(updated.value).toBe("3");
+  });
+
+  it("sends a value-only partial patch through", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await updateProjectEstimatePoint(stubClient(point(POINT_A, 1, "8"), calls), WS, PROJECT, SYSTEM, POINT_A, {
+      value: "8",
+    });
+    expect(calls.post[0]?.body).toEqual({ value: "8" });
+  });
+
+  it("carries an over-long value to the server where the cap is enforced", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const long = "x".repeat(21);
+    await updateProjectEstimatePoint(stubClient(point(POINT_A, 1, long), calls), WS, PROJECT, SYSTEM, POINT_A, {
+      value: long,
+    });
+    expect(calls.post[0]?.body).toEqual({ value: long });
+  });
+});
+
+describe("deleteProjectEstimatePoint", () => {
+  it("deletes with the replacement value and parses the renumbered rows", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const renumbered = [point(POINT_B, 1, "2")];
+    const answer = await deleteProjectEstimatePoint(stubClient(renumbered, calls), WS, PROJECT, SYSTEM, POINT_A, {
+      newEstimateId: POINT_B,
+    });
+    expect(calls.post).toEqual([
+      {
+        url: `DELETE /api/workspaces/${WS}/projects/${PROJECT}/estimates/${SYSTEM}/estimate-points/${POINT_A}/`,
+        body: { new_estimate_id: POINT_B },
+      },
+    ]);
+    expect(answer).toEqual(renumbered);
+  });
+
+  it("sends no body when the delete clears instead of reassigning", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await deleteProjectEstimatePoint(stubClient([], calls), WS, PROJECT, SYSTEM, POINT_A, {});
+    expect(calls.post).toHaveLength(1);
+    expect(calls.post[0]?.body).toBeUndefined();
+  });
+
+  it("clears by default when no input is given", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    await expect(deleteProjectEstimatePoint(stubClient([], calls), WS, PROJECT, SYSTEM, POINT_A)).resolves.toEqual([]);
+    expect(calls.post).toHaveLength(1);
+    expect(calls.post[0]?.body).toBeUndefined();
+  });
+});
+
+describe("isEstimateActivityField", () => {
+  it.each(["estimate_points", "estimate_categories", "estimate_time", "estimate_point"])(
+    "recognises the family member %s",
+    (field) => {
+      expect(isEstimateActivityField(field)).toBe(true);
+    }
+  );
+
+  it.each(["state", "estimate", "Estimate_points", "", null, undefined])("rejects the non-family field %s", (field) => {
+    expect(isEstimateActivityField(field)).toBe(false);
+  });
+});
+
+describe("selectEstimateActivities", () => {
+  function activity(field: string | null): IssueActivity {
+    return { field } as unknown as IssueActivity;
+  }
+
+  it("keeps only the family entries in feed order", () => {
+    const entries = [
+      activity("state"),
+      activity("estimate_points"),
+      activity("assignee"),
+      activity("estimate_point"),
+      activity(null),
+    ];
+    expect(selectEstimateActivities(entries).map((entry) => entry.field)).toEqual([
+      "estimate_points",
+      "estimate_point",
+    ]);
+  });
+
+  it("accepts an empty feed", () => {
+    expect(selectEstimateActivities([])).toEqual([]);
   });
 });
