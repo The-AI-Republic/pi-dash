@@ -17787,9 +17787,10 @@ export class WebNewDriver implements ParityDriver {
   async pagesToolbarSeedStickyPref(_value: boolean): Promise<void> {
     return todo("pagesToolbarSeedStickyPref");
   }
-  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180). The runs
-  // --- methods read the new app's own DOM contract (test ids and the runs
-  // --- API); the approvals and dispatch methods stay stubs for their slice.
+  // --- Runs, approvals, run dispatch, re-tick (NEWFRONT-180, NEWFRONT-547).
+  // --- The methods read the new app's own DOM contract (test ids and the
+  // --- runs API). The issue controls mount in the issues area under the
+  // --- `issue-run-ai` / `issue-re-tick` test ids this driver clicks.
 
   private runsBase(workspaceSlug: string, projectId?: string): string {
     return projectId === undefined ? `/${workspaceSlug}/runners` : `/${workspaceSlug}/projects/${projectId}/runners`;
@@ -17846,8 +17847,19 @@ export class WebNewDriver implements ParityDriver {
     await this.waitRunDetailSettled();
   }
 
-  async openApprovals(_workspaceSlug: string, _projectId?: string): Promise<void> {
-    return todo("openApprovals");
+  private async waitApprovalsSettled(timeoutMs = WebNewDriver.WAIT_MS): Promise<void> {
+    await this.page.getByTestId("approvals-list").waitFor({ timeout: timeoutMs });
+    // Cards or the empty marker: the marker only exists once loading has
+    // finished, so waiters never settle on a spinner.
+    await this.page
+      .locator('[data-testid="approval-card"], [data-testid="approvals-empty"]')
+      .first()
+      .waitFor({ timeout: timeoutMs });
+  }
+
+  async openApprovals(workspaceSlug: string, projectId?: string): Promise<void> {
+    await this.page.goto(`${this.runsBase(workspaceSlug, projectId)}/approvals`, { timeout: 60_000 });
+    await this.waitApprovalsSettled();
   }
 
   async runsRows(): Promise<RunsListRow[]> {
@@ -18151,27 +18163,118 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async approvalsCards(): Promise<ApprovalCard[]> {
-    return todo("approvalsCards");
+    const out: ApprovalCard[] = [];
+    for (const card of await this.page.getByTestId("approval-card").all()) {
+      const header = (
+        (await card
+          .getByTestId("approval-card-header")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const kindLabel = (
+        (await card
+          .getByTestId("approval-card-kind")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const reasonLoc = card.getByTestId("approval-card-reason");
+      const reason =
+        (await reasonLoc.count()) > 0
+          ? (
+              (await reasonLoc
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            ).trim() || null
+          : null;
+      const expiryLoc = card.getByTestId("approval-card-expiry");
+      const expiry =
+        (await expiryLoc.count()) > 0
+          ? (
+              (await expiryLoc
+                .first()
+                .innerText()
+                .catch(() => "")) ?? ""
+            ).trim() || null
+          : null;
+      const payload = (
+        (await card
+          .getByTestId("approval-card-payload")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      out.push({ header, kindLabel, reason, expiry, payload });
+    }
+    return out;
   }
 
   async approvalsEmptyVisible(): Promise<boolean> {
-    return todo("approvalsEmptyVisible");
+    const list = this.page.getByTestId("approvals-list");
+    await list.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if ((await this.page.getByTestId("approval-card").count()) > 0) return false;
+    const empty = this.page.getByTestId("approvals-empty");
+    if ((await empty.count()) === 0) return false;
+    return await empty
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
-  async approvalsDecide(_payloadMarker: string, _decision: "accept" | "accept_for_session" | "decline"): Promise<void> {
-    return todo("approvalsDecide");
+  async approvalsDecide(payloadMarker: string, decision: "accept" | "accept_for_session" | "decline"): Promise<void> {
+    const names = { accept: "Allow once", accept_for_session: "Allow for session", decline: "Deny" } as const;
+    const card = this.page.getByTestId("approval-card").filter({ hasText: payloadMarker }).first();
+    await card.getByRole("button", { name: names[decision] }).click({ timeout: WebNewDriver.WAIT_MS });
+    // Success drops the card on refetch; a refused decision leaves it with
+    // a toast instead, so a card that stays is data, not a driver failure.
+    const gone = this.page.getByTestId("approval-card").filter({ hasText: payloadMarker });
+    try {
+      await gone.first().waitFor({ state: "detached", timeout: 15_000 });
+    } catch {
+      await this.page.waitForTimeout(2_000);
+    }
   }
 
   async issueRunAiDispatch(): Promise<{ toast: string | null; requestUrls: string[] }> {
-    return todo("issueRunAiDispatch");
+    const seen: string[] = [];
+    const onRequest = (request: { url(): string }): void => {
+      const url = request.url();
+      if (url.includes("/api/")) seen.push(url);
+    };
+    const before = await this.lastToast();
+    this.page.on("request", onRequest);
+    try {
+      await this.page.getByTestId("issue-run-ai").first().click({ timeout: WebNewDriver.WAIT_MS });
+      const deadline = Date.now() + 90_000;
+      for (;;) {
+        const toast = await this.lastToast();
+        if (toast !== null && toast !== before) return { toast, requestUrls: [...new Set(seen)] };
+        if (Date.now() > deadline) return { toast, requestUrls: [...new Set(seen)] };
+        await this.page.waitForTimeout(1_000);
+      }
+    } finally {
+      this.page.off("request", onRequest);
+    }
   }
 
   async issueReTickVisible(): Promise<boolean> {
-    return todo("issueReTickVisible");
+    const button = this.page.getByTestId("issue-re-tick");
+    if ((await button.count()) === 0) return false;
+    return await button
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   async issueReTickClick(): Promise<string | null> {
-    return todo("issueReTickClick");
+    const before = await this.lastToast();
+    await this.page.getByTestId("issue-re-tick").first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      const toast = await this.lastToast();
+      if (toast !== null && toast !== before) return toast;
+      if (Date.now() > deadline) return toast;
+      await this.page.waitForTimeout(1_000);
+    }
   }
 
   async runDetailLoadingObserved(workspaceSlug: string, runId: string): Promise<boolean> {
