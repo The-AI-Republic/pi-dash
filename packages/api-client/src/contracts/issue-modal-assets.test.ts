@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createClient } from "../client.js";
 import { ApiError } from "../errors.js";
 import { fakeResponse, recordingTransport } from "../client.test.js";
-import { searchMentionPeople } from "./entity-search.js";
+import { MENTION_SEARCH_DEFAULT_COUNT, searchEntitySections, searchMentionPeople } from "./entity-search.js";
 import {
   DRAFT_DESCRIPTION_ENTITY_TYPE,
   ISSUE_DESCRIPTION_ENTITY_TYPE,
@@ -64,6 +64,76 @@ describe("mention search", () => {
   it("reports no people when the envelope omits the section", async () => {
     const client = clientFor({});
     await expect(searchMentionPeople(client, SLUG, { query: "x" })).resolves.toEqual([]);
+  });
+
+  it("defaults to five suggestions per kind with no client-side maximum", () => {
+    expect(MENTION_SEARCH_DEFAULT_COUNT).toBe(5);
+  });
+
+  it("keeps the people section and ignores sibling sections", async () => {
+    const transport = json({
+      user_mention: [{ member__id: "u-1", member__display_name: "Ada", member__avatar_url: null }],
+      issue: [{ name: "Fix the clock", id: "i-1" }],
+    });
+    const client = createClient({ baseUrl: "https://api.test", transport });
+
+    const people = await searchMentionPeople(client, SLUG, { query: "a" });
+
+    expect(people.map((person) => person.member__display_name)).toEqual(["Ada"]);
+  });
+});
+
+describe("entity section search", () => {
+  const envelope = {
+    user_mention: [{ member__id: "u-1", member__display_name: "Ada", member__avatar_url: null }],
+    issue: [{ name: "Fix the clock", id: "i-1" }],
+  };
+
+  it("requests each kind and keeps every returned section", async () => {
+    const transport = json(envelope);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+
+    const sections = await searchEntitySections(client, SLUG, {
+      query: "fix",
+      queryTypes: ["user_mention", "issue"],
+      projectId: PROJECT,
+      count: 5,
+    });
+
+    expect(sections.user_mention?.map((person) => person.member__display_name)).toEqual(["Ada"]);
+    expect(sections.issue).toEqual([{ name: "Fix the clock", id: "i-1" }]);
+    const call = transport.calls.find((entry) => entry.url.includes("/entity-search/"));
+    expect(call?.init.method).toBe("GET");
+    expect(call?.url).toContain(`/api/workspaces/${SLUG}/entity-search/`);
+    expect(call?.url).toContain("query=fix");
+    expect(call?.url).toContain("query_type=user_mention%2Cissue");
+    expect(call?.url).toContain(`project_id=${PROJECT}`);
+    expect(call?.url).toContain("count=5");
+  });
+
+  it("defaults to the people section and omits unset optionals", async () => {
+    const transport = json(envelope);
+    const client = createClient({ baseUrl: "https://api.test", transport });
+
+    const sections = await searchEntitySections(client, SLUG, { query: "ad" });
+
+    expect(sections.user_mention).toHaveLength(1);
+    const call = transport.calls.find((entry) => entry.url.includes("/entity-search/"));
+    expect(call?.url).toContain("query_type=user_mention");
+    expect(call?.url).not.toContain("project_id=");
+    expect(call?.url).not.toContain("count=");
+  });
+
+  it("preserves sections the contract does not type", async () => {
+    const client = clientFor({ ...envelope, roadmap: [{ title: "Next" }] });
+
+    const sections = await searchEntitySections(client, SLUG, {
+      query: "n",
+      queryTypes: ["user_mention", "roadmap"],
+    });
+
+    expect(sections.user_mention).toHaveLength(1);
+    expect(sections.roadmap).toEqual([{ title: "Next" }]);
   });
 });
 

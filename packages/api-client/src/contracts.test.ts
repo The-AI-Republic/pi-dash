@@ -351,6 +351,7 @@ import { EpicUserProperties, getEpicUserProperties, updateEpicUserProperties } f
 import {
   createIssueComment,
   deleteIssueComment,
+  gitSyncedCommentErrorFrom,
   listIssueComments,
   updateIssueComment,
 } from "./contracts/issue-comments.js";
@@ -360,6 +361,7 @@ import {
   createIssueReaction,
   deleteCommentReaction,
   deleteIssueReaction,
+  duplicateReactionErrorFrom,
   listCommentReactions,
   listIssueReactions,
 } from "./contracts/issue-reactions.js";
@@ -4971,6 +4973,86 @@ describe("issue comment contracts", () => {
     const error = await listIssueComments(client, "acme", UUID2, UUID).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("contract");
   });
+
+  it("reads the git-sync refusal off a conflicted delete", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            status: 409,
+            body: JSON.stringify({
+              error: "This comment is synced from a Git provider. Unbind the project's repository to delete.",
+            }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await deleteIssueComment(client, "acme", UUID2, UUID, UUID).catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(409);
+    const failure = gitSyncedCommentErrorFrom(error);
+    expect(failure?.status).toBe(409);
+    expect(failure?.fields).toEqual([]);
+    expect(failure?.message).toContain("Unbind");
+    const deleteCall = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/comments/${UUID}/`
+    );
+  });
+
+  it("reads the locked fields off a refused synced-body edit", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({
+            status: 400,
+            body: JSON.stringify({
+              comment_html: [
+                "This comment is synced from a Git provider and is read-only. Unbind the project's repository to edit.",
+              ],
+              comment_json: [
+                "This comment is synced from a Git provider and is read-only. Unbind the project's repository to edit.",
+              ],
+            }),
+          })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await updateIssueComment(client, "acme", UUID2, UUID, UUID, {
+      comment_html: "<p>Edited</p>",
+    }).catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(400);
+    const failure = gitSyncedCommentErrorFrom(error);
+    expect(failure?.status).toBe(400);
+    expect(failure?.fields).toEqual(["comment_html", "comment_json"]);
+    expect(failure?.message).toContain("Unbind");
+  });
+
+  it("ignores failures that are not git-sync refusals", () => {
+    expect(gitSyncedCommentErrorFrom(new Error("boom"))).toBeNull();
+    expect(gitSyncedCommentErrorFrom(null)).toBeNull();
+    expect(gitSyncedCommentErrorFrom(new ApiError({ status: 500, code: "http", message: "Server Error" }))).toBeNull();
+    expect(
+      gitSyncedCommentErrorFrom(
+        new ApiError({ status: 409, code: "http", message: "Conflict", body: { error: "Version mismatch" } })
+      )
+    ).toBeNull();
+    expect(
+      gitSyncedCommentErrorFrom(new ApiError({ status: 409, code: "http", message: "Conflict", body: null }))
+    ).toBeNull();
+    expect(
+      gitSyncedCommentErrorFrom(
+        new ApiError({
+          status: 400,
+          code: "http",
+          message: "Bad Request",
+          body: { comment_html: ["This field may not be blank."] },
+        })
+      )
+    ).toBeNull();
+    expect(
+      gitSyncedCommentErrorFrom(
+        new ApiError({ status: 400, code: "http", message: "Bad Request", body: { error: "Nope" } })
+      )
+    ).toBeNull();
+  });
 });
 
 describe("comment image asset contract", () => {
@@ -5203,6 +5285,60 @@ describe("issue reaction contracts", () => {
     expect(deleteCall?.url).toBe(
       `https://api.test/api/workspaces/acme/projects/${UUID2}/comments/${UUID}/reactions/heart/`
     );
+  });
+
+  it("reads the duplicate refusal off a repeated comment reaction", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 400, body: JSON.stringify({ error: "Reaction already exists for the user" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await createCommentReaction(client, "acme", UUID2, UUID, "heart").catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(400);
+    const failure = duplicateReactionErrorFrom(error);
+    expect(failure?.status).toBe(400);
+    expect(failure?.message).toBe("Reaction already exists for the user");
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/comments/${UUID}/reactions/`);
+    expect(postCall?.init.body).toBe(JSON.stringify({ reaction: "heart" }));
+  });
+
+  it("reads the duplicate refusal off a repeated issue reaction", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 400, body: JSON.stringify({ error: "The payload is not valid" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const error = await createIssueReaction(client, "acme", UUID2, UUID, "thumbsup").catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(400);
+    const failure = duplicateReactionErrorFrom(error);
+    expect(failure?.status).toBe(400);
+    expect(failure?.message).toBe("The payload is not valid");
+  });
+
+  it("ignores failures that are not duplicate refusals", () => {
+    expect(duplicateReactionErrorFrom(new Error("boom"))).toBeNull();
+    expect(duplicateReactionErrorFrom(new ApiError({ status: 500, code: "http", message: "Server Error" }))).toBeNull();
+    expect(
+      duplicateReactionErrorFrom(
+        new ApiError({
+          status: 400,
+          code: "http",
+          message: "Bad Request",
+          body: { reaction: ["This field may not be blank."] },
+        })
+      )
+    ).toBeNull();
+    expect(
+      duplicateReactionErrorFrom(
+        new ApiError({ status: 400, code: "http", message: "Bad Request", body: { error: "Unknown shape" } })
+      )
+    ).toBeNull();
+    expect(
+      duplicateReactionErrorFrom(new ApiError({ status: 400, code: "http", message: "Bad Request", body: null }))
+    ).toBeNull();
   });
 });
 

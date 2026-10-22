@@ -7,6 +7,7 @@
 // toggle, fold-label writes and delete run against the collection.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { isApiError } from "../errors.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
 import { UserLite } from "./users.js";
 import { CommentReaction } from "./issue-reactions.js";
@@ -133,4 +134,60 @@ export async function deleteIssueComment(
   commentId: string
 ): Promise<void> {
   await client.delete(`/api/workspaces/${slug}/projects/${projectId}/issues/${issueId}/comments/${commentId}/`);
+}
+
+/** The git-synced delete refusal body: 409 with an unbind instruction. */
+export const GitSyncConflictErrorBody = z.object({
+  error: z.string(),
+});
+export type GitSyncConflictErrorBody = z.infer<typeof GitSyncConflictErrorBody>;
+
+/**
+ * The synced-body edit refusal: 400 naming each locked body field
+ * (`comment_html`, `comment_json`, `comment_stripped`) whose value the
+ * PATCH tried to change, each carrying the read-only sentence.
+ */
+export const GitSyncLockedFieldsErrorBody = z.record(z.string(), z.array(z.string()));
+export type GitSyncLockedFieldsErrorBody = z.infer<typeof GitSyncLockedFieldsErrorBody>;
+
+export interface GitSyncedCommentFailure {
+  /** The server's instruction (names unbinding the repository). */
+  message: string;
+  /** 409 for a refused delete, 400 for a refused body edit. */
+  status: number;
+  /** Locked fields the edit touched; empty on the delete path. */
+  fields: string[];
+}
+
+/**
+ * Read the git-sync refusal off a rejected comment write: the unbind
+ * instruction, the HTTP status, and (on edits) the locked fields. Null
+ * when the failure is not a git-sync refusal (transport errors,
+ * contract violations, other statuses, or bodies without the unbind
+ * marker), so callers branch on the result instead of matching the
+ * server text themselves.
+ */
+export function gitSyncedCommentErrorFrom(error: unknown): GitSyncedCommentFailure | null {
+  if (!isApiError(error)) return null;
+  if (error.status === 409) {
+    const parsed = GitSyncConflictErrorBody.safeParse(error.body);
+    if (!parsed.success || !/unbind/i.test(parsed.data.error)) return null;
+    return { message: parsed.data.error, status: error.status, fields: [] };
+  }
+  if (error.status === 400) {
+    const parsed = GitSyncLockedFieldsErrorBody.safeParse(error.body);
+    if (!parsed.success) return null;
+    const fields: string[] = [];
+    let message: string | undefined;
+    for (const [field, messages] of Object.entries(parsed.data)) {
+      const hit = messages.find((entry) => /unbind/i.test(entry));
+      if (hit !== undefined) {
+        fields.push(field);
+        message ??= hit;
+      }
+    }
+    if (message === undefined) return null;
+    return { message, status: error.status, fields };
+  }
+  return null;
 }

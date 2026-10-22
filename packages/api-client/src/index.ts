@@ -380,16 +380,20 @@ export {
   COMMENT_ACCESS,
   COMMENT_FOLD_LABEL,
   COMMENT_SPEAKERS,
+  GitSyncConflictErrorBody,
+  GitSyncLockedFieldsErrorBody,
   IssueComment,
   IssueCommentList,
   createIssueComment,
   deleteIssueComment,
+  gitSyncedCommentErrorFrom,
   listIssueComments,
   updateIssueComment,
 } from "./contracts/issue-comments.js";
 export type {
   CommentAccess,
   CommentSpeaker,
+  GitSyncedCommentFailure,
   IssueCommentCreate,
   IssueCommentPatch,
   IssueCommentQuery,
@@ -419,15 +423,19 @@ export type { IssueActivityQuery } from "./contracts/issue-activity.js";
 export {
   CommentReaction,
   CommentReactionList,
+  DuplicateReactionErrorBody,
+  ISSUE_DUPLICATE_REACTION_MESSAGE,
   IssueReaction,
   IssueReactionList,
   createCommentReaction,
   createIssueReaction,
   deleteCommentReaction,
   deleteIssueReaction,
+  duplicateReactionErrorFrom,
   listCommentReactions,
   listIssueReactions,
 } from "./contracts/issue-reactions.js";
+export type { DuplicateReactionFailure } from "./contracts/issue-reactions.js";
 export { IssueLite, IssueMeta, getIssueByIdentifier, getIssueMeta } from "./contracts/issue-identity.js";
 export {
   AddSubIssuesResponse,
@@ -525,8 +533,14 @@ export type {
   IntakeIssueUpdateIssue,
   IntakeStatus,
 } from "./contracts/intake-issues.js";
-export { MentionPerson, MentionSearchResponse, searchMentionPeople } from "./contracts/entity-search.js";
-export type { MentionSearchQuery } from "./contracts/entity-search.js";
+export {
+  MENTION_SEARCH_DEFAULT_COUNT,
+  MentionPerson,
+  MentionSearchResponse,
+  searchEntitySections,
+  searchMentionPeople,
+} from "./contracts/entity-search.js";
+export type { EntitySearchQuery, MentionSearchQuery } from "./contracts/entity-search.js";
 export {
   DRAFT_DESCRIPTION_ENTITY_TYPE,
   ISSUE_DESCRIPTION_ENTITY_TYPE,
