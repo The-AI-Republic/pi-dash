@@ -5,8 +5,10 @@
 // Members write hooks (parity/specs/project-settings-members.md §"Add
 // members", §"Inline role changes", §"Remove and leave-self", §"Project
 // defaults"; PSET-022–026): each hook calls its contract with the route's
-// ids, folds the answer into the caches, and toasts refusals. The project
-// defaults read and the editor identity come from the shared auth reads.
+// ids, folds the answer into the caches, confirms successes and toasts
+// refusals — except the invite submit, whose failure stays silent apart
+// from a console entry. The project defaults read and the editor identity
+// come from the shared auth reads.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { ApiError } from "@pidash/api-client";
@@ -29,7 +31,7 @@ vi.mock("@pidash/api-client", async (importOriginal) => {
   return { ...original, ...contractMocks };
 });
 
-vi.mock("../../../shared/shell/index.js", () => ({ notifyError: vi.fn() }));
+vi.mock("../../../shared/shell/index.js", () => ({ notifyError: vi.fn(), notifySuccess: vi.fn() }));
 
 const authMocks = vi.hoisted(() => ({
   me: { data: { id: "123e4567-e89b-12d3-a456-42661417400a" }, isPending: false },
@@ -66,11 +68,12 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => ({
   useMe: () => authMocks.me,
 }));
 
-import { notifyError } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import {
-  INVITE_MEMBERS_FAILED_TITLE,
+  DEFAULTS_SAVED_TITLE,
   LEAVE_PROJECT_FAILED_TITLE,
+  MEMBERS_ADDED_TITLE,
   memberKeys,
   REMOVE_MEMBER_FAILED_TITLE,
   SAVE_DEFAULTS_FAILED_TITLE,
@@ -111,6 +114,7 @@ afterEach(() => {
   resetAppClient();
   for (const fn of Object.values(contractMocks)) fn.mockReset();
   vi.mocked(notifyError).mockReset();
+  vi.mocked(notifySuccess).mockReset();
 });
 
 describe("useAddProjectMembers", () => {
@@ -128,17 +132,26 @@ describe("useAddProjectMembers", () => {
     ]);
     expect(invalidate).toHaveBeenCalledWith({ queryKey: memberKeys.memberships(SLUG, PROJECT) });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: memberKeys.directory(SLUG) });
+    expect(notifySuccess).toHaveBeenCalledWith(MEMBERS_ADDED_TITLE);
     expect(notifyError).not.toHaveBeenCalled();
   });
 
-  it("toasts the server refusal", async () => {
-    contractMocks.addProjectMembers.mockRejectedValue(new ApiError({ status: 400, code: "http", message: "Nope." }));
-    const { result } = renderHook(() => useAddProjectMembers(SLUG, PROJECT), { wrapper: wrapper(newClient()) });
-    await act(async () => {
-      result.current.mutate({ members: [] });
-    });
-    await waitFor(() => expect(result.current.isError).toBe(true));
-    expect(notifyError).toHaveBeenCalledWith(INVITE_MEMBERS_FAILED_TITLE, "Nope.");
+  it("stays silent apart from a console entry when the submit fails", async () => {
+    const errored = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const failure = new ApiError({ status: 400, code: "http", message: "Nope." });
+      contractMocks.addProjectMembers.mockRejectedValue(failure);
+      const { result } = renderHook(() => useAddProjectMembers(SLUG, PROJECT), { wrapper: wrapper(newClient()) });
+      await act(async () => {
+        result.current.mutate({ members: [] });
+      });
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      expect(errored).toHaveBeenCalledWith(failure);
+      expect(notifyError).not.toHaveBeenCalled();
+      expect(notifySuccess).not.toHaveBeenCalled();
+    } finally {
+      errored.mockRestore();
+    }
   });
 });
 
@@ -277,6 +290,8 @@ describe("useSaveProjectDefaults", () => {
       expect.objectContaining({ id: PROJECT, project_lead: "u" }),
       expect.objectContaining({ id: "other", name: "Other" }),
     ]);
+    expect(notifySuccess).toHaveBeenCalledWith(DEFAULTS_SAVED_TITLE);
+    expect(notifyError).not.toHaveBeenCalled();
   });
 
   it("leaves absent caches absent", async () => {

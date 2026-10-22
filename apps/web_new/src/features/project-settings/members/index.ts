@@ -28,8 +28,9 @@ export {
 } from "./roster.js";
 export { clearMemberFilters, readMemberFilters, useMemberFilters, writeMemberFilters } from "./filters.js";
 export {
-  INVITE_MEMBERS_FAILED_TITLE,
+  DEFAULTS_SAVED_TITLE,
   LEAVE_PROJECT_FAILED_TITLE,
+  MEMBERS_ADDED_TITLE,
   MEMBERS_LOAD_FAILED_FALLBACK,
   MEMBERS_LOAD_FAILED_TITLE,
   REMOVE_MEMBER_FAILED_TITLE,

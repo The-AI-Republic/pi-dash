@@ -54,13 +54,17 @@ vi.mock("../../../../../../features/project-settings/members/api.js", async (imp
     data: [],
     isPending: false,
   }),
-  useProjectDefaults: () => ({ status: "success", data: { id: harness.params.projectId }, isPending: false }),
+  useProjectDefaults: () => ({
+    status: "success",
+    data: { project_lead: null, default_assignee: null, guest_view_all_features: false },
+    isPending: false,
+  }),
   useAddProjectMembers: () => ({ isPending: false, mutate: vi.fn() }),
   useUpdateProjectMemberRole: () => ({ isPending: false, mutate: vi.fn() }),
   useRemoveProjectMember: () => ({ isPending: false, mutate: vi.fn() }),
   useLeaveProject: () => ({ isPending: false, mutate: vi.fn() }),
   useSaveProjectDefaults: () => ({ isPending: false, mutate: vi.fn() }),
-  useMemberEditor: () => ({ editing: null, setEditing: vi.fn(), roleOverride: null, setRoleOverride: vi.fn() }),
+  useMemberEditor: () => ({ userId: null, workspaceRole: null, projectRole: null, ready: true }),
   notifyMembersLoadFailure: vi.fn(),
 }));
 

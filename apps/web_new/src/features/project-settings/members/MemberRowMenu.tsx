@@ -29,7 +29,9 @@ export function confirmationCopy(
   if (action === "leave") {
     return {
       title: "Leave project?",
-      description: "You will lose access to this project's work items and settings.",
+      description:
+        "If you leave this project you will lose access to its work items and settings. " +
+        "You can rejoin if you are invited again.",
       confirm: LEAVE_CONFIRM_VERB,
     };
   }

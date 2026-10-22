@@ -35,7 +35,7 @@ import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/cli
 import { authKeys, useProjectRoles, useWorkspaceMembership } from "../../auth/index.js";
 import { useMe } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectKeys } from "../../projects/index.js";
-import { notifyError } from "../../../shared/shell/index.js";
+import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
 /** Failure title when the two roster reads cannot load. */
 export const MEMBERS_LOAD_FAILED_TITLE = "Couldn't load the members";
@@ -96,8 +96,10 @@ export function notifyMembersLoadFailure(error: unknown): void {
 // PSET-022–026). Every mutation folds its answer into the caches the tab and
 // the project shell read, so the surface settles without a refetch.
 
+/** Confirmation titles the write paths raise on success. */
+export const MEMBERS_ADDED_TITLE = "Members added";
+export const DEFAULTS_SAVED_TITLE = "Project defaults saved";
 /** Failure titles the write paths raise. */
-export const INVITE_MEMBERS_FAILED_TITLE = "Couldn't add the members";
 export const UPDATE_ROLE_FAILED_TITLE = "Couldn't change the role";
 export const REMOVE_MEMBER_FAILED_TITLE = "Couldn't remove the member";
 export const LEAVE_PROJECT_FAILED_TITLE = "Couldn't leave the project";
@@ -139,20 +141,22 @@ export interface AddMembersInput {
 }
 
 /**
- * Bulk-add every row in one POST. The answered memberships replace the
- * cached list so the new rows appear immediately; the workspace directory
- * is refreshed for identities the tab had not seen yet.
+ * Bulk-add every row in one POST. Success confirms and refreshes the
+ * memberships and the workspace directory (for identities the tab had not
+ * seen yet); a failed submit stays silent apart from a console entry —
+ * no failure notice renders (PSET-022).
  */
 export function useAddProjectMembers(workspaceSlug: string, projectId: string) {
   const queryClient = useQueryClient();
   return useMutation<ProjectMemberRoleList, Error, AddMembersInput>({
     mutationFn: ({ members }) => addProjectMembers(getAppClient(), workspaceSlug, projectId, members),
     onSuccess: () => {
+      notifySuccess(MEMBERS_ADDED_TITLE);
       void queryClient.invalidateQueries({ queryKey: memberKeys.memberships(workspaceSlug, projectId) });
       void queryClient.invalidateQueries({ queryKey: memberKeys.directory(workspaceSlug) });
     },
     onError: (error) => {
-      notifyError(INVITE_MEMBERS_FAILED_TITLE, writeFailureDetail(error));
+      console.error(error);
     },
   });
 }
@@ -227,16 +231,17 @@ export type ProjectDefaultsPatch = Pick<
 >;
 
 /**
- * Save one defaults choice through the project update. The answered row
- * stands in for the retrieve cache so the pickers paint the saved value;
- * a refusal toasts the title and rolls back nothing the caller did not
- * change itself.
+ * Save one defaults choice through the project update. Success confirms
+ * and the answered row stands in for the retrieve cache so the pickers
+ * paint the saved value; a refusal toasts the title and rolls back
+ * nothing the caller did not change itself.
  */
 export function useSaveProjectDefaults(workspaceSlug: string, projectId: string) {
   const queryClient = useQueryClient();
   return useMutation<ProjectDetails, Error, ProjectDefaultsPatch>({
     mutationFn: (patch) => updateProject(getAppClient(), workspaceSlug, projectId, patch),
     onSuccess: (project) => {
+      notifySuccess(DEFAULTS_SAVED_TITLE);
       queryClient.setQueryData(authKeys.project(workspaceSlug, projectId), (row: ProjectDetail | undefined) =>
         row === undefined ? row : { ...row, ...project }
       );

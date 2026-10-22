@@ -30,7 +30,9 @@ describe("confirmationCopy", () => {
   it("asks to leave on one's own row", () => {
     const copy = confirmationCopy("leave", "Grace Hopper");
     expect(copy.title).toBe("Leave project?");
+    expect(copy.description).toContain("leave");
     expect(copy.description.toLowerCase()).toContain("lose access");
+    expect(copy.description).toContain("invited again");
     expect(copy.confirm).toBe("Leave");
   });
 });
