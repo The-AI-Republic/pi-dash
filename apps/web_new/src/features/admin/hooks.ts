@@ -51,6 +51,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceRunnersQueryOptions,
   instanceWorkspacesQueryOptions,
   loopJobDetailQueryOptions,
   loopJobsQueryOptions,
@@ -498,4 +499,13 @@ export function createInstanceWorkspaceMutationOptions(client: ApiClient, queryC
  */
 export function useCreateInstanceWorkspace() {
   return useMutation(createInstanceWorkspaceMutationOptions(getAppClient(), useQueryClient()));
+}
+
+/**
+ * One runners page for the runners table (ADM-080). Each filter value
+ * and page reads its own cached entry; the page restarts from 1 when
+ * the filter changes, which the query key carries as its own entry.
+ */
+export function useInstanceRunners(provisioning: string, page: number) {
+  return useQuery(instanceRunnersQueryOptions(getAppClient(), provisioning, page));
 }

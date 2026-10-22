@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project read contracts (GET /api/workspaces/<slug>/projects/ and the
-// user-property and role reads the shell and gates need). Lifecycle
+// user-property and role reads the shell and gates need), plus the one
+// lifecycle write the shell calls eagerly. The remaining lifecycle
 // writes, identifier checks, invitations, favorites and preference
 // writes live in project-management.ts, out of the initial bundle
 // (NEWFRONT-523, size gate).
@@ -239,4 +240,21 @@ export async function getMyProjectRoles(client: ApiClient, slug: string): Promis
   const path = `/api/users/me/workspaces/${slug}/project-roles/`;
   const body = await client.getJson<unknown>(path);
   return client.parse(ProjectRoleMap, body, `GET ${path}`);
+}
+
+/**
+ * The one lifecycle write that lives with the reads: the shell tab order
+ * and project order call it eagerly, which would otherwise pin the whole
+ * project-management writes module into the initial bundle (NEWFRONT-518,
+ * size gate).
+ */
+export async function updateProjectUserProperties(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  patch: Partial<Pick<ProjectUserProperties, "sort_order" | "preferences">>
+): Promise<ProjectUserProperties> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/user-properties/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
+  return client.parse(ProjectUserProperties, envelope.data, `PATCH ${path}`);
 }

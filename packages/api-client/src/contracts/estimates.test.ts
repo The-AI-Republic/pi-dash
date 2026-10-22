@@ -188,6 +188,13 @@ describe("createEstimate", () => {
     expect(calls.post).toEqual([]);
   });
 
+  it("refuses a non-numeric position", async () => {
+    const calls: Calls = { get: [], post: [], delete: [] };
+    const textKey = [{ key: "1", value: "2" }] as unknown as NonNullable<EstimateCreateInput["points"]>;
+    await expect(createEstimate(stubClient(system(), calls), WS, PROJECT, { points: textKey })).rejects.toThrow();
+    expect(calls.post).toEqual([]);
+  });
+
   it("cannot construct a body that omits key (type contract)", () => {
     // @ts-expect-error — a point body always carries its 1-based position.
     const body: EstimateCreateBody = { estimate: {}, estimate_points: [{ value: "2" }] };

@@ -2,15 +2,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project management contracts: lifecycle writes (create, update, delete,
-// archive, leave, join), identifier checks, project invitations, favorite
-// projects, and user-property writes. The shell and gates only read
-// projects (see projects.ts); everything here runs from lazy routes and
-// dialogs, so it stays out of the initial bundle (NEWFRONT-523, size
-// gate). Response shapes shared with the reads live in projects.ts.
+// archive, leave), identifier checks, project invitations, favorite
+// projects, and workspace user-property writes. The shell and gates only
+// read projects (see projects.ts); everything here runs from lazy routes
+// and dialogs, so it stays out of the initial bundle (NEWFRONT-523, size
+// gate). Response shapes shared with the reads live in projects.ts. The
+// project join and per-project user-property writes live with the reads
+// and invitations instead: the auth flow and the shell call them eagerly
+// (NEWFRONT-518, size gate).
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { ProjectDetails, ProjectUserProperties, WorkspaceUserProperties } from "./projects.js";
+import { ProjectDetails, WorkspaceUserProperties } from "./projects.js";
 
 export interface ProjectCreateInput {
   name: string;
@@ -233,21 +236,6 @@ export async function listProjectInvitations(client: ApiClient, slug: string): P
   return client.parse(ProjectInvitationList, body, `GET ${path}`);
 }
 
-export const JoinProjectsResult = z.object({
-  message: z.string(),
-});
-export type JoinProjectsResult = z.infer<typeof JoinProjectsResult>;
-
-/**
- * POST /api/users/me/workspaces/<slug>/projects/invitations/ with
- * `{ project_ids }` joins the caller to each project (201 + message).
- */
-export async function joinProjects(client: ApiClient, slug: string, projectIds: string[]): Promise<JoinProjectsResult> {
-  const path = `/api/users/me/workspaces/${slug}/projects/invitations/`;
-  const envelope = await client.sendJson<unknown>("POST", path, { json: { project_ids: projectIds } });
-  return client.parse(JoinProjectsResult, envelope.data, `POST ${path}`);
-}
-
 /**
  * Favorite-project row. `entity_data` is the favorited project's own
  * serialized shape, null when the project is gone.
@@ -301,15 +289,4 @@ export async function updateWorkspaceUserProperties(
   const path = `/api/workspaces/${slug}/user-properties/`;
   const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
   return client.parse(WorkspaceUserProperties, envelope.data, `PATCH ${path}`);
-}
-
-export async function updateProjectUserProperties(
-  client: ApiClient,
-  slug: string,
-  projectId: string,
-  patch: Partial<Pick<ProjectUserProperties, "sort_order" | "preferences">>
-): Promise<ProjectUserProperties> {
-  const path = `/api/workspaces/${slug}/projects/${projectId}/user-properties/`;
-  const envelope = await client.sendJson<unknown>("PATCH", path, { json: patch });
-  return client.parse(ProjectUserProperties, envelope.data, `PATCH ${path}`);
 }

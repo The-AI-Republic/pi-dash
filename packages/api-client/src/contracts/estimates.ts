@@ -108,10 +108,14 @@ export function orderEstimatePoints(points: readonly EstimatePoint[]): EstimateP
  * assign it. Sending a row
  * without `key` makes the server store its column default `0`, which lands
  * the value before every real position — the create path must never rely
- * on that default, which is why this field is not optional.
+ * on that default, which is why this field is not optional. The integer
+ * range itself is enforced by `createEstimate`, not the schema: new zod
+ * check APIs ride their whole module into the web initial bundle, so this
+ * schema stays on the primitives the shell already ships (NEWFRONT-518,
+ * size gate).
  */
 export const EstimatePointCreateInput = z.object({
-  key: z.int().check(z.minimum(1)),
+  key: z.number(),
   value: z.string(),
   description: z.optional(z.string()),
 });
@@ -147,7 +151,9 @@ export interface EstimateCreateInput {
  * POST .../projects/<pid>/estimates/ answers 200 (not 201) with the created
  * system including its points. The body wraps the system under `estimate`
  * and the point rows under `estimate_points`; it is validated here so a
- * caller cannot send a row without a position.
+ * caller cannot send a row without a position. Each position must be an
+ * integer at least 1: fractional, zero, negative and non-numeric keys are
+ * refused before anything is sent.
  */
 export async function createEstimate(
   client: ApiClient,
@@ -156,6 +162,11 @@ export async function createEstimate(
   input: EstimateCreateInput
 ): Promise<Estimate> {
   const path = `/api/workspaces/${slug}/projects/${projectId}/estimates/`;
+  for (const [index, point] of (input.points ?? []).entries()) {
+    if (typeof point.key !== "number" || !Number.isInteger(point.key) || point.key < 1) {
+      throw new Error(`estimate point ${index} must carry its 1-based integer position`);
+    }
+  }
   const body: EstimateCreateBody = EstimateCreateBody.parse({
     estimate: {
       ...(input.name === undefined ? {} : { name: input.name }),
