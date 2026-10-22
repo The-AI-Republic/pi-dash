@@ -28,10 +28,12 @@
 //! 4. A failed save raises `SessionInterrupted` in Django (a 500); here the
 //!    layer answers `500` with an empty body.
 //!
-//! Request side, the layer also mirrors Django `get_user`: a live session
-//! whose `_auth_user_id` has no `users` row (deleted user, stale session)
-//! is flushed to anonymous before handlers run, so the existing 401 arms
-//! fire instead of 500ing on the missing row (PIDASHCONV-723).
+//! Request side, the layer mirrors Django `get_user` once for every route:
+//! the backend must be `ModelBackend`, the `users` row must exist and be
+//! active, and `_auth_user_hash` must match the current password field. A
+//! hash mismatch flushes the session (row and cookie); the other failures
+//! are anonymous without a flush, exactly like Django. The rejected bare
+//! auth keys are hidden from handlers so their existing 401 arms fire.
 //! Without a store (`SessionConfig.store == None`) the layer is fully
 //! transparent: nothing is loaded, saved, or set. That is the deployed
 //! shape until `serve` boots pools — Django behind the proxy owns sessions
@@ -58,6 +60,8 @@ use pidash_auth::session::{
 };
 use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 
+use crate::license::{verify_session_hash, MODEL_BACKEND};
+
 /// What went wrong talking to the session table. A load/save failure maps
 /// to Django's 500 (`SessionInterrupted` on save races), never to a
 /// session-state change.
@@ -77,6 +81,14 @@ impl std::error::Error for StoreError {}
 pub struct StoredSession {
     pub session_data: String,
     pub expire_date_unix: i64,
+}
+
+/// The `users` columns Django's `ModelBackend.get_user` and session-hash
+/// check read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionUser {
+    pub password: String,
+    pub is_active: bool,
 }
 
 /// A row to persist: the signed payload plus the mirrored columns and the
@@ -104,14 +116,20 @@ pub trait SessionStore: Clone + Send + Sync + 'static {
     /// Persist `row`; returns the key it is stored under (freshly issued
     /// when `row.key` is `None`, like `_get_new_session_key`).
     fn save(&self, row: SessionRow) -> BoxFuture<String>;
-    /// Does the `users` row for a session's `_auth_user_id` still exist?
-    /// Django's `get_user` maps a missing row to anonymous (the request
-    /// 401s); the layer flushes such sessions before handlers run so every
-    /// existing 401 arm fires with no per-handler change (PIDASHCONV-723).
-    /// Stores without a users table keep the default (`true`).
-    fn user_exists(&self, user_id: String) -> BoxFuture<bool> {
+    /// Load the user behind `_auth_user_id` for Django's `get_user` check.
+    /// `None` means the user is missing or the id is not a UUID; Django
+    /// treats both as anonymous without flushing. Stores without a users
+    /// table keep the default (`None`).
+    fn load_user(&self, user_id: String) -> BoxFuture<Option<SessionUser>> {
         let _ = user_id;
-        Box::pin(async move { Ok(true) })
+        Box::pin(async move { Ok(None) })
+    }
+    /// Delete one `sessions` row. Used only when Django's hash check calls
+    /// `request.session.flush()`; the default keeps stores without rows
+    /// usable.
+    fn delete(&self, key: String) -> BoxFuture<()> {
+        let _ = key;
+        Box::pin(async move { Ok(()) })
     }
 }
 
@@ -161,6 +179,28 @@ impl SessionStore for MemorySessionStore {
             Ok(key)
         })
     }
+
+    fn load_user(&self, user_id: String) -> BoxFuture<Option<SessionUser>> {
+        // The memory store models sessions, not the users table. Tests that
+        // need missing/inactive users use a scripted store; this keeps the
+        // existing session vectors authenticated as an active user with an
+        // empty password field.
+        let _ = user_id;
+        Box::pin(async move {
+            Ok(Some(SessionUser {
+                password: String::new(),
+                is_active: true,
+            }))
+        })
+    }
+
+    fn delete(&self, key: String) -> BoxFuture<()> {
+        let rows = self.rows.clone();
+        Box::pin(async move {
+            rows.lock().expect("memory store lock").remove(&key);
+            Ok(())
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,9 +224,10 @@ impl PgSessionStore {
     pub const LOAD_SQL: &'static str =
         "SELECT session_data, EXTRACT(EPOCH FROM expire_date)::BIGINT FROM sessions WHERE session_key = $1";
 
-    /// The `get_user` existence probe behind [`SessionStore::user_exists`]:
-    /// Django maps a missing `users` row to anonymous (401), never 500.
-    pub const USER_EXISTS_SQL: &'static str = "SELECT 1 FROM users WHERE id = $1";
+    /// The `get_user` probes behind [`SessionStore::load_user`].
+    pub const USER_SQL: &'static str = "SELECT password, is_active FROM users WHERE id = $1";
+
+    const DELETE_SQL: &'static str = "DELETE FROM sessions WHERE session_key = $1";
 
     const INSERT_SQL: &'static str =
         "INSERT INTO sessions (session_key, session_data, expire_date, user_id, device_info) \
@@ -240,21 +281,35 @@ impl SessionStore for PgSessionStore {
         })
     }
 
-    fn user_exists(&self, user_id: String) -> BoxFuture<bool> {
+    fn load_user(&self, user_id: String) -> BoxFuture<Option<SessionUser>> {
         let pool = self.pool.clone();
         Box::pin(async move {
             // `users.id` is a UUID primary key. A non-UUID session value
-            // keeps the old path (handlers 401 on shape); only a well-formed
-            // id with no row is flushed to anonymous.
+            // is anonymous, like a missing row (`ModelBackend.get_user`).
             let Ok(id) = user_id.parse::<uuid::Uuid>() else {
-                return Ok(true);
+                return Ok(None);
             };
-            let row: Option<(i32,)> = sqlx::query_as(Self::USER_EXISTS_SQL)
+            let row: Option<(String, bool)> = sqlx::query_as(Self::USER_SQL)
                 .bind(id)
                 .fetch_optional(&pool)
                 .await
                 .map_err(|e| StoreError(e.to_string()))?;
-            Ok(row.is_some())
+            Ok(row.map(|(password, is_active)| SessionUser {
+                password,
+                is_active,
+            }))
+        })
+    }
+
+    fn delete(&self, key: String) -> BoxFuture<()> {
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            sqlx::query(Self::DELETE_SQL)
+                .bind(key)
+                .execute(&pool)
+                .await
+                .map_err(|e| StoreError(e.to_string()))?;
+            Ok(())
         })
     }
 }
@@ -341,6 +396,10 @@ pub struct RequestSession {
     pub modified: bool,
     pub accessed: bool,
     pub expiry: SessionExpiry,
+    /// Django returned `AnonymousUser` before the handler ran. Hide the
+    /// `_auth_*` keys from readers without disturbing the stored session
+    /// (the non-flush anonymous cases keep the row and cookie).
+    auth_rejected: bool,
 }
 
 impl RequestSession {
@@ -378,6 +437,7 @@ impl RequestSession {
             modified: false,
             accessed: false,
             expiry: SessionExpiry::Default,
+            auth_rejected: false,
         }
     }
 
@@ -388,6 +448,9 @@ impl RequestSession {
     /// Read one value. Marks `accessed`, like every `SessionBase` getter.
     pub fn get(&mut self, key: &str) -> Option<&serde_json::Value> {
         self.accessed = true;
+        if self.auth_rejected && is_auth_key(key) {
+            return None;
+        }
         self.data.get(key)
     }
 
@@ -396,6 +459,11 @@ impl RequestSession {
     pub fn set(&mut self, key: String, value: serde_json::Value) {
         self.accessed = true;
         self.modified = true;
+        // A login handler writes the auth trio after the pre-request
+        // `get_user` check ran as anonymous; those fresh values are real.
+        if is_auth_key(&key) {
+            self.auth_rejected = false;
+        }
         self.data.insert(key, value);
     }
 
@@ -416,11 +484,37 @@ impl RequestSession {
         self.key = None;
         self.accessed = true;
         self.modified = true;
+        self.auth_rejected = false;
+    }
+
+    /// Django `get_user` returned anonymous without flushing: hide the
+    /// bare session auth keys from handlers while leaving the row/cookie
+    /// untouched.
+    fn reject_auth(&mut self) {
+        self.accessed = true;
+        self.auth_rejected = true;
     }
 
     fn user_id(&self) -> Option<String> {
+        if self.auth_rejected {
+            return None;
+        }
         self.data
             .get("_auth_user_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    }
+
+    fn backend(&self) -> Option<String> {
+        self.data
+            .get("_auth_user_backend")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    }
+
+    fn session_hash(&self) -> Option<String> {
+        self.data
+            .get("_auth_user_hash")
             .and_then(|v| v.as_str())
             .map(str::to_owned)
     }
@@ -435,6 +529,9 @@ impl RequestSession {
     /// The full session dict as JSON. The save path serializes this;
     /// the desktop gate reads its marker from a snapshot's copy (marking
     /// nothing — the snapshot is already detached from the live session).
+    /// `auth_rejected` hides the trio from readers only: Django's
+    /// non-flush anonymous cases never drop keys, so a later save
+    /// persists them.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Object(
             self.data
@@ -443,6 +540,13 @@ impl RequestSession {
                 .collect(),
         )
     }
+}
+
+fn is_auth_key(key: &str) -> bool {
+    matches!(
+        key,
+        "_auth_user_id" | "_auth_user_backend" | "_auth_user_hash"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -623,16 +727,41 @@ where
                 }
                 None => RequestSession::empty(),
             };
-            // Django `get_user`: a live session whose `_auth_user_id` has no
-            // `users` row is anonymous. Flush it here so every handler's
-            // existing 401 arm fires with no per-handler change; the peek
-            // marks nothing, so `Vary` behavior is unchanged. A failed probe
-            // is a 500 like any other store failure.
+            // Django `get_user`: every request resolves request.user before
+            // routing. Do the same once here so handlers cannot trust a bare
+            // `_auth_user_id`. A failed store probe is a 500 like any other
+            // session-table failure.
             if let Some(user_id) = session.user_id() {
-                match store.user_exists(user_id).await {
-                    Ok(true) => {}
-                    Ok(false) => session.clear(),
-                    Err(_) => return Ok(server_error()),
+                if session.backend().as_deref() != Some(MODEL_BACKEND) {
+                    // `get_user` skips the backend entirely when its path is
+                    // not configured; the session row and cookie survive.
+                    session.reject_auth();
+                } else {
+                    let user = match store.load_user(user_id).await {
+                        Ok(user) => user,
+                        Err(_) => return Ok(server_error()),
+                    };
+                    match user {
+                        // `ModelBackend.get_user` returns None for a missing
+                        // or inactive user; Django does not flush that case.
+                        None => session.reject_auth(),
+                        Some(user) if !user.is_active => session.reject_auth(),
+                        Some(user) => {
+                            let session_hash = session.session_hash().unwrap_or_default();
+                            if !verify_session_hash(&session_hash, &user.password, &secret_key) {
+                                // The one branch Django flushes: a loaded,
+                                // active user whose session hash no longer
+                                // matches the password field.
+                                let key = session.key.clone();
+                                session.clear();
+                                if let Some(key) = key {
+                                    if store.delete(key).await.is_err() {
+                                        return Ok(server_error());
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             let handle = SessionHandle::new(session);
@@ -770,14 +899,28 @@ mod tests {
         }
     }
 
-    /// Seed one live row carrying `_auth_user_id`, through any store.
-    async fn seed_session<S: SessionStore>(store: &S, key: &str, user_id: &str) {
+    fn auth_hash() -> String {
+        crate::license::make_session_auth_hash("", SECRET)
+    }
+
+    /// Seed one live row carrying the full Django auth trio, through any store.
+    async fn seed_session_with<S: SessionStore>(
+        store: &S,
+        key: &str,
+        user_id: &str,
+        backend: &str,
+        session_hash: &str,
+    ) {
         use pidash_auth::signing::{Signer, SESSION_SIGNING_SALT};
 
         let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
         let session_data = signer
             .sign_object(
-                &serde_json::json!({"_auth_user_id": user_id}),
+                &serde_json::json!({
+                    "_auth_user_id": user_id,
+                    "_auth_user_backend": backend,
+                    "_auth_user_hash": session_hash,
+                }),
                 4_000_000_000,
             )
             .expect("sign");
@@ -793,6 +936,10 @@ mod tests {
             .expect("seed");
     }
 
+    async fn seed_session<S: SessionStore>(store: &S, key: &str, user_id: &str) {
+        seed_session_with(store, key, user_id, MODEL_BACKEND, &auth_hash()).await;
+    }
+
     /// Memory sessions plus a scripted `users` probe: `missing` ids report
     /// no row, `fail_probe` errors the probe (a 500 like any store failure).
     #[derive(Debug, Clone)]
@@ -800,6 +947,8 @@ mod tests {
         inner: MemorySessionStore,
         missing: Option<String>,
         fail_probe: bool,
+        inactive: bool,
+        deleted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl ProbeStore {
@@ -808,7 +957,13 @@ mod tests {
                 inner: MemorySessionStore::new(),
                 missing: None,
                 fail_probe: false,
+                inactive: false,
+                deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             }
+        }
+
+        fn deleted_keys(&self) -> Vec<String> {
+            self.deleted.lock().expect("deleted lock").clone()
         }
     }
 
@@ -821,12 +976,29 @@ mod tests {
             self.inner.save(row)
         }
 
-        fn user_exists(&self, user_id: String) -> BoxFuture<bool> {
+        fn load_user(&self, user_id: String) -> BoxFuture<Option<SessionUser>> {
             if self.fail_probe {
                 return Box::pin(async move { Err(StoreError("probe down".to_string())) });
             }
             let missing = self.missing.clone();
-            Box::pin(async move { Ok(missing.as_ref() != Some(&user_id)) })
+            let inactive = self.inactive;
+            Box::pin(async move {
+                if missing.as_ref() == Some(&user_id) {
+                    return Ok(None);
+                }
+                Ok(Some(SessionUser {
+                    password: String::new(),
+                    is_active: !inactive,
+                }))
+            })
+        }
+
+        fn delete(&self, key: String) -> BoxFuture<()> {
+            let deleted = self.deleted.clone();
+            Box::pin(async move {
+                deleted.lock().expect("deleted lock").push(key);
+                Ok(())
+            })
         }
     }
 
@@ -864,14 +1036,23 @@ mod tests {
     }
 
     fn mutate(req: &Request<Body>, user: &str) {
-        req.extensions()
+        let handle = req
+            .extensions()
             .get::<SessionHandle>()
-            .expect("session handle in extensions")
-            .lock()
-            .set(
-                "_auth_user_id".to_string(),
-                serde_json::Value::String(user.to_string()),
-            );
+            .expect("session handle in extensions");
+        let mut session = handle.lock();
+        session.set(
+            "_auth_user_id".to_string(),
+            serde_json::Value::String(user.to_string()),
+        );
+        session.set(
+            "_auth_user_backend".to_string(),
+            serde_json::Value::String(MODEL_BACKEND.to_string()),
+        );
+        session.set(
+            "_auth_user_hash".to_string(),
+            serde_json::Value::String(auth_hash()),
+        );
     }
 
     async fn set_user(req: Request<Body>) -> Response<Body> {
@@ -1320,34 +1501,35 @@ mod tests {
     }
 
     #[test]
-    fn pg_user_exists_sql_probes_users_pk() {
+    fn pg_user_sql_loads_password_and_active() {
         assert_eq!(
-            PgSessionStore::USER_EXISTS_SQL,
-            "SELECT 1 FROM users WHERE id = $1"
+            PgSessionStore::USER_SQL,
+            "SELECT password, is_active FROM users WHERE id = $1"
         );
     }
 
     #[tokio::test]
-    async fn memory_store_assumes_users_exist() {
-        // Stores without a users table keep the default: no flush, so the
-        // pre-existing memory-backed tests above are unaffected.
+    async fn memory_store_models_an_active_user() {
         assert!(MemorySessionStore::new()
-            .user_exists("any-id".to_string())
+            .load_user("any-id".to_string())
             .await
-            .expect("default probes true"));
+            .expect("memory load")
+            .is_some());
     }
 
     #[tokio::test]
-    async fn missing_user_session_is_flushed_to_anonymous() {
+    async fn missing_user_session_is_anonymous_without_flush() {
         let user_id = "11111111-1111-4111-8111-111111111111";
         let store = ProbeStore {
             inner: MemorySessionStore::new(),
             missing: Some(user_id.to_string()),
             fail_probe: false,
+            inactive: false,
+            deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         seed_session(&store, "deleteduserkey1", user_id).await;
         let inner = axum::Router::new().route("/api/x/", axum::routing::any(auth_gate));
-        let response = SessionLayer::new(config_for(Some(store)))
+        let response = SessionLayer::new(config_for(Some(store.clone())))
             .layer(inner)
             .oneshot(
                 Request::builder()
@@ -1358,14 +1540,12 @@ mod tests {
             )
             .await
             .expect("serve");
-        // Django `get_user` parity: anonymous 401, and the flush deletes the
-        // cookie exactly like an emptied session.
+        // Django `get_user` parity: anonymous 401 without a flush, so the
+        // row and cookie survive.
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            set_cookies(&response),
-            vec!["session-id=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax".to_string()]
-        );
+        assert!(set_cookies(&response).is_empty());
         assert!(has_vary_cookie(&response));
+        assert!(store.deleted_keys().is_empty());
         let body = http_body_util::BodyExt::collect(response.into_body())
             .await
             .expect("body")
@@ -1398,12 +1578,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_session_hash_is_flushed() {
+        let user_id = "44444444-4444-4444-8444-444444444444";
+        let store = ProbeStore::with_users();
+        seed_session_with(&store, "stalehashkey1", user_id, MODEL_BACKEND, "bogus").await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(auth_gate));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=stalehashkey1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            set_cookies(&response),
+            vec!["session-id=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax".to_string()]
+        );
+        assert_eq!(store.deleted_keys(), vec!["stalehashkey1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn non_model_backend_is_anonymous_without_flush() {
+        let user_id = "55555555-5555-4555-8555-555555555555";
+        let store = ProbeStore::with_users();
+        seed_session_with(
+            &store,
+            "otherbackend1",
+            user_id,
+            "tests.OtherBackend",
+            &auth_hash(),
+        )
+        .await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(auth_gate));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=otherbackend1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).is_empty());
+        assert!(store.deleted_keys().is_empty());
+    }
+
+    #[tokio::test]
+    async fn inactive_user_is_anonymous_without_flush() {
+        let user_id = "66666666-6666-4666-8666-666666666666";
+        let store = ProbeStore {
+            inactive: true,
+            ..ProbeStore::with_users()
+        };
+        seed_session(&store, "inactivekey1", user_id).await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(auth_gate));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=inactivekey1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(set_cookies(&response).is_empty());
+        assert!(store.deleted_keys().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_session_write_keeps_auth_keys() {
+        // Django's non-flush anonymous cases leave the session dict alone:
+        // a later save persists the auth trio, it does not drop it.
+        async fn write_note(req: Request<Body>) -> Response<Body> {
+            req.extensions()
+                .get::<SessionHandle>()
+                .expect("session handle in extensions")
+                .lock()
+                .set(
+                    "note".to_string(),
+                    serde_json::Value::String("x".to_string()),
+                );
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .expect("inner")
+        }
+        let user_id = "77777777-7777-4777-8777-777777777777";
+        let store = ProbeStore::with_users();
+        seed_session_with(
+            &store,
+            "rejectedwrite1",
+            user_id,
+            "tests.OtherBackend",
+            &auth_hash(),
+        )
+        .await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(write_note));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=rejectedwrite1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(store.deleted_keys().is_empty());
+        let stored = store
+            .inner
+            .load("rejectedwrite1".to_string())
+            .await
+            .expect("load")
+            .expect("row kept");
+        let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
+        let saved: serde_json::Value = signer.unsign_object(&stored.session_data).expect("unsign");
+        assert_eq!(
+            saved.get("_auth_user_id").and_then(|v| v.as_str()),
+            Some(user_id)
+        );
+        assert_eq!(
+            saved.get("_auth_user_backend").and_then(|v| v.as_str()),
+            Some("tests.OtherBackend")
+        );
+        assert!(saved
+            .get("_auth_user_hash")
+            .and_then(|v| v.as_str())
+            .is_some());
+        assert_eq!(saved.get("note").and_then(|v| v.as_str()), Some("x"));
+    }
+
+    #[tokio::test]
     async fn user_probe_failure_is_a_500() {
         let user_id = "33333333-3333-4333-8333-333333333333";
         let store = ProbeStore {
             inner: MemorySessionStore::new(),
             missing: None,
             fail_probe: true,
+            inactive: false,
+            deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         seed_session(&store, "probedownkey1", user_id).await;
         let inner = axum::Router::new().route("/api/x/", axum::routing::any(auth_gate));
