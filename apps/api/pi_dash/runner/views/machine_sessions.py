@@ -29,7 +29,6 @@ import time
 import uuid as _uuid
 from typing import Any, Dict, List
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import transaction
 from django.http import JsonResponse
@@ -39,6 +38,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from pi_dash.utils.db_async import db_sync_to_async
 from pi_dash.runner.authentication import MachineTokenAuthentication
 from pi_dash.runner.models import DevMachine, MachineSession
 from pi_dash.runner.services import machine_outbox
@@ -279,7 +279,12 @@ async def machine_session_poll(request, dev_machine_id, sid):
     ``LONG_POLL_INTERVAL_SECS`` waiting for control messages, and under
     ASGI a sync long poll would block every other request sharing the
     worker's ``thread_sensitive`` thread. Auth + DB bookkeeping stay
-    sync (briefly, via ``sync_to_async``); only the wait is async.
+    sync (briefly, via ``db_sync_to_async``); only the wait is async.
+
+    ``db_sync_to_async``, not a bare ``sync_to_async``: see the
+    matching note on ``runner_session_poll``. A bare one would hold the
+    bookkeeping connection open across the wait below, so every connected
+    dev machine would pin a permanently-idle Postgres connection.
     """
     if request.method != "POST":
         return JsonResponse(
@@ -287,7 +292,7 @@ async def machine_session_poll(request, dev_machine_id, sid):
         )
 
     try:
-        token = await sync_to_async(_authenticate_poll_machine)(request)
+        token = await db_sync_to_async(_authenticate_poll_machine)(request)
     except drf_exceptions.AuthenticationFailed as exc:
         return JsonResponse(
             {"detail": str(exc.detail)}, status=status.HTTP_401_UNAUTHORIZED
@@ -300,7 +305,7 @@ async def machine_session_poll(request, dev_machine_id, sid):
         return JsonResponse(
             {"error": "dev_machine_mismatch"}, status=status.HTTP_403_FORBIDDEN
         )
-    machine = await sync_to_async(lambda: token.dev_machine)()
+    machine = await db_sync_to_async(lambda: token.dev_machine)()
 
     body: Dict[str, Any] = {}
     if request.body:
@@ -313,7 +318,7 @@ async def machine_session_poll(request, dev_machine_id, sid):
         if isinstance(parsed, dict):
             body = parsed
 
-    error, plan = await sync_to_async(_poll_bookkeeping)(machine, body, sid)
+    error, plan = await db_sync_to_async(_poll_bookkeeping)(machine, body, sid)
     if error is not None:
         return JsonResponse(error["payload"], status=error["status"])
 
@@ -329,7 +334,7 @@ async def machine_session_poll(request, dev_machine_id, sid):
             {"error": "session_evicted"}, status=status.HTTP_409_CONFLICT
         )
     if plan["use_zero"]:
-        await sync_to_async(machine_outbox.mark_pel_drained)(sid)
+        await db_sync_to_async(machine_outbox.mark_pel_drained)(sid)
 
     return JsonResponse(
         {

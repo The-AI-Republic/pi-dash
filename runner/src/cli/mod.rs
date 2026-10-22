@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 
+mod agent_install;
 mod ai;
 pub mod auth;
 mod comment;
@@ -9,8 +10,10 @@ pub mod connect;
 pub mod context;
 pub mod doctor;
 mod install;
-pub mod managed;
 pub mod issue;
+pub mod managed;
+// `pub` so the CLI contract tests can drive the label subcommands directly.
+pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
 mod project;
@@ -24,6 +27,7 @@ pub mod run_cmd;
 pub mod runner;
 pub mod runner_ops;
 mod start;
+mod scheduler;
 mod state;
 mod status;
 mod stop;
@@ -127,6 +131,10 @@ pub enum Command {
     /// Read or update a Pi Dash work item (fetch, change state, edit fields).
     Issue(issue::IssueArgs),
 
+    /// Manage a project's labels (`label list` / `create` / `update` /
+    /// `delete`). Attaching a label to a work item lives on `pidash issue`.
+    Label(label::LabelArgs),
+
     /// List, post, or edit work-item comments.
     Comment(comment::CommentArgs),
 
@@ -135,6 +143,10 @@ pub enum Command {
 
     /// Inspect workflow states on a project.
     State(state::StateArgs),
+
+    /// Read project schedulers (read-only): `scheduler list` /
+    /// `scheduler get <id>` / `scheduler runs <id>`.
+    Scheduler(scheduler::SchedulerArgs),
 
     /// Read or overwrite the coding agent's per-issue workpad.
     Workpad(workpad::WorkpadArgs),
@@ -188,9 +200,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Remove(args) => remove::run(args, &paths).await,
         Command::Ai(args) => ai::run(args, &paths).await,
         Command::Issue(args) => run_crud(issue::run(args, &paths).await),
+        Command::Label(args) => run_crud(label::run(args, &paths).await),
         Command::Comment(args) => run_crud(comment::run(args, &paths).await),
         Command::Page(args) => run_crud(page::run(args, &paths).await),
         Command::State(args) => run_crud(state::run(args, &paths).await),
+        Command::Scheduler(args) => run_crud(scheduler::run(args, &paths).await),
         Command::Workpad(args) => run_crud(workpad::run(args, &paths).await),
         Command::Workspace(args) => run_crud(workspace::run(args, &paths).await),
         Command::RunCmd(args) => run_crud(run_cmd::run(args, &paths).await),
@@ -211,7 +225,7 @@ async fn run_default(paths: &crate::util::paths::Paths) -> Result<()> {
                 url: None,
                 no_browser: false,
                 workspace: None,
-                device_code: None,
+                device_code_stdin: false,
             }),
         };
         return auth::run(args, paths).await;

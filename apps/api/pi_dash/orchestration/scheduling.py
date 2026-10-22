@@ -85,12 +85,10 @@ RUN_OUTCOMES = frozenset(
         OUTCOME_BLOCKED,
     }
 )
-#: Outcomes that stop the clock for the stage the run was rendered for.
-STOPPING_OUTCOMES = frozenset({OUTCOME_DONE, OUTCOME_BLOCKED, OUTCOME_WAITING_ON_HUMAN})
 #: Legacy done-payload statuses from the Cloud Agent structured result and
-#: the pre-yield fence, mapped onto the §7 vocabulary. ``noop`` is per kind
-#: (see :func:`normalize_outcome`): "nothing changed" keeps an In Progress
-#: clock ticking and stops a review / test one.
+#: the pre-yield fence, mapped onto the §7 vocabulary. Outcomes are
+#: informational only (PDASHOSS01-247) — none of them stops the clock; only
+#: an explicit ``done_payload.stop_ticking`` does.
 _LEGACY_OUTCOME_ALIASES = {
     "completed": OUTCOME_DONE,
     "paused": OUTCOME_WAITING_ON_HUMAN,
@@ -336,9 +334,9 @@ def normalize_outcome(value, phase_kind: str = "") -> Optional[str]:
     Returns ``None`` for anything unrecognised (a bridge's
     ``{"conclusion": …}`` payload has no status at all), which the
     ``RUN_ENDED`` handler treats as "the run did not yield". The legacy
-    ``noop`` ("nothing changed") follows the per-kind default: an In
-    Progress run that found nothing to do must keep ticking (CI may still
-    be running), while a review / test that found nothing new is satisfied.
+    ``noop`` ("nothing changed") follows the per-kind default —
+    ``progressed`` in every stage since PDASHOSS01-247: outcomes are
+    informational, and "nothing changed" never stops the clock.
     """
     if not isinstance(value, str):
         return None
@@ -357,18 +355,16 @@ def outcome_for_run(run: AgentRun) -> Optional[str]:
     return normalize_outcome(payload.get("status"), getattr(run, "phase_kind", "") or "")
 
 
-def default_outcome_for_kind(phase_kind: str) -> str:
+def default_outcome_for_kind(phase_kind: str) -> str:  # noqa: ARG001 — kept for callers
     """What a run that exited without yielding is taken to mean.
 
-    ``coding-task`` → keep ticking (the budget still bounds it). ``review``
-    / ``test`` → ``done`` (stay; stop) — the cost-safe reading, so an
-    approved review that forgets to yield does not tick to its cap.
+    ``progressed`` in every stage: no report means keep ticking, and the
+    budget bounds the cost (PDASHOSS01-247). Outcomes are informational
+    only, so there is no cost-safe reason left to read a silent review /
+    test run as ``done`` — that inference is what used to strand
+    agent-driven issues with the clock off.
     """
-    from pi_dash.prompting.recipes import KIND_CODING_TASK
-
-    if phase_kind in ("", KIND_CODING_TASK):
-        return OUTCOME_PROGRESSED
-    return OUTCOME_DONE
+    return OUTCOME_PROGRESSED
 
 
 def reconcile(issue: Issue, event: TickerEvent) -> TickerDecision:
@@ -462,8 +458,14 @@ def _on_left_bucket(issue: Issue, event: TickerEvent) -> TickerDecision:
 def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
     """A run on the issue reached a resting status (design §7).
 
-    The guard: a run that moved the issue on and *then* reported ``done``
-    must not stop the clock that is already set for the next stage.
+    The clock stops only on the run's explicit ``done_payload.stop_ticking``
+    (``STOP_SIGNAL``). The outcome — including ``done``, ``blocked`` and
+    ``waiting_on_human``, and a missing report — is informational and keeps
+    the clock ticking; the budget bounds the cost (PDASHOSS01-247).
+
+    The guard: a signal from a run whose stage the issue has already left
+    is ignored — ``stop_ticking`` included — so the clock that is already
+    set for the next stage survives.
     """
     run = event.run
     ticker = _lock_ticker(issue, create=False)
@@ -483,34 +485,31 @@ def _on_run_ended(issue: Issue, event: TickerEvent) -> TickerDecision:
 
     outcome = event.outcome if event.outcome is not None else outcome_for_run(run)
     if outcome is None:
-        # No yield. A run that *completed* is read per kind (§7 defaults);
-        # one that failed, was cancelled, or was refused said nothing about
-        # the stage — keep ticking so the next tick retries, rather than
-        # stopping the clock on a crash (which would strand a review/test
-        # issue with no Re-tick button, since the cap was never reached).
-        if run.status == AgentRunStatus.COMPLETED:
-            outcome = default_outcome_for_kind(run_kind or current_kind)
-        elif run.status == AgentRunStatus.PAUSED_AWAITING_INPUT:
+        # No yield. The outcome is informational either way; keep ticking
+        # so the next tick retries — whether the run completed silently,
+        # paused on a question, failed, was cancelled, or was refused.
+        if run.status == AgentRunStatus.PAUSED_AWAITING_INPUT:
             outcome = OUTCOME_WAITING_ON_HUMAN
         else:
-            outcome = OUTCOME_PROGRESSED
+            outcome = default_outcome_for_kind(run_kind or current_kind)
 
     if ticker.pending_entry:
         # Something (a human, a queued hand-off) already owes the next run
         # on this clock; the finished run's opinion does not override it.
         return TickerDecision(ticker=ticker, reason=f"{outcome}:pending-entry-kept")
 
-    if outcome in STOPPING_OUTCOMES:
+    payload = run.done_payload if isinstance(run.done_payload, dict) else {}
+    if payload.get("stop_ticking") is True:
         if ticker.enabled:
             # Only stop an armed clock — a prior ``cap_hit`` must survive so
             # the deferred auto-pause still fires (design §5.2).
-            _stop_clock(ticker, TickerDisarmReason.TERMINAL_SIGNAL)
+            _stop_clock(ticker, TickerDisarmReason.STOP_SIGNAL)
             _save_clock(ticker)
             return TickerDecision(ticker=ticker, reason=f"{outcome}:stopped")
         return TickerDecision(ticker=ticker, reason=f"{outcome}:already-stopped")
 
-    # progressed / waiting_on_external: keep ticking. ``fire_tick`` already
-    # re-timed the clock at claim for tick-started runs; make sure a
+    # No stop signal: keep ticking, whatever the outcome said. ``fire_tick``
+    # already re-timed the clock at claim for tick-started runs; make sure a
     # human-started run leaves a live clock behind too.
     if ticker.enabled and ticker.next_run_at is None and not ticker.cap_reached():
         ticker.next_run_at = _compute_next_run_at(ticker.effective_interval_seconds())
@@ -612,10 +611,10 @@ def disarm_ticker(
     reason: str = TickerDisarmReason.LEFT_TICKING_STATE,
 ) -> Optional[IssueAgentTicker]:
     """Stop the clock with ``reason``. Idempotent."""
-    if reason == TickerDisarmReason.TERMINAL_SIGNAL:
+    if reason in (TickerDisarmReason.TERMINAL_SIGNAL, TickerDisarmReason.STOP_SIGNAL):
         raise ValueError(
             "disarm_ticker overwrites disarm_reason — send a RUN_ENDED event "
-            "(reconcile) for TERMINAL_SIGNAL so a prior CAP_HIT survives."
+            "(reconcile) for a run's stop signal so a prior CAP_HIT survives."
         )
     with transaction.atomic():
         ticker = _lock_ticker(issue, create=False)
@@ -630,7 +629,12 @@ def disarm_ticker(
 
 
 def maybe_disarm_on_terminal_signal(run: AgentRun) -> bool:
-    """Send ``RUN_ENDED`` for ``run``; ``True`` when the clock was stopped."""
+    """Send ``RUN_ENDED`` for ``run``; ``True`` when the clock was stopped.
+
+    Historical name — since PDASHOSS01-247 only an explicit
+    ``done_payload.stop_ticking`` stops the clock (``STOP_SIGNAL``), never
+    the outcome itself.
+    """
     if run.work_item_id is None:
         return False
     decision = reconcile(run.work_item, TickerEvent.run_ended(run))
@@ -727,6 +731,132 @@ def _in_progress_state_for(issue: Issue):
 
 
 # ---------------------------------------------------------------------------
+# The agent's wait — ``pidash issue wait`` (PDASHOSS01-204)
+# ---------------------------------------------------------------------------
+#
+# The platform does not decide when a wait ends, and does not read the
+# agent's workpad or the ``blocked_by`` semantics to guess that it started.
+# Each tick the agent already sees its blockers and their states; if it
+# decides it cannot safely proceed it says so here and yields. The only
+# thing the platform does is make that decision free: one extra tick, so
+# the run that is ending costs no net budget.
+
+
+#: ``wait_ticker`` applied the wait.
+WAIT_GRANTED = "waited"
+#: The issue has spent its wait allowance (one extra pool). Further waiting
+#: spends normal budget until the pool runs out and the issue parks.
+WAIT_CAP_REACHED = "wait_cap_reached"
+#: ``agent_default_max_ticks == -1``: there is no budget to buy back, so the
+#: command is a no-op — as Re-tick already is on an infinite pool.
+WAIT_INFINITE_POOL = "infinite_pool"
+#: The issue has no clock (it never entered the ticking bucket), so there is
+#: no budget to refund and nothing to wait for.
+WAIT_NO_TICKER = "no_ticker"
+
+#: ``IssueActivity.field`` recorded on every wait call.
+WAIT_ACTIVITY_FIELD = "agent_wait"
+
+#: Disarm reasons a wait may lift. Both mean "the pool ran out"; the extra
+#: tick has nothing to buy if the clock never fires again.
+_WAIT_REARMABLE_DISARMS = frozenset(
+    {
+        TickerDisarmReason.CAP_HIT,
+        TickerDisarmReason.POOL_SPENT,
+    }
+)
+
+
+def wait_ticker(issue: Issue, *, run: Optional[AgentRun] = None, actor=None) -> dict:
+    """Buy back one tick so an agent can yield without spending budget.
+
+    Returns ``{"applied": bool, "reason": str, "ticker": IssueAgentTicker|None}``.
+    Every call adds a tick while the allowance lasts — including a second
+    call inside the same run. The per-issue allowance (one extra pool) is the
+    only limit; one run may spend the whole of it, and the cap bounds that.
+
+    ``run`` is the run that asked, recorded on the activity entry so repeated
+    waits are visible and attributable.
+    """
+    now = timezone.now()
+    with transaction.atomic():
+        ticker = (
+            IssueAgentTicker.objects.select_for_update(of=("self",))
+            .select_related("issue", "issue__state", "issue__project")
+            .filter(issue_id=issue.pk)
+            .first()
+        )
+        if ticker is None:
+            return {"applied": False, "reason": WAIT_NO_TICKER, "ticker": None}
+        if ticker.pool_size() == INFINITE_MAX_TICKS:
+            return {"applied": False, "reason": WAIT_INFINITE_POOL, "ticker": ticker}
+        if ticker.wait_allowance() <= 0:
+            return {"applied": False, "reason": WAIT_CAP_REACHED, "ticker": ticker}
+
+        ticker.waited = ticker.waited + 1
+        update_fields = ["waited", "updated_at"]
+
+        # Re-arm when the clock stopped *because the pool ran out* and the
+        # raised cap has now left room. This is the common case, not an edge
+        # one: an agent that waits on its last run has the claim disarm the
+        # ticker (CAP_HIT) before it ever gets to call this, and a CAP_HIT
+        # disarm is also what ``maybe_apply_deferred_pause`` reads to park
+        # the issue when the run ends. Without the re-arm the refunded tick
+        # would be unspendable and the issue would be Paused anyway.
+        if (
+            not ticker.enabled
+            and ticker.disarm_reason in _WAIT_REARMABLE_DISARMS
+            and not ticker.cap_reached()
+            and not ticker.user_disabled
+            and getattr(ticker.issue.project, "agent_ticking_enabled", True)
+            and is_ticking_state(ticker.issue.state)
+        ):
+            interval = ticker.effective_interval_seconds()
+            ticker.enabled = True
+            ticker.disarm_reason = TickerDisarmReason.NONE
+            ticker.next_run_at = now + timedelta(seconds=interval + jitter_seconds(interval))
+            update_fields += ["enabled", "disarm_reason", "next_run_at"]
+
+        ticker.save(update_fields=update_fields)
+        _record_wait_activity(ticker.issue, ticker, run=run, actor=actor)
+
+    logger.info(
+        "agent_wait: issue=%s waited=%d used=%d cap=%d run=%s",
+        issue.pk,
+        ticker.waited,
+        ticker.used,
+        ticker.effective_max_ticks(),
+        getattr(run, "pk", None),
+    )
+    return {"applied": True, "reason": WAIT_GRANTED, "ticker": ticker}
+
+
+def _record_wait_activity(issue: Issue, ticker: IssueAgentTicker, *, run=None, actor=None) -> None:
+    """Log the wait on the issue's activity feed, naming the calling run."""
+    import time
+
+    from pi_dash.db.models.issue import IssueActivity
+    from pi_dash.orchestration.workpad import get_agent_system_user
+
+    pool = ticker.pool_size()
+    run_id = str(run.pk) if run is not None else ""
+    IssueActivity.objects.create(
+        issue=issue,
+        project_id=issue.project_id,
+        workspace_id=issue.workspace_id,
+        verb="updated",
+        field=WAIT_ACTIVITY_FIELD,
+        # The allowance and the wait's position in it, so the UI can render
+        # "waited (3 of 10)" without re-deriving project policy.
+        old_value=str(pool),
+        new_value=str(ticker.waited),
+        comment=f"Waited on a blocker ({ticker.waited} of {pool})" + (f"; run {run_id}" if run_id else ""),
+        actor=actor if actor is not None else get_agent_system_user(),
+        epoch=time.time(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Continuation dispatch
 # ---------------------------------------------------------------------------
 
@@ -737,10 +867,9 @@ def _in_progress_state_for(issue: Issue):
 TRIGGER_TICK = AgentRunTrigger.TICK.value
 TRIGGER_COMMENT_AND_RUN = AgentRunTrigger.COMMENT_AND_RUN.value
 TRIGGER_RUN_AI = AgentRunTrigger.RUN_AI.value
-TRIGGER_BLOCKER_COMPLETED = AgentRunTrigger.BLOCKER_COMPLETED.value
 #: Triggers the clock starts on its own — resolved like a tick (system bot on
 #: a local runner, never an explicit actor).
-_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK, TRIGGER_BLOCKER_COMPLETED})
+_MACHINE_TRIGGERS = frozenset({TRIGGER_TICK})
 
 
 def _resolve_pod_for_issue(issue: Issue):
@@ -1230,8 +1359,9 @@ def maybe_apply_deferred_pause(run: AgentRun) -> bool:
     Returns ``True`` when a transition was applied, ``False`` otherwise.
 
     Gated on ``disarm_reason == CAP_HIT`` — the timer tick that consumed
-    the last run. Terminal-signal stops leave the issue in place for the
-    human to act, and so does ``POOL_SPENT`` (an agent parked the issue, or
+    the last run. Stop-signal stops (and legacy terminal-signal rows) leave
+    the issue in place for the human to act, and so does ``POOL_SPENT``
+    (an agent parked the issue, or
     a human moved it, on an already-spent pool): the §5.4 comment tells the
     human to Re-tick, which needs the issue to stay in the bucket.
     ``LEFT_TICKING_STATE`` and ``USER_DISABLED`` likewise are not
@@ -1359,8 +1489,6 @@ __all__ = [
     "RUN_AI_NO_ELIGIBLE_RUNNER",
     "RUN_AI_NO_POD",
     "RUN_OUTCOMES",
-    "STOPPING_OUTCOMES",
-    "TRIGGER_BLOCKER_COMPLETED",
     "TRIGGER_COMMENT_AND_RUN",
     "TRIGGER_RUN_AI",
     "TRIGGER_TICK",
@@ -1382,4 +1510,10 @@ __all__ = [
     "re_tick_ticker",
     "reconcile",
     "reset_ticker_after_comment_and_run",
+    "WAIT_ACTIVITY_FIELD",
+    "WAIT_CAP_REACHED",
+    "WAIT_GRANTED",
+    "WAIT_INFINITE_POOL",
+    "WAIT_NO_TICKER",
+    "wait_ticker",
 ]
