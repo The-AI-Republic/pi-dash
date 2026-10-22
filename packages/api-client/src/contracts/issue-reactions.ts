@@ -6,6 +6,7 @@
 // stores refetch after a toggle.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { isApiError } from "../errors.js";
 import { dateTime, nullableDateTime, uuid } from "./fields.js";
 import { UserLite } from "./users.js";
 
@@ -125,4 +126,43 @@ export async function deleteCommentReaction(
   await client.delete(
     `/api/workspaces/${slug}/projects/${projectId}/comments/${commentId}/reactions/${encodeURIComponent(reaction)}/`
   );
+}
+
+/** The duplicate-add refusal body: 400 with a single error sentence. */
+export const DuplicateReactionErrorBody = z.object({
+  error: z.string(),
+});
+export type DuplicateReactionErrorBody = z.infer<typeof DuplicateReactionErrorBody>;
+
+/**
+ * The issue path's duplicate sentence. The comment view names the
+ * duplicate itself; the issue view lets the base viewset translate the
+ * unique-constraint violation into this generic payload message.
+ */
+export const ISSUE_DUPLICATE_REACTION_MESSAGE = "The payload is not valid";
+
+export interface DuplicateReactionFailure {
+  /** The server's duplicate sentence. */
+  message: string;
+  /** Always 400: the duplicate refusal status. */
+  status: number;
+}
+
+/**
+ * Read the duplicate-reaction refusal off a rejected reaction create:
+ * the 400 plus the duplicate sentence, on either the comment path
+ * ("already exists") or the issue path (the base payload message).
+ * Null when the failure is not a duplicate refusal (transport errors,
+ * contract violations, other statuses, or another 400 shape such as
+ * serializer field errors), so callers branch on the result instead of
+ * matching the server text themselves. Only call with errors from
+ * {@link createIssueReaction} and {@link createCommentReaction}.
+ */
+export function duplicateReactionErrorFrom(error: unknown): DuplicateReactionFailure | null {
+  if (!isApiError(error) || error.status !== 400) return null;
+  const parsed = DuplicateReactionErrorBody.safeParse(error.body);
+  if (!parsed.success) return null;
+  const message = parsed.data.error;
+  if (!/already exists/i.test(message) && message !== ISSUE_DUPLICATE_REACTION_MESSAGE) return null;
+  return { message, status: error.status };
 }
