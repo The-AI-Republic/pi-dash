@@ -27,6 +27,11 @@
 //! * [`scheduler_hook`] — `scheduler_hook.py:1-42`
 //!   (`update_scheduler_binding_on_terminate`).
 //!
+//! * [`signals`] — `create_default_pod_for_new_project`
+//!   (`runner/signals.py:32-66`) as an explicit post-commit fn, the
+//!   single copy (lifted from the api crate, PIDASHCONV-1268, so the
+//!   jobs dummy-data path can call it too).
+//!
 //! The Python modules import each other (`run_lifecycle` ↔
 //! `agent_run_finalization`); here they are sibling modules of one
 //! directory, which is the same cycle cut the crate graph requires.
@@ -94,6 +99,7 @@ pub mod guards;
 pub mod lifecycle;
 pub mod scheduler_hook;
 pub mod shape;
+pub mod signals;
 
 pub use finalization::{
     apply_done_payload_merge, effects_lock_passes, finalize_error_code, finalize_lock_passes,

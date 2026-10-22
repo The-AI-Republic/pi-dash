@@ -3487,126 +3487,6 @@ const NO_SKIP_BLANK: &[&str] = &[];
 /// `RETURNING` stamps of the workspace/theme `INSERT`s.
 type InsertedStamps = Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>;
 
-/// One `ensure_select_sql` row: the seeder kernel's 14-column `SELECT`
-/// in order (`created_at`, `updated_at`, `created_by_id`,
-/// `updated_by_id`, `deleted_at`, `id`, `workspace_id`, `slug`, `name`,
-/// `description`, `prompt`, `source`, `is_enabled`, `color`).
-type SchedulerSeedRow = (
-    chrono::DateTime<chrono::Utc>,
-    chrono::DateTime<chrono::Utc>,
-    Option<uuid::Uuid>,
-    Option<uuid::Uuid>,
-    Option<chrono::DateTime<chrono::Utc>>,
-    uuid::Uuid,
-    uuid::Uuid,
-    String,
-    String,
-    String,
-    String,
-    String,
-    bool,
-    String,
-);
-
-/// `post_save` receiver `_seed_builtins_on_workspace_create`
-/// (`scheduler/signals.py:28-39`): `ensure_builtin_schedulers` runs on
-/// every workspace creation. The receiver swallows every exception
-/// (`logger.exception`), so this edge returns `()` and every error arm
-/// below is a silent stop — seeding can never block workspace creation.
-/// `created_by` is the requesting user (`BaseModel.save` stamps the crum
-/// user on the scheduler rows too). Shared by every workspace-create
-/// entry point (the Django signal fires regardless of entry point).
-pub(crate) async fn seed_builtin_schedulers(
-    pool: &sqlx::PgPool,
-    workspace_id: uuid::Uuid,
-    created_by: uuid::Uuid,
-) {
-    use pidash_services::scheduler::builtins as seeder;
-    use seeder::EnsureAction;
-    if !seeder::should_seed_on_workspace_create(true) {
-        return;
-    }
-    for builtin in seeder::BUILTINS {
-        let row: Result<Option<SchedulerSeedRow>, sqlx::Error> =
-            sqlx::query_as(seeder::ensure_select_sql())
-                .bind(workspace_id)
-                .bind(builtin.slug)
-                .fetch_optional(pool)
-                .await;
-        let row = match row {
-            Ok(row) => row,
-            Err(_) => return,
-        };
-        let view = row.as_ref().map(|row| seeder::SchedulerRowView {
-            name: row.8.clone(),
-            description: row.9.clone(),
-            prompt: row.10.clone(),
-            source: row.11.clone(),
-        });
-        match (row, seeder::decide_ensure(view.as_ref())) {
-            (Some(row), EnsureAction::Repaint) => {
-                if sqlx::query(seeder::builtin_repaint_sql())
-                    .bind(builtin.name)
-                    .bind(builtin.description)
-                    .bind(builtin.prompt)
-                    .bind(row.5)
-                    .execute(pool)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            (None, EnsureAction::Create) => {
-                match sqlx::query(seeder::builtin_insert_sql())
-                    .bind(uuid::Uuid::new_v4())
-                    .bind(workspace_id)
-                    .bind(builtin.slug)
-                    .bind(builtin.name)
-                    .bind(builtin.description)
-                    .bind(builtin.prompt)
-                    .bind(created_by)
-                    .execute(pool)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(error) if is_unique_violation(&error) => {
-                        // Lost the race: re-fetch and repaint the
-                        // winner (`builtins/__init__.py:177-186`).
-                        let winner: Result<Option<SchedulerSeedRow>, sqlx::Error> =
-                            sqlx::query_as(seeder::ensure_select_sql())
-                                .bind(workspace_id)
-                                .bind(builtin.slug)
-                                .fetch_optional(pool)
-                                .await;
-                        match winner {
-                            Ok(Some(winner)) => {
-                                if sqlx::query(seeder::builtin_repaint_sql())
-                                    .bind(builtin.name)
-                                    .bind(builtin.description)
-                                    .bind(builtin.prompt)
-                                    .bind(winner.5)
-                                    .execute(pool)
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(_) => return,
-                        }
-                    }
-                    Err(_) => return,
-                }
-            }
-            // Unreachable by `decide_ensure`'s contract (`Some` repaints,
-            // `None` creates); stop silently like any seeder failure.
-            _ => return,
-        }
-    }
-}
-
 /// POST `workspaces/` (`:83-166`).
 pub async fn create_workspace(
     State(state): State<AppState>,
@@ -3729,7 +3609,12 @@ pub async fn create_workspace(
     // during the save above, before the member row below: seed the
     // builtin schedulers. The receiver swallows every failure, so this
     // never fails the request.
-    seed_builtin_schedulers(&pool, workspace_id, user_id).await;
+    pidash_services::scheduler::builtins::seed_builtin_schedulers(
+        &pool,
+        workspace_id,
+        Some(user_id),
+    )
+    .await;
     // `WorkspaceMember.objects.create(...)` (`:126-132`): the `company_role`
     // echo (`:127`) renders through Python `str()` (null stays null).
     let company_role = match input.get("company_role") {
