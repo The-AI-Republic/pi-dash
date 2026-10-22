@@ -107,6 +107,16 @@
         try_files {path} {path}/ /index.html
         file_server
     }
+    handle_path /settings/profile* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
+    handle_path /profile* {
+        root * /app/web_new
+        try_files {path} {path}/ /index.html
+        file_server
+    }
     # END MIGRATED ROUTES
     handle_path /* {
         root * /app/web
