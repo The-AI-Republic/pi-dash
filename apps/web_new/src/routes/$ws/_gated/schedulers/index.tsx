@@ -8,11 +8,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { SchedulerCatalog, schedulersQueryOptions } from "../../../../features/schedulers/index.js";
+import { SchedulerCatalog } from "../../../../features/schedulers/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/schedulers/")({
-  loader: ({ context, params }) =>
-    context.queryClient.ensureQueryData(schedulersQueryOptions(context.apiClient, params.ws)),
+  // NOTE (NEWFRONT-852, size gate): the definition-list read stays behind
+  // a dynamic import so the scheduler api modules never join the initial
+  // bundle — this loader only runs on scheduler navigation, after first
+  // paint. The loader still resolves before render, as before.
+  loader: async ({ context, params }) => {
+    const { schedulersQueryOptions } = await import("../../../../features/schedulers/api.js");
+    return context.queryClient.ensureQueryData(schedulersQueryOptions(context.apiClient, params.ws));
+  },
   component: SchedulersComponent,
 });
 

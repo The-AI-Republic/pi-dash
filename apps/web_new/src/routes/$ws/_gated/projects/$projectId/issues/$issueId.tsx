@@ -11,10 +11,15 @@ import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { Spinner } from "@pidash/kit";
 import * as React from "react";
 
-import { DetailMissingState, resolveShortLink } from "../../../../../../features/issues/index.js";
+import { DetailMissingState } from "../../../../../../features/issues/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/$issueId")({
+  // NOTE (NEWFRONT-852, size gate): the short-link resolve stays behind a
+  // dynamic import so the browse api modules never join the initial
+  // bundle — this loader only runs on short-link navigation, after first
+  // paint. The loader still resolves before render, as before.
   loader: async ({ context, params }) => {
+    const { resolveShortLink } = await import("../../../../../../features/issues/api/browse.js");
     const target = await resolveShortLink(context.apiClient, params.ws, params.projectId, params.issueId);
     if (target === null) return { missing: true };
     throw redirect({

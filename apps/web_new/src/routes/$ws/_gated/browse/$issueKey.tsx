@@ -52,10 +52,13 @@ export function projectIdentifier(project: { identifier: string } | undefined, i
 }
 
 export const Route = createFileRoute("/$ws/_gated/browse/$issueKey")({
+  // NOTE (NEWFRONT-852, size gate): the lite-identifier read stays behind
+  // a dynamic import so the browse api modules never join the initial
+  // bundle — this loader only runs on browse navigation, after first
+  // paint. The loader still resolves before render, as before.
   loader: async ({ context, params }) => {
-    const lite = await context.queryClient.ensureQueryData(
-      liteIssueQueryOptions(context.apiClient, params.ws, params.issueKey)
-    );
+    const { liteIssueQueryOptions: liteOptions } = await import("../../../../features/issues/api/browse.js");
+    const lite = await context.queryClient.ensureQueryData(liteOptions(context.apiClient, params.ws, params.issueKey));
     if (lite.lite?.is_intake === true) {
       throw redirect({
         to: "/$ws/projects/$projectId/intake",

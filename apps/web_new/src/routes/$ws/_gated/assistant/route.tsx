@@ -10,14 +10,19 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { assistantThreadsQueryOptions } from "../../../../features/assistant/index.js";
 import { AssistantLayout } from "../../../../features/assistant/components/AssistantLayout.js";
 
 export const Route = createFileRoute("/$ws/_gated/assistant")({
-  loader: ({ context, params }) =>
-    context.queryClient
+  // NOTE (NEWFRONT-852, size gate): the threads read stays behind a
+  // dynamic import so the assistant query modules never join the initial
+  // bundle — this loader only runs on assistant navigation, after first
+  // paint. The loader still resolves before render, as before.
+  loader: async ({ context, params }) => {
+    const { assistantThreadsQueryOptions } = await import("../../../../features/assistant/api/queries.js");
+    return context.queryClient
       .ensureQueryData(assistantThreadsQueryOptions(context.apiClient, params.ws))
-      .catch(() => undefined),
+      .catch(() => undefined);
+  },
   component: AssistantLayoutComponent,
 });
 
