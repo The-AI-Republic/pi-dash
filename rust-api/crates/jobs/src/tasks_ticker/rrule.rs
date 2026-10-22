@@ -682,14 +682,17 @@ fn check_freq_interval(parsed: &ParsedRule) -> Result<(), RRuleValidationError> 
 /// `BYWEEKNO` have no range check in `rrule.__init__` — confirmed against a
 /// live `dateutil` — so they are deliberately not checked here.
 fn check_rrule_init_semantics(parsed: &ParsedRule, anchor_aware: bool) -> Result<(), String> {
-    // `if self._dtstart and self._until:` — the anchor is the aware
-    // `datetime.now(tz=utc)` unless the rule text carries its own DTSTART,
-    // which `rrulestr` substitutes. Only an aware anchor rejects a naive
-    // UNTIL.
-    if anchor_aware && parsed.until == Some(false) {
-        return Err(
-            "RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware".to_owned(),
-        );
+    // `if self._dtstart and self._until:` — the awareness must match
+    // (`rrule.py:462-472`); either mismatch direction raises the same
+    // message. The anchor is the aware `datetime.now(tz=utc)` unless the
+    // rule text carries its own DTSTART, which `rrulestr` substitutes.
+    if let Some(until_aware) = parsed.until {
+        if anchor_aware != until_aware {
+            return Err(
+                "RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
+                    .to_owned(),
+            );
+        }
     }
 
     // bysetpos must be in [-366, -1] or [1, 366].

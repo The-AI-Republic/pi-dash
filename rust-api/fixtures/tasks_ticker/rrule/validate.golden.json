@@ -95,6 +95,12 @@
     {
       "rrule": "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231",
       "valid": true
+    },
+    {
+      "rrule": "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231T000000Z",
+      "valid": false,
+      "error": "RRuleValidationError",
+      "message": "invalid RRULE: RRULE UNTIL values must be specified in UTC when DTSTART is timezone-aware"
     }
   ]
 }

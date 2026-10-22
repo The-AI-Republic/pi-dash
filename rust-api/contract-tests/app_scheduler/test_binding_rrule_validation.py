@@ -32,6 +32,13 @@ INVALID_RRULE_VECTORS = [
     ("FREQ=DAILY;BYHOUR=25", "invalid RRULE: hour must be in 0..23"),
     ("FREQ=DAILY;BYHOUR=24", "invalid RRULE: hour must be in 0..23"),
     ("FREQ=WEEKLY;BYSECOND=61", "invalid RRULE: second must be in 0..59"),
+    # Awareness must match in either direction: a naive embedded DTSTART
+    # with an aware UNTIL raises the same message (dateutil rrule.py:462-472).
+    (
+        "DTSTART:20270101T000000\nRRULE:FREQ=DAILY;UNTIL=20271231T000000Z",
+        "invalid RRULE: RRULE UNTIL values must be specified in UTC when "
+        "DTSTART is timezone-aware",
+    ),
 ]
 
 
