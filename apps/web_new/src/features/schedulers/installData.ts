@@ -17,6 +17,7 @@ import {
   type ApiClient,
   type SchedulerBinding,
   type SchedulerBindingCreateInput,
+  type SchedulerBindingDetail,
   type SchedulerBindingList,
   type SchedulerBindingUpdateInput,
 } from "@pidash/api-client";
@@ -124,10 +125,9 @@ export interface UpdateBindingRequest {
 
 export function useUpdateSchedulerBinding(workspaceSlug: string) {
   const queryClient = useQueryClient();
-  return useMutation<void, Error, UpdateBindingRequest>({
-    mutationFn: async ({ projectId, bindingId, input }) => {
-      await updateSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId, input);
-    },
+  return useMutation<SchedulerBindingDetail, Error, UpdateBindingRequest>({
+    mutationFn: ({ projectId, bindingId, input }) =>
+      updateSchedulerBinding(getAppClient(), workspaceSlug, projectId, bindingId, input),
     onSuccess: async (_data, { projectId }) => {
       notifySuccess("Install updated", "Subsequent runs use the new settings.");
       await invalidateInstalls(queryClient, workspaceSlug, projectId);
