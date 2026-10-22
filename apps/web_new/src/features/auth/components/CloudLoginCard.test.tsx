@@ -178,6 +178,27 @@ describe("CloudLoginCard", () => {
     expect(location.assign).not.toHaveBeenCalled();
   });
 
+  it("returns to the root for encoded and case-variant login targets", async () => {
+    // The router decodes escapes and matches case-insensitively, so each of
+    // these would land back on the card: the handoff must fall back to root.
+    for (const target of [
+      "/%6Cogin",
+      "/LoGiN",
+      "/%6Cogin%3Fnext_path=%2Fdocs",
+      "/login%2F",
+      "/SIGNIN/",
+      "/%73ign-in",
+    ]) {
+      location.search = `?next_path=${encodeURIComponent(target)}`;
+      location.replace.mockClear();
+      const { unmount } = render(<CloudLoginCard />);
+
+      await waitFor(() => expect(location.replace).toHaveBeenCalledTimes(1));
+      expect(navigatedUrl(location.replace).searchParams.get("return_to")).toBe("/");
+      unmount();
+    }
+  });
+
   it("drops the fragment from a pending target", async () => {
     location.search = `?next_path=${encodeURIComponent("/docs#token")}`;
     render(<CloudLoginCard />);
