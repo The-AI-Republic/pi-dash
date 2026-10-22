@@ -721,6 +721,10 @@ describe("estimates shell driver (EST-001-003, EST-026-028)", () => {
         }),
     });
     expect(await new WebNewDriver(unreadable).estimatesScreenText()).toBe("");
+    const blank = pageOf({
+      getByRole: () => locator({ innerText: async () => null as unknown as string }),
+    });
+    expect(await new WebNewDriver(blank).estimatesScreenText()).toBe("");
   });
 
   it("lists the system names from their rows, skipping blanks and dead reads", async () => {
@@ -732,6 +736,7 @@ describe("estimates shell driver (EST-001-003, EST-026-028)", () => {
           throw new Error("detached");
         },
       }),
+      locator({ innerText: async () => null as unknown as string }),
       locator({ innerText: async () => "Beta" }),
     ];
     const inner = vi.fn(() => locator());
