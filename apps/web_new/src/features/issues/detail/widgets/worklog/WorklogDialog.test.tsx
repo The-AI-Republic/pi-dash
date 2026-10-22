@@ -112,4 +112,15 @@ describe("WorklogDialog", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onSubmit).not.toHaveBeenCalled();
   });
+
+  it("dismisses with Escape without submitting", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const onClose = vi.fn();
+    render(<WorklogDialog saving={false} onClose={onClose} onSubmit={onSubmit} />);
+
+    await user.keyboard("{Escape}");
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });

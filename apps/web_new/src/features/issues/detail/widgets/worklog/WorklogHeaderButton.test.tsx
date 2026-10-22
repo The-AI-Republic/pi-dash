@@ -122,4 +122,14 @@ describe("WorklogHeaderButton", () => {
     expect(screen.getByRole("dialog")).toBeDefined();
     expect((within(dialog).getByLabelText("Minutes") as HTMLInputElement).value).toBe("30");
   });
+
+  it("dismisses the dialog with Escape", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(screen.getByRole("button", { name: "Log time" }));
+    await screen.findByRole("dialog");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
 });

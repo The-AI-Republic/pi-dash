@@ -254,6 +254,27 @@ describe("WorklogSidebarSection", () => {
     expect(calls.some((call) => call.method === "DELETE" && call.url.includes(`/worklogs/${ENTRY_ONE}/`))).toBe(true);
   });
 
+  it("dismisses the edit dialog with Escape", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(await screen.findByRole("button", { name: "Edit 1h 30m on Oct 20, 2026" }));
+    await screen.findByRole("dialog", { name: "Edit time entry" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("dismisses the removal confirm with Escape", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup();
+
+    await user.click(await screen.findByRole("button", { name: "Remove 1h 30m on Oct 20, 2026" }));
+    await screen.findByRole("dialog", { name: "Remove 1h 30m on Oct 20, 2026?" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+
   it("cancels a removal without a request", async () => {
     const user = userEvent.setup();
     const { calls } = setup();

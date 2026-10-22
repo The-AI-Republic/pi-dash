@@ -192,9 +192,7 @@ function WorklogDeleteDialog({
     <Dialog
       title={`Remove ${formatMinutes(entry.minutes)} on ${formatLoggedOn(entry.logged_on)}?`}
       open
-      onOpenChange={(open) => {
-        if (!open) onCancel();
-      }}
+      onOpenChange={onCancel}
       actions={
         <>
           <Button onClick={onCancel}>Cancel</Button>

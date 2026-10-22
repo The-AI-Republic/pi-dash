@@ -56,9 +56,7 @@ export function WorklogDialog({ initial, saving, onClose, onSubmit }: WorklogDia
     <Dialog
       title={initial === undefined ? WORKLOG_DIALOG_TITLE_LOG : WORKLOG_DIALOG_TITLE_EDIT}
       open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
+      onOpenChange={onClose}
       initialFocus={minutesRef}
       actions={
         <>
