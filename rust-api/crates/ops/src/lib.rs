@@ -349,6 +349,11 @@ pub struct OpsIo<'a> {
     pub stdin: &'a mut dyn std::io::BufRead,
     pub stdout: &'a mut dyn std::io::Write,
     pub stderr: &'a mut dyn std::io::Write,
+    /// Whether stdin is a controlling terminal. CPython's `getpass`
+    /// only opens `/dev/tty` and suppresses echo when this is true;
+    /// otherwise it takes `fallback_getpass`. Unit tests drive
+    /// in-memory buffers and pass `false`.
+    pub stdin_is_terminal: bool,
 }
 
 /// Users subgroup entry (PIDASHCONV-807). Connects from the
@@ -375,6 +380,10 @@ async fn run_users(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>
         }
     };
     let stdin = std::io::stdin();
+    let stdin_is_terminal = {
+        use std::io::IsTerminal;
+        stdin.is_terminal()
+    };
     let mut stdin = stdin.lock();
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -384,6 +393,7 @@ async fn run_users(command: OpsCommand) -> Result<(), Box<dyn std::error::Error>
         stdin: &mut stdin,
         stdout: &mut stdout,
         stderr: &mut stderr,
+        stdin_is_terminal,
     };
     let code = match command {
         OpsCommand::ActivateUser(args) => {
