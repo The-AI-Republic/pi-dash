@@ -191,16 +191,23 @@ test(
         await driver.settingsProfileGeneralFillField("last_name", original.last);
         await driver.settingsProfileGeneralFillField("display_name", original.display);
         await driver.settingsProfileGeneralSave();
+        // Gate on the write landing first: both saves toast identically, so
+        // a toast poll here can match the previous save's still-visible card
+        // while this write is in flight (read pre-write state twice under
+        // load). The feedback assertion after still pins the success toast.
+        await expect
+          .poll(() => serverSettingsUserRecord(member.session), { timeout: 30_000 })
+          .toMatchObject({
+            firstName: original.first,
+            lastName: original.last,
+            displayName: original.display,
+          });
         await expect
           .poll(() => driver.rulesLastToast(), { timeout: 30_000 })
           .toMatchObject({
             title: "Success!",
             message: "Profile updated successfully.",
           });
-        const record = await serverSettingsUserRecord(member.session);
-        expect(record.firstName).toBe(original.first);
-        expect(record.lastName).toBe(original.last);
-        expect(record.displayName).toBe(original.display);
       });
     } finally {
       await cleanupMember(seed, ownerSession, member.userId);

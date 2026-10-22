@@ -840,54 +840,6 @@ describe("settings account reads (NEWFRONT-586, PROF-011..015)", () => {
     expect(await driver.settingsProfileGeneralSaveLabel()).toBe("");
   });
 
-  it("waits for a started save round-trip to land before returning", async () => {
-    const click = vi.fn(async () => undefined);
-    const idleWait = vi.fn(async () => undefined);
-    const form = locator({
-      getByRole: (_role: string, options?: unknown) => {
-        const name = String((options as { name?: unknown } | undefined)?.name ?? "");
-        if (name === "/Saving/") return locator();
-        if (name === "Save changes") return locator({ waitFor: idleWait });
-        return locator({ click });
-      },
-    });
-    const page = pageOf({ getByTestId: () => form });
-    const driver = new WebNewDriver(page);
-    await driver.settingsProfileGeneralSave();
-    expect(click).toHaveBeenCalledTimes(1);
-    expect(idleWait).toHaveBeenCalledWith({ timeout: 30_000 });
-  });
-
-  it("returns a validation-failure save without waiting for a round-trip", async () => {
-    const idleWait = vi.fn(async () => undefined);
-    const form = locator({
-      getByRole: (_role: string, options?: unknown) => {
-        const name = String((options as { name?: unknown } | undefined)?.name ?? "");
-        if (name === "/Saving/") {
-          return locator({
-            waitFor: async () => {
-              throw new Error("never busy");
-            },
-          });
-        }
-        if (name === "Save changes") return locator({ waitFor: idleWait });
-        return locator();
-      },
-    });
-    const page = pageOf({
-      getByTestId: () => form,
-      locator: () =>
-        locator({
-          waitFor: async () => {
-            throw new Error("no toast");
-          },
-        }),
-    });
-    const driver = new WebNewDriver(page);
-    await expect(driver.settingsProfileGeneralSave()).resolves.toBeUndefined();
-    expect(idleWait).not.toHaveBeenCalled();
-  });
-
   it("reads avatar rejections with absent twins and reports no cover control", async () => {
     const dialog = locator({
       locator: (selector: string) =>
