@@ -1108,19 +1108,7 @@ pub async fn create_user(
 /// (`django.utils.crypto.salted_hmac`, SHA256) — same construction as the
 /// license-domain verifier.
 pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let key = Sha256::digest([SESSION_AUTH_HASH_SALT.as_bytes(), secret_key].concat());
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
+    super::login::session_auth_hash(password_field, secret_key)
 }
 
 // ---------------------------------------------------------------------------
@@ -2148,38 +2136,31 @@ pub async fn upsert_account(
 }
 
 /// `django.contrib.auth.login` + `user_login`
-/// (`authentication/utils/login.py:14-29`): session-key rotation (flush
-/// when a *different* user is logged in — data gone, fresh key; cycle
-/// when anonymous — data kept, fresh key; untouched for the same user),
-/// the `_auth_*` triple, the `update_last_login` signal write, then
-/// `device_info`. The middleware persists + issues the `session-id`
-/// cookie on success; a 500 answer never persists (status gate).
+/// (`authentication/utils/login.py:14-29`): the shared `login()` half
+/// first (rotation, the `_auth_*` triple, the `update_last_login` signal
+/// write, the CSRF cookie — see
+/// [`super::login::login_session_keys`]), then `device_info`. Returns the
+/// rotated `csrftoken` `Set-Cookie` value for the success redirect. The
+/// middleware persists + issues the `session-id` cookie on success; a 500
+/// answer never persists (status gate).
 pub async fn login_user(
     ctx: &RequestContext<'_>,
+    settings: &pidash_db::config::Settings,
     user: &UserRow,
     secret: &[u8],
     domain: &str,
-) -> Result<(), CallbackError> {
-    match session_get(&ctx.session, "_auth_user_id") {
-        Some(current) if current != user.id.to_string() => ctx.session.lock().clear(),
-        Some(_) => {}
-        None => {
-            ctx.session.lock().key = None;
-        }
-    }
-    session_set(&ctx.session, "_auth_user_id", user.id.to_string());
-    session_set(&ctx.session, "_auth_user_backend", LOGIN_BACKEND.to_owned());
-    session_set(
+) -> Result<String, CallbackError> {
+    let csrf_cookie = super::login::login_session_keys(
         &ctx.session,
-        "_auth_user_hash",
-        session_auth_hash(&user.password, secret),
-    );
-    sqlx::query("UPDATE \"users\" SET \"last_login\" = $1 WHERE \"id\" = $2")
-        .bind(chrono::Utc::now())
-        .bind(user.id)
-        .execute(&ctx.pool)
-        .await
-        .map_err(|_| CallbackError::Internal)?;
+        &ctx.pool,
+        user.id,
+        &user.password,
+        secret,
+        settings,
+        chrono::Utc::now(),
+    )
+    .await
+    .map_err(|_| CallbackError::Internal)?;
     let mut info = serde_json::Map::new();
     info.insert(
         "user_agent".to_owned(),
@@ -2193,7 +2174,7 @@ pub async fn login_user(
     ctx.session
         .lock()
         .set("device_info".to_owned(), Value::Object(info));
-    Ok(())
+    Ok(csrf_cookie)
 }
 
 /// `get_redirection_path` (`utils/redirection_path.py:8-46`): profile
@@ -2444,12 +2425,18 @@ pub async fn app_callback(
         }
         Err(CallbackError::Internal) => server_error(),
         Ok(authed) => {
-            if login_user(&ctx, &authed.row, secret.as_bytes(), &ctx.app_base)
-                .await
-                .is_err()
+            let csrf_cookie = match login_user(
+                &ctx,
+                state.settings(),
+                &authed.row,
+                secret.as_bytes(),
+                &ctx.app_base,
+            )
+            .await
             {
-                return server_error();
-            }
+                Ok(cookie) => cookie,
+                Err(_) => return server_error(),
+            };
             let path = match session_next {
                 Some(next) if !next.is_empty() => next,
                 _ => match redirection_path(
@@ -2470,7 +2457,9 @@ pub async fn app_callback(
                 &[],
                 &allowed_hosts(&ctx.settings_view),
             );
-            redirect_response(&url)
+            let mut response = redirect_response(&url);
+            super::login::push_cookie(&mut response, csrf_cookie);
+            response
         }
     }
 }
@@ -2511,7 +2500,14 @@ pub async fn space_callback(
     // Valid path: `authenticate()` + `user_login()` side effects run
     // first (Python `:85-90`), then the f-string `base_host(...)` raises.
     if let Ok(authed) = authenticate_google(&ctx, &secret, &code, false).await {
-        let _ = login_user(&ctx, &authed.row, secret.as_bytes(), &ctx.space_base).await;
+        let _ = login_user(
+            &ctx,
+            state.settings(),
+            &authed.row,
+            secret.as_bytes(),
+            &ctx.space_base,
+        )
+        .await;
     }
     server_error()
 }

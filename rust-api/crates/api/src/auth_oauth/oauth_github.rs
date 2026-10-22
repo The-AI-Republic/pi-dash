@@ -787,27 +787,6 @@ fn encode_password(password: &str) -> String {
     pidash_auth::password::hash_password(password, &password_salt(), 600_000)
 }
 
-/// `user.get_session_auth_hash()`: `salted_hmac` over the password field
-/// (`django/contrib/auth/__init__.py`, salt
-/// `AbstractBaseUser.get_session_auth_hash` — the construction the D-16
-/// port verifies in `license/mod.rs`).
-fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    const SALT: &[u8] = b"django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-    let key = Sha256::digest([SALT, secret_key].concat());
-    use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
 /// `onboarding_step` default (`db/models/user.py:get_default_onboarding`).
 fn default_onboarding_step() -> Value {
     serde_json::json!({
@@ -1479,32 +1458,20 @@ async fn redirection_path(
     Ok("create-workspace".to_owned())
 }
 
-/// `user_login` (`authentication/utils/login.py:15-27`): `login()` writes
-/// the auth trio, then `device_info`, then the session saves (the layer
-/// persists the mutated handle on response).
+/// `device_info` half of `user_login`
+/// (`authentication/utils/login.py:21-25`): the `login()` half (rotation,
+/// the auth trio, `last_login`, the CSRF cookie) runs first via
+/// [`super::login::login_session_keys`]; this writes only `device_info`,
+/// then the session saves (the layer persists the mutated handle on
+/// response).
 fn login_session(
     handle: &SessionHandle,
     settings: &pidash_db::config::Settings,
     headers: &HeaderMap,
     remote_addr: Option<&str>,
-    user: &ResolvedUser,
     is_app: bool,
     is_space: bool,
 ) {
-    session_set(handle, "_auth_user_id", Value::String(user.id.to_string()));
-    session_set(
-        handle,
-        "_auth_user_backend",
-        Value::String("django.contrib.auth.backends.ModelBackend".to_owned()),
-    );
-    session_set(
-        handle,
-        "_auth_user_hash",
-        Value::String(session_auth_hash(
-            &user.password_field,
-            settings.secret_key.as_bytes(),
-        )),
-    );
     let domain = if is_space {
         space_base(settings)
     } else if is_app {
@@ -1590,7 +1557,7 @@ async fn app_callback(
         &request_host(&headers),
         "github",
     );
-    let outcome: Result<String, CallbackFailure> = async {
+    let outcome: Result<(String, String), CallbackFailure> = async {
         if !providers::github_configured(
             config.client_id.as_deref(),
             config.client_secret.as_deref(),
@@ -1617,7 +1584,20 @@ async fn app_callback(
             redis,
         )
         .await?;
-        login_session(&handle, settings, &headers, remote_addr, &user, true, false);
+        // `user_login(is_app=True)`: the shared `login()` half first
+        // (rotation, trio, `last_login`, CSRF cookie), then `device_info`.
+        let csrf_cookie = super::login::login_session_keys(
+            &handle,
+            &pool,
+            user.id,
+            &user.password_field,
+            secret.as_bytes(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|_| CallbackFailure::Server)?;
+        login_session(&handle, settings, &headers, remote_addr, true, false);
         // `path = next_path or get_redirection_path(user)`
         // (`github.py:98-101`): the RAW session value (possibly "").
         let path = match session_next.as_deref() {
@@ -1627,16 +1607,18 @@ async fn app_callback(
                 .map_err(|_| CallbackFailure::Server)?,
         };
         let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
-        Ok(shapes::get_safe_redirect_url(
-            &base,
-            &path,
-            &[],
-            &allowed_refs,
+        Ok((
+            shapes::get_safe_redirect_url(&base, &path, &[], &allowed_refs),
+            csrf_cookie,
         ))
     }
     .await;
     match outcome {
-        Ok(url) => redirect_response(url),
+        Ok((url, csrf_cookie)) => {
+            let mut response = redirect_response(url);
+            super::login::push_cookie(&mut response, csrf_cookie);
+            response
+        }
         Err(CallbackFailure::Auth(exc)) => redirect_response(error_location(
             &base,
             session_next.as_deref(),
@@ -1875,19 +1857,7 @@ mod tests {
     fn login_device_info_absent_header_defaults() {
         let settings = test_settings();
         let handle = SessionHandle::new(crate::middleware::RequestSession::empty());
-        let user = ResolvedUser {
-            id: Uuid::new_v4(),
-            password_field: "pw".to_owned(),
-        };
-        login_session(
-            &handle,
-            &settings,
-            &HeaderMap::new(),
-            None,
-            &user,
-            true,
-            false,
-        );
+        login_session(&handle, &settings, &HeaderMap::new(), None, true, false);
         let info = handle
             .lock()
             .get("device_info")

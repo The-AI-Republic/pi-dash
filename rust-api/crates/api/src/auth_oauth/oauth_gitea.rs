@@ -1953,62 +1953,49 @@ pub async fn redirection_path(
 // §10 `user_login` session (`authentication/utils/login.py:10-27`)
 // ---------------------------------------------------------------------------
 
-/// `user.get_session_auth_hash()`: `salted_hmac` over the password field
-/// with the Django session-auth salt (same construction the D-01
+/// `user.get_session_auth_hash()`: the shared construction
+/// ([`super::login::session_auth_hash`], same `salted_hmac` the D-01
 /// `verify_session_hash` checks against).
 pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    const SALT: &str = "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let key = Sha256::digest([SALT.as_bytes(), secret_key].concat());
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC accepts any key length");
-    mac.update(password_field.as_bytes());
-    let mut out = String::with_capacity(64);
-    for b in mac.finalize().into_bytes() {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
+    super::login::session_auth_hash(password_field, secret_key)
 }
 
-/// `user_login` (`login.py:10-27`): Django `login()` (session `_auth_*`
-/// trio) + `device_info` + save. One documented divergence: Django
-/// `login()` cycles the session key (fresh key; old row deleted; data
-/// preserved on cycle, wiped on flush), but the session middleware exposes
-/// no cycle API and the crate is read-only for this issue, so the keys are
-/// written onto the live session and the middleware persists them. Fresh
-/// sessions — the only contract-relevant case — behave identically (fresh
-/// key + `Set-Cookie`); a pre-existing key is reused instead of rotated.
-pub fn user_login_session(
+/// `user_login` (`login.py:10-27`): the shared `login()` half first
+/// (rotation, the `_auth_*` trio, `last_login`, the CSRF cookie — see
+/// [`super::login::login_session_keys`]), then the `device_info` dict.
+/// Returns the rotated `csrftoken` `Set-Cookie` value (`None` when no
+/// session extension is installed, in which case nothing is written).
+#[allow(clippy::too_many_arguments)]
+pub async fn user_login_session(
     handle: &Option<Extension<SessionHandle>>,
+    pool: &sqlx::PgPool,
+    settings: &pidash_db::config::Settings,
+    now: chrono::DateTime<chrono::Utc>,
     user_id: &uuid::Uuid,
     password_field: &str,
-    secret_key: &[u8],
     user_agent: Option<&str>,
     ip: Option<&str>,
     domain: &str,
-) {
+) -> Result<Option<String>, sqlx::Error> {
     let Some(Extension(handle)) = handle else {
-        return;
+        return Ok(None);
     };
+    let csrf_cookie = super::login::login_session_keys(
+        handle,
+        pool,
+        *user_id,
+        password_field,
+        settings.secret_key.as_bytes(),
+        settings,
+        now,
+    )
+    .await?;
     let mut session = handle.lock();
-    session.set(
-        "_auth_user_id".to_owned(),
-        serde_json::Value::String(user_id.to_string()),
-    );
-    session.set(
-        "_auth_user_backend".to_owned(),
-        serde_json::Value::String(crate::license::MODEL_BACKEND.to_owned()),
-    );
-    session.set(
-        "_auth_user_hash".to_owned(),
-        serde_json::Value::String(session_auth_hash(password_field, secret_key)),
-    );
     session.set(
         "device_info".to_owned(),
         device_info_value(user_agent, ip, domain),
     );
+    Ok(Some(csrf_cookie))
 }
 
 // ---------------------------------------------------------------------------
@@ -2592,15 +2579,22 @@ async fn app_callback(
         Err(AuthError::Server(denial)) => return denial.into_response(),
     };
     let base = app_base(&settings);
-    user_login_session(
+    let csrf_cookie = match user_login_session(
         &extension,
+        &pool,
+        &settings,
+        now,
         &user.id,
         &user.password_field,
-        settings.secret_key.as_bytes(),
         inputs.user_agent.as_deref(),
         inputs.ip.as_deref(),
         &base,
-    );
+    )
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     // `if next_path: validate else: get_redirection_path` — a present
     // but invalid next_path validates to `""` and stays `""` (it does NOT
     // fall back to the redirection path); only an absent/empty one does.
@@ -2615,7 +2609,11 @@ async fn app_callback(
             }
         }
     };
-    redirect(app_success_location(session.host.as_deref(), &path))
+    let mut response = redirect(app_success_location(session.host.as_deref(), &path));
+    if let Some(cookie) = csrf_cookie {
+        super::login::push_cookie(&mut response, cookie);
+    }
+    response
 }
 
 async fn user_email(pool: &sqlx::PgPool, user_id: &uuid::Uuid) -> String {
@@ -2756,17 +2754,28 @@ async fn space_callback(
         }
         Err(AuthError::Server(denial)) => return denial.into_response(),
     };
-    user_login_session(
+    let csrf_cookie = match user_login_session(
         &extension,
+        &pool,
+        &settings,
+        now,
         &user.id,
         &user.password_field,
-        settings.secret_key.as_bytes(),
         inputs.user_agent.as_deref(),
         inputs.ip.as_deref(),
         &base,
-    );
+    )
+    .await
+    {
+        Ok(cookie) => cookie,
+        Err(_) => return Denial::ServerError.into_response(),
+    };
     let next = validated_next.unwrap_or_default();
-    redirect(space_success_location(&base, &next))
+    let mut response = redirect(space_success_location(&base, &next));
+    if let Some(cookie) = csrf_cookie {
+        super::login::push_cookie(&mut response, cookie);
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------
