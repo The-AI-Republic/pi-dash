@@ -23,6 +23,18 @@ vi.mock("../../../../../../features/issues/list/pages.js", () => ({ listPageQuer
 vi.mock("../../../../../../features/issues/list/lazy.js", () => ({
   loadListLayout: async () => ({ default: () => null }),
 }));
+vi.mock("../../../../../../features/cycles/components/CycleDetailGate.js", () => ({
+  CycleDetailGate: (props: Record<string, unknown>) => (
+    <div
+      data-testid="detail-gate"
+      data-workspace={String(props.workspaceSlug ?? "")}
+      data-project={String(props.projectId ?? "")}
+      data-cycle={String(props.cycleId ?? "")}
+    >
+      {props.children as never}
+    </div>
+  ),
+}));
 vi.mock("../../../../../../features/cycles/components/CycleMemberDates.js", () => ({
   CycleMemberDates: (props: Record<string, unknown>) => (
     <div
@@ -51,6 +63,9 @@ vi.mock("../../../../../../features/issues/list/EntityListScreen.js", () => ({
     </div>
   ),
 }));
+import { ApiError } from "@pidash/api-client";
+
+import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { Route } from "./$cycleId.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -100,6 +115,15 @@ describe("cycle issues route", () => {
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-peek", "");
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
+  });
+
+  it("wraps the page in the gone-away gate", async () => {
+    renderRoute();
+    const node = await screen.findByTestId("detail-gate");
+    expect(node).toHaveAttribute("data-workspace", "acme");
+    expect(node).toHaveAttribute("data-project", PROJECT);
+    expect(node).toHaveAttribute("data-cycle", CYCLE);
+    expect(node).toContainElement(await screen.findByTestId("entity-screen"));
   });
 
   it("mounts the member-timezone dates above the list", async () => {
@@ -155,6 +179,73 @@ describe("cycle issues route", () => {
       cycleId: CYCLE,
     });
   }, 20000);
+
+  it("lets a missing cycle through the prefetch to the gone-away gate", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    mocks.page.mockReturnValue({
+      queryKey: ["page"],
+      queryFn: async () => {
+        throw new ApiError({ status: 404, code: "http", message: "missing" });
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, cycleId: CYCLE },
+      } as never)
+    ).resolves.toBe(undefined);
+  });
+
+  it("rethrows non-404 prefetch failures", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    const failure = new ApiError({ status: 500, code: "http", message: "boom" });
+    mocks.page.mockReturnValue({
+      queryKey: ["page"],
+      queryFn: async () => {
+        throw failure;
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, cycleId: CYCLE },
+      } as never)
+    ).rejects.toBe(failure);
+  });
+
+  it("rethrows non-API prefetch failures", async () => {
+    const beforeLoad = Route.options.beforeLoad;
+    if (!beforeLoad) throw new Error("missing beforeLoad");
+    const failure = new Error("boom");
+    mocks.page.mockReturnValue({
+      queryKey: ["page"],
+      queryFn: async () => {
+        throw failure;
+      },
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+    });
+    await expect(
+      beforeLoad({
+        context: { queryClient, apiClient: { stub: true } },
+        params: { ws: "acme", projectId: PROJECT, cycleId: CYCLE },
+      } as never)
+    ).rejects.toBe(failure);
+  });
+
+  it("validates search through the issue search parser", () => {
+    const validateSearch = Route.options.validateSearch as unknown as (input: Record<string, unknown>) => unknown;
+    expect(validateSearch({})).toEqual(parseIssueSearch({}));
+  });
 
   it("renders the list skeleton while pending", () => {
     const Pending = Route.options.pendingComponent;
