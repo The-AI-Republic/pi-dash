@@ -6,14 +6,19 @@
 // cycle-context grouping, group-header create/attach and the read-only
 // completed state here by mounting the shared list layout. The stored
 // start/end dates render above the list in the member timezone
-// (PROF-017 stored-dates fix, NEWFRONT-859).
+// (PROF-017 stored-dates fix, NEWFRONT-859). A missing, deleted or
+// archived cycle renders the area's gone-away view through the detail
+// gate (parity/specs/cycles.md §5, CYC-013, NEWFRONT-707); slice F keeps
+// the gate inside the full detail host.
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { isApiError } from "@pidash/api-client";
 import * as React from "react";
 
 // Direct module imports: this route definition is eager, and the feature
 // barrel would pull the analytics entry and picker parts into the initial
 // bundle (NEWFRONT-619, size gate).
+import { CycleDetailGate } from "../../../../../../features/cycles/components/CycleDetailGate.js";
 import { CycleMemberDates } from "../../../../../../features/cycles/components/CycleMemberDates.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
@@ -32,7 +37,13 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
   beforeLoad: async ({ context, params }) => {
     const { prefetchEntityList } = await import("../../../../../../features/issues/list/prefetch.js");
     const entity = { scope: "cycle", projectId: params.projectId, cycleId: params.cycleId } as const;
-    await prefetchEntityList(context, params.ws, entity);
+    try {
+      await prefetchEntityList(context, params.ws, entity);
+    } catch (error) {
+      // A missing cycle 404s the prefetch: let the gone-away gate own it
+      // instead of failing the load (CYC-013).
+      if (!isApiError(error) || error.status !== 404) throw error;
+    }
   },
   pendingComponent: function CycleIssuesPending() {
     return <ListSkeleton />;
@@ -43,7 +54,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
     const navigate = useNavigate();
     const entity = { scope: "cycle", projectId: params.projectId, cycleId: params.cycleId } as const;
     return (
-      <>
+      <CycleDetailGate workspaceSlug={params.ws} projectId={params.projectId} cycleId={params.cycleId}>
         <CycleMemberDates workspaceSlug={params.ws} projectId={params.projectId} cycleId={params.cycleId} />
         <React.Suspense fallback={<ListSkeleton />}>
           <LazyEntityListScreen
@@ -61,7 +72,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
             compact={search.layout === "compact"}
           />
         </React.Suspense>
-      </>
+      </CycleDetailGate>
     );
   },
 });
