@@ -41,7 +41,19 @@ export const CONTRACT_DESKTOP_SESSION_KEY =
  */
 export const CONTRACT_CLOUD_BASE_URL = process.env["PIDASH_CONTRACT_CLOUD_BASE_URL"] ?? "";
 
+/**
+ * Live-server contract backend. The page live-ops endpoints (health,
+ * convert, printable export) are served by apps/live, not Django, so
+ * their suite gates on this base URL: a scratch live server whose
+ * API_BASE_URL points at the contract Django above. Empty keeps the
+ * suite skipped like the other env-gated suites.
+ */
+export const CONTRACT_LIVE_URL = process.env["PIDASH_CONTRACT_LIVE_URL"] ?? "";
+
 export const contractEnabled = CONTRACT_BASE_URL.length > 0;
+
+/** The live-ops suite needs both backends: Django for page setup, live for the operations. */
+export const liveContractEnabled = contractEnabled && CONTRACT_LIVE_URL.length > 0;
 
 export const cloudContractEnabled = CONTRACT_CLOUD_BASE_URL.length > 0;
 
