@@ -2212,13 +2212,29 @@ export class WebNewDriver implements ParityDriver {
   async openCyclePage(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
     await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`, { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
-    // The cycle page hosts the shared list layout; settle on its labelled
-    // box the way project issues do (tag-agnostic: rows, empty and error
-    // twins use different elements).
-    await this.page
-      .locator('[aria-label="Issue list"], [aria-label="Issues"]')
-      .first()
-      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+    // Settle on whatever the guard decides, the way project issues do:
+    // the shared list header mounts with the rows, empty and error twins
+    // alike (the labelled list box only wraps the not-found branches, so
+    // it cannot be the wait), the signed-out entry after a bounce, or the
+    // workspace denial. Never throw on the bounce — callers assert it;
+    // the per-read waits fail precisely when content is missing.
+    const deadline = Date.now() + 60_000;
+    let reloaded = false;
+    for (;;) {
+      const header = this.page.getByTestId("issues-header");
+      if ((await header.count()) > 0 && (await header.first().isVisible())) return;
+      const list = this.page.locator('[aria-label="Issue list"], [aria-label="Issues"]');
+      if ((await list.count()) > 0 && (await list.first().isVisible())) return;
+      if ((await this.authEmailField().count()) > 0) return;
+      if ((await this.page.getByRole("heading", { name: "Workspace not found" }).count()) > 0) return;
+      if (Date.now() > deadline) return;
+      if (!reloaded && Date.now() > deadline - 30_000) {
+        reloaded = true;
+        await this.page.reload().catch(() => {});
+      } else {
+        await this.page.waitForTimeout(1_000);
+      }
+    }
   }
 
   async openModulePage(_workspaceSlug: string, _projectId: string, _moduleId: string): Promise<void> {

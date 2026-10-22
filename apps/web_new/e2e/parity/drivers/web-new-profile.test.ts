@@ -1214,18 +1214,116 @@ describe("settings preferences (NEWFRONT-586, PROF-016..018)", () => {
     expect(clicks).toEqual(['[data-profile-layout-choice="kanban"]']);
   });
 
-  it("opens the cycle page on the shared list section", async () => {
+  it("opens the cycle page and settles on the shared list header", async () => {
     const goto = vi.fn(async () => undefined);
-    const waitFor = vi.fn(async () => undefined);
+    const waitForTimeout = vi.fn(async () => undefined);
     const page = pageOf({
       goto,
       waitForLoadState: async () => undefined,
-      locator: () => locator({ first: () => locator({ waitFor }) }),
+      waitForTimeout,
+      getByTestId: (id: string) => (id === "issues-header" ? locator() : locator({ count: async () => 0 })),
+      locator: () => locator({ count: async () => 0 }),
+      getByPlaceholder: () => locator({ count: async () => 0 }),
+      getByRole: () => locator({ count: async () => 0 }),
     });
     const driver = new WebNewDriver(page);
     await driver.openCyclePage("acme", "p-1", "c-1");
     expect(goto).toHaveBeenCalledWith("/acme/projects/p-1/cycles/c-1", { timeout: 60_000 });
-    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+    expect(waitForTimeout).not.toHaveBeenCalled();
+  });
+
+  it("settles the cycle page on the labelled list box when the header is hidden", async () => {
+    const page = pageOf({
+      goto: async () => undefined,
+      waitForLoadState: async () => undefined,
+      getByTestId: () => locator({ count: async () => 1, isVisible: async () => false }),
+      locator: (selector: string) =>
+        selector === '[aria-label="Issue list"], [aria-label="Issues"]' ? locator() : locator({ count: async () => 0 }),
+      getByPlaceholder: () => locator({ count: async () => 0 }),
+      getByRole: () => locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+  });
+
+  it("returns the cycle page unsettled on a bounce or denial instead of throwing", async () => {
+    const settled = (overrides: Partial<Record<string, unknown>>): Page =>
+      pageOf({
+        goto: async () => undefined,
+        waitForLoadState: async () => undefined,
+        getByTestId: () => locator({ count: async () => 0 }),
+        locator: () => locator({ count: async () => 0 }),
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+        ...overrides,
+      });
+    const bounced = new WebNewDriver(settled({ getByPlaceholder: () => locator() }));
+    await expect(bounced.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+    const denied = new WebNewDriver(settled({ getByRole: () => locator() }));
+    await expect(denied.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+  });
+
+  it("reloads the cycle page once mid-wait, then settles when the header mounts", async () => {
+    // Time advances a quarter-window per header check, so the loop is a
+    // fixed five iterations whatever else reads the clock (a once-queue
+    // would spin forever if a stray Date.now consumed it): two waits
+    // pre-window, one reload in-window, one post-reload wait, then settle.
+    let step = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => 1_000_000 + step * 15_000);
+    try {
+      const reload = vi.fn(async () => undefined);
+      const waitForTimeout = vi.fn(async () => undefined);
+      const page = pageOf({
+        goto: async () => undefined,
+        waitForLoadState: async () => undefined,
+        waitForTimeout,
+        reload,
+        getByTestId: () =>
+          locator({
+            count: async () => {
+              step += 1;
+              return step >= 5 ? 1 : 0;
+            },
+          }),
+        locator: () => locator({ count: async () => 1, isVisible: async () => false }),
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+      });
+      const driver = new WebNewDriver(page);
+      await driver.openCyclePage("acme", "p-1", "c-1");
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(waitForTimeout).toHaveBeenCalledTimes(3);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("gives up the cycle page wait at the deadline instead of throwing", async () => {
+    let step = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => 1_000_000 + step * 61_000);
+    try {
+      const reload = vi.fn(async () => undefined);
+      const page = pageOf({
+        goto: async () => undefined,
+        waitForLoadState: async () => undefined,
+        reload,
+        getByTestId: () =>
+          locator({
+            count: async () => {
+              step += 1;
+              return 0;
+            },
+          }),
+        locator: () => locator({ count: async () => 0 }),
+        getByPlaceholder: () => locator({ count: async () => 0 }),
+        getByRole: () => locator({ count: async () => 0 }),
+      });
+      const driver = new WebNewDriver(page);
+      await expect(driver.openCyclePage("acme", "p-1", "c-1")).resolves.toBeUndefined();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("reads the cycle member-timezone date pair from its labelled section", async () => {
