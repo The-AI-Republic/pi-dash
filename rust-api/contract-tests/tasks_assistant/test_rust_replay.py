@@ -20,7 +20,9 @@ worker (``pidash-api worker``) must be running against the same
 Every path the turn walk covers is exercised: model resolution (missing
 config, unreachable endpoint, resolved BYOK), the instructions + the 17
 local tool schemas on the wire (toolset), the streamed text, usage
-extraction, the terminal writes and the delta prune, and the cancel key.
+extraction, the terminal writes and the delta prune, the cancel key, and a
+mid-stream seam fault failing the turn at once (PIDASHCONV-1254, via a
+turn-scoped trigger on the delta writes).
 BYOK ciphertext is Fernet under ``ASSISTANT_ENCRYPTION_KEY`` — the same
 backend the Rust handlers decrypt with (``assistant/crypto.py``
 ``FernetBackend``), so the seeded row is what the worker reads.
@@ -673,4 +675,129 @@ def test_turn_tools_see_stateless_issue(db_conn):
             f"get_issue missed the stateless issue: {str(content)[:500]}"
         )
     finally:
+        stub.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Seam fault injection: a trigger fails one turn's delta writes (PIDASHCONV-1254)
+# --------------------------------------------------------------------------- #
+
+#: The trigger's RAISE text. It matches no ``_classify_error`` marker, so a
+#: mid-stream seam fault classifies ``internal`` on both backends (mirrors
+#: ``assistant/test_turn_errors.py``; modules stay independent).
+SEAM_FAULT_MESSAGE = "seam fault injection: assistant_delta blocked"
+
+
+def _install_delta_fault(db_conn, tag: str, turn_id: str):
+    """Fail this turn's ``assistant_delta`` writes with a turn-scoped trigger.
+
+    ``BEFORE INSERT ON assistant_event ... WHEN (kind, turn_id)``: only this
+    turn's deltas raise; every other write (other turns, other kinds — in
+    particular the ``turn_failed`` event the failure path emits) passes.
+    Names carry the unique tag so parallel runs never share a trigger. Both
+    interpolated values are generated hex/UUIDs, never user input.
+    """
+    fn = f"seam_fault_{tag}"
+    trg = f"seam_fault_{tag}_trg"
+    with db_conn.cursor() as cur:
+        cur.execute(
+            f"CREATE OR REPLACE FUNCTION {fn}() RETURNS trigger LANGUAGE plpgsql AS "
+            f"$$ BEGIN RAISE EXCEPTION '{SEAM_FAULT_MESSAGE}'; END $$"
+        )
+        cur.execute(f"DROP TRIGGER IF EXISTS {trg} ON assistant_event")
+        cur.execute(
+            f"CREATE TRIGGER {trg} BEFORE INSERT ON assistant_event FOR EACH ROW "
+            f"WHEN (NEW.kind = 'assistant_delta' AND NEW.turn_id = '{turn_id}') "
+            f"EXECUTE FUNCTION {fn}()"
+        )
+    db_conn.commit()
+    return fn, trg
+
+
+def _remove_delta_fault(db_conn, fn: str, trg: str):
+    with db_conn.cursor() as cur:
+        cur.execute(f"DROP TRIGGER IF EXISTS {trg} ON assistant_event")
+        cur.execute(f"DROP FUNCTION IF EXISTS {fn}()")
+    db_conn.commit()
+
+
+def test_midstream_seam_failure_fails_turn_at_once(db_conn):
+    """A DB error from a mid-stream row write fails the turn at once.
+
+    The trigger fails the first ``assistant_delta`` INSERT — the black-box
+    shape of ``emit_delta`` raising out of the stream loop. The driver must
+    take the same path as a provider error (report, fail the open row,
+    classify ``internal``, fail the turn with ``turn_failed``) — immediately,
+    not at the 390s sweep. Before the PIDASHCONV-1254 fix the turn stayed
+    RUNNING and this test timed out waiting for ``failed``.
+    """
+    stub = _StubProvider(chunks=("Hello",))
+    base = stub.start()
+    tag = uuid.uuid4().hex[:8]
+    fn = trg = None
+    try:
+        user, workspace = _seed_member(db_conn, f"seam{tag}")
+        _configure_llm(db_conn, user["id"], base)
+        thread_id, turn_id, _msg = _seed_turn_trio(db_conn, user, workspace)
+        fn, trg = _install_delta_fault(db_conn, tag, turn_id)
+
+        t0 = time.monotonic()
+        celery_id = _publish(turn_id)
+        row = wait_for(
+            lambda: _turn_row(db_conn, turn_id)
+            if _turn_row(db_conn, turn_id)["status"] == "failed"
+            else None,
+            what="seam-fault turn failed",
+        )
+        elapsed = time.monotonic() - t0
+        assert elapsed < SWEEP_CUTOFF_SECS, (
+            f"failed after {elapsed:.0f}s: the sweep won, not the run"
+        )
+        rust_queue.wait_for_settled(celery_id, what="seam-fault turn settled")
+
+        def _failure_writes_complete():
+            kinds = [e["kind"] for e in _turn_events(db_conn, turn_id)]
+            if "turn_failed" in kinds and "assistant_delta" not in kinds:
+                return kinds
+            return None
+
+        kinds = wait_for(_failure_writes_complete, what="seam-fault failure writes")
+        assert row["error_code"] == "internal"
+        assert row["error_detail"] == "The assistant hit an unexpected error."
+        assert row["completed_at"] is not None
+        assert row["started_at"] is not None
+
+        assert _thread_row(db_conn, thread_id)["active_turn_id"] is None
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'assistant' ORDER BY seq",
+                (turn_id,),
+            )
+            streamed = cur.fetchall()
+        assert streamed, "the streamed chunk wrote an assistant row"
+        assert "".join(r["display_content"] for r in streamed) == "Hello"
+        assert all(r["status"] == "failed" for r in streamed)
+
+        with db_conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT display_content, status FROM assistant_message "
+                "WHERE turn_id = %s AND kind = 'error'",
+                (turn_id,),
+            )
+            err = cur.fetchone()
+        assert err is not None and err["status"] == "failed"
+        assert err["display_content"] == row["error_detail"]
+
+        failed = next(e for e in _turn_events(db_conn, turn_id) if e["kind"] == "turn_failed")
+        assert failed["payload"] == {
+            "turn_id": turn_id,
+            "error_code": "internal",
+            "detail": "The assistant hit an unexpected error.",
+        }
+        assert "assistant_delta" not in kinds, "deltas are pruned on failure"
+    finally:
+        if fn is not None:
+            _remove_delta_fault(db_conn, fn, trg)
         stub.stop()
