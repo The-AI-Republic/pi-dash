@@ -6,15 +6,21 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 import { FULL_RUN_TEST_TIMEOUT_MS } from "./src/testing/testBudget";
+import { resolveEditionModule } from "./tools/edition-module.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+// Same swap as vite.config.ts so tests can run against the cloud module.
+const { modulePath: editionModule } = resolveEditionModule(process.env, here);
 
 export default defineConfig({
   resolve: {
     alias: [
       { find: "@pidash/api-client", replacement: resolve(here, "../../packages/api-client/src/index.ts") },
       { find: /^@pidash\/kit$/, replacement: resolve(here, "../../packages/kit/src/index.ts") },
-      { find: "@pidash/edition", replacement: resolve(here, "src/core/edition/oss.ts") },
+      { find: "@pidash/edition", replacement: editionModule },
+      // Same public-sources alias as vite.config.ts (see there).
+      { find: /^@web_new\/(.+)$/, replacement: `${resolve(here, "src")}/$1` },
       { find: "@pidash/platform-target", replacement: resolve(here, "src/core/platform/web.ts") },
     ],
   },
@@ -42,6 +48,7 @@ export default defineConfig({
       "checks/check-similarity.test.mjs",
       "checks/check-headers.test.mjs",
       "tools/prerender.test.mjs",
+      "tools/edition-module.test.mjs",
       "checks/check-oracle-build.test.mjs",
       "checks/check-boundaries.test.mjs",
       "checks/check-tokens.test.mjs",

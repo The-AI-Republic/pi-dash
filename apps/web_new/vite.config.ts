@@ -10,6 +10,7 @@ import { defineConfig, type ProxyOptions } from "vite";
 
 import { hostedBaseUrlFromEnv } from "./src/core/platform/hostedBaseUrl.js";
 import { publicSiteOriginFromEnv } from "./src/core/platform/publicSiteOrigin.js";
+import { resolveEditionModule } from "./tools/edition-module.mjs";
 
 const target = process.env.PIDASH_TARGET === "desktop" ? "desktop" : "web";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,9 @@ const apiBaseUrl = process.env.VITE_API_BASE_URL ?? "";
 // reads the same variable, so a deployment's canonical/og:url/sitemap all
 // name one address before and after hydration.
 const publicSiteOrigin = publicSiteOriginFromEnv(process.env);
+// Edition swap (maintainer decision 2026-10-18): PIDASH_EDITION_MODULE
+// points @pidash/edition at the private cloud module; unset keeps oss.ts.
+const { modulePath: editionModule, fsAllow: editionFsAllow } = resolveEditionModule(process.env, here);
 
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind
@@ -78,8 +82,13 @@ export default defineConfig(({ mode }) => {
         // Exact match only: the kit CSS entries must keep resolving to the
         // built package (see styles/app.css).
         { find: /^@pidash\/kit$/, replacement: resolve(here, "../../packages/kit/src/index.ts") },
-        // Single edition swap point: the cloud build replaces this target.
-        { find: "@pidash/edition", replacement: resolve(here, "src/core/edition/oss.ts") },
+        // Single edition swap point: PIDASH_EDITION_MODULE or oss.ts.
+        { find: "@pidash/edition", replacement: editionModule },
+        // Public sources for the edition module: the private cloud module
+        // imports its slot components from public web_new through here
+        // (maintainer decision 2026-10-18), so no checkout layout is
+        // assumed. App code never uses this; it imports relatively.
+        { find: /^@web_new\/(.+)$/, replacement: `${resolve(here, "src")}/$1` },
         // Build-time platform selection: only one implementation is ever
         // bundled, so the web bundle cannot contain desktop code.
         {
@@ -103,6 +112,9 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3010,
       strictPort: true,
+      // An edition module outside the repo (the private checkout) needs
+      // an explicit serve allowance; in-repo modules need none.
+      ...(editionFsAllow === null ? {} : { fs: { allow: editionFsAllow } }),
       proxy: {
         // Keep the browser Host: Django compares it against Origin for
         // native form views, and the session cookie stays host-only.
