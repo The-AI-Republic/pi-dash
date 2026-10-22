@@ -86,7 +86,7 @@ def ticker_id(issue: str) -> str:
     )["id"])
 
 
-def runs(issue: str) -> list:
+def runs(issue: str) -> int:
     return fetchone(
         get_database_url(),
         "SELECT count(*) AS n FROM agent_run WHERE work_item_id = %s",
