@@ -20,6 +20,7 @@ consumer may serve ``rust_job_queue`` on that database while they run
 for the probe job). Env contract:
 
 - ``DATABASE_URL`` (required).
+- ``REDIS_URL`` (required: the worker's mail handler fails boot without it).
 - ``PIDASH_BIN`` (default: ``<repo>/rust-api/target/debug/pidash-api``).
 
 Local run (from ``rust-api/contract-tests``)::
