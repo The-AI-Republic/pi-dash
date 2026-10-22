@@ -3058,9 +3058,6 @@ export class WebNewDriver implements ParityDriver {
     for await (const chunk of stream) chunks.push(Buffer.from(chunk));
     return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
   }
-  private appDialogs(): Locator {
-    return this.page.locator('xpath=//*[@role="dialog" and not(ancestor::*[@aria-label="Notifications"])]');
-  }
 
   private async openAppDialog(): Promise<Locator | null> {
     const dialogs = this.appDialogs();
