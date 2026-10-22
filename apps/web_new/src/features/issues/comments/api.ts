@@ -26,6 +26,7 @@ import {
 import { getAppClient } from "../../../core/api/client.js";
 import { rollbackSnapshots, snapshotQueries, type QuerySnapshot } from "../../../core/query/optimistic.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { mergeDeltaRows, newestCreatedAt } from "../api/incremental.js";
 import { issueKeys } from "../api/keys.js";
 import { patchCommentList, toggledAccess, withFold, type CommentPatch } from "./model.js";
 
@@ -70,21 +71,37 @@ export interface CommentScope {
   issueId: string;
 }
 
-/** The issue's comments in creation order. */
-export function commentsQueryOptions(client: ApiClient, scope: CommentScope) {
+/**
+ * The issue's comments in creation order. With the query client the
+ * refetch is incremental (parity/specs/comments.md §4.5, CMT-017): it
+ * reads the newest cached timestamp as its `created_at__gt` cursor and
+ * merges the delta. Without it (or on an empty cache) the read fetches
+ * the whole list.
+ */
+export function commentsQueryOptions(client: ApiClient, scope: CommentScope, queryClient?: QueryClient) {
+  const key = issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId);
   return queryOptions({
-    queryKey: issueKeys.comments(scope.workspaceSlug, scope.projectId, scope.issueId),
-    queryFn: () =>
-      listIssueComments(client, scope.workspaceSlug, scope.projectId, scope.issueId).then((rows) =>
-        [...rows].sort((left, right) => left.created_at.localeCompare(right.created_at))
-      ),
+    queryKey: key,
+    queryFn: async () => {
+      const cached = queryClient?.getQueryData<IssueComment[]>(key);
+      const cursor = cached === undefined ? undefined : newestCreatedAt(cached);
+      if (cached === undefined || cursor === undefined) {
+        const rows = await listIssueComments(client, scope.workspaceSlug, scope.projectId, scope.issueId);
+        return [...rows].sort((left, right) => left.created_at.localeCompare(right.created_at));
+      }
+      const delta = await listIssueComments(client, scope.workspaceSlug, scope.projectId, scope.issueId, {
+        createdAfter: cursor,
+      });
+      return mergeDeltaRows(cached, delta).sort((left, right) => left.created_at.localeCompare(right.created_at));
+    },
     staleTime: 15_000,
     refetchOnWindowFocus: false,
   });
 }
 
 export function useIssueComments(scope: CommentScope) {
-  return useQuery(commentsQueryOptions(getAppClient(), scope));
+  const queryClient = useQueryClient();
+  return useQuery(commentsQueryOptions(getAppClient(), scope, queryClient));
 }
 
 /** Repaint one row in the comment cache, returning the snapshots. */

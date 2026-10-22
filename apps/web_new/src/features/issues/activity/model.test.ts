@@ -109,13 +109,14 @@ describe("activity categories", () => {
     expect(activityFilterOf({ field: "assignees" })).toBe("ASSIGNEE");
   });
 
-  it("sends creation/deletion rows to the always-visible category", () => {
+  it("sends only creation rows to the always-visible category", () => {
     expect(activityFilterOf({ field: null })).toBe("DEFAULT");
   });
 
-  it("puts every other field under updates", () => {
+  it("puts every other field under updates, including the deletion row", () => {
     expect(activityFilterOf({ field: "name" })).toBe("ACTIVITY");
     expect(activityFilterOf({ field: "agent_wait" })).toBe("ACTIVITY");
+    expect(activityFilterOf({ field: "issue" })).toBe("ACTIVITY");
   });
 });
 
@@ -146,10 +147,20 @@ describe("feed composition", () => {
     expect(sortFeed(buildFeed([early, broken], []), "asc").map((entry) => entry.id)).toEqual(["bad", "a1"]);
   });
 
-  it("hides a category that is switched off but keeps creation and deletion", () => {
-    const deleted = activity({ id: "a4", verb: "deleted", created_at: "2026-10-16T13:00:00Z" });
-    const entries = filterFeed(buildFeed([early, late, deleted], [note]), ["COMMENT"]);
-    expect(entries.map((entry) => entry.id)).toEqual(["a1", "a4", "c1"]);
+  it("hides a category that is switched off but keeps creation", () => {
+    const entries = filterFeed(buildFeed([early, late], [note]), ["COMMENT"]);
+    expect(entries.map((entry) => entry.id)).toEqual(["a1", "c1"]);
+  });
+
+  it("hides the deletion row with Updates off and shows it with Updates on", () => {
+    const deleted = activity({
+      id: "a4",
+      field: "issue",
+      verb: "deleted",
+      created_at: "2026-10-16T13:00:00Z",
+    });
+    expect(filterFeed(buildFeed([early, deleted], []), ["ACTIVITY"]).map((entry) => entry.id)).toEqual(["a1", "a4"]);
+    expect(filterFeed(buildFeed([early, deleted], []), ["COMMENT"]).map((entry) => entry.id)).toEqual(["a1"]);
   });
 
   it("answers visibility per entry kind", () => {
@@ -213,6 +224,9 @@ describe("activity sentences", () => {
       "created the work item."
     );
     expect(activitySentence({ field: null, verb: "deleted", old_value: null, new_value: null })).toBe(
+      "deleted the work item."
+    );
+    expect(activitySentence({ field: "issue", verb: "deleted", old_value: null, new_value: null })).toBe(
       "deleted the work item."
     );
   });

@@ -86,6 +86,16 @@ describe("ActivityEntryRow", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("renders the deletion row the server stamps with field issue", () => {
+    render(
+      <ActivityEntryRow
+        workspaceSlug="acme"
+        activity={activity({ field: "issue", verb: "deleted", old_value: null, new_value: null })}
+      />
+    );
+    expect(screen.getByText("deleted the work item.")).toBeInTheDocument();
+  });
+
   it("credits the product for its own actions without a member link", () => {
     render(
       <ActivityEntryRow
