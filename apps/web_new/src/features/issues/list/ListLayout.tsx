@@ -406,6 +406,8 @@ export function ListLayout({
         hrefFor={hrefFor}
         selected={selection.isSelected(issue.id)}
         active={selection.isActive(issue.id)}
+        selectionSelectedFor={selection.isSelected}
+        selectionActiveFor={selection.isActive}
         onSelectionToggle={enableSelection ? selection.onRowToggle : undefined}
         selectionAvailable={issue.project_id === projectId}
         onExpandedChange={onExpandedChange}

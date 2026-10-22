@@ -100,6 +100,9 @@ export interface ListRowProps {
   /** Selection control, when the list enables bulk selection. */
   selected?: boolean | undefined;
   active?: boolean | undefined;
+  /** Resolves a row's selection state, including recursively rendered children. */
+  selectionSelectedFor?: ((id: string) => boolean) | undefined;
+  selectionActiveFor?: ((id: string) => boolean) | undefined;
   onSelectionToggle?: ((id: string, shiftKey: boolean) => void) | undefined;
   /** Enables the checkbox; a foreign-project row gets a disabled hint. */
   selectionAvailable?: boolean | undefined;
@@ -204,6 +207,8 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
     timeZone = null,
     selected = false,
     active = false,
+    selectionSelectedFor,
+    selectionActiveFor,
     onSelectionToggle,
     selectionAvailable = true,
     onExpandedChange,
@@ -213,6 +218,8 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
   const temp = isTempRowId(issue.id);
   const highlighted = isRowHighlighted(issue, highlightedId);
   const key = issueKey(projectIdentifierFor?.(issue) ?? projectIdentifier, issue);
+  const isSelected = selectionSelectedFor?.(issue.id) ?? selected;
+  const isActive = selectionActiveFor?.(issue.id) ?? active;
   const href = hrefFor(issue);
   const [uncontrolledExpanded, setUncontrolledExpanded] = React.useState(false);
   const expanded = selectionTree === undefined ? uncontrolledExpanded : selectionTree.expanded.has(issue.id);
@@ -243,17 +250,17 @@ function ListRowImpl(props: ListRowProps): React.ReactElement {
         data-testid="list-row"
         {...{ [SELECTION_ROW_ATTR]: issue.id }}
         data-highlight={highlighted ? "true" : undefined}
-        data-active={active ? "true" : undefined}
+        data-active={isActive ? "true" : undefined}
         className={[
           compact ? "h-8" : "h-11",
           "flex items-center gap-(--space-2) border-b border-(--border) px-(--space-3)",
           highlighted ? "bg-(--accent-subtle)" : "",
-          active ? "ring-1 ring-inset ring-(--accent)" : "",
+          isActive ? "ring-1 ring-inset ring-(--accent)" : "",
         ].join(" ")}
       >
         {onSelectionToggle === undefined ? null : selectionAvailable ? (
           <RowSelectionCheckbox
-            checked={selected}
+            checked={isSelected}
             label={`Select ${key}`}
             onChange={(event) => onSelectionToggle(issue.id, event.shiftKey)}
           />

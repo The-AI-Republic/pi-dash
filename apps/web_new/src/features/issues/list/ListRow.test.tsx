@@ -258,7 +258,30 @@ describe("ListRow selection", () => {
       />
     );
     expect(screen.getByText("Child")).toBeInTheDocument();
-    expect(screen.getByRole("checkbox", { name: "Select OTHER-43" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Cannot select OTHER-43" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Select OTHER-43" })).not.toBeInTheDocument();
     expect(queryMock.useQuery.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false });
+  });
+
+  it("gives each nested row its own selected and active state", () => {
+    const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE });
+    render(
+      <ListRow
+        {...props({
+          issue: issue({ sub_issues_count: 1 }),
+          onSelectionToggle: vi.fn(),
+          selected: false,
+          active: false,
+          selectionSelectedFor: (id) => id === "child-1",
+          selectionActiveFor: (id) => id === "child-1",
+          selectionTree: { expanded: new Set([ISSUE]), children: new Map([[ISSUE, [child]]]) },
+        })}
+      />
+    );
+    const boxes = screen.getAllByRole("checkbox");
+    expect(boxes[0]).not.toBeChecked();
+    expect(boxes[1]).toBeChecked();
+    const childRow = screen.getByRole("checkbox", { name: "Select WEB-43" }).closest("[data-selection-id]");
+    expect(childRow).toHaveAttribute("data-active", "true");
   });
 });
