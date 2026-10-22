@@ -25,4 +25,7 @@ export const runnersKeys = {
   run: (workspaceSlug: string, runId: string) => [...runnersKeys.all(workspaceSlug), "run", runId] as const,
   approvals: (workspaceSlug: string, projectId: RunnersScope) =>
     [...runnersKeys.all(workspaceSlug), "approvals", scopeSegment(projectId)] as const,
+  devMachines: (workspaceSlug: string) => [...runnersKeys.all(workspaceSlug), "dev-machines"] as const,
+  runnerDetail: (workspaceSlug: string, runnerId: string) =>
+    [...runnersKeys.all(workspaceSlug), "detail", runnerId] as const,
 };

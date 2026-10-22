@@ -1,19 +1,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runner detail mount point (NEWFRONT-540, RUN-010). The Details row action
-// deep-links here in both scopes; the detail screen itself lands with
-// NEWFRONT-555.
+// Runner detail, workspace scope (NEWFRONT-555, RUN-042/RUN-043). The area
+// shell owns the role gate and rail; this route mounts the detail screen.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { RunnersAreaSectionMount } from "../../../../../features/runners/components/RunnersAreaSectionMount.js";
+import { RunnerDetailContainer } from "../../../../../features/runners/detail/RunnerDetailContainer.js";
 
 export const Route = createFileRoute("/$ws/_gated/runners/detail/$runnerId")({
-  component: RunnerDetailMountRoute,
+  component: RunnerDetailRoute,
 });
 
-function RunnerDetailMountRoute(): React.ReactElement {
-  return <RunnersAreaSectionMount title="Runner details" />;
+function RunnerDetailRoute(): React.ReactElement {
+  const { ws, runnerId } = Route.useParams();
+  return <RunnerDetailContainer workspaceSlug={ws} runnerId={runnerId} />;
 }

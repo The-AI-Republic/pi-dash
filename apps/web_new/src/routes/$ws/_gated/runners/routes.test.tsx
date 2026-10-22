@@ -16,6 +16,7 @@ const params = { value: { ws: "acme" } as Record<string, string> };
 const shellProps: Array<Record<string, unknown>> = [];
 const screenProps: Array<Record<string, unknown>> = [];
 const chatProps: Array<Record<string, unknown>> = [];
+const detailProps: Array<Record<string, unknown>> = [];
 const chatNavigate = vi.fn();
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
@@ -42,6 +43,12 @@ vi.mock("../../../../features/runners/index.js", () => ({
   RunnersWorkspaceShell: (props: Record<string, unknown>) => {
     shellProps.push(props);
     return <div data-testid="workspace-shell">{props["children"] as React.ReactNode}</div>;
+  },
+}));
+vi.mock("../../../../features/runners/detail/RunnerDetailContainer.js", () => ({
+  RunnerDetailContainer: (props: Record<string, unknown>) => {
+    detailProps.push(props);
+    return <div data-testid="runner-detail-container" />;
   },
 }));
 vi.mock("../../../../features/runners/components/RunnersOverviewScreen.js", () => ({
@@ -96,6 +103,7 @@ beforeEach(() => {
   screenProps.length = 0;
   params.value = { ws: "acme" };
   chatProps.length = 0;
+  detailProps.length = 0;
   chatNavigate.mockReset();
   runsProps.length = 0;
   vi.spyOn(LayoutRoute, "useParams").mockReturnValue(params.value);
@@ -140,7 +148,6 @@ describe("workspace runners section routes", () => {
   it.each([
     ["Runs", RunsRoute],
     ["Approvals", ApprovalsRoute],
-    ["Runner details", DetailRoute],
   ])("mounts the %s section", (heading, route) => {
     mount(route.options.component);
     expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
@@ -163,6 +170,13 @@ describe("workspace runners section routes", () => {
   it("passes the run id from the address to the same screen", () => {
     mount(RunDetailRoute.options.component);
     expect(runsProps.at(-1)).toEqual({ search: { page: 2 }, selectedRunId: "run-1" });
+  });
+
+  it("mounts the runner detail screen with the runner from the address (RUN-042)", () => {
+    vi.spyOn(DetailRoute, "useParams").mockReturnValue({ ws: "acme", runnerId: "r-7" });
+    mount(DetailRoute.options.component);
+    expect(detailProps[0]).toMatchObject({ workspaceSlug: "acme", runnerId: "r-7" });
+    expect(screen.getByTestId("runner-detail-container")).toBeInTheDocument();
   });
 
   it("mounts the chat page with the runner from the address", () => {
