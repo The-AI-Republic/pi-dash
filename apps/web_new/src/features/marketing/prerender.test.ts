@@ -50,6 +50,24 @@ describe("prerender", () => {
     expect(home.markup).toContain("https://github.com/The-AI-Republic/pi-dash");
   });
 
+  it("renders the content bodies with their pinned destinations", () => {
+    const docs = renderMarketingPage("/docs");
+    expect(docs.markup).toContain("pidash auth login");
+    expect(docs.markup).toContain("releases/latest/download");
+    expect(docs.markup).toContain("pidash-x86_64-pc-windows-msvc.msi");
+
+    const downloads = renderMarketingPage("/downloads");
+    expect(downloads.markup).toContain("pidash-desktop-releases.s3.us-west-2.amazonaws.com/downloads/latest");
+    expect(downloads.markup).toContain('id="cli-heading"');
+    expect(downloads.markup).toContain("not yet publisher-signed");
+
+    const pricing = renderMarketingPage("/pricing");
+    expect(pricing.markup).toContain("Free + pay as you go");
+    expect(pricing.markup).toContain("AI Republic membership");
+    expect(pricing.markup).toContain("https://airepublic.com/pricing");
+    expect(pricing.markup).toContain("https://airepublic.com/contact");
+  });
+
   it("refuses an address with no prerender body", () => {
     expect(() => renderMarketingPage("/nowhere")).toThrow(/No prerender body/);
   });

@@ -9,9 +9,11 @@
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { MarketingDocs } from "./components/MarketingDocs.js";
+import { MarketingDownloads } from "./components/MarketingDownloads.js";
 import { MarketingFrame } from "./components/MarketingFrame.js";
 import { MarketingHome } from "./components/MarketingHome.js";
-import { MarketingIntro } from "./components/MarketingIntro.js";
+import { MarketingPricing } from "./components/MarketingPricing.js";
 import { bakedPublicSiteOrigin } from "../../core/platform/publicSiteOrigin.js";
 import { metaFor, type MarketingPageMeta } from "./content.js";
 
@@ -27,9 +29,9 @@ export const PRERENDER_PATHS = ["/", "/home", "/docs", "/downloads", "/pricing"]
 
 function PageBody({ path }: { path: string }): React.ReactElement {
   if (path === "/home" || path === "/") return <MarketingHome />;
-  if (path === "/docs" || path === "/downloads" || path === "/pricing") {
-    return <MarketingIntro path={path} />;
-  }
+  if (path === "/docs") return <MarketingDocs />;
+  if (path === "/downloads") return <MarketingDownloads />;
+  if (path === "/pricing") return <MarketingPricing />;
   throw new Error(`No prerender body for ${path}`);
 }
 
