@@ -370,18 +370,26 @@ pub const USER_FLAGS_SELECT_SQL: &str = "SELECT is_active, is_bot FROM users WHE
 // SQL: render bundle (mirrors the api prompt-preview loaders)
 // ---------------------------------------------------------------------------
 
-/// `issue.labels` (`context.py:536`): live link + live label, newest
-/// first. `$1` is the issue id.
+/// `issue.labels` (`context.py:536`): the M2M manager filters only
+/// through the label's default manager (`l.deleted_at IS NULL`) and
+/// never through the link table, so soft-deleted links still render
+/// and re-added labels repeat once per historical row (PB-2031).
+/// Newest label first (`Label.Meta.ordering`, `-created_at`). `$1`
+/// is the issue id.
 pub const BUNDLE_LABELS_SQL: &str = "SELECT l.name FROM issue_labels il \
     JOIN labels l ON l.id = il.label_id \
-    WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL \
+    WHERE il.issue_id = $1 AND l.deleted_at IS NULL \
     ORDER BY l.created_at DESC";
 
-/// `issue.assignees` (`context.py:537`): display name / email pairs. `$1`
-/// is the issue id.
+/// `issue.assignees` (`context.py:537`): display name / email pairs.
+/// The M2M manager never filters the link table's `deleted_at`, so
+/// soft-deleted assignments still render and re-added assignees
+/// repeat once per historical row (PB-2031). Newest user first
+/// (`User.Meta.ordering`, `-created_at`; `db/models/user.py:137`).
+/// `$1` is the issue id.
 pub const BUNDLE_ASSIGNEES_SQL: &str = "SELECT u.display_name, u.email FROM issue_assignees ia \
-    JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL \
-    ORDER BY u.id";
+    JOIN users u ON u.id = ia.assignee_id WHERE ia.issue_id = $1 \
+    ORDER BY u.created_at DESC";
 
 /// `State.objects.filter(project=…)` (`context.py:538-544`): triage
 /// excluded, `sequence` order. `$1` is the project id.

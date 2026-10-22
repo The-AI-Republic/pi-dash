@@ -2313,12 +2313,14 @@ async fn load_state(
 }
 
 /// `issue.labels` (`context.py:536`): label names, newest first
-/// (`Label.Meta.ordering`), through + target soft-delete filtered.
+/// (`Label.Meta.ordering`). The M2M manager never filters the link
+/// table's `deleted_at`, so soft-deleted links still render and
+/// re-added labels repeat once per historical row (PB-2031).
 async fn load_labels(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<String>, Denial> {
     let rows: Vec<(String,)> = sqlx::query_as(
         r#"SELECT l.name FROM issue_labels il
            JOIN labels l ON l.id = il.label_id
-           WHERE il.issue_id = $1 AND il.deleted_at IS NULL AND l.deleted_at IS NULL
+           WHERE il.issue_id = $1 AND l.deleted_at IS NULL
            ORDER BY l.created_at DESC"#,
     )
     .bind(issue_id)
@@ -2329,13 +2331,16 @@ async fn load_labels(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<S
 }
 
 /// `issue.assignees` (`context.py:537`): display name, else email, else
-/// empty (`context.py:257-265`).
+/// empty (`context.py:257-265`). The M2M manager never filters the
+/// link table's `deleted_at`, so soft-deleted assignments still render
+/// and re-added assignees repeat once per historical row (PB-2031);
+/// newest user first (`User.Meta.ordering`, `-created_at`).
 async fn load_assignees(pool: &sqlx::PgPool, issue_id: &uuid::Uuid) -> Result<Vec<String>, Denial> {
     let rows: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
         r#"SELECT u.display_name, u.email FROM issue_assignees ia
            JOIN users u ON u.id = ia.assignee_id
-           WHERE ia.issue_id = $1 AND ia.deleted_at IS NULL
-           ORDER BY u.id"#,
+           WHERE ia.issue_id = $1
+           ORDER BY u.created_at DESC"#,
     )
     .bind(issue_id)
     .fetch_all(pool)
