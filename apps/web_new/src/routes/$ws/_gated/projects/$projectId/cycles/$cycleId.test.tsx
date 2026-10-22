@@ -23,6 +23,16 @@ vi.mock("../../../../../../features/issues/list/pages.js", () => ({ listPageQuer
 vi.mock("../../../../../../features/issues/list/lazy.js", () => ({
   loadListLayout: async () => ({ default: () => null }),
 }));
+vi.mock("../../../../../../features/cycles/components/CycleMemberDates.js", () => ({
+  CycleMemberDates: (props: Record<string, unknown>) => (
+    <div
+      data-testid="member-dates"
+      data-workspace={String(props.workspaceSlug ?? "")}
+      data-project={String(props.projectId ?? "")}
+      data-cycle={String(props.cycleId ?? "")}
+    />
+  ),
+}));
 vi.mock("../../../../../../features/issues/list/EntityListScreen.js", () => ({
   EntityListScreen: (props: Record<string, unknown>) => (
     <div
@@ -90,6 +100,14 @@ describe("cycle issues route", () => {
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-completed", "false");
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-peek", "");
     expect(await screen.findByTestId("entity-screen")).toHaveAttribute("data-compact", "false");
+  });
+
+  it("mounts the member-timezone dates above the list", async () => {
+    renderRoute();
+    const node = await screen.findByTestId("member-dates");
+    expect(node).toHaveAttribute("data-workspace", "acme");
+    expect(node).toHaveAttribute("data-project", PROJECT);
+    expect(node).toHaveAttribute("data-cycle", CYCLE);
   });
 
   it("passes peek and compact from the search state", async () => {

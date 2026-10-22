@@ -4,7 +4,9 @@
 // Cycle detail host for the issues list (parity/specs/issues.md §2,
 // ISS-007–014). The Cycles area owns the full page; this slice proves
 // cycle-context grouping, group-header create/attach and the read-only
-// completed state here by mounting the shared list layout.
+// completed state here by mounting the shared list layout. The stored
+// start/end dates render above the list in the member timezone
+// (PROF-017 stored-dates fix, NEWFRONT-859).
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -12,6 +14,7 @@ import * as React from "react";
 // Direct module imports: this route definition is eager, and the feature
 // barrel would pull the analytics entry and picker parts into the initial
 // bundle (NEWFRONT-619, size gate).
+import { CycleMemberDates } from "../../../../../../features/cycles/components/CycleMemberDates.js";
 import { parseIssueSearch } from "../../../../../../features/issues/filters/search.js";
 import { ListSkeleton } from "../../../../../../features/issues/loaders/ListSkeleton.js";
 
@@ -40,22 +43,25 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/cycles/$cy
     const navigate = useNavigate();
     const entity = { scope: "cycle", projectId: params.projectId, cycleId: params.cycleId } as const;
     return (
-      <React.Suspense fallback={<ListSkeleton />}>
-        <LazyEntityListScreen
-          workspaceSlug={params.ws}
-          entity={entity}
-          projectId={params.projectId}
-          cycleId={params.cycleId}
-          peekKey={search.peekIssueId ?? null}
-          onPeekChange={(key) => {
-            const next = { ...search };
-            if (key === null) delete next.peekIssueId;
-            else next.peekIssueId = key;
-            void navigate({ to: ".", search: next, replace: true } as never);
-          }}
-          compact={search.layout === "compact"}
-        />
-      </React.Suspense>
+      <>
+        <CycleMemberDates workspaceSlug={params.ws} projectId={params.projectId} cycleId={params.cycleId} />
+        <React.Suspense fallback={<ListSkeleton />}>
+          <LazyEntityListScreen
+            workspaceSlug={params.ws}
+            entity={entity}
+            projectId={params.projectId}
+            cycleId={params.cycleId}
+            peekKey={search.peekIssueId ?? null}
+            onPeekChange={(key) => {
+              const next = { ...search };
+              if (key === null) delete next.peekIssueId;
+              else next.peekIssueId = key;
+              void navigate({ to: ".", search: next, replace: true } as never);
+            }}
+            compact={search.layout === "compact"}
+          />
+        </React.Suspense>
+      </>
     );
   },
 });
