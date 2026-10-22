@@ -57,6 +57,9 @@ vi.mock("../../../../features/runners/runs/RunsScreen.js", () => ({
     return <h1>Runs</h1>;
   },
 }));
+vi.mock("../../../../features/runners/approvals/ApprovalsScreen.js", () => ({
+  ApprovalsScreen: () => <h1>Approvals</h1>,
+}));
 
 const { sessionKeys, setSessionClient } = await import("../../../../core/session/index.js");
 const { Route: LayoutRoute } = await import("./route.js");

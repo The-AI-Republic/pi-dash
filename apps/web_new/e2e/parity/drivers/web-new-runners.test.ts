@@ -1683,3 +1683,255 @@ describe("run canceling", () => {
     expect(confirm.click).toHaveBeenCalled();
   });
 });
+
+function approvalCardStub(fields: {
+  header: string;
+  kind: string;
+  reason?: string | null;
+  expiry?: string | null;
+  payload: string;
+}) {
+  return stubLocator({
+    getByTestId: vi.fn((id: string) => {
+      if (id === "approval-card-header") return textNode(fields.header);
+      if (id === "approval-card-kind") return textNode(fields.kind);
+      if (id === "approval-card-reason") {
+        return fields.reason === undefined || fields.reason === null
+          ? stubLocator({ count: vi.fn(async () => 0) })
+          : textNode(fields.reason);
+      }
+      if (id === "approval-card-expiry") {
+        return fields.expiry === undefined || fields.expiry === null
+          ? stubLocator({ count: vi.fn(async () => 0) })
+          : textNode(fields.expiry);
+      }
+      return textNode(fields.payload);
+    }),
+  });
+}
+
+describe("approvals queue (NEWFRONT-547, RUN-023/RUN-024)", () => {
+  it("opens the queue in both scopes and settles on cards or the empty marker", async () => {
+    const list = textNode("");
+    const settled = stubLocator();
+    const page = testIdPage({ "approvals-list": list }, { locator: vi.fn(() => settled) });
+    const driver = new WebNewDriver(page);
+
+    await driver.openApprovals("acme");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/runners/approvals", { timeout: 60_000 });
+    await driver.openApprovals("acme", "p-1");
+    expect(page.goto).toHaveBeenLastCalledWith("/acme/projects/p-1/runners/approvals", { timeout: 60_000 });
+    expect(settled.waitFor).toHaveBeenCalled();
+  });
+
+  it("reads header, kind, reason, expiry and payload from each card", async () => {
+    const cards = [
+      approvalCardStub({
+        header: "Run run-9 · asked 10:00:00",
+        kind: "Run a shell command",
+        reason: "listing files",
+        expiry: "Ends 11:00:00",
+        payload: '{"command":"ls"}',
+      }),
+      approvalCardStub({ header: "Run run-8", kind: "Change a file", payload: '{"path":"/tmp/x"}' }),
+    ];
+    const collection = stubLocator({ all: vi.fn(async () => cards) });
+    const driver = new WebNewDriver(testIdPage({ "approval-card": collection }));
+
+    await expect(driver.approvalsCards()).resolves.toEqual([
+      {
+        header: "Run run-9 · asked 10:00:00",
+        kindLabel: "Run a shell command",
+        reason: "listing files",
+        expiry: "Ends 11:00:00",
+        payload: '{"command":"ls"}',
+      },
+      { header: "Run run-8", kindLabel: "Change a file", reason: null, expiry: null, payload: '{"path":"/tmp/x"}' },
+    ]);
+  });
+
+  it("reads blank reason and expiry as absent and survives unreadable text", async () => {
+    const blank = approvalCardStub({ header: "h", kind: "k", reason: "  ", expiry: "", payload: "p" });
+    const flaky = stubLocator({
+      getByTestId: vi.fn(() => stubLocator({ innerText: vi.fn(async () => "") })),
+    });
+    const collection = stubLocator({ all: vi.fn(async () => [blank, flaky]) });
+    const driver = new WebNewDriver(testIdPage({ "approval-card": collection }));
+
+    await expect(driver.approvalsCards()).resolves.toEqual([
+      { header: "h", kindLabel: "k", reason: null, expiry: null, payload: "p" },
+      { header: "", kindLabel: "", reason: null, expiry: null, payload: "" },
+    ]);
+  });
+
+  it("reports the empty state only without cards and a visible marker", async () => {
+    const list = stubLocator();
+    const visible = new WebNewDriver(
+      testIdPage({
+        "approvals-list": list,
+        "approval-card": stubLocator({ count: vi.fn(async () => 0) }),
+        "approvals-empty": textNode("Nothing waiting for review."),
+      })
+    );
+    await expect(visible.approvalsEmptyVisible()).resolves.toBe(true);
+
+    const withCard = new WebNewDriver(
+      testIdPage({
+        "approvals-list": list,
+        "approval-card": stubLocator({ count: vi.fn(async () => 1) }),
+        "approvals-empty": textNode("Nothing waiting for review."),
+      })
+    );
+    await expect(withCard.approvalsEmptyVisible()).resolves.toBe(false);
+
+    const noMarker = new WebNewDriver(
+      testIdPage({
+        "approvals-list": list,
+        "approval-card": stubLocator({ count: vi.fn(async () => 0) }),
+        "approvals-empty": stubLocator({ count: vi.fn(async () => 0) }),
+      })
+    );
+    await expect(noMarker.approvalsEmptyVisible()).resolves.toBe(false);
+
+    const hidden = new WebNewDriver(
+      testIdPage({
+        "approvals-list": list,
+        "approval-card": stubLocator({ count: vi.fn(async () => 0) }),
+        "approvals-empty": textNode("Nothing waiting for review.", { isVisible: vi.fn(async () => false) }),
+      })
+    );
+    await expect(hidden.approvalsEmptyVisible()).resolves.toBe(false);
+  });
+
+  it.each([
+    ["accept", "Allow once"],
+    ["accept_for_session", "Allow for session"],
+    ["decline", "Deny"],
+  ] as const)("decides %s on the matching card and waits for it to drop", async (decision, name) => {
+    const click = vi.fn(async () => undefined);
+    const target = stubLocator({
+      getByRole: vi.fn(() => stubLocator({ click })),
+      waitFor: vi.fn(async () => undefined),
+    });
+    const filtered = stubLocator({ first: () => target });
+    const filter = vi.fn(() => filtered);
+    const page = testIdPage({ "approval-card": stubLocator({ filter }) });
+    const driver = new WebNewDriver(page);
+
+    await driver.approvalsDecide("parity-marker", decision);
+    expect(filter).toHaveBeenCalledWith({ hasText: "parity-marker" });
+    expect(target.getByRole).toHaveBeenCalledWith("button", { name });
+    expect(click).toHaveBeenCalled();
+    expect(target.waitFor).toHaveBeenCalledWith({ state: "detached", timeout: 15_000 });
+    expect(page.waitForTimeout).not.toHaveBeenCalled();
+  });
+
+  it("treats a staying card as data after the detach window", async () => {
+    const target = stubLocator({
+      getByRole: vi.fn(() => stubLocator({ click: vi.fn(async () => undefined) })),
+      waitFor: vi.fn(async () => {
+        throw new Error("still attached");
+      }),
+    });
+    const filtered = stubLocator({ first: () => target });
+    const page = testIdPage({ "approval-card": stubLocator({ filter: vi.fn(() => filtered) }) });
+    const driver = new WebNewDriver(page);
+
+    await driver.approvalsDecide("parity-marker", "decline");
+    expect(page.waitForTimeout).toHaveBeenCalledWith(2_000);
+  });
+});
+
+describe("issue dispatch and re-tick (NEWFRONT-547, RUN-046/RUN-048)", () => {
+  it("dispatches Run AI, dedupes API urls, and unsubscribes", async () => {
+    const handlers: Array<(request: { url(): string }) => void> = [];
+    const on = vi.fn((_event: string, handler: (request: { url(): string }) => void) => {
+      handlers.push(handler);
+    });
+    const off = vi.fn();
+    const runButton = stubLocator({
+      click: vi.fn(async () => {
+        for (const handler of handlers) {
+          handler({ url: () => "https://api.test/api/runners/runs/" });
+          handler({ url: () => "https://api.test/api/runners/runs/" });
+          handler({ url: () => "https://app.test/static.js" });
+        }
+      }),
+    });
+    const page = testIdPage({ "issue-run-ai": runButton }, { on, off });
+    const driver = new WebNewDriver(page);
+    // No toast yet on the first poll, so the driver waits and polls again.
+    vi.spyOn(driver, "lastToast")
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue("Run started");
+
+    await expect(driver.issueRunAiDispatch()).resolves.toEqual({
+      toast: "Run started",
+      requestUrls: ["https://api.test/api/runners/runs/"],
+    });
+    expect(page.waitForTimeout).toHaveBeenCalledWith(1_000);
+    expect(off).toHaveBeenCalledWith("request", handlers[0]);
+  });
+
+  it("gives up dispatch with the latest toast after the deadline", async () => {
+    const off = vi.fn();
+    const page = testIdPage({ "issue-run-ai": textNode("Run AI") }, { off });
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver, "lastToast").mockResolvedValue(null);
+    const start = 1_000_000;
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 200_000);
+    try {
+      await expect(driver.issueRunAiDispatch()).resolves.toEqual({ toast: null, requestUrls: [] });
+    } finally {
+      now.mockRestore();
+    }
+    expect(off).toHaveBeenCalled();
+  });
+
+  it("reads re-tick visibility from the issue control", async () => {
+    const shown = new WebNewDriver(testIdPage({ "issue-re-tick": textNode("Re-tick") }));
+    await expect(shown.issueReTickVisible()).resolves.toBe(true);
+
+    const missing = new WebNewDriver(testIdPage({ "issue-re-tick": stubLocator({ count: vi.fn(async () => 0) }) }));
+    await expect(missing.issueReTickVisible()).resolves.toBe(false);
+
+    const hidden = new WebNewDriver(
+      testIdPage({ "issue-re-tick": textNode("Re-tick", { isVisible: vi.fn(async () => false) }) })
+    );
+    await expect(hidden.issueReTickVisible()).resolves.toBe(false);
+  });
+
+  it("clicks re-tick and waits for a fresh toast", async () => {
+    const click = vi.fn(async () => undefined);
+    const page = testIdPage({ "issue-re-tick": stubLocator({ click }) });
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver, "lastToast")
+      .mockResolvedValueOnce("Older notice")
+      .mockResolvedValueOnce("Older notice")
+      .mockResolvedValue("Budget refilled");
+
+    await expect(driver.issueReTickClick()).resolves.toBe("Budget refilled");
+    expect(click).toHaveBeenCalled();
+    expect(page.waitForTimeout).toHaveBeenCalledWith(1_000);
+  });
+
+  it("gives up re-tick with the latest toast after the deadline", async () => {
+    const page = testIdPage({ "issue-re-tick": textNode("Re-tick") });
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver, "lastToast").mockResolvedValue("Older notice");
+    const start = 1_000_000;
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(start)
+      .mockReturnValue(start + 200_000);
+    try {
+      await expect(driver.issueReTickClick()).resolves.toBe("Older notice");
+    } finally {
+      now.mockRestore();
+    }
+  });
+});
