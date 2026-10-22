@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as WsRouteRouteImport } from './routes/$ws/route'
+import { Route as MarketingRouteImport } from './routes/_marketing'
 import { Route as CreateWorkspaceRouteImport } from './routes/create-workspace'
 import { Route as GodModeRouteRouteImport } from './routes/god-mode/route'
 import { Route as InvitationsRouteImport } from './routes/invitations'
@@ -23,6 +24,10 @@ import { Route as SigninRouteImport } from './routes/signin'
 import { Route as WorkspaceInvitationsRouteImport } from './routes/workspace-invitations'
 import { Route as WsSplatRouteImport } from './routes/$ws/$'
 import { Route as WsGatedRouteRouteImport } from './routes/$ws/_gated/route'
+import { Route as MarketingDocsRouteImport } from './routes/_marketing/docs'
+import { Route as MarketingDownloadsRouteImport } from './routes/_marketing/downloads'
+import { Route as MarketingHomeRouteImport } from './routes/_marketing/home'
+import { Route as MarketingPricingRouteImport } from './routes/_marketing/pricing'
 import { Route as AccountsForgotPasswordRouteImport } from './routes/accounts/forgot-password'
 import { Route as AccountsResetPasswordRouteImport } from './routes/accounts/reset-password'
 import { Route as AccountsSetPasswordRouteImport } from './routes/accounts/set-password'
@@ -139,6 +144,10 @@ const WsRouteRoute = WsRouteRouteImport.update({
   path: '/$ws',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MarketingRoute = MarketingRouteImport.update({
+  id: '/_marketing',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const CreateWorkspaceRoute = CreateWorkspaceRouteImport.update({
   id: '/create-workspace',
   path: '/create-workspace',
@@ -197,6 +206,26 @@ const WsSplatRoute = WsSplatRouteImport.update({
 const WsGatedRouteRoute = WsGatedRouteRouteImport.update({
   id: '/_gated',
   getParentRoute: () => WsRouteRoute,
+} as any)
+const MarketingDocsRoute = MarketingDocsRouteImport.update({
+  id: '/docs',
+  path: '/docs',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingDownloadsRoute = MarketingDownloadsRouteImport.update({
+  id: '/downloads',
+  path: '/downloads',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingHomeRoute = MarketingHomeRouteImport.update({
+  id: '/home',
+  path: '/home',
+  getParentRoute: () => MarketingRoute,
+} as any)
+const MarketingPricingRoute = MarketingPricingRouteImport.update({
+  id: '/pricing',
+  path: '/pricing',
+  getParentRoute: () => MarketingRoute,
 } as any)
 const AccountsForgotPasswordRoute = AccountsForgotPasswordRouteImport.update({
   id: '/accounts/forgot-password',
@@ -811,6 +840,10 @@ export interface FileRoutesByFullPath {
   '/workspace-invitations': typeof WorkspaceInvitationsRoute
   '/settings/profile': typeof SettingsProfileRouteRouteWithChildren
   '/$ws/$': typeof WsSplatRoute
+  '/docs': typeof MarketingDocsRoute
+  '/downloads': typeof MarketingDownloadsRoute
+  '/home': typeof MarketingHomeRoute
+  '/pricing': typeof MarketingPricingRoute
   '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
   '/accounts/reset-password': typeof AccountsResetPasswordRoute
   '/accounts/set-password': typeof AccountsSetPasswordRoute
@@ -929,6 +962,10 @@ export interface FileRoutesByTo {
   '/workspace-invitations': typeof WorkspaceInvitationsRoute
   '/god-mode': typeof GodModeIndexRoute
   '/$ws/$': typeof WsSplatRoute
+  '/docs': typeof MarketingDocsRoute
+  '/downloads': typeof MarketingDownloadsRoute
+  '/home': typeof MarketingHomeRoute
+  '/pricing': typeof MarketingPricingRoute
   '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
   '/accounts/reset-password': typeof AccountsResetPasswordRoute
   '/accounts/set-password': typeof AccountsSetPasswordRoute
@@ -1026,6 +1063,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/$ws': typeof WsRouteRouteWithChildren
   '/god-mode': typeof GodModeRouteRouteWithChildren
+  '/_marketing': typeof MarketingRouteWithChildren
   '/create-workspace': typeof CreateWorkspaceRoute
   '/invitations': typeof InvitationsRoute
   '/login': typeof LoginRoute
@@ -1039,6 +1077,10 @@ export interface FileRoutesById {
   '/god-mode/_dashboard': typeof GodModeDashboardRouteRouteWithChildren
   '/settings/profile': typeof SettingsProfileRouteRouteWithChildren
   '/$ws/$': typeof WsSplatRoute
+  '/_marketing/docs': typeof MarketingDocsRoute
+  '/_marketing/downloads': typeof MarketingDownloadsRoute
+  '/_marketing/home': typeof MarketingHomeRoute
+  '/_marketing/pricing': typeof MarketingPricingRoute
   '/accounts/forgot-password': typeof AccountsForgotPasswordRoute
   '/accounts/reset-password': typeof AccountsResetPasswordRoute
   '/accounts/set-password': typeof AccountsSetPasswordRoute
@@ -1160,6 +1202,10 @@ export interface FileRouteTypes {
     | '/workspace-invitations'
     | '/settings/profile'
     | '/$ws/$'
+    | '/docs'
+    | '/downloads'
+    | '/home'
+    | '/pricing'
     | '/accounts/forgot-password'
     | '/accounts/reset-password'
     | '/accounts/set-password'
@@ -1278,6 +1324,10 @@ export interface FileRouteTypes {
     | '/workspace-invitations'
     | '/god-mode'
     | '/$ws/$'
+    | '/docs'
+    | '/downloads'
+    | '/home'
+    | '/pricing'
     | '/accounts/forgot-password'
     | '/accounts/reset-password'
     | '/accounts/set-password'
@@ -1374,6 +1424,7 @@ export interface FileRouteTypes {
     | '/'
     | '/$ws'
     | '/god-mode'
+    | '/_marketing'
     | '/create-workspace'
     | '/invitations'
     | '/login'
@@ -1387,6 +1438,10 @@ export interface FileRouteTypes {
     | '/god-mode/_dashboard'
     | '/settings/profile'
     | '/$ws/$'
+    | '/_marketing/docs'
+    | '/_marketing/downloads'
+    | '/_marketing/home'
+    | '/_marketing/pricing'
     | '/accounts/forgot-password'
     | '/accounts/reset-password'
     | '/accounts/set-password'
@@ -1496,6 +1551,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   WsRouteRoute: typeof WsRouteRouteWithChildren
   GodModeRouteRoute: typeof GodModeRouteRouteWithChildren
+  MarketingRoute: typeof MarketingRouteWithChildren
   CreateWorkspaceRoute: typeof CreateWorkspaceRoute
   InvitationsRoute: typeof InvitationsRoute
   LoginRoute: typeof LoginRoute
@@ -1529,6 +1585,13 @@ declare module '@tanstack/react-router' {
       path: '/$ws'
       fullPath: '/$ws'
       preLoaderRoute: typeof WsRouteRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_marketing': {
+      id: '/_marketing'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof MarketingRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/create-workspace': {
@@ -1614,6 +1677,34 @@ declare module '@tanstack/react-router' {
       fullPath: '/$ws'
       preLoaderRoute: typeof WsGatedRouteRouteImport
       parentRoute: typeof WsRouteRoute
+    }
+    '/_marketing/docs': {
+      id: '/_marketing/docs'
+      path: '/docs'
+      fullPath: '/docs'
+      preLoaderRoute: typeof MarketingDocsRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/_marketing/downloads': {
+      id: '/_marketing/downloads'
+      path: '/downloads'
+      fullPath: '/downloads'
+      preLoaderRoute: typeof MarketingDownloadsRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/_marketing/home': {
+      id: '/_marketing/home'
+      path: '/home'
+      fullPath: '/home'
+      preLoaderRoute: typeof MarketingHomeRouteImport
+      parentRoute: typeof MarketingRoute
+    }
+    '/_marketing/pricing': {
+      id: '/_marketing/pricing'
+      path: '/pricing'
+      fullPath: '/pricing'
+      preLoaderRoute: typeof MarketingPricingRouteImport
+      parentRoute: typeof MarketingRoute
     }
     '/accounts/forgot-password': {
       id: '/accounts/forgot-password'
@@ -2754,6 +2845,24 @@ const GodModeRouteRouteWithChildren = GodModeRouteRoute._addFileChildren(
   GodModeRouteRouteChildren,
 )
 
+interface MarketingRouteChildren {
+  MarketingDocsRoute: typeof MarketingDocsRoute
+  MarketingDownloadsRoute: typeof MarketingDownloadsRoute
+  MarketingHomeRoute: typeof MarketingHomeRoute
+  MarketingPricingRoute: typeof MarketingPricingRoute
+}
+
+const MarketingRouteChildren: MarketingRouteChildren = {
+  MarketingDocsRoute: MarketingDocsRoute,
+  MarketingDownloadsRoute: MarketingDownloadsRoute,
+  MarketingHomeRoute: MarketingHomeRoute,
+  MarketingPricingRoute: MarketingPricingRoute,
+}
+
+const MarketingRouteWithChildren = MarketingRoute._addFileChildren(
+  MarketingRouteChildren,
+)
+
 interface SettingsProfileRouteRouteChildren {
   SettingsProfileTabRoute: typeof SettingsProfileTabRoute
   SettingsProfileIndexRoute: typeof SettingsProfileIndexRoute
@@ -2771,6 +2880,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   WsRouteRoute: WsRouteRouteWithChildren,
   GodModeRouteRoute: GodModeRouteRouteWithChildren,
+  MarketingRoute: MarketingRouteWithChildren,
   CreateWorkspaceRoute: CreateWorkspaceRoute,
   InvitationsRoute: InvitationsRoute,
   LoginRoute: LoginRoute,

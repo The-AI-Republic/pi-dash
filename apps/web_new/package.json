@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite --port 3010",
     "build": "vite build --mode web && vite build --mode desktop",
-    "build:web": "vite build --mode web",
+    "build:web": "vite build --mode web && node tools/prerender.mjs",
     "build:desktop": "vite build --mode desktop",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --deny-warnings",
@@ -34,7 +34,8 @@
     "test:parity": "node e2e/parity/tools/run-parity.mjs all",
     "test:parity:oracle": "node e2e/parity/tools/run-parity.mjs oracle",
     "test:parity:new": "node e2e/parity/tools/run-parity.mjs new",
-    "parity:report": "node e2e/parity/report/generate.mjs"
+    "parity:report": "node e2e/parity/report/generate.mjs",
+    "prerender": "node tools/prerender.mjs"
   },
   "dependencies": {
     "@pidash/api-client": "workspace:*",

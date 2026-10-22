@@ -9,7 +9,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema plus prop passing.
-vi.mock("../features/auth/index.js", () => ({
+vi.mock("../features/auth/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../features/auth/index.js")>()),
+  EntryScreen: (props: { next?: string; unsafeNext?: string; email?: string; errorCode?: string }) => (
+    <div
+      data-testid="entry-screen"
+      data-next={props.next ?? ""}
+      data-unsafe-next={props.unsafeNext ?? ""}
+      data-email={props.email ?? ""}
+      data-error-code={props.errorCode ?? ""}
+    />
+  ),
   SignInCard: (props: {
     next?: string;
     unsafeNext?: string;
@@ -47,7 +57,8 @@ vi.mock("../core/platform/index.js", () => ({
 
 import { isRedirect } from "@tanstack/react-router";
 
-import { EntryScreen, parseEntrySearch, returnPath, Route } from "./index.js";
+import { edition } from "../core/edition/index.js";
+import { parseEntrySearch, returnPath, Route } from "./index.js";
 
 describe("parseEntrySearch", () => {
   it("keeps every known param", () => {
@@ -110,6 +121,11 @@ describe("returnPath", () => {
 describe("entry guard", () => {
   const me = { is_password_autoset: false };
 
+  afterEach(() => {
+    delete edition.routes;
+    platformHarness.kind = "web";
+  });
+
   function stubContext(values: Record<string, unknown>, search: Record<string, unknown> = {}) {
     return {
       context: {
@@ -123,7 +139,7 @@ describe("entry guard", () => {
           },
         },
       },
-      search,
+      search: parseEntrySearch(search),
       location: { href: "/" },
       params: {},
     } as never;
@@ -139,9 +155,49 @@ describe("entry guard", () => {
     expect.unreachable("expected a redirect");
   }
 
+  // Session-shaped signed-out read: only an ApiError 401/403 resolves the
+  // gate to signed-out; any other failure rethrows (core/session/guards).
+  const signedOut = new ApiError({ status: 401, code: "http", message: "signed out" });
+
   it("renders the card for signed-out visitors", async () => {
     const failed = new ApiError({ status: 401, code: "http", message: "signed out" });
     await expect(Route.options.beforeLoad?.(stubContext({ me: failed }))).resolves.toEqual({});
+  });
+
+  it("forwards a signed-out visitor to the marketing home on the cloud root (CLOUD-001)", async () => {
+    edition.routes = [{ path: "/", scope: "top-level" }];
+    await expect(landingOf(stubContext({ me: signedOut }))).resolves.toBe("/home");
+  });
+
+  it("keeps the desktop entry card on the cloud root (DESK-011)", async () => {
+    edition.routes = [{ path: "/", scope: "top-level" }];
+    platformHarness.kind = "desktop";
+    await expect(Route.options.beforeLoad?.(stubContext({ me: signedOut }))).resolves.toEqual({});
+  });
+
+  it("carries a deep target to the login page as next_path (CLOUD-001)", async () => {
+    edition.routes = [{ path: "/", scope: "top-level" }];
+    await expect(landingOf(stubContext({ me: signedOut }, { next_path: "/docs" }))).resolves.toBe(
+      "/login?next_path=%2Fdocs"
+    );
+  });
+
+  it("carries the alias spelling too and drops an unsafe one", async () => {
+    edition.routes = [{ path: "/", scope: "top-level" }];
+    await expect(landingOf(stubContext({ me: signedOut }, { next: "/acme" }))).resolves.toBe(
+      "/login?next_path=%2Facme"
+    );
+    await expect(landingOf(stubContext({ me: signedOut }, { next_path: "https://evil.test/x" }))).resolves.toBe(
+      "/home"
+    );
+  });
+
+  it("leaves signed-in members on their landing even with the cloud root", async () => {
+    edition.routes = [{ path: "/", scope: "top-level" }];
+    const settings = { workspace: { last_workspace_slug: "acme", fallback_workspace_slug: null } };
+    await expect(
+      landingOf(stubContext({ me, profile: { is_onboarded: true }, settings, workspaces: [{ slug: "acme" }] }))
+    ).resolves.toBe("/acme");
   });
 
   it("honors the return path for signed-in members", async () => {
@@ -191,39 +247,6 @@ describe("entry guard", () => {
   });
 });
 
-describe("EntryScreen", () => {
-  it("renders the sign-in card with the return path for signed-out visitors", () => {
-    render(<EntryScreen next="/acme/" />);
-    expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/acme/");
-  });
-
-  it("passes the card params through to the sign-in card", () => {
-    render(
-      <EntryScreen
-        next="/acme"
-        email="ada@example.com"
-        errorCode="5065"
-        invitationId="invite-1"
-        invitationSlug="acme"
-      />
-    );
-    const card = screen.getByTestId("sign-in-card");
-    expect(card).toHaveAttribute("data-next", "/acme");
-    expect(card).toHaveAttribute("data-unsafe-next", "");
-    expect(card).toHaveAttribute("data-email", "ada@example.com");
-    expect(card).toHaveAttribute("data-error", "5065");
-    expect(card).toHaveAttribute("data-invitation", "invite-1");
-    expect(card).toHaveAttribute("data-slug", "acme");
-  });
-
-  it("passes an unsafe return path through to the sign-in card", () => {
-    render(<EntryScreen unsafeNext="https://evil.test/phish" />);
-    const card = screen.getByTestId("sign-in-card");
-    expect(card).toHaveAttribute("data-next", "");
-    expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
-  });
-});
-
 describe("entry route component", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -242,14 +265,14 @@ describe("entry route component", () => {
     render(<Component />);
   }
 
-  it("passes a safe return path through to the sign-in card", () => {
+  it("passes a safe return path through to the entry screen", () => {
     renderEntry({ next: "/acme" });
-    expect(screen.getByTestId("sign-in-card")).toHaveAttribute("data-next", "/acme");
+    expect(screen.getByTestId("entry-screen")).toHaveAttribute("data-next", "/acme");
   });
 
-  it("passes an unsafe return path through to the sign-in card", () => {
+  it("passes an unsafe return path through to the entry screen", () => {
     renderEntry({ unsafeNext: "https://evil.test/phish" });
-    const card = screen.getByTestId("sign-in-card");
+    const card = screen.getByTestId("entry-screen");
     expect(card).toHaveAttribute("data-next", "");
     expect(card).toHaveAttribute("data-unsafe-next", "https://evil.test/phish");
   });

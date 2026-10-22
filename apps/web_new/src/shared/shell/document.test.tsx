@@ -13,6 +13,7 @@ import {
   OverlayPortal,
   markInitialColorScheme,
   useDocumentHead,
+  type HeadTag,
 } from "./document.js";
 
 function seedServedHead(): void {
@@ -20,6 +21,7 @@ function seedServedHead(): void {
     '<meta name="description" content="served description">',
     '<meta property="og:title" content="served title">',
     '<meta name="twitter:card" content="summary">',
+    '<link rel="canonical" href="https://site.test/served">',
     '<meta name="viewport" content="width=device-width, initial-scale=1.0">',
     '<meta name="theme-color" content="#ffffff">',
   ].join("");
@@ -33,18 +35,36 @@ function mockColorScheme(dark: boolean): void {
   });
 }
 
+/** Canonical + description + og:url for one address, the way a page owner sends them. */
+function CANONICAL_TAGS(path: string): HeadTag[] {
+  const url = `https://site.test/${path}`;
+  return [
+    { tag: "link", attributes: { rel: "canonical", href: url } },
+    { tag: "meta", attributes: { name: "description", content: `${path} description.` } },
+    { tag: "meta", attributes: { property: "og:url", content: url } },
+    { tag: "meta", attributes: { property: "og:image:width", content: "1200" } },
+  ];
+}
+
 function HeadProbe({
   title,
   robots,
   fallback = false,
+  tags,
   children,
 }: {
   title: string;
   robots: string;
   fallback?: boolean;
+  tags?: readonly HeadTag[];
   children?: React.ReactNode;
 }): React.ReactElement {
-  useDocumentHead({ title, robots, fallback });
+  useDocumentHead({
+    title,
+    robots,
+    fallback,
+    ...(tags === undefined ? {} : { tags }),
+  });
   return <span>probe{children}</span>;
 }
 
@@ -61,6 +81,38 @@ describe("useDocumentHead", () => {
     // Static markers stay put.
     expect(document.querySelector('meta[name="viewport"]')).not.toBeNull();
     expect(document.querySelector('meta[name="theme-color"]')).not.toBeNull();
+  });
+
+  it("writes canonical, description and social preview tags for a crawlable page", () => {
+    seedServedHead();
+    render(
+      <HeadProbe
+        title="Pi Dash docs"
+        robots="index, follow"
+        tags={[
+          { tag: "link", attributes: { rel: "canonical", href: "https://site.test/docs" } },
+          { tag: "meta", attributes: { name: "description", content: "How Pi Dash works." } },
+          { tag: "meta", attributes: { property: "og:url", content: "https://site.test/docs" } },
+          { tag: "meta", attributes: { property: "og:image:width", content: "1200" } },
+        ]}
+      />
+    );
+    expect(document.querySelector('link[rel="canonical"]')?.getAttribute("href")).toBe("https://site.test/docs");
+    expect(document.querySelector('meta[property="og:url"]')?.getAttribute("content")).toBe("https://site.test/docs");
+    expect(document.querySelector('meta[name="description"]')?.getAttribute("content")).toBe("How Pi Dash works.");
+    expect(document.querySelector('meta[property="og:image:width"]')?.getAttribute("content")).toBe("1200");
+    // The served canonical is replaced, not duplicated (CLOUD-005).
+    expect(document.querySelectorAll('link[rel="canonical"]')).toHaveLength(1);
+  });
+
+  it("takes the managed tags away when a crawlable page unmounts", () => {
+    document.title = "served";
+    const { unmount } = render(<HeadProbe title="Pi Dash docs" robots="index, follow" tags={CANONICAL_TAGS("docs")} />);
+    expect(document.querySelectorAll('link[rel="canonical"]')).toHaveLength(1);
+    unmount();
+    expect(document.querySelector('link[rel="canonical"]')).toBeNull();
+    expect(document.querySelector('meta[property="og:url"]')).toBeNull();
+    expect(document.querySelector('meta[name="description"]')).toBeNull();
   });
 
   it("restores the previous title and robots on unmount", () => {
@@ -163,6 +215,59 @@ describe("useDocumentHead", () => {
       </HeadProbe>
     );
     expect(document.title).toBe("Workspace Name · Home");
+  });
+
+  it("replaces managed tags left by an earlier route on a fresh mount", () => {
+    document.head.innerHTML = "";
+    const stale = document.createElement("meta");
+    stale.setAttribute("property", "og:url");
+    stale.setAttribute("content", "https://site.test/stale");
+    stale.setAttribute("data-route-head", "");
+    document.head.appendChild(stale);
+
+    render(<HeadProbe title="Pi Dash docs" robots="index, follow" tags={CANONICAL_TAGS("docs")} />);
+    const ogUrls = document.querySelectorAll('meta[property="og:url"]');
+    expect(ogUrls).toHaveLength(1);
+    expect(ogUrls[0]?.getAttribute("content")).toBe("https://site.test/docs");
+  });
+
+  it("replaces the managed tags when a crawlable page changes address", () => {
+    seedServedHead();
+    const { rerender } = render(
+      <HeadProbe title="Pi Dash docs" robots="index, follow" tags={CANONICAL_TAGS("docs")} />
+    );
+    rerender(<HeadProbe title="Pi Dash pricing" robots="index, follow" tags={CANONICAL_TAGS("pricing")} />);
+    const canonicals = document.querySelectorAll('link[rel="canonical"]');
+    expect(canonicals).toHaveLength(1);
+    expect(canonicals[0]?.getAttribute("href")).toBe("https://site.test/pricing");
+    expect(document.querySelectorAll('meta[name="description"]')).toHaveLength(1);
+    expect(document.querySelector('meta[property="og:url"]')?.getAttribute("content")).toBe(
+      "https://site.test/pricing"
+    );
+  });
+});
+
+describe("document-less environments", () => {
+  function withoutDocument(run: () => void): void {
+    const realDocument = globalThis.document;
+    // The prerender build imports this module in Node, where no DOM exists.
+    Object.defineProperty(globalThis, "document", { configurable: true, get: () => undefined });
+    try {
+      run();
+    } finally {
+      Object.defineProperty(globalThis, "document", { configurable: true, value: realDocument });
+    }
+  }
+
+  it("resolves the initial scheme without touching a document", () => {
+    mockColorScheme(true);
+    withoutDocument(() => expect(markInitialColorScheme()).toBe("dark"));
+  });
+
+  it("renders no portal without a document", () => {
+    withoutDocument(() => {
+      expect(OverlayPortal({ rootId: MENU_PORTAL_ID, children: <span>overlay</span> })).toBeNull();
+    });
   });
 });
 

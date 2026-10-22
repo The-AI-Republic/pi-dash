@@ -9,9 +9,10 @@
 
 import type { ApiClient } from "@pidash/api-client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { createRootRouteWithContext, Outlet } from "@tanstack/react-router";
+import { createRootRouteWithContext, Outlet, useLocation } from "@tanstack/react-router";
 import * as React from "react";
 
+import { edition, isEditionProviderFreePath } from "../core/edition/index.js";
 import { LanguageProvider } from "../core/i18n/LanguageProvider.js";
 import { ThemeProvider } from "../core/theme/ThemeProvider.js";
 import { RuntimeSignOutLifecycle } from "../features/runners/runtime/SignOutLifecycle.js";
@@ -30,6 +31,14 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     React.useEffect(() => {
       markInitialColorScheme();
     }, []);
+    // Marketing pages are static content (CLOUD-005): they mount without
+    // the authenticated provider stack, which also lets the prerender build
+    // render them with no session or query state. Every other route keeps
+    // the full stack.
+    const { pathname } = useLocation();
+    if (isEditionProviderFreePath(edition, pathname)) {
+      return <Outlet />;
+    }
     return (
       <QueryClientProvider client={context.queryClient}>
         <ThemeProvider notifyError={notifyError}>

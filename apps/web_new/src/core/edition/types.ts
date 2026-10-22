@@ -8,10 +8,19 @@
 import type { Middleware } from "@pidash/api-client";
 import type { ComponentType } from "react";
 
-/** Extra route subtree contributed by an edition. */
+/**
+ * Extra route subtree contributed by an edition. `scope` says where the
+ * path lives: a `workspace` route is a segment under the active workspace
+ * (`{ path: "apps" }` → `/<workspace>/apps/`), while a `top-level` route
+ * is an address from the site root (`{ path: "home", scope: "top-level" }`
+ * → `/home`). Absent scope means `workspace`, so existing modules keep
+ * their meaning.
+ */
 export interface RouteExtension {
-  /** Route segment the edition declares, matched exactly (workspace routes use the bare segment, e.g. "apps"). */
+  /** Route segment or top-level address the edition declares, matched exactly. */
   path: string;
+  /** Where the route lives; only `top-level` differs from the default. */
+  scope?: "workspace" | "top-level";
 }
 
 /** Extra sidebar entry contributed by an edition. */
