@@ -1038,6 +1038,16 @@ describe("SpreadsheetLayout selection", () => {
     expect(screen.getByTestId("bulk-toolbar")).toBeInTheDocument();
   });
 
+  it("keeps the cloud toolbar hidden for readers without edit permission", async () => {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+    stub();
+    renderSheet({ canEdit: false });
+    await screen.findByRole("table");
+    fireEvent.click(screen.getAllByRole("checkbox", { name: "Select WEB-1" })[0]!);
+    await waitFor(() => expect(screen.queryByTestId("bulk-upgrade-banner")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("bulk-toolbar")).not.toBeInTheDocument();
+  });
+
   it("keeps a foreign-project row visible but out of the selection", async () => {
     const FOREIGN = "923e4567-e89b-12d3-a456-426614174009";
     stub({

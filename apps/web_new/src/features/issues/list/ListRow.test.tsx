@@ -263,6 +263,14 @@ describe("ListRow selection", () => {
     expect(queryMock.useQuery.mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false });
   });
 
+  it("reports an empty child list when the expanded payload omits sub-issues", () => {
+    const onChildrenChange = vi.fn();
+    queryMock.useQuery.mockReturnValue({ data: {}, isFetching: false });
+    render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), onChildrenChange })} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
+    expect(onChildrenChange).toHaveBeenCalledWith(ISSUE, []);
+  });
+
   it("gives each nested row its own selected and active state", () => {
     const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE });
     render(

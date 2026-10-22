@@ -145,11 +145,20 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
     onSelectionToggle?: (id: string, shiftKey: boolean) => void;
     onExpandedChange?: (id: string, expanded: boolean) => void;
     onChildrenChange?: (id: string, children: readonly IssueListItem[]) => void;
+    projectIdentifierFor?: (row: IssueListItem) => string;
     selectionTree?: { expanded: ReadonlySet<string>; children: ReadonlyMap<string, readonly IssueListItem[]> };
     onOpenPeek: (key: string, title: string) => void;
     hrefFor: (row: IssueListItem) => string;
   }) => (
-    <div data-testid="row-probe" data-compact={String(props.compact ?? false)} data-href={props.hrefFor(props.issue)}>
+    <div
+      data-testid="row-probe"
+      data-compact={String(props.compact ?? false)}
+      data-href={props.hrefFor(props.issue)}
+      data-own-key={props.projectIdentifierFor?.(props.issue)}
+      data-foreign-key={props.projectIdentifierFor?.(
+        row({ id: "foreign-row", project_id: "823e4567-e89b-12d3-a456-426614174008" })
+      )}
+    >
       {props.onSelectionToggle === undefined ? null : props.selectionAvailable === false ? (
         <span role="img" aria-label={`Cannot select ${props.issue.sequence_id}`} />
       ) : (
@@ -185,6 +194,22 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
         }}
       >
         Collapse selection child
+      </button>
+      <button type="button" onClick={() => props.onExpandedChange?.(props.issue.id, true)}>
+        Expand without children
+      </button>
+      <button type="button" onClick={() => props.onExpandedChange?.(props.issue.id, false)}>
+        Collapse without children
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          const stable = [row({ id: "stable-child", sequence_id: 44, parent_id: props.issue.id })];
+          props.onChildrenChange?.(props.issue.id, stable);
+          props.onChildrenChange?.(props.issue.id, stable);
+        }}
+      >
+        Report stable children
       </button>
       {props.selectionTree?.children.get(props.issue.id)?.map((child) => (
         <input
@@ -891,5 +916,53 @@ describe("ListLayout selection", () => {
     expect(await screen.findByTestId("bulk-upgrade-banner")).toHaveTextContent("1 work item selected.");
     fireEvent.click(screen.getByRole("button", { name: "Collapse selection child" }));
     await waitFor(() => expect(screen.queryByText(/work item selected/)).not.toBeInTheDocument());
+  });
+
+  it("ignores repeated expand and collapse reports and waits for child rows", async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "Expand without children" }));
+    fireEvent.click(screen.getByRole("button", { name: "Expand without children" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse without children" }));
+    fireEvent.click(screen.getByRole("button", { name: "Collapse without children" }));
+    expect(screen.getByTestId("row-probe")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Select 43" })).not.toBeInTheDocument();
+  });
+
+  it("resolves nested row keys by project and falls back for an unknown project", async () => {
+    const { queryClient } = renderLayout();
+    expect(screen.getByTestId("row-probe")).toHaveAttribute("data-own-key", "WEB");
+    expect(screen.getByTestId("row-probe")).toHaveAttribute("data-foreign-key", "WEB");
+    const projects = queryClient.getQueryData(projectKeys.list("acme")) as Array<Record<string, unknown>>;
+    act(() => {
+      queryClient.setQueryData(projectKeys.list("acme"), [
+        ...projects,
+        {
+          ...projects[0]!,
+          id: "823e4567-e89b-12d3-a456-426614174008",
+          name: "Other",
+          identifier: "OTH",
+        },
+      ]);
+    });
+    await waitFor(() => expect(screen.getByTestId("row-probe")).toHaveAttribute("data-foreign-key", "OTH"));
+  });
+
+  it("keeps the child map stable when the same children are reported again", async () => {
+    renderLayout();
+    fireEvent.click(screen.getByRole("button", { name: "Expand without children" }));
+    fireEvent.click(screen.getByRole("button", { name: "Report stable children" }));
+    expect(await screen.findByRole("checkbox", { name: "Select 44" })).toBeInTheDocument();
+  });
+
+  it("disables row and group controls when the list opts out of selection", async () => {
+    const sections = groupedSections(
+      { results: { [STATE]: { results: [row()], total_results: 1 } } },
+      new Map([[STATE, "Todo"]]),
+      { showEmptyGroups: false, dimension: "state" }
+    );
+    mocks.pages.mockReturnValue(pageState({ sections, total: 1, grouped: true }));
+    renderLayout({ enableSelection: false, prefs: prefs({ groupBy: "state" }) });
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Cannot select/ })).not.toBeInTheDocument();
   });
 });
