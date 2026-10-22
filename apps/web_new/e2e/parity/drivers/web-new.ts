@@ -13613,10 +13613,10 @@ export class WebNewDriver implements ParityDriver {
     const badges = this.page.locator('[data-testid="archives-count-badge"]');
     if ((await badges.count()) === 0) return null;
     const text = (
-      (await badges
+      await badges
         .first()
         .innerText()
-        .catch(() => "")) ?? ""
+        .catch(() => "")
     ).trim();
     return text === "" ? null : text;
   }
@@ -13630,7 +13630,7 @@ export class WebNewDriver implements ParityDriver {
     } catch {
       return null;
     }
-    const text = ((await tip.innerText().catch(() => "")) ?? "").trim();
+    const text = (await tip.innerText().catch(() => "")).trim();
     return text === "" ? null : text;
   }
   async archivesPageTitle(): Promise<string> {
