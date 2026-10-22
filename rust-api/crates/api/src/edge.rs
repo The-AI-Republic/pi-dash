@@ -295,7 +295,11 @@ pub(crate) async fn serve_web_bytes(
     let owned =
         edge.flags().is_rust(Prefix::Web) && matches!(*req.method(), Method::GET | Method::HEAD);
     if !owned {
-        return proxy_request(state, req).await;
+        // Through `proxy` (not `proxy_request` directly) so the answer
+        // carries `ProxiedUpstream` like every other proxied arm — the
+        // session layer stays transparent on marked responses
+        // (PIDASHCONV-1304).
+        return proxy(State(state.clone()), req).await;
     }
     let mut response = ([(header::CONTENT_TYPE, content_type)], body).into_response();
     if req.method() == Method::HEAD {

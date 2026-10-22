@@ -114,7 +114,11 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = Result<T, StoreError>> + Send>>;
 pub trait SessionStore: Clone + Send + Sync + 'static {
     fn load(&self, key: String) -> BoxFuture<Option<StoredSession>>;
     /// Persist `row`; returns the key it is stored under (freshly issued
-    /// when `row.key` is `None`, like `_get_new_session_key`).
+    /// when `row.key` is `None`, like `_get_new_session_key`). An existing
+    /// key whose row is gone errors — Django's `UpdateError` on the
+    /// `force_update` miss (`SessionInterrupted` → 500) — on the Postgres
+    /// store; the memory store upserts (test double, like Django's
+    /// non-db backends, which have no update-miss failure).
     fn save(&self, row: SessionRow) -> BoxFuture<String>;
     /// Load the user behind `_auth_user_id` for Django's `get_user` check.
     /// `None` means the user is missing or the id is not a UUID; Django
@@ -259,8 +263,11 @@ impl SessionStore for PgSessionStore {
         let pool = self.pool.clone();
         Box::pin(async move {
             if let Some(key) = row.key.clone() {
-                // Django's `save()`: update when the key exists, insert
-                // when it does not.
+                // Django's `save()` with an existing key is `force_update`:
+                // the row must be there. A 0-row update means the session
+                // vanished mid-request (concurrent flush) — `UpdateError`
+                // (`SessionInterrupted` → 500) in Django, never a fresh
+                // insert (PIDASHCONV-1304).
                 let updated = sqlx::query(Self::UPDATE_SQL)
                     .bind(&key)
                     .bind(&row.session_data)
@@ -274,10 +281,11 @@ impl SessionStore for PgSessionStore {
                 if updated > 0 {
                     return Ok(key);
                 }
-                insert_new(&pool, &row).await
-            } else {
-                insert_new(&pool, &row).await
+                return Err(StoreError(
+                    "session row missing for existing key (Django UpdateError)".to_string(),
+                ));
             }
+            insert_new(&pool, &row).await
         })
     }
 
@@ -767,6 +775,21 @@ where
             let handle = SessionHandle::new(session);
             req.extensions_mut().insert(handle.clone());
             let mut response = inner.call(req).await?;
+            // Transparent when the responder already owns the session
+            // decision: Django behind the proxy (marked
+            // `ProxiedUpstream`), or an owned handler that set the session
+            // cookie itself (email-style direct-SQL issuance,
+            // `auth_session/email.rs`). Applying the pre-request
+            // snapshot's rules on top would append a second, conflicting
+            // `Set-Cookie` (PIDASHCONV-1304).
+            if response
+                .extensions()
+                .get::<crate::edge::ProxiedUpstream>()
+                .is_some()
+                || response_has_session_cookie(&response, &cookie_name)
+            {
+                return Ok(response);
+            }
             let session = handle.snapshot();
             if apply_response_rules(
                 &config,
@@ -862,6 +885,19 @@ async fn apply_response_rules<Store: SessionStore>(
         }),
     );
     Ok(())
+}
+
+/// Does `response` already carry a `Set-Cookie` for the session cookie?
+/// Owned session-managing handlers set it themselves, as does Django on
+/// proxied answers; either way the session decision is made downstream.
+fn response_has_session_cookie(response: &Response<Body>, cookie_name: &str) -> bool {
+    let prefix = format!("{cookie_name}=");
+    response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| v.starts_with(&prefix))
 }
 
 /// Append a `Set-Cookie` without disturbing existing ones (Django's
@@ -1745,5 +1781,226 @@ mod tests {
             .await
             .expect("serve");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// Save-counting store: proves the layer never persists for
+    /// responses whose session decision is already made downstream.
+    #[derive(Debug, Clone)]
+    struct CountingStore {
+        inner: MemorySessionStore,
+        saves: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                inner: MemorySessionStore::new(),
+                saves: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        fn saves(&self) -> usize {
+            self.saves.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl SessionStore for CountingStore {
+        fn load(&self, key: String) -> BoxFuture<Option<StoredSession>> {
+            self.inner.load(key)
+        }
+
+        fn save(&self, row: SessionRow) -> BoxFuture<String> {
+            self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.save(row)
+        }
+    }
+
+    fn always_save(store: CountingStore) -> SessionConfig<CountingStore> {
+        let mut full = config_for(Some(store));
+        full.save_every_request = true;
+        full
+    }
+
+    /// Django's sign-out bytes in miniature: 302 + the flushed-session
+    /// delete cookie + `Vary: Cookie`, marked as proxied upstream.
+    async fn proxied_signout(_req: Request<Body>) -> Response<Body> {
+        let mut response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::VARY, "Cookie")
+            .header(
+                header::SET_COOKIE,
+                "session-id=\"\"; expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; Path=/; SameSite=Lax",
+            )
+            .body(Body::empty())
+            .expect("inner");
+        response
+            .extensions_mut()
+            .insert(crate::edge::ProxiedUpstream);
+        response
+    }
+
+    /// Django's sign-in bytes in miniature: 302 + the fresh session
+    /// cookie, marked as proxied upstream.
+    async fn proxied_signin(_req: Request<Body>) -> Response<Body> {
+        let mut response = Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::VARY, "Cookie")
+            .header(
+                header::SET_COOKIE,
+                "session-id=newkey-from-django; expires=Thu, 29 Oct 2026 05:00:00 GMT; HttpOnly; Max-Age=604800; Path=/; SameSite=Lax",
+            )
+            .body(Body::empty())
+            .expect("inner");
+        response
+            .extensions_mut()
+            .insert(crate::edge::ProxiedUpstream);
+        response
+    }
+
+    /// An owned email-style sign-in in miniature: the handler issued
+    /// the session itself (direct SQL) and set the cookie + `Vary`
+    /// (`auth_session/email.rs` `redirect_response`); unmarked.
+    async fn owned_signin(_req: Request<Body>) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::FOUND)
+            .header(header::VARY, "Cookie")
+            .header(
+                header::SET_COOKIE,
+                "session-id=newkey-from-handler; expires=Thu, 29 Oct 2026 05:00:00 GMT; HttpOnly; Max-Age=604800; Path=/; SameSite=Lax",
+            )
+            .body(Body::empty())
+            .expect("inner")
+    }
+
+    #[tokio::test]
+    async fn proxied_signout_saves_nothing_and_keeps_djangos_cookie() {
+        // Case B (PIDASHCONV-1304): save-every-request + a proxied
+        // sign-out. The pre-request snapshot is a live session, so rule 3
+        // would re-save (resurrecting the flushed row) and append a fresh
+        // cookie after Django's delete. The marked response must pass
+        // through untouched instead: no save, Django's bytes as-is.
+        let store = CountingStore::new();
+        seed_session(&store, "livekey-b123", "user-b").await;
+        let seeded = store.saves();
+        let inner =
+            axum::Router::new().route("/auth/sign-out/", axum::routing::any(proxied_signout));
+        let response = SessionLayer::new(always_save(store.clone()))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/sign-out/")
+                    .header(header::COOKIE, "session-id=livekey-b123")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        // No save past the seed: the flushed row stays gone.
+        assert_eq!(store.saves(), seeded);
+        let cookies = set_cookies(&response);
+        assert_eq!(cookies.len(), 1);
+        assert!(cookies[0].contains("Max-Age=0"), "{}", cookies[0]);
+        assert!(has_vary_cookie(&response));
+    }
+
+    #[tokio::test]
+    async fn proxied_signin_keeps_djangos_cookie() {
+        // Case A, proxied (PIDASHCONV-1304): a stale cookie (no row) +
+        // Django's sign-in answer. Rule 1 would append a delete after
+        // Django's new cookie; the marked response passes through.
+        let store = CountingStore::new();
+        let inner = axum::Router::new().route("/auth/sign-in/", axum::routing::any(proxied_signin));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/sign-in/")
+                    .header(header::COOKIE, "session-id=stale-no-such-row")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(store.saves(), 0);
+        let cookies = set_cookies(&response);
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookie_key(&cookies[0], "session-id"), "newkey-from-django");
+    }
+
+    #[tokio::test]
+    async fn owned_handler_cookie_disables_layer_rules() {
+        // Case A, owned (PIDASHCONV-1304): email-style handlers issue the
+        // session themselves and set the cookie (`auth_session/email.rs`
+        // documents the layer as transparent there). A stale incoming
+        // cookie must not make rule 1 append a delete after the
+        // handler's cookie.
+        let store = CountingStore::new();
+        let inner = axum::Router::new().route("/auth/sign-in/", axum::routing::any(owned_signin));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/sign-in/")
+                    .header(header::COOKIE, "session-id=stale-no-such-row")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(store.saves(), 0);
+        let cookies = set_cookies(&response);
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookie_key(&cookies[0], "session-id"), "newkey-from-handler");
+    }
+
+    #[tokio::test]
+    async fn pg_save_missing_key_fails_like_django_update_error() {
+        // `PgSessionStore::save` with an existing key whose row vanished
+        // is Django's `force_update` miss: `UpdateError`
+        // (`SessionInterrupted` → 500), never a fresh insert
+        // (PIDASHCONV-1304). Live-db, gated like the handoff tests.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping live-db test: DATABASE_URL is not set");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect to scratch DATABASE_URL");
+        let store = PgSessionStore::new(pool.clone());
+        let row = |key: Option<String>| SessionRow {
+            key,
+            session_data: "signed-data".to_string(),
+            expire_date_unix: 4_100_000_000,
+            user_id: None,
+            device_info: None,
+        };
+        // Missing row under an existing key: error, and nothing inserted.
+        let missing = format!("pidash1304-missing-{}", now_unix());
+        let before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key = $1")
+                .bind(&missing)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(before, 0);
+        assert!(store.save(row(Some(missing.clone()))).await.is_err());
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE session_key = $1")
+            .bind(&missing)
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(after, 0);
+        // Positive control: keyless save inserts, keyed save updates.
+        let key = store.save(row(None)).await.expect("insert");
+        let again = store.save(row(Some(key.clone()))).await.expect("update");
+        assert_eq!(again, key);
+        sqlx::query("DELETE FROM sessions WHERE session_key = $1")
+            .bind(&key)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
     }
 }
