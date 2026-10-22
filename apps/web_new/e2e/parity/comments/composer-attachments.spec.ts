@@ -17,14 +17,16 @@ const ROWS = ["CMT-009", "CMT-010"];
 test.setTimeout(600_000);
 const uploadFile = fileURLToPath(new URL("./composer-upload.png", import.meta.url));
 
-// Oracle truth for NEWFRONT-145: a failed attachment upload surfaces NO
-// notice at all and leaves a stuck 0%-progress image node in the draft;
-// submit usually re-arms, but intermittently stays disabled until reload
-// (flaky even holding the steps fixed, so only the stable half — silent,
-// draft kept — is asserted). Intended per CMT-009/CMT-010: failed uploads
-// report an error without losing the draft; every upload resolves in
-// exactly one visible notice of the matching kind. Locked here so the fix
-// has a regression test.
+// Oracle truth for NEWFRONT-145: on the old app a failed attachment
+// upload surfaces NO notice at all and leaves a stuck 0%-progress image
+// node in the draft; submit usually re-arms, but intermittently stays
+// disabled until reload (flaky even holding the steps fixed, so only the
+// stable half — silent, draft kept — is asserted on that leg). Intended
+// per CMT-009/CMT-010: failed uploads report an error without losing the
+// draft; every upload resolves in exactly one visible notice of the
+// matching kind. The new-app leg (CMT-010, NEWFRONT-817) asserts the
+// fixed behavior: exactly one error notice, the draft text intact, and a
+// usable submit. The stuck-node half of the draft is NEWFRONT-812's.
 test(
   specTitle(ROWS, "bug: failed attachment upload stays silent without losing the draft (NEWFRONT-145)"),
   { tag: specTags(ROWS) },
@@ -43,14 +45,43 @@ test(
       });
       const draft = `composer upload keeps draft ${Date.now()}`;
       await driver.composerType(draft);
-      await driver.composerAttachFile(uploadFile);
-      // Give the upload chain time to settle, then assert the stable oracle
-      // outcome: the upload was attempted, still no notice (success or
-      // error), and the draft text is intact.
-      await page.waitForTimeout(8_000);
-      expect(uploadAttempts).toBeGreaterThan(0);
-      expect(await driver.composerVisibleNotices()).toEqual([]);
-      expect(await driver.composerDraftText()).toContain(draft);
+      if (driver.target === "web_new") {
+        // Toasts dismiss within seconds, so the error notice is sampled
+        // while the upload runs; anything already visible before the
+        // attach is excluded by message.
+        const before = new Set((await driver.composerVisibleNotices()).map((notice) => notice.message));
+        const seen = new Map<string, { message: string; kind: string }>();
+        let stop = false;
+        const sampler = (async () => {
+          while (!stop) {
+            const current = await driver.composerVisibleNotices();
+            for (const notice of current) {
+              if (!seen.has(notice.message)) seen.set(notice.message, notice);
+            }
+            await page.waitForTimeout(200);
+          }
+        })();
+        await driver.composerAttachFile(uploadFile);
+        // Let a trailing toast land after the upload settles.
+        await page.waitForTimeout(3_000);
+        stop = true;
+        await sampler;
+        const added = [...seen.values()].filter((notice) => !before.has(notice.message));
+        expect(uploadAttempts).toBeGreaterThan(0);
+        expect(added).toHaveLength(1);
+        expect(added[0]).toMatchObject({ kind: "error" });
+        expect(await driver.composerDraftText()).toContain(draft);
+        await expect.poll(() => driver.composerSubmitDisabled(), { timeout: 30_000 }).toBe(false);
+      } else {
+        await driver.composerAttachFile(uploadFile);
+        // Give the upload chain time to settle, then assert the stable oracle
+        // outcome: the upload was attempted, still no notice (success or
+        // error), and the draft text is intact.
+        await page.waitForTimeout(8_000);
+        expect(uploadAttempts).toBeGreaterThan(0);
+        expect(await driver.composerVisibleNotices()).toEqual([]);
+        expect(await driver.composerDraftText()).toContain(draft);
+      }
       await page.unroute("**/api/assets/v2/**");
     });
   }

@@ -208,6 +208,20 @@ describe("useToggleIssueReaction", () => {
     await result.current.mutateAsync({ code: "128077", action: "remove" }).catch(() => undefined);
     expect(notifyError).toHaveBeenCalledWith(REACTION_REMOVE_FAILED_TITLE, "server fell over");
   });
+
+  it("refuses a duplicate add with one failure notice and re-reads the list", async () => {
+    stubClient(() => ({ status: 400, body: { error: "The payload is not valid" } }));
+    const { queryClient, wrapper } = harness();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useToggleIssueReaction(SCOPE), { wrapper });
+    await result.current.mutateAsync({ code: "128077", action: "add" }).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(REACTION_CREATE_FAILED_TITLE, "The payload is not valid");
+    expect(notifySuccess).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.reactions(SLUG, PROJECT, ISSUE) })
+    );
+  });
 });
 
 describe("useToggleCommentReaction", () => {
@@ -237,6 +251,20 @@ describe("useToggleCommentReaction", () => {
     const { result } = renderHook(() => useToggleCommentReaction(SCOPE, COMMENT), { wrapper });
     await result.current.mutateAsync({ code: "zzz", action: "add" }).catch(() => undefined);
     expect(notifyError).toHaveBeenCalledWith(REACTION_CREATE_FAILED_TITLE, "Bad reaction.");
+  });
+
+  it("refuses a duplicate add with one failure notice and re-reads the list", async () => {
+    stubClient(() => ({ status: 400, body: { error: "Reaction already exists for the user" } }));
+    const { queryClient, wrapper } = harness();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => useToggleCommentReaction(SCOPE, COMMENT), { wrapper });
+    await result.current.mutateAsync({ code: "127881", action: "add" }).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(REACTION_CREATE_FAILED_TITLE, "Reaction already exists for the user");
+    expect(notifySuccess).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.commentReactions(SLUG, PROJECT, COMMENT) })
+    );
   });
 });
 

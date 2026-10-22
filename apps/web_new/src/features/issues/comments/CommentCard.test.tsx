@@ -316,6 +316,61 @@ describe("CommentCard", () => {
     expect(screen.getByText("Hello", { exact: false })).toBeInTheDocument();
   });
 
+  it("hides the reaction picker and cluster on an archived issue even with stored reactions", async () => {
+    const row = {
+      id: "723e4567-e89b-12d3-a456-426614174007",
+      actor: ADA,
+      comment: comment().id,
+      reaction: "127881",
+      display_name: "Ada L",
+      project: "323e4567-e89b-12d3-a456-426614174002",
+      workspace: "423e4567-e89b-12d3-a456-426614174003",
+      created_at: "2026-10-16T22:00:00Z",
+      updated_at: "2026-10-16T22:00:00Z",
+      created_by: ADA,
+      updated_by: null,
+      deleted_at: null,
+    };
+    const seen: string[] = [];
+    createAppClient("https://api.test", async (url: string) => {
+      seen.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => null },
+        text: async () =>
+          url.endsWith("/auth/get-csrf-token/")
+            ? JSON.stringify({ csrf_token: "x" })
+            : JSON.stringify(url.includes("/reactions/") ? [row] : []),
+      };
+    });
+    const view = render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { mutations: { retry: false } } })}>
+        <CommentCard
+          workspaceSlug="acme"
+          projectId="p-1"
+          comment={comment()}
+          viewerId={ADA}
+          readOnly
+          access={{ toggle: true, copyLink: true }}
+          onEdit={async () => undefined}
+          onDelete={() => undefined}
+          onToggleAccess={() => undefined}
+          onToggleFold={() => undefined}
+          onCopyLink={() => undefined}
+        />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByText("Hello", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Reactions on this comment" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add reaction" })).not.toBeInTheDocument();
+    // Give a mounted cluster a chance to read; none is mounted, so no
+    // reaction request goes out for a surface that would not be seen.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(seen.some((url) => url.includes("/reactions/"))).toBe(false);
+    view.unmount();
+  });
+
   it("renders the author avatar when the profile carries one", () => {
     const { view } = renderCard({
       comment: comment({

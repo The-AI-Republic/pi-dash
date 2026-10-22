@@ -225,6 +225,7 @@ describe("useUpdateComment", () => {
       commentId: COMMENT,
       patch: { comment_html: "<p>New</p>", labels: ["fold"] },
     });
+    expect(notifySuccess).toHaveBeenCalledTimes(1);
     expect(notifySuccess).toHaveBeenCalledWith(COMMENT_UPDATED_TITLE);
     expect(calls.some((call) => call.method === "PATCH" && call.url.includes(`/comments/${COMMENT}/`))).toBe(true);
     await waitFor(() =>
@@ -293,6 +294,24 @@ describe("useUpdateComment", () => {
     expect(commentFailureDetail(new Error(""))).toBe("Check your connection and try again.");
     expect(commentFailureDetail("not an error")).toBe("Check your connection and try again.");
   });
+
+  it("rolls a refused access switch back to the stored visibility with one notice", async () => {
+    const { queryClient, wrapper } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
+    stubClient(() => ({ status: 403, body: { error: "You don't have the required permissions." } }));
+    const { result } = renderHook(() => useUpdateComment(SCOPE, COMMENT_UPDATE_FAILED_TITLE, COMMENT_UPDATED_TITLE), {
+      wrapper,
+    });
+    await result.current.mutateAsync({ commentId: COMMENT, patch: accessPatch(comment()) }).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(COMMENT_UPDATE_FAILED_TITLE, "You don't have the required permissions.");
+    expect(notifySuccess).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE))?.[0]?.access).toBe(
+        "INTERNAL"
+      )
+    );
+  });
 });
 
 describe("useDeleteComment", () => {
@@ -305,6 +324,7 @@ describe("useDeleteComment", () => {
     const { calls } = stubClient(() => ({ status: 204, body: "" }));
     const { result } = renderHook(() => useDeleteComment(SCOPE), { wrapper });
     await result.current.mutateAsync(COMMENT);
+    expect(notifySuccess).toHaveBeenCalledTimes(1);
     expect(notifySuccess).toHaveBeenCalledWith(COMMENT_REMOVED_TITLE);
     expect(calls.some((call) => call.method === "DELETE" && call.url.includes(`/comments/${COMMENT}/`))).toBe(true);
     await waitFor(() =>
@@ -335,7 +355,9 @@ describe("useCreateComment", () => {
     );
     const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
     await result.current.mutateAsync({ html: "<p>Hi</p>", access: "EXTERNAL", assetIds: ["asset-1"] });
+    expect(notifySuccess).toHaveBeenCalledTimes(1);
     expect(notifySuccess).toHaveBeenCalledWith(COMMENT_CREATED_TITLE);
+    expect(notifyError).not.toHaveBeenCalled();
     const post = calls.find((call) => call.method === "POST" && call.url.endsWith("/comments/"));
     expect(JSON.parse(post?.body ?? "{}")).toEqual({ comment_html: "<p>Hi</p>", access: "EXTERNAL" });
     const bulk = calls.find((call) => call.url.includes("/bulk/"));
@@ -368,6 +390,11 @@ describe("useCreateComment", () => {
       result.current.mutateAsync({ html: "<p>Hi</p>", access: "INTERNAL", assetIds: ["asset-1"] })
     ).resolves.toBeTruthy();
     expect(notifyError).toHaveBeenCalledWith("Couldn't finish the comment upload", "Asset missing");
+    // The attach error rides beside the single create notice; the create
+    // itself is never toasted twice for one post.
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifySuccess).toHaveBeenCalledTimes(1);
+    expect(notifySuccess).toHaveBeenCalledWith(COMMENT_CREATED_TITLE);
   });
 
   it("notices when the create itself is refused", async () => {
@@ -375,6 +402,7 @@ describe("useCreateComment", () => {
     const { wrapper } = harness();
     const { result } = renderHook(() => useCreateComment(SCOPE), { wrapper });
     await result.current.mutateAsync({ html: "", access: "INTERNAL" }).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
     expect(notifyError).toHaveBeenCalledWith(COMMENT_CREATE_FAILED_TITLE, "Invalid HTML passed");
   });
 });
@@ -413,6 +441,7 @@ describe("useUploadCommentImage", () => {
     await result.current
       .mutateAsync({ file: new File(["x"], "shot.svg", { type: "image/svg+xml" }) })
       .catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
     expect(notifyError).toHaveBeenCalledWith(COMMENT_IMAGE_UPLOAD_FAILED_TITLE, "Invalid file type.");
   });
 });
