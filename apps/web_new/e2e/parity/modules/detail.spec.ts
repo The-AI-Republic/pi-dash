@@ -528,7 +528,7 @@ test.describe("module detail on desktop", () => {
   test(
     specTitle(
       ["MOD-029", "MOD-031", "MOD-033"],
-      "bug: NEWFRONT-334 guests land on the missing-module state though the module exists"
+      "guests read the detail page with every control disabled (NEWFRONT-334)"
     ),
     { tag: specTags(["MOD-029", "MOD-031", "MOD-033"]) },
     async ({ driver, seed }) => {
@@ -536,50 +536,90 @@ test.describe("module detail on desktop", () => {
       const guest = requireGuest(seed);
       const session = await signInSession(seed.email, seed.password);
       const guestSession = await signInSession(guest.email, guest.password);
-      const projectId = await createModuleProject(seed, `${tag} project`, session);
+      const projectName = `${tag} project`;
+      const projectId = await createModuleProject(seed, projectName, session);
       const moduleName = `${tag} module`;
       const moduleId = await serverCreateModule(seed.workspaceSlug, projectId, moduleName, session);
+      const otherName = `${tag} other`;
+      const otherId = await serverCreateModule(seed.workspaceSlug, projectId, otherName, session);
       const issueId = await serverCreateIssue(seed.workspaceSlug, projectId, session, `${tag} issue`);
       await serverAddIssuesToModule(seed.workspaceSlug, projectId, moduleId, [issueId], session);
       await serverEnsureProjectGuest(seed.workspaceSlug, projectId, guest.email, session);
       try {
-        await test.step("the server refuses the guest's detail and item reads", async () => {
+        await test.step("the server answers the guest's detail and item reads", async () => {
           const base = parityApiBase();
           const detail = await serverRequestStatus(
             "GET",
             `${base}/api/workspaces/${seed.workspaceSlug}/projects/${projectId}/modules/${moduleId}/`,
             guestSession
           );
-          expect(detail.status).toBe(403);
+          expect(detail.status).toBe(200);
           const issues = await serverRequestStatus(
             "GET",
             `${base}/api/workspaces/${seed.workspaceSlug}/projects/${projectId}/modules/${moduleId}/issues/`,
             guestSession
           );
-          expect(issues.status).toBe(403);
+          expect(issues.status).toBe(200);
           const list = await serverRequestStatus(
             "GET",
             `${base}/api/workspaces/${seed.workspaceSlug}/projects/${projectId}/modules/`,
             guestSession
           );
           expect(list.status).toBe(200);
+          // The fixture issue belongs to a member, so the default guest
+          // flag scopes the guest's item read to nothing (NEWFRONT-334).
+          expect(await serverModuleIssueIds(seed.workspaceSlug, projectId, moduleId, guestSession)).toEqual([]);
+          expect(await serverModuleIssueIds(seed.workspaceSlug, projectId, moduleId, session)).toEqual([issueId]);
         });
 
-        await test.step("the guest lands on the missing-module state with a way back", async () => {
-          // The sidebar paints briefly from list-hydrated store data, so
-          // only the settled state is pinned: the error empty state.
-          await driver.openAuthenticated(
-            `/${seed.workspaceSlug}/projects/${projectId}/modules/${moduleId}`,
-            sessionBrowserCookies(guestSession)
-          );
+        await test.step("the guest sees the frame without the error state", async () => {
+          await openDetail(driver, seed, projectId, moduleId, moduleName, guestSession);
+          expect(await driver.modulesDetailUnknownTitle()).toBe(null);
+          const crumbs = await driver.modulesDetailCrumbs();
+          expect(crumbs).toContain(projectName);
+          expect(crumbs).toContain("Modules");
+          expect(crumbs).toContain(moduleName);
           await expect
-            .poll(() => driver.modulesDetailUnknownTitle(), { timeout: 120_000 })
-            .toBe("Module does not exist");
-          expect(await driver.modulesDetailSidebarName()).toBe(null);
-          await driver.modulesDetailUnknownBack();
+            .poll(() => driver.modulesDetailPageTitle(), { timeout: 60_000 })
+            .toBe(`${projectName} - ${moduleName}`);
+          // The badge counts loaded items, so the scoped-empty list hides
+          // it; settle on the empty state first so the read never races
+          // the fetch.
+          await expect
+            .poll(() => driver.layoutsEmptyTitle(), { timeout: 120_000 })
+            .toBe("No work items to show in this Module");
+          await expect.poll(() => driver.modulesDetailBadgeText(), { timeout: 30_000 }).toBe(null);
+        });
+
+        await test.step("the empty list offers only disabled actions", async () => {
+          expect(await driver.layoutsEmptyActions()).toEqual([
+            { label: "Create work item", disabled: true },
+            { label: "Add existing work item", disabled: true },
+          ]);
+          expect(await driver.modulesDetailHeaderAddVisible()).toBe(false);
+        });
+
+        await test.step("the sidebar reads but cannot edit", async () => {
+          expect(await driver.modulesDetailSidebarName()).toBe(moduleName);
+          expect(await driver.modulesDetailSidebarStatus()).not.toBe(null);
+          expect(await driver.modulesDetailSidebarStatusDisabled()).toBe(true);
+          expect(await driver.modulesDetailSidebarDateDisabled()).toBe(true);
+          expect(await driver.modulesDetailSidebarLeadDisabled()).toBe(true);
+          expect(await driver.modulesDetailSidebarMembersDisabled()).toBe(true);
+        });
+
+        await test.step("the switcher jumps without leaving", async () => {
+          await driver.modulesDetailSwitcherOpen();
+          const options = await driver.modulesDetailSwitcherOptions();
+          expect(options).toContain(moduleName);
+          expect(options).toContain(otherName);
+          await driver.modulesDetailSwitcherSearch(otherName);
+          await expect.poll(() => driver.modulesDetailSwitcherOptions(), { timeout: 30_000 }).toEqual([otherName]);
+          await driver.modulesDetailSwitcherPick(otherName);
           await expect
             .poll(() => currentPathClean(driver), { timeout: 30_000 })
-            .toBe(`/${seed.workspaceSlug}/projects/${projectId}/modules`);
+            .toBe(`/${seed.workspaceSlug}/projects/${projectId}/modules/${otherId}`);
+          await expect.poll(() => driver.modulesDetailSidebarName(), { timeout: 120_000 }).toBe(otherName);
         });
       } finally {
         await serverCleanupProject(seed.workspaceSlug, projectId, session);
@@ -869,9 +909,9 @@ test.describe("module detail on desktop", () => {
     specTitle(["MOD-033"], "fields disable on archived modules; loader shows while fetching"),
     { tag: specTags(["MOD-033"]) },
     async ({ driver, seed }) => {
-      // Guest disabling is unreachable live: guests are refused the
-      // detail read itself (bug NEWFRONT-334, pinned above), so the
-      // archived branch carries the disabled proof.
+      // The guest scenario above pins guest-disabled fields on the live
+      // detail page (NEWFRONT-334); the archived branch below carries the
+      // archived-disabled proof.
       const tag = `NF310 disabled ${Date.now()}`;
       const session = await signInSession(seed.email, seed.password);
       const projectId = await createModuleProject(seed, `${tag} project`, session);
@@ -1449,8 +1489,8 @@ test.describe("module detail on small screens", () => {
     specTitle(["MOD-032"], "small screens open analytics from the bar"),
     { tag: specTags(["MOD-032"]) },
     async ({ driver, seed }) => {
-      // Guests never reach the bar: they are refused the detail read
-      // itself (bug NEWFRONT-334, pinned on desktop above).
+      // This test pins the member leg; guests on small screens are not
+      // exercised here (desktop guest legs live in the scenario above).
       const tag = `NF310 mobileanalytics ${Date.now()}`;
       const session = await signInSession(seed.email, seed.password);
       const projectId = await createModuleProject(seed, `${tag} project`, session);
