@@ -84,7 +84,8 @@ pub fn sweep_context_select() -> String {
 /// How one stale row settled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleOutcome {
-    /// Context gone (terminal already, or row vanished): skipped, uncounted
+    /// Context gone (terminal already, or row vanished) — or a concurrent
+    /// terminal write won the guarded fail: skipped, uncounted
     /// (`tasks.py:521-523`, `continue`).
     Skipped,
     /// Failed with `turn_timeout` (`tasks.py:524-525`): counted.
@@ -92,6 +93,7 @@ pub enum StaleOutcome {
 }
 
 /// Store boundary for the sweep: list stale ids, load each context, fail it.
+/// The fail reports whether its guarded write won the row.
 pub trait SweepStore: Send + Sync {
     fn stale_turn_ids(
         &self,
@@ -106,12 +108,13 @@ pub trait SweepStore: Send + Sync {
         ctx: &TurnContext,
         code: &str,
         detail: &str,
-    ) -> impl std::future::Future<Output = Result<(), SeamError>> + Send;
+    ) -> impl std::future::Future<Output = Result<bool, SeamError>> + Send;
 }
 
 /// Fail every stale turn (`tasks.py:511-526`): per-row load, skip when the
-/// context is gone, else `_fail_turn("turn_timeout", …)`. Returns the failed
-/// count.
+/// context is gone, else `_fail_turn("turn_timeout", …)`. A lost guard race
+/// (the turn went terminal concurrently) skips like a gone context.
+/// Returns the failed count.
 pub async fn drive_sweep<S: SweepStore>(
     store: &S,
     now: &DateTime<Utc>,
@@ -124,11 +127,15 @@ pub async fn drive_sweep<S: SweepStore>(
         match store.load_context(turn_id).await? {
             None => outcomes.push((turn_id, StaleOutcome::Skipped)),
             Some(ctx) => {
-                store
+                if store
                     .fail_turn(&ctx, CODE_TURN_TIMEOUT, SWEEP_TIMEOUT_DETAIL)
-                    .await?;
-                count += 1;
-                outcomes.push((turn_id, StaleOutcome::Failed));
+                    .await?
+                {
+                    count += 1;
+                    outcomes.push((turn_id, StaleOutcome::Failed));
+                } else {
+                    outcomes.push((turn_id, StaleOutcome::Skipped));
+                }
             }
         }
     }
@@ -191,7 +198,7 @@ impl SweepStore for LiveSweepStore {
         ctx: &TurnContext,
         code: &str,
         detail: &str,
-    ) -> Result<(), SeamError> {
+    ) -> Result<bool, SeamError> {
         use super::run_turn as rt;
         let code = rt::truncate_code(code).to_owned();
         let detail = rt::truncate_detail(detail).to_owned();
@@ -211,13 +218,20 @@ impl SweepStore for LiveSweepStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| SeamError(e.to_string()))?;
-        sqlx::query(&rt::fail_turn_update())
+        let won = sqlx::query(&rt::fail_turn_update())
             .bind(ctx.turn_id)
             .bind(&code)
             .bind(&detail)
             .execute(&mut *tx)
             .await
-            .map_err(|e| SeamError(e.to_string()))?;
+            .map_err(|e| SeamError(e.to_string()))?
+            .rows_affected();
+        if won == 0 {
+            // The turn left `running` between the sweep's load and its lock
+            // (a concurrent terminal write won): roll back and emit nothing,
+            // so the sweep never writes a second terminal event.
+            return Ok(false);
+        }
         sqlx::query(&rt::finalize_open_rows_update())
             .bind(ctx.turn_id)
             .bind(MSG_FAILED)
@@ -273,7 +287,7 @@ impl SweepStore for LiveSweepStore {
             .await
             .map_err(|e| SeamError(e.to_string()))?;
         tx.commit().await.map_err(|e| SeamError(e.to_string()))?;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -311,6 +325,7 @@ mod tests {
         stale: Vec<Uuid>,
         contexts: Mutex<std::collections::HashMap<Uuid, TurnContext>>,
         failed: Mutex<Vec<(Uuid, String, String)>>,
+        win: bool,
     }
 
     fn ctx(id: Uuid) -> TurnContext {
@@ -341,12 +356,12 @@ mod tests {
             c: &TurnContext,
             code: &str,
             detail: &str,
-        ) -> Result<(), SeamError> {
+        ) -> Result<bool, SeamError> {
             self.failed
                 .lock()
                 .unwrap()
                 .push((c.turn_id, code.to_owned(), detail.to_owned()));
-            Ok(())
+            Ok(self.win)
         }
     }
 
@@ -386,6 +401,7 @@ mod tests {
             stale: vec![live, gone],
             contexts: Mutex::new([(live, ctx(live))].into_iter().collect()),
             failed: Mutex::new(Vec::new()),
+            win: true,
         };
         let now = Utc::now();
         let (count, outcomes) = drive_sweep(&store, &now).await.unwrap();
@@ -402,6 +418,23 @@ mod tests {
                 SWEEP_TIMEOUT_DETAIL.to_owned()
             )]
         );
+    }
+
+    /// A lost guard race (the turn went terminal between the sweep's load
+    /// and its fail) skips like a gone context: uncounted, no failure.
+    #[tokio::test]
+    async fn sweep_lost_guard_race_skips_uncounted() {
+        let raced = Uuid::new_v4();
+        let store = FakeStore {
+            stale: vec![raced],
+            contexts: Mutex::new([(raced, ctx(raced))].into_iter().collect()),
+            failed: Mutex::new(Vec::new()),
+            win: false,
+        };
+        let now = Utc::now();
+        let (count, outcomes) = drive_sweep(&store, &now).await.unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(outcomes, vec![(raced, StaleOutcome::Skipped)]);
     }
 
     #[test]

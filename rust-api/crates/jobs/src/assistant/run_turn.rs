@@ -52,9 +52,12 @@
 //!   [`RUN_TURN_TASK`] + [`register_turn_handler`]. Celery retries are
 //!   disabled for the turn task, so the handler returns [`Verdict::Ack`] or
 //!   [`Verdict::Fail`] — never `Retry`. The `SoftTimeLimitExceeded` arm
-//!   (`:486-489`) has no equivalent here: signal-based timeout enforcement
-//!   belongs to the worker loop, and a killed turn is recovered by the sweep
-//!   like any other crashed turn.
+//!   (`:486-489`) is the stream-phase deadline in [`drive_turn`]: past
+//!   [`TURN_SOFT_LIMIT_SECS`] the stream drops (aborting the agent), the
+//!   open row fails, and the turn fails with `turn_timeout`. There is no
+//!   hard-kill equivalent — a timed-out turn ends in its fail write, and
+//!   anything still `RUNNING` past 390s is recovered by the sweep like any
+//!   other crashed turn.
 //! - `_close_turn_connection` (`:494-508`) has no equivalent: it releases the
 //!   worker's thread-local Django connection, and `sqlx` pooling (plus the
 //!   seam owning its own pool handle) needs no turn-end release.
@@ -70,6 +73,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use sea_query::{Expr, JoinType, Order, PostgresQueryBuilder, Query};
 use serde::{Deserialize, Serialize};
@@ -227,6 +231,8 @@ pub const DETAIL_MODEL_INVALID: &str =
     "The configured model name was not accepted by the provider.";
 /// User-facing details, verbatim (`tasks.py:469-480`).
 pub const DETAIL_INTERNAL: &str = "The assistant hit an unexpected error.";
+/// Soft-time-limit detail, verbatim (`tasks.py:489`).
+pub const DETAIL_TURN_TIMEOUT: &str = "The assistant took too long to respond.";
 
 /// Classify an untyped provider failure: the text fallback of
 /// `_classify_error` (`tasks.py:454-480`).
@@ -635,11 +641,16 @@ pub fn lock_turn_select() -> String {
 }
 
 /// Terminal complete write (`tasks.py:157-166`): status + model_messages +
-/// usage + model_used (or "") + completed_at.
+/// usage + model_used (or "") + completed_at. The `AND status = 'running'`
+/// guard has no Python equivalent (`tasks.py` overwrites unconditionally):
+/// Python's hard kill at 330s keeps a live turn and the 390s sweep mutually
+/// exclusive, while Rust relies on the guard so a swept turn can never flip
+/// back to completed. Callers skip the event/row writes when 0 rows match.
 pub fn complete_turn_update() -> String {
     format!(
         "UPDATE {TABLE_TURN} SET status = '{TURN_COMPLETED}', model_messages = $2, \
-         usage = $3, model_used = $4, completed_at = NOW() WHERE id = $1"
+         usage = $3, model_used = $4, completed_at = NOW() WHERE id = $1 \
+         AND status = '{TURN_RUNNING}'"
     )
 }
 
@@ -655,19 +666,23 @@ pub fn clear_active_turn_update() -> String {
 /// Terminal fail write (`tasks.py:181-188`): status plus truncated
 /// code/detail plus `completed_at`. Truncation happens in
 /// [`truncate_code`]/[`truncate_detail`] before binding, never in SQL,
-/// because the Python slices count code points.
+/// because the Python slices count code points. Guarded on `running` like
+/// [`complete_turn_update`]: only the first terminal writer owns the row.
 pub fn fail_turn_update() -> String {
     format!(
         "UPDATE {TABLE_TURN} SET status = '{TURN_FAILED}', error_code = $2, \
-         error_detail = $3, completed_at = NOW() WHERE id = $1"
+         error_detail = $3, completed_at = NOW() WHERE id = $1 \
+         AND status = '{TURN_RUNNING}'"
     )
 }
 
 /// Terminal cancel write (`tasks.py:204-209`): status + completed_at only —
-/// no error columns, unlike the fail path.
+/// no error columns, unlike the fail path. Guarded on `running` like
+/// [`complete_turn_update`]: only the first terminal writer owns the row.
 pub fn cancel_turn_update() -> String {
     format!(
-        "UPDATE {TABLE_TURN} SET status = '{TURN_CANCELLED}', completed_at = NOW() WHERE id = $1"
+        "UPDATE {TABLE_TURN} SET status = '{TURN_CANCELLED}', completed_at = NOW() WHERE id = $1 \
+         AND status = '{TURN_RUNNING}'"
     )
 }
 
@@ -943,7 +958,28 @@ pub enum DriveResult {
 /// report on every exit → terminal write. The runtime-failure report runs on
 /// the success path too (`tasks.py:363`): a turn that survived a dying tool
 /// server is exactly when the user must hear about it.
+///
+/// The stream phase runs under the soft-limit deadline
+/// ([`TURN_SOFT_LIMIT_SECS`] from drive start, like Celery counting from
+/// task start): past it the stream drops (aborting the agent), the open row
+/// fails, and the turn fails with `turn_timeout` — the
+/// `SoftTimeLimitExceeded` arm (`tasks.py:486-489`).
 pub async fn drive_turn<S: TurnSeam>(seam: &S, turn_id: Uuid) -> Result<DriveResult, SeamError> {
+    drive_turn_with_deadline(
+        seam,
+        turn_id,
+        tokio::time::Instant::now() + Duration::from_secs(TURN_SOFT_LIMIT_SECS),
+    )
+    .await
+}
+
+/// [`drive_turn`] with an explicit stream-phase deadline (the production
+/// deadline is `now + TURN_SOFT_LIMIT_SECS`; tests pass a near one).
+pub async fn drive_turn_with_deadline<S: TurnSeam>(
+    seam: &S,
+    turn_id: Uuid,
+    deadline: tokio::time::Instant,
+) -> Result<DriveResult, SeamError> {
     let ctx = match seam.load_context(turn_id).await? {
         Some(ctx) => ctx,
         None => return Ok(DriveResult::Noop),
@@ -973,23 +1009,39 @@ pub async fn drive_turn<S: TurnSeam>(seam: &S, turn_id: Uuid) -> Result<DriveRes
     let model_label = seam.model_label(&ctx).await?;
 
     let mut open_row: Option<Uuid> = None;
-    let mut stream = match seam.open_stream(&ctx, &history, &toolsets).await {
-        Ok(stream) => stream,
-        Err(err) => {
+    let mut sink = StreamSink::new();
+    let mut stream = match tokio::time::timeout_at(
+        deadline,
+        seam.open_stream(&ctx, &history, &toolsets),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
             return stream_failed(seam, &ctx, &toolsets, None, &mut open_row, err).await;
         }
+        // No stream exists yet, so there is nothing to drop; the sink is
+        // fresh, so no row is open — just fail the turn.
+        Err(_) => return soft_limit_expired(seam, &ctx, &mut sink, &mut open_row).await,
     };
 
-    let mut sink = StreamSink::new();
     loop {
-        let item = match seam.next_event(&mut stream).await {
-            Ok(Some(item)) => item,
-            Ok(None) => break,
-            Err(err) => {
+        let item = match tokio::time::timeout_at(deadline, seam.next_event(&mut stream)).await {
+            Ok(Ok(Some(item))) => item,
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => {
                 // `streamer.fail_open_row(FAILED)` (`tasks.py:353,358`):
                 // close the open row through the tracked id, then fail.
                 let fail_action = sink.fail_open(MSG_FAILED);
                 return stream_failed(seam, &ctx, &toolsets, fail_action, &mut open_row, err).await;
+            }
+            Err(_) => {
+                // Soft limit (`tasks.py:486-489`): drop the stream — for the
+                // live seam this aborts the agent task — then fail the open
+                // row and the turn. No runtime-failure report: the Python
+                // arm raises out of `_run_turn` past it.
+                drop(stream);
+                return soft_limit_expired(seam, &ctx, &mut sink, &mut open_row).await;
             }
         };
         // The cancel check runs only when an event is delivered, never on
@@ -1056,6 +1108,27 @@ async fn stream_failed<S: TurnSeam>(
     };
     seam.fail_turn(ctx, &code, &detail).await?;
     Ok(DriveResult::Failed { code, detail })
+}
+
+/// Soft-limit exit (`tasks.py:486-489`, `SoftTimeLimitExceeded`): fail the
+/// open row when one is open, then fail the turn with `turn_timeout`. The
+/// caller already dropped the stream. Deliberately no runtime-failure
+/// report — the Python arm bypasses `_report_runtime_tool_failures`.
+async fn soft_limit_expired<S: TurnSeam>(
+    seam: &S,
+    ctx: &TurnContext,
+    sink: &mut StreamSink,
+    open_row: &mut Option<Uuid>,
+) -> Result<DriveResult, SeamError> {
+    if let Some(action) = sink.fail_open(MSG_FAILED) {
+        perform(seam, ctx, open_row, &action).await?;
+    }
+    seam.fail_turn(ctx, CODE_TURN_TIMEOUT, DETAIL_TURN_TIMEOUT)
+        .await?;
+    Ok(DriveResult::Failed {
+        code: CODE_TURN_TIMEOUT.to_owned(),
+        detail: DETAIL_TURN_TIMEOUT.to_owned(),
+    })
 }
 
 /// Report runtime tool failures, emitting only when non-empty
@@ -1458,6 +1531,35 @@ mod tests {
         assert!(prune.contains("assistant_event") && prune.contains("'assistant_delta'"));
     }
 
+    /// Terminal writes are guarded on `running` (PIDASHCONV-1253): a swept
+    /// turn can never flip back. Python overwrites unconditionally — safe
+    /// there because its hard kill precedes the sweep — so the guard is a
+    /// no-op on every Python-reachable path.
+    #[test]
+    fn terminal_updates_guard_running() {
+        for sql in [
+            complete_turn_update(),
+            fail_turn_update(),
+            cancel_turn_update(),
+        ] {
+            assert!(
+                sql.contains("AND status = 'running'"),
+                "guarded terminal write: {sql}"
+            );
+        }
+    }
+
+    /// The soft-limit (code, detail) pair is Django's verbatim
+    /// (`tasks.py:489`); the contract test pins it live on both backends.
+    #[test]
+    fn turn_timeout_code_and_detail_verbatim() {
+        assert_eq!(CODE_TURN_TIMEOUT, "turn_timeout");
+        assert_eq!(
+            DETAIL_TURN_TIMEOUT,
+            "The assistant took too long to respond."
+        );
+    }
+
     #[test]
     fn wire_arg_parsing() {
         let good = Uuid::new_v4();
@@ -1511,7 +1613,9 @@ mod tests {
 
     /// Scripted seam: canned answers, recorded calls. The script drives the
     /// agent stream; `cancel_after` flips `is_cancelled` after that many
-    /// successful `next_event` pulls.
+    /// successful `next_event` pulls. `open_delay` stalls `open_stream`;
+    /// `stall_at_pull` stalls that 1-based `next_event` pull for `stall_for`
+    /// (soft-limit tests).
     struct FakeSeam {
         ctx: Option<TurnContext>,
         claim: bool,
@@ -1520,6 +1624,9 @@ mod tests {
         runtime_failed: Vec<SkippedServer>,
         script: Mutex<VecDeque<Result<Option<StreamItem>, AgentError>>>,
         open_err: Option<AgentError>,
+        open_delay: Option<Duration>,
+        stall_at_pull: Option<usize>,
+        stall_for: Duration,
         cancel_after: Option<usize>,
         pulls: Mutex<usize>,
         usage: Option<TurnUsage>,
@@ -1537,6 +1644,9 @@ mod tests {
                 runtime_failed: Vec::new(),
                 script: Mutex::new(script.into_iter().map(Ok).map(|r| r.map(Some)).collect()),
                 open_err: None,
+                open_delay: None,
+                stall_at_pull: None,
+                stall_for: Duration::from_secs(5),
                 cancel_after: None,
                 pulls: Mutex::new(0),
                 usage: Some(TurnUsage {
@@ -1638,6 +1748,9 @@ mod tests {
             _t: &[ToolsetHandle],
         ) -> Result<FakeStream, AgentError> {
             self.log("open_stream".to_owned());
+            if let Some(delay) = self.open_delay {
+                tokio::time::sleep(delay).await;
+            }
             match &self.open_err {
                 Some(e) => Err(e.clone()),
                 None => Ok(FakeStream),
@@ -1645,6 +1758,10 @@ mod tests {
         }
         async fn next_event(&self, _s: &mut FakeStream) -> Result<Option<StreamItem>, AgentError> {
             *self.pulls.lock().unwrap() += 1;
+            let pulls = *self.pulls.lock().unwrap();
+            if self.stall_at_pull == Some(pulls) {
+                tokio::time::sleep(self.stall_for).await;
+            }
             self.script.lock().unwrap().pop_front().unwrap_or(Ok(None))
         }
         fn now_ms(&self) -> u64 {
@@ -1708,6 +1825,86 @@ mod tests {
             self.log("cancel_turn".to_owned());
             Ok(())
         }
+    }
+
+    /// Soft limit mid-stream (`tasks.py:486-489`, PIDASHCONV-1253): the
+    /// second pull stalls past the deadline, so the open row fails and the
+    /// turn fails with `turn_timeout` — no completion, and no
+    /// runtime-failure report (the Python arm bypasses it).
+    #[tokio::test]
+    async fn drive_soft_limit_mid_stream_fails_turn_timeout() {
+        let mut seam = FakeSeam::ok(vec![StreamItem::TextDelta {
+            chunk: "hi".to_owned(),
+        }]);
+        seam.stall_at_pull = Some(2);
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let out = drive_turn_with_deadline(&seam, Uuid::new_v4(), deadline)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_TURN_TIMEOUT.to_owned(),
+                detail: DETAIL_TURN_TIMEOUT.to_owned(),
+            }
+        );
+        let calls = seam.take_calls();
+        assert!(
+            calls.iter().any(|c| c.starts_with("start_row:")),
+            "the streamed row opened: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c == "finalize_row:failed:hi"),
+            "the open row failed: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c == "fail_turn:turn_timeout:The assistant took too long to respond."),
+            "the turn failed with turn_timeout: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("complete_turn")),
+            "never completes: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c == "runtime_failures"),
+            "no runtime-failure report on the timeout path: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("emit_skipped")),
+            "no skipped-servers emit on the timeout path: {calls:?}"
+        );
+    }
+
+    /// Soft limit while the stream is still opening: no row can be open, so
+    /// only the turn fails.
+    #[tokio::test]
+    async fn drive_soft_limit_during_open_fails_without_row() {
+        let mut seam = FakeSeam::ok(vec![]);
+        seam.open_delay = Some(Duration::from_secs(5));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let out = drive_turn_with_deadline(&seam, Uuid::new_v4(), deadline)
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            DriveResult::Failed {
+                code: CODE_TURN_TIMEOUT.to_owned(),
+                detail: DETAIL_TURN_TIMEOUT.to_owned(),
+            }
+        );
+        let calls = seam.take_calls();
+        assert!(calls.iter().any(|c| c == "open_stream"));
+        assert!(
+            !calls.iter().any(|c| c.starts_with("start_row")),
+            "no row opened: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|c| c.starts_with("fail_turn:")).count(),
+            1,
+            "exactly one fail: {calls:?}"
+        );
     }
 
     #[tokio::test]
