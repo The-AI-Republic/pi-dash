@@ -16,7 +16,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+        ("runner", "0031_runner_paused"),
     ]
 
     operations = [

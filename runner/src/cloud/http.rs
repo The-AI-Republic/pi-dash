@@ -1180,6 +1180,16 @@ pub struct PollStatus {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
+    // ----- activity-watchdog health -----
+    // Serialised whenever a run is in flight, independent of
+    // `agent_observability_v1`: health is lifecycle, not opt-in telemetry.
+    // Rides with the `observed_run_id` envelope so the cloud binds it to the
+    // right run and wipes it on run change. See `daemon::activity_watchdog`.
+    /// `"healthy"` or `"unhealthy"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_health: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_last_activity_at: Option<DateTime<Utc>>,
 }
 
 /// Wire-side wrapper used to express the three states of `observed_run_id`:
@@ -1242,6 +1252,8 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
+            agent_health: None,
+            agent_last_activity_at: None,
         }
     }
 
@@ -1266,6 +1278,8 @@ impl PollStatus {
             tokens: None,
             model: None,
             turn_count: None,
+            agent_health: None,
+            agent_last_activity_at: None,
         }
     }
 
@@ -1297,6 +1311,22 @@ impl PollStatus {
         me.model = snapshot.model;
         me.turn_count = snapshot.turn_count;
         me
+    }
+
+    /// Attach the in-flight run's activity-watchdog health. Always binds the
+    /// `observed_run_id` envelope (an explicit null when idle) so the cloud
+    /// can scope the health to the run it describes.
+    pub fn with_agent_health(
+        mut self,
+        in_flight_run: Option<Uuid>,
+        report: crate::daemon::state::AgentHealthReport,
+    ) -> Self {
+        self.observed_run_id_envelope = PollStatusObservabilityFlag::Present(in_flight_run);
+        if in_flight_run.is_some() {
+            self.agent_health = Some(report.wire_label().to_string());
+            self.agent_last_activity_at = report.last_activity_at;
+        }
+        self
     }
 }
 
@@ -1703,12 +1733,17 @@ impl HttpLoop {
         let wire_status = *self.status_rx.borrow();
         let in_flight = *self.in_flight_rx.borrow();
         let status = match self.state.as_ref() {
-            Some(state) if state.agent_observability_v1() => {
-                let snapshot = state.observability_snapshot().await;
-                let approvals = state.approvals_pending_value().await;
-                PollStatus::from_state(wire_status, in_flight, true, snapshot, approvals)
+            Some(state) => {
+                let status = if state.agent_observability_v1() {
+                    let snapshot = state.observability_snapshot().await;
+                    let approvals = state.approvals_pending_value().await;
+                    PollStatus::from_state(wire_status, in_flight, true, snapshot, approvals)
+                } else {
+                    PollStatus::from_wire(wire_status, in_flight)
+                };
+                status.with_agent_health(in_flight, state.agent_health().await)
             }
-            _ => PollStatus::from_wire(wire_status, in_flight),
+            None => PollStatus::from_wire(wire_status, in_flight),
         };
         let resp = self
             .client
@@ -2643,5 +2678,45 @@ mod tests {
         );
         // Unreported breakdowns stay off the wire rather than as nulls.
         assert!(!tokens.contains_key("cache_write"));
+    }
+
+    #[test]
+    fn poll_status_reports_agent_health_with_observability_off() {
+        use crate::daemon::state::AgentHealthReport;
+        let rid = Uuid::new_v4();
+        let last = Utc::now();
+        let s = PollStatus::from_wire(WireStatus::Busy, Some(rid)).with_agent_health(
+            Some(rid),
+            AgentHealthReport {
+                last_activity_at: Some(last),
+                unhealthy: true,
+            },
+        );
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("observed_run_id"), Some(&serde_json::json!(rid)));
+        assert_eq!(
+            obj.get("agent_health"),
+            Some(&serde_json::json!("unhealthy"))
+        );
+        assert_eq!(
+            obj.get("agent_last_activity_at"),
+            Some(&serde_json::json!(last))
+        );
+        // Health does not drag the opt-in observability scalars along.
+        assert!(!obj.contains_key("last_event_at"));
+        assert!(!obj.contains_key("approvals_pending"));
+    }
+
+    #[test]
+    fn poll_status_idle_health_binds_null_run_and_omits_health() {
+        let s = PollStatus::from_wire(WireStatus::Idle, None)
+            .with_agent_health(None, crate::daemon::state::AgentHealthReport::default());
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        // Explicit null tells the cloud to drop the previous run's health.
+        assert_eq!(obj.get("observed_run_id"), Some(&serde_json::Value::Null));
+        assert!(!obj.contains_key("agent_health"));
+        assert!(!obj.contains_key("agent_last_activity_at"));
     }
 }

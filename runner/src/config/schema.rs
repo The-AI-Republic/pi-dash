@@ -70,6 +70,10 @@ pub struct DaemonConfig {
     /// See `.ai_design/runner_agent_bridge/design.md` §4.2.
     #[serde(default)]
     pub agent_observability_v1: bool,
+    /// Passive-kill activity watchdog for agent runs (`[daemon.agent_watchdog]`).
+    /// Missing section falls back to the 24h-unhealthy / 48h-kill defaults.
+    #[serde(default)]
+    pub agent_watchdog: AgentWatchdogConfig,
     /// Auto-update policy. When `true` (default), the daemon swaps the
     /// on-disk `pidash` binary in place whenever the cloud announces a
     /// newer `latest_runner_version` in the welcome frame. The running
@@ -93,6 +97,59 @@ fn default_retention_days() -> u32 {
     14
 }
 
+/// Thresholds for the supervisor's passive-kill activity watchdog.
+///
+/// A run is never killed for being quiet for a while: a live agent can sit
+/// silent for hours inside a long tool call (an integration suite, a
+/// migration), and the runner cannot tell that apart from a frozen agent.
+/// Provable deaths (the agent process exiting, a terminal agent error, the
+/// turn ending) are handled immediately elsewhere. These thresholds are only
+/// the backstop for a run that never proves itself dead:
+///
+/// - after `unhealthy_after_hours` with no agent event the run is reported
+///   unhealthy to the cloud, but keeps running;
+/// - after `kill_after_hours` with no agent event the run is failed.
+///
+/// Any agent event resets both clocks and clears the unhealthy mark.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentWatchdogConfig {
+    #[serde(default = "default_unhealthy_after_hours")]
+    pub unhealthy_after_hours: u64,
+    #[serde(default = "default_kill_after_hours")]
+    pub kill_after_hours: u64,
+}
+
+/// Upper bound on either watchdog threshold (one year). Far beyond any real
+/// run, and keeps `Instant + kill_after` well clear of overflow.
+pub const MAX_AGENT_WATCHDOG_HOURS: u64 = 24 * 365;
+
+fn default_unhealthy_after_hours() -> u64 {
+    24
+}
+
+fn default_kill_after_hours() -> u64 {
+    48
+}
+
+impl Default for AgentWatchdogConfig {
+    fn default() -> Self {
+        Self {
+            unhealthy_after_hours: default_unhealthy_after_hours(),
+            kill_after_hours: default_kill_after_hours(),
+        }
+    }
+}
+
+impl AgentWatchdogConfig {
+    pub fn unhealthy_after(self) -> Duration {
+        Duration::from_secs(self.unhealthy_after_hours.saturating_mul(3600))
+    }
+
+    pub fn kill_after(self) -> Duration {
+        Duration::from_secs(self.kill_after_hours.saturating_mul(3600))
+    }
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
@@ -101,6 +158,7 @@ impl Default for DaemonConfig {
             log_level: default_log_level(),
             log_retention_days: default_retention_days(),
             agent_observability_v1: false,
+            agent_watchdog: AgentWatchdogConfig::default(),
             auto_update: default_auto_update(),
         }
     }
@@ -269,43 +327,6 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
-    /// How long the supervisor's stall watchdog waits for a fresh
-    /// bridge event before declaring the agent stuck. Tuned per agent
-    /// because the protocols have very different "natural quiet"
-    /// envelopes:
-    ///
-    /// - **Codex** emits `codex/event/token_count` continuously while
-    ///   the model thinks, so prolonged silence is genuinely abnormal.
-    ///   5 minutes catches real stalls without false-positive on a
-    ///   long but live token stream.
-    /// - **Claude Code** can be silent for the full duration of a
-    ///   single tool call (e.g. a long `Bash` running tests or a
-    ///   build), and the stream-json transport doesn't expose
-    ///   intra-tool progress. 15 minutes accommodates real-world
-    ///   tool calls without hanging cancellation forever on a truly
-    ///   stuck process.
-    pub fn stall_timeout(self) -> Duration {
-        match self {
-            AgentKind::Codex => Duration::from_secs(5 * 60),
-            // Cursor Agent, like Claude Code, can be silent for the full
-            // duration of a single tool call (a long build or test run) with no
-            // intra-tool progress on the stream-json transport. Use the same
-            // 15-minute envelope so a live-but-quiet tool call isn't killed.
-            // OpenClaw (driven via acpx), like Cursor and Claude, can be silent
-            // for the full duration of a single tool call with no intra-tool
-            // progress on the ACP stream. Use the same 15-minute envelope.
-            // Grok, also driven over ACP, has the same quiet-tool-call profile.
-            // Muse Code (`muse exec`), like Cursor, is one-shot per turn and can
-            // be silent for the full duration of a single tool call; use the
-            // same 15-minute envelope.
-            AgentKind::ClaudeCode
-            | AgentKind::CursorAgent
-            | AgentKind::OpenClaw
-            | AgentKind::Grok
-            | AgentKind::MuseCode => Duration::from_secs(15 * 60),
-        }
-    }
-
     /// Kebab-case wire names of every agent kind this binary understands —
     /// exactly the spellings the machine-control `create_runner` path's
     /// `parse_agent_kind` accepts. Advertised on machine-session open so the
@@ -675,6 +696,17 @@ impl Config {
     /// hold the WS open before any runners have been added. The daemon
     /// stays connected and the user runs ``pidash runner add`` later.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let watchdog = self.daemon.agent_watchdog;
+        if watchdog.unhealthy_after_hours == 0
+            || watchdog.kill_after_hours < watchdog.unhealthy_after_hours
+            || watchdog.kill_after_hours > MAX_AGENT_WATCHDOG_HOURS
+        {
+            return Err(ConfigError::InvalidAgentWatchdog {
+                unhealthy_after_hours: watchdog.unhealthy_after_hours,
+                kill_after_hours: watchdog.kill_after_hours,
+            });
+        }
+
         if self.runners.len() > MAX_RUNNERS_PER_DAEMON {
             return Err(ConfigError::TooManyRunners {
                 count: self.runners.len(),
@@ -810,6 +842,12 @@ pub enum ConfigError {
         runner: String,
         missing: String,
     },
+    /// `[daemon.agent_watchdog]` thresholds that cannot both hold: a zero
+    /// unhealthy threshold, or a kill threshold below the unhealthy one.
+    InvalidAgentWatchdog {
+        unhealthy_after_hours: u64,
+        kill_after_hours: u64,
+    },
 }
 
 impl std::fmt::Display for ConfigError {
@@ -871,6 +909,18 @@ impl std::fmt::Display for ConfigError {
                 f,
                 "configuration error: runner {runner:?} sets some managed Codex                  fields but is missing {missing}. These are written together by                  the Pi Dash desktop app; a partial set means the config was                  hand-edited or a write was interrupted. Re-open the project in                  Pi Dash Desktop to rewrite it."
             ),
+            ConfigError::InvalidAgentWatchdog {
+                unhealthy_after_hours,
+                kill_after_hours,
+            } => write!(
+                f,
+                "configuration error: [daemon.agent_watchdog] has \
+                 unhealthy_after_hours = {unhealthy_after_hours} and \
+                 kill_after_hours = {kill_after_hours}. unhealthy_after_hours \
+                 must be at least 1, kill_after_hours must not be lower \
+                 than unhealthy_after_hours, and neither may exceed \
+                 {MAX_AGENT_WATCHDOG_HOURS} (one year)."
+            ),
         }
     }
 }
@@ -927,11 +977,63 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners,
             cli: None,
         }
+    }
+
+    #[test]
+    fn agent_watchdog_defaults_to_24h_unhealthy_and_48h_kill() {
+        let watchdog = AgentWatchdogConfig::default();
+        assert_eq!(watchdog.unhealthy_after(), Duration::from_secs(24 * 3600));
+        assert_eq!(watchdog.kill_after(), Duration::from_secs(48 * 3600));
+    }
+
+    #[test]
+    fn agent_watchdog_section_parses_and_fills_missing_fields() {
+        let daemon: DaemonConfig = toml::from_str(
+            r#"
+                cloud_url = "https://x"
+                [agent_watchdog]
+                kill_after_hours = 72
+            "#,
+        )
+        .unwrap();
+        assert_eq!(daemon.agent_watchdog.unhealthy_after_hours, 24);
+        assert_eq!(daemon.agent_watchdog.kill_after_hours, 72);
+
+        let daemon: DaemonConfig = toml::from_str(r#"cloud_url = "https://x""#).unwrap();
+        assert_eq!(daemon.agent_watchdog, AgentWatchdogConfig::default());
+    }
+
+    #[test]
+    fn validate_rejects_inconsistent_agent_watchdog() {
+        for (unhealthy, kill) in [
+            (0, 48),
+            (24, 12),
+            (24, MAX_AGENT_WATCHDOG_HOURS + 1),
+            (u64::MAX, u64::MAX),
+        ] {
+            let mut cfg = config_with(vec![]);
+            cfg.daemon.agent_watchdog = AgentWatchdogConfig {
+                unhealthy_after_hours: unhealthy,
+                kill_after_hours: kill,
+            };
+            assert!(matches!(
+                cfg.validate(),
+                Err(ConfigError::InvalidAgentWatchdog { .. })
+            ));
+        }
+
+        let mut cfg = config_with(vec![]);
+        cfg.daemon.agent_watchdog = AgentWatchdogConfig {
+            unhealthy_after_hours: 24,
+            kill_after_hours: 24,
+        };
+        cfg.validate().unwrap();
     }
 
     #[test]
