@@ -156,7 +156,7 @@ export function DuplicatePanel({ matches }: { matches: readonly IssueSearchHit[]
         "aria-expanded": open ? "true" : "false",
         onClick: () => setOpen((current) => !current),
         className:
-          "inline-flex h-(--control-height-sm) items-center rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-3) text-meta text-(--text) hover:bg-(--subtle) focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-(--focus-ring-color) focus-visible:outline-offset-1",
+          "inline-flex h-6 items-center rounded-(--radius-control) border border-(--border) bg-(--bg) px-(--space-3) text-meta text-(--text) hover:bg-(--subtle) focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-(--focus-ring-color) focus-visible:outline-offset-1",
       },
       `${matches.length} possible duplicate${matches.length === 1 ? "" : "s"}`
     ),

@@ -45,7 +45,7 @@ export function TimezonePicker({ value, onSelect }: TimezonePickerProps): React.
     <div className="flex min-h-0 flex-col gap-(--space-2)">
       <Input label="Search timezones" value={query} onChange={(event) => setQuery(event.target.value)} />
       {options.length === 0 ? (
-        <p className="text-body text-(--text-subtle)">No timezones match “{query}”.</p>
+        <p className="text-body text-(--text-muted)">No timezones match “{query}”.</p>
       ) : (
         <ul role="listbox" aria-label="Timezones" className="min-h-0 overflow-y-auto">
           {options.map((option) => {
@@ -57,11 +57,11 @@ export function TimezonePicker({ value, onSelect }: TimezonePickerProps): React.
                   role="option"
                   aria-selected={selected}
                   onClick={() => onSelect(option.value)}
-                  className="text-body flex w-full items-center justify-between gap-(--space-3) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-left text-(--text) hover:bg-(--bg-hover)"
+                  className="text-body flex w-full items-center justify-between gap-(--space-3) rounded-(--radius-control) px-(--space-3) py-(--space-2) text-left text-(--text) hover:bg-(--subtle)"
                 >
                   <span className="min-w-0">
                     <span className="block truncate font-medium">{option.label}</span>
-                    <span className="block truncate text-(--text-subtle)">{option.detail}</span>
+                    <span className="block truncate text-(--text-muted)">{option.detail}</span>
                   </span>
                   {selected ? (
                     <span aria-hidden="true" className="shrink-0 text-(--accent)">
