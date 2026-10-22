@@ -3,13 +3,14 @@
 Parent epic NEWFRONT-72. Inventory:
 `.ai_design/new_frontend_implementation/parity/inventory/comments.md` (rows
 CMT-001–025). Oracle scenarios:
-`apps/web_new/e2e/parity/comments/` (25 spec files, green against the old
-app). Slices: NEWFRONT-812 (composer, paste, guest rule, attachments,
+`apps/web_new/e2e/parity/comments/` (26 spec files — the 25 original
+scenarios plus `editions-sameness.spec.ts`, written by NEWFRONT-819; all green
+against the old app). Slices: NEWFRONT-812 (composer, paste, guest rule, attachments,
 keyboard, mention autocomplete), 813 (cards, git-sync delete, identity,
 fold, edit), 814 (activity feed), 815 (mention render, save, notify,
 unmention), 816 (intake + editions), 817 (visibility, deep link, notices,
-reactions); contracts NEWFRONT-811; CMT-025's missing scenario NEWFRONT-819;
-area gate NEWFRONT-818.
+reactions); contracts NEWFRONT-811; CMT-025's scenario NEWFRONT-819 (done,
+`editions-sameness.spec.ts`); area gate NEWFRONT-818.
 
 Method: the old app was read as behaviour reference only — the comment
 components and their edition overrides, the issue-detail activity and
@@ -246,14 +247,22 @@ In both the composer and the inline edit form:
 - IME composition commits with Enter; the composer must leave that Enter to
   the input layer.
 
-The composer and edit form both already implement this shape (early return
-on `shiftKey || ctrlKey || metaKey`, empty-body guard, composing guard). The
-mid-upload rule is **not** implemented: both forms disable the submit/save
-control on `sending`/`saving` and empty content only, and neither tracks an
-upload in flight, so Enter during a stalled upload would post a body without
-the image. **Verified gap:** the slice tracks pending uploads and disables
-submit while any is in flight, then proves every keyboard branch, including
-the mid-upload no-op and the post-settle post. **Slice: NEWFRONT-812.**
+Both forms already implement the early return on
+`shiftKey || ctrlKey || metaKey` and the empty-body guard. Only the composer
+also has the IME guard: `CommentComposer` returns early while
+`event.nativeEvent.isComposing` is true, while `CommentEditForm`'s key handler
+has no composing check, so pressing Enter to commit a composition inside the
+edit form would save a half-composed body. The new app therefore **does not**
+yet implement the IME rule in both places.
+
+The mid-upload rule is also **not** implemented: both forms disable the
+submit/save control on `sending`/`saving` and empty content only, and neither
+tracks an upload in flight, so Enter during a stalled upload would post a body
+without the image. **Verified gap:** the slice adds the composing guard to the
+edit form to match the composer, tracks pending uploads and disables submit
+while any is in flight, then proves every keyboard branch in both forms,
+including the IME commit, the mid-upload no-op and the post-settle post.
+**Slice: NEWFRONT-812.**
 
 ## 3. Comment cards — identity, edit, delete, git-sync, fold (CMT-003, 004, 005, 008, 012)
 
@@ -346,19 +355,35 @@ card gone. This is the refusal shape NEWFRONT-811 contracts.
 
 ### 3.5 Fold (CMT-008)
 
-Any viewer may fold/unfold, not just the author. The fold marker is the
-literal label **`fold`** in the comment's `labels` array; toggling sends
-`PATCH` with the full `labels` array (`withFold` keeps other labels). A folded
-card hides its body **and its reactions** and shows a header affordance
-("Folded comment · Click to expand" / "Click to collapse") plus the "Unfold
-comment" menu entry. Folding persists across reloads (the label is on the
-server). Unfolding removes the label and reveals body and reactions. The
-folded state is a per-comment preference, not per-viewer state.
+The fold marker is the literal label **`fold`** in the comment's `labels`
+array; toggling sends `PATCH` with the full `labels` array (`withFold` keeps
+other labels). A folded card hides its body **and its reactions** and shows a
+header affordance ("Folded comment · Click to expand" / "Click to collapse")
+plus the "Unfold comment" menu entry. Folding persists across reloads (the
+label is on the server). Unfolding removes the label and reveals body and
+reactions. The folded state is a per-comment preference, not per-viewer state:
+everyone reading the item sees the same folded card.
+
+**Offering vs permission.** The card menu _offers_ fold/unfold to **every
+viewer**, not just the author — unfolding a noisy agent message is the main
+use. But the write is a comment `PATCH`, and that endpoint is gated
+server-side on the creator or a project/workspace admin
+(`allow_permission(allowed_roles=[ADMIN], creator=True)` on
+`partial_update`). So a viewer who is neither the comment's creator nor an
+admin can pick fold, see the optimistic paint, and then get **403** with
+`{"error": "You don't have the required permissions."}`; the client must roll
+back to the previous row and raise one error notice (§10). The oracle
+(`rules-collapse.spec.ts`) drives the scenario as the comment's author, so it
+exercises only the permitted path; the refused path is client behaviour this
+spec pins and 813 covers with a unit test, not with an oracle scenario.
 
 **Verified gap.** Implemented in `model.ts` (`isCommentFolded`, `withFold`),
 `CommentCard` and the thread's update mutation; reactions are hidden because
-the cluster lives inside the body branch. **Slice: NEWFRONT-813** proves the
-label round-trip, the hidden reaction and the reload.
+the cluster lives inside the body branch; the refusal already rolls back via
+`useUpdateComment`. The menu currently gives no hint that a non-author may be
+refused, which is accepted: the surface still offers it, as the old app does.
+**Slice: NEWFRONT-813** proves the label round-trip, the hidden reaction, the
+reload and the 403 rollback.
 
 ## 4. Activity feed (CMT-013, 014, 015, 016, 017)
 
@@ -471,8 +496,8 @@ projects have a non-null `project.anchor`). On such projects:
 - each card shows a corner visibility mark (icon only, no text) that reads
   as internal or public;
 - the overflow menu offers **Switch to public comment** when the comment is
-  internal and **Switch to private comment** when it is public; the switch is
-  not author-gated;
+  internal and **Switch to private comment** when it is public; the entry is
+  offered to every viewer, not author-gated in the UI;
 - toggling sends `PATCH …/comments/{cid}/` with `access` (`INTERNAL` /
   `EXTERNAL`), paints the new mark optimistically and reconciles from the
   response.
@@ -481,9 +506,16 @@ On projects **without** an anchor there is no composer switch, no corner
 mark, and no menu entry; the driver reads "hidden" for the badge in that case.
 New comments start internal.
 
+**Offering vs permission.** Like fold, the access switch is _offered_ to
+every viewer but _permitted_ by the server only to the comment's creator or an
+admin (the same `partial_update` gate, §3.5). A non-author non-admin who picks
+it gets **403**; the optimistic mark must roll back and one error notice must
+report the refusal, leaving the server value unchanged.
+
 **Verified gap.** Built: `showAccess={published}` / `accessToggle: published`,
-`toggledAccess`, badges. **Slice: NEWFRONT-817** proves the anchored and
-non-anchored pairs and the persistence.
+`toggledAccess`, badges, optimistic paint and rollback on error. **Slice:
+NEWFRONT-817** proves the anchored and non-anchored pairs, the persistence,
+and the non-author 403 rollback.
 
 ### 5.2 Deep link (CMT-007)
 
@@ -518,7 +550,7 @@ wires the comment surface into that host when it exists and proves the
 variant against the seeded intake row.
 
 **Verified gap.** Flag exists, host absent. **Slice: NEWFRONT-816**, blocked
-by NEWFRONT-692/693 (+819). Until the intake host lands, 816 must not fake a
+by NEWFRONT-692/693. Until the intake host lands, 816 must not fake a
 second detail screen; it registers the thread in the intake detail's
 activity slot, proven by `rules-intake.spec.ts`.
 
@@ -540,13 +572,23 @@ correct. Rules:
 - the desktop shell may wrap the web app, but a desktop-only comment feature
   must not appear, and a web feature must not disappear in desktop.
 
-**Verified gap.** Structural: the surfaces are edition-agnostic, but nothing
-proves it. **CMT-025 has no oracle scenario yet** — NEWFRONT-819 (stage 0,
-under this epic) writes it; NEWFRONT-816's edition half is blocked by 819 and
-consumes it. The scenario must run the same comment/feed/reaction flow in the
-OSS and cloud stacks (`PARITY_ORACLE_EDITION=cloud`, separate namespace) and
-in the desktop target against the same stack, asserting no extra or missing
-surfaces. **Slice: NEWFRONT-816** (behaviour), scenario NEWFRONT-819.
+**Verified gap.** Structural: the surfaces are edition-agnostic, and since
+NEWFRONT-819 landed the sameness is pinned by the oracle.
+`editions-sameness.spec.ts` drives one edition-agnostic probe of the whole
+surface: composer reachable and posting exactly one stored comment through
+`POST …/comments/`; the merged feed listing the comment beside the creation
+entry, sort reversing order, the filter menu narrowing client-side; the
+mention trigger asking the same `entity-search` endpoint and listing the
+members it returns; both reaction rows writing and reading through the same
+reaction endpoints; and no API write outside those capabilities. The scenario
+runs against the old app in the OSS stack (and in the cloud stack under
+`PARITY_ORACLE_EDITION=cloud`), and the desktop leg is the same scenario with
+`PARITY_NEW_URL` pointing at the desktop build. The row's note records which
+legs a given run actually exercised. Remaining work is the behaviour half:
+CMT-025 has no code of its own beyond keeping the surfaces edition-neutral, so
+**NEWFRONT-816** only has to confirm no edition hook was added and let the
+gate prove the row on `apps/web_new`. **Slice: NEWFRONT-816** (behaviour),
+scenario NEWFRONT-819 (done, oracle green).
 
 **Seam to public boards (NEWFRONT-99).** Published boards render comments
 through a separate public API, gated by whether comments are enabled and
@@ -754,19 +796,19 @@ collections (`issue-reactions.ts`, exercised by `comments.contract.test.ts`).
 
 ## 9. Permissions matrix
 
-| Action                 | Admin           | Member | Guest                                      | Guest (not own item, flag off)  | Author (any role) |
-| ---------------------- | --------------- | ------ | ------------------------------------------ | ------------------------------- | ----------------- |
-| Read feed/comments     | yes             | yes    | yes (may be barred from the item entirely) | item hidden                     | yes               |
-| Post comment           | yes             | yes    | yes if own item or flag on                 | **400 refusal**, nothing stored | yes               |
-| Edit own comment       | yes             | yes    | yes                                        | n/a (item hidden)               | yes               |
-| Edit others' comment   | **no**          | **no** | **no**                                     | —                               | —                 |
-| Delete own comment     | yes             | yes    | yes                                        | n/a                             | yes               |
-| Delete others' comment | **no**          | **no** | **no**                                     | —                               | —                 |
-| Fold/unfold            | yes             | yes    | yes                                        | n/a                             | yes               |
-| Toggle access          | yes             | yes    | yes                                        | n/a                             | yes               |
-| Copy deep link         | yes             | yes    | yes                                        | n/a                             | yes               |
-| React (item/comment)   | yes             | yes    | yes                                        | n/a                             | yes               |
-| Attach/post images     | same as posting | same   | same                                       | —                               | yes               |
+| Action                 | Admin           | Member                        | Guest                             | Guest (not own item, flag off)  | Author (any role) |
+| ---------------------- | --------------- | ----------------------------- | --------------------------------- | ------------------------------- | ----------------- |
+| Read feed/comments     | yes             | yes                           | yes (may be barred from the item) | item hidden                     | yes               |
+| Post comment           | yes             | yes                           | yes if own item or flag on        | **400 refusal**, nothing stored | yes               |
+| Edit own comment       | yes             | yes                           | yes                               | n/a (item hidden)               | yes               |
+| Edit others' comment   | **no**          | **no**                        | **no**                            | —                               | —                 |
+| Delete own comment     | yes             | yes                           | yes                               | n/a                             | yes               |
+| Delete others' comment | **no**          | **no**                        | **no**                            | —                               | —                 |
+| Fold/unfold            | yes             | creator only (403 for others) | creator only                      | n/a                             | yes               |
+| Toggle access          | yes             | creator only (403 for others) | creator only                      | n/a                             | yes               |
+| Copy deep link         | yes             | yes                           | yes                               | n/a                             | yes               |
+| React (item/comment)   | yes             | yes                           | yes                               | n/a                             | yes               |
+| Attach/post images     | same as posting | same                          | same                              | —                               | yes               |
 
 Archived items: feed stays, composer gone, card menus gone, reactions hidden/
 disabled. Intake items: no copy-link. Non-anchored projects: no access
@@ -777,7 +819,9 @@ switch or mark.
 - Empty feed after a successful read: no rows, no error.
 - Read failure: one error line; retry by the usual query refresh.
 - Optimistic fold/access/delete paints and rolls back on refusal; a rollback
-  must restore the exact prior row.
+  must restore the exact prior row. A non-author non-admin's fold or access
+  `PATCH` gets 403: the paint rolls back and one error notice reports it
+  (§3.5, §5.1).
 - Comment still being edited when the item is archived: the edit surface
   disappears with the card menus.
 - A comment created while the feed was open appears through the incremental
@@ -785,7 +829,8 @@ switch or mark.
 - A mention of a member who left: the chip still renders from stored markup.
 - A reaction emoji outside the shelf: render from its code points; an
   unparseable key renders the key itself.
-- IME composition Enter must not post.
+- IME composition Enter must not post or save, in the composer **and** the
+  edit form.
 - Clipboard denial on copy-link is an error notice, not a silent no-op.
 - Git-synced comment: delete refused; edit of the body fields is also
   refused by the server (400).
@@ -852,12 +897,12 @@ Split reads only (§4.1). Not a client bug.
 | CMT-003 | `CommentEditForm` (prefill, Enter, discard); `useUpdateComment` (optimistic `edited_at`, reconcile)               | **Pristine save not implemented** (save enabled on prefilled body); identical-patch/marker branches need proof                                                                    | NEWFRONT-813                         |
 | CMT-004 | Overflow delete, optimistic removal, rollback, success notice                                                     | Prove; the synced 409 is CMT-005                                                                                                                                                  | NEWFRONT-813                         |
 | CMT-005 | `is_synced` in the contract; generic error rollback                                                               | Generic title lacks "fail" (oracle-pinned); no 409/unbind branch or test                                                                                                          | NEWFRONT-813                         |
-| CMT-006 | `showAccess`/`accessToggle`, `toggledAccess`, card marks                                                          | Anchored/non-anchored parity tests                                                                                                                                                | NEWFRONT-817                         |
+| CMT-006 | `showAccess`/`accessToggle`, `toggledAccess`, card marks, optimistic paint + rollback                             | Anchored/non-anchored parity tests; non-author 403 rollback (offered to all, permitted to creator/admin, §5.1)                                                                    | NEWFRONT-817                         |
 | CMT-007 | `commentDeepLink`, hash highlight (8 s), copy notice                                                              | Clipboard text/notice/highlight proof                                                                                                                                             | NEWFRONT-817                         |
-| CMT-008 | `withFold` label, card fold, hidden body & reactions                                                              | Label round-trip + reload proof                                                                                                                                                   | NEWFRONT-813                         |
+| CMT-008 | `withFold` label, card fold offered to every viewer, hidden body & reactions, rollback on error                   | Label round-trip + reload proof; non-author 403 rollback proof (offered to all, permitted to creator/admin, §3.5)                                                                 | NEWFRONT-813                         |
 | CMT-009 | Upload-and-attach on create; attach-on-edit upload; failed-upload notice                                          | Comment editor stores a bare `<img>`, not `image-component` + `status="uploaded"`; non-stuck draft node on failure; **duplicate-on-edit** round trip; NEWFRONT-147 reconciliation | NEWFRONT-812                         |
 | CMT-010 | Titled notices + rollback for create/update/delete; failed-upload notice                                          | No double notice on attach failure; one-notice proof; reconcile the silent-upload `bug:` scenario                                                                                 | NEWFRONT-817                         |
-| CMT-011 | Enter/Shift+Enter/modifier/empty guards in both forms                                                             | **No mid-upload disable** (no in-flight tracking); full keyboard branch coverage                                                                                                  | NEWFRONT-812                         |
+| CMT-011 | Enter/Shift+Enter/modifier/empty guards in both forms; IME guard in the composer                                  | **No IME guard in the edit form**; **no mid-upload disable** (no in-flight tracking); full keyboard branch coverage in both forms                                                 | NEWFRONT-812                         |
 | CMT-012 | `commentAuthorName` (agent label), avatar, relative time + tooltip, edited marker                                 | Bot accounts render plain name (need bot label)                                                                                                                                   | NEWFRONT-813                         |
 | CMT-013 | `buildFeed`/`sortFeed`/`composeFeed` over split history reads                                                     | Deletion activity (`field="issue"`) dropped by `activitySentence`; merge proof; keep split reads                                                                                  | NEWFRONT-814                         |
 | CMT-014 | `DEFAULT_SORT`, `SORT_STORAGE_KEY`, composer placement                                                            | Persistence/reload proof                                                                                                                                                          | NEWFRONT-814                         |
@@ -871,7 +916,7 @@ Split reads only (§4.1). Not a client bug.
 | CMT-022 | `IssueReactions`, picker, toggles, notices, archived disable                                                      | Proof set                                                                                                                                                                         | NEWFRONT-817                         |
 | CMT-023 | `CommentReactions` on card, hidden when folded/archived                                                           | Proof set                                                                                                                                                                         | NEWFRONT-817                         |
 | CMT-024 | Generic error notice + re-read                                                                                    | No typed duplicate-400 parser (811) or duplicate-flow test                                                                                                                        | NEWFRONT-817 (contract 811)          |
-| CMT-025 | Edition-neutral surfaces; no comment edition flags                                                                | No scenario proving edition sameness                                                                                                                                              | NEWFRONT-816 (scenario NEWFRONT-819) |
+| CMT-025 | Edition-neutral surfaces; no comment edition flags                                                                | Structural only: nothing in the code forks by edition; sameness is now proven by `editions-sameness.spec.ts` (NEWFRONT-819, oracle green)                                         | NEWFRONT-816 (scenario NEWFRONT-819) |
 
 Every row is in exactly one slice; the contracts slice NEWFRONT-811 owns no
 row and the area gate NEWFRONT-818 closes none on its own (it proves them).
