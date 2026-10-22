@@ -18,23 +18,26 @@ export type LostRunnerRule = "fail_to_backlog" | "fall_back";
 export const DEFAULT_LOST_RUNNER_RULE: LostRunnerRule = DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG;
 
 export interface LostRunnerRuleOption {
-  value: LostRunnerRule;
   label: string;
   description: string;
 }
 
-export const LOST_RUNNER_RULE_OPTIONS: readonly LostRunnerRuleOption[] = [
-  {
-    value: DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG,
+/** The two rules in display order. */
+export const LOST_RUNNER_RULE_ORDER: readonly LostRunnerRule[] = [
+  DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG,
+  DEDICATED_RUNNER_LOST_FALL_BACK,
+];
+
+export const LOST_RUNNER_RULE_OPTIONS: Record<LostRunnerRule, LostRunnerRuleOption> = {
+  [DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG]: {
     label: "Fail the run and move the issue to Backlog",
     description: "Queued runs on the lost runner fail, and their issues move to Backlog.",
   },
-  {
-    value: DEDICATED_RUNNER_LOST_FALL_BACK,
+  [DEDICATED_RUNNER_LOST_FALL_BACK]: {
     label: "Fall back to the pod",
     description: "Queued runs continue on any runner in the pod instead.",
   },
-];
+};
 
 /**
  * The form value for the stored setting. Anything but the known
@@ -49,7 +52,12 @@ export function lostRunnerRuleFrom(stored: string | undefined): LostRunnerRule {
 
 /** Trigger label for a rule value. */
 export function lostRunnerRuleLabel(value: LostRunnerRule): string {
-  return LOST_RUNNER_RULE_OPTIONS.find((option) => option.value === value)?.label ?? value;
+  return LOST_RUNNER_RULE_OPTIONS[value].label;
+}
+
+/** Explainer for a rule value. */
+export function lostRunnerRuleDescription(value: LostRunnerRule): string {
+  return LOST_RUNNER_RULE_OPTIONS[value].description;
 }
 
 /** The project write a rule pick saves. */

@@ -9,20 +9,20 @@
 // patch. Reads resolve lazily on open; a caller that has to name an
 // existing target before the popup opens preloads them.
 import { Badge, Button, Combobox, IconButton, type ButtonVariant, type ComboboxOption } from "@pidash/kit";
-import type { Runner } from "@pidash/api-client";
 import { Cloud, Container, Monitor, Server } from "lucide-react";
 import * as React from "react";
 
 import { useWorkspace } from "../../core/session/hooks.js";
 import {
-  AGENT_ROW_LABELS,
   buildExecutionTargets,
   executionSelectionId,
   isAgentRowKind,
   parseExecutionSelectionId,
   podOptionLabel,
-  runnerWaitNote,
   selectRunnerOwnerName,
+  selectRunnerWaitNote,
+  selectTriggerPodName,
+  selectTriggerText,
   type AgentRowKind,
   type ExecutionSelection,
   type ExecutionTarget,
@@ -117,40 +117,6 @@ function toComboboxOption(target: ExecutionTarget): ComboboxOption {
   };
 }
 
-/**
- * Trigger text for a selection: the pod, runner or agent name. A set
- * pod or runner renders the prompt until the lists load; once loaded,
- * a missing row reads as unknown (every single picker shares the
- * prompt fallback).
- */
-function selectionText(
-  selection: ExecutionSelection | null,
-  targets: ExecutionTarget[],
-  listsLoaded: boolean,
-  placeholder: string
-): string {
-  if (selection === null) return placeholder;
-  if (selection.type === "agent") {
-    return isAgentRowKind(selection.executor) ? AGENT_ROW_LABELS[selection.executor] : placeholder;
-  }
-  if (!listsLoaded) return placeholder;
-  if (selection.type === "pod") {
-    const pod = targets.find((target) => target.kind === "pod" && target.podId === selection.podId);
-    return pod?.label ?? "Unknown pod";
-  }
-  const runner = targets.find((target) => target.kind === "runner" && target.runnerId === selection.runnerId);
-  return runner?.label ?? "Unknown runner";
-}
-
-/** Pod name behind a runner selection, for the trigger's secondary text. */
-function selectionPodName(selection: ExecutionSelection | null, targets: ExecutionTarget[]): string | null {
-  if (selection === null || selection.type !== "runner") return null;
-  const runner = targets.find((target) => target.kind === "runner" && target.runnerId === selection.runnerId);
-  if (runner?.kind !== "runner") return null;
-  const pod = targets.find((target) => target.kind === "pod" && target.podId === runner.podId);
-  return pod?.label ?? null;
-}
-
 function selectionGlyph(selection: ExecutionSelection | null, targets: ExecutionTarget[]): React.ReactNode {
   if (selection === null) return null;
   if (selection.type === "agent") {
@@ -191,9 +157,10 @@ export function PodPicker({
 
   const readsAllowed = open || preload;
   const { workspace } = useWorkspace(workspaceSlug);
+  const workspaceId = workspace?.id ?? "";
   const pods = usePickerPods(workspaceSlug, projectId, readsAllowed);
   const project = usePickerProject(workspaceSlug, projectId, readsAllowed);
-  const runners = usePickerRunners(workspaceSlug, workspace?.id ?? "", projectId, assignableFor, readsAllowed);
+  const runners = usePickerRunners(workspaceSlug, workspaceId, projectId, assignableFor, readsAllowed);
   // The directory only names runner owners, so it stays off until a
   // runner row needs it; pod-only projects never pay for the read.
   const directory = usePickerWorkspaceMembers(workspaceSlug, readsAllowed && (runners.data?.length ?? 0) > 0);
@@ -207,18 +174,22 @@ export function PodPicker({
       ),
     [pods.data, project.data, runners.data, directory.data]
   );
-  const loading = open && !disabled && (pods.isPending || project.isPending || runners.isPending);
+  // Without a workspace id the runner read stays off and the picker
+  // offers pods and agents alone; it must neither spin nor wait for it.
+  const loading =
+    open && !disabled && (pods.isPending || project.isPending || (workspaceId !== "" && runners.isPending));
   const errorText = pods.isError || project.isError || runners.isError ? "Couldn't load execution targets." : undefined;
 
   function handleSelect(id: string): void {
     onChange(parseExecutionSelectionId(id, runners.data ?? []));
   }
 
-  const listsLoaded = pods.data !== undefined && runners.data !== undefined;
-  const waitNote = value !== null && value.type === "runner" ? runnerWaitNoteFor(runners.data, value.runnerId) : null;
+  const listsLoaded = pods.data !== undefined && (workspaceId === "" || runners.data !== undefined);
+  const waitNote =
+    value !== null && value.type === "runner" ? selectRunnerWaitNote(runners.data, value.runnerId) : null;
 
   function defaultTrigger(): React.ReactElement<Record<string, unknown>> {
-    const text = selectionText(value, targets, listsLoaded, placeholder);
+    const text = selectTriggerText(value, targets, listsLoaded, placeholder);
     const glyph = selectionGlyph(value, targets);
     if (iconOnly) {
       return (
@@ -227,7 +198,7 @@ export function PodPicker({
         </IconButton>
       );
     }
-    const podName = selectionPodName(value, targets);
+    const podName = selectTriggerPodName(value, targets);
     return (
       <Button variant={variant}>
         {glyph === null ? null : (
@@ -271,11 +242,4 @@ export function PodPicker({
       )}
     </div>
   );
-}
-
-/** The wait note for the selected runner, or null when none applies. */
-function runnerWaitNoteFor(runners: Runner[] | undefined, runnerId: string): string | null {
-  const runner = runners?.find((entry) => entry.id === runnerId);
-  if (runner === undefined) return null;
-  return runnerWaitNote(runner);
 }

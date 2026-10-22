@@ -573,4 +573,26 @@ describe("PodPicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Select target" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load execution targets.");
   });
+
+  it("stays loading while the runner read lags behind pods", async () => {
+    const { queryClient } = harness({}, {}, { hang: true });
+    renderPicker({}, queryClient);
+    fireEvent.click(screen.getByRole("button", { name: "Select target" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Loading execution targets");
+  });
+
+  it("offers pods alone while the workspace id is unknown", async () => {
+    const { queryClient, calls } = harness();
+    queryClient.setQueryData(["session", "workspaces"], []);
+    const onChange = vi.fn();
+    renderPicker(
+      { value: { type: "pod", podId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }, preload: true, onChange },
+      queryClient
+    );
+    expect(await screen.findByRole("button", { name: "ACME-Backend" })).toBeInTheDocument();
+    expect(calls.some((url) => new URL(url).pathname === "/api/runners/")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "ACME-Backend" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Any runner in ACME-Tier" }));
+    expect(onChange).toHaveBeenCalledWith({ type: "pod", podId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" });
+  });
 });

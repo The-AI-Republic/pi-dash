@@ -538,6 +538,12 @@ describe("selectExecutionSelection", () => {
     ).toEqual({ type: "runner", runnerId: "runner-1", podId: POD_A });
   });
 
+  it("keeps a runner without a pod readable with an empty pod", () => {
+    expect(
+      selectExecutionSelection(issueFixture({ assigned_pod_id: null, assigned_runner_id: "runner-1" }), localProject)
+    ).toEqual({ type: "runner", runnerId: "runner-1", podId: "" });
+  });
+
   it("inherits a cloud project default when the issue pins no executor", () => {
     expect(
       selectExecutionSelection(issueFixture({ agent_executor: null }), { default_agent_executor: "cloud_agent" })

@@ -111,7 +111,9 @@ export type { AiWorkersTabProps } from "./ai-workers/AiWorkersTabScreen.js";
 export {
   DEFAULT_LOST_RUNNER_RULE,
   LOST_RUNNER_RULE_OPTIONS,
+  LOST_RUNNER_RULE_ORDER,
   buildLostRunnerRulePayload,
+  lostRunnerRuleDescription,
   lostRunnerRuleFrom,
   lostRunnerRuleLabel,
 } from "./ai-workers/rules.js";

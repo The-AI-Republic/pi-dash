@@ -107,7 +107,7 @@ function projectRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function setup(detail: Record<string, unknown>, patchStatus = 200) {
+function setup(detail: Record<string, unknown>, patchStatus = 200, patchHang = false) {
   const calls: Array<{ method: string; body: string }> = [];
   let current = detail;
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
@@ -116,6 +116,7 @@ function setup(detail: Record<string, unknown>, patchStatus = 200) {
     if (url.endsWith(PROJECT_PATH) && method === "GET") return jsonResponse(url, 200, current);
     if (url.endsWith(PROJECT_PATH) && method === "PATCH") {
       calls.push({ method, body: init.body ?? "" });
+      if (patchHang) await new Promise(() => {});
       const payload = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
       if (patchStatus === 200) current = { ...current, ...payload };
       return jsonResponse(url, patchStatus, patchStatus === 200 ? current : {});
@@ -173,10 +174,26 @@ describe("ProjectSettingsAiWorkersTab", () => {
 
   it("renders the member form inert without a save control", async () => {
     harness.role = ROLE_MEMBER;
-    setup(projectRow({ dedicated_runner_lost_action: "fall_back" }));
+    const { calls } = setup(projectRow({ dedicated_runner_lost_action: "fall_back" }));
     await screen.findByText("Fall back to the pod");
     expect(screen.getByRole("button", { name: /Fall back to the pod/ })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+    fireEvent.submit(screen.getByRole("form", { name: "AI Workers settings" }));
+    await waitFor(() => expect(calls).toHaveLength(0));
+  });
+
+  it("shows the saving state and ignores resubmits while pending", async () => {
+    const user = userEvent.setup();
+    const { calls } = setup(projectRow({ dedicated_runner_lost_action: "fail_to_backlog" }), 200, true);
+    await screen.findByText("Fail the run and move the issue to Backlog");
+    await user.click(screen.getByRole("button", { name: /Fail the run and move the issue to Backlog/ }));
+    await user.click(await screen.findByRole("option", { name: "Fall back to the pod" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await screen.findByRole("button", { name: "Saving" });
+    fireEvent.submit(screen.getByRole("form", { name: "AI Workers settings" }));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls).toHaveLength(1);
   });
 
   it("toasts when the save fails", async () => {

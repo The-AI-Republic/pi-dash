@@ -17,6 +17,8 @@ import { useSaveLostRunnerRule } from "./api/mutations.js";
 import {
   buildLostRunnerRulePayload,
   LOST_RUNNER_RULE_OPTIONS,
+  LOST_RUNNER_RULE_ORDER,
+  lostRunnerRuleDescription,
   lostRunnerRuleFrom,
   lostRunnerRuleLabel,
   type LostRunnerRule,
@@ -60,7 +62,6 @@ function AiWorkersTabBody({
   }
 
   const formClass = canEdit ? "flex flex-col gap-(--space-6)" : "flex flex-col gap-(--space-6) opacity-60";
-  const selected = LOST_RUNNER_RULE_OPTIONS.find((option) => option.value === value);
   return (
     <form onSubmit={submit} className={formClass} aria-label="AI Workers settings">
       <section aria-label="Dedicated runners" className="flex flex-col gap-(--space-2)">
@@ -72,7 +73,10 @@ function AiWorkersTabBody({
               <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
             </Button>
           }
-          options={LOST_RUNNER_RULE_OPTIONS.map((option) => ({ id: option.value, label: option.label }))}
+          options={LOST_RUNNER_RULE_ORDER.map((rule) => ({
+            id: rule,
+            label: LOST_RUNNER_RULE_OPTIONS[rule].label,
+          }))}
           value={value}
           onSelect={(id) => setValue(lostRunnerRuleFrom(id))}
           listLabel="Lost-runner rule"
@@ -80,7 +84,7 @@ function AiWorkersTabBody({
           emptyText="No rules"
           disabled={!canEdit}
         />
-        {selected === undefined ? null : <p className="text-caption text-(--text-muted)">{selected.description}</p>}
+        <p className="text-caption text-(--text-muted)">{lostRunnerRuleDescription(value)}</p>
       </section>
       {canEdit ? (
         <div className="flex justify-end">

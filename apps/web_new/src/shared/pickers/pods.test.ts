@@ -18,6 +18,9 @@ import {
   runnerWaitNote,
   selectDefaultPod,
   selectRunnerOwnerName,
+  selectRunnerWaitNote,
+  selectTriggerPodName,
+  selectTriggerText,
 } from "./pods.js";
 
 const POD_A = {
@@ -377,5 +380,83 @@ describe("buildExecutionTargets with runners", () => {
       runner({ id: "823e4567-e89b-12d3-a456-426614174007", pod: POD_A.id }),
     ] as unknown as RunnerList);
     expect(targets[1]).toMatchObject({ kind: "runner", assignable: true, reason: "" });
+  });
+
+  it("disables an unassignable runner without a code and no reason", () => {
+    const targets = buildExecutionTargets([POD_A] as PodList, [], [
+      runner({ id: "923e4567-e89b-12d3-a456-426614174008", pod: POD_A.id, assignable: false }),
+    ] as unknown as RunnerList);
+    expect(targets[1]).toMatchObject({ kind: "runner", assignable: false, reason: "" });
+  });
+});
+
+describe("selectTriggerText", () => {
+  const targets = buildExecutionTargets([POD_A] as PodList, [], [
+    runner({ id: "runner-1", name: "gpu-box", pod: POD_A.id }),
+  ] as unknown as RunnerList);
+
+  it("names pods, runners and agents", () => {
+    expect(selectTriggerText({ type: "pod", podId: POD_A.id }, targets, true, "Select")).toBe("ACME-Backend");
+    expect(selectTriggerText({ type: "runner", runnerId: "runner-1", podId: POD_A.id }, targets, true, "Select")).toBe(
+      "gpu-box"
+    );
+    expect(selectTriggerText({ type: "agent", executor: "cloud_agent" }, targets, true, "Select")).toBe(
+      "Pi Dash Cloud Agent"
+    );
+  });
+
+  it("falls back to the prompt and the unknown labels", () => {
+    expect(selectTriggerText(null, targets, true, "Select")).toBe("Select");
+    expect(selectTriggerText({ type: "agent", executor: "local_runner" }, targets, true, "Select")).toBe("Select");
+    expect(selectTriggerText({ type: "pod", podId: POD_A.id }, targets, false, "Select")).toBe("Select");
+    expect(selectTriggerText({ type: "pod", podId: "missing" }, targets, true, "Select")).toBe("Unknown pod");
+    expect(selectTriggerText({ type: "runner", runnerId: "missing", podId: POD_A.id }, targets, true, "Select")).toBe(
+      "Unknown runner"
+    );
+  });
+});
+
+describe("selectTriggerPodName", () => {
+  const targets = buildExecutionTargets([POD_A] as PodList, [], [
+    runner({ id: "runner-1", name: "gpu-box", pod: POD_A.id }),
+  ] as unknown as RunnerList);
+
+  it("names the pod behind a runner selection", () => {
+    expect(selectTriggerPodName({ type: "runner", runnerId: "runner-1", podId: POD_A.id }, targets)).toBe(
+      "ACME-Backend"
+    );
+  });
+
+  it("reads null without a runner or without its pod", () => {
+    expect(selectTriggerPodName(null, targets)).toBe(null);
+    expect(selectTriggerPodName({ type: "pod", podId: POD_A.id }, targets)).toBe(null);
+    expect(selectTriggerPodName({ type: "agent", executor: "cloud_agent" }, targets)).toBe(null);
+    expect(selectTriggerPodName({ type: "runner", runnerId: "missing", podId: POD_A.id }, targets)).toBe(null);
+    const stray = [
+      {
+        kind: "runner",
+        runnerId: "runner-9",
+        podId: POD_B.id,
+        label: "stray",
+        statusLine: "online · idle",
+        ownerName: "",
+        assignable: true,
+        reason: "",
+      },
+    ] as const;
+    expect(selectTriggerPodName({ type: "runner", runnerId: "runner-9", podId: POD_B.id }, [...stray])).toBe(null);
+  });
+});
+
+describe("selectRunnerWaitNote", () => {
+  it("reads the note for the selected runner", () => {
+    const runners = [
+      runner({ id: "runner-1", status: "busy", is_busy: true, queue_depth: 2 }),
+    ] as unknown as RunnerList;
+    expect(selectRunnerWaitNote(runners, "runner-1")).toContain("wait behind 2 others");
+    expect(selectRunnerWaitNote(runners, "missing")).toBe(null);
+    expect(selectRunnerWaitNote(undefined, "runner-1")).toBe(null);
+    const free = [runner({ id: "runner-2", status: "online", queue_depth: 0 })] as unknown as RunnerList;
+    expect(selectRunnerWaitNote(free, "runner-2")).toBe(null);
   });
 });

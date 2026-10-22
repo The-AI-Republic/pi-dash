@@ -397,4 +397,25 @@ describe("WaitingBanner", () => {
     expect(screen.getByRole("button", { name: "Change runner" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel run" })).toBeDisabled();
   });
+
+  it("falls back to the pod wording without a pod name", async () => {
+    const { queryClient } = harness();
+    const issue = waitingIssue();
+    issue.assigned_pod_id = "99999999-9999-4999-8999-999999999999";
+    renderBanner(queryClient, issue);
+    expect(await screen.findByRole("button", { name: "Run on any runner in the pod once" })).toBeInTheDocument();
+  });
+
+  it("closes the change dialog without saving", async () => {
+    const user = userEvent.setup();
+    const { calls, queryClient } = harness();
+    renderBanner(queryClient);
+    await user.click(await screen.findByRole("button", { name: "Change runner" }));
+    await screen.findByRole("option", { name: /gpu-box/ });
+    await user.click(screen.getByRole("heading", { name: "Change runner" }));
+    await waitFor(() => expect(screen.queryByRole("option", { name: /gpu-box/ })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Close dialog" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Change runner" })).not.toBeInTheDocument());
+    expect(calls.some((call) => call.method === "PATCH")).toBe(false);
+  });
 });

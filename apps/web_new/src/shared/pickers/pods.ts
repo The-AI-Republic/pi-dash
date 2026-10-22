@@ -270,6 +270,47 @@ export function executionSelectionId(selection: ExecutionSelection | null): stri
 }
 
 /**
+ * Trigger text for a selection: the pod, runner or agent name. A set
+ * pod or runner renders the prompt until the lists load; once loaded,
+ * a missing row reads as unknown (every single picker shares the
+ * prompt fallback).
+ */
+export function selectTriggerText(
+  selection: ExecutionSelection | null,
+  targets: ExecutionTarget[],
+  listsLoaded: boolean,
+  placeholder: string
+): string {
+  if (selection === null) return placeholder;
+  if (selection.type === "agent") {
+    return isAgentRowKind(selection.executor) ? AGENT_ROW_LABELS[selection.executor] : placeholder;
+  }
+  if (!listsLoaded) return placeholder;
+  if (selection.type === "pod") {
+    const pod = targets.find((target) => target.kind === "pod" && target.podId === selection.podId);
+    return pod?.label ?? "Unknown pod";
+  }
+  const runner = targets.find((target) => target.kind === "runner" && target.runnerId === selection.runnerId);
+  return runner?.label ?? "Unknown runner";
+}
+
+/** Pod name behind a runner selection, for the trigger's secondary text. */
+export function selectTriggerPodName(selection: ExecutionSelection | null, targets: ExecutionTarget[]): string | null {
+  if (selection === null || selection.type !== "runner") return null;
+  const runner = targets.find((target) => target.kind === "runner" && target.runnerId === selection.runnerId);
+  if (runner?.kind !== "runner") return null;
+  const pod = targets.find((target) => target.kind === "pod" && target.podId === runner.podId);
+  return pod?.label ?? null;
+}
+
+/** The wait note for the selected runner, or null when none applies. */
+export function selectRunnerWaitNote(runners: RunnerList | undefined, runnerId: string): string | null {
+  const runner = runners?.find((entry) => entry.id === runnerId);
+  if (runner === undefined) return null;
+  return runnerWaitNote(runner);
+}
+
+/**
  * Read a selection back from an option id. Ids only ever come from
  * rendered options, so a runner id always resolves against the loaded
  * list; a stale id keeps the runner with an empty pod rather than

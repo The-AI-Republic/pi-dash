@@ -6,6 +6,8 @@ import {
   buildLostRunnerRulePayload,
   DEFAULT_LOST_RUNNER_RULE,
   LOST_RUNNER_RULE_OPTIONS,
+  LOST_RUNNER_RULE_ORDER,
+  lostRunnerRuleDescription,
   lostRunnerRuleFrom,
   lostRunnerRuleLabel,
 } from "./rules.js";
@@ -27,12 +29,19 @@ describe("lostRunnerRuleLabel", () => {
   });
 });
 
+describe("lostRunnerRuleDescription", () => {
+  it("explains both rules", () => {
+    expect(lostRunnerRuleDescription("fail_to_backlog")).toContain("Backlog");
+    expect(lostRunnerRuleDescription("fall_back")).toContain("pod");
+  });
+});
+
 describe("LOST_RUNNER_RULE_OPTIONS", () => {
   it("offers the default first", () => {
-    expect(LOST_RUNNER_RULE_OPTIONS.map((option) => option.value)).toEqual(["fail_to_backlog", "fall_back"]);
-    for (const option of LOST_RUNNER_RULE_OPTIONS) {
-      expect(option.label.length).toBeGreaterThan(0);
-      expect(option.description.length).toBeGreaterThan(0);
+    expect(LOST_RUNNER_RULE_ORDER).toEqual(["fail_to_backlog", "fall_back"]);
+    for (const rule of LOST_RUNNER_RULE_ORDER) {
+      expect(LOST_RUNNER_RULE_OPTIONS[rule].label.length).toBeGreaterThan(0);
+      expect(LOST_RUNNER_RULE_OPTIONS[rule].description.length).toBeGreaterThan(0);
     }
   });
 });
