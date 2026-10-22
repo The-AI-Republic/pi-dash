@@ -23,7 +23,10 @@ test(
     const session = await cloudDevLogin(email, "Cloud Newcomer");
     const passwordCalls: string[] = [];
     driver.page.on("request", (request) => {
-      if (request.url().includes("set-password"))
+      // Endpoint paths only (NEWFRONT-662): the dev server also serves
+      // source modules like set-password.tsx, which are not endpoint
+      // calls. The oracle serves no such modules, so it is unaffected.
+      if (request.url().includes("/set-password/"))
         passwordCalls.push(`${request.method()} ${new URL(request.url).pathname}`);
     });
     await driver.openAuthenticated("/onboarding", cloudBrowserCookies(session.cookie));

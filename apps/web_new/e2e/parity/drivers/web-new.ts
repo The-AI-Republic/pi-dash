@@ -1787,7 +1787,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async submitCreateModal(): Promise<void> {
-    await this.createDialog().locator('form button[type="submit"]').first().click();
+    // The Save button carries type="submit" but renders in the dialog
+    // footer, outside the <form> it submits via the form attribute
+    // (NEWFRONT-662); match the attribute, not the ancestry.
+    await this.createDialog().locator('button[type="submit"]').first().click();
   }
 
   async clickModalDiscard(): Promise<void> {
