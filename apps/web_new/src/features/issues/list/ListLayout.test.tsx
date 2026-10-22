@@ -743,8 +743,13 @@ describe("ListLayout", () => {
     view.unmount();
     renderLayout({ peekKey: "WEB-42", onPeekChange });
     expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(onPeekChange).toHaveBeenCalledWith(null);
+    // The peek is a lazy chunk: its Escape listener attaches on mount, so
+    // retry the key until the mounted peek has answered (a single fire can
+    // land between the lazy render and the effect under load).
+    await waitFor(() => {
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(onPeekChange).toHaveBeenCalledWith(null);
+    });
   });
 
   it("supports uncontrolled peek state", async () => {
