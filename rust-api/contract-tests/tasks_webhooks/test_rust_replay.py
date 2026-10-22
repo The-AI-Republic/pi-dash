@@ -1226,6 +1226,101 @@ def test_rust_crawl_link_executes_locally(db_conn, broker_url):
     }
 
 
+def _seed_closed_to_world(db_conn, slug):
+    """Issue + cancel state + one notified subscriber (PIDASHCONV-1276).
+
+    Mirrors the oracle seed in ``test_webhook_tasks.py``: the
+    subscriber is an active project member with a preferences row, so
+    ``notifications`` writes exactly one ``notifications`` row for
+    them.
+    """
+    chain = seed_helpers.issue_chain(db_conn, slug)
+    owner, workspace, project, issue = (
+        chain["owner"],
+        chain["workspace"],
+        chain["project"],
+        chain["issue"],
+    )
+    close_state = seed_helpers.state(
+        db_conn, project["id"], workspace["id"], name="Cancelled", group="cancelled"
+    )
+    sub = seed_helpers.user(db_conn, f"{slug}-subscriber")
+    seed_helpers.project_member(db_conn, project["id"], workspace["id"], sub["id"])
+    seed_helpers.issue_subscriber(
+        db_conn, project["id"], workspace["id"], issue["id"], sub["id"]
+    )
+    seed_helpers.notification_preference(db_conn, sub["id"])
+    return {
+        "owner": owner,
+        "workspace": workspace,
+        "project": project,
+        "issue": issue,
+        "close_state": close_state,
+        "subscriber": sub,
+    }
+
+
+def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn, broker_url):
+    """closed_to, Rust side: EXECUTE locally (PIDASHCONV-1276).
+
+    Mirrors ``test_issue_activity_closed_to_writes_state_row_and_notifies``
+    (same auto-close payload): the Rust worker resolves ``closed_to``
+    through the project-scoped states snapshot
+    (``activity_dispatch.rs``), writes the one
+    ``"Pi Dash updated the state to "`` row, and enqueues + executes
+    ``notifications`` for the subscriber. Settlement plus the row
+    diffs is the proof: with the Django worker stopped, a forward
+    could never produce local rows.
+    """
+    world = _seed_closed_to_world(db_conn, "rustclosedto")
+    issue, owner, project = world["issue"], world["owner"], world["project"]
+    close_state, sub = world["close_state"], world["subscriber"]
+    epoch = 1728500000
+    before = snapshot(db_conn, ["issue_activities", "notifications", "email_notification_logs"])
+
+    celery_id = rust_queue.publish(
+        ISSUE_ACTIVITY,
+        kwargs={
+            "type": "issue.activity.updated",
+            "requested_data": json.dumps({"closed_to": str(close_state["id"])}),
+            "current_instance": None,
+            "issue_id": str(issue["id"]),
+            "actor_id": str(owner["id"]),
+            "project_id": str(project["id"]),
+            "epoch": epoch,
+            "subscriber": False,
+            "notification": True,
+        },
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{ISSUE_ACTIVITY} executed")
+    (row,) = wait_for(
+        lambda: _added_rows(db_conn, "issue_activities", before) or None,
+        what="closed_to issue_activities row",
+    )
+    assert row["field"] == "state"
+    assert row["verb"] == "updated"
+    assert row["comment"] == "Pi Dash updated the state to "
+    assert row["new_value"] == close_state["name"]
+    assert row["new_identifier"] == str(close_state["id"])
+    assert row["old_value"] is None
+    assert row["old_identifier"] is None
+    assert row["issue_id"] == str(issue["id"])
+    assert row["project_id"] == str(project["id"])
+    assert row["actor_id"] == str(owner["id"])
+    assert row["epoch"] == epoch
+
+    (note,) = wait_for(
+        lambda: _added_rows(db_conn, "notifications", before) or None,
+        what="closed_to notifications row",
+    )
+    assert note["receiver_id"] == str(sub["id"])
+    assert note["entity_identifier"] == str(issue["id"])
+    assert note["sender"] == "in_app:issue_activities:subscribed"
+    assert note["title"] == "Pi Dash updated the state to "
+    assert note["triggered_by_id"] == str(owner["id"])
+    assert len(_added_rows(db_conn, "email_notification_logs", before)) == 1
+
+
 @pytest.mark.parametrize(
     "family",
     [socket.AF_INET, socket.AF_INET6],
