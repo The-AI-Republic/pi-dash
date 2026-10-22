@@ -55,6 +55,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-comments.test.ts",
       "e2e/parity/drivers/web-new-webhooks.test.ts",
       "e2e/parity/drivers/web-new-activity.test.ts",
+      "e2e/parity/drivers/web-new-issue-widgets.test.ts",
       "e2e/parity/drivers/web-new-notifications-prefs.test.ts",
       "e2e/parity/drivers/web-new-prompts.test.ts",
       "e2e/parity/drivers/web-new-project-settings.test.ts",

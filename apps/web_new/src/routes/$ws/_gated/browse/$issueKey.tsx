@@ -28,6 +28,11 @@ import {
   issueKeys,
   liteIssueQueryOptions,
 } from "../../../../features/issues/index.js";
+import {
+  AttachmentsWidget,
+  type AttachmentsWidgetHandle,
+} from "../../../../features/issues/detail/widgets/attachments/AttachmentsWidget.js";
+import { CodeReviewsWidget } from "../../../../features/issues/detail/widgets/codeReviews/CodeReviewsWidget.js";
 import { mayDeleteWorkItem } from "../../../../features/issues/lifecycle/rules.js";
 import {
   LinkActionButton,
@@ -175,6 +180,7 @@ function BrowseIssueDetail({
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
   const writable = editable && issue.archived_at === null && !issue.is_synced;
+  const attachmentsRef = React.useRef<AttachmentsWidgetHandle>(null);
   const widgetSections = [
     {
       label: "Relations" as const,
@@ -194,6 +200,18 @@ function BrowseIssueDetail({
       action: <LinkActionButton canEdit={writable} />,
       node: <LinksWidget workspaceSlug={workspaceSlug} projectId={projectId} issueId={issue.id} canEdit={writable} />,
     },
+    {
+      label: "Attachments" as const,
+      node: (
+        <AttachmentsWidget
+          ref={attachmentsRef}
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          issueId={issue.id}
+          editable={editable}
+        />
+      ),
+    },
   ];
   const workbench = (
     <WidgetActionsProvider>
@@ -204,6 +222,7 @@ function BrowseIssueDetail({
         editable={editable}
         projectIdentifier={projectIdentifier(project, issueKey)}
         canWrite={editable}
+        onAttach={() => attachmentsRef.current?.openPicker()}
         onOpen={(row, identifier) =>
           void navigate({
             to: "/$ws/browse/$issueKey",
@@ -248,6 +267,12 @@ function BrowseIssueDetail({
         activity={
           <div className="flex flex-col gap-(--space-6)">
             {workbench}
+            <CodeReviewsWidget
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issueId={issue.id}
+              editable={editable}
+            />
             <CommentThread
               workspaceSlug={workspaceSlug}
               projectId={projectId}
