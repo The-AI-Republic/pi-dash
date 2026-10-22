@@ -7387,6 +7387,22 @@ export class WebDriver implements ParityDriver {
     return texts.some((text) => /log/i.test(text));
   }
 
+  // --- Cloud worklog (NEWFRONT-672, ISS-206 cloud leg). The cloud spec
+  // --- runs on web_new only (the private cloud UI is intentionally not
+  // --- pinned here), so the old-app driver refuses these outright.
+
+  async worklogLogEntry(): Promise<void> {
+    throw new Error("[parity] cloud worklog runs on web_new only (NEWFRONT-672).");
+  }
+
+  async worklogSidebarTotal(): Promise<string | null> {
+    throw new Error("[parity] cloud worklog runs on web_new only (NEWFRONT-672).");
+  }
+
+  async worklogSidebarEntryTexts(): Promise<string[]> {
+    throw new Error("[parity] cloud worklog runs on web_new only (NEWFRONT-672).");
+  }
+
   // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Observed on
   // --- the running old app: each sidebar row is a flex container pairing a
   // --- label span with a value cell holding the combobox trigger button;
