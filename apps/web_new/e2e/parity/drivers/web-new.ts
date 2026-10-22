@@ -8892,132 +8892,516 @@ export class WebNewDriver implements ParityDriver {
     return todo("schedulerShellCount");
   }
 
-  // --- Dev machines, runner detail, agent activity (NEWFRONT-183, RUN-037–043) ---
-  async devMachinesOpen(_workspaceSlug: string): Promise<void> {
-    return todo("devMachinesOpen");
+  // --- Dev machines, runner detail, agent activity (NEWFRONT-555, RUN-037–043).
+  // --- The table carries the machine name over a host/id subline, a status
+  // --- badge in a button, the counts sentence and action buttons; the
+  // --- install section is a heading plus one card per <pre>; the activity
+  // --- panel is an "Agent" heading with the badge beside it and a dl below.
+
+  private static readonly DEV_MACHINES_PATTERN = "**/api/runners/dev-machines/**";
+
+  private devMachinesTable(): Locator {
+    return this.page.getByTestId("dev-machines-table");
   }
+
+  async devMachinesOpen(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/ai-dev-machines`);
+    await this.devMachinesTable().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async devMachinesRows(): Promise<DevMachineRow[]> {
-    return todo("devMachinesRows");
+    const table = this.devMachinesTable();
+    if ((await table.count()) === 0) return [];
+    return table.evaluate((root) => {
+      const out: {
+        name: string;
+        subline: string;
+        status: string;
+        runners: string;
+        lastSeen: string;
+        lastHeartbeat: string;
+        actions: string[];
+      }[] = [];
+      for (const tr of root.querySelectorAll("tbody tr")) {
+        const cells = tr.querySelectorAll(":scope > td");
+        if (cells.length < 6) continue;
+        const divs = cells[0]?.querySelectorAll(":scope > div") ?? [];
+        const buttons = cells[5]?.querySelectorAll("button") ?? [];
+        out.push({
+          name: divs[0]?.textContent?.trim() ?? "",
+          subline: divs[1]?.textContent?.trim() ?? "",
+          status: cells[1]?.querySelector("button")?.textContent?.trim() ?? "",
+          runners: cells[2]?.textContent?.trim().replace(/\s+/g, " ") ?? "",
+          lastSeen: cells[3]?.textContent?.trim() ?? "",
+          lastHeartbeat: cells[4]?.textContent?.trim() ?? "",
+          actions: [...buttons].map((button) => (button.textContent ?? "").trim()).filter((label) => label !== ""),
+        });
+      }
+      return out;
+    });
   }
-  async devMachinesRowByName(_name: string): Promise<DevMachineRow | null> {
-    return todo("devMachinesRowByName");
+
+  async devMachinesRowByName(name: string): Promise<DevMachineRow | null> {
+    const rows = await this.devMachinesRows();
+    return rows.find((row) => row.name === name) ?? null;
   }
+
+  private async devMachinesStateText(): Promise<string> {
+    const table = this.devMachinesTable();
+    if ((await table.count()) === 0) return "";
+    return ((await table.locator("tbody").first().innerText()) ?? "").trim();
+  }
+
   async devMachinesEmptyVisible(): Promise<boolean> {
-    return todo("devMachinesEmptyVisible");
+    return (await this.devMachinesStateText()).includes("No dev machines");
   }
+
   async devMachinesLoadingVisible(): Promise<boolean> {
-    return todo("devMachinesLoadingVisible");
+    return (await this.devMachinesStateText()).includes("Loading dev machines");
   }
+
   async devMachinesErrorVisible(): Promise<boolean> {
-    return todo("devMachinesErrorVisible");
+    return (await this.devMachinesStateText()).includes("Could not load dev machines");
   }
-  async devMachinesStubListOnce(_rows: unknown[]): Promise<void> {
-    return todo("devMachinesStubListOnce");
+
+  async devMachinesStubListOnce(rows: unknown[]): Promise<void> {
+    let armed = true;
+    await this.page.route(WebNewDriver.DEV_MACHINES_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(rows) });
+        return;
+      }
+      await route.continue();
+    });
   }
+
   async devMachinesFailListOnce(): Promise<void> {
-    return todo("devMachinesFailListOnce");
+    let armed = true;
+    await this.page.route(WebNewDriver.DEV_MACHINES_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity list failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
   }
-  async devMachinesDelayListOnce(_ms: number): Promise<void> {
-    return todo("devMachinesDelayListOnce");
+
+  async devMachinesDelayListOnce(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route(WebNewDriver.DEV_MACHINES_PATTERN, async (route) => {
+      if (armed && route.request().method() === "GET") {
+        armed = false;
+        await this.page.waitForTimeout(ms);
+      }
+      await route.continue();
+    });
   }
-  async devMachinesListPollCount(_windowMs: number): Promise<number> {
-    return todo("devMachinesListPollCount");
+
+  async devMachinesListPollCount(windowMs: number): Promise<number> {
+    let calls = 0;
+    const pattern = WebNewDriver.DEV_MACHINES_PATTERN;
+    const counter = async (route: Route) => {
+      if (route.request().method() === "GET") calls += 1;
+      await route.continue();
+    };
+    await this.page.route(pattern, counter);
+    try {
+      await this.page.waitForTimeout(windowMs);
+      return calls;
+    } finally {
+      await this.page.unroute(pattern, counter).catch(() => undefined);
+    }
   }
-  async devMachinesOpenRotate(_name: string): Promise<void> {
-    return todo("devMachinesOpenRotate");
+
+  private devMachinesDataRow(name: string): Locator {
+    return this.devMachinesTable()
+      .locator("tbody tr")
+      .filter({ has: this.page.getByText(name, { exact: true }) })
+      .first();
   }
-  async devMachinesOpenRevoke(_name: string): Promise<void> {
-    return todo("devMachinesOpenRevoke");
+
+  private async devMachinesOpenAction(name: string, action: string): Promise<void> {
+    const row = this.devMachinesDataRow(name);
+    await row.getByRole("button", { name: action, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.devMachinesModalVisible(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
-  async devMachinesOpenDelete(_name: string): Promise<void> {
-    return todo("devMachinesOpenDelete");
+
+  async devMachinesOpenRotate(name: string): Promise<void> {
+    await this.devMachinesOpenAction(name, "Rotate");
   }
+
+  async devMachinesOpenRevoke(name: string): Promise<void> {
+    await this.devMachinesOpenAction(name, "Revoke");
+  }
+
+  async devMachinesOpenDelete(name: string): Promise<void> {
+    await this.devMachinesOpenAction(name, "Delete");
+  }
+
+  private devMachinesDialog(): Locator {
+    return this.appDialogs()
+      .filter({ has: this.page.locator("h3") })
+      .first();
+  }
+
   async devMachinesModal(): Promise<DevMachineModal | null> {
-    return todo("devMachinesModal");
+    const dialog = this.devMachinesDialog();
+    if ((await dialog.count()) === 0) return null;
+    const title = ((await dialog.locator("h3").first().innerText()) ?? "").trim();
+    const body = (
+      (await dialog.locator("h3").first().locator("xpath=following-sibling::div[1]").innerText()) ?? ""
+    ).trim();
+    const buttons = dialog.getByRole("button");
+    if ((await buttons.count()) === 0) return null;
+    const confirmLabel = ((await buttons.last().innerText()) ?? "").trim();
+    return { title, body, confirmLabel };
   }
+
   async devMachinesModalVisible(): Promise<boolean> {
-    return todo("devMachinesModalVisible");
+    return (await this.devMachinesDialog().count()) > 0;
   }
+
   async devMachinesModalConfirm(): Promise<void> {
-    return todo("devMachinesModalConfirm");
+    const dialog = this.devMachinesDialog();
+    await dialog.getByRole("button").last().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async devMachinesModalCancel(): Promise<void> {
-    return todo("devMachinesModalCancel");
+    const dialog = this.devMachinesDialog();
+    const cancel = dialog.getByRole("button", { name: "Cancel", exact: true });
+    if ((await cancel.count()) > 0) {
+      await cancel.first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async devMachinesModalPressEscape(): Promise<void> {
-    return todo("devMachinesModalPressEscape");
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(300);
   }
-  async devMachinesDelayActionOnce(_ms: number): Promise<void> {
-    return todo("devMachinesDelayActionOnce");
+
+  private static devMachinesIsActionRequest(url: string, method: string): boolean {
+    if (method === "DELETE") return true;
+    return method === "POST" && (url.includes("/rotate/") || url.includes("/revoke/"));
   }
+
+  async devMachinesDelayActionOnce(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route(WebNewDriver.DEV_MACHINES_PATTERN, async (route) => {
+      const request = route.request();
+      if (armed && WebNewDriver.devMachinesIsActionRequest(request.url(), request.method())) {
+        armed = false;
+        await this.page.waitForTimeout(ms);
+      }
+      await route.continue();
+    });
+  }
+
   async devMachinesFailActionOnce(): Promise<void> {
-    return todo("devMachinesFailActionOnce");
+    let armed = true;
+    await this.page.route(WebNewDriver.DEV_MACHINES_PATTERN, async (route) => {
+      const request = route.request();
+      if (armed && WebNewDriver.devMachinesIsActionRequest(request.url(), request.method())) {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity action failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
   }
+
   async devMachinesLastToast(): Promise<string | null> {
-    return todo("devMachinesLastToast");
+    return this.lastToast();
   }
+
+  private devMachinesDeleteSpyState: {
+    urls: string[];
+    handler: (route: Route) => Promise<void>;
+  } | null = null;
+
   async devMachinesDeleteSpyStart(): Promise<void> {
-    return todo("devMachinesDeleteSpyStart");
+    const urls: string[] = [];
+    const handler = async (route: Route) => {
+      if (route.request().method() === "DELETE") urls.push(route.request().url());
+      await route.continue();
+    };
+    this.devMachinesDeleteSpyState = { urls, handler };
+    await this.page.route(WebNewDriver.DEV_MACHINES_PATTERN, handler);
   }
+
   async devMachinesDeleteSpyUrls(): Promise<string[]> {
-    return todo("devMachinesDeleteSpyUrls");
+    return [...(this.devMachinesDeleteSpyState?.urls ?? [])];
   }
+
   async devMachinesDeleteSpyStop(): Promise<void> {
-    return todo("devMachinesDeleteSpyStop");
+    const state = this.devMachinesDeleteSpyState;
+    this.devMachinesDeleteSpyState = null;
+    if (state !== null) {
+      await this.page.unroute(WebNewDriver.DEV_MACHINES_PATTERN, state.handler).catch(() => undefined);
+    }
   }
+
+  private devMachinesInstallSection(): Locator {
+    return this.page
+      .locator("section", { has: this.page.getByRole("heading", { name: "Install the pidash CLI" }) })
+      .first();
+  }
+
   async devMachinesInstallCards(): Promise<DevMachineInstallCard[]> {
-    return todo("devMachinesInstallCards");
+    const section = this.devMachinesInstallSection();
+    if ((await section.count()) === 0) return [];
+    return section.evaluate((root) => {
+      const cards: { label: string; command: string; downloadHref: string | null }[] = [];
+      for (const pre of root.querySelectorAll("pre")) {
+        const card = pre.parentElement;
+        if (card === null) continue;
+        cards.push({
+          label: card.querySelector("span")?.textContent?.trim() ?? "",
+          command: pre.textContent ?? "",
+          downloadHref: card.querySelector("a[href]")?.getAttribute("href") ?? null,
+        });
+      }
+      return cards;
+    });
   }
-  async devMachinesInstallCopy(_label: string): Promise<void> {
-    return todo("devMachinesInstallCopy");
+
+  private async devMachinesInstallCardRoot(label: string): Promise<Locator | null> {
+    const section = this.devMachinesInstallSection();
+    const pres = section.locator("pre");
+    const count = await pres.count();
+    for (let index = 0; index < count; index += 1) {
+      const root = pres.nth(index).locator("xpath=..");
+      const text = (
+        (await root
+          .locator("span")
+          .first()
+          .textContent()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === label) return root;
+    }
+    return null;
   }
-  async devMachinesInstallCopyState(_label: string): Promise<string | null> {
-    return todo("devMachinesInstallCopyState");
+
+  async devMachinesInstallCopy(label: string): Promise<void> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const root = await this.devMachinesInstallCardRoot(label);
+    if (root === null) throw new Error(`[parity] no install card labelled ${label}.`);
+    await root.getByRole("button").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  async devMachinesInstallCopyState(label: string): Promise<string | null> {
+    const root = await this.devMachinesInstallCardRoot(label);
+    if (root === null) return null;
+    const button = root.getByRole("button").first();
+    if ((await button.count()) === 0) return null;
+    return (((await button.innerText()) ?? "").trim() || null) as string | null;
+  }
+
   async devMachinesInstallPrereq(): Promise<string | null> {
-    return todo("devMachinesInstallPrereq");
+    const section = this.devMachinesInstallSection();
+    const note = section.locator("p", { hasText: "doctor" }).first();
+    if ((await note.count()) === 0) return null;
+    return (((await note.innerText()) ?? "").trim() || null) as string | null;
   }
+
   async devMachinesInstallBreakClipboard(): Promise<void> {
-    return todo("devMachinesInstallBreakClipboard");
+    await this.page.evaluate(() => {
+      window.Clipboard.prototype.writeText = () => Promise.reject(new Error("parity: clipboard blocked"));
+    });
   }
+
   async devMachinesReadClipboard(): Promise<string> {
-    return todo("devMachinesReadClipboard");
+    return this.readClipboard();
   }
-  async runnerDetailOpen(_workspaceSlug: string, _runnerId: string, _projectId?: string): Promise<void> {
-    return todo("runnerDetailOpen");
+
+  async runnerDetailOpen(workspaceSlug: string, runnerId: string, projectId?: string): Promise<void> {
+    const base =
+      projectId !== undefined ? `/${workspaceSlug}/projects/${projectId}/runners` : `/${workspaceSlug}/runners`;
+    await this.page.goto(`${base}/detail/${runnerId}`);
+    const header = this.page.locator("h1").first();
+    const error = this.page.getByText("Failed to load runner").first();
+    await expect(header.or(error)).toBeVisible({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async runnerDetailState(): Promise<"loaded" | "loading" | "error"> {
-    return todo("runnerDetailState");
+    const header = this.page.locator("h1").first();
+    if ((await header.count()) > 0 && (await header.isVisible().catch(() => false))) return "loaded";
+    if ((await this.page.getByText("Failed to load runner").count()) > 0) return "error";
+    return "loading";
   }
+
   async runnerDetailHeader(): Promise<{ name: string; status: string } | null> {
-    return todo("runnerDetailHeader");
+    const header = this.page.locator("h1").first();
+    if ((await header.count()) === 0) return null;
+    const badge = header.locator("xpath=ancestor::section[1]").getByRole("button").first();
+    if ((await badge.count()) === 0) return null;
+    return {
+      name: ((await header.innerText()) ?? "").trim(),
+      status: ((await badge.innerText()) ?? "").trim(),
+    };
   }
+
   async runnerDetailMeta(): Promise<{ label: string; value: string }[]> {
-    return todo("runnerDetailMeta");
+    const section = this.page.locator("section", { hasText: "Metadata" }).first();
+    if ((await section.count()) === 0) return [];
+    const list = section.locator("dl").first();
+    if ((await list.count()) === 0) return [];
+    return list.evaluate((root) => {
+      const out: { label: string; value: string }[] = [];
+      for (const term of root.querySelectorAll(":scope > dt")) {
+        const next = term.nextElementSibling;
+        if (next === null || next.tagName !== "DD") continue;
+        out.push({
+          label: (term.textContent ?? "").trim(),
+          value: (next.textContent ?? "").trim().replace(/\s+/g, " "),
+        });
+      }
+      return out;
+    });
   }
+
   async runnerDetailBackHref(): Promise<string | null> {
-    return todo("runnerDetailBackHref");
+    const link = this.page.getByRole("link", { name: "Back to runners" }).first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
   }
+
   async runnerDetailOpenChat(): Promise<void> {
-    return todo("runnerDetailOpenChat");
+    await this.page.getByRole("link", { name: "Open chat" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL("**/chat/**", { timeout: WebNewDriver.WAIT_MS });
   }
-  async runnerDetailPollCount(_runnerId: string, _windowMs: number): Promise<number> {
-    return todo("runnerDetailPollCount");
+
+  async runnerDetailPollCount(runnerId: string, windowMs: number): Promise<number> {
+    let calls = 0;
+    const pattern = `**/api/runners/${runnerId}/*`;
+    const counter = async (route: Route) => {
+      if (route.request().method() === "GET") calls += 1;
+      await route.continue();
+    };
+    await this.page.route(pattern, counter);
+    try {
+      await this.page.waitForTimeout(windowMs);
+      return calls;
+    } finally {
+      await this.page.unroute(pattern, counter).catch(() => undefined);
+    }
   }
-  async runnerDetailDelayOnce(_ms: number): Promise<void> {
-    return todo("runnerDetailDelayOnce");
+
+  private static runnerDetailIsShapedRequest(url: string, method: string): boolean {
+    if (method !== "GET") return false;
+    let path: string;
+    try {
+      path = new URL(url).pathname;
+    } catch {
+      return false;
+    }
+    const segment = /^\/api\/runners\/([^/]+)\/?$/.exec(path)?.[1];
+    return segment !== undefined && segment !== "dev-machines" && segment !== "chat";
   }
+
+  async runnerDetailDelayOnce(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route("**/api/runners/**", async (route) => {
+      const request = route.request();
+      if (armed && WebNewDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
+        armed = false;
+        await this.page.waitForTimeout(ms);
+      }
+      await route.continue();
+    });
+  }
+
   async runnerDetailFailOnce(): Promise<void> {
-    return todo("runnerDetailFailOnce");
+    let armed = true;
+    await this.page.route("**/api/runners/**", async (route) => {
+      const request = route.request();
+      if (armed && WebNewDriver.runnerDetailIsShapedRequest(request.url(), request.method())) {
+        armed = false;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "parity detail failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
   }
+
+  private runnerActivitySection(): Locator {
+    return this.page.getByRole("region", { name: "Agent activity" }).first();
+  }
+
   async runnerActivityBadge(): Promise<string | null> {
-    return todo("runnerActivityBadge");
+    const section = this.runnerActivitySection();
+    if ((await section.count()) === 0) return null;
+    const heading = section.getByRole("heading", { name: "Agent", exact: true }).first();
+    if ((await heading.count()) === 0) return null;
+    const badge = heading.locator("xpath=..").getByRole("button").first();
+    if ((await badge.count()) === 0) return null;
+    return (((await badge.innerText()) ?? "").trim() || null) as string | null;
   }
+
+  private runnerActivityGrid(): Locator {
+    return this.runnerActivitySection().locator("dl").first();
+  }
+
   async runnerActivityTelemetry(): Promise<{ label: string; value: string }[]> {
-    return todo("runnerActivityTelemetry");
+    const grid = this.runnerActivityGrid();
+    if ((await grid.count()) === 0) return [];
+    return grid.evaluate((root) => {
+      const out: { label: string; value: string }[] = [];
+      for (const term of root.querySelectorAll(":scope > dt")) {
+        const next = term.nextElementSibling;
+        if (next === null || next.tagName !== "DD") continue;
+        out.push({
+          label: (term.textContent ?? "").trim(),
+          value: (next.textContent ?? "").trim().replace(/\s+/g, " "),
+        });
+      }
+      return out;
+    });
   }
+
+  private async runnerActivityLastActivity(): Promise<string | null> {
+    const grid = this.runnerActivityGrid();
+    if ((await grid.count()) === 0) return null;
+    const value = grid.locator("dt", { hasText: "Last activity" }).locator("xpath=following-sibling::dd[1]");
+    if ((await value.count()) === 0) return null;
+    return (((await value.first().innerText()) ?? "").trim() || null) as string | null;
+  }
+
   async runnerActivityAgingObserved(): Promise<boolean> {
-    return todo("runnerActivityAgingObserved");
+    const pattern = "**/api/runners/**";
+    const blocker = async (route: Route) => {
+      const request = route.request();
+      if (request.method() === "GET" && !request.url().includes("dev-machines")) {
+        await route.abort();
+      } else {
+        await route.continue();
+      }
+    };
+    await this.page.route(pattern, blocker);
+    try {
+      const first = await this.runnerActivityLastActivity();
+      if (first === null) return false;
+      await expect.poll(() => this.runnerActivityLastActivity(), { timeout: 25_000 }).not.toBe(first);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      await this.page.unroute(pattern, blocker).catch(() => undefined);
+    }
   }
 
   async schedulerOpenProjectList(_workspaceSlug: string, _projectId: string): Promise<void> {

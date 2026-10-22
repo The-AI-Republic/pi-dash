@@ -1,18 +1,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Runner details mount point, project scope (NEWFRONT-540). Row actions and rail contacts
-// link here; the screen itself lands with its owning slice.
+// Runner detail, project scope (NEWFRONT-555, RUN-042/RUN-043). Same screen,
+// project-scoped back link and chat address.
 
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { RunnersAreaSectionMount } from "../../../../../../../features/runners/components/RunnersAreaSectionMount.js";
+import { RunnerDetailContainer } from "../../../../../../../features/runners/detail/RunnerDetailContainer.js";
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/runners/detail/$runnerId")({
-  component: ProjectRunnerMountRoute,
+  component: ProjectRunnerDetailRoute,
 });
 
-function ProjectRunnerMountRoute(): React.ReactElement {
-  return <RunnersAreaSectionMount title="Runner details" />;
+function ProjectRunnerDetailRoute(): React.ReactElement {
+  const { ws, projectId, runnerId } = Route.useParams();
+  return <RunnerDetailContainer workspaceSlug={ws} runnerId={runnerId} projectId={projectId} />;
 }
