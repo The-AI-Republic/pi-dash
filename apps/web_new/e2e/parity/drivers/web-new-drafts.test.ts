@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Unit tests for the WebNewDriver draft methods (NEWFRONT-643,
-// ISS-137–141). A recording fake stands in for Playwright: each locator
+// ISS-137–141; list-surface reads added by NEWFRONT-782, DRAFT-001–003,
+// 022–024, 026, 027). A recording fake stands in for Playwright: each locator
 // remembers the path of calls that built it, so a test can assert both
 // which selector the driver used and what it does with the answer.
 
@@ -18,6 +19,7 @@ const CHAIN = ["filter", "first", "last", "getByRole", "getByText", "getByPlaceh
 const ACTIONS = [
   "count",
   "isVisible",
+  "isDisabled",
   "click",
   "dblclick",
   "dispatchEvent",
@@ -35,7 +37,8 @@ function render(args: unknown[]): string {
         const record = arg as Record<string, unknown>;
         // A `has` locator is a filter target; keep its chain readable.
         if (record.toString && String(record.toString).includes("locator")) return "<has>";
-        return JSON.stringify(record);
+        // Keep accessible-name patterns readable instead of `"name":{}`.
+        return JSON.stringify(record, (_key, value: unknown) => (value instanceof RegExp ? String(value) : value));
       }
       return String(arg);
     })
@@ -49,7 +52,8 @@ class Recorder {
   respond: Respond = ({ method }) => {
     if (method === "count") return 0;
     if (method === "allTextContents") return [];
-    if (method === "textContent" || method === "inputValue") return "";
+    if (method === "textContent" || method === "inputValue" || method === "title") return "";
+    if (method === "isDisabled" || method === "isVisible") return false;
     return undefined;
   };
 
@@ -76,6 +80,26 @@ class Recorder {
     node.goto = async (url: string) => {
       this.calls.push({ path: "page.goto", method: "goto", args: [url] });
     };
+    node.title = async () => {
+      const call = { path: "page.title", method: "title", args: [] as unknown[] };
+      this.calls.push(call);
+      return this.respond(call);
+    };
+    node.route = async (...args: unknown[]) => {
+      this.calls.push({ path: "page.route", method: "route", args });
+    };
+    node.unroute = async (...args: unknown[]) => {
+      this.calls.push({ path: "page.unroute", method: "unroute", args });
+    };
+    node.on = (event: string, listener: unknown) => {
+      this.calls.push({ path: "page.on", method: "on", args: [event, listener] });
+    };
+    node.off = (event: string, listener: unknown) => {
+      this.calls.push({ path: "page.off", method: "off", args: [event, listener] });
+    };
+    node.evaluate = async (...args: unknown[]) => {
+      this.calls.push({ path: "page.evaluate", method: "evaluate", args });
+    };
     node.waitForLoadState = async () => undefined;
     node.waitForTimeout = async () => undefined;
     node.keyboard = {
@@ -101,6 +125,27 @@ class Recorder {
 
   gotos(): string[] {
     return this.calls.filter((call) => call.path === "page.goto").map((call) => call.args[0] as string);
+  }
+
+  routeHandlers(): Array<{
+    matches: (url: URL) => boolean;
+    handler: (route: { request(): { method(): string }; continue(): Promise<void> }) => Promise<void>;
+  }> {
+    return this.calls
+      .filter((call) => call.path === "page.route")
+      .map((call) => ({
+        matches: call.args[0] as (url: URL) => boolean,
+        handler: call.args[1] as (route: {
+          request(): { method(): string };
+          continue(): Promise<void>;
+        }) => Promise<void>,
+      }));
+  }
+
+  requestListeners(): Array<(request: { url(): string; method(): string }) => void> {
+    return this.calls
+      .filter((call) => call.path === "page.on")
+      .map((call) => call.args[1] as (request: { url(): string; method(): string }) => void);
   }
 }
 
@@ -381,5 +426,196 @@ describe("sign-in retry", () => {
     };
     await driver.signInWithPasswordRetry("ada@example.com", "secret");
     expect(seen).toEqual(["ada@example.com:secret"]);
+  });
+});
+
+// Fragments of the drafts region selectors, in the order they appear.
+const REGION = 'getByRole("region",{"name":"Drafts"})';
+const HEADER = `${REGION}.locator(":scope > *").first()`;
+const COUNT_CHIP = `${HEADER}.getByTestId("drafts-count")`;
+const LOAD_MORE = 'getByRole("button",{"name":"/Load more/"})';
+
+describe("drafts list-surface reads (NEWFRONT-782)", () => {
+  it("reads the tab title", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "title" ? "Workspace Draft" : undefined);
+    await expect(new WebNewDriver(recorder.page()).draftsPageTitle()).resolves.toBe("Workspace Draft");
+    expectTrace(recorder.trace(), ["title page.title"]);
+  });
+
+  it("reads the header block and collapses its whitespace", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 1 : " Drafts\n  51 ");
+    await expect(new WebNewDriver(recorder.page()).draftsHeaderText()).resolves.toBe("Drafts 51");
+    expectTrace(recorder.trace(), ["count", HEADER, "textContent", HEADER]);
+  });
+
+  it("answers blank header and region text when the screen never mounts", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftsHeaderText()).resolves.toBe("");
+    await expect(driver.draftsMainText()).resolves.toBe("");
+  });
+
+  it("reads the region text, never the shell chrome", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 1 : " Drafts\n Half-written work items ");
+    await expect(new WebNewDriver(recorder.page()).draftsMainText()).resolves.toBe("Drafts Half-written work items");
+    expectTrace(recorder.trace(), ["textContent", REGION]);
+  });
+
+  it("reads the count chip and answers null when it is absent", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count") return path.includes("drafts-count") ? 1 : 0;
+      if (method === "textContent") return " 51 ";
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).draftsCountChip()).resolves.toBe("51");
+    expectTrace(recorder.trace(), ["textContent", COUNT_CHIP]);
+    const empty = new Recorder();
+    await expect(new WebNewDriver(empty.page()).draftsCountChip()).resolves.toBeNull();
+  });
+
+  it("reads row names in render order", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "allTextContents" ? [" Two ", "", "One"] : undefined);
+    await expect(new WebNewDriver(recorder.page()).draftRowNames()).resolves.toEqual(["Two", "One"]);
+    expectTrace(recorder.trace(), ['allTextContents page.locator("p[data-draft-name]")']);
+  });
+
+  it.each([
+    ["draftsHeaderCreateState", "Draft a work item"],
+    ["draftsEmptyCreateState", "Create draft work item"],
+    ["draftsNoProjectCreateState", "Start your first project"],
+  ] as const)("reads the %s gate: absent, disabled, enabled", async (method, name) => {
+    for (const [count, disabled, state] of [
+      [0, false, "absent"],
+      [1, true, "disabled"],
+      [1, false, "enabled"],
+    ] as const) {
+      const recorder = new Recorder();
+      recorder.respond = ({ method: action }) =>
+        action === "count" ? count : action === "isDisabled" ? disabled : undefined;
+      await expect(new WebNewDriver(recorder.page())[method]()).resolves.toBe(state);
+    }
+    const traced = new Recorder();
+    traced.respond = ({ method: action }) => (action === "count" ? 1 : false);
+    await new WebNewDriver(traced.page())[method]();
+    expectTrace(traced.trace(), [`getByRole("button",{"name":"${name}","exact":true})`]);
+  });
+
+  it("counts checkboxes and draggable rows", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => (method === "count" && !path.includes("checkbox") ? 1 : 0);
+    const driver = new WebNewDriver(recorder.page());
+    await expect(driver.draftsMainCheckboxCount()).resolves.toBe(0);
+    expectTrace(recorder.trace(), [`getByRole("checkbox")`]);
+    const missing = new Recorder();
+    await expect(new WebNewDriver(missing.page()).draftsMainCheckboxCount()).resolves.toBe(0);
+    await expect(new WebNewDriver(missing.page()).draftRowsDraggableCount()).resolves.toBe(0);
+    expectTrace(missing.trace(), ['count page.locator("[data-draft-block][draggable=\\"true\\"]")']);
+  });
+
+  it("presses a key on the page", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).draftsPressKey("?");
+    expect(recorder.pressed()).toEqual(["?"]);
+  });
+
+  it("finds the skeleton behind either loader", async () => {
+    const initial = new Recorder();
+    initial.respond = ({ method, path }) => (method === "isVisible" ? path.includes("drafts-loading") : false);
+    await expect(new WebNewDriver(initial.page()).draftsSkeletonVisible()).resolves.toBe(true);
+    const next = new Recorder();
+    next.respond = ({ method, path }) => (method === "isVisible" ? path.includes("drafts-load-more-loading") : false);
+    await expect(new WebNewDriver(next.page()).draftsSkeletonVisible()).resolves.toBe(true);
+    const settled = new Recorder();
+    await expect(new WebNewDriver(settled.page()).draftsSkeletonVisible()).resolves.toBe(false);
+  });
+
+  it("reads load-more visibility", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method }) => (method === "count" ? 1 : undefined);
+    await expect(new WebNewDriver(recorder.page()).draftsLoadMoreVisible()).resolves.toBe(true);
+    expectTrace(recorder.trace(), [LOAD_MORE]);
+    const exhausted = new Recorder();
+    await expect(new WebNewDriver(exhausted.page()).draftsLoadMoreVisible()).resolves.toBe(false);
+  });
+
+  it("clicks load-more and waits for the appended rows", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes(BLOCK)) return recorder.clicks().length > 0 ? 2 : 1;
+      return undefined;
+    };
+    await new WebNewDriver(recorder.page()).draftsLoadMore();
+    expectTrace(recorder.clicks(), [LOAD_MORE]);
+  });
+
+  it("holds list reads for the skeleton probe and lets writes through", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).draftsDelayList(4000);
+    const [route] = recorder.routeHandlers();
+    expect(route).toBeDefined();
+    expect(route!.matches(new URL("https://app.test/api/workspaces/acme/draft-issues/?per_page=50"))).toBe(true);
+    expect(route!.matches(new URL("https://app.test/api/workspaces/acme/projects/details/"))).toBe(false);
+    const continued: string[] = [];
+    await route!.handler({
+      request: () => ({ method: () => "POST" }),
+      continue: async () => void continued.push("write"),
+    });
+    expect(continued).toEqual(["write"]);
+    const held = new Recorder();
+    await new WebNewDriver(held.page()).draftsDelayList(1);
+    const [probe] = held.routeHandlers();
+    const reads: string[] = [];
+    await probe!.handler({
+      request: () => ({ method: () => "GET" }),
+      continue: async () => void reads.push("read"),
+    });
+    expect(reads).toEqual(["read"]);
+  });
+
+  it("counts list reads across a refocus cycle", async () => {
+    const recorder = new Recorder();
+    await expect(new WebNewDriver(recorder.page()).draftsListFetchCountOnRefocus()).resolves.toBe(0);
+    const [route] = recorder.routeHandlers();
+    expect(route).toBeDefined();
+    expect(route!.matches(new URL("https://app.test/api/workspaces/acme/draft-issues/"))).toBe(true);
+    expect(route!.matches(new URL("https://app.test/api/workspaces/acme/issues/"))).toBe(false);
+    const continued: string[] = [];
+    await route!.handler({
+      request: () => ({ method: () => "GET" }),
+      continue: async () => void continued.push("read"),
+    });
+    expect(continued).toEqual(["read"]);
+    expectTrace(recorder.trace(), ["evaluate page.evaluate", "unroute page.unroute"]);
+  });
+
+  it("collects draft entry traffic and nothing else", async () => {
+    const recorder = new Recorder();
+    let fed = false;
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes(BLOCK)) {
+        if (!fed) {
+          fed = true;
+          for (const listener of recorder.requestListeners()) {
+            listener({
+              url: () => "https://app.test/api/workspaces/acme/draft-issues/?per_page=50",
+              method: () => "GET",
+            });
+            listener({ url: () => "https://app.test/api/workspaces/acme/projects/details/", method: () => "GET" });
+            listener({ url: () => "http://[invalid/draft-issues", method: () => "GET" });
+          }
+        }
+        return 1;
+      }
+      return 0;
+    };
+    const seen = await new WebNewDriver(recorder.page()).draftsEntryRequests("acme");
+    expect(seen).toEqual(["GET /api/workspaces/acme/draft-issues/"]);
+    expect(recorder.gotos()).toEqual(["/acme/drafts"]);
+    expectTrace(recorder.trace(), ["off page.off"]);
   });
 });

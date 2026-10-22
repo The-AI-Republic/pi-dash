@@ -58,6 +58,7 @@ import { Route as WsGatedAssistantIndexRouteImport } from './routes/$ws/_gated/a
 import { Route as WsGatedAssistantThreadIdRouteImport } from './routes/$ws/_gated/assistant/$threadId'
 import { Route as WsGatedBrowseIssueKeyRouteImport } from './routes/$ws/_gated/browse/$issueKey'
 import { Route as WsGatedDraftsIndexRouteImport } from './routes/$ws/_gated/drafts/index'
+import { Route as WsGatedDraftsSplatRouteImport } from './routes/$ws/_gated/drafts/$'
 import { Route as WsGatedNotificationsIndexRouteImport } from './routes/$ws/_gated/notifications/index'
 import { Route as WsGatedProfileUserIdRouteRouteImport } from './routes/$ws/_gated/profile/$userId/route'
 import { Route as WsGatedProjectsIndexRouteImport } from './routes/$ws/_gated/projects/index'
@@ -379,6 +380,11 @@ const WsGatedBrowseIssueKeyRoute = WsGatedBrowseIssueKeyRouteImport.update({
 const WsGatedDraftsIndexRoute = WsGatedDraftsIndexRouteImport.update({
   id: '/drafts/',
   path: '/drafts/',
+  getParentRoute: () => WsGatedRouteRoute,
+} as any)
+const WsGatedDraftsSplatRoute = WsGatedDraftsSplatRouteImport.update({
+  id: '/drafts/$',
+  path: '/drafts/$',
   getParentRoute: () => WsGatedRouteRoute,
 } as any)
 const WsGatedNotificationsIndexRoute =
@@ -870,6 +876,7 @@ export interface FileRoutesByFullPath {
   '/$ws/settings': typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/drafts/$': typeof WsGatedDraftsSplatRoute
   '/$ws/runners/approvals': typeof WsGatedRunnersApprovalsRoute
   '/$ws/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
   '/$ws/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
@@ -982,6 +989,7 @@ export interface FileRoutesByTo {
   '/settings/profile': typeof SettingsProfileIndexRoute
   '/$ws/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/drafts/$': typeof WsGatedDraftsSplatRoute
   '/$ws/runners/approvals': typeof WsGatedRunnersApprovalsRoute
   '/$ws/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
   '/$ws/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
@@ -1107,6 +1115,7 @@ export interface FileRoutesById {
   '/$ws/_gated/settings/_workspace': typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
   '/$ws/_gated/assistant/$threadId': typeof WsGatedAssistantThreadIdRoute
   '/$ws/_gated/browse/$issueKey': typeof WsGatedBrowseIssueKeyRoute
+  '/$ws/_gated/drafts/$': typeof WsGatedDraftsSplatRoute
   '/$ws/_gated/runners/approvals': typeof WsGatedRunnersApprovalsRoute
   '/$ws/_gated/settings/api-tokens': typeof WsGatedSettingsApiTokensRoute
   '/$ws/_gated/workspace-views/all-issues': typeof WsGatedWorkspaceViewsAllIssuesRoute
@@ -1232,6 +1241,7 @@ export interface FileRouteTypes {
     | '/$ws/settings'
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
+    | '/$ws/drafts/$'
     | '/$ws/runners/approvals'
     | '/$ws/settings/api-tokens'
     | '/$ws/workspace-views/all-issues'
@@ -1344,6 +1354,7 @@ export interface FileRouteTypes {
     | '/settings/profile'
     | '/$ws/assistant/$threadId'
     | '/$ws/browse/$issueKey'
+    | '/$ws/drafts/$'
     | '/$ws/runners/approvals'
     | '/$ws/settings/api-tokens'
     | '/$ws/workspace-views/all-issues'
@@ -1468,6 +1479,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/settings/_workspace'
     | '/$ws/_gated/assistant/$threadId'
     | '/$ws/_gated/browse/$issueKey'
+    | '/$ws/_gated/drafts/$'
     | '/$ws/_gated/runners/approvals'
     | '/$ws/_gated/settings/api-tokens'
     | '/$ws/_gated/workspace-views/all-issues'
@@ -1914,6 +1926,13 @@ declare module '@tanstack/react-router' {
       path: '/drafts'
       fullPath: '/$ws/drafts/'
       preLoaderRoute: typeof WsGatedDraftsIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
+    '/$ws/_gated/drafts/$': {
+      id: '/$ws/_gated/drafts/$'
+      path: '/drafts/$'
+      fullPath: '/$ws/drafts/$'
+      preLoaderRoute: typeof WsGatedDraftsSplatRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
     '/$ws/_gated/notifications/': {
@@ -2657,6 +2676,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedProjectsProjectIdRouteRoute: typeof WsGatedProjectsProjectIdRouteRouteWithChildren
   WsGatedSettingsWorkspaceRouteRoute: typeof WsGatedSettingsWorkspaceRouteRouteWithChildren
   WsGatedBrowseIssueKeyRoute: typeof WsGatedBrowseIssueKeyRoute
+  WsGatedDraftsSplatRoute: typeof WsGatedDraftsSplatRoute
   WsGatedSettingsApiTokensRoute: typeof WsGatedSettingsApiTokensRoute
   WsGatedWorkspaceViewsAllIssuesRoute: typeof WsGatedWorkspaceViewsAllIssuesRoute
   WsGatedAnalyticsIndexRoute: typeof WsGatedAnalyticsIndexRoute
@@ -2697,6 +2717,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedSettingsWorkspaceRouteRoute:
     WsGatedSettingsWorkspaceRouteRouteWithChildren,
   WsGatedBrowseIssueKeyRoute: WsGatedBrowseIssueKeyRoute,
+  WsGatedDraftsSplatRoute: WsGatedDraftsSplatRoute,
   WsGatedSettingsApiTokensRoute: WsGatedSettingsApiTokensRoute,
   WsGatedWorkspaceViewsAllIssuesRoute: WsGatedWorkspaceViewsAllIssuesRoute,
   WsGatedAnalyticsIndexRoute: WsGatedAnalyticsIndexRoute,

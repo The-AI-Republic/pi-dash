@@ -16039,25 +16039,53 @@ export class WebNewDriver implements ParityDriver {
     return todo("estimatesAnalyticsTableRows");
   }
   // --- Workspace drafts oracle (NEWFRONT-32). Throwing stubs per the
-  // --- shared driver contract; the Drafts area fills these in.
+  // --- shared driver contract; the Drafts area fills these in. NEWFRONT-782
+  // --- implements the list-surface reads below; row/menu/picker methods
+  // --- stay stubs for their owning slices.
+
+  /** The drafts content region (the screen's own section, never shell chrome). */
+  private draftsRegion(): Locator {
+    return this.page.getByRole("region", { name: "Drafts" });
+  }
+
+  /** The header block: the region's first child (heading, count, actions). */
+  private draftsHeaderBlock(): Locator {
+    return this.draftsRegion().locator(":scope > *").first();
+  }
+
+  private static cleanDraftText(text: string | null): string {
+    return (text ?? "").replace(/\s+/g, " ").trim();
+  }
 
   async draftsPageTitle(): Promise<string> {
-    return todo("draftsPageTitle");
+    return this.page.title();
   }
   async draftsHeaderText(): Promise<string> {
-    return todo("draftsHeaderText");
+    const header = this.draftsHeaderBlock();
+    if ((await header.count()) === 0) return "";
+    return WebNewDriver.cleanDraftText(await header.textContent().catch(() => null));
   }
   async draftsCountChip(): Promise<string | null> {
-    return todo("draftsCountChip");
+    // The chip renders only above a zero total; absent entirely otherwise.
+    const chip = this.draftsHeaderBlock().getByTestId("drafts-count");
+    if ((await chip.count()) === 0) return null;
+    const text = WebNewDriver.cleanDraftText(await chip.textContent().catch(() => null));
+    return text.length > 0 ? text : null;
   }
   async draftsHeaderCreateState(): Promise<"enabled" | "disabled" | "absent"> {
-    return todo("draftsHeaderCreateState");
+    const action = this.page.getByRole("button", { name: "Draft a work item", exact: true });
+    if ((await action.count()) === 0) return "absent";
+    return (await action.first().isDisabled()) ? "disabled" : "enabled";
   }
   async draftsMainText(): Promise<string> {
-    return todo("draftsMainText");
+    const region = this.draftsRegion();
+    if ((await region.count()) === 0) return "";
+    return WebNewDriver.cleanDraftText(await region.textContent().catch(() => null));
   }
   async draftRowNames(): Promise<string[]> {
-    return todo("draftRowNames");
+    // Titles in render order, top row first — the same name paragraphs the
+    // Issues-era drafts driver reads.
+    return this.visibleDraftNames();
   }
   async draftRowProjectMarker(_name: string): Promise<string> {
     return todo("draftRowProjectMarker");
@@ -16155,41 +16183,129 @@ export class WebNewDriver implements ParityDriver {
   async draftClearPatchFailure(): Promise<void> {
     return todo("draftClearPatchFailure");
   }
-  async draftsEntryRequests(_workspaceSlug: string): Promise<string[]> {
-    return todo("draftsEntryRequests");
+  async draftsEntryRequests(workspaceSlug: string): Promise<string[]> {
+    const seen = new Set<string>();
+    const listener = (request: { url(): string; method(): string }): void => {
+      const url = request.url();
+      if (!url.includes("/draft-issues")) return;
+      try {
+        seen.add(`${request.method()} ${new URL(url).pathname}`);
+      } catch {
+        // Unparseable URLs cannot be endpoint calls; ignore them.
+      }
+    };
+    this.page.on("request", listener);
+    try {
+      await this.page.goto(`/${workspaceSlug}/drafts`, { timeout: 60_000 });
+      await this.page.waitForLoadState("domcontentloaded");
+      await expect
+        .poll(
+          async () =>
+            (await this.draftBlockCount()) > 0 ||
+            (await this.pageTextContains("Half-written work items")) ||
+            (await this.pageTextContains("No project")),
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+        .toBe(true);
+      // Drain late follow-up requests.
+      await this.page.waitForTimeout(1_000);
+    } finally {
+      this.page.off("request", listener);
+    }
+    return [...seen].sort();
   }
   async draftRowsDraggableCount(): Promise<number> {
-    return todo("draftRowsDraggableCount");
+    return this.page.locator('[data-draft-block][draggable="true"]').count();
   }
-  async draftsPressKey(_key: string): Promise<void> {
-    return todo("draftsPressKey");
+  async draftsPressKey(key: string): Promise<void> {
+    await this.page.keyboard.press(key);
   }
   async draftPublishError(): Promise<string | null> {
     return todo("draftPublishError");
   }
   async draftsEmptyCreateState(): Promise<"enabled" | "disabled" | "absent"> {
-    return todo("draftsEmptyCreateState");
+    const action = this.page.getByRole("button", { name: "Create draft work item", exact: true });
+    if ((await action.count()) === 0) return "absent";
+    return (await action.first().isDisabled()) ? "disabled" : "enabled";
   }
   async draftsNoProjectCreateState(): Promise<"enabled" | "disabled" | "absent"> {
-    return todo("draftsNoProjectCreateState");
+    const action = this.page.getByRole("button", { name: "Start your first project", exact: true });
+    if ((await action.count()) === 0) return "absent";
+    return (await action.first().isDisabled()) ? "disabled" : "enabled";
   }
-  async draftsDelayList(_ms: number): Promise<void> {
-    return todo("draftsDelayList");
+  async draftsDelayList(ms: number): Promise<void> {
+    // Hold the drafts-list answers so the skeleton stays up long enough
+    // to observe; writes pass through untouched. A URL predicate (not a
+    // glob) routes the request, mirroring the oracle driver.
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes("/draft-issues/");
+    const hold = async (route: Route): Promise<void> => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route(matches, hold);
   }
   async draftsSkeletonVisible(): Promise<boolean> {
-    return todo("draftsSkeletonVisible");
+    const region = this.draftsRegion();
+    if (
+      await region
+        .getByTestId("drafts-loading")
+        .isVisible()
+        .catch(() => false)
+    )
+      return true;
+    return region
+      .getByTestId("drafts-load-more-loading")
+      .isVisible()
+      .catch(() => false);
   }
   async draftsLoadMoreVisible(): Promise<boolean> {
-    return todo("draftsLoadMoreVisible");
+    return (
+      (await this.draftsRegion()
+        .getByRole("button", { name: /Load more/ })
+        .count()) > 0
+    );
   }
   async draftsLoadMore(): Promise<void> {
-    return todo("draftsLoadMore");
+    const before = await this.draftBlockCount();
+    await this.draftsRegion()
+      .getByRole("button", { name: /Load more/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.draftBlockCount(), { timeout: WebNewDriver.WAIT_MS }).toBeGreaterThan(before);
   }
   async draftsListFetchCountOnRefocus(): Promise<number> {
-    return todo("draftsListFetchCountOnRefocus");
+    // Count drafts-list reads across a blur/focus cycle: the screen
+    // fetches on mount only, never on refocus.
+    let calls = 0;
+    const matches = (url: URL): boolean =>
+      url.pathname.includes("/api/workspaces/") && url.pathname.includes("/draft-issues/");
+    const counter = async (route: Route): Promise<void> => {
+      if (route.request().method() === "GET") calls += 1;
+      await route.continue();
+    };
+    await this.page.route(matches, counter);
+    try {
+      await this.page.evaluate(() => {
+        window.dispatchEvent(new Event("blur"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        window.dispatchEvent(new Event("focus"));
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await this.page.waitForTimeout(3000);
+      return calls;
+    } finally {
+      await this.page.unroute(matches, counter).catch(() => undefined);
+    }
   }
   async draftsMainCheckboxCount(): Promise<number> {
-    return todo("draftsMainCheckboxCount");
+    const region = this.draftsRegion();
+    if ((await region.count()) === 0) return 0;
+    return region.getByRole("checkbox").count();
   }
 
   // Modules dialogs, archive and archived screen (NEWFRONT-309, MOD-022..028).
