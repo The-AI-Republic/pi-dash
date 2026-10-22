@@ -24992,23 +24992,24 @@ export class WebNewDriver implements ParityDriver {
   // --- PROF-021..025, PROF-027, PROF-028). The area gate implements these
   // --- against apps/web_new; until then every method throws todo().
   async settingsProfileOpenTab(
-    _tab: "ai-assistant" | "auto-project-management" | "integrations",
-    _cookies: ParityBrowserCookie[]
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("settingsProfileOpenTab");
+    // Shell settle only; the tab-content actions carry their own waits.
+    await this.settingsProfileGoto(`/settings/profile/${tab}`, cookies);
   }
   async settingsProfileOpenTabWithQuery(
-    _tab: "ai-assistant" | "auto-project-management" | "integrations",
-    _query: string,
-    _cookies: ParityBrowserCookie[]
+    tab: "ai-assistant" | "auto-project-management" | "integrations",
+    query: string,
+    cookies: ParityBrowserCookie[]
   ): Promise<void> {
-    return todo("settingsProfileOpenTabWithQuery");
+    await this.settingsProfileGoto(`/settings/profile/${tab}?${query}`, cookies);
   }
   async settingsProfileCurrentPath(): Promise<string> {
-    return todo("settingsProfileCurrentPath");
+    return new URL(this.page.url()).pathname;
   }
   async settingsProfileCurrentQuery(): Promise<string> {
-    return todo("settingsProfileCurrentQuery");
+    return new URL(this.page.url()).search.replace(/^\?/, "");
   }
   async settingsProfileLastToast(): Promise<{ title: string; message: string } | null> {
     return todo("settingsProfileLastToast");
@@ -25147,7 +25148,16 @@ export class WebNewDriver implements ParityDriver {
     return todo("settingsProfilePressKeys");
   }
   async settingsProfileDialogOpen(): Promise<boolean> {
-    return todo("settingsProfileDialogOpen");
+    // Toasts render as dialogs inside the Notifications region; only a
+    // dialog outside it counts as an open dialog for the silence checks.
+    return this.page.evaluate(() => {
+      const dialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')];
+      return dialogs.some((el) => {
+        if ((el as HTMLElement).closest('[aria-label="Notifications"]') !== null) return false;
+        const rect = (el as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    });
   }
   async settingsProfileWatchReads(): Promise<void> {
     return todo("settingsProfileWatchReads");
@@ -25176,42 +25186,98 @@ export class WebNewDriver implements ParityDriver {
 
   // ---------------------------------------------------------------------------
   // Profile-settings shell, general/account tabs and security tab
-  // (NEWFRONT-426, rows PROF-009..015, PROF-026). Stubs until the area lands
-  // in apps/web_new. Appended; existing entries above are untouched per the
-  // shared contract.
+  // (NEWFRONT-426, rows PROF-009..015, PROF-026). The area gate implements
+  // these against apps/web_new (NEWFRONT-586).
   // ---------------------------------------------------------------------------
-  async settingsProfileOpen(_tabId: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("settingsProfileOpen");
+  /**
+   * First-paint wait for settings navigations. Same dev-server module
+   * throughput as the profile pages: ~900 unbundled requests, ~30s on a
+   * loaded host.
+   */
+  private static readonly SETTINGS_FIRST_PAINT_WAIT_MS = 60_000;
+
+  /** Navigate to a settings address with cookies; the shell is the settle state. */
+  private async settingsProfileGoto(path: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.page.context().addCookies(cookies);
+    await this.page.goto(path, { waitUntil: "domcontentloaded" });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.settingsProfileSettle();
+  }
+
+  /** Settle the settings page on its shell (unknown ids redirect to the default tab). */
+  private async settingsProfileSettle(): Promise<void> {
+    await this.page
+      .getByTestId("profile-settings-shell")
+      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
+  }
+
+  /** Link labels under one sidebar section heading (tabs or shortcuts). */
+  private async settingsProfileSectionLinks(heading: string): Promise<string[]> {
+    // Headings render under a CSS uppercase transform, which innerText
+    // reflects; textContent reads the sourced label the specs name.
+    const sections = this.page.getByTestId("profile-settings-sidebar").locator("section");
+    const total = await sections.count();
+    for (let index = 0; index < total; index += 1) {
+      const section = sections.nth(index);
+      const title = section.locator("h2");
+      if ((await title.count()) === 0) continue;
+      if (((await title.first().textContent()) ?? "").trim() !== heading) continue;
+      return (await section.locator("a").allInnerTexts()).map((text) => text.trim().replace(/\s+/g, " "));
+    }
+    return [];
+  }
+
+  async settingsProfileOpen(tabId: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.settingsProfileGoto(`/settings/profile/${tabId}`, cookies);
   }
   async settingsProfileShellVisible(): Promise<boolean> {
-    return todo("settingsProfileShellVisible");
+    return this.isShown(this.page.getByTestId("profile-settings-shell"));
   }
   async settingsProfileLoaderOnly(): Promise<boolean> {
-    return todo("settingsProfileLoaderOnly");
+    if (await this.settingsProfileShellVisible()) return false;
+    return (await this.page.locator(".animate-pulse").count()) > 0;
   }
   async settingsProfileGroupLabels(): Promise<string[]> {
-    return todo("settingsProfileGroupLabels");
+    const headings = this.page.getByTestId("profile-settings-sidebar").locator("h2");
+    return (await headings.allTextContents()).map((text) => text.trim());
   }
-  async settingsProfileGroupTabs(_group: string): Promise<string[]> {
-    return todo("settingsProfileGroupTabs");
+  async settingsProfileGroupTabs(group: string): Promise<string[]> {
+    return this.settingsProfileSectionLinks(group);
   }
   async settingsProfileActiveTab(): Promise<string | null> {
-    return todo("settingsProfileActiveTab");
+    return this.profileSettingsActiveTab();
   }
   async settingsProfileBackLabel(): Promise<string | null> {
-    return todo("settingsProfileBackLabel");
+    const back = this.page.getByTestId("profile-settings-sidebar").getByRole("link", { name: "Back to home" });
+    if ((await back.count()) === 0) return null;
+    return (await back.first().getAttribute("aria-label")) ?? "Back to home";
   }
   async settingsProfileSidebarTitle(): Promise<string | null> {
-    return todo("settingsProfileSidebarTitle");
+    const title = this.page.getByTestId("profile-settings-sidebar").getByText("Profile settings", { exact: true });
+    if ((await title.count()) === 0) return null;
+    return (await title.first().innerText()).trim() || null;
   }
   async settingsProfileWorkspaceShortcuts(): Promise<string[]> {
-    return todo("settingsProfileWorkspaceShortcuts");
+    return this.settingsProfileSectionLinks("Workspace");
   }
-  async settingsProfileSelectTab(_label: string): Promise<void> {
-    return todo("settingsProfileSelectTab");
+  async settingsProfileSelectTab(label: string): Promise<void> {
+    const before = this.page.url();
+    await this.page
+      .getByTestId("profile-settings-sidebar")
+      .getByRole("link", { name: label, exact: true })
+      .first()
+      .click();
+    await this.page
+      .waitForFunction((prior) => window.location.href !== prior, before, { timeout: WebNewDriver.WAIT_MS })
+      .catch(() => {
+        throw new Error(`[parity] settings tab switch to ${label} never navigated.`);
+      });
+    await this.settingsProfileSettle();
   }
-  async settingsProfileOpenPath(_path: string, _cookies: ParityBrowserCookie[]): Promise<string> {
-    return todo("settingsProfileOpenPath");
+  async settingsProfileOpenPath(path: string, cookies: ParityBrowserCookie[]): Promise<string> {
+    await this.settingsProfileGoto(path, cookies);
+    const url = new URL(this.page.url());
+    return `${url.pathname}${url.search}`;
   }
   async settingsProfileGeneralFieldValue(_field: SettingsProfileGeneralField): Promise<string> {
     return todo("settingsProfileGeneralFieldValue");
@@ -30571,10 +30637,28 @@ export class WebNewDriver implements ParityDriver {
   // ---------------------------------------------------------------------------
 
   async settingsProfileOpenPreferences(): Promise<void> {
-    return todo("settingsProfileOpenPreferences");
+    await this.page.goto("/settings/profile/preferences", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByTestId("preferences-settings")
+      .waitFor({ state: "visible", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileOpenActivity(): Promise<void> {
-    return todo("settingsProfileOpenActivity");
+    const feedWait = this.page
+      .waitForResponse(
+        (response) => response.request().method() === "GET" && response.url().includes("/api/users/me/activities/"),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await this.page.goto("/settings/profile/activity", { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await feedWait;
+    // Rows, the illustrated empty state, or the error note: the loader
+    // detaching covers every settled twin (a cached read never shows it,
+    // which resolves immediately).
+    await this.page
+      .getByTestId("own-activity-loading")
+      .waitFor({ state: "detached", timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileThemeValue(): Promise<SettingsProfileTheme | null> {
     return todo("settingsProfileThemeValue");
@@ -30621,14 +30705,25 @@ export class WebNewDriver implements ParityDriver {
   async settingsProfileSetWeekStart(_day: string): Promise<void> {
     return todo("settingsProfileSetWeekStart");
   }
-  async settingsProfileOpenHome(_workspaceSlug: string): Promise<void> {
-    return todo("settingsProfileOpenHome");
+  async settingsProfileOpenHome(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page
+      .getByRole("heading", { name: /Good (morning|afternoon|evening)/ })
+      .first()
+      .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileGreetingClockText(): Promise<string | null> {
     return todo("settingsProfileGreetingClockText");
   }
-  async settingsProfileOpenMemberProfile(_workspaceSlug: string, _userId: string): Promise<void> {
-    return todo("settingsProfileOpenMemberProfile");
+  async settingsProfileOpenMemberProfile(workspaceSlug: string, userId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/profile/${userId}`, { timeout: 60_000 });
+    await this.page.waitForLoadState("domcontentloaded");
+    // The sidebar clock settles with the profile payload.
+    await this.page
+      .locator("[data-profile-clock]")
+      .first()
+      .waitFor({ timeout: WebNewDriver.SETTINGS_FIRST_PAINT_WAIT_MS });
   }
   async settingsProfileSidebarClockText(): Promise<string | null> {
     return todo("settingsProfileSidebarClockText");

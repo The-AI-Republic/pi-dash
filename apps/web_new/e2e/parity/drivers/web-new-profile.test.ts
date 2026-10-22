@@ -578,3 +578,180 @@ describe("profileSidebarAvatar", () => {
     await expect(driver.profileSidebarAvatar()).rejects.toThrow("neither an avatar image nor an initial");
   });
 });
+
+describe("settings shell reads (NEWFRONT-586, PROF-009/010/026)", () => {
+  function settingsPage(overrides: Partial<Record<string, unknown>> = {}): {
+    page: Page;
+    goto: ReturnType<typeof vi.fn>;
+    addCookies: ReturnType<typeof vi.fn>;
+  } {
+    const goto = vi.fn(async () => undefined);
+    const addCookies = vi.fn(async () => undefined);
+    const page = pageOf({
+      context: () => ({ addCookies }),
+      goto,
+      waitForLoadState: async () => undefined,
+      waitForFunction: async () => undefined,
+      url: () => "https://app.test/settings/profile/general",
+      ...overrides,
+    });
+    return { page, goto, addCookies };
+  }
+
+  function sidebarShell(selectors: Record<string, StubLocator>): (id: string) => Locator {
+    return (id: string) => {
+      if (id === "profile-settings-sidebar" || id === "profile-settings-shell") {
+        return locator({
+          count: async () => 1,
+          isVisible: async () => true,
+          locator: (selector: string) => selectors[selector] ?? locator({ count: async () => 0 }),
+          getByRole: (_role: string, options?: unknown) =>
+            (selectors[`role:${JSON.stringify(options)}`] as Locator | undefined) ?? locator({ count: async () => 0 }),
+          getByText: (_text: string) =>
+            (selectors["title"] as Locator | undefined) ?? locator({ count: async () => 0 }),
+          allInnerTexts: async () => selectors["headings"]?.allInnerTexts?.() ?? [],
+        });
+      }
+      return locator({ count: async () => 0 });
+    };
+  }
+
+  it("opens a tab address with cookies and settles on the shell", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const { page, goto, addCookies } = settingsPage({
+      getByTestId: () => locator({ waitFor }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpen("security", [{ name: "s", value: "v", domain: "app.test", path: "/" }]);
+    expect(addCookies).toHaveBeenCalledTimes(1);
+    expect(goto).toHaveBeenCalledWith("/settings/profile/security", { waitUntil: "domcontentloaded" });
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 60_000 });
+  });
+
+  it("opens tab shortcuts and query variants at their addresses", async () => {
+    const { page, goto } = settingsPage();
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpenTab("integrations", []);
+    await driver.settingsProfileOpenTabWithQuery("ai-assistant", "keep=1", []);
+    expect(goto).toHaveBeenNthCalledWith(1, "/settings/profile/integrations", { waitUntil: "domcontentloaded" });
+    expect(goto).toHaveBeenNthCalledWith(2, "/settings/profile/ai-assistant?keep=1", { waitUntil: "domcontentloaded" });
+  });
+
+  it("reads the shell, loader, path and query", async () => {
+    const { page } = settingsPage({
+      url: () => "https://app.test/settings/profile/general?keep=1",
+      getByTestId: sidebarShell({}),
+      locator: () => locator({ count: async () => 2 }),
+    });
+    const driver = new WebNewDriver(page);
+    expect(await driver.settingsProfileShellVisible()).toBe(true);
+    expect(await driver.settingsProfileLoaderOnly()).toBe(false);
+    expect(await driver.settingsProfileCurrentPath()).toBe("/settings/profile/general");
+    expect(await driver.settingsProfileCurrentQuery()).toBe("keep=1");
+  });
+
+  it("reports loader-only only when the shell is gone and a pulse shows", async () => {
+    const noShell = () => locator({ count: async () => 0 });
+    const noPulse = () => locator({ count: async () => 0 });
+    const pulsed = new WebNewDriver(settingsPage({ getByTestId: noShell, locator: noPulse }).page);
+    expect(await pulsed.settingsProfileLoaderOnly()).toBe(false);
+    const withPulse = new WebNewDriver(
+      settingsPage({ getByTestId: noShell, locator: () => locator({ count: async () => 1 }) }).page
+    );
+    expect(await withPulse.settingsProfileLoaderOnly()).toBe(true);
+  });
+
+  it("reads group labels, group tabs and shortcuts from their sections", async () => {
+    const section = (heading: string, links: string[]): StubLocator => ({
+      locator: (selector: string) =>
+        selector === "h2"
+          ? locator({ textContent: async () => heading })
+          : locator({ allInnerTexts: async () => links }),
+    });
+    const sections = [
+      section("Your Profile", ["Profile", "Security"]),
+      section("Workspace", ["Acme", "Create workspace"]),
+    ];
+    const sidebar = locator({
+      locator: (selector: string) =>
+        selector === "h2"
+          ? locator({ allTextContents: async () => ["Your Profile", "Workspace"] })
+          : locator({ count: async () => sections.length, nth: (index: number) => sections[index]! }),
+    });
+    const driver = new WebNewDriver(settingsPage({ getByTestId: () => sidebar }).page);
+    expect(await driver.settingsProfileGroupLabels()).toEqual(["Your Profile", "Workspace"]);
+    expect(await driver.settingsProfileGroupTabs("Your Profile")).toEqual(["Profile", "Security"]);
+    expect(await driver.settingsProfileGroupTabs("Missing")).toEqual([]);
+    expect(await driver.settingsProfileWorkspaceShortcuts()).toEqual(["Acme", "Create workspace"]);
+  });
+
+  it("reads the back label and sidebar title with absent twins", async () => {
+    const present = new WebNewDriver(
+      settingsPage({
+        getByTestId: sidebarShell({
+          'role:{"name":"Back to home"}': locator({ getAttribute: async () => "Back to home" }),
+          title: locator({ innerText: async () => "Profile settings" }),
+        }),
+      }).page
+    );
+    expect(await present.settingsProfileBackLabel()).toBe("Back to home");
+    expect(await present.settingsProfileSidebarTitle()).toBe("Profile settings");
+    const absent = new WebNewDriver(settingsPage({ getByTestId: sidebarShell({}) }).page);
+    expect(await absent.settingsProfileBackLabel()).toBeNull();
+    expect(await absent.settingsProfileSidebarTitle()).toBeNull();
+  });
+
+  it("switches tabs by link and reports the landed address", async () => {
+    const click = vi.fn(async () => undefined);
+    const link = locator({ click });
+    const sidebar = locator({ getByRole: () => link });
+    const { page, goto } = settingsPage({
+      getByTestId: () => sidebar,
+      url: () => "https://app.test/settings/profile/security/?keep=2",
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileSelectTab("Security");
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(await driver.settingsProfileOpenPath("/settings?keep=2", [])).toBe("/settings/profile/security/?keep=2");
+    expect(goto).toHaveBeenCalledWith("/settings?keep=2", { waitUntil: "domcontentloaded" });
+  });
+
+  it("refuses a tab switch that never navigates", async () => {
+    const { page } = settingsPage({
+      waitForFunction: async () => {
+        throw new Error("nope");
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.settingsProfileSelectTab("Security")).rejects.toThrow("never navigated");
+  });
+
+  it("reports dialogs from the page evaluate", async () => {
+    const open = new WebNewDriver(settingsPage({ evaluate: async () => true }).page);
+    expect(await open.settingsProfileDialogOpen()).toBe(true);
+    const shut = new WebNewDriver(settingsPage({ evaluate: async () => false }).page);
+    expect(await shut.settingsProfileDialogOpen()).toBe(false);
+  });
+
+  it("opens home, member profiles, preferences and activity at their markers", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const waitForResponse = vi.fn(async () => null);
+    const { page, goto } = settingsPage({
+      getByTestId: () => locator({ waitFor }),
+      getByRole: () => locator({ first: () => locator({ waitFor }) }),
+      locator: () => locator({ first: () => locator({ waitFor }) }),
+      waitForResponse,
+    });
+    const driver = new WebNewDriver(page);
+    await driver.settingsProfileOpenHome("acme");
+    await driver.settingsProfileOpenMemberProfile("acme", "u-1");
+    await driver.settingsProfileOpenPreferences();
+    await driver.settingsProfileOpenActivity();
+    expect(goto).toHaveBeenNthCalledWith(1, "/acme", { timeout: 60_000 });
+    expect(goto).toHaveBeenNthCalledWith(2, "/acme/profile/u-1", { timeout: 60_000 });
+    expect(goto).toHaveBeenNthCalledWith(3, "/settings/profile/preferences", { timeout: 60_000 });
+    expect(goto).toHaveBeenNthCalledWith(4, "/settings/profile/activity", { timeout: 60_000 });
+    expect(waitForResponse).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalled();
+  });
+});

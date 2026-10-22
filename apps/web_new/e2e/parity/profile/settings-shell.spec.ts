@@ -46,13 +46,20 @@ test(
     await expect.poll(() => driver.sidebarLinkTexts(), { timeout: 60_000 }).toContain("Home");
 
     await test.step("the user-menu settings entry still opens the dialog variant", async () => {
-      // Current behavior only: main#573 removes the dialog and sends this
-      // entry to the settings page instead. Rework this step then.
       await driver.openUserMenu();
       await driver.activateUserMenuItem("Settings");
-      await expect.poll(() => driver.isDialogWithTextVisible("Your profile"), { timeout: 30_000 }).toBe(true);
-      await expect.poll(() => driver.profileSettingsActiveTab(), { timeout: 30_000 }).toBe("Profile");
-      await driver.dismissTopmost();
+      if (driver.target === "web_new") {
+        // Target per main#573 (PROF-010): no dialog variant exists; the
+        // entry navigates to the settings page general tab instead.
+        await expect.poll(() => driver.currentPath(), { timeout: 30_000 }).toContain("/settings/profile/general");
+        await expect.poll(() => driver.profileSettingsActiveTab(), { timeout: 30_000 }).toBe("Profile");
+      } else {
+        // Current behavior only: main#573 removes the dialog and sends
+        // this entry to the settings page instead. Rework this step then.
+        await expect.poll(() => driver.isDialogWithTextVisible("Your profile"), { timeout: 30_000 }).toBe(true);
+        await expect.poll(() => driver.profileSettingsActiveTab(), { timeout: 30_000 }).toBe("Profile");
+        await driver.dismissTopmost();
+      }
     });
 
     await test.step("the shell shows grouped tabs, the title with back control, and shortcuts", async () => {
@@ -106,14 +113,24 @@ test(
 
     await test.step("an unknown tab id shows only the loader with no recovery", async () => {
       await driver.settingsProfileOpen("bogus-tab-id", browserSessionCookies(admin));
-      expect(await driver.currentPath()).toBe("/settings/profile/bogus-tab-id");
-      expect(await driver.settingsProfileShellVisible()).toBe(false);
-      expect(await driver.settingsProfileLoaderOnly()).toBe(true);
-      // Intended: fall back to the default tab (or a not-found state). The
-      // loader never resolves, so waiting changes nothing.
-      await new Promise((resolve) => setTimeout(resolve, 5_000));
-      expect(await driver.currentPath()).toBe("/settings/profile/bogus-tab-id");
-      expect(await driver.settingsProfileLoaderOnly()).toBe(true);
+      if (driver.target === "web_new") {
+        // Target for NEWFRONT-430 (PROF-009): the unknown id forwards to
+        // the default tab instead of stranding the page on the loader
+        // (landing on the slashed in-app form of the address).
+        expect(await driver.currentPath()).toBe("/settings/profile/general/");
+        expect(await driver.settingsProfileShellVisible()).toBe(true);
+        expect(await driver.settingsProfileLoaderOnly()).toBe(false);
+        expect(await driver.settingsProfileActiveTab()).toBe("Profile");
+      } else {
+        expect(await driver.currentPath()).toBe("/settings/profile/bogus-tab-id");
+        expect(await driver.settingsProfileShellVisible()).toBe(false);
+        expect(await driver.settingsProfileLoaderOnly()).toBe(true);
+        // Intended: fall back to the default tab (or a not-found state). The
+        // loader never resolves, so waiting changes nothing.
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        expect(await driver.currentPath()).toBe("/settings/profile/bogus-tab-id");
+        expect(await driver.settingsProfileLoaderOnly()).toBe(true);
+      }
     });
   }
 );
@@ -159,10 +176,21 @@ test(
     });
 
     await test.step("an unknown forwarded tab lands on the loader like a direct visit", async () => {
-      expect(
-        await driver.settingsProfileOpenPath(`/${seed.workspaceSlug}/settings/account/bogus-tab-id`, cookies)
-      ).toBe("/settings/profile/bogus-tab-id");
-      expect(await driver.settingsProfileLoaderOnly()).toBe(true);
+      const landed = await driver.settingsProfileOpenPath(
+        `/${seed.workspaceSlug}/settings/account/bogus-tab-id`,
+        cookies
+      );
+      if (driver.target === "web_new") {
+        // Target for NEWFRONT-430 (PROF-026): unknown forwarded tabs
+        // default to the general tab with the shell rendered.
+        expect(landed).toBe("/settings/profile/general");
+        expect(await driver.settingsProfileShellVisible()).toBe(true);
+        expect(await driver.settingsProfileLoaderOnly()).toBe(false);
+        expect(await driver.settingsProfileActiveTab()).toBe("Profile");
+      } else {
+        expect(landed).toBe("/settings/profile/bogus-tab-id");
+        expect(await driver.settingsProfileLoaderOnly()).toBe(true);
+      }
     });
   }
 );
@@ -174,11 +202,16 @@ test(
     const admin = await seedAuthed(seed.email, seed.password);
 
     // Intended: parameters carried over like the other three forwards.
-    expect(
-      await driver.settingsProfileOpenPath(
-        `/${seed.workspaceSlug}/settings/api-tokens?keep=3`,
-        browserSessionCookies(admin)
-      )
-    ).toBe("/settings/profile/api-tokens/");
+    const landed = await driver.settingsProfileOpenPath(
+      `/${seed.workspaceSlug}/settings/api-tokens?keep=3`,
+      browserSessionCookies(admin)
+    );
+    if (driver.target === "web_new") {
+      // Target for NEWFRONT-431 (PROF-026): the tokens forward keeps its
+      // parameters like its siblings (still landing on the slashed form).
+      expect(landed).toBe("/settings/profile/api-tokens/?keep=3");
+    } else {
+      expect(landed).toBe("/settings/profile/api-tokens/");
+    }
   }
 );
