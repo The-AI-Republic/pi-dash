@@ -54,9 +54,25 @@ async function bootSignedIn(userId: string) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * The server as each edition's sign-out sees it, so the seam can be swapped:
+ * the default edition reads the CSRF token through `requestCSRFToken` and its
+ * session-logout view answers with a redirect the native transport refuses
+ * (that refusal is its success signal); an edition may instead read the token
+ * with `get` and sign out at a JSON view that simply succeeds.
+ */
+const signOutClient = {
+  requestCSRFToken: async () => ({ csrf_token: "csrf" }),
+  get: async () => ({ data: { csrf_token: "csrf" } }),
+  post: async (url: string) => {
+    if (url === "/auth/sign-out/") throw new Error("API redirect is not allowed");
+    return { data: {} };
+  },
+};
+
 async function signOut() {
   const { performSignOut } = await import("@/services/auth-signout");
-  await performSignOut({ requestCSRFToken: async () => ({ csrf_token: "csrf" }) }, "http://localhost:18002");
+  await performSignOut(signOutClient, "http://localhost:18002");
 }
 
 beforeEach(() => {
@@ -67,8 +83,9 @@ beforeEach(() => {
   sessionStorage.clear();
   document.body.innerHTML = "";
   Object.assign(window, { __TAURI__: { core: { invoke } } });
-  // The sign-out form POST is a real navigation; there is nowhere to go here.
+  // Sign-out ends in a real navigation; there is nowhere to go here.
   vi.spyOn(HTMLFormElement.prototype, "submit").mockImplementation(() => {});
+  vi.spyOn(window.location, "replace").mockImplementation(() => {});
 });
 
 describe("approval mode across a desktop sign-out", () => {
