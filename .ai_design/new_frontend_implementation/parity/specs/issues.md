@@ -1217,8 +1217,8 @@ and detaches on hover; attaching pastes a PR/MR URL (trimmed, cleared
 on success, server errors surfaced). Reads and writes use the
 code-reviews collection under the issue. The worklog (ISS-206) is
 cloud-only: in this build every worklog surface renders empty — no
-button, rows, or summary, not even a call to action — and the worklog
-activity-filter category exists but filters nothing; in cloud,
+button, rows, or summary, not even a call to action — and the activity
+filter keeps no worklog category; in cloud,
 eligible members log time against an issue and it appears in the feed
 and sidebar. §23 defines the cloud proof. Oracle:
 `code-reviews.spec.ts`, `worklog-absent.spec.ts`.
