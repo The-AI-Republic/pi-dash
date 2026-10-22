@@ -109,6 +109,22 @@ def add_member(ws: SeededWorkspace, user: SeededUser, role: int) -> None:
         )
 
 
+def soft_delete_member(ws: SeededWorkspace, user: SeededUser) -> int:
+    """Soft-delete the membership row, leaving ``is_active`` true.
+
+    Mirrors Django's ``SoftDeletionManager`` (``db/mixins.py``): the row is
+    still present and active, but ``deleted_at`` hides it from default-manager
+    queries. Returns the number of rows touched.
+    """
+    with db_cursor() as cur:
+        cur.execute(
+            """UPDATE workspace_members SET deleted_at = now()
+               WHERE workspace_id = %s AND member_id = %s AND deleted_at IS NULL""",
+            (ws.id, user.id),
+        )
+        return cur.rowcount
+
+
 def ensure_instance() -> None:
     """The sign-in flow refuses to authenticate until an Instance is set up."""
     with db_cursor() as cur:
