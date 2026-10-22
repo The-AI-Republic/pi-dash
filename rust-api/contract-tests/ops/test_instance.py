@@ -11,9 +11,11 @@ plus matching DB rows. Outbound side effects go to local sinks: mail to
 ``_harness.sinks.SmtpSink``, the GitHub releases probe to
 ``FixedResponseStub`` (via ``PIDASH_RELEASES_URL``), and the
 ``instance_traces`` side effect. That side effect differs by plane: the
-Django leg publishes a Celery message to an exclusive AMQP tap queue
-bound to the ``celery`` exchange, while the Rust leg (PIDASHCONV-1108
-removed its Celery/AMQP publisher) enqueues a row onto the Postgres
+Django leg publishes a Celery message to the shared ``celery`` queue
+(Celery's default-routed ``.delay()`` goes to the anonymous exchange,
+never the ``celery`` exchange, so an exchange-bound tap cannot see it;
+PIDASHCONV-1387), while the Rust leg (PIDASHCONV-1108 removed its
+Celery/AMQP publisher) enqueues a row onto the Postgres
 ``rust_job_queue``.
 
 Environment (CI provides all of these; see
@@ -240,45 +242,63 @@ def broker_url() -> str:
 
 
 @contextmanager
-def traces_tap():
+def traces_queue():
     """Yield a drain() collecting fresh `instance_traces` messages.
 
-    The tap queue is exclusive to this test, so other agents' traffic
-    on the shared broker only adds filterable noise, never assertions.
+    Reads the shared ``celery`` queue directly. Celery's default-routed
+    ``.delay()`` publishes to the anonymous (default) exchange, never the
+    ``celery`` exchange (``celery/app/amqp.py`` converts ``(not exchange
+    or not routing_key)`` + direct to ``('', qname)``), so an
+    exchange-bound tap never sees the Django leg (PIDASHCONV-1387;
+    pre-1108 the tap only ever saw the Rust publisher's explicit
+    exchange publishes). Non-matching messages are requeued untouched,
+    so other suites' traffic on a shared broker is never eaten; stale
+    traces are purged on entry so each drain sees only this test's
+    publishes.
     """
     connection = pika.BlockingConnection(pika.URLParameters(broker_url()))
     channel = connection.channel()
-    # Declare before binding: a fresh broker (CI) has no `celery`
-    # exchange yet, and binding to a missing exchange raises 404. The
-    # params match Celery's own declare (direct, durable), so this is
-    # idempotent wherever a worker already declared it.
-    channel.exchange_declare(exchange="celery", exchange_type="direct", durable=True)
-    queue = channel.queue_declare(
-        queue="", exclusive=True, auto_delete=True
-    ).method.queue
-    channel.queue_bind(queue=queue, exchange="celery", routing_key="celery")
+    # Non-passive declare (the durable shape Celery's own publisher
+    # uses): a missing queue simply starts empty.
+    channel.queue_declare(queue="celery", durable=True)
+    purge_traces_leftovers()
 
     def drain(timeout: float = 20.0) -> list[dict]:
         deadline = time.time() + timeout
         found: list[dict] = []
-        while time.time() < deadline:
-            method, properties, body = channel.basic_get(queue=queue, auto_ack=True)
-            if method is None:
-                if found:
-                    return found
-                time.sleep(0.2)
-                continue
-            headers = dict((properties.headers or {}))
-            if headers.get("task") == TRACES_TASK:
-                payload = json.loads(body)
-                found.append(
-                    {
-                        "args": payload[0],
-                        "kwargs": payload[1],
-                        "headers": headers,
-                        "content_type": properties.content_type,
-                    }
+        held: list = []
+        try:
+            for _ in range(10_000):
+                if time.time() >= deadline:
+                    break
+                method, properties, body = channel.basic_get(
+                    queue="celery", auto_ack=False
                 )
+                if method is None:
+                    if found:
+                        break
+                    time.sleep(0.2)
+                    continue
+                headers = dict((properties.headers or {}))
+                if headers.get("task") == TRACES_TASK:
+                    channel.basic_ack(method.delivery_tag)
+                    payload = json.loads(body)
+                    found.append(
+                        {
+                            "args": payload[0],
+                            "kwargs": payload[1],
+                            "headers": headers,
+                            "content_type": properties.content_type,
+                        }
+                    )
+                else:
+                    held.append(method.delivery_tag)
+        finally:
+            for tag in held:
+                try:
+                    channel.basic_reject(tag, requeue=True)
+                except Exception:
+                    pass
         return found
 
     try:
@@ -290,19 +310,18 @@ def traces_tap():
 def purge_traces_leftovers() -> int:
     """Ack this suite's `instance_traces` messages off the shared `celery` queue.
 
-    Both legs publish through the real topology (the Rust publisher even
-    declares the durable `celery` queue), so every register invocation
-    leaves an original on `celery` next to the tap-queue copy this suite
-    asserts on. A later broker-draining suite in the same job (e.g.
-    ops/test_repair.py's sync tests, whose drain requeues non-matching
-    messages until its marker arrives) would spin on those leftovers
-    forever: get-then-requeue redelivers the same message, so a sweep
-    containing one never terminates and the sweep deadline never fires
-    (observed as a 60-minute aggregate-workflow timeout). Purge them here.
+    The Django register leg publishes through the real topology (Celery
+    `.delay()` lands on the `celery` queue via the anonymous exchange),
+    so every register invocation leaves a message on `celery`. A later
+    broker-draining suite in the same job (e.g. ops/test_repair.py's sync
+    tests, whose drain requeues non-matching messages until its marker
+    arrives) would spin on those leftovers forever: get-then-requeue
+    redelivers the same message, so a sweep containing one never
+    terminates and the sweep deadline never fires (observed as a
+    60-minute aggregate-workflow timeout). Purge them here.
 
     Matching by task name is safe: only register flows publish
-    `instance_traces`, and every assertion on those messages consumes the
-    tap-queue copy, never the `celery` original.
+    `instance_traces`.
 
     Single pass, strictly terminating: each fetched message is acked
     (traces) or held and requeued once at the end (anything else), with
@@ -581,7 +600,7 @@ def rust_traces_rows(db_url):
 def test_register_create_fallback_update_and_traces(scratch_pair):
     django_db, rust_db = scratch_pair
     # Same cwd on both legs: the package.json probe is cwd-relative.
-    with traces_tap() as drain:
+    with traces_queue() as drain:
         oracle = run_django(
             django_db, "register_instance", "sig-contract", env_extra=DEAD_PROXY
         )
@@ -616,9 +635,11 @@ def test_register_create_fallback_update_and_traces(scratch_pair):
             == b"Error checking for latest version\nInstance already registered\n"
         )
         update_msgs = drain()
-    # The Django legs publish `instance_traces` to the broker; the Rust leg
-    # enqueues onto `rust_job_queue` instead (PIDASHCONV-1108 removed the
-    # Celery/AMQP publisher), so the tap sees only the Python-plane traffic.
+    # The Django legs publish `instance_traces` to the shared `celery`
+    # queue (Celery `.delay()` bypasses the `celery` exchange, so this is
+    # read at the queue, not a tap); the Rust leg enqueues onto
+    # `rust_job_queue` instead (PIDASHCONV-1108 removed the Celery/AMQP
+    # publisher), so the queue drain sees only Python-plane traffic.
     assert len(django_msgs) >= 1 and len(update_msgs) >= 1
     for message in django_msgs + update_msgs:
         assert message["args"] == []
@@ -903,11 +924,12 @@ def test_register_empty_signature_rejected(scratch_pair):
 
 
 def test_traces_cleanup_purges_celery_leftovers():
-    # The register legs publish real `instance_traces` messages through
-    # the shared `celery` queue; the per-test teardown purge must remove
-    # exactly those (and nothing else) so a later broker-draining suite
-    # in the same job never sees them (a requeue drain spins forever on
-    # one: observed as a 60-minute aggregate-workflow timeout).
+    # The Django register leg publishes real `instance_traces` messages
+    # through the shared `celery` queue; the per-test teardown purge must
+    # remove exactly those (and nothing else) so a later broker-draining
+    # suite in the same job never sees them (a requeue drain spins
+    # forever on one: observed as a 60-minute aggregate-workflow
+    # timeout).
     connection = pika.BlockingConnection(pika.URLParameters(broker_url()))
     try:
         channel = connection.channel()
