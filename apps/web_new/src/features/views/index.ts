@@ -17,6 +17,22 @@ export type { ViewAccessFieldProps } from "./dialog/ViewAccessField.js";
 export { ViewIconPicker, ViewLogoMark } from "./dialog/ViewIconPicker.js";
 export type { ViewIconPickerProps, ViewLogoProps } from "./dialog/ViewIconPicker.js";
 export { validateViewTitle, VIEW_TITLE_MAX_LENGTH } from "./dialog/viewTitle.js";
+export { ViewsPaletteEntries } from "./palette/ViewsPaletteEntries.js";
+export type { ViewsPaletteEntriesProps } from "./palette/ViewsPaletteEntries.js";
+export {
+  buildViewCreateCommand,
+  buildViewJumpCommand,
+  VIEW_CREATE_COMMAND_ID,
+  VIEW_CREATE_SEQUENCE,
+  VIEW_CREATE_TITLE,
+  VIEW_JUMP_COMMAND_ID,
+  VIEW_JUMP_PAGE_ID,
+  VIEW_JUMP_SEQUENCE,
+  VIEW_JUMP_TITLE,
+} from "./palette/viewCommands.js";
+export type { ViewCreateCommandContext, ViewJumpCommandContext } from "./palette/viewCommands.js";
+export { projectViewsJumpPage, VIEW_JUMP_EMPTY_TEXT, VIEW_JUMP_PAGE_PLACEHOLDER } from "./palette/viewJumpPage.js";
+export type { ViewJumpPageArgs } from "./palette/viewJumpPage.js";
 export {
   PROJECT_VIEWS_CRUMB,
   VIEW_ACCESS_SHARED,
