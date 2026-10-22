@@ -70,7 +70,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -81,6 +81,8 @@ use uuid::Uuid;
 
 use super::gates::{decide_gate, tenant_context, Gate, GateOutcome};
 use crate::state::AppState;
+use crate::v1_cycles_modules::body as shared_body;
+use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 use pidash_types::WorkspaceId;
 
@@ -160,6 +162,10 @@ pub enum Denial {
     InvalidDetail,
     /// 400, Django `IntegrityError` branch.
     InvalidPayload,
+    /// 400, `{"detail": ...}` (DRF body `ParseError`).
+    BadDetail(String),
+    /// 415, unsupported request content type.
+    UnsupportedMediaType(String),
     /// 500, generic branch.
     ServerError,
 }
@@ -181,6 +187,14 @@ impl Denial {
             ),
             Denial::InvalidDetail => (StatusCode::BAD_REQUEST, INVALID_DETAIL_BODY.to_owned()),
             Denial::InvalidPayload => (StatusCode::BAD_REQUEST, INVALID_PAYLOAD_BODY.to_owned()),
+            Denial::BadDetail(message) => (
+                StatusCode::BAD_REQUEST,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
+            Denial::UnsupportedMediaType(message) => (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("{{\"detail\":{}}}", json_string(message)),
+            ),
             Denial::ServerError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 SERVER_ERROR_BODY.to_owned(),
@@ -507,12 +521,55 @@ pub fn request_origin(state: &AppState) -> Result<String, Denial> {
         .ok_or(Denial::ServerError)
 }
 
-/// Parse the JSON request body the way DRF does: a non-object (or
-/// unparseable) body has no `.get`, so attribute access dies with
-/// `AttributeError` → generic 500 on the paths below.
-pub fn parse_object_body(body: &Bytes) -> Result<Map<String, Value>, Denial> {
-    let value: Value = serde_json::from_slice(body).map_err(|_| Denial::ServerError)?;
-    value.as_object().cloned().ok_or(Denial::ServerError)
+/// DRF request-body shape for the three cycle write routes: no key is
+/// list-shaped and no scalar treats a present-but-empty form value as
+/// absent (every route only ever `.get`s a scalar).
+const CYCLE_WRITE_BODY_SPEC: shared_body::BodySpec = shared_body::BodySpec {
+    list_fields: &[],
+    skip_blank_fields: &[],
+};
+
+/// Decode the request body exactly as DRF's default parsers do
+/// (`Request._parse` + `select_parser` over `JSONParser`, `FormParser`,
+/// `MultiPartParser`), following the merged license work
+/// (PIDASHCONV-1117/1128) through the shared D-20 pipeline:
+///
+/// * an empty body (by Content-Length) or no content type is `{}`;
+/// * JSON media types parse through the shared CPython layer, so a
+///   malformed body is the 400 `{"detail":"JSON parse error - <CPython
+///   message>"}`, and a valid non-object value (whose `.get` Django's
+///   `AttributeError` turns into the generic 500) stays a 500;
+/// * urlencoded/multipart bodies arrive as their `QueryDict` text map
+///   (last value wins on `.get`);
+/// * any other content type is the 415 `Unsupported media type` detail.
+pub fn parse_object_body(headers: &HeaderMap, body: &[u8]) -> Result<Map<String, Value>, Denial> {
+    let map_error = |error: shared_body::BodyError| match error {
+        shared_body::BodyError::UnsupportedMediaType(message) => {
+            Denial::UnsupportedMediaType(message)
+        }
+        shared_body::BodyError::ParseDetail(message) => Denial::BadDetail(message),
+        shared_body::BodyError::ServerError => Denial::ServerError,
+    };
+    match shared_body::negotiate_body(headers, body, &CYCLE_WRITE_BODY_SPEC).map_err(map_error)? {
+        shared_body::NegotiatedBody::Empty => Ok(Map::new()),
+        shared_body::NegotiatedBody::JsonText { text, surr } => {
+            let value =
+                json_cpython::parse_request_data_spans(text.as_bytes(), &surr).map_err(|fail| {
+                    match fail {
+                        JsonFail::Message(detail) => Denial::BadDetail(format!(
+                            "{}{detail}",
+                            json_cpython::JSON_PARSE_PREFIX
+                        )),
+                        JsonFail::Recursion => Denial::ServerError,
+                    }
+                })?;
+            match json_cpython::to_serde_publish(&value) {
+                Value::Object(map) => Ok(map),
+                _ => Err(Denial::ServerError),
+            }
+        }
+        shared_body::NegotiatedBody::Form { map, .. } => Ok(map),
+    }
 }
 
 /// Python truthiness for a JSON body value (`request.data.get(...)`
@@ -617,6 +674,7 @@ pub async fn date_check(
     State(state): State<AppState>,
     Path((slug, project_raw)): Path<(String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let actor = match actor(&state, extension).await {
@@ -642,7 +700,7 @@ pub async fn date_check(
     if let Err(denial) = check_gate(&gate, &slug, &membership) {
         return denial.into_response();
     }
-    let data = match parse_object_body(&body) {
+    let data = match parse_object_body(&headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -861,6 +919,7 @@ pub async fn transfer_issues(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let actor = match actor(&state, extension).await {
@@ -890,7 +949,7 @@ pub async fn transfer_issues(
     if let Err(denial) = check_gate(&gate, &slug, &membership) {
         return denial.into_response();
     }
-    let data = match parse_object_body(&body) {
+    let data = match parse_object_body(&headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
@@ -2148,6 +2207,7 @@ pub async fn patch_user_properties(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
     extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let context =
@@ -2173,7 +2233,7 @@ pub async fn patch_user_properties(
     let Some(mut row) = fetched else {
         return Denial::NotFound.into_response();
     };
-    let data = match parse_object_body(&body) {
+    let data = match parse_object_body(&headers, &body) {
         Ok(data) => data,
         Err(denial) => return denial.into_response(),
     };
