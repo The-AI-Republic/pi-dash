@@ -94,6 +94,7 @@ interface Harness {
   members: ReturnType<typeof makeMember>[];
   workspaces: ReturnType<typeof workspaceRow>[];
   me: Record<string, unknown>;
+  meStatus: number;
 }
 
 let harness: Harness;
