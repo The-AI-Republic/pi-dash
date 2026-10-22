@@ -77,6 +77,19 @@ function dialogLocator(node: StubLocator): StubLocator {
   return node;
 }
 
+/**
+ * A waitFor stub that resolves "attached" waits and fails "detached" ones,
+ * so the driver's `.catch(() => {})` settle paths run in unit tests.
+ */
+function detachFails(): (options?: unknown) => Promise<unknown> {
+  return async (options?: unknown) => {
+    if ((options as { state?: string } | undefined)?.state === "detached") {
+      throw new Error("already detached");
+    }
+    return undefined;
+  };
+}
+
 describe("invite dialog driver", () => {
   it("opens it from the Add member control and waits for the first row", async () => {
     const click = vi.fn(async () => undefined);
@@ -142,6 +155,7 @@ describe("invite dialog driver", () => {
 
   it("opens a row's colleague picker only when no listbox is up", async () => {
     const pickerClick = vi.fn(async () => undefined);
+    let listboxOpen = false;
     const page = pageOf({
       locator: (selector: string) => {
         if (selector === "[role='dialog']") {
@@ -154,11 +168,17 @@ describe("invite dialog driver", () => {
             })
           );
         }
-        if (selector === "[role='listbox']") return locator({ count: async () => 0 });
+        if (selector === "[role='listbox']") {
+          return locator({ count: async () => (listboxOpen ? 1 : 0) });
+        }
         return locator();
       },
     });
-    await new WebNewDriver(page).settingsMembersInviteOpenMemberPicker(1);
+    const driver = new WebNewDriver(page);
+    await driver.settingsMembersInviteOpenMemberPicker(1);
+    expect(pickerClick).toHaveBeenCalledTimes(1);
+    listboxOpen = true;
+    await driver.settingsMembersInviteOpenMemberPicker(1);
     expect(pickerClick).toHaveBeenCalledTimes(1);
   });
 
@@ -171,6 +191,7 @@ describe("invite dialog driver", () => {
           return locator({
             locator: () => locator({ filter: () => locator({ first: () => option }), evaluateAll: () => [] }),
             getByRole: () => option,
+            waitFor: detachFails(),
           });
         }
         if (selector === "[role='dialog']") return dialogLocator(locator());
@@ -193,6 +214,7 @@ describe("invite dialog driver", () => {
             count: async () => 0,
             locator: () => locator({ evaluateAll: async () => ["Guest", "Member"] }),
             getByRole: () => locator(),
+            waitFor: detachFails(),
           });
         }
         if (selector === "[role='dialog']") {
@@ -213,19 +235,57 @@ describe("invite dialog driver", () => {
     expect(pickerClick).toHaveBeenCalledTimes(2);
   });
 
+  it("lists colleague options through the shared listbox reader", async () => {
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === "[role='listbox']") {
+          return locator({
+            count: async () => 1,
+            locator: () =>
+              locator({
+                evaluateAll: async (fn: (elements: Element[]) => unknown) =>
+                  fn([{ innerText: "  Grace Hopper " }, { innerText: "   " }, {}] as unknown as Element[]),
+              }),
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).settingsMembersInviteMemberOptions()).resolves.toEqual(["Grace Hopper"]);
+  });
+
   it("reads a row's inline message or reports none", async () => {
     const page = pageOf({
       locator: (selector: string) => {
         if (selector === "[role='dialog']") {
           return dialogLocator(
             locator({
-              locator: (inner: string) =>
-                inner === '[data-testid="invite-row-error-0"]'
-                  ? locator({
-                      count: async () => 1,
-                      first: () => locator({ innerText: async () => "  Select a co-worker  " }),
-                    })
-                  : locator({ count: async () => 0 }),
+              locator: (inner: string) => {
+                if (inner === '[data-testid="invite-row-error-0"]') {
+                  return locator({
+                    count: async () => 1,
+                    first: () => locator({ innerText: async () => "  Select a co-worker  " }),
+                  });
+                }
+                if (inner === '[data-testid="invite-row-error-2"]') {
+                  return locator({
+                    count: async () => 1,
+                    first: () =>
+                      locator({
+                        innerText: async () => {
+                          throw new Error("gone");
+                        },
+                      }),
+                  });
+                }
+                if (inner === '[data-testid="invite-row-error-3"]') {
+                  return locator({
+                    count: async () => 1,
+                    first: () => locator({ innerText: async () => null as unknown as string }),
+                  });
+                }
+                return locator({ count: async () => 0 });
+              },
             })
           );
         }
@@ -235,11 +295,17 @@ describe("invite dialog driver", () => {
     const driver = new WebNewDriver(page);
     expect(await driver.settingsMembersInviteRowError(0)).toBe("Select a co-worker");
     expect(await driver.settingsMembersInviteRowError(1)).toBe("");
+    expect(await driver.settingsMembersInviteRowError(2)).toBe("");
+    expect(await driver.settingsMembersInviteRowError(3)).toBe("");
   });
 
   it("submits, attempts a submit without waiting, and cancels", async () => {
     const click = vi.fn(async () => undefined);
-    const waitFor = vi.fn(async () => undefined);
+    let cancelling = false;
+    const waitFor = vi.fn(async (options?: unknown) => {
+      if (cancelling) return detachFails()(options);
+      return undefined;
+    });
     const page = pageOf({
       locator: (selector: string) =>
         selector === "[role='dialog']"
@@ -249,6 +315,7 @@ describe("invite dialog driver", () => {
     const driver = new WebNewDriver(page);
     await driver.settingsMembersInviteSubmit();
     await driver.settingsMembersInviteAttemptSubmit();
+    cancelling = true;
     await driver.settingsMembersInviteCancel();
     expect(click).toHaveBeenCalledTimes(3);
     expect(waitFor).toHaveBeenCalled();
@@ -256,13 +323,16 @@ describe("invite dialog driver", () => {
 
   it("closes an open colleague picker and reports add-control visibility", async () => {
     const pickerClick = vi.fn(async () => undefined);
+    let listboxOpen = true;
     const page = pageOf({
       getByRole: (role: string, options?: { name?: string }) =>
         role === "button" && options?.name === "Add member"
           ? locator({ count: async () => 1, first: () => locator({ isVisible: async () => true }) })
           : locator(),
       locator: (selector: string) => {
-        if (selector === "[role='listbox']") return locator({ count: async () => 1 });
+        if (selector === "[role='listbox']") {
+          return locator({ count: async () => (listboxOpen ? 1 : 0), waitFor: detachFails() });
+        }
         if (selector === "[role='dialog']") {
           return dialogLocator(
             locator({
@@ -278,6 +348,9 @@ describe("invite dialog driver", () => {
     });
     const driver = new WebNewDriver(page);
     expect(await driver.settingsMembersAddVisible()).toBe(true);
+    await driver.settingsMembersInviteCloseMemberPicker(0);
+    expect(pickerClick).toHaveBeenCalledTimes(1);
+    listboxOpen = false;
     await driver.settingsMembersInviteCloseMemberPicker(0);
     expect(pickerClick).toHaveBeenCalledTimes(1);
   });
@@ -324,9 +397,23 @@ describe("role editor driver", () => {
     expect(await driver.settingsMembersRoleText("Guest")).toBe("Guest");
   });
 
+  it("reads empty text when the role cell is gone or blank", async () => {
+    const failing = tablePage(
+      locator({
+        innerText: async () => {
+          throw new Error("gone");
+        },
+      })
+    );
+    expect(await new WebNewDriver(failing.page).settingsMembersRoleText("Grace H")).toBe("");
+    const blank = tablePage(locator({ innerText: async () => null as unknown as string }));
+    expect(await new WebNewDriver(blank.page).settingsMembersRoleText("Grace H")).toBe("");
+  });
+
   it("opens the editor and picks a role", async () => {
     const cellClick = vi.fn(async () => undefined);
     const optionClick = vi.fn(async () => undefined);
+    let listboxOpen = false;
     const { page } = tablePage(
       locator({ locator: () => locator({ click: cellClick }), innerText: async () => "Member" })
     );
@@ -334,9 +421,10 @@ describe("role editor driver", () => {
     baseLocator.mockImplementation((selector: string) => {
       if (selector === "[role='listbox']") {
         return locator({
-          count: async () => 0,
+          count: async () => (listboxOpen ? 1 : 0),
           getByRole: () => locator({ click: optionClick }),
           locator: () => locator({ evaluateAll: async () => ["Guest", "Member"] }),
+          waitFor: detachFails(),
         });
       }
       return locator();
@@ -347,6 +435,9 @@ describe("role editor driver", () => {
     expect(await driver.settingsMembersRoleEditorOptions()).toEqual(["Guest", "Member"]);
     await driver.settingsMembersRoleEditorPick("Member");
     expect(optionClick).toHaveBeenCalledTimes(1);
+    listboxOpen = true;
+    await driver.settingsMembersRoleEditorOpen("Grace H");
+    expect(cellClick).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -366,7 +457,7 @@ describe("row menu and confirmation driver", () => {
           ? table
           : locator({
               evaluateAll: async (fn: (items: Element[]) => unknown) =>
-                fn([{ innerText: " Remove " }] as unknown as Element[]),
+                fn([{ innerText: " Remove " }, {}] as unknown as Element[]),
             })
       ),
     });
@@ -379,7 +470,9 @@ describe("row menu and confirmation driver", () => {
 
   it("picks a menu verb and submits or cancels the confirmation", async () => {
     const click = vi.fn(async () => undefined);
-    const waitFor = vi.fn(async () => undefined);
+    const waitFor = vi.fn(detachFails());
+    let confirmText: string | null = " Remove Grace? ";
+    let confirmFails = false;
     const page = pageOf({
       getByRole: vi.fn((role: string) =>
         role === "menuitem" ? locator({ first: () => locator({ click }) }) : locator()
@@ -387,7 +480,14 @@ describe("row menu and confirmation driver", () => {
       locator: (selector: string) =>
         selector === "[role='dialog']"
           ? dialogLocator(
-              locator({ getByRole: () => locator({ click }), waitFor, innerText: async () => " Remove Grace? " })
+              locator({
+                getByRole: () => locator({ click }),
+                waitFor,
+                innerText: async () => {
+                  if (confirmFails) throw new Error("gone");
+                  return confirmText as string;
+                },
+              })
             )
           : locator(),
     });
@@ -395,6 +495,11 @@ describe("row menu and confirmation driver", () => {
     await driver.settingsMembersRowMenuPick("Remove");
     expect(click).toHaveBeenCalledTimes(1);
     expect(await driver.settingsMembersConfirmText()).toBe("Remove Grace?");
+    confirmFails = true;
+    expect(await driver.settingsMembersConfirmText()).toBe("");
+    confirmFails = false;
+    confirmText = null;
+    expect(await driver.settingsMembersConfirmText()).toBe("");
     await driver.settingsMembersConfirmSubmit();
     await driver.settingsMembersConfirmCancel();
     expect(click).toHaveBeenCalledTimes(3);
@@ -416,10 +521,15 @@ describe("defaults driver", () => {
   }
 
   it("reads visibility and picker text", async () => {
+    let pickerText: string | null = "  grace ";
+    let pickerFails = false;
     const lead = locator({
       count: async () => 1,
       first: () => locator({ isVisible: async () => true }),
-      innerText: async () => "  grace ",
+      innerText: async () => {
+        if (pickerFails) throw new Error("gone");
+        return pickerText as string;
+      },
       isDisabled: async () => true,
     });
     const page = defaultsPage(lead, () => locator({ count: async () => 1 }));
@@ -428,6 +538,13 @@ describe("defaults driver", () => {
     expect(await driver.settingsMembersLeadText()).toBe("grace");
     expect(await driver.settingsMembersAssigneeText()).toBe("grace");
     expect(await driver.settingsMembersLeadDisabled()).toBe(true);
+    pickerFails = true;
+    expect(await driver.settingsMembersLeadText()).toBe("");
+    expect(await driver.settingsMembersAssigneeText()).toBe("");
+    pickerFails = false;
+    pickerText = null;
+    expect(await driver.settingsMembersLeadText()).toBe("");
+    expect(await driver.settingsMembersAssigneeText()).toBe("");
   });
 
   it("picks a lead and an assignee when no listbox is open", async () => {
@@ -445,6 +562,7 @@ describe("defaults driver", () => {
       locator({
         count: async () => (open ? 1 : 0),
         locator: () => locator({ filter: () => locator({ first: () => option }) }),
+        waitFor: detachFails(),
       })
     );
     const driver = new WebNewDriver(page);
@@ -456,11 +574,30 @@ describe("defaults driver", () => {
 
   it("reads and flips the guest-visibility switch", async () => {
     const click = vi.fn(async () => undefined);
-    const page = defaultsPage(locator({ evaluate: async () => true, click, isDisabled: async () => false }), () =>
-      locator()
+    let checked: string | null = "true";
+    let dataChecked = false;
+    const node = {
+      getAttribute: (name: string) => {
+        if (name === "aria-checked") return checked;
+        if (name === "data-checked") return dataChecked ? "" : null;
+        return null;
+      },
+    };
+    const page = defaultsPage(
+      locator({
+        evaluate: async (fn: (node: Element) => unknown) => fn(node as unknown as Element),
+        click,
+        isDisabled: async () => false,
+      }),
+      () => locator()
     );
     const driver = new WebNewDriver(page);
     expect(await driver.settingsMembersGuestToggleState()).toBe(true);
+    checked = "false";
+    dataChecked = true;
+    expect(await driver.settingsMembersGuestToggleState()).toBe(true);
+    dataChecked = false;
+    expect(await driver.settingsMembersGuestToggleState()).toBe(false);
     await driver.settingsMembersGuestToggle();
     expect(click).toHaveBeenCalled();
     expect(await driver.settingsMembersGuestToggleDisabled()).toBe(false);
