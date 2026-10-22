@@ -4,7 +4,13 @@
 // Archived-module contracts against a stub client (no backend).
 import { describe, expect, it } from "vitest";
 import type { ApiClient } from "../client.js";
-import { archiveModule, getArchivedModule, listArchivedModules, restoreModule } from "./modules.js";
+import {
+  archiveModule,
+  getArchivedModule,
+  listArchivedModules,
+  listWorkspaceModules,
+  restoreModule,
+} from "./modules.js";
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
@@ -131,5 +137,37 @@ describe("restoreModule", () => {
       { method: "DELETE", url: `/api/workspaces/acme/projects/${UUID2}/modules/${UUID}/archive/` },
     ]);
     expect(status).toBe(204);
+  });
+});
+
+describe("listWorkspaceModules", () => {
+  const WORKSPACE_ROW = {
+    id: UUID,
+    workspace_id: UUID2,
+    project_id: UUID2,
+    name: "Alpha",
+    status: "planned",
+    total_issues: 2,
+    completed_issues: 1,
+  };
+
+  it("reads the workspace module list without a project segment", async () => {
+    const { client, urls } = stubClient([WORKSPACE_ROW]);
+    const rows = await listWorkspaceModules(client, "acme");
+    expect(urls).toEqual(["/api/workspaces/acme/modules/"]);
+    expect(rows.map((row) => row.name)).toEqual(["Alpha"]);
+  });
+
+  it("accepts the favorite flag when the projection carries it", async () => {
+    const { client } = stubClient([{ ...WORKSPACE_ROW, is_favorite: true }]);
+    const rows = await listWorkspaceModules(client, "acme");
+    expect(rows[0]?.is_favorite).toBe(true);
+  });
+
+  it("rejects a row without its identity", async () => {
+    const { name: _dropped, ...rest } = WORKSPACE_ROW;
+    void _dropped;
+    const { client } = stubClient([rest]);
+    await expect(listWorkspaceModules(client, "acme")).rejects.toThrow();
   });
 });

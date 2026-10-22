@@ -102,7 +102,13 @@ import {
   updateQuickLink,
 } from "./contracts/home.js";
 import { completeTour } from "./contracts/tour.js";
-import { listLabels, listMembers, listStates } from "./contracts/reference.js";
+import {
+  listLabels,
+  listMembers,
+  listStates,
+  listWorkspaceLabels,
+  listWorkspaceStates,
+} from "./contracts/reference.js";
 import {
   getIssue,
   listCycleIssues,
@@ -1214,6 +1220,55 @@ describe("reference contracts", () => {
     });
     const parsed = await listLabels(client, "acme", UUID2);
     expect(parsed[0]?.parent).toBeNull();
+  });
+
+  it("reads workspace states without a project segment", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify([
+          {
+            id: UUID,
+            project_id: UUID2,
+            workspace_id: UUID2,
+            name: "Todo",
+            color: "#5e6ad2",
+            group: "unstarted",
+            default: true,
+            description: "",
+            sequence: 1,
+            order: 0.5,
+          },
+        ]),
+        url: "https://api.test/",
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listWorkspaceStates(client, "acme");
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/workspaces/acme/states/");
+    expect(parsed[0]?.name).toBe("Todo");
+  });
+
+  it("reads workspace labels without a project segment", async () => {
+    const transport = recordingTransport(() =>
+      fakeResponse({
+        body: JSON.stringify([
+          {
+            id: UUID,
+            project_id: UUID2,
+            workspace_id: UUID2,
+            name: "bug",
+            color: "#e11d48",
+            parent: null,
+            sort_order: 1,
+          },
+        ]),
+        url: "https://api.test/",
+      })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await listWorkspaceLabels(client, "acme");
+    expect(transport.calls[0]?.url).toBe("https://api.test/api/workspaces/acme/labels/");
+    expect(parsed[0]?.name).toBe("bug");
   });
 
   it("parses members as role projections", async () => {

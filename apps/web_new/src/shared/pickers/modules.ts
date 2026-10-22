@@ -5,7 +5,6 @@
 // modules in server order with selected-first sorting. Single-select
 // leads with a No-module clear row; multi-select toggles without one.
 // The list stays thin: full module ownership lives in the modules area.
-import type { ModuleList } from "@pidash/api-client";
 
 /** One module row in display order. */
 export interface ModuleOption {
@@ -17,7 +16,8 @@ export interface ModuleOption {
 }
 
 export interface ModuleOptionsInput {
-  modules: ModuleList;
+  /** Thin rows; only identity and name shape the options. */
+  modules: readonly { id: string; name: string }[];
   selectedIds: readonly string[];
   single: boolean;
   allowClear?: boolean | undefined;

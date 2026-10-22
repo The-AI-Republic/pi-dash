@@ -18,7 +18,10 @@ export {
   pickerProjectsQueryOptions,
   pickerRunnersQueryOptions,
   pickerStatesQueryOptions,
+  pickerWorkspaceCyclesQueryOptions,
   pickerWorkspaceMembersQueryOptions,
+  pickerWorkspaceModulesQueryOptions,
+  pickerWorkspaceStatesQueryOptions,
   usePickerCycles,
   usePickerEstimates,
   usePickerIntakeStates,
@@ -29,7 +32,10 @@ export {
   usePickerProjects,
   usePickerRunners,
   usePickerStates,
+  usePickerWorkspaceCycles,
   usePickerWorkspaceMembers,
+  usePickerWorkspaceModules,
+  usePickerWorkspaceStates,
 } from "./reference.js";
 export { MemberPicker } from "./MemberPicker.js";
 export type { MemberPickerProps } from "./MemberPicker.js";

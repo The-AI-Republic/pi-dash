@@ -55,6 +55,32 @@ export async function listModules(client: ApiClient, slug: string, projectId: st
   return client.parse(ModuleList, body, `GET modules ${projectId}`);
 }
 
+/**
+ * Thin workspace module row for cross-project hosts (the workspace
+ * view dialog's filter builder). The workspace list is the full
+ * module serializer with the project list's favorite annotation
+ * missing, so `is_favorite` stays optional and the schema ignores
+ * the serializer's remaining keys.
+ */
+export const WorkspaceModuleRow = z.object({
+  id: uuid(),
+  project_id: uuid(),
+  name: z.string(),
+  status: z.string(),
+  is_favorite: z.optional(z.boolean()),
+});
+export type WorkspaceModuleRow = z.infer<typeof WorkspaceModuleRow>;
+
+export const WorkspaceModuleList = z.array(WorkspaceModuleRow);
+export type WorkspaceModuleList = z.infer<typeof WorkspaceModuleList>;
+
+/** GET WS/modules/ — workspace-wide rows for switchers and pickers. */
+export async function listWorkspaceModules(client: ApiClient, slug: string): Promise<WorkspaceModuleList> {
+  const path = `/api/workspaces/${slug}/modules/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(WorkspaceModuleList, body, `GET ${path}`);
+}
+
 export async function updateModule(
   client: ApiClient,
   slug: string,

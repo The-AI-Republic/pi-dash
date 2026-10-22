@@ -13,6 +13,7 @@ import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 const { contractMocks } = vi.hoisted(() => ({
   contractMocks: {
     listLabels: vi.fn(),
+    listWorkspaceLabels: vi.fn(),
     createLabel: vi.fn(),
     updateLabel: vi.fn(),
     deleteLabel: vi.fn(),
@@ -47,6 +48,8 @@ import {
   useLabels,
   useMoveLabel,
   useUpdateLabel,
+  useWorkspaceLabels,
+  workspaceLabelsQueryOptions,
 } from "./api.js";
 
 const SLUG = "acme";
@@ -95,6 +98,10 @@ afterEach(() => {
 describe("labelKeys", () => {
   it("nests the project list under the workspace labels scope", () => {
     expect(labelKeys.list(SLUG, PROJECT)).toEqual([...labelKeys.all(SLUG), "list", PROJECT]);
+  });
+
+  it("keys the workspace list without a project segment", () => {
+    expect(labelKeys.workspace(SLUG)).toEqual([...labelKeys.all(SLUG), "workspace-list"]);
   });
 });
 
@@ -164,6 +171,40 @@ describe("useLabels", () => {
     expect(result.current.isPending).toBe(true);
     expect(result.current.fetchStatus).toBe("idle");
     expect(contractMocks.listLabels).not.toHaveBeenCalled();
+  });
+
+  it("never fires the project read for an empty project id", () => {
+    const queryClient = freshClient();
+    const { result } = renderHook(() => useLabels(SLUG, ""), { wrapper: wrapper(queryClient) });
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(contractMocks.listLabels).not.toHaveBeenCalled();
+  });
+});
+
+describe("useWorkspaceLabels", () => {
+  it("reads the workspace list through the contract", async () => {
+    const labels = [row("a", "A", 10000)];
+    contractMocks.listWorkspaceLabels.mockResolvedValue(labels);
+    const queryClient = freshClient();
+    const { result } = renderHook(() => useWorkspaceLabels(SLUG), { wrapper: wrapper(queryClient) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual(labels);
+    expect(contractMocks.listWorkspaceLabels).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays idle until enabled", () => {
+    const queryClient = freshClient();
+    const { result } = renderHook(() => useWorkspaceLabels(SLUG, false), {
+      wrapper: wrapper(queryClient),
+    });
+    expect(result.current.isPending).toBe(true);
+    expect(result.current.fetchStatus).toBe("idle");
+    expect(contractMocks.listWorkspaceLabels).not.toHaveBeenCalled();
+  });
+
+  it("keys the read under the workspace list", () => {
+    const options = workspaceLabelsQueryOptions({} as never, SLUG);
+    expect(options.queryKey).toEqual(labelKeys.workspace(SLUG));
   });
 });
 

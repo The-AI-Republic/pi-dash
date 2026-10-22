@@ -252,11 +252,11 @@ function WorkspaceViewForm(props: WorkspaceViewFormAllProps): React.ReactElement
           {/*
             A workspace view spans projects, so the temporary builder has
             no project: the empty id only feeds the row's project-role
-            lookup (unused for a temporary instance) and the value pickers
-            of project-scoped dimensions, which need workspace-scoped
-            reads from the issues area before they resolve here. Cycle
-            and module fields stay hidden: the workspace filter set has
-            no project features to read them from.
+            lookup (unused for a temporary instance) and switches the
+            value pickers of project-scoped dimensions to their
+            workspace lists. Cycle and module fields stay hidden: the
+            workspace filter set has no project features to read them
+            from.
           */}
           <FilterSectionLoader
             workspaceSlug={workspaceSlug}

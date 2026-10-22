@@ -59,6 +59,27 @@ export async function listLabels(client: ApiClient, slug: string, projectId: str
   return client.parse(LabelList, body, "GET issue-labels");
 }
 
+/**
+ * Workspace-wide states for cross-project hosts (the workspace view
+ * dialog's filter builder). Same serializer as the project list, so
+ * the same schema parses it.
+ */
+export async function listWorkspaceStates(client: ApiClient, slug: string): Promise<StateList> {
+  const path = `/api/workspaces/${slug}/states/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(StateList, body, `GET ${path}`);
+}
+
+/**
+ * Workspace-wide labels for cross-project hosts. Same serializer as
+ * the project list, so the same schema parses it.
+ */
+export async function listWorkspaceLabels(client: ApiClient, slug: string): Promise<LabelList> {
+  const path = `/api/workspaces/${slug}/labels/`;
+  const body = await client.getJson<unknown>(path);
+  return client.parse(LabelList, body, `GET ${path}`);
+}
+
 export interface LabelCreate {
   name: string;
   color: string;

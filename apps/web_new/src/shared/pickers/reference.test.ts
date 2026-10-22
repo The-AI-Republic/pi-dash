@@ -13,7 +13,10 @@ import {
   pickerProjectMembersQueryOptions,
   pickerProjectsQueryOptions,
   pickerStatesQueryOptions,
+  pickerWorkspaceCyclesQueryOptions,
   pickerWorkspaceMembersQueryOptions,
+  pickerWorkspaceModulesQueryOptions,
+  pickerWorkspaceStatesQueryOptions,
 } from "./reference.js";
 
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -115,6 +118,9 @@ describe("pickerKeys", () => {
     expect(pickerKeys.projects("acme")).toEqual(["ws", "acme", "pickers", "projects"]);
     expect(pickerKeys.cycles("acme", PROJECT)).toEqual(["ws", "acme", "pickers", "cycles", PROJECT]);
     expect(pickerKeys.modules("acme", PROJECT)).toEqual(["ws", "acme", "pickers", "modules", PROJECT]);
+    expect(pickerKeys.workspaceStates("acme")).toEqual(["ws", "acme", "pickers", "workspace-states"]);
+    expect(pickerKeys.workspaceCycles("acme")).toEqual(["ws", "acme", "pickers", "workspace-cycles"]);
+    expect(pickerKeys.workspaceModules("acme")).toEqual(["ws", "acme", "pickers", "workspace-modules"]);
   });
 });
 
@@ -170,5 +176,55 @@ describe("picker reference reads", () => {
     });
     const rows = await queryClient.fetchQuery(pickerModulesQueryOptions(getAppClient(), "acme", PROJECT));
     expect(rows.map((row) => row.name)).toEqual(["Alpha"]);
+  });
+
+  it("reads workspace states without a project segment", async () => {
+    const { queryClient, calls } = harness({ "/states/": [STATE] });
+    const options = pickerWorkspaceStatesQueryOptions(getAppClient(), "acme");
+    expect(options.staleTime).toBe(REFERENCE_STALE_TIME_MS);
+    const rows = await queryClient.fetchQuery(options);
+    expect(rows.map((row) => row.name)).toEqual(["Todo"]);
+    expect(calls.some((url) => url.endsWith("/api/workspaces/acme/states/"))).toBe(true);
+  });
+
+  it("reads workspace cycles in the narrower projection", async () => {
+    const { queryClient, calls } = harness({
+      "/cycles/": [
+        {
+          id: OTHER,
+          workspace_id: WORKSPACE,
+          project_id: PROJECT,
+          name: "Current",
+          description: "",
+          start_date: null,
+          end_date: null,
+          owned_by_id: null,
+          view_props: {},
+          sort_order: 1,
+          external_source: null,
+          external_id: null,
+          progress_snapshot: null,
+          logo_props: {},
+          total_issues: 2,
+          cancelled_issues: 0,
+          completed_issues: 1,
+          started_issues: 1,
+          unstarted_issues: 0,
+          backlog_issues: 0,
+        },
+      ],
+    });
+    const rows = await queryClient.fetchQuery(pickerWorkspaceCyclesQueryOptions(getAppClient(), "acme"));
+    expect(rows.map((row) => row.name)).toEqual(["Current"]);
+    expect(calls.some((url) => url.endsWith("/api/workspaces/acme/cycles/"))).toBe(true);
+  });
+
+  it("reads workspace modules without the favorite flag", async () => {
+    const { queryClient, calls } = harness({
+      "/modules/": [{ id: OTHER, project_id: PROJECT, name: "Alpha", status: "planned" }],
+    });
+    const rows = await queryClient.fetchQuery(pickerWorkspaceModulesQueryOptions(getAppClient(), "acme"));
+    expect(rows.map((row) => row.name)).toEqual(["Alpha"]);
+    expect(calls.some((url) => url.endsWith("/api/workspaces/acme/modules/"))).toBe(true);
   });
 });
