@@ -259,7 +259,8 @@ directory belongs to and what else exists in the workspace:
 - **Machine-level** `~/.pidash/context.md` (`scope: "machine"`) — every project
   in every workspace this machine is bound to, keyed by workspace slug. The
   lookup table for "what else exists in this workspace" and the fallback when
-  there is no working-dir file. Written on `auth login` and refreshable with
+  there is no working-dir file. Written on `auth login`, at `runner add`, and
+  when the daemon resolves a workspace, and refreshable with
   `pidash context refresh`. Its location follows `PIDASH_CONFIG_DIR` when set,
   otherwise `~/.pidash`.
 

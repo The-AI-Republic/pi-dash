@@ -116,7 +116,9 @@ pub async fn run(args: ContextArgs, paths: &crate::util::paths::Paths) -> i32 {
 
 /// Write `<workspace_dir>/.pidash/context.md` scoped to a single project, and
 /// best-effort exclude `.pidash/` from git. Callers: `runner add` and the daemon
-/// after it resolves a workspace.
+/// after it resolves a workspace. Also best-effort rewrites the machine-level
+/// `~/.pidash/context.md` for the bound workspace, so both triggers keep it
+/// fresh; a failure there never fails the working-dir write.
 pub async fn write_context_for_project(
     paths: &crate::util::paths::Paths,
     workspace_dir: &Path,
@@ -125,7 +127,11 @@ pub async fn write_context_for_project(
     let env = CliEnv::resolve(paths)?;
     let client = ApiClient::new(env).map_err(|e| CliError::new(EXIT_UNKNOWN, format!("{e}")))?;
     let project = resolve_project(&client, project_ref).await?;
-    write_project_context_file(workspace_dir, &client.env.workspace_slug, &project)
+    let path = write_project_context_file(workspace_dir, &client.env.workspace_slug, &project)?;
+    if let Err(err) = write_machine_context(paths, &client).await {
+        tracing::debug!(error = %err, "could not refresh machine-level context.md");
+    }
+    Ok(path)
 }
 
 /// Rewrite `~/.pidash/context.md` for the currently-bound workspace, listing all
