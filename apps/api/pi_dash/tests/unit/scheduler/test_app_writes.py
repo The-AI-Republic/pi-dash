@@ -64,16 +64,31 @@ def test_create_install_delete(db, workspace, project, create_user):
     assert duplicate.status_code == 400
     assert "slug" in duplicate.data
 
+    install = {
+        "scheduler": scheduler_id,
+        "dtstart": "2026-01-01T09:00:00Z",
+        "rrule": "FREQ=DAILY",
+    }
+    # The web app's install still requires the body `project` (the
+    # serializer's unique-together field), unlike the v1 install.
+    missing_project = _call(
+        ProjectSchedulerBindingListEndpoint,
+        "post",
+        "/scheduler-bindings/",
+        create_user,
+        install,
+        slug=workspace.slug,
+        project_id=str(project.id),
+    )
+    assert missing_project.status_code == 400
+    assert "project" in missing_project.data
+
     installed = _call(
         ProjectSchedulerBindingListEndpoint,
         "post",
         "/scheduler-bindings/",
         create_user,
-        {
-            "scheduler": scheduler_id,
-            "dtstart": "2026-01-01T09:00:00Z",
-            "rrule": "FREQ=DAILY",
-        },
+        {**install, "project": str(project.id)},
         slug=workspace.slug,
         project_id=str(project.id),
     )

@@ -36,9 +36,6 @@ def install_binding(project, scheduler, data: Mapping, actor) -> SchedulerBindin
     from pi_dash.app.serializers.scheduler import SchedulerBindingSerializer
     from pi_dash.bgtasks.scheduler import _next_fire_for_binding
 
-    # Identity comes from the caller (URL / resolved scheduler), never from
-    # a body that may name another project or a scheduler by slug.
-    data = {**data, "scheduler": scheduler.pk, "project": project.pk}
     serializer = SchedulerBindingSerializer(data=data, context={"project": project})
     serializer.is_valid(raise_exception=True)
     binding = serializer.save(

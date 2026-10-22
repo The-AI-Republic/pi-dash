@@ -357,7 +357,14 @@ class ProjectSchedulerListAPIEndpoint(BaseAPIView):
             return already
         try:
             with transaction.atomic():
-                binding = install_binding(project, scheduler, data, actor=request.user)
+                # The serializer's identity fields come from the URL and the
+                # resolved scheduler, never from the body.
+                binding = install_binding(
+                    project,
+                    scheduler,
+                    {**data, "scheduler": scheduler.pk, "project": project.pk},
+                    actor=request.user,
+                )
         except IntegrityError:
             # A concurrent install won the per-project unique constraint.
             return already
