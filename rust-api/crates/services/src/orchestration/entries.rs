@@ -152,11 +152,6 @@ pub const REASON_PRIOR_RUN_ACTIVE: &str = "prior-run-active";
 
 /// Cloud scheduler with no usable human principal (`service.py:924`).
 pub const SCHEDULER_NO_CREATOR: &str = "no current human execution principal";
-/// Cloud scheduler refusing a non-`create_issue` binding (`:942`).
-pub const SCHEDULER_OUTCOME_MODE_REFUSAL: &str =
-    "Cloud Agent scheduler runs support only the create_issue outcome mode";
-/// The only outcome mode a Cloud Agent scheduler run supports (`:938`).
-pub const OUTCOME_MODE_CREATE_ISSUE: &str = "create_issue";
 
 /// `f"no default pod for project {binding.project_id}"` (`service.py:889`).
 /// A `None` project renders `None`, as Python's `str()` does.
@@ -217,7 +212,7 @@ pub const SCHEDULER_POD_OVERRIDE_SQL: &str = "SELECT id, project_id FROM pod \
 /// deleted guard): the Beat loop passes the live binding object, and the
 /// read must return that same row. `$1` is the binding id.
 pub const BINDING_SELECT_SQL: &str = "SELECT id, workspace_id, project_id, scheduler_id, \
-    outcome_mode, extra_context, actor_id, pod_id FROM scheduler_bindings WHERE id = $1";
+    extra_context, actor_id, pod_id FROM scheduler_bindings WHERE id = $1";
 
 /// The consumed `schedulers` projection for the `binding.scheduler` FK
 /// follow (`context.py:675`): the default manager scope applies, so a
@@ -288,7 +283,6 @@ pub struct BindingView {
     /// model allows it; the dispatcher answers the no-pod error then).
     pub project_id: Option<Uuid>,
     pub scheduler_id: Uuid,
-    pub outcome_mode: String,
     pub extra_context: String,
     pub actor_id: Option<Uuid>,
     pub pod_id: Option<Uuid>,
@@ -1110,19 +1104,10 @@ pub async fn dispatch_scheduler_run<S: EntriesSeam>(
     };
     let mut admission_error = execution.cloud_admission_error.clone();
 
-    // Permanent misconfiguration — refuse BEFORE creating a run so a
-    // broken binding writes last_error once instead of minting a FAILED
-    // AgentRun on every scheduler firing. Note the execution's executor
-    // kind, not the project default.
-    if execution.executor_kind == AgentExecutorKind::CloudAgent
-        && binding.outcome_mode != OUTCOME_MODE_CREATE_ISSUE
-    {
-        return Ok(SchedulerOutcome {
-            run: None,
-            error: Some(SCHEDULER_OUTCOME_MODE_REFUSAL.to_owned()),
-        });
-    }
-
+    // No outcome-mode gate (PDASHOSS01-281): what a Cloud Agent
+    // scheduler run may do is bounded by its tool plan (no filesystem,
+    // shell or worktree; writes limited to issue creation and relations)
+    // and the locked cloud scheduler sections, not by a binding field.
     admission_error = seam
         .lock_cloud_creation_capacity(project.workspace_id, execution.executor_kind, true)
         .await?
@@ -1239,7 +1224,6 @@ async fn render_scheduler_turn<S: EntriesSeam>(
         limits: tool_plan.get("limits").cloned().unwrap_or(Value::Null),
         scheduler_prompt: scheduler.prompt.clone(),
         binding_extra_context: binding.extra_context.clone(),
-        outcome_directive: context::outcome_mode_directive(&binding.outcome_mode).to_owned(),
     };
     let context_value = context::build_scheduler_context(&input);
     let workspace_id = binding.workspace_id.to_string();
@@ -2961,7 +2945,6 @@ mod tests {
             workspace_id: uid(0x10),
             project_id: Some(uid(0x20)),
             scheduler_id: uid(0x81),
-            outcome_mode: OUTCOME_MODE_CREATE_ISSUE.to_owned(),
             extra_context: String::new(),
             actor_id: Some(uid(0x40)),
             pod_id: None,
@@ -3374,8 +3357,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn s6_cloud_outcome_mode_refusal_before_insert() {
-        let case = scheduler_case("S6_outcome_mode_refusal");
+    async fn s6_cloud_binding_asking_for_fixes_still_dispatches() {
+        // PDASHOSS01-281: the outcome-mode gate is gone. A Cloud Agent
+        // binding whose task asks for code changes dispatches like any
+        // other; the run stays bounded by its tool plan and the locked
+        // cloud sections, and nothing is appended to the operator's task.
         let now = frozen_now();
         let mut seam = scheduler_seam();
         cloud_project(&mut seam);
@@ -3391,7 +3377,7 @@ mod tests {
         seam.bindings
             .get_mut(&uid(0x80))
             .expect("binding")
-            .outcome_mode = "apply_fix".to_owned();
+            .extra_context = "Implement the fix and open a pull request.".to_owned();
         let outcome = dispatch_scheduler_run(
             &mut seam,
             &SchedulerRequest {
@@ -3401,14 +3387,16 @@ mod tests {
         )
         .await
         .expect("scheduler runs");
-        assert!(outcome.run.is_none());
-        assert_eq!(outcome.error.as_deref(), case["returned"]["error"].as_str());
-        assert_eq!(
-            outcome.error.as_deref(),
-            Some(SCHEDULER_OUTCOME_MODE_REFUSAL)
-        );
-        assert!(seam.scheduler_runs.is_empty());
-        assert!(seam.dispatched.is_empty());
+        assert_eq!(outcome.error, None);
+        let run_id = outcome.run.expect("run returned");
+        assert_eq!(seam.dispatched, vec![run_id]);
+        let run = seam.runs.get(&run_id).expect("run stored");
+        assert_eq!(run.executor_kind, AgentExecutorKind::CloudAgent);
+        assert!(run
+            .prompt
+            .contains("Implement the fix and open a pull request."));
+        assert!(!run.prompt.contains("at most one Pi Dash backlog issue"));
+        assert!(!run.prompt.contains("## Work mode"));
     }
 
     #[tokio::test]
@@ -3929,17 +3917,10 @@ mod tests {
 
     #[test]
     fn scheduler_consts_match_fixture() {
-        assert_eq!(OUTCOME_MODE_CREATE_ISSUE, "create_issue");
         assert_eq!(SCHEDULER_ALLOWED_ROLES, &[20, 15, 5]);
         assert_eq!(
             SCHEDULER_NO_CREATOR,
             scheduler_case("S5_cloud_no_creator")["returned"]["error"]
-                .as_str()
-                .unwrap()
-        );
-        assert_eq!(
-            SCHEDULER_OUTCOME_MODE_REFUSAL,
-            scheduler_case("S6_outcome_mode_refusal")["returned"]["error"]
                 .as_str()
                 .unwrap()
         );
@@ -3965,7 +3946,7 @@ mod tests {
         );
         assert_eq!(
             BINDING_SELECT_SQL,
-            "SELECT id, workspace_id, project_id, scheduler_id, outcome_mode, extra_context, actor_id, pod_id FROM scheduler_bindings WHERE id = $1"
+            "SELECT id, workspace_id, project_id, scheduler_id, extra_context, actor_id, pod_id FROM scheduler_bindings WHERE id = $1"
         );
         assert_eq!(
             SCHEDULER_SELECT_SQL,

@@ -381,7 +381,7 @@ pub fn lock_issue_sql() -> String {
 /// `select_related("work_item", "work_item__state",
 /// "work_item__project", "scheduler_binding").filter(pk,
 /// status__in=terminal).first()` with `FOR UPDATE OF "agent_run"` —
-/// 41 + 34 + 46 + 18 + 22 columns. Param: `$1` run id, `$2..$6` the
+/// 41 + 34 + 46 + 18 + 21 columns. Param: `$1` run id, `$2..$6` the
 /// terminal values in tuple order (same set-ordering quirk as the
 /// finalize lock).
 pub fn lock_run_for_effects_sql() -> String {
@@ -1452,7 +1452,7 @@ mod tests {
                 ("\"issues\"".to_owned(), 34),
                 ("\"projects\"".to_owned(), 46),
                 ("\"states\"".to_owned(), 18),
-                ("\"scheduler_bindings\"".to_owned(), 22),
+                ("\"scheduler_bindings\"".to_owned(), 21),
             ]
         );
         assert!(
@@ -1530,7 +1530,7 @@ mod tests {
                 "revoked_reason",
             ]
         );
-        assert_eq!(scheduler_binding::COLUMNS.len(), 22);
+        assert_eq!(scheduler_binding::COLUMNS.len(), 21);
         assert_eq!(pod::COLUMNS.len(), 10);
     }
 }

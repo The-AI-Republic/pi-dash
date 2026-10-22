@@ -431,8 +431,8 @@ def seed_binding(db_url, scheduler_id, workspace_id, cron, created_at, *, enable
         """insert into scheduler_bindings
            (created_at, updated_at, id, extra_context, enabled, last_error,
             workspace_id, scheduler_id, dtstart, tzid, rrule, rdates, exdates,
-            outcome_mode, cron)
-           values (%s,%s,%s,'',%s,'',%s,%s,%s,'UTC','','[]','[]','CREATE_ISSUE',%s)""",
+            cron)
+           values (%s,%s,%s,'',%s,'',%s,%s,%s,'UTC','','[]','[]',%s)""",
         (
             created_at,
             created_at,

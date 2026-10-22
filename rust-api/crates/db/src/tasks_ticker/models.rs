@@ -4,9 +4,9 @@
 //! (`IssueAgentTicker`, `TickerDisarmReason`, `jitter_seconds`,
 //! `DEFAULT_INTERVAL_SECONDS`, `DEFAULT_MAX_TICKS`, `INFINITE_MAX_TICKS`,
 //! `JITTER_FRACTION`) and `apps/api/pi_dash/db/models/scheduler.py:1-251`
-//! (`Scheduler`, `SchedulerBinding`, `SchedulerSource`, `OutcomeMode`,
-//! `OUTCOME_MODE_DIRECTIVES`, `outcome_mode_directive`,
-//! `LAST_ERROR_MAX_LEN`). Adopts the Django-owned schema column-for-column;
+//! (`Scheduler`, `SchedulerBinding`, `SchedulerSource`,
+//! `LAST_ERROR_MAX_LEN`). The binding's `outcome_mode` column and its
+//! work-mode directives are gone (PDASHOSS01-281, Django migration 0169). Adopts the Django-owned schema column-for-column;
 //! migrations are not ported — Django stays schema owner until switchover.
 //!
 //! Column order in each `*_COLUMNS` const follows the Django `_meta` field
@@ -52,8 +52,6 @@
 //!   off `last_run.status`.
 //! * `pod` is late-bound: `NULL` means "use the project's default pod",
 //!   resolved at fire time; a hard pod delete degrades via `SET_NULL`.
-//! * `outcome_mode_directive` falls back to the `CREATE_ISSUE` directive for
-//!   unknown values so a stale row never dispatches without guidance.
 //! * `jitter_seconds` draws from the same uniform
 //!   `[0, interval × JITTER_FRACTION)` distribution via the caller's RNG;
 //!   the exact Python Mersenne-Twister stream is not reproduced across RNG
@@ -212,99 +210,6 @@ impl FromStr for SchedulerSource {
             other => Err(UnknownSchedulerSource(other.to_string())),
         }
     }
-}
-
-/// What a scheduler run does with its findings (`scheduler.py:30-45`).
-/// Stored per-install on the binding, not on the scheduler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum OutcomeMode {
-    /// File issues (the Django field default).
-    #[default]
-    CreateIssue,
-    /// Implement fixes, open PRs for review, never merge.
-    ApplyFix,
-    /// File issues and delegate the fix to the issue agent.
-    FixAndReview,
-}
-
-impl OutcomeMode {
-    /// The stored string.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            OutcomeMode::CreateIssue => "create_issue",
-            OutcomeMode::ApplyFix => "apply_fix",
-            OutcomeMode::FixAndReview => "fix_and_review",
-        }
-    }
-}
-
-/// Error for unknown outcome-mode strings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnknownOutcomeMode(pub String);
-
-impl std::fmt::Display for UnknownOutcomeMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unknown outcome mode: {}", self.0)
-    }
-}
-
-impl std::error::Error for UnknownOutcomeMode {}
-
-impl FromStr for OutcomeMode {
-    type Err = UnknownOutcomeMode;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "create_issue" => Ok(OutcomeMode::CreateIssue),
-            "apply_fix" => Ok(OutcomeMode::ApplyFix),
-            "fix_and_review" => Ok(OutcomeMode::FixAndReview),
-            other => Err(UnknownOutcomeMode(other.to_string())),
-        }
-    }
-}
-
-/// Work-mode directive appended to a scheduler run's prompt, keyed by
-/// [`OutcomeMode`] (`scheduler.py:52-93`, verbatim).
-pub const OUTCOME_MODE_DIRECTIVES: &[(&str, &str)] = &[
-    (
-        "create_issue",
-        "## Work mode: create issues\n\
-         \n\
-         For each distinct finding, file a Pi Dash issue with the `pidash` CLI:\n\
-         \x20   pidash issue create --project <PROJ> --title \"<short summary>\" \\\n\
-         \x20       --description \"<file path, line range, evidence, severity, suggested fix>\"\n\
-         Before creating an issue, list existing open issues and skip any finding that already has a corresponding open issue (de-dupe by file + root cause, not by exact title). Do NOT modify code.",
-    ),
-    (
-        "apply_fix",
-        "## Work mode: apply fix\n\
-         \n\
-         For each finding you are confident about, implement the fix and open a pull request for human review \u{2014} do NOT merge it. Keep one PR per logical fix where practical. If a fix is risky, ambiguous, or larger than a focused change, do NOT force it: create a Pi Dash issue describing the finding instead (same form as create-issue mode).",
-    ),
-    (
-        "fix_and_review",
-        "## Work mode: file issue and delegate fix\n\
-         \n\
-         Do NOT modify code or open a pull request in this run \u{2014} the fix is delegated to the issue agent. For each distinct finding, do ALL of the following:\n\
-         1. File a Pi Dash issue with the `pidash` CLI (de-dupe against existing open issues by file + root cause, as in create-issue mode), and note the issue identifier it returns. Write the description so an AI agent can implement the fix without re-investigating: file path(s) and line range, the evidence you observed, root cause, severity, a concrete suggested fix, and how to validate it:\n\
-         \x20   pidash issue create --project <PROJ> --title \"<short summary>\" \\\n\
-         \x20       --description \"<agent-ready technical details>\"\n\
-         2. Move the issue to In Progress \u{2014} this automatically delegates it to the coding agent, which implements the fix and opens a pull request for human review:\n\
-         \x20   pidash issue patch <IDENT> --state \"In Progress\"\n\
-         If a finding is risky, ambiguous, or larger than a focused change, still file the issue but leave it in its default state (do NOT move it to In Progress) and describe the open questions in the issue description instead.",
-    ),
-];
-
-/// Return the prompt directive for `mode` (`scheduler.py:96-104`).
-///
-/// Falls back to the `CREATE_ISSUE` directive for an unknown value so a
-/// stale row can never dispatch a run with no work-mode guidance at all.
-pub fn outcome_mode_directive(mode: &str) -> &'static str {
-    OUTCOME_MODE_DIRECTIVES
-        .iter()
-        .find(|(key, _)| *key == mode)
-        .map(|(_, directive)| *directive)
-        .unwrap_or(OUTCOME_MODE_DIRECTIVES[0].1)
 }
 
 /// The project's per-issue pool (`issue_agent_ticker.py:200-203`).
@@ -606,7 +511,7 @@ pub mod scheduler {
 /// `scheduler_bindings` table (`scheduler.py:154-248`).
 ///
 /// One install of a [`scheduler::Scheduler`] onto one project: the
-/// per-install cadence, prompt context, outcome mode, and the runtime state
+/// per-install cadence, prompt context, and the runtime state
 /// the beat fire loop reads.
 pub mod scheduler_binding {
     use super::OnDelete;
@@ -639,7 +544,6 @@ pub mod scheduler_binding {
         "exdates",
         "extra_context",
         "enabled",
-        "outcome_mode",
         "next_run_at",
         "last_run_id",
         "last_error",
@@ -673,12 +577,6 @@ pub mod scheduler_binding {
     /// `enabled` default (`:182`).
     pub const DEFAULT_ENABLED: bool = true;
 
-    /// `outcome_mode` bound and default (`:189-193`, `default=create_issue`
-    /// matching the pre-existing builtin behavior).
-    pub const OUTCOME_MODE_MAX_LENGTH: usize = 16;
-    /// See [`OUTCOME_MODE_MAX_LENGTH`].
-    pub const DEFAULT_OUTCOME_MODE: &str = "create_issue";
-
     /// `last_error` default (`:207`, short-circuit errors only).
     pub const DEFAULT_LAST_ERROR: &str = "";
 
@@ -702,7 +600,7 @@ pub mod scheduler_binding {
         &message[..end]
     }
 
-    /// One binding row. `rrule` / `extra_context` / `outcome_mode` /
+    /// One binding row. `rrule` / `extra_context` /
     /// `last_error` store `""`, never `NULL`; `rdates` / `exdates` are JSON
     /// arrays (fresh `[]` per row in Django); `next_run_at`, `last_run_id`,
     /// `actor_id`, `pod_id`, and `project_id` are nullable.
@@ -724,7 +622,6 @@ pub mod scheduler_binding {
         pub exdates: serde_json::Value,
         pub extra_context: String,
         pub enabled: bool,
-        pub outcome_mode: String,
         pub next_run_at: Option<chrono::DateTime<chrono::Utc>>,
         pub last_run_id: Option<uuid::Uuid>,
         pub last_error: String,
@@ -1004,27 +901,26 @@ mod tests {
         assert_eq!(default("rrule"), "");
         assert_eq!(default("extra_context"), "");
         assert_eq!(default("enabled"), true);
-        assert_eq!(default("outcome_mode"), "create_issue");
+        assert!(b["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["name"] != "outcome_mode"));
         assert_eq!(default("last_error"), "");
-        let (tzid, rrule, context, enabled, mode, error): (&str, &str, &str, bool, &str, &str) = (
+        let (tzid, rrule, context, enabled, error): (&str, &str, &str, bool, &str) = (
             scheduler_binding::DEFAULT_TZID,
             scheduler_binding::DEFAULT_RRULE,
             scheduler_binding::DEFAULT_EXTRA_CONTEXT,
             scheduler_binding::DEFAULT_ENABLED,
-            scheduler_binding::DEFAULT_OUTCOME_MODE,
             scheduler_binding::DEFAULT_LAST_ERROR,
         );
         assert_eq!(
-            (tzid, rrule, context, enabled, mode, error),
-            ("UTC", "", "", true, "create_issue", "")
+            (tzid, rrule, context, enabled, error),
+            ("UTC", "", "", true, "")
         );
         assert_eq!(field(b, "tzid")["max_length"], 64);
-        assert_eq!(field(b, "outcome_mode")["max_length"], 16);
-        let (tzid_len, mode_len): (usize, usize) = (
-            scheduler_binding::TZID_MAX_LENGTH,
-            scheduler_binding::OUTCOME_MODE_MAX_LENGTH,
-        );
-        assert_eq!((tzid_len, mode_len), (64, 16));
+        let tzid_len: usize = scheduler_binding::TZID_MAX_LENGTH;
+        assert_eq!(tzid_len, 64);
         assert_eq!(field(b, "scheduler")["on_delete"], "CASCADE");
         assert_eq!(field(b, "last_run")["on_delete"], "SET_NULL");
         assert_eq!(field(b, "actor")["on_delete"], "SET_NULL");
@@ -1063,39 +959,10 @@ mod tests {
         assert_eq!(sources, values("scheduler_source"));
         assert_eq!(SchedulerSource::default(), SchedulerSource::Builtin);
 
-        let modes: Vec<String> = [
-            OutcomeMode::CreateIssue,
-            OutcomeMode::ApplyFix,
-            OutcomeMode::FixAndReview,
-        ]
-        .iter()
-        .map(|m| m.as_str().to_string())
-        .collect();
-        assert_eq!(modes, values("outcome_mode"));
-        assert_eq!(OutcomeMode::default(), OutcomeMode::CreateIssue);
-
-        // Directives verbatim: every Rust entry equals the fixture text.
-        let fixture_directives = v["outcome_mode_directives"].as_object().unwrap();
-        assert_eq!(OUTCOME_MODE_DIRECTIVES.len(), fixture_directives.len());
-        for (key, directive) in OUTCOME_MODE_DIRECTIVES {
-            assert_eq!(*directive, fixture_directives[*key].as_str().unwrap());
-        }
-        // Unknown mode falls back to CREATE_ISSUE (fixture probes the prefix).
-        let fallback_prefix = v["outcome_mode_directive_unknown_fallback"]
-            .as_str()
-            .unwrap();
-        assert!(v["outcome_mode_directive_fallback_is_create_issue"]
-            .as_bool()
-            .unwrap());
-        assert_eq!(
-            outcome_mode_directive("create_issue"),
-            OUTCOME_MODE_DIRECTIVES[0].1
-        );
-        assert_eq!(
-            outcome_mode_directive("stale-mode"),
-            OUTCOME_MODE_DIRECTIVES[0].1
-        );
-        assert!(outcome_mode_directive("stale-mode").starts_with(fallback_prefix));
+        // The outcome-mode enum and its directives were removed with the
+        // binding column (PDASHOSS01-281).
+        assert!(v.get("outcome_mode").is_none());
+        assert!(v.get("outcome_mode_directives").is_none());
     }
 
     #[test]

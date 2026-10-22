@@ -34,16 +34,15 @@ Reading material only: `tests/unit/bg_tasks/test_agent_ticker.py` (564),
   Full concrete column list incl. inherited `BaseModel` audit/pk cols.
 - `models/scheduler.columns.json` — `db/models/scheduler.py:107-151`
   (`Scheduler`: `scheduler_unique_workspace_slug_when_active` 142-148),
-  `:154-248` (`SchedulerBinding`: RRULE bundle 175-179, `outcome_mode`
-  default 189-193, `next_run_at` 195, `last_run` SET_NULL 199-205,
+  `:154-248` (`SchedulerBinding`: RRULE bundle 175-179 (`outcome_mode`
+  dropped by migration 0169, PDASHOSS01-281), `next_run_at` 195, `last_run` SET_NULL 199-205,
   `last_error` 207, `actor`/`pod` SET_NULL 209-229,
   `scheduler_binding_unique_per_project_when_active` 236-241,
   `sched_binding_due_idx` 243-248).
 - `models/enums.json` — `db/models/issue_agent_ticker.py:41-61`
   (`TickerDisarmReason`, 6 values); `db/models/scheduler.py:25-27`
-  (`SchedulerSource`), `:30-45` (`OutcomeMode`), `:52-93`
-  (`OUTCOME_MODE_DIRECTIVES` verbatim), `:96-104`
-  (`outcome_mode_directive` unknown-mode fallback probe).
+  (`SchedulerSource`). `OutcomeMode` and its directives were removed
+  by PDASHOSS01-281.
 - `models/constants.json` — `db/models/issue_agent_ticker.py:35-38`
   (`DEFAULT_INTERVAL_SECONDS`, `DEFAULT_MAX_TICKS`, `INFINITE_MAX_TICKS`,
   `JITTER_FRACTION`); `db/models/scheduler.py:22`

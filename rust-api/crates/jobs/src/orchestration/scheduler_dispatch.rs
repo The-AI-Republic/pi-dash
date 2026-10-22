@@ -88,7 +88,6 @@ type BindingRow = (
     Option<Uuid>,
     Uuid,
     String,
-    String,
     Option<Uuid>,
     Option<Uuid>,
 );
@@ -222,16 +221,8 @@ where
             .fetch_optional(&mut **self.dispatch_tx().inner())
             .await
             .map_err(db)?;
-        let Some((
-            id,
-            workspace_id,
-            project_id,
-            scheduler_id,
-            outcome_mode,
-            extra_context,
-            actor_id,
-            pod_id,
-        )) = row
+        let Some((id, workspace_id, project_id, scheduler_id, extra_context, actor_id, pod_id)) =
+            row
         else {
             return Err(CreationError::MissingRow(format!(
                 "no binding {binding_id}"
@@ -242,7 +233,6 @@ where
             workspace_id,
             project_id,
             scheduler_id,
-            outcome_mode,
             extra_context,
             actor_id,
             pod_id,

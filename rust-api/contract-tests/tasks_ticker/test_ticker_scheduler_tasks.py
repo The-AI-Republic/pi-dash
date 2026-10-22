@@ -252,7 +252,6 @@ def test_scan_due_bindings_fans_out_fire(db_conn, broker_url):
             "exdates": [],
             "extra_context": "",
             "enabled": True,
-            "outcome_mode": "create_issue",
             "last_error": "",
             "next_run_at": None,
         },

@@ -107,7 +107,6 @@ pub struct BindingRow {
     pub exdates: Value,
     pub extra_context: String,
     pub enabled: bool,
-    pub outcome_mode: String,
     pub next_run_at: Option<DateTime<Utc>>,
     pub last_run_id: Option<uuid::Uuid>,
     pub last_error: String,
@@ -166,7 +165,7 @@ const WORKSPACE_SCHEDULERS_SQL: &str = concat!(
 /// `project_members`), exactly as Django builds it.
 const WORKSPACE_BINDINGS_SQL: &str = concat!(
     "SELECT ",
-    r#""b"."created_at", "b"."updated_at", "b"."id", "b"."workspace_id", "b"."project_id", "b"."scheduler_id", "b"."dtstart", "b"."tzid", "b"."rrule", "b"."rdates", "b"."exdates", "b"."extra_context", "b"."enabled", "b"."outcome_mode", "b"."next_run_at", "b"."last_run_id", "b"."last_error", "b"."pod_id", "s"."slug" AS "scheduler_slug", "s"."name" AS "scheduler_name", "p"."name" AS "pod_name", "lr"."status" AS "last_run_status", "lr"."started_at" AS "last_run_started_at", "lr"."ended_at" AS "last_run_ended_at""#,
+    r#""b"."created_at", "b"."updated_at", "b"."id", "b"."workspace_id", "b"."project_id", "b"."scheduler_id", "b"."dtstart", "b"."tzid", "b"."rrule", "b"."rdates", "b"."exdates", "b"."extra_context", "b"."enabled", "b"."next_run_at", "b"."last_run_id", "b"."last_error", "b"."pod_id", "s"."slug" AS "scheduler_slug", "s"."name" AS "scheduler_name", "p"."name" AS "pod_name", "lr"."status" AS "last_run_status", "lr"."started_at" AS "last_run_started_at", "lr"."ended_at" AS "last_run_ended_at""#,
     r#" FROM "scheduler_bindings" "b" JOIN "schedulers" "s" ON "s"."id" = "b"."scheduler_id" LEFT JOIN "pod" "p" ON "p"."id" = "b"."pod_id" LEFT JOIN "agent_run" "lr" ON "lr"."id" = "b"."last_run_id" JOIN "projects" "pr" ON "pr"."id" = "b"."project_id" JOIN "project_members" "pm" ON "pm"."project_id" = "pr"."id" AND "pm"."member_id" = $2 AND "pm"."is_active" WHERE "b"."deleted_at" IS NULL AND "b"."scheduler_id" = ANY($1) AND "pr"."archived_at" IS NULL ORDER BY "b"."created_at" DESC"#,
 );
 
@@ -185,7 +184,7 @@ const PROJECT_SCHEDULERS_SQL: &str = concat!(
 /// quirk — only the workspace list filters it).
 const PROJECT_BINDINGS_SQL: &str = concat!(
     "SELECT ",
-    r#""b"."created_at", "b"."updated_at", "b"."id", "b"."workspace_id", "b"."project_id", "b"."scheduler_id", "b"."dtstart", "b"."tzid", "b"."rrule", "b"."rdates", "b"."exdates", "b"."extra_context", "b"."enabled", "b"."outcome_mode", "b"."next_run_at", "b"."last_run_id", "b"."last_error", "b"."pod_id", "s"."slug" AS "scheduler_slug", "s"."name" AS "scheduler_name", "p"."name" AS "pod_name", "lr"."status" AS "last_run_status", "lr"."started_at" AS "last_run_started_at", "lr"."ended_at" AS "last_run_ended_at""#,
+    r#""b"."created_at", "b"."updated_at", "b"."id", "b"."workspace_id", "b"."project_id", "b"."scheduler_id", "b"."dtstart", "b"."tzid", "b"."rrule", "b"."rdates", "b"."exdates", "b"."extra_context", "b"."enabled", "b"."next_run_at", "b"."last_run_id", "b"."last_error", "b"."pod_id", "s"."slug" AS "scheduler_slug", "s"."name" AS "scheduler_name", "p"."name" AS "pod_name", "lr"."status" AS "last_run_status", "lr"."started_at" AS "last_run_started_at", "lr"."ended_at" AS "last_run_ended_at""#,
     r#" FROM "scheduler_bindings" "b" JOIN "schedulers" "s" ON "s"."id" = "b"."scheduler_id" LEFT JOIN "pod" "p" ON "p"."id" = "b"."pod_id" LEFT JOIN "agent_run" "lr" ON "lr"."id" = "b"."last_run_id" WHERE "b"."deleted_at" IS NULL AND "b"."scheduler_id" = ANY($1) AND "b"."project_id" = $2 ORDER BY "b"."created_at" DESC"#,
 );
 
@@ -281,10 +280,6 @@ pub fn render_binding(row: &BindingRow, tz: &Tz) -> Value {
         Value::String(row.extra_context.clone()),
     );
     map.insert("enabled".to_owned(), Value::Bool(row.enabled));
-    map.insert(
-        "outcome_mode".to_owned(),
-        Value::String(row.outcome_mode.clone()),
-    );
     map.insert("pod".to_owned(), opt_uuid(&row.pod_id));
     // `pod_name = CharField(source="pod.name", default=None)`: null when
     // no pod (the LEFT JOIN leg).
@@ -914,7 +909,6 @@ mod tests {
             exdates: Value::Array(vec![]),
             extra_context: String::new(),
             enabled: true,
-            outcome_mode: "create_issue".to_owned(),
             next_run_at: None,
             last_run_id: None,
             last_error: String::new(),
@@ -977,7 +971,6 @@ mod tests {
                 "exdates",
                 "extra_context",
                 "enabled",
-                "outcome_mode",
                 "pod",
                 "pod_name",
                 "next_run_at",

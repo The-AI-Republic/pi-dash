@@ -19,7 +19,7 @@ def bind_list(world):
 BINDING_KEYS = {
     "id", "scheduler", "scheduler_slug", "scheduler_name",
     "scheduler_color", "project", "workspace", "dtstart", "tzid", "rrule",
-    "rdates", "exdates", "extra_context", "enabled", "outcome_mode", "pod",
+    "rdates", "exdates", "extra_context", "enabled", "pod",
     "pod_name", "next_run_at", "last_run", "last_run_status",
     "last_run_ended_at", "last_error", "actor", "created_at", "updated_at",
 }
@@ -70,7 +70,7 @@ def test_install_shape(org):
     assert body["exdates"] == []
     assert body["extra_context"] == ""
     assert body["enabled"] is True
-    assert body["outcome_mode"] == "create_issue"
+    assert "outcome_mode" not in body
     # Runner wire fields: install computes the first fire time and records
     # the installing actor; nothing has run yet.
     assert body["pod"] is None
