@@ -51,11 +51,14 @@ from .run_endpoints import (
     RunStreamUpgradeEndpoint,
 )
 from .runners import (
+    DevMachineDeleteEndpoint,
     DevMachineListEndpoint,
     DevMachineRevokeEndpoint,
     DevMachineRotateEndpoint,
     RunnerDetailEndpoint,
     RunnerListEndpoint,
+    RunnerPauseEndpoint,
+    RunnerResumeEndpoint,
     RunnerRevokeEndpoint,
 )
 from .runs import (
@@ -115,11 +118,14 @@ __all__ = [
     "PodDetailEndpoint",
     "PodListEndpoint",
     "ProjectListEndpoint",
+    "DevMachineDeleteEndpoint",
     "DevMachineListEndpoint",
     "DevMachineRevokeEndpoint",
     "DevMachineRotateEndpoint",
     "RunnerDetailEndpoint",
     "RunnerListEndpoint",
+    "RunnerPauseEndpoint",
+    "RunnerResumeEndpoint",
     "AgentReTickEndpoint",
     "AgentRunCancelEndpoint",
     "AgentRunDetailEndpoint",

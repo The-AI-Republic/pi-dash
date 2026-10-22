@@ -20,6 +20,9 @@ from .issue import (
     IssueDetailAPIEndpoint,
     IssueMoveAPIEndpoint,
     IssueReTickAPIEndpoint,
+    IssueRunAiAPIEndpoint,
+    IssueWaitAPIEndpoint,
+    AgentRunYieldAPIEndpoint,
     LabelListCreateAPIEndpoint,
     LabelDetailAPIEndpoint,
     IssueLinkListCreateAPIEndpoint,
@@ -33,6 +36,9 @@ from .issue import (
     IssueSearchEndpoint,
     IssueAdvancedSearchEndpoint,
     IssueRelationListCreateAPIEndpoint,
+    IssueRelationGroupedAPIEndpoint,
+    IssueRelationRelateAPIEndpoint,
+    IssueRelationUnrelateAPIEndpoint,
     IssueWorkpadAPIEndpoint,
 )
 
@@ -78,4 +84,13 @@ from .invite import WorkspaceInvitationsViewset
 
 from .sticky import StickyViewSet
 
+from .page import PageListAPIEndpoint, PageDetailAPIEndpoint, PageArchiveAPIEndpoint
+
 from .runner import RunnerDeleteEndpoint
+
+from .scheduler import (
+    WorkspaceSchedulerListAPIEndpoint,
+    ProjectSchedulerListAPIEndpoint,
+    ProjectSchedulerDetailAPIEndpoint,
+    ProjectSchedulerRunsAPIEndpoint,
+)

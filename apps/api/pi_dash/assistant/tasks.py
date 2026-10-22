@@ -24,6 +24,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from pi_dash.utils.db_async import close_idle_connections, db_sync_to_async
 from pi_dash.assistant.errors import AssistantError
 from pi_dash.assistant.models import (
     AssistantMessage,
@@ -36,6 +37,7 @@ from pi_dash.assistant.models import (
 from pi_dash.assistant.runtime import events, history
 from pi_dash.assistant.runtime.agent import assistant
 from pi_dash.assistant.runtime.deps import AssistantDeps
+from pi_dash.assistant.runtime.provider_errors import classify_provider_error
 from pi_dash.core.permissions import workspace_role
 from pi_dash.settings.redis import redis_instance
 
@@ -64,7 +66,9 @@ class _Ctx:
 
 
 # --------------------------------------------------------------------------- #
-# Sync DB helpers (called from async via sync_to_async)
+# Sync DB helpers (called from async via db_sync_to_async, which closes
+# the Django connection around each call so a long agent turn does not park an
+# idle Postgres connection for its whole duration).
 # --------------------------------------------------------------------------- #
 
 def _load_context(turn_id):
@@ -151,7 +155,7 @@ def _finalize_row(ctx: _Ctx, message: AssistantMessage, text: str, status: str):
         )
 
 
-def _complete_turn(ctx: _Ctx, model_messages, usage, model_used):
+def _complete_turn(ctx: _Ctx, model_messages, usage, model_used, *, truncated: bool = False):
     with transaction.atomic():
         turn = AssistantTurn.objects.select_for_update().get(pk=ctx.turn.id)
         turn.status = TurnStatus.COMPLETED
@@ -161,9 +165,10 @@ def _complete_turn(ctx: _Ctx, model_messages, usage, model_used):
         turn.completed_at = timezone.now()
         turn.save()
         AssistantThread.objects.filter(pk=ctx.thread.id, active_turn_id=ctx.turn.id).update(active_turn=None)
-    events.append_event(
-        ctx.thread, "turn_completed", payload={"turn_id": str(ctx.turn.id), "usage": usage or {}}, turn=ctx.turn
-    )
+    payload = {"turn_id": str(ctx.turn.id), "usage": usage or {}}
+    if truncated:
+        payload["truncated"] = True
+    events.append_event(ctx.thread, "turn_completed", payload=payload, turn=ctx.turn)
     events.prune_turn_deltas(ctx.turn)
 
 
@@ -226,7 +231,7 @@ class _Streamer:
         from pydantic_ai.messages import PartDeltaEvent, PartStartEvent, TextPart, TextPartDelta
 
         async for event in event_stream:
-            if await sync_to_async(_is_cancelled)(self.ctx.turn.id):
+            if await db_sync_to_async(_is_cancelled)(self.ctx.turn.id):
                 raise _Cancelled()
             if isinstance(event, PartStartEvent):
                 part = getattr(event, "part", None)
@@ -242,7 +247,7 @@ class _Streamer:
         await self._finalize()
 
     async def _start(self, initial: str):
-        self.message = await sync_to_async(_start_assistant_row)(self.ctx)
+        self.message = await db_sync_to_async(_start_assistant_row)(self.ctx)
         self.text = ""
         self.pending = ""
         self.last_flush = asyncio.get_running_loop().time()
@@ -263,6 +268,15 @@ class _Streamer:
     async def _flush(self):
         if self.message is not None and self.pending:
             chunk, self.pending = self.pending, ""
+            # Deliberately a bare ``sync_to_async`` while every other ORM call
+            # in this module uses ``db_sync_to_async``. This is the hot
+            # streaming path — it fires every DELTA_FLUSH_MS (100ms) for the
+            # length of a turn — and ``db_sync_to_async`` closes the
+            # connection after each call, so using it here would mean a fresh
+            # connect + auth round-trip to the (remote) database ten times a
+            # second. The connection this leaves open is the worker's single
+            # thread-sensitive one, which is bounded at one per prefork child
+            # and released by ``_close_turn_connection`` when the turn ends.
             await sync_to_async(_emit_delta)(self.ctx, self.message, chunk)
             self.last_flush = asyncio.get_running_loop().time()
 
@@ -270,13 +284,13 @@ class _Streamer:
         if self.message is None:
             return
         await self._flush()
-        await sync_to_async(_finalize_row)(self.ctx, self.message, self.text, MessageStatus.COMPLETED)
+        await db_sync_to_async(_finalize_row)(self.ctx, self.message, self.text, MessageStatus.COMPLETED)
         self.message = None
         self.text = ""
 
     async def fail_open_row(self, status: str):
         if self.message is not None:
-            await sync_to_async(_finalize_row)(self.ctx, self.message, self.text, status)
+            await db_sync_to_async(_finalize_row)(self.ctx, self.message, self.text, status)
             self.message = None
 
 
@@ -293,28 +307,28 @@ async def _run_turn(turn_id: str):
         resolve_toolsets_for_user,
     )
 
-    ctx = await sync_to_async(_load_context)(turn_id)
+    ctx = await db_sync_to_async(_load_context)(turn_id)
     if ctx is None:
         return
-    if not await sync_to_async(_mark_running)(ctx):
+    if not await db_sync_to_async(_mark_running)(ctx):
         return  # turn was already taken, cancelled, or swept
 
     try:
-        model = await sync_to_async(resolve_model_for_user)(ctx.user)
+        model = await db_sync_to_async(resolve_model_for_user)(ctx.user)
     except AssistantError as exc:
-        await sync_to_async(_fail_turn)(ctx, exc.code, exc.detail)
+        await db_sync_to_async(_fail_turn)(ctx, exc.code, exc.detail)
         return
 
     # Tool servers are additive: a failure to build them degrades the turn's
     # capabilities but never fails it, so this is deliberately outside the
     # model-resolution try/except above.
-    toolsets, skipped = await sync_to_async(_resolve_toolsets)(
+    toolsets, skipped = await db_sync_to_async(_resolve_toolsets)(
         ctx, resolve_toolsets_for_user
     )
 
-    hist = await sync_to_async(history.load_history)(ctx.thread)
+    hist = await db_sync_to_async(history.load_history)(ctx.thread)
     streamer = _Streamer(ctx)
-    model_label = await sync_to_async(_model_label)(ctx.user)
+    model_label = await db_sync_to_async(_model_label)(ctx.user)
 
     # Servers that dropped out mid-run were absorbed to keep the turn alive;
     # report them however the turn ends. On the failure paths this matters
@@ -332,27 +346,30 @@ async def _run_turn(turn_id: str):
             event_stream_handler=streamer.handle,
         )
     except _Cancelled:
-        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+        await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.CANCELLED)
-        await sync_to_async(_cancel_turn)(ctx)
+        await db_sync_to_async(_cancel_turn)(ctx)
         return
     except UsageLimitExceeded as exc:
-        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+        await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
-        await sync_to_async(_fail_turn)(ctx, "iteration_limit", str(exc))
+        await db_sync_to_async(_fail_turn)(ctx, "iteration_limit", str(exc))
         return
     except Exception as exc:  # noqa: BLE001 — classify provider failures
-        await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+        await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
         await streamer.fail_open_row(MessageStatus.FAILED)
-        code, detail = _classify_error(exc)
-        await sync_to_async(_fail_turn)(ctx, code, detail)
+        code, detail = await db_sync_to_async(_classify_error)(exc, ctx.user)
+        await db_sync_to_async(_fail_turn)(ctx, code, detail)
         return
 
-    await sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
+    await db_sync_to_async(_report_runtime_tool_failures)(ctx, toolsets)
 
-    model_messages = await sync_to_async(history.dump_new_messages)(result)
+    model_messages = await db_sync_to_async(history.dump_new_messages)(result)
     usage = _extract_usage(result)
-    await sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label)
+    truncated = _was_cut_off(result)
+    if truncated:
+        await db_sync_to_async(_mark_cut_off)(ctx)
+    await db_sync_to_async(_complete_turn)(ctx, model_messages, usage, model_label, truncated=truncated)
 
 
 def _resolve_toolsets(ctx, resolver) -> tuple[list, list]:
@@ -427,31 +444,90 @@ def _extract_usage(result) -> dict:
     }
 
 
-def _classify_error(exc: Exception) -> tuple[str, str]:
-    text = str(exc).lower()
-    # Credit exhaustion is a distinct, user-actionable condition — routed
-    # providers (OpenRouter, and any metered gateway) answer 402 rather than
-    # 401 for it. Without this it lands in the generic "unexpected error"
-    # bucket, which tells the user nothing about what to do.
-    #
-    # The status code is read from the exception, never substring-matched:
-    # "402" appears in request ids and token counts, so matching it in the
-    # message text misclassifies unrelated errors. The remaining markers are
-    # provider error *codes* and phrases specific enough to trust.
-    if getattr(exc, "status_code", None) == 402 or any(
-        s in text
-        for s in ("payment required", "insufficient_credits", "insufficient credits",
-                  "no_credit_account", "quota exceeded")
-    ):
-        return "provider_out_of_credit", "The provider rejected the request for lack of credit."
-    if any(s in text for s in ("401", "unauthorized", "api key", "authentication", "invalid_api_key")):
-        return "provider_auth_failed", "Your API key was rejected by the provider."
-    if any(s in text for s in ("connection", "timeout", "timed out", "unreachable", "could not connect", "name resolution")):
-        return "provider_unreachable", "Could not reach the configured provider endpoint."
-    if any(s in text for s in ("model_not_found", "does not exist", "unknown model", "no such model")):
-        return "model_invalid", "The configured model name was not accepted by the provider."
-    logger.exception("assistant turn failed: %s", exc)
+def _classify_error(exc: Exception, user=None) -> tuple[str, str]:
+    # A typed error raised inside the run — by a model adapter or an ee
+    # provider — already carries its stable code and user-facing detail.
+    # Guessing from the message text instead would erase both and land it in
+    # the generic "unexpected error" bucket. The cause chain is walked because
+    # the agent runtime may re-raise a provider failure wrapped in its own type.
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, AssistantError):
+            return cause.code, cause.detail
+        cause = cause.__cause__
+
+    typed = _turn_error(exc, user)
+    if typed is not None:
+        return typed.code, typed.detail
+    if _hit_output_limit(exc):
+        return "response_truncated", "The reply was cut off because it reached the model's output limit."
+    logger.error("assistant turn failed: %s", exc, exc_info=exc)
     return "internal", "The assistant hit an unexpected error."
+
+
+def _turn_error(exc: Exception, user) -> AssistantError | None:
+    """Ask the model-provider seam how this failure should read for ``user``.
+
+    The wording depends on how the user reaches the model (their own key, or a
+    metered gateway), which only the seam knows. The hook is looked up rather
+    than imported because an overlay replaces that module wholesale: a build
+    whose overlay predates the hook must still classify errors, and a hook
+    that itself fails must not strand the turn as running.
+    """
+    from pi_dash.ee.assistant import model_provider
+
+    hook = getattr(model_provider, "turn_error_for_user", None)
+    if hook is not None and user is not None:
+        try:
+            typed = hook(user, exc)
+            return typed if isinstance(typed, AssistantError) else None
+        except Exception:  # noqa: BLE001 — never fail the failure path
+            logger.exception("turn_error_for_user failed; using the default classifier")
+    return classify_provider_error(exc)
+
+
+def _hit_output_limit(exc: Exception) -> bool:
+    """True when the model ran out of output tokens before it could reply.
+
+    The runtime raises instead of returning when the limit lands mid-tool-call
+    or before any text, so this never reaches :func:`_was_cut_off`.
+    """
+    from pydantic_ai.exceptions import IncompleteToolCall, UnexpectedModelBehavior
+
+    if isinstance(exc, IncompleteToolCall):
+        return True
+    return isinstance(exc, UnexpectedModelBehavior) and "token limit" in str(exc).lower()
+
+
+def _was_cut_off(result) -> bool:
+    """True when the final reply ended because the output limit was reached."""
+    try:
+        return result.response.finish_reason == "length"
+    except Exception:  # noqa: BLE001 — a missing field is "not truncated"
+        return False
+
+
+def _mark_cut_off(ctx: _Ctx) -> None:
+    """Flag the turn's last reply as cut off, in the row and on the stream.
+
+    The row was already finalized as completed while streaming — the finish
+    reason is only known once the whole run returns — so the flag is written
+    to its payload and the envelope is sent again for clients to merge.
+    """
+    message = (
+        AssistantMessage.objects.filter(turn=ctx.turn, kind=MessageKind.ASSISTANT).order_by("-seq").first()
+    )
+    if message is None:
+        return
+    message.payload = {**(message.payload or {}), "truncated": True}
+    message.save(update_fields=["payload"])
+    events.append_event(
+        ctx.thread,
+        "message_completed",
+        payload={"turn_id": str(ctx.turn.id), "message": events.message_envelope(message)},
+        message=message,
+        turn=ctx.turn,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -472,6 +548,25 @@ def run_assistant_turn(turn_id):
         ctx = _load_context(str(turn_id))
         if ctx is not None:
             _fail_turn(ctx, "turn_timeout", "The assistant took too long to respond.")
+    finally:
+        asyncio.run(_close_turn_connection())
+
+
+async def _close_turn_connection() -> None:
+    """Release the worker's thread-sensitive DB connection at turn end.
+
+    ``AssistantStream._flush`` deliberately leaves a connection open on the
+    worker's thread-sensitive thread rather than reconnecting ten times a
+    second. Close it here so it does not sit idle between turns — a Celery
+    child can be parked for hours, and these connections share a Postgres
+    host with home-page.
+
+    This has to run *on that thread*: Django connections are thread-local, so
+    calling ``close_idle_connections()`` from the Celery main thread would not
+    reach it. ``sync_to_async(thread_sensitive=True)`` routes back to the same
+    process-wide executor the turn used, even from this second event loop.
+    """
+    await sync_to_async(close_idle_connections)()
 
 
 @shared_task(name="assistant.sweep_stale_turns")

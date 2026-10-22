@@ -93,6 +93,7 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "parent": {
                 "identifier": "SAMPLE-0",
                 "title": "Parent issue",
+                "state": "In Test",
                 "work_branch": "pi-dash/sample-0",
                 "description": "Parent description.",
                 "comments_count": 3,
@@ -102,6 +103,29 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
                 {"identifier": "SAMPLE-0", "title": "Parent issue"},
                 {"identifier": "SAMPLE-root", "title": "Root issue"},
             ],
+            "children": [
+                {"identifier": "SAMPLE-2", "title": "Child issue", "state": "Backlog"},
+            ],
+            "related": [
+                {"identifier": "SAMPLE-9", "title": "Related issue", "state": "Cancelled"},
+            ],
+            "blocked_by": [
+                {"identifier": "SAMPLE-3", "title": "Blocker issue", "state": "In Review", "state_group": "review"},
+            ],
+            "blocking": [
+                {"identifier": "SAMPLE-4", "title": "Dependent issue", "state": "Todo", "state_group": "unstarted"},
+            ],
+            "other_relations": [
+                {
+                    "identifier": "SAMPLE-5",
+                    "title": "Implementing issue",
+                    "state": "Backlog",
+                    "state_group": "backlog",
+                    "relation": "Implemented by",
+                },
+            ],
+            "open_blockers": ["SAMPLE-3"],
+            "has_open_blockers": True,
             "run": {
                 "id": "00000000-0000-0000-0000-000000000003",
                 "kind": kind,
@@ -121,9 +145,16 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
             "extra_toolsets_schema_tool": "sample_get_tool_schema",
             "limits": {},
             "tick": {
+                # A wait run is a run (PDASHOSS01-211): with two waits the cap
+                # is the pool plus those two, so 5 of 12 with 7 remaining. The
+                # netted shape this used to carry is no longer producible.
                 "count": 5,
-                "cap": 24,
-                "remaining": 19,
+                "cap": 12,
+                "remaining": 7,
+                "waited": 2,
+                "wait_allowance": 8,
+                "spent": False,
+                "clock_live": True,
                 "interval_seconds": 10800,
                 "interval_human": "3 hours",
             },
@@ -162,6 +193,13 @@ def _issue_sample(kind: str, *, populated: bool) -> Dict[str, Any]:
         "code_reviews": [],
         "parent": None,
         "lineage": None,
+        "children": [],
+        "related": [],
+        "blocked_by": [],
+        "blocking": [],
+        "other_relations": [],
+        "open_blockers": [],
+        "has_open_blockers": False,
         "run": {
             "id": "00000000-0000-0000-0000-000000000003",
             "kind": kind,

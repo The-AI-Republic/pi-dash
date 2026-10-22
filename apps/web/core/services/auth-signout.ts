@@ -6,6 +6,8 @@
 
 // types
 import type { ICsrfTokenData } from "@pi-dash/types";
+import { isDesktop } from "@/services/agent-runtime";
+import { clearDesktopSessionData } from "@/services/desktop-session";
 
 /**
  * The minimal slice of ``AuthService`` the sign-out strategy needs. Declared
@@ -14,6 +16,36 @@ import type { ICsrfTokenData } from "@pi-dash/types";
  */
 export interface SignOutClient {
   requestCSRFToken(): Promise<ICsrfTokenData>;
+  post(url: string, data?: unknown): Promise<unknown>;
+}
+
+// Mirrors the Rust side's error string (desktop_http.rs).
+const REDIRECT_REFUSED = "API redirect is not allowed";
+
+/**
+ * Desktop sign-out. The window never navigates to the server host outside
+ * `/api/` (the app bounces such navigations back to the bundle), so the form
+ * POST below would never reach the server. Send the same request over the API
+ * transport instead, then clear the app's own cookie jar — the request needs
+ * the CSRF cookie, so the order matters — and land on the bundled sign-in page.
+ */
+async function performDesktopSignOut(client: SignOutClient, csrfToken: string): Promise<void> {
+  // The view answers a completed sign-out with a redirect to the hosted web
+  // app, which the native transport refuses to follow — that refusal is the
+  // success signal. Anything else (a network failure, or the CSRF failure
+  // page, which is served with a 200) means the session is still alive on the
+  // server, so stay signed in.
+  const signedOut = await client.post("/auth/sign-out/", new URLSearchParams({ csrfmiddlewaretoken: csrfToken })).then(
+    () => false,
+    (error) => {
+      if (error instanceof Error && error.message.includes(REDIRECT_REFUSED)) return true;
+      throw error;
+    }
+  );
+  if (!signedOut) throw new Error("Sign-out was not completed by the server");
+  await clearDesktopSessionData();
+  // Full navigation (not a router push) so every store starts from scratch.
+  window.location.replace("/");
 }
 
 /**
@@ -32,6 +64,8 @@ export async function performSignOut(client: SignOutClient, baseUrl: string): Pr
   const csrfToken = data?.csrf_token;
 
   if (!csrfToken) throw new Error("CSRF token not found");
+
+  if (isDesktop()) return performDesktopSignOut(client, csrfToken);
 
   const form = document.createElement("form");
   const input = document.createElement("input");

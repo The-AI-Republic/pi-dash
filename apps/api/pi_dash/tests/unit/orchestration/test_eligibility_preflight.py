@@ -411,7 +411,7 @@ def test_bounce_falls_back_gracefully_when_no_backlog_state(
     # ticker as if the issue were actively running.
     Issue.all_objects.filter(pk=bare_issue.pk).update(state=started)
     bare_issue.refresh_from_db()
-    IssueAgentTicker.objects.create(issue=bare_issue, enabled=True, tick_count=1)
+    IssueAgentTicker.objects.create(issue=bare_issue, enabled=True, used=1)
 
     _make_runner(user_b, workspace, pod)
 
@@ -585,7 +585,7 @@ def test_bounce_disarms_ticker(db, issue, pod, user_a, user_b, states):
     Issue.all_objects.filter(pk=issue.pk).update(state=states["in_progress"])
     issue.refresh_from_db()
     IssueAgentTicker.objects.create(
-        issue=issue, enabled=True, tick_count=3
+        issue=issue, enabled=True, used=3
     )
     _make_runner(user_b, issue.workspace, pod)
 

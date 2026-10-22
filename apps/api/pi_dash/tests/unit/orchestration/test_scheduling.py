@@ -14,6 +14,7 @@ from django.utils import timezone
 
 from pi_dash.db.models import Issue, Project, State
 from pi_dash.db.models.issue_agent_ticker import (
+    INFINITE_MAX_TICKS,
     IssueAgentTicker,
     TickerDisarmReason,
 )
@@ -117,20 +118,23 @@ def stub_drain(monkeypatch):
 def test_arm_ticker_creates_row_and_sets_next_run_at(seeded, issue, states):
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    assert sched.tick_count == 0
+    assert sched.used == 0
     assert sched.next_run_at is not None
     assert sched.next_run_at > timezone.now()
     assert sched.enabled is True
 
 
 @pytest.mark.unit
-def test_arm_ticker_is_idempotent_resets_tick_count(seeded, issue, states):
+def test_arm_ticker_is_idempotent_and_never_resets_used(seeded, issue, states):
+    """One clock per issue: re-arming re-times the clock but the pool
+    counter is for the life of the issue (design §5.2)."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    sched.tick_count = 5
-    sched.save(update_fields=["tick_count"])
+    sched.used = 5
+    sched.save(update_fields=["used"])
     again = scheduling.arm_ticker(issue)
-    assert again.tick_count == 0
+    assert again.used == 5
+    assert again.enabled is True
     assert again.pk == sched.pk  # one row per issue
 
 
@@ -194,14 +198,29 @@ def test_disarm_ticker_with_no_row_returns_none(seeded, issue):
 
 
 @pytest.mark.unit
-def test_reset_after_comment_and_run_resets_tick_count(seeded, issue, states):
+def test_comment_and_run_is_free_and_retimes_the_clock(seeded, issue, states):
+    """Human-started runs never touch the pool; the clock is re-timed only
+    while budget remains."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    sched.tick_count = 17
-    sched.save(update_fields=["tick_count"])
+    sched.used = 7
+    sched.save(update_fields=["used"])
     out = scheduling.reset_ticker_after_comment_and_run(issue)
-    assert out.tick_count == 0
+    assert out.used == 7
+    assert out.enabled is True
     assert out.next_run_at > timezone.now()
+
+
+@pytest.mark.unit
+def test_comment_and_run_on_spent_pool_leaves_clock_stopped(seeded, issue, states):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    sched.used = sched.effective_max_ticks()
+    sched.save(update_fields=["used"])
+    out = scheduling.reset_ticker_after_comment_and_run(issue)
+    assert out.used == sched.used
+    assert out.enabled is False
+    assert out.disarm_reason == TickerDisarmReason.POOL_SPENT
 
 
 # ---------------------------------------------------------------------------
@@ -405,96 +424,69 @@ def test_deferred_pause_still_applies_for_in_progress(
 
 
 @pytest.mark.unit
-def test_project_defaults_resolve_test_pair_for_in_test(
+def test_interval_follows_the_stage_but_the_pool_does_not(
     seeded, issue, project, create_user
 ):
-    """``_project_default_interval`` / ``_project_default_max_ticks`` return
-    the **test** defaults for an In Test issue — not review's, not impl's."""
+    """Each stage keeps its own interval; the cap is one pool per issue."""
     with impersonate(create_user):
         in_test = State.objects.create(
             name="In Test", project=project, group="test"
         )
+    project.agent_default_interval_seconds = 43200
+    project.agent_default_max_ticks = 10
+    project.agent_review_default_interval_seconds = 10800
+    project.agent_test_default_interval_seconds = 7200
+    project.save()
     Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
     issue.refresh_from_db()
-    # Distinguish all three pairs so the assertion is meaningful.
-    project.agent_default_interval_seconds = 43200
-    project.agent_default_max_ticks = 24
-    project.agent_review_default_interval_seconds = 10800
-    project.agent_review_default_max_ticks = 4
-    project.agent_test_default_interval_seconds = 7200
-    project.agent_test_default_max_ticks = 6
-    project.save()
-    assert scheduling._project_default_interval(issue) == 7200
-    assert scheduling._project_default_max_ticks(issue) == 6
+    sched = scheduling.arm_ticker(issue)
+    assert sched.disarm_reason == TickerDisarmReason.NONE
+    assert sched.effective_interval_seconds() == 7200
+    assert sched.effective_max_ticks() == 10
 
 
 @pytest.mark.unit
-def test_arm_ticker_on_in_test_uses_test_cadence(
+def test_re_tick_in_test_grants_to_the_shared_pool(
     seeded, issue, project, create_user
 ):
-    """``arm_ticker`` on an In Test issue seeds the test-phase cadence and
-    clears ``disarm_reason``."""
+    """A Re-tick while In Test adds to the one pool the issue has — there is
+    no per-stage column for a grant to land on (or leak from)."""
     with impersonate(create_user):
         in_test = State.objects.create(
             name="In Test", project=project, group="test"
         )
     Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
     issue.refresh_from_db()
-    project.agent_review_default_max_ticks = 4
-    project.agent_test_default_max_ticks = 6
-    project.save(
-        update_fields=[
-            "agent_review_default_max_ticks",
-            "agent_test_default_max_ticks",
-        ]
-    )
+    project.agent_default_max_ticks = 3
+    project.save(update_fields=["agent_default_max_ticks"])
+
     sched = scheduling.arm_ticker(issue)
-    assert sched.disarm_reason == TickerDisarmReason.NONE
+    sched.used = 3  # exhausted
+    sched.save(update_fields=["used"])
+
+    with mock.patch.object(scheduling, "dispatch_run_ai_run", return_value=mock.Mock(name="run")):
+        result = scheduling.re_tick_ticker(issue)
+    assert result["granted"] is True
+
+    sched.refresh_from_db()
+    # Re-tick grants one whole pool (= agent_default_max_ticks), not a fixed 3.
+    assert sched.granted == 3
     assert sched.effective_max_ticks() == 6
 
 
 @pytest.mark.unit
-def test_re_tick_in_test_grants_on_test_column_only(
-    seeded, issue, project, create_user
+@pytest.mark.parametrize(
+    "reason", [TickerDisarmReason.STOP_SIGNAL, TickerDisarmReason.TERMINAL_SIGNAL]
+)
+def test_deferred_pause_skips_when_disarmed_by_a_signal(
+    seeded, issue, states, runner_for_workspace, create_user, reason
 ):
-    """A cap grant made while In Test lands on ``test_max_ticks`` and leaves
-    ``review_max_ticks`` untouched.
-
-    This is the cross-phase leak the shared-pair design allowed: with both
-    phases writing ``review_max_ticks``, extending an exhausted In Test issue
-    silently inflated the budget In Review would get next.
-    """
-    with impersonate(create_user):
-        in_test = State.objects.create(
-            name="In Test", project=project, group="test"
-        )
-    Issue.all_objects.filter(pk=issue.pk).update(state=in_test)
-    issue.refresh_from_db()
-    project.agent_test_default_max_ticks = 3
-    project.save(update_fields=["agent_test_default_max_ticks"])
-
-    sched = scheduling.arm_ticker(issue)
-    sched.tick_count = 3  # exhausted
-    sched.save(update_fields=["tick_count"])
-
-    result = scheduling.re_tick_ticker(issue)
-    assert result["granted"] is True
-
-    sched.refresh_from_db()
-    assert sched.test_max_ticks == 6  # 3 (current cap) + 3 (grant)
-    assert sched.review_max_ticks is None
-    assert sched.max_ticks is None
-
-
-@pytest.mark.unit
-def test_deferred_pause_skips_when_disarm_reason_is_terminal_signal(
-    seeded, issue, states, runner_for_workspace, create_user
-):
-    """Terminal-signal disarm must NOT cascade into auto-Pause."""
+    """A stop-signal disarm (or a legacy terminal-signal row) must NOT
+    cascade into auto-Pause."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     sched.enabled = False
-    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.disarm_reason = reason
     sched.save(update_fields=["enabled", "disarm_reason"])
     run = AgentRun.objects.create(
         workspace=issue.workspace,
@@ -543,14 +535,16 @@ def test_deferred_pause_skips_when_other_active_run_exists(
 
 
 # ---------------------------------------------------------------------------
-# maybe_disarm_on_terminal_signal — new in PR A
+# maybe_disarm_on_terminal_signal — stops only on an explicit stop signal
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_completed(
+def test_disarm_only_on_stop_signal_not_on_completed(
     seeded, issue, states, runner_for_workspace, create_user
 ):
+    """A ``completed`` (legacy alias for ``done``) without ``stop_ticking``
+    is informational: the clock keeps ticking (PDASHOSS01-247)."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     assert sched.enabled is True
@@ -564,14 +558,36 @@ def test_disarm_on_terminal_signal_completed(
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
-    assert applied is True
+    assert applied is False
     sched.refresh_from_db()
-    assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.enabled is True
+    assert sched.disarm_reason == TickerDisarmReason.NONE
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_blocked(
+def test_disarm_on_stop_signal(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    run = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        done_payload={"status": "waiting_on_human", "stop_ticking": True},
+        prompt="x",
+    )
+    applied = scheduling.maybe_disarm_on_terminal_signal(run)
+    assert applied is True
+    sched.refresh_from_db()
+    assert sched.enabled is False
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
+
+
+@pytest.mark.unit
+def test_blocked_without_stop_signal_keeps_ticking(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     _to_in_progress(issue, states)
@@ -586,39 +602,60 @@ def test_disarm_on_terminal_signal_blocked(
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
-    assert applied is True
-    sched.refresh_from_db()
-    assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
-
-
-@pytest.mark.unit
-def test_disarm_on_terminal_signal_noop_does_not_disarm(
-    seeded, issue, states, runner_for_workspace, create_user
-):
-    """``noop`` persists as COMPLETED but must not trigger disarm —
-    the agent self-parking on an unchanged diff should keep ticking."""
-    _to_in_progress(issue, states)
-    sched = scheduling.arm_ticker(issue)
-    run = AgentRun.objects.create(
-        workspace=issue.workspace,
-        created_by=create_user,
-        pod=runner_for_workspace.pod,
-        work_item=issue,
-        status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "noop"},
-        prompt="x",
-    )
-    applied = scheduling.maybe_disarm_on_terminal_signal(run)
     assert applied is False
     sched.refresh_from_db()
     assert sched.enabled is True
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_paused_does_not_disarm(
+def test_legacy_noop_keeps_ticking_in_every_kind(
     seeded, issue, states, runner_for_workspace, create_user
 ):
+    """The legacy ``noop`` status means "nothing changed" — informational
+    in every stage now; a review that found nothing new keeps ticking and
+    the budget bounds the cost."""
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    impl = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        phase_kind="coding-task",
+        done_payload={"status": "noop"},
+        prompt="x",
+    )
+    assert scheduling.maybe_disarm_on_terminal_signal(impl) is False
+    sched.refresh_from_db()
+    assert sched.enabled is True
+
+    with impersonate(issue.created_by):
+        in_review = State.objects.create(name="In Review", project=issue.project, group="review")
+    Issue.all_objects.filter(pk=issue.pk).update(state=in_review)
+    issue.refresh_from_db()
+    review = AgentRun.objects.create(
+        workspace=issue.workspace,
+        created_by=create_user,
+        pod=runner_for_workspace.pod,
+        work_item=issue,
+        status=AgentRunStatus.COMPLETED,
+        phase_kind="review",
+        done_payload={"status": "noop"},
+        prompt="x",
+    )
+    assert scheduling.maybe_disarm_on_terminal_signal(review) is False
+    sched.refresh_from_db()
+    assert sched.enabled is True
+
+
+@pytest.mark.unit
+def test_paused_run_keeps_ticking_without_stop_signal(
+    seeded, issue, states, runner_for_workspace, create_user
+):
+    """A paused run asked the human something: ``waiting_on_human`` is
+    informational and the clock keeps ticking; a Comment & Run re-engages
+    sooner."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     run = AgentRun.objects.create(
@@ -637,7 +674,7 @@ def test_disarm_on_terminal_signal_paused_does_not_disarm(
 
 
 @pytest.mark.unit
-def test_disarm_on_terminal_signal_idempotent(
+def test_disarm_on_stop_signal_idempotent(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     """Running the hook twice in a row is safe; the second call is a
@@ -650,27 +687,27 @@ def test_disarm_on_terminal_signal_idempotent(
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "completed"},
+        done_payload={"status": "done", "stop_ticking": True},
         prompt="x",
     )
     assert scheduling.maybe_disarm_on_terminal_signal(run) is True
     sched = IssueAgentTicker.objects.get(issue=issue)
     assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
     # Second call is a no-op because the ticker is already disabled —
     # this is what protects the cap-hit auto-pause path.
     assert scheduling.maybe_disarm_on_terminal_signal(run) is False
     sched.refresh_from_db()
     assert sched.enabled is False
-    assert sched.disarm_reason == TickerDisarmReason.TERMINAL_SIGNAL
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
 
 
 @pytest.mark.unit
-def test_terminal_signal_preserves_cap_hit_reason(
+def test_stop_signal_preserves_cap_hit_reason(
     seeded, issue, states, runner_for_workspace, create_user
 ):
     """Critical race: cap-hit fires during a tick, the dispatched run
-    later emits ``completed``. The terminal-disarm hook must NOT
+    later yields with ``stop_ticking``. The disarm hook must NOT
     overwrite the CAP_HIT reason or the auto-pause path is skipped."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
@@ -683,7 +720,7 @@ def test_terminal_signal_preserves_cap_hit_reason(
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "completed"},
+        done_payload={"status": "done", "stop_ticking": True},
         prompt="x",
     )
     applied = scheduling.maybe_disarm_on_terminal_signal(run)
@@ -699,11 +736,11 @@ def test_terminal_signal_preserves_cap_hit_reason(
 
 
 @pytest.mark.unit
-def test_terminal_signal_then_deferred_pause_does_not_auto_pause(
+def test_stop_signal_then_deferred_pause_does_not_auto_pause(
     seeded, issue, states, runner_for_workspace, create_user
 ):
-    """The combined ordering used by the runner consumer (terminal
-    disarm before deferred pause) must NOT cascade into auto-Pause."""
+    """The combined ordering used by the runner consumer (signal disarm
+    before deferred pause) must NOT cascade into auto-Pause."""
     _to_in_progress(issue, states)
     scheduling.arm_ticker(issue)
     run = AgentRun.objects.create(
@@ -712,10 +749,12 @@ def test_terminal_signal_then_deferred_pause_does_not_auto_pause(
         pod=runner_for_workspace.pod,
         work_item=issue,
         status=AgentRunStatus.COMPLETED,
-        done_payload={"status": "completed"},
+        done_payload={"status": "done", "stop_ticking": True},
         prompt="x",
     )
     scheduling.maybe_disarm_on_terminal_signal(run)
+    sched = IssueAgentTicker.objects.get(issue=issue)
+    assert sched.disarm_reason == TickerDisarmReason.STOP_SIGNAL
     applied = scheduling.maybe_apply_deferred_pause(run)
     assert applied is False
     issue.refresh_from_db()
@@ -723,10 +762,13 @@ def test_terminal_signal_then_deferred_pause_does_not_auto_pause(
 
 
 @pytest.mark.unit
-def test_arm_ticker_clears_disarm_reason(seeded, issue, states):
+@pytest.mark.parametrize(
+    "reason", [TickerDisarmReason.STOP_SIGNAL, TickerDisarmReason.TERMINAL_SIGNAL]
+)
+def test_arm_ticker_clears_disarm_reason(seeded, issue, states, reason):
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.disarm_reason = reason
     sched.enabled = False
     sched.save(update_fields=["disarm_reason", "enabled"])
     sched = scheduling.arm_ticker(issue)
@@ -751,17 +793,67 @@ def test_disarm_ticker_persists_reason(seeded, issue, states):
 def _exhaust(sched, cap):
     """Drive a ticker to its cap so ``cap_reached()`` is true, mirroring the
     disarmed state ``fire_tick`` leaves behind on the final tick."""
-    sched.tick_count = cap
+    sched.used = cap
     sched.enabled = False
     sched.disarm_reason = TickerDisarmReason.CAP_HIT
-    sched.save(update_fields=["tick_count", "enabled", "disarm_reason"])
+    sched.save(update_fields=["used", "enabled", "disarm_reason"])
+
+
+@pytest.fixture
+def no_retick_dispatch(monkeypatch):
+    """Re-tick fires a run now; these tests only care about the budget, so
+    the dispatch is stubbed to succeed (a ``None`` would roll the grant back)."""
+    fake = mock.Mock(return_value=mock.Mock(name="run"))
+    monkeypatch.setattr(scheduling, "dispatch_run_ai_run", fake)
+    return fake
 
 
 @pytest.mark.unit
-def test_re_tick_grants_extra_budget_when_exhausted(seeded, issue, states):
+def test_re_tick_rolls_back_when_no_run_could_be_dispatched(seeded, issue, states, monkeypatch):
+    """A Re-tick that produced no run (no pod / preflight bounce) is not a
+    grant: the pool and the clock look exactly as before, and the API says
+    so instead of promising a run that is not coming."""
+    monkeypatch.setattr(scheduling, "dispatch_run_ai_run", mock.Mock(return_value=None))
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    cap = sched.effective_max_ticks()  # project default (24) for In Progress
+    _exhaust(sched, sched.effective_max_ticks())
+    result = scheduling.re_tick_ticker(issue)
+    assert result["granted"] is False
+    assert result["reason"] == "dispatch-failed"
+    sched.refresh_from_db()
+    assert sched.granted == 0
+    assert sched.enabled is False
+
+
+@pytest.mark.unit
+def test_re_tick_from_paused_moves_the_issue_back_and_fires(seeded, issue, states, create_user, monkeypatch):
+    """The cap-hit auto-pause parks the issue on Paused, outside the bucket;
+    Re-tick must still be honoured from there — grant, move back to In
+    Progress as a human move, fire."""
+    fake = mock.Mock(return_value=mock.Mock(name="run"))
+    monkeypatch.setattr(scheduling, "dispatch_run_ai_run", fake)
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    _exhaust(sched, sched.effective_max_ticks())
+    Issue.all_objects.filter(pk=issue.pk).update(state=states["paused"])
+    issue.refresh_from_db()
+
+    result = scheduling.re_tick_ticker(issue, actor=create_user)
+    assert result["granted"] is True
+    issue.refresh_from_db()
+    assert issue.state == states["in_progress"]
+    sched.refresh_from_db()
+    assert sched.granted == issue.project.agent_default_max_ticks
+    assert sched.enabled is True
+    assert sched.cap_reached() is False
+    fake.assert_called_once()
+
+
+@pytest.mark.unit
+def test_re_tick_grants_extra_budget_when_exhausted(seeded, issue, states, no_retick_dispatch):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    cap = sched.effective_max_ticks()  # project pool (10)
     _exhaust(sched, cap)
 
     result = scheduling.re_tick_ticker(issue)
@@ -769,22 +861,83 @@ def test_re_tick_grants_extra_budget_when_exhausted(seeded, issue, states):
     assert result["granted"] is True
     assert result["reason"] == "granted"
     ticker = result["ticker"]
-    # Cap grows by one fresh phase budget; tick_count is NOT reset.
-    assert ticker.effective_max_ticks() == cap * 2
-    assert ticker.tick_count == cap
+    # Cap grows by one whole pool (= agent_default_max_ticks); ``used`` is NOT
+    # reset. Pool 10, used 10 → cap 20.
+    grant = issue.project.agent_default_max_ticks
+    assert ticker.effective_max_ticks() == cap + grant
+    assert ticker.effective_max_ticks() == 20
+    assert ticker.used == cap
     assert ticker.cap_reached() is False
-    # Re-armed: enabled, clock restarted, disarm cause cleared.
+    # Re-armed: enabled, clock restarted, disarm cause cleared — and a run
+    # was requested right away.
     assert ticker.enabled is True
     assert ticker.disarm_reason == TickerDisarmReason.NONE
     assert ticker.next_run_at > timezone.now()
+    no_retick_dispatch.assert_called_once()
 
 
 @pytest.mark.unit
-def test_re_tick_noop_when_budget_not_exhausted(seeded, issue, states):
+def test_second_re_tick_adds_another_full_pool(seeded, issue, states, no_retick_dispatch):
+    """Each press grants a fresh pool: 10 → 20 → 30 for a 10-pool project."""
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
-    sched.tick_count = 1  # well under the cap
-    sched.save(update_fields=["tick_count"])
+    pool = sched.pool_size()  # 10
+    _exhaust(sched, pool)
+
+    first = scheduling.re_tick_ticker(issue)["ticker"]
+    assert first.granted == pool
+    assert first.effective_max_ticks() == 2 * pool  # 20
+
+    # Spend the second pool and press again.
+    _exhaust(sched, 2 * pool)
+    second = scheduling.re_tick_ticker(issue)["ticker"]
+    assert second.granted == 2 * pool
+    assert second.effective_max_ticks() == 3 * pool  # 30
+    assert second.used == 2 * pool
+    assert second.cap_reached() is False
+
+
+@pytest.mark.unit
+def test_re_tick_grant_scales_with_a_larger_pool(seeded, issue, states, project, no_retick_dispatch):
+    """A 20-pool project grants 20 per Re-tick, not a fixed 3."""
+    project.agent_default_max_ticks = 20
+    project.save(update_fields=["agent_default_max_ticks"])
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    _exhaust(sched, 20)
+
+    ticker = scheduling.re_tick_ticker(issue)["ticker"]
+    assert ticker.granted == 20
+    assert ticker.effective_max_ticks() == 40
+
+
+@pytest.mark.unit
+def test_re_tick_leaves_granted_untouched_on_infinite_pool(seeded, issue, states, project, no_retick_dispatch):
+    """An infinite pool (-1) never reaches its cap, so Re-tick is a no-op with
+    reason ``budget_not_exhausted`` and the sentinel never leaks into
+    ``granted``."""
+    project.agent_default_max_ticks = INFINITE_MAX_TICKS
+    project.save(update_fields=["agent_default_max_ticks"])
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    sched.used = 999  # would be "spent" on any finite pool
+    sched.save(update_fields=["used"])
+
+    result = scheduling.re_tick_ticker(issue)
+
+    assert result["granted"] is False
+    assert result["reason"] == "budget_not_exhausted"
+    sched.refresh_from_db()
+    assert sched.granted == 0
+    no_retick_dispatch.assert_not_called()
+
+
+@pytest.mark.unit
+def test_re_tick_noop_when_budget_not_exhausted(seeded, issue, states, no_retick_dispatch):
+    _to_in_progress(issue, states)
+    sched = scheduling.arm_ticker(issue)
+    sched.used = 1  # well under the cap
+    sched.save(update_fields=["used"])
     before = sched.effective_max_ticks()
 
     result = scheduling.re_tick_ticker(issue)
@@ -793,11 +946,12 @@ def test_re_tick_noop_when_budget_not_exhausted(seeded, issue, states):
     assert result["reason"] == "budget_not_exhausted"
     sched.refresh_from_db()
     assert sched.effective_max_ticks() == before  # unchanged
-    assert sched.tick_count == 1
+    assert sched.used == 1
+    no_retick_dispatch.assert_not_called()
 
 
 @pytest.mark.unit
-def test_re_tick_noop_when_not_ticking_state(seeded, issue, states):
+def test_re_tick_noop_when_not_ticking_state(seeded, issue, states, no_retick_dispatch):
     # Issue stays in Todo (not a ticking state) but has an exhausted ticker.
     sched = scheduling.arm_ticker(issue)
     _exhaust(sched, sched.effective_max_ticks())
@@ -813,7 +967,7 @@ def test_re_tick_noop_when_not_ticking_state(seeded, issue, states):
 
 
 @pytest.mark.unit
-def test_re_tick_noop_when_no_ticker(seeded, issue, states):
+def test_re_tick_noop_when_no_ticker(seeded, issue, states, no_retick_dispatch):
     _to_in_progress(issue, states)
     result = scheduling.re_tick_ticker(issue)
     assert result["granted"] is False
@@ -822,7 +976,7 @@ def test_re_tick_noop_when_no_ticker(seeded, issue, states):
 
 
 @pytest.mark.unit
-def test_re_tick_respects_user_disabled(seeded, issue, states):
+def test_re_tick_respects_user_disabled(seeded, issue, states, no_retick_dispatch):
     _to_in_progress(issue, states)
     sched = scheduling.arm_ticker(issue)
     cap = sched.effective_max_ticks()
@@ -835,5 +989,5 @@ def test_re_tick_respects_user_disabled(seeded, issue, states):
     # Budget is still granted, but ticking stays disabled per user's choice.
     assert result["granted"] is True
     ticker = result["ticker"]
-    assert ticker.effective_max_ticks() == cap * 2
+    assert ticker.effective_max_ticks() == cap + issue.project.agent_default_max_ticks
     assert ticker.enabled is False

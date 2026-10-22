@@ -47,22 +47,43 @@ All cycles share this shape:
 6. Post a summary back to the pidash issue as a comment: confirmed issues
    found, what you fixed automatically, what still needs human action.
 
-## Step 3 — Emit a done-signal
+## Step 3 — Decide where the task goes next
 
-The review pass concludes by matching the outcome (see "Available states"
-and "Ending the run"):
+The review pass concludes with the next-state decision from "Task
+lifecycle" (match the target `group` first in "Available states", then the
+name), then the outcome report from "Ending the run". The outcome
+describes this run — `done` means "this run's turn is done" — and only an
+explicit `--stop-ticking` stops the issue's clock:
 
-- **approved** — review satisfied. Post your summary comment and **leave
-  the issue In Review**. Do **not** move it to a `completed`/Done state:
-  the runner never promotes an issue to Done — a human closes it once
-  they've seen the review, or a separate supporting process does. (Review
-  ticking is bounded; once it's exhausted the issue simply stays In Review.
-  If a later tick finds nothing has changed, emit a **noop** and exit
-  without moving state.)
-- **changes needed** — real issues found that you could not auto-fix and
-  that need human attention. Follow "Blocking the run" (post the summary
-  comment, move to "Blocked" if the project has that state).
-- **clarification** — a clarifying question for the human. Follow
-  "Blocking the run".
-- **noop** — nothing has changed since your last review pass. Post a short
-  noop comment and exit without moving state.
+- **approved** — no unresolved findings. Post your summary comment and
+  move the issue to **In Test** (the `test` group) so the change gets
+  exercised from the user's side. Yield `done` — your turn is done and
+  the issue moved on.
+- **approved, no `test` state** — the project has no `test`-group state
+  to move on to. Leave the issue In Review (never move it to
+  `completed`/Done — a human closes it) and yield `done --stop-ticking`:
+  the review stage is satisfied, so no further review run has anything
+  to add until a human acts.
+- **changes needed** — real defects you could not auto-fix. List them as
+  open items in the workpad `### Path to done` block, post the summary
+  comment, and move the issue **back to In Progress** (the `started`
+  group) so the next run fixes them. Do not use Blocked for a bug. Yield
+  `done`.
+- **clarification** — a question only a human can answer. Follow
+  "Blocking the run". Yield `waiting_on_human --stop-ticking`.
+- **waiting on CI or the PR** — checks are still running, a merge or an
+  update to the PR is pending, or nothing has changed since your last
+  pass while that remains true. Leave the issue In Review and yield
+  `waiting_on_external` — **keep the clock ticking** so a later run
+  re-checks; no human is needed for this wait. Comment only if you have
+  something a human actually needs to see (a finding, a question, a
+  result); do **not** post a bare "review tick (N/M) — noop, nothing
+  changed" comment — silence is the correct signal for "nothing
+  changed," and such comments only bury the ones that matter.
+- **waiting on a human reviewer** — the PR waits on a person (a
+  requested review, a human decision on your findings), or nothing has
+  changed since your last pass and that person is the only way forward.
+  Leave the issue In Review and yield `waiting_on_human --stop-ticking`
+  — no further review run can do anything useful until they act; their
+  reply, a state move, Run AI or Re-tick re-arms the clock. Same
+  comment discipline: silence unless a human needs something from you.

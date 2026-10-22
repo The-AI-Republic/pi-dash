@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -9,7 +8,7 @@ use uuid::Uuid;
 
 use crate::approval::ApprovalRouter;
 use crate::cloud::protocol::RunnerStatus;
-use crate::config::schema::Config;
+use crate::config::schema::{AgentWatchdogConfig, Config};
 use crate::daemon::observability::TokenUsage;
 use crate::ipc::protocol::{CurrentRunSummary, RunnerStatusSnapshot};
 
@@ -24,64 +23,12 @@ impl Drop for AutoSwapGuard {
     }
 }
 
-/// Volatile observability fields that ride on `PollStatus`.
-///
-/// **Ownership (B2):** this snapshot is written **only by the assign (issue)
-/// lane** — `set_agent_pid`, `set_tokens`, `set_model`, `incr_turn`,
-/// `note_agent_event`, `note_exec_command*`. The chat lane MUST NOT write any of
-/// these (it has no per-lane slot here); per-lane chat observability is deferred
-/// (design `make_chat_issue_parallel_working` §3.3 B2 / Phase 3). With the two
-/// lanes running concurrently, a single shared snapshot would otherwise
-/// last-write-wins between two agents.
-///
-/// Doubles as
-/// the in-memory storage shape (held under one `Mutex` inside `Inner`)
-/// AND the wire-snapshot returned by `StateHandle::observability_snapshot()`.
-/// Keeping them in one struct means `reset_run_snapshot()` is a single
-/// `Default::default()` assignment and a new field added here is automatically
-/// included in reset, snapshot read, and rid-change wipe — no enumeration to
-/// keep in sync.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObservabilitySnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_event_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_event_kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_event_summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_pid: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_subprocess_alive: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<TokenUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_count: Option<u32>,
-    /// Last shell command tool the agent kicked off (for failure-detail
-    /// enrichment), including whether a matching completion/result event was
-    /// later observed. Reset on rid change like the other per-run scalars;
-    /// never serialised onto the wire — only consumed locally to enrich
-    /// `RunFailed.detail` when the watchdog or stdout-close path fires.
-    #[serde(skip)]
-    pub last_exec_command: Option<ExecCommandSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecCommandSnapshot {
-    pub command: String,
-    pub cwd: Option<String>,
-    pub tool_call_id: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    /// `Some(true)` when the matching completion event reported a clean
-    /// terminal status, `Some(false)` for a non-success terminal (codex
-    /// `failed` status, Claude `is_error: true`). `None` when no
-    /// completion has been observed yet or the protocol frame didn't
-    /// surface an outcome.
-    pub completed_success: Option<bool>,
-}
+// `ObservabilitySnapshot` and `ExecCommandSnapshot` moved to the shared
+// `pidash-ipc` crate (PDASHOSS01-158) because `ObservabilitySnapshot` is a
+// wire type the IPC `Response` reaches into. They are re-exported here so
+// every `daemon::state::{ObservabilitySnapshot, ExecCommandSnapshot}` call
+// site is unchanged.
+pub use pidash_ipc::dto::{ExecCommandSnapshot, ObservabilitySnapshot};
 
 #[derive(Clone)]
 pub struct StateHandle {
@@ -110,6 +57,8 @@ struct Inner {
     /// at runtime in v1, so reading from `Inner` saves a `Mutex<Config>` lock
     /// on every poll.
     agent_observability_v1: bool,
+    /// Cached at construction, like `agent_observability_v1`.
+    agent_watchdog: AgentWatchdogConfig,
     cloud_url: Mutex<String>,
     started_at: DateTime<Utc>,
     connected: Mutex<bool>,
@@ -168,6 +117,33 @@ struct Inner {
     /// Collectively wiped on rid change in `set_current_run` so a freshly
     /// assigned run never inherits stale metrics.
     run_snapshot: Mutex<ObservabilitySnapshot>,
+    /// Activity-watchdog health of the in-flight run, reported on every poll
+    /// regardless of `agent_observability_v1` (it is lifecycle, not optional
+    /// telemetry). Wiped with `run_snapshot` on run-id change.
+    agent_health: Mutex<AgentHealthReport>,
+}
+
+/// Activity-watchdog health of the in-flight run, as the supervisor last
+/// stamped it. See `AgentWatchdogConfig` for the thresholds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentHealthReport {
+    /// When the agent last emitted an event. `None` until the run's
+    /// watchdog arms.
+    pub last_activity_at: Option<DateTime<Utc>>,
+    /// True once the run has gone `unhealthy_after_hours` without an agent
+    /// event; cleared by the next event.
+    pub unhealthy: bool,
+}
+
+impl AgentHealthReport {
+    /// Wire value for the poll status: `"unhealthy"` or `"healthy"`.
+    pub fn wire_label(&self) -> &'static str {
+        if self.unhealthy {
+            "unhealthy"
+        } else {
+            "healthy"
+        }
+    }
 }
 
 impl StateHandle {
@@ -182,6 +158,7 @@ impl StateHandle {
         };
         let cloud_url = cfg.daemon.cloud_url.clone();
         let agent_observability_v1 = cfg.daemon.agent_observability_v1;
+        let agent_watchdog = cfg.daemon.agent_watchdog;
         Self {
             inner: Arc::new(Inner {
                 cfg: Mutex::new(cfg),
@@ -189,6 +166,7 @@ impl StateHandle {
                 project_slug,
                 pod_id,
                 agent_observability_v1,
+                agent_watchdog,
                 cloud_url: Mutex::new(cloud_url),
                 started_at: Utc::now(),
                 connected: Mutex::new(false),
@@ -203,6 +181,7 @@ impl StateHandle {
                 update_advisory: Mutex::new((None, None)),
                 on_disk_version: Mutex::new(None),
                 run_snapshot: Mutex::new(ObservabilitySnapshot::default()),
+                agent_health: Mutex::new(AgentHealthReport::default()),
             }),
             tx_tick,
             rx_tick,
@@ -225,6 +204,21 @@ impl StateHandle {
     /// snapshot on its `PollStatus`. Cached at construction.
     pub fn agent_observability_v1(&self) -> bool {
         self.inner.agent_observability_v1
+    }
+
+    /// Passive-kill watchdog thresholds. Cached at construction.
+    pub fn agent_watchdog(&self) -> AgentWatchdogConfig {
+        self.inner.agent_watchdog
+    }
+
+    /// Stamp the in-flight run's activity-watchdog health.
+    pub async fn set_agent_health(&self, report: AgentHealthReport) {
+        *self.inner.agent_health.lock().await = report;
+        self.tick();
+    }
+
+    pub async fn agent_health(&self) -> AgentHealthReport {
+        self.inner.agent_health.lock().await.clone()
     }
 
     pub fn force_reconnect(&self) {
@@ -352,6 +346,7 @@ impl StateHandle {
     /// to call directly from tests.
     pub async fn reset_run_snapshot(&self) {
         *self.inner.run_snapshot.lock().await = ObservabilitySnapshot::default();
+        *self.inner.agent_health.lock().await = AgentHealthReport::default();
         self.tick();
     }
 
@@ -727,6 +722,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_id_change_resets_agent_health() {
+        let state = empty_state();
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        state
+            .set_agent_health(AgentHealthReport {
+                last_activity_at: Some(Utc::now()),
+                unhealthy: true,
+            })
+            .await;
+        assert_eq!(state.agent_health().await.wire_label(), "unhealthy");
+
+        // A new run must never inherit the previous run's unhealthy mark.
+        state
+            .set_current_run(Some(summary(Uuid::new_v4(), "running")))
+            .await;
+        assert_eq!(state.agent_health().await, AgentHealthReport::default());
+        assert_eq!(state.agent_health().await.wire_label(), "healthy");
+    }
+
+    #[tokio::test]
+    async fn agent_watchdog_is_cached_from_the_daemon_config() {
+        let mut daemon: crate::config::schema::DaemonConfig = Default::default();
+        daemon.agent_watchdog.kill_after_hours = 72;
+        let state = StateHandle::new(Config {
+            version: 2,
+            daemon,
+            runners: vec![],
+            cli: None,
+        });
+        assert_eq!(state.agent_watchdog().kill_after_hours, 72);
+        assert_eq!(state.agent_watchdog().unhealthy_after_hours, 24);
+    }
+
+    #[tokio::test]
     async fn run_id_change_resets_observability_snapshot() {
         let state = empty_state();
         let rid_a = Uuid::new_v4();
@@ -740,6 +771,7 @@ mod tests {
                 input: 1,
                 output: 2,
                 total: 3,
+                ..Default::default()
             })
             .await;
         state.incr_turn().await;

@@ -420,9 +420,7 @@ def test_finalize_falls_back_to_matching_live_state_usage(
     RunnerLiveState.objects.create(
         runner=runner,
         observed_run_id=run.id,
-        input_tokens=10,
-        output_tokens=20,
-        total_tokens=30,
+        usage={"input": 10, "output": 20, "total": 30},
         llm_model="claude-sonnet-4-6",
     )
 

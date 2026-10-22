@@ -15,6 +15,7 @@ READ_TOOLS = (
     "pidash_search_project_issues",
     "pidash_get_project_issue",
     "pidash_list_linked_code_reviews",
+    "pidash_list_issue_relations",
     "github_get_file",
     "github_get_linked_pull_request",
 )
@@ -23,6 +24,21 @@ WRITE_TOOLS = (
     "pidash_update_current_issue_workpad",
     "pidash_transition_current_issue",
     "pidash_create_project_issue",
+    "pidash_relate_issues",
+    "pidash_unrelate_issues",
+)
+#: Writes that are idempotent by construction (relating an already-related
+#: pair is a no-op), so a run may call them more than once — a split needs one
+#: ``blocked_by`` call per dependent child. Still bounded by the per-run write
+#: limit. Every other write tool is single-use per run.
+REPEATABLE_WRITE_TOOLS = frozenset({"pidash_relate_issues", "pidash_unrelate_issues"})
+#: Writes aimed at the run's bound issue; meaningless without one.
+CURRENT_ISSUE_WRITE_TOOLS = frozenset(
+    {
+        "pidash_add_current_issue_comment",
+        "pidash_update_current_issue_workpad",
+        "pidash_transition_current_issue",
+    }
 )
 
 
@@ -109,7 +125,7 @@ def build_tool_plan(
         if run_kind != "scheduler":
             tools.discard("pidash_create_project_issue")
         if not has_issue:
-            tools -= set(WRITE_TOOLS) - {"pidash_create_project_issue"}
+            tools -= CURRENT_ISSUE_WRITE_TOOLS
     tools -= disabled
     requested = set(required_capabilities)
     unavailable = sorted(requested - tools)

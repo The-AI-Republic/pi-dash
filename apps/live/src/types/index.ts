@@ -9,6 +9,10 @@ import type { fetchPayload, onLoadDocumentPayload, storePayload } from "@hocuspo
 export type TConvertDocumentRequestBody = {
   description_html: string;
   variant: "rich" | "document";
+  /** Optional base64-encoded Yjs state to apply the new content onto (preserves Yjs lineage). */
+  description_binary?: string | null;
+  /** Optional title to write into the doc's `title` fragment. */
+  title?: string | null;
 };
 
 export interface OnLoadDocumentPayloadWithContext extends onLoadDocumentPayload {

@@ -434,6 +434,56 @@ pub async fn diagnose_recent_exit() -> Option<String> {
     Some(describe_exit_status(status, raw_status))
 }
 
+/// macOS half of [`crate::service::Service::recent_exit_is_retryable`].
+/// Returns true only when the daemon is currently NOT running and its last
+/// launchd `LastExitStatus` is a retryable SIGKILL (see
+/// [`exit_status_is_retryable`]).
+///
+/// Mirrors the guard structure of [`diagnose_recent_exit`]: a running daemon
+/// (PID > 0) means the current start already succeeded, and an unloaded label
+/// has no exit to classify — neither is "a startup a retry would fix."
+///
+/// Called from `restart_and_verify` when the IPC wait times out, so the
+/// intermittent macOS AMFI SIGKILL-on-first-exec race (PDASHOSS01-164)
+/// recovers transparently instead of erroring out and making the operator
+/// re-run `pidash restart` by hand.
+pub async fn recent_exit_is_retryable() -> bool {
+    let out = match Command::new("launchctl")
+        .args(["list", LABEL])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false, // label not loaded / launchctl failed — nothing to retry
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A daemon that's currently up isn't a failed startup.
+    if matches!(parse_loaded_pid(&stdout), Some(p) if p > 0) {
+        return false;
+    }
+    match parse_last_exit_status(&stdout) {
+        Some(raw) => exit_status_is_retryable(raw),
+        None => false,
+    }
+}
+
+/// Decide whether a launchd `LastExitStatus` is the kind a bounded restart
+/// retry is likely to clear. True only for SIGKILL (signal 9): on macOS a
+/// SIGKILL moments after a launchd exec of a freshly-swapped binary is the
+/// AMFI code-signing race (PDASHOSS01-164) — the first launchd-spawned exec
+/// is rejected while the signature/provenance record is still being cached,
+/// but the very next exec of the same binary succeeds.
+///
+/// Deliberately narrow: a non-zero `exit()` (config / credential error) or a
+/// SIGABRT panic is a real fault a retry would only paper over, so those are
+/// NOT retryable and keep failing fast with their existing diagnosis.
+fn exit_status_is_retryable(raw_status: i32) -> bool {
+    matches!(
+        decode_launchd_exit_status(raw_status),
+        LaunchdExitStatus::Signaled { signal: 9, .. }
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchdExitStatus {
     Exited(i32),
@@ -879,6 +929,23 @@ mod tests {
                 core_dumped: true
             }
         );
+    }
+
+    #[test]
+    fn exit_status_is_retryable_only_for_sigkill() {
+        // SIGKILL (raw 9) is the AMFI race we auto-retry (PDASHOSS01-164).
+        assert!(exit_status_is_retryable(9));
+        // SIGKILL with the core-dump bit set is still SIGKILL.
+        assert!(exit_status_is_retryable(9 | 0x80));
+        // Legacy negative-signal form some launchctl versions print.
+        assert!(exit_status_is_retryable(-9));
+        // Everything else is a real fault a retry would only mask:
+        assert!(!exit_status_is_retryable(0)); // clean exit
+        assert!(!exit_status_is_retryable(256)); // exit(1)
+        assert!(!exit_status_is_retryable(19968)); // exit(78) config error
+        assert!(!exit_status_is_retryable(6)); // SIGABRT panic
+        assert!(!exit_status_is_retryable(11)); // SIGSEGV
+        assert!(!exit_status_is_retryable(15)); // SIGTERM
     }
 
     #[test]
