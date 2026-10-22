@@ -33,6 +33,7 @@ describe("link dialog", () => {
   it("keeps an existing http(s) scheme", async () => {
     const user = userEvent.setup();
     const { onSubmit } = renderDialog();
+    expect(screen.getByLabelText("URL")).toHaveFocus();
     await user.type(screen.getByLabelText("URL"), "https://example.com/page");
     await user.click(screen.getByRole("button", { name: "Add link" }));
     expect(onSubmit).toHaveBeenCalledWith({ url: "https://example.com/page", title: "" });
