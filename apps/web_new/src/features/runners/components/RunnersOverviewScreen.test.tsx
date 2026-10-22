@@ -18,6 +18,8 @@ vi.mock("../../../core/platform/index.js", () => ({
 }));
 
 vi.mock("../useOverview.js", () => ({ useRunnersOverview: (slug: string) => useRunnersOverview(slug) }));
+// The header action is the add-runner dialog; it has its own suite.
+vi.mock("../addRunner/AddRunnerEntry.js", () => ({ AddRunnerEntry: () => null }));
 vi.mock("../area.js", () => ({
   useRunnersArea: () => ({
     scope: { workspaceSlug: "acme" },

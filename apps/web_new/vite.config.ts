@@ -20,6 +20,9 @@ const apiOrigin = process.env.PIDASH_API_ORIGIN ?? "http://localhost:8000";
 // VITE_WEB_BASE_URL; PIDASH_WEB_BASE_URL is accepted too. Builds without
 // either leave the define null so links refuse rather than guess an origin.
 const webBaseUrl = hostedBaseUrlFromEnv(process.env);
+// API origin baked into the client. Empty (the default) keeps calls on the
+// serving origin and makes the add-runner command fall back to it too.
+const apiBaseUrl = process.env.VITE_API_BASE_URL ?? "";
 
 // Static SPA only (D9). One bundle per target; the desktop bundle is loaded
 // by the Tauri shell. No file swapping: platform differences live behind
@@ -57,6 +60,7 @@ export default defineConfig(({ mode }) => {
     define: {
       __PIDASH_TARGET__: JSON.stringify(buildTarget),
       __PIDASH_WEB_BASE_URL__: JSON.stringify(webBaseUrl),
+      __PIDASH_API_BASE_URL__: JSON.stringify(apiBaseUrl),
     },
     outDir: `dist/${buildTarget}`,
     resolve: {

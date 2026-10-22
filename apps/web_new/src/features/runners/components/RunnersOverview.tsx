@@ -66,6 +66,8 @@ export interface RunnersOverviewProps {
   podsFailed: boolean;
   onDelete: (runnerId: string) => Promise<void>;
   onRevoke: (runnerId: string) => Promise<void>;
+  /** Header action slot (the add-runner entry mounts here). */
+  action?: React.ReactNode;
 }
 
 /** The confirmation waiting for an answer; the runner row is its target. */
@@ -81,6 +83,7 @@ export function RunnersOverview({
   podsFailed,
   onDelete,
   onRevoke,
+  action,
 }: RunnersOverviewProps): React.ReactElement {
   const navigate = useNavigate();
   const runners = filter.runners;
@@ -117,7 +120,10 @@ export function RunnersOverview({
       data-testid="runners-overview"
       className="flex flex-col gap-(--space-6) p-(--space-6)"
     >
-      <h1 className="text-h2 text-(--text)">Runners</h1>
+      <div className="flex items-center justify-between gap-(--space-3)">
+        <h1 className="text-h2 text-(--text)">Runners</h1>
+        {action}
+      </div>
       <RunnersPods
         pods={pods}
         loading={podsLoading}

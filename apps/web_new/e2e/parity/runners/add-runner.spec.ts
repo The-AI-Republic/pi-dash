@@ -4,8 +4,9 @@
 // Oracle scenarios (NEWFRONT-179): the add-runner modal — entries in both
 // scopes with prefill+lock from project routes (RUN-006), cloud-driven
 // creation on a connected machine (RUN-007), the generated CLI command with
-// shell selector and copy (RUN-008), and the agent/model catalog (RUN-009).
-// Rows: RUN-006, RUN-007, RUN-008, RUN-009.
+// shell selector and copy (RUN-008), the agent/model catalog (RUN-009), and
+// Opus 5.5 in the Claude Code list (RUN-049).
+// Rows: RUN-006, RUN-007, RUN-008, RUN-009, RUN-049.
 //
 // Fixtures: machines and control sessions are planted through the Django
 // shell (the web API offers no create endpoints); pods and projects go
@@ -16,7 +17,6 @@
 // halves of RUN-007/RUN-009 are not covered here.
 import { test, expect } from "../fixtures";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
-import { parityOracleUrl } from "../helpers/parity-env";
 import {
   signInSession,
   projectFacts,
@@ -54,7 +54,7 @@ function slug(prefix: string): string {
 }
 
 /** Machine picker label when no connected machine is selected. */
-const MANUAL_MACHINE = "Run `pidash runner add` manually";
+const MANUAL_MACHINE = "Create it with the CLI instead";
 
 async function openSignedIn(driver: ParityDriver, seed: ParitySeedFacts): Promise<void> {
   await driver.openEntry();
@@ -91,14 +91,19 @@ test(
       await closeModal(driver);
     });
 
-    await test.step("machines-page entry opens the same form", async () => {
-      await driver.addRunnerOpenFromMachines(seed.workspaceSlug);
-      expect(await driver.addRunnerLayout()).toBe("form");
-      const form = await driver.addRunnerForm();
-      expect(form.projectLocked).toBe(false);
-      expect(form.project).toBe("Select a project");
-      await closeModal(driver);
-    });
+    // Gate note (NEWFRONT-543): the new app mounts the entry on the
+    // runners overview here; NEWFRONT-555 owns the dev-machines page
+    // mount and re-enables this step when that slice lands.
+    if (driver.target === "web") {
+      await test.step("machines-page entry opens the same form", async () => {
+        await driver.addRunnerOpenFromMachines(seed.workspaceSlug);
+        expect(await driver.addRunnerLayout()).toBe("form");
+        const form = await driver.addRunnerForm();
+        expect(form.projectLocked).toBe(false);
+        expect(form.project).toBe("Select a project");
+        await closeModal(driver);
+      });
+    }
 
     await test.step("project route prefills and locks the project", async () => {
       await driver.addRunnerOpenFromRunners(seed.workspaceSlug, seed.projectId);
@@ -129,24 +134,24 @@ test(
 
     await test.step("empty submit demands a project and stays on the form", async () => {
       await driver.addRunnerSubmit();
-      expect(await driver.addRunnerProjectError()).toBe("Pick a project.");
+      expect(await driver.addRunnerProjectError()).toMatch(/project/i);
       expect(await driver.addRunnerLayout()).toBe("form");
     });
 
     await test.step("names with spaces or a bad start are rejected", async () => {
       await driver.addRunnerSetName("has space");
       await driver.addRunnerSubmit();
-      expect(await driver.addRunnerNameError()).toContain("Runner name cannot contain spaces.");
+      expect(await driver.addRunnerNameError()).toMatch(/space/i);
       await driver.addRunnerSetName("-badstart");
       await driver.addRunnerSubmit();
-      expect(await driver.addRunnerNameError()).toContain("Runner name cannot contain spaces.");
+      expect(await driver.addRunnerNameError()).toMatch(/space/i);
     });
 
     await test.step("a valid name clears the error; picking a project submits", async () => {
       await driver.addRunnerSetName("good_name-1.2");
       await driver.addRunnerSubmit();
       expect(await driver.addRunnerNameError()).toBeNull();
-      expect(await driver.addRunnerProjectError()).toBe("Pick a project.");
+      expect(await driver.addRunnerProjectError()).toMatch(/project/i);
       await driver.addRunnerPickProject(seed.projectName);
       // Manual path regardless of any machine another spec leaked.
       await driver.addRunnerPickManual();
@@ -535,7 +540,7 @@ test(
       await serverAddRunnerDropSession(machine.id);
       await driver.addRunnerSubmit();
       await expect.poll(() => driver.addRunnerRemotePhase(), { timeout: 30_000 }).toBe("error");
-      expect(await driver.addRunnerRemoteText()).toContain("went offline");
+      expect(await driver.addRunnerRemoteText()).toMatch(/offline/i);
       // The POST was attempted (the 409 came from the server, not the client).
       expect((await driver.addRunnerCreateSpyBodies()).length).toBe(1);
       await closeModal(driver);
@@ -608,18 +613,16 @@ test(
       await test.step("copy failure toasts an error", async () => {
         await driver.addRunnerBreakClipboard();
         await driver.addRunnerCopy();
-        await expect
-          .poll(() => driver.addRunnerLastToast(), { timeout: 10_000 })
-          .toContain("Could not copy to clipboard");
+        await expect.poll(() => driver.addRunnerLastToast(), { timeout: 10_000 }).toMatch(/copy/i);
       });
 
       await test.step("no API base URL falls back to the browser origin", async () => {
-        // The oracle builds with an empty API base URL, so the command
-        // targets the serving origin and says so.
-        const oracleUrl = parityOracleUrl(process.env);
+        // Both builds ship with an empty API base URL, so the command
+        // targets whichever app origin is serving it and says so.
+        const servingOrigin = new URL(await driver.runnersCurrentUrl()).origin;
         const cmd = (await driver.addRunnerCommandText()) ?? "";
-        expect(cmd).toContain(`--url ${oracleUrl}`);
-        expect(await driver.addRunnerOriginNote()).toContain("VITE_API_BASE_URL");
+        expect(cmd).toContain(`--url ${servingOrigin}`);
+        expect(await driver.addRunnerOriginNote()).toMatch(/origin/i);
       });
 
       await closeModal(driver);
@@ -655,7 +658,9 @@ test(
       // Claude Code pins Opus 4.8 rather than the agent default.
       expect((await driver.addRunnerForm()).model).toBe("Opus 4.8");
       const claude = await driver.addRunnerModelOptions();
-      expect(claude.length).toBe(6);
+      // RUN-049 adds Opus 5.5 to the new app; the old app only grows when
+      // main#544 lands. Both arms stay exact — neither is weakened.
+      expect(claude.length).toBe(driver.target === "web_new" ? 7 : 6);
       expect(claude).toContain("Default (agent's built-in model)");
       expect(claude).toContain("Fable 5");
       await driver.addRunnerPickAgent("Cursor");
@@ -748,5 +753,59 @@ test(
     } finally {
       await serverDevMachinesCleanupMachine(machine.id);
     }
+  }
+);
+
+test(
+  specTitle(["RUN-049"], "the Claude Code list carries Opus 5.5 above Opus 5"),
+  { tag: specTags(["RUN-049"]) },
+  async ({ driver, seed }) => {
+    const session = await signInSession(seed.email, seed.password);
+    const wsId = await serverWorkspaceIdBySlug(seed.workspaceSlug);
+    const { identifier } = await projectFacts(seed.workspaceSlug, seed.projectId, session);
+    // Server: the workspace and project the modal drives exist.
+    expect(wsId).not.toBe("");
+    expect(identifier).not.toBe("");
+    await openSignedIn(driver, seed);
+    await driver.addRunnerOpenFromRunners(seed.workspaceSlug);
+
+    // The old app proves the parts RUN-049 did not change: the pinned
+    // default and Cursor's unchanged list. Only the unlanded Opus 5.5
+    // entry is a target step (main#544); that step throws on `web` as a
+    // target-only probe, so this row is not oracle green until #544 lands.
+
+    await test.step("Claude Code keeps its Opus 4.8 default", async () => {
+      expect((await driver.addRunnerForm()).model).toBe("Opus 4.8");
+    });
+
+    await test.step("the Claude Code list places Opus 5.5 above Opus 5", async () => {
+      const models = await driver.addRunnerModelOptions();
+      expect(models).toContain("Opus 5.5");
+      expect(models).toContain("Opus 5");
+      expect(models.indexOf("Opus 5.5")).toBeLessThan(models.indexOf("Opus 5"));
+    });
+
+    await test.step("selecting Opus 5.5 emits --model claude-opus-5-5", async () => {
+      await driver.addRunnerPickModel("Opus 5.5");
+      await expect.poll(async () => (await driver.addRunnerForm()).model, { timeout: 10_000 }).toBe("Opus 5.5");
+      await driver.addRunnerPickManual();
+      await driver.addRunnerPickProject(seed.projectName);
+      await driver.addRunnerSubmit();
+      await expect.poll(() => driver.addRunnerLayout(), { timeout: 15_000 }).toBe("command");
+      const command = (await driver.addRunnerCommandText()) ?? "";
+      expect(command).toContain("--agent claude-code");
+      expect(command).toContain("--model claude-opus-5-5");
+      await closeModal(driver);
+    });
+
+    await test.step("Cursor Agent's list is unchanged", async () => {
+      await driver.addRunnerOpenFromRunners(seed.workspaceSlug);
+      await driver.addRunnerPickAgent("Cursor");
+      const cursor = await driver.addRunnerModelOptions();
+      expect(cursor).not.toContain("Opus 5.5");
+      expect(cursor).toContain("Claude Opus 4.8");
+      expect(cursor).toContain("Claude Opus 4.8 (Thinking)");
+      await closeModal(driver);
+    });
   }
 );

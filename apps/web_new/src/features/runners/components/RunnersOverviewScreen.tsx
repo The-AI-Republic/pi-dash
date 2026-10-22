@@ -10,6 +10,7 @@ import * as React from "react";
 
 import { platform } from "../../../core/platform/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
+import { AddRunnerEntry } from "../addRunner/AddRunnerEntry.js";
 import { useRunnersArea } from "../area.js";
 import { useRunnersOverview } from "../useOverview.js";
 import { CliSetupPanel } from "./CliSetupPanel.js";
@@ -46,6 +47,7 @@ export function RunnersOverviewScreen({
         podsFailed={data.podsFailed}
         onDelete={data.onDelete}
         onRevoke={data.onRevoke}
+        action={<AddRunnerEntry />}
       />
     </>
   );

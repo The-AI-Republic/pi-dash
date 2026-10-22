@@ -29,6 +29,12 @@ export const DevMachine = z.object({
   runner_count: z.number(),
   online_runner_count: z.number(),
   control_online: z.boolean(),
+  /**
+   * Agent ids the daemon advertises (main#539). Absent from older servers
+   * and empty for a daemon that predates the capability: both mean
+   * "unknown", so clients must not gate anything on them.
+   */
+  supported_agents: z.optional(z.array(z.string())),
   last_seen_at: nullableDateTime(),
   last_heartbeat_at: nullableDateTime(),
   revoked_at: nullableDateTime(),
