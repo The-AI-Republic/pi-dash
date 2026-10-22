@@ -1147,6 +1147,37 @@ def test_rust_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
     assert _added_rows(db_conn, "page_logs", before) == []
 
 
+def test_rust_page_transaction_second_chunk_poison_inserts_nothing(db_conn, broker_url):
+    """Poison id past the first 50, Rust side: no rows (PIDASHCONV-1282).
+
+    Mirrors ``test_page_transaction_second_chunk_poison_inserts_nothing``:
+    Django's bulk_create is one transaction over all batches, so the Rust
+    driver must commit every chunk INSERT atomically too — the 50 valid
+    first-chunk rows must roll back when the 51st id fails to parse.
+    Settlement proves the handler ran.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-txchunk-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplaytxchunk", owner["id"])
+    page = _seed_page(db_conn, workspace["id"], owner["id"])
+    parts = [
+        f'<mention-component id="{uuid.uuid4()}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-{n}" entity_type="issue"></mention-component>'
+        for n in range(50)
+    ]
+    parts.append(
+        f'<mention-component id="not-a-uuid" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-50" entity_type="issue"></mention-component>'
+    )
+    html = "".join(parts)
+    before = snapshot(db_conn, ["page_logs"])
+    celery_id = rust_queue.publish(
+        PAGE_TRANSACTION,
+        args=[html, "", str(page["id"])],
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{PAGE_TRANSACTION} poisoned run")
+    assert _added_rows(db_conn, "page_logs", before) == []
+
+
 def test_rust_issue_activity_executes_locally(db_conn, broker_url):
     """issue_activity, Rust side: EXECUTE locally (PIDASHCONV-836).
 
