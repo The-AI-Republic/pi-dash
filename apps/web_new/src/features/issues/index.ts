@@ -408,3 +408,47 @@ export type { WidgetActionLabel, WidgetSectionSlot, SubIssuesWidgetProps } from 
 export { SubIssueSection } from "./subIssues/SubIssueSection.js";
 export type { SubIssueSectionHandle, SubIssueSectionProps } from "./subIssues/SubIssueSection.js";
 export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";
+// Saved-view dialog seam (VIEW-013, NEWFRONT-721). The views area builds
+// its create/edit dialog on the rich filter builder, the expression
+// serializer, the temporary registry and the snapshot helpers; it never
+// reaches past this barrel into the rich/ modules. All five arrive
+// through the loader below: the builder chunk is lazy, and a static
+// barrel edge to views.js makes the bundler hoist the shared expression
+// codec into the initial bundle (size gate). The loader lives here, not
+// in an eager module, so its dynamic imports stay lazy with its callers.
+export type RichFilterBuilderModule = {
+  useRichFilterBuilder: (typeof import("./filters/rich/RichFilterBuilder.js"))["useRichFilterBuilder"];
+  serializeRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["serializeRichExpression"];
+  FieldConfigRegistry: (typeof import("./filters/rich/temporary.js"))["FieldConfigRegistry"];
+  buildViewCreate: (typeof import("./filters/rich/views.js"))["buildViewCreate"];
+  savedViewKeys: (typeof import("./filters/rich/views.js"))["savedViewKeys"];
+};
+
+let richFilterBuilderRequest: Promise<RichFilterBuilderModule> | null = null;
+
+/** Start (or reuse) the builder-module request for lazy dialog hosts. */
+export function loadRichFilterBuilder(): Promise<RichFilterBuilderModule> {
+  richFilterBuilderRequest ??= Promise.all([
+    import("./filters/rich/RichFilterBuilder.js"),
+    import("./filters/rich/views.js"),
+    import("./filters/rich/temporary.js"),
+  ]).then(([builder, views, temporary]) => ({
+    useRichFilterBuilder: builder.useRichFilterBuilder,
+    serializeRichExpression: builder.serializeRichExpression,
+    FieldConfigRegistry: temporary.FieldConfigRegistry,
+    buildViewCreate: views.buildViewCreate,
+    savedViewKeys: views.savedViewKeys,
+  }));
+  return richFilterBuilderRequest;
+}
+
+/** Kick the request while the host list's data is still loading. */
+export function preloadRichFilterBuilder(): void {
+  void loadRichFilterBuilder().catch(() => {
+    // The host's filter section surfaces the failure when it renders.
+  });
+}
+
+export type { FieldConfigRegistry } from "./filters/rich/temporary.js";
+export type { RichCondition, RichExpression } from "./filters/rich/expression.js";
+export type { ViewSnapshot } from "./filters/rich/views.js";

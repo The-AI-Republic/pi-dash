@@ -4,6 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -18,6 +19,26 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   ),
   useNavigate: () => routerHarness.navigate,
+}));
+
+// The create dialog's filter builder reads the session; the screen never
+// opens the dialog in the suites above, so these stand-ins only serve the
+// create-dialog wiring tests below.
+const sessionHarness = vi.hoisted(() => ({ useMe: vi.fn(), usePermissions: vi.fn() }));
+
+vi.mock("../../../core/session/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../core/session/index.js")>()),
+  useMe: sessionHarness.useMe,
+  usePermissions: sessionHarness.usePermissions,
+}));
+
+// The screen preloads the dialog's filter chunk on mount; every other
+// barrel entry stays real so the dialog tests below load the real builder.
+const issuesBarrel = vi.hoisted(() => ({ preloadRichFilterBuilder: vi.fn() }));
+
+vi.mock("../../issues/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../issues/index.js")>()),
+  preloadRichFilterBuilder: issuesBarrel.preloadRichFilterBuilder,
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
@@ -97,6 +118,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 beforeEach(() => {
   harness = resetHarness();
   routerHarness.navigate.mockReset();
+  sessionHarness.useMe.mockReturnValue({ data: { id: VIEWS_OWNER_ID } });
+  sessionHarness.usePermissions.mockReturnValue({ isAdmin: false, isLoading: false });
+  issuesBarrel.preloadRichFilterBuilder.mockClear();
   createAppClient("https://api.test", (async (url: string) => {
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
     if (url.endsWith(`/api/workspaces/acme/projects/${PROJECT_ID}/`)) {
@@ -263,5 +287,35 @@ describe("ProjectViewsListScreen", () => {
     harness.project = projectRow();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(screen.getByTestId("project-views-zero")).toBeInTheDocument());
+  });
+
+  it("opens the create dialog from the header Add action by default (VIEW-003)", async () => {
+    const user = userEvent.setup();
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("project-views-zero")).toBeInTheDocument());
+    expect(screen.queryByRole("heading", { name: "Create View" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add view" }));
+    expect(await screen.findByRole("heading", { name: "Create View" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Create View" })).not.toBeInTheDocument());
+  });
+
+  it("preloads the dialog's filter chunk while the list loads", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("project-views-zero")).toBeInTheDocument());
+    expect(issuesBarrel.preloadRichFilterBuilder).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the same dialog from the zero state with the project's feature flags", async () => {
+    const user = userEvent.setup();
+    harness.project = projectRow({ cycle_view: false, module_view: false });
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("project-views-zero")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Create view" }));
+    expect(await screen.findByRole("heading", { name: "Create View" })).toBeInTheDocument();
+    await user.click(screen.getByTestId("rich-filter-add"));
+    expect(await screen.findByRole("option", { name: "Target date" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Cycle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Module" })).not.toBeInTheDocument();
   });
 });
