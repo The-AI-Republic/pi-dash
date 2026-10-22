@@ -52,7 +52,7 @@ export type { SingleInvitationView, SingleInvitationViewState } from "./invitati
 export { asString, safeNextPath } from "./entrySearch.js";
 export { isStrongSecret, secretCriteria } from "./passwordStrength.js";
 export type { SecretCriterion } from "./passwordStrength.js";
-export { resolveSignInProviders } from "./providers.js";
+export { CLOUD_PROVIDER_ID, resolveSignInProviders } from "./providers.js";
 export type { ResolveProvidersOptions, SignInProvider } from "./providers.js";
 export { authKeys, useViewerEmail } from "./queries.js";
 export {
@@ -121,7 +121,14 @@ export {
 } from "./workspace.js";
 export type { WorkspaceStepView } from "./workspace.js";
 
-export { performSignOut, SIGN_OUT_FAILED_MESSAGE, SIGN_OUT_FAILED_TITLE, signOutLandingTarget } from "./signOut.js";
+export {
+  CLOUD_SIGN_OUT_LANDING,
+  isHostedBackend,
+  performSignOut,
+  SIGN_OUT_FAILED_MESSAGE,
+  SIGN_OUT_FAILED_TITLE,
+  signOutLandingTarget,
+} from "./signOut.js";
 export type { PerformSignOutArgs } from "./signOut.js";
 export { useSignOut } from "./signOut.js";
 export {
@@ -187,14 +194,19 @@ export {
   cloudHandoffTarget,
   cloudSignInUrl,
   CLOUD_SIGN_IN_HREF,
+  currentPageTarget,
+  DESKTOP_OPEN_FAILED,
+  DESKTOP_ORIGIN_MISSING,
+  DESKTOP_ORIGIN_UNUSABLE,
   EXPLICIT_LOGOUT_KEY,
   markExplicitLogout,
   parseCloudLoginSearch,
   readExplicitLogout,
   resolveCloudReturnTarget,
   shouldAttemptSilentSignIn,
+  startCloudHandoff,
 } from "./cloudLogin.js";
-export type { CloudLoginSearch } from "./cloudLogin.js";
+export type { CloudLoginSearch, StartCloudHandoffArgs } from "./cloudLogin.js";
 export { AuthBanner, isValidEmail, SignInCard } from "./components/SignInCard.js";
 export type { AuthBannerProps, SignInCardProps } from "./components/SignInCard.js";
 export { SignUpCard } from "./components/SignUpCard.js";

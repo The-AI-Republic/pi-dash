@@ -7,6 +7,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
+import { ApiError } from "@pidash/api-client";
 import * as React from "react";
 import { Suspense } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -368,7 +369,7 @@ describe("gated layout guard", () => {
   }
 
   it("bounces signed-out visitors to the entry with a return path", async () => {
-    const failed = new Error("signed out");
+    const failed = new ApiError({ status: 401, code: "http", message: "signed out" });
     const args = stubContext({ me: failed });
     try {
       await Route.options.beforeLoad?.(args);

@@ -8,6 +8,7 @@
 
 import { createClient, type ApiClient, type Transport } from "@pidash/api-client";
 
+import { edition } from "../edition/index.js";
 import { platform, toApiTransport } from "../platform/index.js";
 import { createSessionMiddleware } from "../session/middleware.js";
 import { setSessionClient } from "../session/queries.js";
@@ -40,7 +41,10 @@ export function createAppClient(baseUrl: string = defaultBaseUrl(), transport?: 
   const client = createClient({
     baseUrl,
     transport: resolvedTransport,
-    middleware: [createSessionMiddleware()],
+    // The expiry layer stays outermost so it reads each answer's final
+    // verdict; the edition's interceptors (cloud rotation, paywall) run
+    // inside it, in listed order. The OSS edition lists none.
+    middleware: [createSessionMiddleware(), ...(edition.api ?? [])],
   });
   appClient = client;
   providerClient = null;
@@ -54,8 +58,9 @@ export function createAppClient(baseUrl: string = defaultBaseUrl(), transport?: 
  * Sibling client for provider-credential writes (NEWFRONT-421): a GitHub
  * or GitLab token rejection answers 401, but that credential is not the
  * signed-in session. This client shares the app's origin and transport and
- * skips only the session-expiry middleware; every other call still uses
- * the app client, so a real expired session keeps signing out.
+ * skips the session-expiry middleware and any edition interceptors (a bad
+ * provider token must not rotate the session either); every other call
+ * still uses the app client, so a real expired session keeps signing out.
  */
 export function getProviderWriteClient(): ApiClient {
   if (!appClient || appTransport === null) {

@@ -7,6 +7,7 @@ export {
   CREATE_WORKSPACE_PATH,
   decidePageGate,
   isOnboardedProfile,
+  isSessionRejection,
   loadGateInputs,
   loadLandingTarget,
   ONBOARDING_PATH,

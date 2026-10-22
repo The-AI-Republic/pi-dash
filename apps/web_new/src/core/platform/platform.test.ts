@@ -38,6 +38,7 @@ describe("platform selection", () => {
     expect(webPlatform.agentRuntime).toBeUndefined();
     expect(webPlatform.updates).toBeUndefined();
     expect(webPlatform.sessionTeardown).toBeUndefined();
+    expect(webPlatform.shellSignIn).toBeUndefined();
   });
 
   it("implements the agent-runtime and session-teardown seams (RUN-044, RUN-047)", () => {

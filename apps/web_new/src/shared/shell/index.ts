@@ -5,7 +5,7 @@
 export { AppShell } from "./AppShell.js";
 export type { AppShellProps } from "./AppShell.js";
 export { CommandPalette } from "./CommandPalette.js";
-export { useSessionExpiredRedirect } from "./expiredRedirect.js";
+export { bouncePathname, isBounceExempt, useSessionExpiredRedirect } from "./expiredRedirect.js";
 export {
   EDITOR_PORTAL_ID,
   FULL_SCREEN_PORTAL_ID,

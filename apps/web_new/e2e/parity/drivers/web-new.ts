@@ -24812,23 +24812,60 @@ export class WebNewDriver implements ParityDriver {
     return todo("cloudPricingFreeCapMentioned");
   }
 
-  async cloudArmConfirm(_action: "accept" | "dismiss"): Promise<void> {
-    return todo("cloudArmConfirm");
+  // --- Cloud paywall prompt (NEWFRONT-653, CLOUD-010). The new app
+  // --- answers the quota refusal with the same native confirm, so the
+  // --- dialog capture and the upgrade popup read work unchanged.
+
+  private cloudConfirmAction: "accept" | "dismiss" = "accept";
+  private cloudConfirmSeen: string[] = [];
+  private cloudPopupWait: Promise<Page | null> | null = null;
+
+  private cloudConfirmHandler = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
+    this.cloudConfirmSeen.push(dialog.message());
+    if (this.cloudConfirmAction === "dismiss") await dialog.dismiss();
+    else await dialog.accept();
+  };
+
+  async cloudArmConfirm(action: "accept" | "dismiss"): Promise<void> {
+    this.cloudConfirmAction = action;
+    this.cloudConfirmSeen = [];
+    // The upgrade tab opens synchronously inside the accept; capture from
+    // arm time so a later read cannot miss an already-opened popup.
+    this.cloudPopupWait = this.page.waitForEvent("popup", { timeout: 60_000 }).catch(() => null);
+    // Re-arming must not stack handlers: a second registration would race
+    // the first on the same dialog ("already handled").
+    this.page.off("dialog", this.cloudConfirmHandler);
+    this.page.on("dialog", this.cloudConfirmHandler);
   }
 
   async cloudConfirmMessages(): Promise<string[]> {
-    return todo("cloudConfirmMessages");
+    return [...this.cloudConfirmSeen];
   }
 
   async cloudUpgradePopupUrl(): Promise<string> {
-    return todo("cloudUpgradePopupUrl");
+    if (this.cloudPopupWait === null) throw new Error("[parity] cloudArmConfirm must run before reading the popup.");
+    const popup = await this.cloudPopupWait;
+    if (popup === null) throw new Error("[parity] no upgrade popup opened after the quota accept.");
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
 
   // --- Cloud login, SSO + session (NEWFRONT-438, CLOUD-011..020).
-  // --- CLOUD-011..014 landed with NEWFRONT-652; the session rows
-  // --- (CLOUD-015..020) still throw until their slice lands.
+  // --- CLOUD-011..014 landed with NEWFRONT-652; CLOUD-015..020 (the
+  // --- session rows) landed with NEWFRONT-653.
 
   private cloudSignInSeen: string[] = [];
+  private cloudRefreshSeen = 0;
+  private cloudConsoleErrorsSeen: string[] = [];
+
+  private cloudRefreshHandler = (request: import("@playwright/test").Request): void => {
+    if (request.url().includes("/api/auth/refresh/")) this.cloudRefreshSeen += 1;
+  };
+
+  private cloudConsoleHandler = (message: import("@playwright/test").ConsoleMessage): void => {
+    if (message.type() === "error") this.cloudConsoleErrorsSeen.push(message.text());
+  };
 
   private cloudLoginCard(): Locator {
     // The screen labels its card region; the driver keys off that label
@@ -24902,11 +24939,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cloudArmRefreshCounter(): Promise<void> {
-    return todo("cloudArmRefreshCounter");
+    this.cloudRefreshSeen = 0;
+    this.page.off("request", this.cloudRefreshHandler);
+    this.page.on("request", this.cloudRefreshHandler);
   }
 
   async cloudRefreshHits(): Promise<number> {
-    return todo("cloudRefreshHits");
+    return this.cloudRefreshSeen;
   }
 
   async cloudSignOutViaAccountMenu(): Promise<void> {
@@ -24915,39 +24954,67 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cloudFailRefresh(): Promise<void> {
-    return todo("cloudFailRefresh");
+    await this.page.unroute("**/api/auth/refresh/");
+    await this.page.route("**/api/auth/refresh/", async (route) => route.abort("failed"));
   }
 
   async cloudArmConsoleErrors(): Promise<void> {
-    return todo("cloudArmConsoleErrors");
+    this.cloudConsoleErrorsSeen = [];
+    this.page.off("console", this.cloudConsoleHandler);
+    this.page.on("console", this.cloudConsoleHandler);
   }
 
   async cloudConsoleErrors(): Promise<string[]> {
-    return todo("cloudConsoleErrors");
+    return [...this.cloudConsoleErrorsSeen];
   }
 
   async cloudStubTauri(): Promise<void> {
-    return todo("cloudStubTauri");
+    await this.page.addInitScript(() => {
+      (window as unknown as Record<string, unknown>).__TAURI__ = {
+        core: {
+          invoke: async () => {
+            throw new Error("[parity] system browser open is blocked in the harness.");
+          },
+        },
+      };
+    });
   }
 
   async cloudProfilePasswordFieldCount(): Promise<number> {
-    return todo("cloudProfilePasswordFieldCount");
+    return this.page.locator('input[type="password"]').count();
   }
 
   async cloudExpireAccessCookie(): Promise<void> {
-    return todo("cloudExpireAccessCookie");
+    await this.page.context().clearCookies({ name: "pidash_access" });
   }
 
   async cloudCookieNames(): Promise<string[]> {
-    return todo("cloudCookieNames");
+    const names = (await this.page.context().cookies()).map((cookie) => cookie.name);
+    return [...new Set(names)].sort();
   }
 
   async cloudProviderButtonFacts(): Promise<CloudProviderButtonFacts> {
-    return todo("cloudProviderButtonFacts");
+    const provider = this.page.getByRole("button", { name: /ai republic/i });
+    const standard = this.page.getByRole("button", { name: "Continue", exact: true });
+    // The card resolves its provider options after the instance config
+    // loads; wait for the card's own action first, then give the provider
+    // option a beat so a cold load cannot misread absence.
+    await standard.first().waitFor({ timeout: 60_000 });
+    let visible = true;
+    try {
+      await provider.first().waitFor({ timeout: 10_000 });
+    } catch {
+      visible = false;
+    }
+    return {
+      visible,
+      label: visible ? ((await provider.first().innerText()) ?? "").replace(/\s+/g, " ").trim() : "",
+      standardContinueVisible: (await standard.count()) > 0,
+    };
   }
 
   async cloudClickProviderButton(): Promise<void> {
-    return todo("cloudClickProviderButton");
+    await this.page.getByRole("button", { name: /ai republic/i }).click();
   }
 
   // --- Page-export dialog oracle reads (NEWFRONT-383, EXP-016..021 + 023/024).

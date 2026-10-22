@@ -28,6 +28,10 @@ import {
   WorkspaceWebhook as EntryWorkspaceWebhook,
 } from "./index.js";
 import { billingPlanAction as moduleBillingPlanAction } from "./contracts/billing-plans.js";
+import { createCloudPaywallMiddleware as entryPaywall } from "./index.js";
+import { createCloudRefreshMiddleware as entryRefresh } from "./index.js";
+import { createCloudPaywallMiddleware as modulePaywall } from "./middleware/cloud-paywall.js";
+import { createCloudRefreshMiddleware as moduleRefresh } from "./middleware/cloud-refresh.js";
 import {
   createPersonalApiToken as moduleCreatePersonalApiToken,
   listPersonalApiTokens as moduleListPersonalApiTokens,
@@ -65,5 +69,10 @@ describe("@pidash/api-client entry", () => {
     expect(createPersonalApiToken).toBe(moduleCreatePersonalApiToken);
     expect(EntryPersonalApiToken).toBe(ModulePersonalApiToken);
     expect(billingPlanAction).toBe(moduleBillingPlanAction);
+  });
+
+  it("re-exports the cloud session middleware", () => {
+    expect(entryRefresh).toBe(moduleRefresh);
+    expect(entryPaywall).toBe(modulePaywall);
   });
 });

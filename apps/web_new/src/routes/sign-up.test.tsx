@@ -8,6 +8,7 @@ import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Transport, TransportInit } from "@pidash/api-client";
+import { ApiError } from "@pidash/api-client";
 
 // Stand-in for the auth card: its internals belong to the auth area.
 // What this suite owns is the search schema, the signed-out-only gate,
@@ -121,7 +122,9 @@ describe("redirectSignedInUser", () => {
   }
 
   it("lets signed-out visitors through to the card", async () => {
-    await expect(redirectSignedInUser(stubInput({ me: new Error("signed out") }))).resolves.toEqual({});
+    await expect(
+      redirectSignedInUser(stubInput({ me: new ApiError({ status: 401, code: "http", message: "signed out" }) }))
+    ).resolves.toEqual({});
   });
 
   it("sends finished members to their return path first", async () => {
@@ -151,9 +154,9 @@ describe("redirectSignedInUser", () => {
 
   it("sends finished members to workspace creation when the landing reads fail", async () => {
     const failed = new Error("landing reads unavailable");
-    await expect(
-      landingOf(stubInput({ me, profile: onboarded, settings: failed, workspaces: failed }))
-    ).resolves.toBe("/create-workspace");
+    await expect(landingOf(stubInput({ me, profile: onboarded, settings: failed, workspaces: failed }))).resolves.toBe(
+      "/create-workspace"
+    );
   });
 
   it("sends unfinished members to onboarding", async () => {
@@ -199,7 +202,7 @@ describe("Route", () => {
 
   it("renders the card through the search schema", async () => {
     const context = guardContext((url) => {
-      if (url.endsWith("/api/users/me/")) throw new Error("signed out");
+      if (url.endsWith("/api/users/me/")) throw new ApiError({ status: 401, code: "http", message: "signed out" });
       throw new Error(`unexpected ${url}`);
     });
     const router = createRouter({

@@ -6,7 +6,7 @@
 // finished member passes through.
 import type { QueryClient } from "@tanstack/react-query";
 import { isRedirect } from "@tanstack/react-router";
-import { createClient } from "@pidash/api-client";
+import { ApiError, createClient } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import { enforceProfileSettingsGate } from "./guard.js";
@@ -69,7 +69,7 @@ describe("enforceProfileSettingsGate", () => {
   });
 
   it("bounces a visitor to the entry with the return path", async () => {
-    const thrown = await gate({ me: new Error("signed out") });
+    const thrown = await gate({ me: new ApiError({ status: 401, code: "http", message: "signed out" }) });
     expect(isRedirect(thrown)).toBe(true);
     expect((thrown as { options: { to: string; search: unknown } }).options).toMatchObject({
       to: "/",

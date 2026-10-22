@@ -34,10 +34,11 @@ export function ProfileSetupStep({ onAdvance }: ProfileSetupStepProps): React.Re
   const setPassword = useSetPassword();
   const uploadAvatar = useUploadUserAvatar();
 
-  // The password pair is offered only to accounts that never set one.
-  // (The cloud slice gates this further per CLOUD-020: cloud identities
-  // never set a password here.)
-  const offerPassword = me?.is_password_autoset === true;
+  // The password pair is offered only to accounts that never set one —
+  // and never on the hosted backend (CLOUD-020, from
+  // parity/specs/cloud.md §4): cloud identities come from the provider,
+  // so no password is ever set here. An unread config keeps the pair.
+  const offerPassword = me?.is_password_autoset === true && instanceConfig?.is_self_managed !== false;
   const offerConsent = instanceConfig?.is_self_managed !== true;
 
   const [name, setName] = React.useState(me?.first_name ?? "");

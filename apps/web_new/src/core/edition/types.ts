@@ -89,7 +89,11 @@ export interface Edition {
   rail?: SidebarItem[];
   settingsSections?: SettingsSection[];
   auth?: AuthProviderExtension[];
-  /** Request middleware, e.g. token refresh. Runs inside the api client. */
+  /**
+   * Request middleware, e.g. token refresh. Runs inside the api client,
+   * in listed order, within the session-expiry layer (the expiry layer
+   * reads each answer's final verdict). The OSS edition leaves it absent.
+   */
   api?: Middleware[];
   flags: Record<string, boolean>;
   slots?: Partial<SlotComponents>;

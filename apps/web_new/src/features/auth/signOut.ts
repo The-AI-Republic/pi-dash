@@ -12,12 +12,17 @@
 // feature owns, so this file never imports a domain feature.
 
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { signOut as postSignOut, type ApiClient } from "@pidash/api-client";
+import {
+  cloudSignOut as postCloudSignOut,
+  signOut as postSignOut,
+  type ApiClient,
+  type InstanceConfig,
+} from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
 import { markExplicitLogout } from "./cloudLogin.js";
 import { platform, type SessionTeardownApi } from "../../core/platform/index.js";
-import { getRuntimeSignOutHooks } from "../../core/session/index.js";
+import { getRuntimeSignOutHooks, instanceKeys } from "../../core/session/index.js";
 import { signOut as clearSession } from "../../core/session/store.js";
 import { notifyError } from "../../shared/shell/index.js";
 
@@ -35,6 +40,18 @@ export const SIGN_OUT_FAILED_TITLE = "Could not sign out";
 // workspace-switcher scenario asserts this exact text, so the wording
 // stays aligned with the old app.
 export const SIGN_OUT_FAILED_MESSAGE = "Failed to sign out. Please try again.";
+
+/** Cloud sign-out landing (CLOUD-016): the login card, reached by a full navigation. */
+export const CLOUD_SIGN_OUT_LANDING = "/login";
+
+/**
+ * True when the cached instance config says this is the hosted (cloud)
+ * backend (CLOUD-016, from parity/specs/cloud.md §4). An unread config
+ * reads self-managed, keeping today's OSS sequence.
+ */
+export function isHostedBackend(queryClient: QueryClient): boolean {
+  return queryClient.getQueryData<InstanceConfig>(instanceKeys.config)?.is_self_managed === false;
+}
 
 /** The signed-out entry: the sign-in card at home, the login route on desktop. */
 export function signOutLandingTarget(kind: "web" | "desktop"): string {
@@ -65,6 +82,11 @@ export interface PerformSignOutArgs {
  * before the POST: server enrollment removal needs a live session. The
  * disposal itself is best-effort, so a failed revocation never traps the
  * user; a failed POST afterwards still leaves the session intact.
+ *
+ * On the hosted backend (CLOUD-016) the POST is the cloud logout pair and
+ * the landing is a full replacing navigation to /login, so every store
+ * and cache starts from scratch; the upstream provider session is left
+ * alone. Everywhere else the OSS sequence below runs unchanged.
  */
 export function performSignOut(args: PerformSignOutArgs & { skipRuntimeConfirm: true }): Promise<string>;
 export function performSignOut(
@@ -79,8 +101,10 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
     await runtime.disposeRuntimeForSignOut(choice);
   }
   client.clearCsrfCache();
+  const cloud = isHostedBackend(queryClient);
   try {
-    await postSignOut(client);
+    if (cloud) await postCloudSignOut(client);
+    else await postSignOut(client);
   } catch (error) {
     notifyError(SIGN_OUT_FAILED_TITLE, SIGN_OUT_FAILED_MESSAGE);
     throw error;
@@ -99,6 +123,10 @@ export async function performSignOut(args: PerformSignOutArgs): Promise<string |
   // webview wipe, which clears sessionStorage; tab-scoped and best-effort,
   // so other tabs keep their own state.
   markExplicitLogout(tabSessionStorage());
+  if (cloud) {
+    globalThis.window.location.replace(CLOUD_SIGN_OUT_LANDING);
+    return CLOUD_SIGN_OUT_LANDING;
+  }
   return signOutLandingTarget(platform.kind);
 }
 

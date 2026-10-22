@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { render, screen } from "@testing-library/react";
+import { ApiError } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -139,7 +140,7 @@ describe("entry guard", () => {
   }
 
   it("renders the card for signed-out visitors", async () => {
-    const failed = new Error("signed out");
+    const failed = new ApiError({ status: 401, code: "http", message: "signed out" });
     await expect(Route.options.beforeLoad?.(stubContext({ me: failed }))).resolves.toEqual({});
   });
 
