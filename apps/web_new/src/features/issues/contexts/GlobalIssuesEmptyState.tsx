@@ -80,7 +80,6 @@ export function GlobalIssuesEmptyState({ workspaceSlug, projects }: GlobalIssues
           setCreateProjectOpen(true);
         }}
         onCreateWorkItem={() => {
-          // `canAct` already turns the entry off without a creatable project.
           setCreateWorkItemOpen(true);
         }}
       />

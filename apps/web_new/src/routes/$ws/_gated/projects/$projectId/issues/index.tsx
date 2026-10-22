@@ -32,7 +32,7 @@ import {
   type WorkItemCreateProject,
 } from "../../../../../../features/issues/index.js";
 import type { RichFilterBuilderParts } from "../../../../../../features/issues/filters/rich/RichFilterBuilder.js";
-import { ProjectIssuesEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
+import { ProjectIssuesEmptyState, loadProjectEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import {
   ResolvedAnalyticsEntry,
   loadIssueListLeaves,
@@ -48,7 +48,6 @@ const LazyCalendarEntry = React.lazy(() =>
 );
 // The empty cards ride their own chunk; the route awaits it with the list
 // leaves in `beforeLoad` so the layout mounts once (Quality gates).
-import { loadProjectEmptyState } from "../../../../../../features/issues/emptyStates/lazy.js";
 import { orderByOf } from "../../../../../../features/issues/prefs/prefsQuery.js";
 import { canEditInProject } from "../../../../../../shared/shell/contextual/index.js";
 
