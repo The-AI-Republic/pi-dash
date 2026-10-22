@@ -24,6 +24,11 @@ export interface ProjectViewRowProps {
   owner: ViewOwner | null;
   /** Star and overflow menu. Slot owner: NEWFRONT-722. */
   trailingControl?: React.ReactNode;
+  /**
+   * Opens the publish dialog from the Live marker (VIEW-020, cloud
+   * only). Absent on OSS: the marker then stays a plain badge.
+   */
+  onLiveMarkerClick?: (() => void) | undefined;
 }
 
 function ViewLogo({ view }: { view: SavedView }): React.ReactElement {
@@ -62,6 +67,7 @@ export function ProjectViewRow({
   view,
   owner,
   trailingControl,
+  onLiveMarkerClick,
 }: ProjectViewRowProps): React.ReactElement {
   return (
     <li data-testid="project-views-row" data-view-id={view.id} className="border-b border-(--border)">
@@ -71,12 +77,35 @@ export function ProjectViewRow({
           className="flex h-11 min-w-0 flex-1 items-center gap-(--space-3)"
         >
           <ViewLogo view={view} />
-          <span className="text-body min-w-0 flex-1 truncate font-medium text-(--text)">{view.name}</span>
+          <span
+            data-testid="project-views-row-name"
+            className="text-body min-w-0 flex-1 truncate font-medium text-(--text)"
+          >
+            {view.name}
+          </span>
           <AccessBadge access={view.access} />
           {isViewLive(view.anchor) ? (
-            <span data-testid="project-views-row-live" className="inline-flex shrink-0">
-              <Badge tone="accent">Live</Badge>
-            </span>
+            onLiveMarkerClick === undefined ? (
+              <span data-testid="project-views-row-live" className="inline-flex shrink-0">
+                <Badge tone="accent">Live</Badge>
+              </span>
+            ) : (
+              <button
+                type="button"
+                data-testid="project-views-row-live"
+                aria-label={`Public link for ${view.name}`}
+                onClick={(event) => {
+                  // The marker sits inside the row link; the click opens
+                  // the publish dialog instead of navigating.
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onLiveMarkerClick();
+                }}
+                className="inline-flex shrink-0 cursor-pointer"
+              >
+                <Badge tone="accent">Live</Badge>
+              </button>
+            )
           ) : null}
           {owner === null ? null : (
             <Tooltip content={owner.name}>

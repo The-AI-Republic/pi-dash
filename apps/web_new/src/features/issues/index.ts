@@ -408,21 +408,23 @@ export type { WidgetActionLabel, WidgetSectionSlot, SubIssuesWidgetProps } from 
 export { SubIssueSection } from "./subIssues/SubIssueSection.js";
 export type { SubIssueSectionHandle, SubIssueSectionProps } from "./subIssues/SubIssueSection.js";
 export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";
-// Saved-view dialog seam (VIEW-013, NEWFRONT-721). The views area builds
-// its create/edit dialog on the rich filter builder, the expression
-// serializer and parser, the temporary registry and the snapshot
-// helpers; it never reaches past this barrel into the rich/ modules.
-// All six arrive through the loader below: the builder chunk is lazy,
-// and a static
-// barrel edge to views.js makes the bundler hoist the shared expression
-// codec into the initial bundle (size gate). The loader lives here, not
-// in an eager module, so its dynamic imports stay lazy with its callers.
+// Saved-view dialog seam (VIEW-013, NEWFRONT-721; edit prefill/save,
+// NEWFRONT-722; VIEW-035, NEWFRONT-726). The views area builds its
+// create/edit dialog on the rich filter builder, the expression codec,
+// the temporary registry and the snapshot helpers; it never reaches
+// past this barrel into the rich/ modules. All eight arrive through the
+// loader below: the builder chunk is lazy, and a static barrel edge to
+// views.js makes the bundler hoist the shared expression codec into the
+// initial bundle (size gate). The loader lives here, not in an eager
+// module, so its dynamic imports stay lazy with its callers.
 export type RichFilterBuilderModule = {
   useRichFilterBuilder: (typeof import("./filters/rich/RichFilterBuilder.js"))["useRichFilterBuilder"];
   serializeRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["serializeRichExpression"];
-  parseRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["parseRichExpression"];
+  parseRichExpression: (typeof import("./filters/rich/expression.js"))["parseRichExpression"];
   FieldConfigRegistry: (typeof import("./filters/rich/temporary.js"))["FieldConfigRegistry"];
   buildViewCreate: (typeof import("./filters/rich/views.js"))["buildViewCreate"];
+  buildViewPatch: (typeof import("./filters/rich/views.js"))["buildViewPatch"];
+  viewDisplaySnapshot: (typeof import("./filters/rich/views.js"))["viewDisplaySnapshot"];
   savedViewKeys: (typeof import("./filters/rich/views.js"))["savedViewKeys"];
 };
 
@@ -432,14 +434,17 @@ let richFilterBuilderRequest: Promise<RichFilterBuilderModule> | null = null;
 export function loadRichFilterBuilder(): Promise<RichFilterBuilderModule> {
   richFilterBuilderRequest ??= Promise.all([
     import("./filters/rich/RichFilterBuilder.js"),
+    import("./filters/rich/expression.js"),
     import("./filters/rich/views.js"),
     import("./filters/rich/temporary.js"),
-  ]).then(([builder, views, temporary]) => ({
+  ]).then(([builder, expression, views, temporary]) => ({
     useRichFilterBuilder: builder.useRichFilterBuilder,
     serializeRichExpression: builder.serializeRichExpression,
-    parseRichExpression: builder.parseRichExpression,
+    parseRichExpression: expression.parseRichExpression,
     FieldConfigRegistry: temporary.FieldConfigRegistry,
     buildViewCreate: views.buildViewCreate,
+    buildViewPatch: views.buildViewPatch,
+    viewDisplaySnapshot: views.viewDisplaySnapshot,
     savedViewKeys: views.savedViewKeys,
   }));
   return richFilterBuilderRequest;

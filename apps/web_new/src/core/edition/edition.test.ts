@@ -42,6 +42,10 @@ describe("edition", () => {
   it("leaves the view access slot absent (VIEW-019: OSS renders no selector)", () => {
     expect(edition.slots?.viewAccess).toBeUndefined();
   });
+
+  it("leaves the view publish slot absent (VIEW-020: OSS renders no publish entry)", () => {
+    expect(edition.slots?.viewPublish).toBeUndefined();
+  });
 });
 
 describe("shell edition gates", () => {

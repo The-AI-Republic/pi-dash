@@ -90,6 +90,18 @@ export interface SlotComponents {
    * editions; a rename is a breaking change.
    */
   viewAccess?: ViewAccessSlot;
+  /**
+   * Saved-view publish seam (VIEW-020, NEWFRONT-722; Decisions D24). The
+   * row menu's publish entry, the publish dialog and the Live marker
+   * render only where an edition fills this slot. The slot owns the two
+   * writes (the server sets or clears the record's `anchor`) and the
+   * public read-only link derivation (the anchor plus the edition's
+   * public base URL); the app owns the menu entry, the dialog chrome,
+   * the cache adoption and the notices. The OSS edition leaves it
+   * absent: no publish entry renders and rows only reflect server data.
+   * The name is stable across editions; a rename is a breaking change.
+   */
+  viewPublish?: ViewPublishSlot;
 }
 
 /** Access values the slot trades in: 1 shared, 0 owner-only. */
@@ -121,6 +133,31 @@ export interface ViewAccessStoreInput {
 export interface ViewAccessSlot {
   Field: ComponentType<ViewAccessFieldProps>;
   storeAccess: (input: ViewAccessStoreInput) => Promise<unknown>;
+}
+
+/** Which saved view a publish write acts on (VIEW-020). */
+export interface ViewPublishInput {
+  workspaceSlug: string;
+  projectId: string;
+  viewId: string;
+}
+
+/** What a publish write returns: the anchor the server set (VIEW-020). */
+export interface ViewPublishResult {
+  anchor: string;
+}
+
+/**
+ * The cloud publish seam: the two anchor writes plus the public link
+ * derivation. The app calls `publish` for an unpublished view and
+ * `unpublish` for a published one, then adopts the anchor (or its
+ * absence) into the cached record so the Live marker follows.
+ */
+export interface ViewPublishSlot {
+  publish: (input: ViewPublishInput) => Promise<ViewPublishResult>;
+  unpublish: (input: ViewPublishInput) => Promise<void>;
+  /** Public read-only address for an anchor the server set. */
+  publicLink: (anchor: string) => string;
 }
 
 export interface Edition {

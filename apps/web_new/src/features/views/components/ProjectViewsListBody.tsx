@@ -9,7 +9,7 @@ import type { SavedView, WorkspaceMember } from "@pidash/api-client";
 import * as React from "react";
 
 import { findViewOwner, type ProjectViewsBodyState } from "../lib/projectViews.js";
-import { ProjectViewRow } from "./ProjectViewRow.js";
+import { ProjectViewRowItem } from "./ProjectViewRowItem.js";
 import { ProjectViewsError } from "./ProjectViewsError.js";
 import { ProjectViewsNoMatch } from "./ProjectViewsNoMatch.js";
 import { ProjectViewsSkeleton } from "./ProjectViewsSkeleton.js";
@@ -23,6 +23,13 @@ export interface ProjectViewsListBodyProps {
   members: readonly WorkspaceMember[] | undefined;
   workspaceSlug: string;
   projectId: string;
+  /** The signed-in user id, or null while unresolved. */
+  viewerId: string | null;
+  /** The caller's project role, or null while unresolved. */
+  projectRole: number | null;
+  /** Cycle/module entries hide while their project features are off. */
+  hideCycle: boolean;
+  hideModule: boolean;
   /** Opens the create dialog. Slot owner: NEWFRONT-721. */
   onCreateView?: (() => void) | undefined;
   onRetry: () => void;
@@ -34,6 +41,10 @@ export function ProjectViewsListBody({
   members,
   workspaceSlug,
   projectId,
+  viewerId,
+  projectRole,
+  hideCycle,
+  hideModule,
   onCreateView,
   onRetry,
 }: ProjectViewsListBodyProps): React.ReactElement {
@@ -44,12 +55,16 @@ export function ProjectViewsListBody({
   return (
     <ul data-testid="project-views-list" className="flex min-w-0 flex-1 flex-col">
       {views.map((view) => (
-        <ProjectViewRow
+        <ProjectViewRowItem
           key={view.id}
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           view={view}
           owner={findViewOwner(members, view.owned_by)}
+          viewerId={viewerId}
+          projectRole={projectRole}
+          hideCycle={hideCycle}
+          hideModule={hideModule}
         />
       ))}
     </ul>

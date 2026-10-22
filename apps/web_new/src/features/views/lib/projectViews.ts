@@ -88,8 +88,9 @@ export function viewAccessLabel(access: number): "Public" | "Private" {
 /**
  * The Live marker shows only when the cloud publish flow wrote an
  * anchor (VIEW-011). OSS records carry none, so OSS rows never mark.
+ * A predicate: a live anchor is always a usable non-empty string.
  */
-export function isViewLive(anchor: SavedView["anchor"]): boolean {
+export function isViewLive(anchor: SavedView["anchor"]): anchor is string {
   return anchor !== undefined && anchor !== null && anchor !== "";
 }
 

@@ -182,6 +182,37 @@ describe("ProjectViewsListScreen", () => {
     expect(harness.viewsCalls).toBe(1);
   });
 
+  it("threads the signed-in owner's standing into the row actions", async () => {
+    harness.views = [makeView({ name: "V1 Star", owned_by: VIEWS_OWNER_ID })];
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("project-views-list")).toBeInTheDocument());
+    // Role 20 with ownership: the star shows and the menu offers edit.
+    expect(screen.getByTestId("project-views-row-star")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for V1 Star" }));
+    await waitFor(() => expect(screen.getAllByRole("menuitem").length).toBeGreaterThan(0));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Edit",
+      "Open in new tab",
+      "Copy link",
+      "Delete",
+    ]);
+  });
+
+  it("degrades row actions while the viewer and standing stay unresolved", async () => {
+    harness.views = [makeView({ name: "V1 Pending", owned_by: VIEWS_OWNER_ID })];
+    harness.rolesStatus = 500;
+    harness.roles = { detail: "boom" } as unknown as Record<string, number>;
+    sessionHarness.useMe.mockReturnValue({ data: undefined });
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("project-views-list")).toBeInTheDocument());
+    // No viewer id and no role: the row renders with no star and the
+    // menu offers only the entries open to every role.
+    expect(screen.queryByTestId("project-views-row-star")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for V1 Pending" }));
+    await waitFor(() => expect(screen.getAllByRole("menuitem").length).toBeGreaterThan(0));
+    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Open in new tab", "Copy link"]);
+  });
+
   it("falls back to the workspace slug when the workspace row is missing", async () => {
     harness.workspaces = [];
     renderScreen();

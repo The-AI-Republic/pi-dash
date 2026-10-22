@@ -30,10 +30,13 @@ export interface FilterSectionLoaderProps {
   /** Receives the temporary registry once the builder chunk has loaded. */
   registryRef: { current: FieldConfigRegistry | null };
   /**
-   * Stored expression an edit dialog reopens with (VIEW-035). Parsed
-   * inside the loaded chunk so the parser never joins the eager graph;
-   * absent on create, where the builder starts empty.
+   * Stored expression an edit dialog reopens with (VIEW-015 project
+   * edit, VIEW-035 workspace edit). Parsed inside the loaded chunk so
+   * the parser never joins the eager graph; absent on create, where
+   * the builder starts empty. `seedExpression` is the workspace slice's
+   * name for the same input (NEWFRONT-726); either prop seeds.
    */
+  expression?: Record<string, unknown> | undefined;
   seedExpression?: Record<string, unknown> | undefined;
 }
 
@@ -50,6 +53,7 @@ function FilterSectionHost({
   hideCycle,
   hideModule,
   registryRef,
+  expression,
   seedExpression,
 }: FilterSectionHostProps): React.ReactElement {
   const registry = React.useMemo(() => new module.FieldConfigRegistry(), [module]);
@@ -59,7 +63,13 @@ function FilterSectionHost({
       registryRef.current = null;
     };
   }, [registry, registryRef]);
-  const seed = seedExpression === undefined ? undefined : module.parseRichExpression(seedExpression);
+  // The codec arrives with the builder chunk, so the seed parses here
+  // (never through a static import, which the size gate forbids).
+  const stored = expression ?? seedExpression;
+  const seed = React.useMemo(
+    () => (stored === undefined ? undefined : module.parseRichExpression(stored)),
+    [module, stored]
+  );
   const { control, row } = module.useRichFilterBuilder({
     workspaceSlug,
     projectId,

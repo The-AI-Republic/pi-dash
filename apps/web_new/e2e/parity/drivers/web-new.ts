@@ -12857,8 +12857,18 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesSeedStoredExpression");
   }
 
+  private viewsRowByName(name: string): Locator {
+    // The name span carries its own testid (NEWFRONT-722); the row's
+    // badges share the link text, so the match scopes to the span.
+    return this.page
+      .getByTestId("project-views-row")
+      .filter({ has: this.page.locator('[data-testid="project-views-row-name"]', { hasText: name }) });
+  }
+
   async viewsListNames(): Promise<string[]> {
-    return todo("viewsListNames");
+    const names = this.page.getByTestId("project-views-list").getByTestId("project-views-row-name");
+    const texts = await names.allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
   async viewsListBreadcrumb(): Promise<string[]> {
     return todo("viewsListBreadcrumb");
@@ -12908,14 +12918,25 @@ export class WebNewDriver implements ParityDriver {
   async viewsRowLiveVisible(_name: string): Promise<boolean> {
     return todo("viewsRowLiveVisible");
   }
-  async viewsRowStarVisible(_name: string): Promise<boolean> {
-    return todo("viewsRowStarVisible");
+  private viewsRowStar(name: string): Locator {
+    return this.viewsRowByName(name).getByTestId("project-views-row-star");
   }
-  async viewsRowStarSelected(_name: string): Promise<boolean> {
-    return todo("viewsRowStarSelected");
+
+  async viewsRowStarVisible(name: string): Promise<boolean> {
+    return this.isShown(this.viewsRowStar(name));
   }
-  async viewsToggleStar(_name: string): Promise<void> {
-    return todo("viewsToggleStar");
+
+  async viewsRowStarSelected(name: string): Promise<boolean> {
+    const star = this.viewsRowStar(name);
+    if ((await star.count()) === 0) return false;
+    return (await star.first().getAttribute("aria-pressed")) === "true";
+  }
+
+  async viewsToggleStar(name: string): Promise<void> {
+    // No quiescence wait: the new screen issues one list read per mount
+    // and applies the toggle to the cached record, so no duplicate
+    // response can clobber the star (NEWFRONT-220 has no counterpart).
+    await this.viewsRowStar(name).click({ timeout: 30_000 });
   }
   async viewsRowText(_name: string): Promise<string> {
     return todo("viewsRowText");
@@ -13183,38 +13204,96 @@ export class WebNewDriver implements ParityDriver {
     };
     await this.page.route(matches, handler);
   }
-  async viewsRowMenuOpen(_name: string): Promise<void> {
-    return todo("viewsRowMenuOpen");
+  async viewsRowMenuOpen(name: string): Promise<void> {
+    const trigger = this.viewsRowByName(name).getByTestId("project-views-row-menu-trigger");
+    await trigger.click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async viewsRowMenuItems(): Promise<string[]> {
-    return todo("viewsRowMenuItems");
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await menu.getByRole("menuitem").allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
-  async viewsRowMenuPick(_item: string): Promise<void> {
-    return todo("viewsRowMenuPick");
+
+  async viewsRowMenuPick(item: string): Promise<void> {
+    const menu = this.page.getByRole("menu");
+    await menu.getByRole("menuitem", { name: item }).first().click({ timeout: 30_000 });
+    await menu.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
-  async viewsRowCopyLink(_name: string): Promise<string> {
-    return todo("viewsRowCopyLink");
+
+  async viewsRowCopyLink(name: string): Promise<string> {
+    // Clipboard-write is denied by default in automation; grant before
+    // picking so the app's writeText (and its toast) actually runs.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.viewsRowMenuOpen(name);
+    await this.viewsRowMenuPick("Copy link");
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()), {
+        timeout: WebNewDriver.WAIT_MS,
+      })
+      .not.toBe("");
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
+
   async viewsRowMenuPublishPresent(): Promise<boolean> {
-    return todo("viewsRowMenuPublishPresent");
+    const items = await this.viewsRowMenuItems();
+    return items.some((item) => /publish/i.test(item));
   }
-  async viewsRowOpenNewTabHref(_name: string): Promise<string> {
-    return todo("viewsRowOpenNewTabHref");
+
+  async viewsRowOpenNewTabHref(name: string): Promise<string> {
+    await this.viewsRowMenuOpen(name);
+    const menu = this.page.getByRole("menu");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 30_000 }),
+      menu.getByRole("menuitem", { name: "Open in new tab" }).first().click({ timeout: 30_000 }),
+    ]);
+    const href = popup.url();
+    await popup.close().catch(() => undefined);
+    return href;
   }
+
+  private viewsDeleteDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: "Are you sure you want to delete this view?" }) });
+  }
+
   async viewsDeleteTitle(): Promise<string> {
-    return todo("viewsDeleteTitle");
+    const heading = this.page.getByRole("heading", { name: "Are you sure you want to delete this view?" });
+    if (!(await this.isShown(heading))) return "";
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
+
   async viewsDeleteBody(): Promise<string> {
-    return todo("viewsDeleteBody");
+    const dialog = this.viewsDeleteDialog();
+    if ((await dialog.count()) === 0) return "";
+    return ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
+
   async viewsDeleteConfirm(): Promise<void> {
-    return todo("viewsDeleteConfirm");
+    await this.viewsDeleteDialog().getByRole("button", { name: "Delete", exact: true }).click({ timeout: 60_000 });
+    await this.page
+      .getByRole("heading", { name: "Are you sure you want to delete this view?" })
+      .waitFor({ state: "hidden", timeout: 60_000 });
   }
+
   async viewsDeleteConfirmAttempt(): Promise<void> {
-    return todo("viewsDeleteConfirmAttempt");
+    await this.viewsDeleteDialog().getByRole("button", { name: "Delete", exact: true }).click({ timeout: 60_000 });
   }
+
   async viewsDeleteCancel(): Promise<void> {
-    return todo("viewsDeleteCancel");
+    await this.viewsDeleteDialog().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page
+      .getByRole("heading", { name: "Are you sure you want to delete this view?" })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
   async viewsDetailBreadcrumb(): Promise<string[]> {
     return todo("viewsDetailBreadcrumb");

@@ -6,6 +6,8 @@
 
 export { viewKeys } from "./api/keys.js";
 export { projectViewsQueryOptions, workspaceViewsQueryOptions } from "./api/queries.js";
+export { resetViewFavoriteIds, selectPendingViewId, useToggleViewFavorite } from "./api/viewFavorites.js";
+export type { ToggleViewFavoriteInput } from "./api/viewFavorites.js";
 export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
 export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
 export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
@@ -18,14 +20,20 @@ export type {
 export { WorkspaceViewsTabStrip } from "./components/WorkspaceViewsTabStrip.js";
 export type { WorkspaceViewsTabStripProps } from "./components/WorkspaceViewsTabStrip.js";
 export type { ProjectViewsListScreenProps } from "./components/ProjectViewsListScreen.js";
-export { CreateViewDialog } from "./dialog/CreateViewDialog.js";
-export type { CreateViewDialogProps } from "./dialog/CreateViewDialog.js";
+export { CreateViewDialog, UpdateViewDialog } from "./dialog/CreateViewDialog.js";
+export type { CreateViewDialogProps, UpdateViewDialogProps } from "./dialog/CreateViewDialog.js";
 export { WorkspaceViewDialog } from "./dialog/WorkspaceViewDialog.js";
 export type { WorkspaceViewDialogProps } from "./dialog/WorkspaceViewDialog.js";
 export { DeleteWorkspaceViewDialog } from "./dialog/DeleteWorkspaceViewDialog.js";
 export type { DeleteWorkspaceViewDialogProps } from "./dialog/DeleteWorkspaceViewDialog.js";
 export { ViewAccessField, OWNER_ACCESS, SHARED_ACCESS } from "./dialog/ViewAccessField.js";
 export type { ViewAccessFieldProps } from "./dialog/ViewAccessField.js";
+export { ViewAccessSummary } from "./dialog/ViewAccessSummary.js";
+export type { ViewAccessSummaryProps } from "./dialog/ViewAccessSummary.js";
+export { DeleteViewDialog, DELETE_VIEW_BODY, DELETE_VIEW_TITLE } from "./dialog/DeleteViewDialog.js";
+export type { DeleteViewDialogProps } from "./dialog/DeleteViewDialog.js";
+export { PublishViewDialog } from "./dialog/PublishViewDialog.js";
+export type { PublishViewDialogProps } from "./dialog/PublishViewDialog.js";
 export { ViewIconPicker, ViewLogoMark } from "./dialog/ViewIconPicker.js";
 export type { ViewIconPickerProps, ViewLogoProps } from "./dialog/ViewIconPicker.js";
 export { validateViewTitle, VIEW_TITLE_MAX_LENGTH } from "./dialog/viewTitle.js";
@@ -59,6 +67,20 @@ export {
   viewAccessLabel,
 } from "./lib/projectViews.js";
 export type { ProjectViewsBodyState, ProjectViewsBodyInput, ViewOwner } from "./lib/projectViews.js";
+export {
+  canDeleteProjectView,
+  canEditProjectView,
+  canStarProjectView,
+  findViewFavoriteId,
+  flipViewFavorite,
+  isViewFavorited,
+  removeProjectViewRow,
+  replaceProjectViewRow,
+  selectProjectViewMenuItems,
+  setProjectViewAnchor,
+  withViewAnchor,
+} from "./lib/projectViewActions.js";
+export type { ProjectViewMenuItemId } from "./lib/projectViewActions.js";
 export {
   capWorkspaceViewName,
   matchesWorkspaceViewQuery,

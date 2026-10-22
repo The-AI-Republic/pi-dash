@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -76,6 +76,36 @@ describe("ProjectViewRow", () => {
     expect(screen.queryByTestId("project-views-row-live")).not.toBeInTheDocument();
     rerender(<ProjectViewRow workspaceSlug="acme" projectId="project-1" view={makeView({})} owner={OWNER} />);
     expect(screen.queryByTestId("project-views-row-live")).not.toBeInTheDocument();
+  });
+
+  it("opens the publish dialog from the Live marker instead of navigating", () => {
+    const onLiveMarkerClick = vi.fn();
+    const view = makeView({ name: "Triage", anchor: "anchor-token" });
+    render(
+      <ProjectViewRow
+        workspaceSlug="acme"
+        projectId="project-1"
+        view={view}
+        owner={OWNER}
+        onLiveMarkerClick={onLiveMarkerClick}
+      />
+    );
+    const marker = screen.getByRole("button", { name: "Public link for Triage" });
+    expect(marker).toHaveTextContent("Live");
+    fireEvent.click(marker);
+    expect(onLiveMarkerClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the marker a plain badge without a publish opener", () => {
+    renderRow(makeView({ anchor: "anchor-token" }));
+    const marker = screen.getByTestId("project-views-row-live");
+    expect(marker.tagName).toBe("SPAN");
+    expect(screen.queryByRole("button", { name: /Public link/ })).not.toBeInTheDocument();
+  });
+
+  it("tags the row name for the parity driver", () => {
+    renderRow(makeView({ name: "Triage" }));
+    expect(screen.getByTestId("project-views-row-name")).toHaveTextContent("Triage");
   });
 
   it("shows the owner avatar and skips it when the owner is unknown", () => {
