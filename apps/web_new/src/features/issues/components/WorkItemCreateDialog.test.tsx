@@ -18,6 +18,7 @@ import { ToastHost } from "@pidash/kit";
 import { generateAssistantTitle } from "@pidash/api-client";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { setSessionClient } from "../../../core/session/queries.js";
 import { edition } from "../../../core/edition/index.js";
 import { FULL_RUN_TEST_TIMEOUT_MS } from "../../../testing/testBudget.js";
 import { pickerKeys } from "../../../shared/pickers/reference.js";
@@ -277,7 +278,10 @@ function promotedRow(projectId: string, name: string): Record<string, unknown> {
 interface StubOptions {
   createStatus?: number;
   createDelayMs?: number;
+  createErrorBody?: unknown;
   editStatus?: number;
+  editErrorBody?: unknown;
+  runners?: unknown[];
   publishStatus?: number;
   assistant?: { model_name: string; has_api_key: boolean };
   generate?: { status: number; body: unknown; delayMs?: number };
@@ -305,7 +309,7 @@ function stubTransport(options: StubOptions = {}) {
     [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas"),
     [PROJECT_BEACON]: projectDetail(PROJECT_BEACON, "Beacon"),
   };
-  createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+  const client = createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     const method = init.method ?? "GET";
     const body: unknown = init.body === undefined ? undefined : JSON.parse(init.body);
     calls.push({ url, method, body });
@@ -315,6 +319,9 @@ function stubTransport(options: StubOptions = {}) {
       headers: { get: () => null },
       text: async () => JSON.stringify(payload),
     });
+    if (new URL(url).pathname === "/api/runners/" && method === "GET") {
+      return json(200, options.runners ?? []);
+    }
     if (url.endsWith("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
     if (url.endsWith("/api/users/me/workspaces/")) {
       return json(200, [
@@ -600,7 +607,10 @@ function stubTransport(options: StubOptions = {}) {
       }
       const status = options.createStatus ?? 201;
       const name = (body as { name?: string } | undefined)?.name ?? "Created";
-      return json(status, status === 201 ? createdRow(projectMatch?.[1] ?? PROJECT_ATLAS, name) : {});
+      return json(
+        status,
+        status === 201 ? createdRow(projectMatch?.[1] ?? PROJECT_ATLAS, name) : (options.createErrorBody ?? {})
+      );
     }
     if (url.includes("/cycle-issues/") && method === "POST") {
       const status = options.membershipStatus ?? 201;
@@ -612,7 +622,7 @@ function stubTransport(options: StubOptions = {}) {
     if (/\/issues\/[^/]+\/$/.test(url) && method === "PATCH") {
       sent.push(body);
       const status = options.editStatus ?? 200;
-      return json(status, status === 200 ? createdRow(PROJECT_ATLAS, "Edited") : {});
+      return json(status, status === 200 ? createdRow(PROJECT_ATLAS, "Edited") : (options.editErrorBody ?? {}));
     }
     if (/\/issues\/[^/]+\/$/.test(url) && method === "GET") {
       const row = options.issueDetail;
@@ -652,6 +662,7 @@ function stubTransport(options: StubOptions = {}) {
     }
     return json(200, {});
   }) as never);
+  setSessionClient(client);
   return { calls, sent };
 }
 
@@ -681,6 +692,12 @@ function setup(
   // the rows a stored edit holds, so the cached lists must carry them.
   queryClient.setQueryData(pickerKeys.cycles(SLUG, PROJECT_ATLAS), [cycleRow(PARENT_ID, "Sprint 4")]);
   queryClient.setQueryData(pickerKeys.modules(SLUG, PROJECT_ATLAS), [moduleRow(PARENT_ID, "Checkout")]);
+  // The execution-target picker resolves the workspace id for its runner
+  // read through the session; seed it so no session fetch fires.
+  queryClient.setQueryData(
+    ["session", "workspaces"],
+    [{ id: WORKSPACE_ID, name: "Atlas", slug: SLUG, logo_url: null, total_members: 1, role: 20 }]
+  );
   const view = render(
     <QueryClientProvider client={queryClient}>
       <WorkItemCreateDialog
@@ -922,10 +939,7 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     setup({}, { projectIdentifier: "ATL" });
     await user.type(titleField(), "Linked report");
     save();
-    expect(await screen.findByRole("link", { name: "View work item" })).toHaveAttribute(
-      "href",
-      "/acme/browse/ATL-7/"
-    );
+    expect(await screen.findByRole("link", { name: "View work item" })).toHaveAttribute("href", "/acme/browse/ATL-7/");
     expect(screen.getByRole("button", { name: "Copy link" })).toBeInTheDocument();
   });
 
@@ -960,6 +974,65 @@ describe("WorkItemCreateDialog title rules (ISS-118)", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalled());
     expect(h.onOpenChange).not.toHaveBeenCalled();
     expect(titleField()).toHaveValue("Fresh report");
+  });
+
+  it("shows an execution-target refusal in place without toasting", async () => {
+    const user = userEvent.setup();
+    setup({
+      createStatus: 400,
+      createErrorBody: {
+        assigned_runner_id: ["That runner belongs to another project."],
+        code: "runner_wrong_project",
+      },
+      runners: [DIALOG_RUNNER],
+    });
+    await user.type(titleField(), "Needs a runner");
+    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
+    save();
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("That runner belongs to another project."));
+    expect(notifyError).not.toHaveBeenCalled();
+  });
+
+  it("clears the execution refusal once the target changes", async () => {
+    const user = userEvent.setup();
+    setup({
+      createStatus: 400,
+      createErrorBody: {
+        assigned_runner_id: ["That runner belongs to another project."],
+        code: "runner_wrong_project",
+      },
+      runners: [DIALOG_RUNNER],
+    });
+    await user.type(titleField(), "Needs a runner");
+    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
+    save();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: /gpu-box/ }));
+    await user.click(await screen.findByRole("option", { name: /Local pod/ }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("clears the execution refusal when the project changes", async () => {
+    const user = userEvent.setup();
+    setup({
+      createStatus: 400,
+      createErrorBody: {
+        assigned_runner_id: ["That runner belongs to another project."],
+        code: "runner_wrong_project",
+      },
+      runners: [DIALOG_RUNNER],
+    });
+    await user.type(titleField(), "Needs a runner");
+    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
+    save();
+    await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Atlas" }));
+    await user.click(await screen.findByRole("option", { name: "Beacon" }));
+    await waitFor(() => expect(screen.getByText("Beacon")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
 
@@ -1654,6 +1727,44 @@ describe("WorkItemCreateDialog preset parent (ISS-175)", () => {
 });
 
 const EDIT_ID = "a23e4567-e89b-12d3-a456-42661417400a";
+const DIALOG_RUNNER_ID = "b23e4567-e89b-12d3-a456-42661417400b";
+
+const DIALOG_RUNNER = {
+  id: DIALOG_RUNNER_ID,
+  name: "gpu-box",
+  status: "online",
+  host_label: "pilot-desktop",
+  provisioning: "manual",
+  os: "linux",
+  arch: "x86_64",
+  runner_version: "1.2.3",
+  dev_metadata: {},
+  protocol_version: 4,
+  capabilities: [],
+  last_heartbeat_at: "2026-01-01T00:00:00Z",
+  owner: WORKSPACE_ID,
+  dev_machine: null,
+  dev_machine_detail: null,
+  visibility: 0,
+  pod: PARENT_ID,
+  pod_detail: {
+    id: PARENT_ID,
+    name: "Local pod",
+    is_default: true,
+    project: PROJECT_ATLAS,
+    project_identifier: "ATL",
+  },
+  live_state: null,
+  enrolled_at: "2026-01-01T00:00:00Z",
+  revoked_at: null,
+  revoked_reason: "",
+  created_at: "2026-01-01T00:00:00Z",
+  updated_at: "2026-01-01T00:00:00Z",
+  assignable: true,
+  not_assignable_code: "",
+  is_busy: false,
+  queue_depth: 0,
+};
 const CYCLE_ID = "b23e4567-e89b-12d3-a456-42661417400b";
 const MODULE_ID = "c23e4567-e89b-12d3-a456-42661417400c";
 
@@ -1855,6 +1966,30 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
     await user.type(titleField(), "!");
     save();
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't update the work item", expect.any(String)));
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("shows an execution-target refusal in place on edit", async () => {
+    const user = userEvent.setup();
+    const { onChanged, props } = editProps();
+    const h = setup(
+      {
+        editStatus: 400,
+        editErrorBody: {
+          assigned_runner_id: ["That runner belongs to another project."],
+          code: "runner_wrong_project",
+        },
+        runners: [DIALOG_RUNNER],
+      },
+      props
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.click(screen.getByRole("button", { name: "Select target" }));
+    await user.click(await screen.findByRole("option", { name: /gpu-box/ }));
+    save();
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("That runner belongs to another project."));
+    expect(notifyError).not.toHaveBeenCalled();
     expect(h.onOpenChange).not.toHaveBeenCalled();
     expect(onChanged).not.toHaveBeenCalled();
   });

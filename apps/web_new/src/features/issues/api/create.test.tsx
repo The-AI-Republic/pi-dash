@@ -62,7 +62,7 @@ function createdRow(): Record<string, unknown> {
   };
 }
 
-function stubClient(status: number) {
+function stubClient(status: number, failureBody = "{}") {
   const calls: Array<{ url: string; method: string; body: string }> = [];
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     calls.push({ url, method: init.method ?? "GET", body: init.body ?? "" });
@@ -78,15 +78,15 @@ function stubClient(status: number) {
       status,
       url,
       headers: { get: () => null },
-      text: async () => (status === 201 ? JSON.stringify(createdRow()) : "{}"),
+      text: async () => (status === 201 ? JSON.stringify(createdRow()) : failureBody),
     };
   }) as never);
   return { calls };
 }
 
 describe("useCreateWorkItem", () => {
-  function renderHandle(status: number) {
-    const { calls } = stubClient(status);
+  function renderHandle(status: number, failureBody = "{}") {
+    const { calls } = stubClient(status, failureBody);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     let save: ((input: WorkItemCreateInput) => void) | null = null;
@@ -183,6 +183,13 @@ describe("useCreateWorkItem", () => {
     await waitFor(() => expect(notifyError).toHaveBeenCalledWith(WORK_ITEM_CREATE_FAILED_TITLE, expect.any(String)));
     expect(notifySuccess).not.toHaveBeenCalled();
     expect(screen.getByText("create:error")).toBeInTheDocument();
+  });
+
+  it("stays quiet on execution-target rejections, which report in place", async () => {
+    const h = renderHandle(400, JSON.stringify({ assigned_runner_id: ["That runner belongs to another project."] }));
+    h.save({ projectId: PROJECT_ID, payload: { name: "Fresh report" } });
+    await waitFor(() => expect(screen.getByText("create:error")).toBeInTheDocument());
+    expect(notifyError).not.toHaveBeenCalled();
   });
 });
 

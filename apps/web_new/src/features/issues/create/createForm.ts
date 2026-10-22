@@ -207,6 +207,7 @@ export function buildCreatePayload(form: CreateFormState): IssueCreateInput {
   if (form.execution !== null) {
     const target = executionTargetPatch(form.execution);
     payload.assigned_pod_id = target.assigned_pod_id;
+    payload.assigned_runner_id = target.assigned_runner_id;
     payload.agent_executor = target.agent_executor;
   }
   const branch = form.gitWorkBranch.trim();

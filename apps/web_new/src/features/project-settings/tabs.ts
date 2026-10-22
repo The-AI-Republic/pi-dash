@@ -33,7 +33,8 @@ export type ProjectSettingsTabKey =
   | "estimates"
   | "automations"
   | "github"
-  | "schedulers";
+  | "schedulers"
+  | "ai_workers";
 
 /** Roles a project tab is offered to, by the sidebar registry (PSET-004). */
 export type ProjectSettingsStanding = "everyone" | "member" | "admin";
@@ -67,6 +68,7 @@ export const PROJECT_SETTINGS_TABS: readonly ProjectSettingsTabDef[] = [
   { key: "automations", label: "Automations", suffix: "/automations", group: "execution", visibleTo: "admin" },
   { key: "github", label: "Repository", suffix: "/github", group: "execution", visibleTo: "admin" },
   { key: "schedulers", label: "Schedulers", suffix: "/schedulers", group: "execution", visibleTo: "admin" },
+  { key: "ai_workers", label: "AI Workers", suffix: "/ai-workers", group: "execution", visibleTo: "member" },
 ];
 
 /** A project role number, or null when the viewer holds no membership. */
@@ -222,6 +224,7 @@ export function decidePageGate(tab: ProjectSettingsTabDef, role: ProjectRole): P
     case "labels":
       return isMemberStanding(role) ? "allowed" : "denied";
     case "github":
+    case "ai_workers":
       return isMemberStanding(role) ? "allowed" : "denied";
     default:
       return isAdminStanding(role) ? "allowed" : "denied";

@@ -18,6 +18,7 @@ import { getToastManager, notifyError } from "../../../shared/shell/index.js";
 import { copyShareAddress, workItemPath } from "../../../shared/shell/shareLink.js";
 import { createTempId } from "../freshness/fresh.js";
 import { insertTempRow, removeTempRow, tempIssueRow } from "../freshness/tempRows.js";
+import { executionTargetFieldError } from "./executionTarget.js";
 import { issueKeys } from "./keys.js";
 
 /** Success title after a work item lands. */
@@ -105,8 +106,13 @@ export function useCreateWorkItem(workspaceSlug: string) {
     onSuccess: (created, input) => {
       announceCreatedWorkItem(workspaceSlug, input.projectIdentifier, created);
     },
-    onError: () => {
-      notifyError(WORK_ITEM_CREATE_FAILED_TITLE, WORK_ITEM_CREATE_FAILED_BODY);
+    onError: (error) => {
+      // Execution-target rejections report in place next to the picker
+      // (design §7.1); the caller's own onError shows them. Every other
+      // failure toasts here, as before.
+      if (executionTargetFieldError(error) === null) {
+        notifyError(WORK_ITEM_CREATE_FAILED_TITLE, WORK_ITEM_CREATE_FAILED_BODY);
+      }
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });

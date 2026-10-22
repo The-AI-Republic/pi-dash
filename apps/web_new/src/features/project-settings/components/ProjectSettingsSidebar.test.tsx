@@ -88,9 +88,11 @@ describe("ProjectSettingsSidebar", () => {
       expect(screen.getByTestId(`project-settings-group-label-${key}`)).toHaveTextContent(label);
     }
     expect(screen.getByTestId("project-settings-group-work-structure")).toHaveTextContent("States");
-    expect(screen.getAllByRole("link")).toHaveLength(14);
+    expect(screen.getAllByRole("link")).toHaveLength(15);
     expect(screen.getByTestId("project-settings-tab-github")).toHaveTextContent("Repository");
     expect(screen.getByTestId("project-settings-tab-github")).toHaveAttribute("href", `${ROOT}/github/`);
+    expect(screen.getByTestId("project-settings-tab-ai_workers")).toHaveTextContent("AI Workers");
+    expect(screen.getByTestId("project-settings-tab-ai_workers")).toHaveAttribute("href", `${ROOT}/ai-workers/`);
   });
 
   it("filters groups for members and guests", () => {

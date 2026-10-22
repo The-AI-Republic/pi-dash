@@ -8,6 +8,7 @@
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableDateTime, nullableUuid, uuid } from "./fields.js";
+import { DispatchWait, RunErrorDiagnostic } from "./issue-agent.js";
 import { PodMini } from "./pods.js";
 
 export const RUN_STATUSES = [
@@ -59,22 +60,6 @@ export const RunEvent = z.object({
 });
 export type RunEvent = z.infer<typeof RunEvent>;
 
-export const RUN_ERROR_SOURCES = ["agent", "pidash_runner", "pidash_cloud", "unknown"] as const;
-export type RunErrorSource = (typeof RUN_ERROR_SOURCES)[number];
-
-/**
- * Structured failure diagnosis. Present on the detail fetch when the
- * run carries error text; the list fetch always answers null.
- */
-export const RunErrorDiagnostic = z.object({
-  source: z.enum(RUN_ERROR_SOURCES),
-  source_label: z.string(),
-  kind: z.string(),
-  summary: z.string(),
-  action: z.string(),
-});
-export type RunErrorDiagnostic = z.infer<typeof RunErrorDiagnostic>;
-
 /** Which scheduler binding fired a run, for the back-link. */
 export const RunSchedulerBinding = z.object({
   id: uuid(),
@@ -108,6 +93,16 @@ export const AgentRun = z.object({
   agent_metadata: z.record(z.string(), z.unknown()),
   runner: nullableUuid(),
   work_item: nullableUuid(),
+  /**
+   * Hybrid-assignment pin (design §14.3): the runner this queued run
+   * waits for, its name, and the pin kind (locality or dedicated);
+   * dispatch_wait explains the wait. Optional so backends that predate
+   * the waiting state still parse.
+   */
+  pinned_runner: z.optional(nullableUuid()),
+  pinned_runner_name: z.optional(z.nullable(z.string())),
+  pin_kind: z.optional(z.string()),
+  dispatch_wait: z.optional(z.nullable(DispatchWait)),
   scheduler_binding: nullableUuid(),
   scheduler_binding_detail: z.nullable(RunSchedulerBinding),
   pod: uuid(),
@@ -260,6 +255,35 @@ export async function cancelRun(client: ApiClient, runId: string, reason?: strin
   const path = `/api/runners/runs/${runId}/cancel/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: { reason: reason ?? "" } });
   return client.parse(AgentRun, envelope.data, `POST ${path}`);
+}
+
+/**
+ * Release-pin outcome (hybrid assignment, design §12.2): the updated
+ * run — still queued, now unpinned — plus, on newer backends, the
+ * assignment note confirming the issue's dedicated runner is unchanged.
+ */
+export const ReleaseRunPinResult = z.object({
+  ...AgentRun.shape,
+  assignment: z.optional(
+    z.object({
+      assigned_runner_id: nullableUuid(),
+      changed: z.boolean(),
+    })
+  ),
+});
+export type ReleaseRunPinResult = z.infer<typeof ReleaseRunPinResult>;
+
+/**
+ * Release one queued pinned run to its pod's shared queue. Run-scoped:
+ * the issue's dedicated assignment is unchanged (design §12.2). Only
+ * the issue's creator and current assignees may release a dedicated
+ * pin (403 otherwise); non-queued or unpinned runs are refused with
+ * 409. Answers the updated run.
+ */
+export async function releaseRunPin(client: ApiClient, runId: string): Promise<ReleaseRunPinResult> {
+  const path = `/api/runners/runs/${runId}/release-pin/`;
+  const envelope = await client.sendJson<unknown>("POST", path, {});
+  return client.parse(ReleaseRunPinResult, envelope.data, `POST ${path}`);
 }
 
 /**

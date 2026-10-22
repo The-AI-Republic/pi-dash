@@ -51,7 +51,7 @@ function labels(role: number | null): string[] {
 }
 
 describe("selectSettingsNav", () => {
-  it("shows admins all thirteen tabs in four groups", () => {
+  it("shows admins all fourteen tabs in four groups", () => {
     const groups = selectSettingsNav(ROLE_ADMIN);
     expect(groups.map((group) => group.label)).toEqual(["General", "Features", "Work structure", "Execution"]);
     expect(labels(ROLE_ADMIN)).toEqual([
@@ -68,12 +68,17 @@ describe("selectSettingsNav", () => {
       "Automations",
       "Repository",
       "Schedulers",
+      "AI Workers",
     ]);
   });
 
-  it("shows members general and work structure only", () => {
-    expect(selectSettingsNav(ROLE_MEMBER).map((group) => group.label)).toEqual(["General", "Work structure"]);
-    expect(labels(ROLE_MEMBER)).toEqual(["General", "Members", "States", "Labels"]);
+  it("shows members general, work structure and AI workers", () => {
+    expect(selectSettingsNav(ROLE_MEMBER).map((group) => group.label)).toEqual([
+      "General",
+      "Work structure",
+      "Execution",
+    ]);
+    expect(labels(ROLE_MEMBER)).toEqual(["General", "Members", "States", "Labels", "AI Workers"]);
   });
 
   it("shows guests general and members, with the general group only", () => {
@@ -212,7 +217,7 @@ describe("decidePageGate", () => {
   });
 
   it("admits members to states, labels and the wider repository page", () => {
-    for (const key of ["states", "labels", "github"]) {
+    for (const key of ["states", "labels", "github", "ai_workers"]) {
       expect(gate(key, ROLE_GUEST)).toBe("denied");
       expect(gate(key, ROLE_MEMBER)).toBe("allowed");
       expect(gate(key, ROLE_ADMIN)).toBe("allowed");

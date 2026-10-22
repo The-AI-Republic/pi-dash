@@ -40,6 +40,8 @@ const DONE_STATE = "623e4567-e89b-12d3-a456-426614174005";
 const STARTED_STATE = "723e4567-e89b-12d3-a456-426614174006";
 const POD_A = "823e4567-e89b-12d3-a456-426614174007";
 const POD_B = "a23e4567-e89b-12d3-a456-426614174008";
+const WORKSPACE_ID = "b23e4567-e89b-12d3-a456-42661417400e";
+const RUNNER_GPU = "c23e4567-e89b-12d3-a456-42661417400f";
 
 const ME = "023e4567-e89b-12d3-a456-426614174009";
 
@@ -242,6 +244,47 @@ function podRow(id: string, name: string, isDefault: boolean) {
 
 const PODS = [podRow(POD_A, "WEB_pod_a", true), podRow(POD_B, "WEB_pod_b", false)];
 
+const RUNNERS = [
+  {
+    id: RUNNER_GPU,
+    name: "gpu-box",
+    status: "online",
+    host_label: "ana-desktop",
+    provisioning: "manual",
+    os: "linux",
+    arch: "x86_64",
+    runner_version: "1.2.3",
+    dev_metadata: {},
+    protocol_version: 4,
+    capabilities: [],
+    last_heartbeat_at: "2024-02-03T04:05:06Z",
+    owner: ADA,
+    dev_machine: null,
+    dev_machine_detail: null,
+    visibility: 0,
+    pod: POD_A,
+    pod_detail: {
+      id: POD_A,
+      name: "WEB_pod_a",
+      is_default: true,
+      project: PROJECT,
+      project_identifier: "WEB",
+    },
+    live_state: null,
+    enrolled_at: "2024-01-02T03:04:05Z",
+    revoked_at: null,
+    revoked_reason: "",
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+    assignable: true,
+    not_assignable_code: "",
+    is_busy: false,
+    queue_depth: 0,
+  },
+];
+
+const WORKSPACES = [{ id: WORKSPACE_ID, name: "Acme", slug: SLUG, logo_url: null, total_members: 2, role: 20 }];
+
 interface HarnessOptions {
   project?: Partial<ProjectDetail>;
   patchStatus?: number;
@@ -249,6 +292,7 @@ interface HarnessOptions {
   projectStatus?: number;
   statesStatus?: number;
   podsStatus?: number;
+  runners?: unknown;
   directory?: unknown;
   /** Keeps the issue PATCH open until the returned release runs. */
   holdPatch?: boolean;
@@ -336,6 +380,14 @@ function harness(options: HarnessOptions = {}) {
         text: async () => (status === 200 ? JSON.stringify(PODS) : "{}"),
       };
     }
+    if (new URL(url).pathname === "/api/runners/") {
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(options.runners ?? []),
+      };
+    }
     if (url.endsWith(`/workspaces/${SLUG}/members/`)) {
       if (directoryGate !== null) await directoryGate;
       return {
@@ -351,6 +403,7 @@ function harness(options: HarnessOptions = {}) {
   setSessionClient(client);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   queryClient.setQueryData(["session", "me"], ME_PAYLOAD);
+  queryClient.setQueryData(["session", "workspaces"], WORKSPACES);
   return {
     client,
     queryClient,
@@ -477,6 +530,18 @@ describe("selectExecutionSelection", () => {
     expect(selectExecutionSelection(issueFixture(), localProject)).toEqual({ type: "pod", podId: POD_A });
     expect(selectExecutionSelection(issueFixture({ assigned_pod_id: null }), localProject)).toBeNull();
     expect(selectExecutionSelection(issueFixture({ assigned_pod_id: undefined }), localProject)).toBeNull();
+  });
+
+  it("reads the pinned runner over the pod", () => {
+    expect(
+      selectExecutionSelection(issueFixture({ assigned_pod_id: POD_A, assigned_runner_id: "runner-1" }), localProject)
+    ).toEqual({ type: "runner", runnerId: "runner-1", podId: POD_A });
+  });
+
+  it("keeps a runner without a pod readable with an empty pod", () => {
+    expect(
+      selectExecutionSelection(issueFixture({ assigned_pod_id: null, assigned_runner_id: "runner-1" }), localProject)
+    ).toEqual({ type: "runner", runnerId: "runner-1", podId: "" });
   });
 
   it("inherits a cloud project default when the issue pins no executor", () => {
@@ -776,6 +841,98 @@ describe("SidebarProperties", () => {
     }
   });
 
+  it("names the pinned runner on the Runs on row", async () => {
+    const { queryClient } = harness({ runners: RUNNERS });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({ assigned_pod_id: POD_A, assigned_runner_id: RUNNER_GPU })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("gpu-box"));
+    expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("WEB_pod_a");
+  });
+
+  it("badges the Runs on trigger while the run waits", async () => {
+    const activeRun = {
+      id: "a23e4567-e89b-12d3-a456-42661417400a",
+      status: "queued",
+      executor_kind: "local_runner",
+      queue_position: null,
+      runner: null,
+      runner_name: null,
+      pinned_runner: RUNNER_GPU,
+      pinned_runner_name: "gpu-box",
+      pin_kind: "dedicated",
+      dispatch_wait: {
+        reason: "runner_offline",
+        pin_kind: "dedicated",
+        runner: RUNNER_GPU,
+        runner_name: "gpu-box",
+        queued_at: "2024-02-03T04:05:06Z",
+        runner_last_seen_at: null,
+        runs_ahead: 0,
+        releasable: true,
+      },
+      created_at: "2024-02-03T04:05:06Z",
+      assigned_at: null,
+      started_at: null,
+      ended_at: null,
+      done_payload: null,
+      error: "",
+      error_code: "",
+      error_diagnostic: null,
+      llm_model: "",
+      input_tokens: null,
+      output_tokens: null,
+      total_tokens: null,
+      live_state: null,
+    };
+    const { queryClient } = harness({ runners: RUNNERS });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture({
+          assigned_pod_id: POD_A,
+          assigned_runner_id: RUNNER_GPU,
+          agent_status: { ticker: null, active_run: activeRun, latest_run: activeRun, run_count: 1 },
+        })}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(within(row("Runs on")).getByRole("button")).toHaveTextContent("Offline"));
+  });
+
+  it("patches the runner pin from the Runs on picker", async () => {
+    const { queryClient, writes } = harness({ runners: RUNNERS });
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    fireEvent.click(within(row("Runs on")).getByRole("button"));
+    fireEvent.click(await screen.findByRole("option", { name: /gpu-box/ }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]!.url).toContain(`/issues/${ISSUE}/`);
+    expect(writes[0]!.body).toEqual({
+      assigned_pod_id: POD_A,
+      assigned_runner_id: RUNNER_GPU,
+      agent_executor: "local_runner",
+    });
+  });
+
   it("patches state with the picked id", async () => {
     const { queryClient, writes } = harness();
     wrap(
@@ -962,7 +1119,11 @@ describe("SidebarProperties", () => {
     expect(cloud).toHaveTextContent(agentReasonMessage("cloud_agent_unavailable"));
     fireEvent.click(screen.getByRole("option", { name: /WEB_pod_b/ }));
     await waitFor(() => expect(writes).toHaveLength(1));
-    expect(writes[0]!.body).toEqual({ assigned_pod_id: POD_B, agent_executor: "local_runner" });
+    expect(writes[0]!.body).toEqual({
+      assigned_pod_id: POD_B,
+      assigned_runner_id: null,
+      agent_executor: "local_runner",
+    });
   });
 
   it("patches a managed-agent pick to the executor with no pod", async () => {
@@ -977,7 +1138,11 @@ describe("SidebarProperties", () => {
     fireEvent.click(within(row("Pod")).getByRole("button"));
     fireEvent.click(await screen.findByRole("option", { name: /Pi Dash Agent \(desktop\)/ }));
     await waitFor(() => expect(writes).toHaveLength(1));
-    expect(writes[0]!.body).toEqual({ assigned_pod_id: null, agent_executor: "managed_runner" });
+    expect(writes[0]!.body).toEqual({
+      assigned_pod_id: null,
+      assigned_runner_id: null,
+      agent_executor: "managed_runner",
+    });
   });
 
   it("reports a refused write and keeps the row on the server value", async () => {

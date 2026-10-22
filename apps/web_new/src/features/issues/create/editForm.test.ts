@@ -217,13 +217,30 @@ describe("buildEditPayload", () => {
     const baseline = baselineFor(form);
     form.execution = target;
     const set = buildEditPayload(form, baseline);
-    expect(set).toMatchObject({ assigned_pod_id: "pod-1", agent_executor: "local_runner" });
+    expect(set).toMatchObject({
+      assigned_pod_id: "pod-1",
+      assigned_runner_id: null,
+      agent_executor: "local_runner",
+    });
 
     const clearedForm = { ...form, execution: null };
     const clearedBaseline = { ...baselineFor(form) };
     expect(buildEditPayload(clearedForm, clearedBaseline)).toMatchObject({
       assigned_pod_id: null,
+      assigned_runner_id: null,
       agent_executor: null,
+    });
+  });
+
+  it("writes the runner pin when the execution moves to a runner", () => {
+    const form = formFromRow(row(), PROJECT);
+    form.execution = { type: "pod", podId: "pod-1" };
+    const baseline = baselineFor(form);
+    form.execution = { type: "runner", runnerId: "runner-1", podId: "pod-1" };
+    expect(buildEditPayload(form, baseline)).toMatchObject({
+      assigned_pod_id: "pod-1",
+      assigned_runner_id: "runner-1",
+      agent_executor: "local_runner",
     });
   });
 

@@ -451,6 +451,7 @@ describe("draftInputFromPatch", () => {
         target_date: null,
         git_work_branch: "team/x",
         assigned_pod_id: "pod",
+        assigned_runner_id: "runner-1",
         agent_executor: "local_runner",
         estimate_point: "e-1",
       })

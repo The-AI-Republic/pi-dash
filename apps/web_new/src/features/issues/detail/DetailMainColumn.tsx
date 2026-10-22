@@ -23,6 +23,7 @@ import { IssueDescriptionField, type RestoredDescription } from "./IssueDescript
 import { IssueTitleField } from "./IssueTitleField.js";
 import { SaveIndicator } from "./SaveIndicator.js";
 import { useSavePipeline } from "./savePipeline.js";
+import { WaitingBanner } from "./waiting/WaitingBanner.js";
 
 export interface DetailMainColumnProps {
   workspaceSlug: string;
@@ -81,6 +82,7 @@ export function DetailMainColumn({
           <SaveIndicator status={pipeline.status} />
         </div>
       </div>
+      <WaitingBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} disabled={readOnly} />
       <IssueTitleField
         value={issue.name}
         disabled={readOnly}

@@ -80,10 +80,25 @@ const { intake_count: _listOnly, ...projectDetailShape } = Project.shape;
  * non-member projects 409. The agent readiness gate reads the executor
  * options and the default executor off this same row (DESK-002).
  */
+/**
+ * What a project does with a dedicated issue when its runner is
+ * revoked or deleted (hybrid assignment, design §6.6): fail the queued
+ * run and move the issue to Backlog, or fall back to the pod. Stays an
+ * open string like the executor kinds; readers compare the two known
+ * values and treat anything else as the default.
+ */
+export const DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG = "fail_to_backlog";
+export const DEDICATED_RUNNER_LOST_FALL_BACK = "fall_back";
+
 export const ProjectDetail = z.object({
   ...projectDetailShape,
   agent_executor_options: z.array(AgentExecutorOption),
   default_agent_executor: z.string(),
+  /**
+   * Lost-runner rule (design §6.6). Optional so backends that predate
+   * the setting still parse; absent reads as the default.
+   */
+  dedicated_runner_lost_action: z.optional(z.string()),
 });
 export type ProjectDetail = z.infer<typeof ProjectDetail>;
 
@@ -152,6 +167,7 @@ export const ProjectDetails = z.object({
   next_work_item_sequence: z.number(),
   agent_executor_options: z.array(AgentExecutorOption),
   default_agent_executor: z.string(),
+  dedicated_runner_lost_action: z.optional(z.string()),
 });
 export type ProjectDetails = z.infer<typeof ProjectDetails>;
 

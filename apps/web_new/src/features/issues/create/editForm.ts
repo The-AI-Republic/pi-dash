@@ -41,12 +41,16 @@ export interface EditBaseline {
 /** The comparable half of the form (identity lives outside it). */
 export type EditFormFields = Omit<CreateFormState, "projectId">;
 
-/** Execution targets compare by their two written columns. */
+/** Execution targets compare by their three written columns. */
 function sameExecution(left: ExecutionSelection | null, right: ExecutionSelection | null): boolean {
   if (left === null || right === null) return left === right;
   const a = executionTargetPatch(left);
   const b = executionTargetPatch(right);
-  return a.assigned_pod_id === b.assigned_pod_id && a.agent_executor === b.agent_executor;
+  return (
+    a.assigned_pod_id === b.assigned_pod_id &&
+    a.assigned_runner_id === b.assigned_runner_id &&
+    a.agent_executor === b.agent_executor
+  );
 }
 
 /** Assignee and label lists compare as sets: order is not an edit. */
@@ -230,16 +234,19 @@ export function buildEditPayload(form: CreateFormState, baseline: EditBaseline):
   // server rather than silently keeping the old branch (ISS-128).
   const branch = form.gitWorkBranch.trim();
   if (branch !== before.gitWorkBranch) patch.git_work_branch = branch;
-  // The execution target is written through the same patch: the pod pin
-  // and the executor override travel as a pair (ISS-218).
+  // The execution target is written through the same patch: the pod
+  // pin, the runner pin and the executor override travel together
+  // (ISS-218).
   if (form.execution === null) {
     if (before.execution !== null) {
       patch.assigned_pod_id = null;
+      patch.assigned_runner_id = null;
       patch.agent_executor = null;
     }
   } else if (!sameExecution(form.execution, before.execution)) {
     const target = executionTargetPatch(form.execution);
     patch.assigned_pod_id = target.assigned_pod_id;
+    patch.assigned_runner_id = target.assigned_runner_id;
     patch.agent_executor = target.agent_executor;
   }
   return patch;

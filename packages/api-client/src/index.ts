@@ -136,6 +136,8 @@ export { Project, ProjectList, listProjects } from "./contracts/projects.js";
 export { ProjectLite } from "./contracts/project-lite.js";
 export {
   AgentExecutorOption,
+  DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG,
+  DEDICATED_RUNNER_LOST_FALL_BACK,
   ProjectDetail,
   ProjectDetails,
   ProjectDetailsList,
@@ -246,6 +248,7 @@ export type {
 export {
   ISSUE_PRIORITIES,
   ArchivedIssue,
+  AssignedRunnerDetail,
   GlobalIssueListResponse,
   GlobalIssueRow,
   GroupedIssueListResponse,
@@ -538,7 +541,16 @@ export type {
   DescriptionByteUploadResponse,
   UploadedDescriptionAsset,
 } from "./contracts/issue-description-assets.js";
-export { AgentLiveState, AgentRunSummary, AgentStatus, AgentTicker } from "./contracts/issue-agent.js";
+export {
+  AgentLiveState,
+  AgentRunSummary,
+  AgentStatus,
+  AgentTicker,
+  DispatchWait,
+  RUN_ERROR_SOURCES,
+  RunErrorDiagnostic,
+} from "./contracts/issue-agent.js";
+export type { RunErrorSource } from "./contracts/issue-agent.js";
 export {
   Favorite,
   FavoriteList,
@@ -1056,9 +1068,8 @@ export {
   AgentRunPage,
   AgentRunQueued,
   EXECUTOR_KINDS,
-  RunErrorDiagnostic,
+  ReleaseRunPinResult,
   RunEvent,
-  RUN_ERROR_SOURCES,
   RunSchedulerBinding,
   RUN_STATUSES,
   RunToolCall,
@@ -1069,6 +1080,7 @@ export {
   createRun,
   getRun,
   listRuns,
+  releaseRunPin,
   reTickIssue,
   ReTickResponse,
   runAi,
@@ -1077,7 +1089,6 @@ export type {
   DispatchInput,
   ExecutorKind,
   RunCreateInput,
-  RunErrorSource,
   RunListQuery,
   RunStatus,
   ToolCallStatus,

@@ -170,6 +170,7 @@ describe("buildCreatePayload", () => {
       estimate_point: "point",
       parent_id: "parent",
       assigned_pod_id: "pod",
+      assigned_runner_id: null,
       agent_executor: "local_runner",
     });
   });
@@ -177,7 +178,17 @@ describe("buildCreatePayload", () => {
   it("pins an agent executor with no pod", () => {
     const payload = buildCreatePayload(form({ name: "Agent", execution: { type: "agent", executor: "cloud_agent" } }));
     expect(payload.assigned_pod_id).toBeNull();
+    expect(payload.assigned_runner_id).toBeNull();
     expect(payload.agent_executor).toBe("cloud_agent");
+  });
+
+  it("pins a runner inside its pod", () => {
+    const payload = buildCreatePayload(
+      form({ name: "Runner", execution: { type: "runner", runnerId: "runner-1", podId: "pod" } })
+    );
+    expect(payload.assigned_pod_id).toBe("pod");
+    expect(payload.assigned_runner_id).toBe("runner-1");
+    expect(payload.agent_executor).toBe("local_runner");
   });
 
   it("leaves the priority out when it is none", () => {

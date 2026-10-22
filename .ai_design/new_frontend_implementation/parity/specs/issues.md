@@ -2043,3 +2043,46 @@ the issue retrieve including the token total, re-tick `POST
 Subscription status, subscribe, and unsubscribe on
 `BASE/issues/{id}/subscribe/` are covered; the palette and header
 toggles reuse them.
+
+## 26. Hybrid issue assignment (ISS-239–242)
+
+An issue runs either on its pod (the squad) or on one dedicated
+runner inside that pod. The contract is settled by the hybrid
+assignment design (HA-1, `.ai_design/dedicated_runner_assignment`)
+and is new-app-first: neither the old web UI nor the backend offered
+any of it when the slices below were built, so the rows below carry
+no oracle result yet and the scenarios named run once the old-app
+picker (PDASHOSS01-299) and the backend (PDASHOSS01-297) land. Until
+then the frontend builds against the intended contract and degrades
+gracefully: every new field is optional, runners without eligibility
+answers stay pickable with status lines from the live status plus
+heartbeat, and the picker surfaces are the create dialog and the
+detail sidebar — the new list, board and table layouts show no pod
+today, so there is nothing to extend there.
+
+The execution-target picker (ISS-241) keeps the ISS-218 shape —
+search, single-select, cloud/managed peer rows with availability
+reasons, the DEFAULT tag — and nests one runner level under each
+pod: the pod row reads as the squad choice, followed by that pod's
+runners, each with a status line (online and idle, busy with a queue
+depth, offline with the last heartbeat), its owner, and — when the
+server rules it out — disabled with the reason for its code. Picking
+a busy or queued runner warns how long the wait is without blocking
+the save. The collapsed trigger names the runner with its pod; while
+the run waits it also carries the waiting reason as a badge. A
+runner pick writes the pod, the runner and the local executor in one
+issue PATCH and survives a reload; an agent pick clears the pod and
+the runner (ISS-242). A rejected write shows the API's validation
+message in place next to the picker instead of a toast.
+
+While the issue's active run is queued for its runner (ISS-239), the
+detail names the runner and the reason — offline with its last
+heartbeat, busy with the runs ahead, not permitted, or dispatching.
+The new detail has no agent-status area yet, so the banner sits at
+the top of the detail's main column, visible to everyone who can see
+the issue, with its actions disabled for read-only viewers. The
+banner offers the three ways out (ISS-240): run once on any runner
+in the pod (disabled unless the server marks the run releasable,
+which is the creator-or-assignee rule), change the issue's runner
+through the picker, and cancel the run. The release is run-scoped:
+the issue keeps its dedicated assignment afterwards.
