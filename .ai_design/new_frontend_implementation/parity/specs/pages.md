@@ -111,7 +111,7 @@ Consequences that shape every slice:
 - **Lists are one cached collection.** The project page collection is read
   once per workspace/project and partitioned client-side into the three
   tabs. With nested pages (D17) the default collection stays top-level only,
-  so the tree fetches children per expanded parent (§9).
+  so the tree fetches children per expanded parent (§11.7, §12.2).
 
 The document's hash is the **mark** — a single emoji or a single vector
 icon, never a cover image (PAGE-082).
@@ -151,7 +151,7 @@ page is refused because deletion requires an archived page.
 A guest's collection read answers 200 with only the pages the guest owns,
 unless the project's guest-all-features flag is on. The list therefore shows
 the guest's own pages and nothing else — not an error panel. Direct links to
-pages the guest does not own land on the not-found panel (§5.2).
+pages the guest does not own land on the not-found panel (§4.2).
 
 ### 2.3 Visibility, lock, archive — the three independent state flags
 
@@ -182,7 +182,7 @@ still showing is dropped, which is why the oracle quiesces between steps.
 ### 2.5 The two "rendered but disabled" cases
 
 Only two controls render disabled instead of hiding: the list's empty-state
-create action for a guest (§4.3), and the project feature-management
+create action for a guest (§3.7), and the project feature-management
 shortcut for a non-admin when the pages feature is off (PAGE-001). Every
 other gated control is absent when not permitted.
 
@@ -305,7 +305,7 @@ favourite **star** (member and above only) and the overflow menu. The
 visibility glyph and the date are revealed on row hover together with the
 owner; a restricted row's glyph reveals a tooltip reading `Private` (pinned
 word) and an open row's glyph reveals `Public` — the tooltip must actually
-open (see §11.2 for the old bug). Clicking the row opens the detail view;
+open (see §15 for the old bug). Clicking the row opens the detail view;
 right-click anywhere on the row opens the same overflow menu at the pointer
 (the browser context menu is suppressed). The row menu is described in
 §3.8.
@@ -455,7 +455,7 @@ link back to the project), a back-to-list control, the **sibling switcher**
 (a searchable menu over the sibling pages the collection holds — same
 project, not archived, that the caller can see; selecting one navigates to
 it and drops the `paneTab` and `version` keys), the **sync indicator**
-(§8.2), and the **header action cluster** (§6.5: favourite, link copy, and
+(§8.2), and the **header action cluster** (§7: favourite, link copy, and
 whatever edition slots register). The cluster always leaves a path back to
 the list.
 
@@ -503,9 +503,10 @@ A mark affordance beside the title reveals on hover and stays pinned while
 the title is empty (so a new page can find it). It opens a picker with two
 tabs, **Emoji** and **Icon** (vector icons from the shared icon set),
 searchable; picking persists over `PATCH .../pages/{pageId}/` — the mark is
-the page's `logo_props` (`{in_use: "emoji" | "icon", ...}`), saved alongside
-`color` — and the mark appears in the list row, the breadcrumb cluster and
-the sibling switcher. The picker offers a clear action that removes the
+the page's `logo_props` (`{in_use: "emoji" | "icon", ...}`), which is the
+only field the picker writes (`color` is a separate, unrelated column and
+the mark never goes through it) — and the mark appears in the list row, the
+breadcrumb cluster and the sibling switcher. The picker offers a clear action that removes the
 mark; clearing persists an empty mark and the fallback glyph returns (the
 old build refused the clear with a 400 — NEWFRONT-355). The whole surface
 is absent for read-only viewers.
@@ -537,7 +538,7 @@ Controls, in reading order:
    reloads with the document.
 7. **Image** (PAGE-034) — opens the file picker, uploads through the file
    pipeline (§11.4) and inserts the image inline at the caret; the image
-   appears in the assets pane (§6.4).
+   appears in the assets pane (§6.7).
 8. **Colour** (PAGE-036, confirmed text) — the letter/wash colour control.
    Its button previews the current letter colour and text-wash colour of
    the selection. It opens a popover with **one swatch row per kind** —
@@ -591,12 +592,13 @@ id and a display label. The block serializes all of those into the document
 so a licensed client can resolve it, and it renders as a single unit that
 selects and deletes as a whole. In the community edition the embed slot
 renders an upgrade prompt in place of the live card, with an outbound link
-to the upgrade surface (shared `UpgradePill`/outbound link, §9 tokens). The
-old community build rendered nothing at all (NEWFRONT-352); the intended
-behaviour is the prompt, and the gate proves the prompt on `web_new` while
-treating the old "nothing renders" assertion as target/no-oracle. In a
+to the upgrade surface (shared `UpgradePill` and the kit's outbound-link
+styling, §10.1). The old community build rendered nothing at all
+(NEWFRONT-352); the intended behaviour is the prompt, and the gate proves
+the prompt on `web_new` while treating the old "nothing renders" assertion
+as target/no-oracle. In a
 licensed edition the slot renders the referenced item's card and its
-peek-overlay (§9.2, PAGE-043 peer).
+peek-overlay (§13.2, PAGE-043 peer).
 
 ### 6.3 Links and entity previews (PAGE-043)
 
@@ -612,7 +614,7 @@ preview for recognised entity references it has a resolver for, and the
 gate proves the link-editing and linkify halves plus the preview on the
 entity kinds the shell resolver knows. The pages slice does not own the
 peek overlay: it emits the entity reference and lets the shell's peek
-open it (§9.2).
+open it (§13.2).
 
 ### 6.4 Mentions (PAGE-041)
 
@@ -634,7 +636,7 @@ width, and the canvas reflows around it (a fixed readable measure, about
 oracle as the two measures the full-width toggle chooses between). It hosts
 three tabs in order: **Outline**, **Info**, **Assets** (pinned labels). The
 active tab rides `paneTab`; "temporarily replaced by extension content"
-is the edition pane slot (§9.6). While the pane is closed, a slim
+is the edition pane slot (§9.4). While the pane is closed, a slim
 heading-density preview floats at the canvas edge, summarising the
 document's heading structure; hovering expands it, and selecting a heading
 opens the pane on Outline and scrolls there. The preview reads the live
@@ -668,7 +670,7 @@ subscribe to editor changes, not to reloads.
 
 Attribution rows: **last edited by** with a relative timestamp, and
 **created by** with a calendar date. Each name links to that person's
-profile (§9.3). A deactivated or missing member renders a textual fallback
+profile (§13.3). A deactivated or missing member renders a textual fallback
 (e.g. "Deactivated user", pinned shape: the row stays intact, the name is
 replaced by a deactivated-user label, and it is not a broken link).
 
@@ -702,7 +704,7 @@ A star in the header, member and above. It writes the favourite through
 `POST/DELETE .../favorite-pages/{pageId}/` (no collection read exists for
 it), flips filled/empty optimistically, rolls back with an error notice on
 failure, and — on the first favourite — asks the sidebar favourites section
-to open (§9.1). It coordinates with the list star through one shared
+to open (§13.1). It coordinates with the list star through one shared
 favourite write helper and two distinct driver method names, never two
 implementations.
 
@@ -735,12 +737,14 @@ so the menu and editor reflect server truth without a reload.
 The detail's options menu gathers, in the owner order pinned by the oracle:
 **Full width**, **Sticky toolbar**, **Copy markdown**, **Version history**,
 **Make a copy**, **Archive** (or **Restore**), **Make private** (or **Make
-public**), **Export** — followed by the export registration seam's entry
-(§9.5) in the position that seam declares. Full width toggles the canvas
-measure (§6.5) and persists; sticky toolbar toggles the bar (§5.3) and
-persists; Copy markdown is PAGE-044; Version history opens the pane on its
-info tab; Make a copy is PAGE-012; Archive is §7.3; visibility is §7.3;
-Export opens the export dialog registered by the exports area.
+public**), **Export**. The last entry is the export registration seam's
+mount point (§9.6): the menu shows it only when a registration exists, and
+the pages side places it after the pages-owned entries, which is where the
+oracle pins `Export` (after `Make private`, PAGE-060). Full width toggles
+the canvas measure (§6.5) and persists; sticky toolbar toggles the bar
+(§5.3) and persists; Copy markdown is PAGE-044; Version history opens the
+pane on its info tab; Make a copy is PAGE-012; Archive is §7.3; visibility
+is §7.3; Export opens the export dialog registered by the exports area.
 
 The menu degrades by role: a member sees Full width, Sticky toolbar, Copy
 markdown, Version history, Make a copy, Export; the owner/admin entries
@@ -956,9 +960,11 @@ Component })` (called once by whoever owns the dialog) and a hook
   `usePageExportEntry()` that returns the registered entry or `null`. The
   entry's `Component` renders the dialog; the pages detail renders it when
   the menu entry is chosen.
-- The options menu renders the entry, at the position the seam declares
-  (after the pages-owned entries), only when a registration exists. With no
-  registration the menu has no Export entry and no placeholder.
+- The options menu renders the entry, at the position the registration
+  declares (the pages side mounts it last, after the pages-owned entries,
+  matching the oracle's `Export`-last pin for PAGE-060), only when a
+  registration exists. With no registration the menu has no Export entry
+  and no placeholder.
 - The pages slice never imports the exports feature and never reimplements
   its dialog. The exports slice never imports pages internals; it imports
   the seam module only.
@@ -1063,9 +1069,9 @@ import the contracts, never call raw fetch.
 | Method and path                                 | Body / query                                                                                                                                | Response                                                                                             | Rows                                           |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
 | `GET BASE/pages/`                               | — (the collection; the UI sends no filter params — filtering is client-side)                                                                | array of page objects                                                                                | 001–021                                        |
-| `POST BASE/pages/`                              | `name` (string), `access` (0/1), `parent` (id or null), `color` (mark), optional `description_html`/`description_json`/`description_binary` | created page object                                                                                  | 007, 008, 084                                  |
+| `POST BASE/pages/`                              | `name` (string), `access` (0/1), `parent` (id or null), `logo_props` (mark), optional `description_html`/`description_json`/`description_binary` | created page object                                                                                  | 007, 008, 084                                  |
 | `GET BASE/pages/{pageId}/`                      | `track_visit=true` (default true)                                                                                                           | page object, plus `issue_ids` when tracking                                                          | 022                                            |
-| `PATCH BASE/pages/{pageId}/`                    | any subset of `name`, `color`, `access`, `parent`                                                                                           | updated page object; `400 "Page is locked"` while locked                                             | 026, 027, 087                                  |
+| `PATCH BASE/pages/{pageId}/`                    | any subset of `name`, `logo_props`, `access`, `parent`                                                                                      | updated page object; `400 "Page is locked"` while locked                                             | 026, 027, 087                                  |
 | `DELETE BASE/pages/{pageId}/`                   | —                                                                                                                                           | 204; `400 "The page should be archived before deleting"` on a live page; 403 for non-owner non-admin | 016, 089                                       |
 | `POST BASE/pages/{pageId}/access/`              | `{access: 0/1}` (0 open, 1 restricted)                                                                                                        | 204; 400 when the caller does not own the page                                                       | 013, 057                                        |
 | `POST`/`DELETE BASE/pages/{pageId}/lock/`       | —                                                                                                                                           | 204                                                                                                  | 014, 058                                       |
@@ -1092,11 +1098,14 @@ PAGE-053). Do not add a contract for one. Likewise:
   and the UI has no affordance (PAGE-017 oracle pins exactly that).
 
 Page object fields the UI reads: `id`, `name`, `owned_by`, `access`,
-`color`, `parent`, `is_favorite`, `is_locked`, `archived_at`,
+`logo_props`, `parent`, `is_favorite`, `is_locked`, `archived_at`,
 `created_at`, `updated_at`, `created_by`, `updated_by`, `label_ids`,
 `project_ids`, and (in nested builds) `parent_id`, `sub_pages_count`
-(§11.7). `name` is free text up to 255; `color` is the mark string (emoji
-or icon id) and is optional/clearable.
+(§11.7). `name` is free text up to 255; `logo_props` is the mark object
+(`{in_use: "emoji" | "icon", emoji: {value}, icon: {name, color}}`) and is
+optional/clearable. `color` is a separate free-text column the pages UI does
+not read for the mark; do not use it as the mark. (Mark clearing is PAGE-027's
+old bug NEWFRONT-355; see §15.)
 
 ### 11.2 Permissions and refusals to preserve
 
@@ -1168,9 +1177,11 @@ target:
   favourite-first rule as the collection. When a search or filter parameter
   is present, results include child pages (so PAGE-090 search finds them).
 - **Fields:** every page object in list and detail carries `parent`
-  (container id or null), `parent_id` (same value, flat, for clients that
-  do not expand) and `sub_pages_count` (visible, non-archived children the
-  caller can see). Counts never include children the caller cannot see.
+  (container id or null) and `parent_id` (same value, flat, for clients
+  that do not expand; `parent` is the serializer's nested field and
+  `parent_id` is the flat one, both emitted), plus `sub_pages_count`
+  (visible, non-archived children the caller can see). Counts never
+  include children the caller cannot see.
 - **Detail:** a child page retrieves by id under the same visibility rule;
   the client no longer gets a "not found" for a page it can see.
 - **Create/update:** `parent` (id or null) is accepted on `POST` and
@@ -1449,7 +1460,7 @@ At the pages area gate:
 - An oracle-backed row turns `new green` when its scenario(s) pass on
   `web_new`. A row with only a `bug:` scenario (PAGE-040, PAGE-063,
   PAGE-069's bug steps are additional to passing ones) is adjudicated per
-  §11.2's bug markers: the intended behaviour is proven on `web_new`, and
+  §15's bug markers: the intended behaviour is proven on `web_new`, and
   the old assertion is target/no-oracle — do not make the old bug pass.
 - PAGE-084–090 turn `new green (target, no oracle)` when their `new`
   tests in `pages/nested.spec.ts` pass (§12.3).
