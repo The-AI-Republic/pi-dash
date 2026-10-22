@@ -79,12 +79,16 @@ function normalizedPath(pathname: string): string {
 /**
  * Fold a pathname to the spelling the router actually matches: percent
  * escapes are decoded and the comparison is case-insensitive, so
- * `/%6Cogin` and `/LoGiN` cannot slip past the loop guard.
+ * `/%6Cogin` and `/LoGiN` cannot slip past the loop guard. A decoded
+ * `?` or `#` ends the pathname, so `/%6Cogin%3Fnext_path=%2Fdocs` names
+ * the login page too once the escapes are read.
  */
 function routerPath(pathname: string): string {
   // `resolveCloudReturnTarget` already proved the path decodes, so this is
   // total for every value that reaches the guard.
-  return normalizedPath(decodeURIComponent(pathname)).toLowerCase();
+  const decoded = decodeURIComponent(pathname);
+  const delimiter = decoded.search(/[?#]/);
+  return normalizedPath(delimiter === -1 ? decoded : decoded.slice(0, delimiter)).toLowerCase();
 }
 
 /**

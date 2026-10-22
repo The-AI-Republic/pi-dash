@@ -198,14 +198,18 @@ behavior: the old app accepts those encoded forms (bug: NEWFRONT-777), so
 the oracle pins the old result as a `bug:` scenario and the new app rejects
 them. The login-loop guard decodes and case-folds the pathname before the
 alias check, because the router matches `/%6Cogin` and `/LoGiN` as `/login`
-(bug: NEWFRONT-778 for the old app's exact-match guard). Bounces to sign-in carry the
+and a decoded `?` or `#` ends the pathname there, so
+`/%6Cogin%3Fnext_path=%2Fdocs` names the login page too. The old app's
+exact-match, case-sensitive guard misses all three spellings and hands the
+provider a login target (bug: NEWFRONT-778). Bounces to sign-in carry the
 preserved location as the root's `next_path` parameter (omitted when the
 location is the root itself); a fixed list of public and auth addresses
 (root, marketing pages, login and its legacy aliases, sign-up and
 account-recovery routes, with or without trailing slash) never triggers a
 bounce. No API beyond the carried parameter. Oracle: `next-path.spec.ts`
 (deep target with query surviving the round trip; unsafe targets
-discarded).
+discarded; the old app's encoded and case-variant login loop pinned as a
+`bug:`).
 
 CLOUD-014 — Explicit logout disables silent sign-in until the next manual
 attempt. Signing out records a tab-scoped explicit-logout marker (tab

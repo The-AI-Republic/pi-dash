@@ -119,11 +119,43 @@ describe("cloudHandoffTarget", () => {
     expect(cloudHandoffTarget("/login/", ORIGIN)).toBe("/");
   });
 
-  it("matches login aliases the way the router does, decoded and case-folded", () => {
-    expect(cloudHandoffTarget("/%6Cogin", ORIGIN)).toBe("/");
-    expect(cloudHandoffTarget("/LoGiN", ORIGIN)).toBe("/");
-    expect(cloudHandoffTarget("/SIGN-IN", ORIGIN)).toBe("/");
-    expect(cloudHandoffTarget("/%73ignin?next_path=%2Fdocs", ORIGIN)).toBe("/");
+  it("guards every login spelling the router folds onto an alias", () => {
+    // The router decodes escapes and matches case-insensitively, so each of
+    // these resolves to the login page or one of its legacy aliases.
+    const loopTargets = [
+      "/login",
+      "/login/",
+      "/login////",
+      "/%6Cogin",
+      "/%6cogin",
+      "/%4Cogin",
+      "/L%6Fgin",
+      "/LoGiN",
+      "/LOGIN",
+      "/login%2F",
+      "/%6Cogin%2F",
+      "/%6Cogin%3Fnext_path=%2Fdocs",
+      "/%6Cogin%23section",
+      "/sign-in",
+      "/sign-in/",
+      "/SIGN-IN",
+      "/%73ign-in",
+      "/sign-in%2F",
+      "/signin",
+      "/signin/",
+      "/SIGNIN",
+      "/%73ignin",
+      "/%73ignin%2F",
+      "/%73ignin?next_path=%2Fdocs",
+    ];
+    for (const target of loopTargets) {
+      expect([target, cloudHandoffTarget(target, ORIGIN)]).toEqual([target, "/"]);
+    }
+  });
+
+  it("keeps an encoded path that only resembles a login alias", () => {
+    expect(cloudHandoffTarget("/%64ocs", ORIGIN)).toBe("/%64ocs");
+    expect(cloudHandoffTarget("/%6Cogin-help", ORIGIN)).toBe("/%6Cogin-help");
   });
 
   it("keeps paths that only share a prefix with a login alias", () => {
