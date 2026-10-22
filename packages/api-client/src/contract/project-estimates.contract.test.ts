@@ -386,6 +386,28 @@ function pointIdOf(system: Awaited<ReturnType<typeof threeValueSystem>>, value: 
   return found?.id ?? "";
 }
 
+/**
+ * The clear path deletes the value in the request but moves the affected
+ * items off it asynchronously: the soft-delete sweep nulls the reference
+ * from a queued Celery task, so an immediate re-read still carries the old
+ * id. Poll until the item settles. This case therefore needs a running
+ * worker (`celery -A pi_dash worker`) alongside the contract server — the
+ * reassignment case above does not, because its `update()` is inline.
+ */
+async function pollIssueEstimate(
+  client: ApiClient,
+  projectId: string,
+  issueId: string,
+  settled: (entry: Awaited<ReturnType<typeof getIssue>>) => boolean
+) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const read = await getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
+    if (settled(read)) return read;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return getIssue(client, CONTRACT_WORKSPACE, projectId, issueId);
+}
+
 describe.skipIf(!contractEnabled)("estimate system update", () => {
   it("patches the name with the full value set and persists across re-read", async () => {
     const client = await signedIn();
@@ -671,7 +693,7 @@ describe.skipIf(!contractEnabled)("estimate point writes", () => {
       const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
       expect(read.points).toHaveLength(2);
       expect(orderEstimatePoints(read.points).map((entry) => entry.key)).toEqual([1, 2]);
-      const cleared = await getIssue(client, CONTRACT_WORKSPACE, projectId, issue.id);
+      const cleared = await pollIssueEstimate(client, projectId, issue.id, (entry) => entry.estimate_point === null);
       expect(cleared.estimate_point).toBeNull();
     } finally {
       await deleteIssue(client, CONTRACT_WORKSPACE, projectId, issue.id).catch(() => undefined);

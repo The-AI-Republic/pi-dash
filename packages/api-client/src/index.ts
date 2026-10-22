@@ -803,10 +803,6 @@ export {
   ArchivedCycleListItem,
   ArchivedDistribution,
   ArchivedEstimateDistribution,
-  CYCLE_ANALYTICS_TYPES,
-  CycleAnalytics,
-  CycleAnalyticsAssignee,
-  CycleAnalyticsLabel,
   CycleArchiveStamp,
   CYCLE_ANALYTICS_TYPES,
   CYCLE_STATUSES,
@@ -848,7 +844,6 @@ export {
   transferCycleIssues,
   updateCycle,
 } from "./contracts/cycles.js";
-export type { CycleAnalyticsQuery, CycleAnalyticsType } from "./contracts/cycles.js";
 export type {
   CycleAnalyticsType,
   CycleCreateInput,
