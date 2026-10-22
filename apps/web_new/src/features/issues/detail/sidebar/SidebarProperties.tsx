@@ -33,6 +33,8 @@ import { useUpdateIssue } from "../../api/mutations.js";
 import { selectWaitingBadge } from "../waiting/waiting.js";
 import { CreatedByRow } from "./CreatedByRow.js";
 import { selectCreator } from "./creator.js";
+import { isWorklogEnabled } from "../widgets/worklog/worklog.js";
+import { WorklogSidebarSection } from "../widgets/worklog/WorklogSidebarSection.js";
 import type { SidebarProject } from "./IssuePropertiesSidebar.js";
 import { SIDEBAR_ROW_CLASS, SIDEBAR_ROW_LABEL_CLASS, SidebarRow } from "./SidebarRow.js";
 import { SidebarPropertiesB } from "./SidebarPropertiesB.js";
@@ -166,6 +168,14 @@ export function SidebarProperties({
         stateGroup={stateGroup}
         editable={editable}
       />
+      {isWorklogEnabled() ? (
+        <WorklogSidebarSection
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          issueId={issue.id}
+          archived={issue.archived_at !== null}
+        />
+      ) : null}
     </div>
   );
 }

@@ -122,6 +122,8 @@ interface RenderFeedProps {
   activitiesPending?: boolean;
   commentsPending?: boolean;
   archived?: boolean;
+  worklogEnabled?: boolean;
+  headerLeading?: React.ReactNode;
 }
 
 function renderFeed(props: RenderFeedProps = {}) {
@@ -133,6 +135,8 @@ function renderFeed(props: RenderFeedProps = {}) {
     activitiesPending = false,
     commentsPending = false,
     archived = false,
+    worklogEnabled = false,
+    headerLeading,
   } = props;
   stubTransport((call) => {
     if (call.url.includes("activity_type=issue-property")) {
@@ -155,6 +159,8 @@ function renderFeed(props: RenderFeedProps = {}) {
         composer={<form aria-label="Composer">Composer</form>}
         renderComment={(row) => <article data-testid={`comment-${row.id}`}>{row.comment_stripped}</article>}
         archived={archived}
+        worklogEnabled={worklogEnabled}
+        headerLeading={headerLeading}
       />
     </QueryClientProvider>
   );
@@ -346,5 +352,53 @@ describe("ActivityFeed", () => {
     renderFeed({ activities: [activity()], comments: [comment()] });
     expect(await screen.findByText("created the work item.")).toBeInTheDocument();
     expect(screen.getByTestId(`comment-${comment().id}`)).toBeInTheDocument();
+  });
+
+  it("renders worklog rows and narrows them through the fifth toggle in cloud", async () => {
+    const user = userEvent.setup();
+    renderFeed({
+      activities: [
+        activity(),
+        activity({
+          id: "b13e4567-e89b-12d3-a456-426614174002",
+          field: "worklog",
+          verb: "created",
+          new_value: "90",
+          created_at: "2026-10-16T12:00:00Z",
+        }),
+      ],
+      worklogEnabled: true,
+      headerLeading: <button type="button" aria-label="Log time" />,
+    });
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    expect(screen.getByText("logged 1h 30m.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Log time" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Filter activity" }));
+    const group = await screen.findByRole("group", { name: "Activity categories" });
+    expect(within(group).getAllByRole("checkbox")).toHaveLength(5);
+    await user.click(within(group).getByRole("checkbox", { name: "Worklog" }));
+    expect(rows()).toHaveLength(1);
+    expect(screen.queryByText("logged 1h 30m.")).not.toBeInTheDocument();
+  });
+
+  it("keeps worklog rows off the OSS timeline with no fifth toggle", async () => {
+    const user = userEvent.setup();
+    renderFeed({
+      activities: [
+        activity(),
+        activity({
+          id: "b13e4567-e89b-12d3-a456-426614174002",
+          field: "worklog",
+          verb: "created",
+          new_value: "90",
+          created_at: "2026-10-16T12:00:00Z",
+        }),
+      ],
+    });
+    await waitFor(() => expect(rows()).toHaveLength(1));
+    expect(screen.queryByText("logged 1h 30m.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Filter activity" }));
+    const group = await screen.findByRole("group", { name: "Activity categories" });
+    expect(within(group).getAllByRole("checkbox")).toHaveLength(4);
   });
 });

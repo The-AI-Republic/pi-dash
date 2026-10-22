@@ -18,6 +18,9 @@ import * as React from "react";
 import { useMe } from "../../../core/session/index.js";
 import { ActivityFeed } from "../activity/ActivityFeed.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { canLogWorklog } from "../detail/widgets/worklog/eligibility.js";
+import { WorklogHeaderButton } from "../detail/widgets/worklog/WorklogHeaderButton.js";
+import { isWorklogEnabled } from "../detail/widgets/worklog/worklog.js";
 import {
   COMMENT_LINK_COPIED_TITLE,
   COMMENT_LINK_COPY_FAILED_TITLE,
@@ -68,6 +71,10 @@ export interface CommentThreadProps {
   isIntake?: boolean;
   /** Signed-in user, for authorship only; defaults to the session. */
   viewerId?: string | null;
+  /** Assignees of the work item, for the log-time rule (ISS-206). */
+  assigneeIds?: readonly string[];
+  /** Project role (20 admin, 15 member, 5 guest); null when unknown. */
+  memberRole?: number | null;
 }
 
 function useCommentHighlight(comments: IssueComment[]): string | null {
@@ -103,10 +110,17 @@ export function CommentThread({
   published,
   isIntake = false,
   viewerId: viewerOverride,
+  assigneeIds = [],
+  memberRole = null,
 }: CommentThreadProps): React.ReactElement {
   const scope = { workspaceSlug, projectId, issueId };
   const me = useMe();
   const viewerId = viewerOverride !== undefined ? viewerOverride : (me.data?.id ?? null);
+  const worklogEnabled = isWorklogEnabled();
+  const worklogLeading =
+    worklogEnabled && canLogWorklog({ memberRole, viewerId, assigneeIds, isIntake, archived }) ? (
+      <WorklogHeaderButton workspaceSlug={workspaceSlug} projectId={projectId} issueId={issueId} />
+    ) : null;
   const comments = useIssueComments(scope);
   const create = useCreateComment(scope);
   const remove = useDeleteComment(scope);
@@ -160,6 +174,8 @@ export function CommentThread({
       commentsPending={comments.isPending}
       commentsError={comments.isError}
       archived={archived}
+      worklogEnabled={worklogEnabled}
+      headerLeading={worklogLeading}
       composer={
         <CommentComposer
           workspaceSlug={workspaceSlug}

@@ -9,6 +9,7 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../../core/api/client.js";
+import { edition } from "../../../../core/edition/index.js";
 import { resetRegisteredStores } from "../../../../core/session/index.js";
 import { setSessionClient } from "../../../../core/session/queries.js";
 import { agentReasonMessage } from "../../../../shared/lib/agentReasons.js";
@@ -22,6 +23,8 @@ import { PRODUCT_CREATOR_NAME, UNKNOWN_CREATOR_NAME, isIntakeBot, selectCreator 
 import { IssuePropertiesSidebar, PROPERTIES_LOAD_FAILED } from "./IssuePropertiesSidebar.js";
 import { SidebarProperties, SidebarPropertiesSkeleton, selectExecutionSelection } from "./SidebarProperties.js";
 import { SidebarRow } from "./SidebarRow.js";
+import { worklogKeys } from "../widgets/worklog/api.js";
+import { WORKLOG_FLAG } from "../widgets/worklog/worklog.js";
 
 vi.mock("../../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../../shared/shell/index.js")>();
@@ -700,6 +703,62 @@ describe("SidebarProperties", () => {
     }
     await waitFor(() => expect(row("Created by")).toHaveTextContent("Ada L"));
     expect(within(row("Created by")).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("mounts the worklog section in cloud", async () => {
+    const { queryClient } = harness();
+    queryClient.setQueryData(worklogKeys.list(SLUG, PROJECT, ISSUE), [
+      {
+        id: "b23e4567-e89b-12d3-a456-426614174008",
+        issue: ISSUE,
+        project: PROJECT,
+        workspace: PROJECT,
+        actor: ME,
+        actor_detail: null,
+        minutes: 90,
+        logged_on: "2026-10-20",
+        note: "",
+        created_at: "2026-10-20T22:00:00Z",
+        updated_at: "2026-10-20T22:00:00Z",
+        created_by: ME,
+        updated_by: ME,
+        deleted_at: null,
+      },
+    ]);
+    edition.flags[WORKLOG_FLAG] = true;
+    try {
+      wrap(
+        <SidebarProperties
+          workspaceSlug={SLUG}
+          projectId={PROJECT}
+          issue={issueFixture()}
+          project={projectFixture()}
+          editable
+        />,
+        queryClient
+      );
+      expect(screen.getByText("Worklog")).toBeInTheDocument();
+      expect(await screen.findByText("1h 30m", { selector: "[data-worklog-total]" })).toBeInTheDocument();
+    } finally {
+      delete edition.flags[WORKLOG_FLAG];
+    }
+  });
+
+  it("mounts no worklog section in OSS", async () => {
+    const { queryClient } = harness();
+    wrap(
+      <SidebarProperties
+        workspaceSlug={SLUG}
+        projectId={PROJECT}
+        issue={issueFixture()}
+        project={projectFixture()}
+        editable
+      />,
+      queryClient
+    );
+    await waitFor(() => expect(row("Created by")).toHaveTextContent("Ada L"));
+    expect(screen.queryByText("Worklog")).toBeNull();
+    expect(document.querySelector("[data-worklog-section]")).toBeNull();
   });
 
   it("skips the member directory when nobody has to be named", async () => {

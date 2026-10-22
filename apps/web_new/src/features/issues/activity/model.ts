@@ -1,18 +1,25 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Activity feed rules (parity/specs/issues.md §16, ISS-194–196). Pure
-// helpers behind the merged timeline: which category an activity belongs
-// to, how activities and comments interleave by creation time, how the
-// four toggles narrow the result, what each stored field reads as, and
-// how the sort and filter choices persist in the browser. The component
-// layer only renders what these return.
+// Activity feed rules (parity/specs/issues.md §16, ISS-194–196, plus the
+// cloud worklog category in ISS-206). Pure helpers behind the merged
+// timeline: which category an activity belongs to, how activities and
+// comments interleave by creation time, how the toggles narrow the
+// result, what each stored field reads as, and how the sort and filter
+// choices persist in the browser. The component layer only renders what
+// these return.
 
 import type { IssueActivity, IssueComment } from "@pidash/api-client";
 
+import { formatMinutes } from "../../../shared/lib/formatDuration.js";
+
 /** The four toggle categories; only creation rows bypass them. */
 export const FEED_FILTERS = ["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"] as const;
-export type FeedFilter = (typeof FEED_FILTERS)[number];
+/** Cloud-only fifth toggle (ISS-206): logged-time entries. Absent in OSS. */
+export const WORKLOG_FILTER = "WORKLOG" as const;
+export type FeedFilter = (typeof FEED_FILTERS)[number] | typeof WORKLOG_FILTER;
+/** All five toggles in menu order, for cloud builds. */
+export const CLOUD_FEED_FILTERS: readonly FeedFilter[] = [...FEED_FILTERS, WORKLOG_FILTER];
 
 /** Toggle labels in menu order. */
 export const FEED_FILTER_LABELS: Record<FeedFilter, string> = {
@@ -20,6 +27,7 @@ export const FEED_FILTER_LABELS: Record<FeedFilter, string> = {
   COMMENT: "Comments",
   STATE: "State",
   ASSIGNEE: "Assignee",
+  WORKLOG: "Worklog",
 };
 
 export type FeedSortOrder = "asc" | "desc";
@@ -36,6 +44,7 @@ export function activityFilterOf(activity: Pick<IssueActivity, "field">): FeedFi
   if (activity.field === null) return "DEFAULT";
   if (activity.field === "state") return "STATE";
   if (activity.field === "assignees") return "ASSIGNEE";
+  if (activity.field === "worklog") return WORKLOG_FILTER;
   return "ACTIVITY";
 }
 
@@ -94,9 +103,16 @@ export function composeFeed(
   return sortFeed(filterFeed(buildFeed(activities, comments), filters), order);
 }
 
-/** The filter button marks itself while any toggle is off (ISS-195). */
-export function isFilterNarrowed(filters: readonly FeedFilter[]): boolean {
-  return filters.length < FEED_FILTERS.length;
+/**
+ * The filter button marks itself while any toggle is off (ISS-195). The
+ * available set defaults to the four OSS toggles; cloud builds pass all
+ * five so four-of-five still reads as narrowed.
+ */
+export function isFilterNarrowed(
+  filters: readonly FeedFilter[],
+  available: readonly FeedFilter[] = FEED_FILTERS
+): boolean {
+  return filters.length < available.length;
 }
 
 /**
@@ -104,12 +120,16 @@ export function isFilterNarrowed(filters: readonly FeedFilter[]): boolean {
  * resulting list keeps menu order rather than click order so the stored
  * value is stable.
  */
-export function toggleFeedFilter(current: readonly FeedFilter[], filter: FeedFilter): FeedFilter[] {
+export function toggleFeedFilter(
+  current: readonly FeedFilter[],
+  filter: FeedFilter,
+  available: readonly FeedFilter[] = FEED_FILTERS
+): FeedFilter[] {
   if (current.includes(filter)) {
     if (current.length === 1) return [...current];
-    return FEED_FILTERS.filter((candidate) => candidate !== filter && current.includes(candidate));
+    return available.filter((candidate) => candidate !== filter && current.includes(candidate));
   }
-  return FEED_FILTERS.filter((candidate) => candidate === filter || current.includes(candidate));
+  return available.filter((candidate) => candidate === filter || current.includes(candidate));
 }
 
 /** The other order when the sort control is pressed. */
@@ -117,18 +137,22 @@ export function flipSort(order: FeedSortOrder): FeedSortOrder {
   return order === "asc" ? "desc" : "asc";
 }
 
-/** Read the stored toggles, falling back to all four for junk or empty. */
-export function parseStoredFilters(raw: string | null): FeedFilter[] {
-  if (raw === null) return [...DEFAULT_FILTERS];
+/**
+ * Read the stored toggles, falling back to every available one for junk
+ * or empty. Stored values outside the available set drop away, so a
+ * cloud-stored worklog toggle never leaks into the OSS menu.
+ */
+export function parseStoredFilters(raw: string | null, available: readonly FeedFilter[] = FEED_FILTERS): FeedFilter[] {
+  if (raw === null) return [...available];
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
-    return [...DEFAULT_FILTERS];
+    return [...available];
   }
-  if (!Array.isArray(value)) return [...DEFAULT_FILTERS];
-  const kept = FEED_FILTERS.filter((filter) => value.includes(filter));
-  return kept.length > 0 ? kept : [...DEFAULT_FILTERS];
+  if (!Array.isArray(value)) return [...available];
+  const kept = available.filter((filter) => value.includes(filter));
+  return kept.length > 0 ? kept : [...available];
 }
 
 /** Read the stored order; anything but "desc" reads as ascending. */
@@ -211,6 +235,8 @@ export function activitySentence(
     case "intake":
     case "inbox":
       return inboxSentence(activity.verb);
+    case "worklog":
+      return worklogSentence(activity.verb, previous, value);
     default:
       return null;
   }
@@ -244,6 +270,26 @@ function inboxSentence(verb: string): string {
     default:
       return "changed the intake status.";
   }
+}
+
+/**
+ * A worklog activity as a sentence (ISS-206, cloud leg). The server
+ * carries minutes in the old/new values; unparseable values fall back
+ * to a plain verb sentence instead of rendering nothing.
+ */
+function worklogSentence(verb: string, previous: string, value: string): string {
+  if (verb === "deleted") return "removed logged time.";
+  if (verb === "updated") {
+    const before = Number(previous);
+    const after = Number(value);
+    if (Number.isInteger(before) && before > 0 && Number.isInteger(after) && after > 0) {
+      return `changed logged time from ${formatMinutes(before)} to ${formatMinutes(after)}.`;
+    }
+    return "edited a time entry.";
+  }
+  if (value === "") return "logged time.";
+  const minutes = Number(value);
+  return Number.isInteger(minutes) && minutes > 0 ? `logged ${formatMinutes(minutes)}.` : "logged time.";
 }
 
 /** Who the row credits: the actor, or the product for its own actions. */

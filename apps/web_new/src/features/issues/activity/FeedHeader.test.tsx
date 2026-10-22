@@ -10,7 +10,7 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ACTIVITY_HEADING, FILTER_LABEL, FeedHeader, SORT_LABEL } from "./FeedHeader.js";
-import { DEFAULT_FILTERS, type FeedFilter } from "./model.js";
+import { CLOUD_FEED_FILTERS, DEFAULT_FILTERS, type FeedFilter } from "./model.js";
 
 function renderHeader(filters: readonly FeedFilter[] = DEFAULT_FILTERS, order: "asc" | "desc" = "asc") {
   const onToggleFilter = vi.fn();
@@ -96,5 +96,57 @@ describe("FeedHeader", () => {
     renderHeader(DEFAULT_FILTERS, "desc");
     const down = screen.getByRole("button", { name: `${SORT_LABEL}: newest first` });
     expect(down).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("offers the worklog toggle last when cloud passes five", async () => {
+    const user = userEvent.setup();
+    const onToggleFilter = vi.fn();
+    render(
+      <FeedHeader
+        filters={CLOUD_FEED_FILTERS}
+        onToggleFilter={onToggleFilter}
+        order="asc"
+        onToggleSort={vi.fn()}
+        availableFilters={CLOUD_FEED_FILTERS}
+      />
+    );
+    await user.click(screen.getByRole("button", { name: FILTER_LABEL }));
+    const group = await screen.findByRole("group", { name: "Activity categories" });
+    const boxes = within(group).getAllByRole("checkbox");
+    expect(boxes.map((box) => box.textContent)).toEqual(["Updates", "Comments", "State", "Assignee", "Worklog"]);
+    await user.click(within(group).getByRole("checkbox", { name: "Worklog" }));
+    expect(onToggleFilter).toHaveBeenCalledWith("WORKLOG");
+  });
+
+  it("marks four-of-five as narrowed in cloud", () => {
+    render(
+      <FeedHeader
+        filters={DEFAULT_FILTERS}
+        onToggleFilter={vi.fn()}
+        order="asc"
+        onToggleSort={vi.fn()}
+        availableFilters={CLOUD_FEED_FILTERS}
+      />
+    );
+    const narrowed = screen.getByRole("button", { name: new RegExp(FILTER_LABEL) });
+    expect(narrowed.querySelector(".sr-only")?.textContent).toBe("Filters narrowed");
+  });
+
+  it("renders a leading control ahead of the sort button", () => {
+    render(
+      <FeedHeader
+        filters={DEFAULT_FILTERS}
+        onToggleFilter={vi.fn()}
+        order="asc"
+        onToggleSort={vi.fn()}
+        leading={<button type="button" aria-label="Log time" />}
+      />
+    );
+    const buttons = screen.getAllByRole("button");
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Log time",
+      `${SORT_LABEL}: oldest first`,
+      FILTER_LABEL,
+    ]);
   });
 });

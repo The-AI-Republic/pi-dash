@@ -15,7 +15,7 @@ import * as React from "react";
 import { useIssueActivities } from "./api.js";
 import { ActivityEntryRow } from "./ActivityEntryRow.js";
 import { FeedHeader } from "./FeedHeader.js";
-import { composeFeed, flipSort, toggleFeedFilter } from "./model.js";
+import { CLOUD_FEED_FILTERS, FEED_FILTERS, composeFeed, flipSort, toggleFeedFilter } from "./model.js";
 import { useFeedPrefs } from "./prefs.js";
 
 export const FEED_LOAD_FAILED = "Couldn't load the activity.";
@@ -34,6 +34,10 @@ export interface ActivityFeedProps {
   renderComment: (comment: IssueComment) => React.ReactNode;
   /** Archived issues keep the timeline and drop the composer. */
   archived: boolean;
+  /** Cloud worklog surfaces: the fifth filter toggle plus the header's leading control (ISS-206). */
+  worklogEnabled?: boolean;
+  /** Leading header control; the log-time button in cloud, nothing in OSS. */
+  headerLeading?: React.ReactNode;
 }
 
 /** Three stand-in rows while either source is still loading. */
@@ -57,9 +61,12 @@ export function ActivityFeed({
   composer,
   renderComment,
   archived,
+  worklogEnabled = false,
+  headerLeading,
 }: ActivityFeedProps): React.ReactElement {
   const activities = useIssueActivities({ workspaceSlug, projectId, issueId });
-  const { filters, setFilters, order, setOrder } = useFeedPrefs();
+  const { filters, setFilters, order, setOrder } = useFeedPrefs(worklogEnabled);
+  const available = worklogEnabled ? CLOUD_FEED_FILTERS : FEED_FILTERS;
 
   const pending = activities.isPending || commentsPending;
   const failed = activities.isError || commentsError;
@@ -73,12 +80,14 @@ export function ActivityFeed({
       <FeedHeader
         filters={filters}
         onToggleFilter={(filter) => {
-          setFilters(toggleFeedFilter(filters, filter));
+          setFilters(toggleFeedFilter(filters, filter, available));
         }}
         order={order}
         onToggleSort={() => {
           setOrder(flipSort(order));
         }}
+        availableFilters={available}
+        leading={headerLeading}
       />
       <div className="mt-(--space-4) flex flex-col gap-(--space-4)">
         {!archived && order === "desc" ? composer : null}

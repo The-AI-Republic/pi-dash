@@ -23,16 +23,28 @@ export interface FeedHeaderProps {
   onToggleFilter: (filter: FeedFilter) => void;
   order: FeedSortOrder;
   onToggleSort: () => void;
+  /** Toggles the menu offers; cloud builds pass all five (ISS-206). */
+  availableFilters?: readonly FeedFilter[];
+  /** Optional leading control, ahead of the sort button (the log-time button in cloud). */
+  leading?: React.ReactNode;
 }
 
-export function FeedHeader({ filters, onToggleFilter, order, onToggleSort }: FeedHeaderProps): React.ReactElement {
+export function FeedHeader({
+  filters,
+  onToggleFilter,
+  order,
+  onToggleSort,
+  availableFilters = FEED_FILTERS,
+  leading,
+}: FeedHeaderProps): React.ReactElement {
   const [open, setOpen] = React.useState(false);
-  const narrowed = isFilterNarrowed(filters);
+  const narrowed = isFilterNarrowed(filters, availableFilters);
 
   return (
     <div className="flex items-center justify-between gap-(--space-2)">
       <h2 className="text-h4 text-(--text)">{ACTIVITY_HEADING}</h2>
       <div className="flex items-center gap-(--space-1)">
+        {leading}
         <IconButton
           label={order === "asc" ? `${SORT_LABEL}: oldest first` : `${SORT_LABEL}: newest first`}
           aria-pressed={order === "desc"}
@@ -68,7 +80,7 @@ export function FeedHeader({ filters, onToggleFilter, order, onToggleSort }: Fee
           }
         >
           <div role="group" aria-label="Activity categories" className="flex flex-col">
-            {FEED_FILTERS.map((filter) => {
+            {availableFilters.map((filter) => {
               const selected = filters.includes(filter);
               return (
                 <button

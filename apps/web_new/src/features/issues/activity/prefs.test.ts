@@ -8,7 +8,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_FILTERS, FILTERS_STORAGE_KEY, SORT_STORAGE_KEY } from "./model.js";
+import { CLOUD_FEED_FILTERS, DEFAULT_FILTERS, FILTERS_STORAGE_KEY, SORT_STORAGE_KEY } from "./model.js";
 import { useFeedPrefs } from "./prefs.js";
 
 beforeEach(() => {
@@ -88,5 +88,28 @@ describe("useFeedPrefs", () => {
     const { result } = renderHook(() => useFeedPrefs());
     expect(result.current.filters).toEqual([...DEFAULT_FILTERS]);
     expect(result.current.order).toBe("asc");
+  });
+
+  it("starts cloud from all five toggles and reads them back", () => {
+    const { result } = renderHook(() => useFeedPrefs(true));
+    expect(result.current.filters).toEqual([...CLOUD_FEED_FILTERS]);
+  });
+
+  it("keeps a stored worklog toggle in cloud and drops it in OSS", () => {
+    window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(["WORKLOG", "STATE"]));
+    const cloud = renderHook(() => useFeedPrefs(true));
+    expect(cloud.result.current.filters).toEqual(["STATE", "WORKLOG"]);
+    const oss = renderHook(() => useFeedPrefs(false));
+    expect(oss.result.current.filters).toEqual(["STATE"]);
+  });
+
+  it("falls back to five in cloud when storage refuses the read", () => {
+    stubStorage({
+      getItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+    const { result } = renderHook(() => useFeedPrefs(true));
+    expect(result.current.filters).toEqual([...CLOUD_FEED_FILTERS]);
   });
 });
