@@ -43,10 +43,11 @@
 //!   response `Content-Type` is never consulted (Django hands raw bytes
 //!   to BeautifulSoup). Known gaps: no `charset-normalizer` detection
 //!   step (undeclared non-UTF-8 pages are best-effort), no exotic
-//!   codecs (hz, ptcp154), superset approximations where WHATWG is
-//!   wider than the declared codec (gb2312, big5-hkscs, tis-620,
-//!   iso-8859-9/11), and surrogate code points read as U+FFFD
-//!   (unrepresentable in UTF-8 strings).
+//!   codecs (hz, ptcp154, utf-7, ebcdic/dos code pages), superset
+//!   approximations where WHATWG is wider than the declared codec
+//!   (gb2312, big5-hkscs, tis-620, iso-8859-9/11, windows-125x
+//!   undefined bytes, shift_jis/gb18030 lone 0x80), and surrogate
+//!   code points read as U+FFFD (unrepresentable in UTF-8 strings).
 
 use std::net::IpAddr;
 use std::sync::LazyLock;
@@ -537,14 +538,12 @@ impl PageEncoding {
     /// (`str(data, encoding, "strict")` raising).
     fn strict_decode(self, body: &[u8]) -> Option<String> {
         match self {
-            PageEncoding::Rs(encoding) => {
-                let (text, _, had_errors) = encoding.decode(body);
-                if had_errors {
-                    None
-                } else {
-                    Some(text.into_owned())
-                }
-            }
+            // No BOM sniffing here: Dammit strips exactly one mark
+            // itself (`strip_bom`); `decode()` would strip a second
+            // one and even switch decoders.
+            PageEncoding::Rs(encoding) => encoding
+                .decode_without_bom_handling_and_without_replacement(body)
+                .map(|text| text.into_owned()),
             PageEncoding::Latin1 => Some(body.iter().map(|&byte| byte as char).collect()),
             PageEncoding::Utf16Bare => {
                 if let Some(rest) = body.strip_prefix(b"\xfe\xff") {
@@ -573,7 +572,8 @@ impl PageEncoding {
     /// (`errors="replace"`). Always succeeds.
     fn decode_replace(self, body: &[u8]) -> String {
         match self {
-            PageEncoding::Rs(encoding) => encoding.decode(body).0.into_owned(),
+            // Same single-strip rule as `strict_decode` above.
+            PageEncoding::Rs(encoding) => encoding.decode_without_bom_handling(body).0.into_owned(),
             PageEncoding::Latin1 => body.iter().map(|&byte| byte as char).collect(),
             PageEncoding::Utf16Bare => {
                 if let Some(rest) = body.strip_prefix(b"\xfe\xff") {
@@ -666,11 +666,14 @@ fn strip_bom(body: &[u8]) -> (&[u8], Option<&'static str>) {
 }
 
 static XML_ENCODING_RE: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-    regex::bytes::Regex::new(r#"(?i)^\s*<\?.*encoding=['"](.*?)['"].*\?>"#)
+    // `(?-u)`: Dammit runs these on bytes, so `\s`, `.` and case
+    // folding are ASCII-only (Unicode mode would match NBSP, ſ and
+    // skip non-UTF-8 bytes differently).
+    regex::bytes::Regex::new(r#"(?i-u)^\s*<\?.*encoding=['"](.*?)['"].*\?>"#)
         .expect("Dammit XML encoding pattern compiles")
 });
 static META_CHARSET_RE: LazyLock<regex::bytes::Regex> = LazyLock::new(|| {
-    regex::bytes::Regex::new(r#"(?i)<\s*meta[^>]+charset\s*=\s*["']?([^>]*?)[ /;'">]"#)
+    regex::bytes::Regex::new(r#"(?i-u)<\s*meta[^>]+charset\s*=\s*["']?([^>]*?)[ /;'">]"#)
         .expect("Dammit meta charset pattern compiles")
 });
 
@@ -762,34 +765,83 @@ fn resolve_form(form: &str) -> Option<PageEncoding> {
         "latin8" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_14)),
         "latin9" | "l9" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_15)),
         "latin10" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_16)),
+        "l7" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_13)),
+        "l8" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_14)),
+        "l10" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_16)),
+        // Underscore `iso_8859_N` / `iso8859_N` spellings WHATWG
+        // lacks (the dashed forms hit `for_label`); `_9`/`_11` read
+        // as windows-1254/874 like `latin5`/`tis-620`.
+        "iso_8859_2" | "iso8859_2" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_2)),
+        "iso_8859_3" | "iso8859_3" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_3)),
+        "iso_8859_4" | "iso8859_4" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_4)),
+        "iso_8859_5" | "iso8859_5" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_5)),
+        "iso_8859_6" | "iso8859_6" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_6)),
+        "iso_8859_7" | "iso8859_7" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_7)),
+        "iso_8859_8" | "iso8859_8" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_8)),
+        "iso_8859_9" | "iso8859_9" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1254)),
+        "iso_8859_10" | "iso8859_10" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_10)),
+        "iso_8859_11" | "iso8859_11" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_874)),
+        "iso_8859_13" | "iso8859_13" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_13)),
+        "iso_8859_14" | "iso8859_14" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_14)),
+        "iso_8859_15" | "iso8859_15" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_15)),
+        "iso_8859_16" | "iso8859_16" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_16)),
+        // Short 8859-6/7 names WHATWG lacks.
+        "asmo_708" | "ecma_114" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_6)),
+        "ecma_118" => Some(PageEncoding::Rs(encoding_rs::ISO_8859_7)),
         // Bare UTF-16/32 (BOM-or-LE) and fixed-endian forms.
         "u16" | "utf16" | "utf_16" | "utf-16" => Some(PageEncoding::Utf16Bare),
-        "utf16be" | "utf_16be" | "utf-16be" | "unicodebigunmarked" => {
+        "utf16be" | "utf_16be" | "utf_16_be" | "utf-16be" | "unicodebigunmarked" => {
             Some(PageEncoding::Rs(encoding_rs::UTF_16BE))
         }
-        "utf16le" | "utf_16le" | "utf-16le" | "unicodelittleunmarked" => {
+        "utf16le" | "utf_16le" | "utf_16_le" | "utf-16le" | "unicodelittleunmarked" => {
             Some(PageEncoding::Rs(encoding_rs::UTF_16LE))
         }
         "u32" | "utf32" | "utf_32" | "utf-32" => Some(PageEncoding::Utf32Bare),
-        "utf32be" | "utf_32be" | "utf-32be" => Some(PageEncoding::Utf32Be),
-        "utf32le" | "utf_32le" | "utf-32le" => Some(PageEncoding::Utf32Le),
-        // Shift_JIS spellings WHATWG lacks.
-        "csshiftjis" | "s_jis" | "shiftjis" | "sjis" => {
-            Some(PageEncoding::Rs(encoding_rs::SHIFT_JIS))
-        }
-        // EUC-JP / EUC-KR spellings WHATWG lacks.
-        "eucjp" | "u_jis" | "ujis" => Some(PageEncoding::Rs(encoding_rs::EUC_JP)),
-        "euckr" => Some(PageEncoding::Rs(encoding_rs::EUC_KR)),
+        "utf32be" | "utf_32be" | "utf_32_be" | "utf-32be" => Some(PageEncoding::Utf32Be),
+        "utf32le" | "utf_32le" | "utf_32_le" | "utf-32le" => Some(PageEncoding::Utf32Le),
+        // Shift_JIS spellings WHATWG lacks (`cp932`'s A0/FD-FF
+        // PUA bytes read as malformed — accepted).
+        "csshiftjis" | "s_jis" | "shiftjis" | "sjis" | "932" | "cp932" | "mskanji"
+        | "x_mac_japanese" => Some(PageEncoding::Rs(encoding_rs::SHIFT_JIS)),
+        // EUC-JP / EUC-KR spellings WHATWG lacks (`cp949`'s extra
+        // multibyte rows read as malformed — accepted).
+        "eucjp" | "u_jis" | "ujis" | "euc_jp" => Some(PageEncoding::Rs(encoding_rs::EUC_JP)),
+        "euckr" | "euc_kr" | "ks_c_5601" | "ks_c_5601_1987" | "ks_x_1001" | "ksx1001" | "949"
+        | "cp949" | "ms949" | "uhc" | "x_mac_korean" => Some(PageEncoding::Rs(encoding_rs::EUC_KR)),
         // GBK spellings WHATWG lacks.
-        "936" | "cp936" | "euc_cn" | "euccn" | "ms936" => Some(PageEncoding::Rs(encoding_rs::GBK)),
+        "936" | "cp936" | "euc_cn" | "euccn" | "eucgb2312_cn" | "ms936" | "gb2312_80"
+        | "gb2312_1980" | "x_mac_simp_chinese" => Some(PageEncoding::Rs(encoding_rs::GBK)),
+        "gb18030_2000" => Some(PageEncoding::Rs(encoding_rs::GB18030)),
         // Big5 spellings WHATWG lacks.
-        "big5_tw" => Some(PageEncoding::Rs(encoding_rs::BIG5)),
+        "big5_tw" | "big5_hkscs" | "big5hkscs" | "hkscs" | "x_mac_trad_chinese" | "950"
+        | "cp950" | "ms950" => Some(PageEncoding::Rs(encoding_rs::BIG5)),
         // `tis620`: WHATWG only lists `tis-620` (which hits
         // `for_label`); both read as windows-874, a superset of
         // strict TIS-620.
-        "tis620" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_874)),
+        "tis620" | "tis_620" | "tis_620_0" | "tis_620_2529_0" | "tis_620_2529_1" | "thai" => {
+            Some(PageEncoding::Rs(encoding_rs::WINDOWS_874))
+        }
+        // ISO-2022-JP spellings WHATWG lacks (the dashed form hits
+        // `for_label`).
+        "iso2022_jp" | "iso2022jp" | "iso_2022_jp" => {
+            Some(PageEncoding::Rs(encoding_rs::ISO_2022_JP))
+        }
+        // WHATWG reads `csiso2022kr` as the replacement encoding,
+        // but CPython decodes it (`iso2022_kr`, which WHATWG lacks),
+        // so skip it like the sibling spellings.
+        "csiso2022kr" => None,
         // MacRoman spellings WHATWG lacks (`macintosh` hits `for_label`).
         "mac-roman" | "macroman" | "mac_roman" => Some(PageEncoding::Rs(encoding_rs::MACINTOSH)),
+        // Bare-number windows-125x spellings WHATWG lacks.
+        "1250" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1250)),
+        "1251" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1251)),
+        "1252" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1252)),
+        "1253" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1253)),
+        "1254" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1254)),
+        "1255" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1255)),
+        "1256" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1256)),
+        "1257" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1257)),
+        "1258" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1258)),
         // Underscore / `cp` windows-125x spellings WHATWG lacks.
         "windows_1250" | "cp1250" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1250)),
         "windows_1251" | "cp1251" => Some(PageEncoding::Rs(encoding_rs::WINDOWS_1251)),
@@ -804,13 +856,17 @@ fn resolve_form(form: &str) -> Option<PageEncoding> {
         // still land on UTF-8, but resolving it keeps the strict
         // attempt (and `original_encoding` behavior) exact.
         "utf8" | "utf_8" => Some(PageEncoding::Rs(encoding_rs::UTF_8)),
-        // ASCII spellings: WHATWG maps `ascii` to windows-1252, but
-        // CPython's strict ASCII either succeeds (pure-ASCII page,
-        // same text as UTF-8) or fails into the same fallback this
-        // skip takes — so skipping is outcome-exact here.
+        // ASCII spellings: WHATWG maps `ascii` (and the dashed
+        // `ansi_x3.4-*` spellings) to windows-1252, but CPython's
+        // strict ASCII either succeeds (pure-ASCII page, same text
+        // as UTF-8) or fails into the same fallback this skip
+        // takes — so skipping is outcome-exact here.
         "646" | "ansi_x3.4_1968" | "ansi_x3.4_1986" | "ansi_x3_4_1968" | "ascii" | "cp367"
         | "csascii" | "ibm367" | "iso646_us" | "iso_646.irv_1991" | "iso_ir_6" | "us"
-        | "us_ascii" | "us-ascii" => None,
+        | "us_ascii" | "us-ascii" | "ansi_x3.4-1968" | "ansi_x3.4-1986" => None,
+        // `koi8_u`: WHATWG only lists `koi8-u` (which hits
+        // `for_label`).
+        "koi8_u" => Some(PageEncoding::Rs(encoding_rs::KOI8_U)),
         // WHATWG reads `unicode` as UTF-16LE, but CPython has no such
         // codec (`LookupError`), so Dammit skips it.
         "unicode" => None,
@@ -2243,10 +2299,14 @@ mod tests {
     }
 
     #[test]
-    fn crawl_title_metacharset_without_space_matches() {
-        // The Dammit meta regex backtracks: `<metacharset=` still declares.
+    fn crawl_title_metacharset_without_space_declares_nothing() {
+        // `<metacharset=` does NOT declare: `[^>]+` needs a character
+        // between `meta` and `charset` (Django-probed: declared None),
+        // so both backends fall back — Rust deterministically to
+        // windows-1252 here (Django consults its detector).
         let body =
             b"<html><head><metacharset=\"windows-1252\"><title>Caf\xe9</title></head></html>";
+        assert_eq!(find_declared_encoding(body), None);
         assert_eq!(
             crawl_title_of(body, HttpHeaders::new()),
             Some("Caf\u{e9}".to_owned())
@@ -2314,7 +2374,9 @@ mod tests {
     #[test]
     fn decode_entities_mirrors_bs4_tokenizer_edges() {
         // Each pair probed against bs4 4.12.3 (`get_text()` output for
-        // the title; `.strip()` not applied here).
+        // the title; `.strip()` not applied here) — except the two
+        // surrogate rows, where Django yields lone surrogates no
+        // UTF-8 string can hold (read as U+FFFD; see module docs).
         let utf8 = PageEncoding::Rs(encoding_rs::UTF_8);
         for (input, expected) in [
             ("&apos", "'"),
@@ -2399,6 +2461,15 @@ mod tests {
             ("windows_1252", Some(Rs(encoding_rs::WINDOWS_1252))),
             ("cp1252", Some(Rs(encoding_rs::WINDOWS_1252))),
             ("windows1252", None),
+            ("1250", Some(Rs(encoding_rs::WINDOWS_1250))),
+            ("1251", Some(Rs(encoding_rs::WINDOWS_1251))),
+            ("1252", Some(Rs(encoding_rs::WINDOWS_1252))),
+            ("1253", Some(Rs(encoding_rs::WINDOWS_1253))),
+            ("1254", Some(Rs(encoding_rs::WINDOWS_1254))),
+            ("1255", Some(Rs(encoding_rs::WINDOWS_1255))),
+            ("1256", Some(Rs(encoding_rs::WINDOWS_1256))),
+            ("1257", Some(Rs(encoding_rs::WINDOWS_1257))),
+            ("1258", Some(Rs(encoding_rs::WINDOWS_1258))),
             ("shift_jis", Some(Rs(encoding_rs::SHIFT_JIS))),
             ("shift-jis", Some(Rs(encoding_rs::SHIFT_JIS))),
             ("shiftjis", Some(Rs(encoding_rs::SHIFT_JIS))),
@@ -2407,6 +2478,11 @@ mod tests {
             ("x-sjis", Some(Rs(encoding_rs::SHIFT_JIS))),
             ("x_sjis", None),
             ("xsjis", None),
+            ("932", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("cp932", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("mskanji", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("x-mac-japanese", Some(Rs(encoding_rs::SHIFT_JIS))),
+            ("x_mac_japanese", Some(Rs(encoding_rs::SHIFT_JIS))),
             ("iso-8859-1", Some(Latin1)),
             ("iso8859-1", Some(Latin1)),
             ("latin1", Some(Latin1)),
@@ -2416,9 +2492,40 @@ mod tests {
             ("iso8859-2", Some(Rs(encoding_rs::ISO_8859_2))),
             ("iso88592", None),
             ("iso88591", None),
-            // Underscore `iso8859_N` skips (rare spelling falls
-            // through; Django decodes it — accepted gap).
-            ("iso8859_2", None),
+            ("iso8859_2", Some(Rs(encoding_rs::ISO_8859_2))),
+            ("iso_8859_2", Some(Rs(encoding_rs::ISO_8859_2))),
+            ("iso8859_11", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("iso_8859_11", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("iso8859_16", Some(Rs(encoding_rs::ISO_8859_16))),
+            ("iso_8859_16", Some(Rs(encoding_rs::ISO_8859_16))),
+            ("iso8859_3", Some(Rs(encoding_rs::ISO_8859_3))),
+            ("iso_8859_3", Some(Rs(encoding_rs::ISO_8859_3))),
+            ("iso8859_4", Some(Rs(encoding_rs::ISO_8859_4))),
+            ("iso_8859_4", Some(Rs(encoding_rs::ISO_8859_4))),
+            ("iso8859_5", Some(Rs(encoding_rs::ISO_8859_5))),
+            ("iso_8859_5", Some(Rs(encoding_rs::ISO_8859_5))),
+            ("iso8859_6", Some(Rs(encoding_rs::ISO_8859_6))),
+            ("iso_8859_6", Some(Rs(encoding_rs::ISO_8859_6))),
+            ("iso8859_7", Some(Rs(encoding_rs::ISO_8859_7))),
+            ("iso_8859_7", Some(Rs(encoding_rs::ISO_8859_7))),
+            ("iso8859_8", Some(Rs(encoding_rs::ISO_8859_8))),
+            ("iso_8859_8", Some(Rs(encoding_rs::ISO_8859_8))),
+            ("iso8859_9", Some(Rs(encoding_rs::WINDOWS_1254))),
+            ("iso_8859_9", Some(Rs(encoding_rs::WINDOWS_1254))),
+            ("iso8859_10", Some(Rs(encoding_rs::ISO_8859_10))),
+            ("iso_8859_10", Some(Rs(encoding_rs::ISO_8859_10))),
+            ("iso8859_13", Some(Rs(encoding_rs::ISO_8859_13))),
+            ("iso_8859_13", Some(Rs(encoding_rs::ISO_8859_13))),
+            ("iso8859_14", Some(Rs(encoding_rs::ISO_8859_14))),
+            ("iso_8859_14", Some(Rs(encoding_rs::ISO_8859_14))),
+            ("iso8859_15", Some(Rs(encoding_rs::ISO_8859_15))),
+            ("iso_8859_15", Some(Rs(encoding_rs::ISO_8859_15))),
+            ("l7", Some(Rs(encoding_rs::ISO_8859_13))),
+            ("l8", Some(Rs(encoding_rs::ISO_8859_14))),
+            ("l10", Some(Rs(encoding_rs::ISO_8859_16))),
+            ("asmo_708", Some(Rs(encoding_rs::ISO_8859_6))),
+            ("ecma_114", Some(Rs(encoding_rs::ISO_8859_6))),
+            ("ecma_118", Some(Rs(encoding_rs::ISO_8859_7))),
             ("latin2", Some(Rs(encoding_rs::ISO_8859_2))),
             ("latin9", Some(Rs(encoding_rs::ISO_8859_15))),
             ("latin5", Some(Rs(encoding_rs::WINDOWS_1254))),
@@ -2431,40 +2538,83 @@ mod tests {
             ("u16", Some(Utf16Bare)),
             ("utf-16le", Some(Rs(encoding_rs::UTF_16LE))),
             ("utf-16be", Some(Rs(encoding_rs::UTF_16BE))),
+            ("utf_16_le", Some(Rs(encoding_rs::UTF_16LE))),
+            ("utf_16_be", Some(Rs(encoding_rs::UTF_16BE))),
             ("unicodebigunmarked", Some(Rs(encoding_rs::UTF_16BE))),
             ("unicodelittleunmarked", Some(Rs(encoding_rs::UTF_16LE))),
             ("utf-32", Some(Utf32Bare)),
             ("u32", Some(Utf32Bare)),
             ("utf-32be", Some(Utf32Be)),
             ("utf-32le", Some(Utf32Le)),
+            ("utf_32_be", Some(Utf32Be)),
+            ("utf_32_le", Some(Utf32Le)),
             ("unicode", None),
             ("macintosh", Some(Rs(encoding_rs::MACINTOSH))),
             ("mac-roman", Some(Rs(encoding_rs::MACINTOSH))),
             ("macroman", Some(Rs(encoding_rs::MACINTOSH))),
             ("ascii", None),
             ("us-ascii", None),
+            ("ansi_x3.4-1968", None),
+            ("ansi_x3.4-1986", None),
             // KOI8 tables verified byte-identical to CPython's,
             // except koi8-u 0xAE/0xBE (RFC short-U vs CPython
             // box-drawing) — accepted 2-byte variance.
             ("koi8-r", Some(Rs(encoding_rs::KOI8_R))),
             ("koi8-u", Some(Rs(encoding_rs::KOI8_U))),
+            ("koi8_u", Some(Rs(encoding_rs::KOI8_U))),
             // TIS-620 reads as its windows-874 superset.
             ("tis-620", Some(Rs(encoding_rs::WINDOWS_874))),
             ("tis620", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("tis_620", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("tis_620_0", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("tis_620_2529_0", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("tis_620_2529_1", Some(Rs(encoding_rs::WINDOWS_874))),
+            ("thai", Some(Rs(encoding_rs::WINDOWS_874))),
             ("cp866", Some(Rs(encoding_rs::IBM866))),
             ("866", Some(Rs(encoding_rs::IBM866))),
             // Escape-heavy ISO-2022-JP pages are best-effort.
             ("iso-2022-jp", Some(Rs(encoding_rs::ISO_2022_JP))),
+            ("iso2022_jp", Some(Rs(encoding_rs::ISO_2022_JP))),
+            ("iso2022jp", Some(Rs(encoding_rs::ISO_2022_JP))),
+            ("iso_2022_jp", Some(Rs(encoding_rs::ISO_2022_JP))),
+            ("csiso2022kr", None),
             ("x-user-defined", None),
             ("x_user_defined", None),
             ("eucjp", Some(Rs(encoding_rs::EUC_JP))),
             ("ujis", Some(Rs(encoding_rs::EUC_JP))),
+            ("euc_jp", Some(Rs(encoding_rs::EUC_JP))),
             ("euckr", Some(Rs(encoding_rs::EUC_KR))),
+            ("euc_kr", Some(Rs(encoding_rs::EUC_KR))),
             ("korean", Some(Rs(encoding_rs::EUC_KR))),
+            ("ks_c_5601", Some(Rs(encoding_rs::EUC_KR))),
+            ("ks_c_5601_1987", Some(Rs(encoding_rs::EUC_KR))),
+            ("ks_x_1001", Some(Rs(encoding_rs::EUC_KR))),
+            ("ksx1001", Some(Rs(encoding_rs::EUC_KR))),
+            ("949", Some(Rs(encoding_rs::EUC_KR))),
+            ("cp949", Some(Rs(encoding_rs::EUC_KR))),
+            ("ms949", Some(Rs(encoding_rs::EUC_KR))),
+            ("uhc", Some(Rs(encoding_rs::EUC_KR))),
+            ("x_mac_korean", Some(Rs(encoding_rs::EUC_KR))),
+            ("x-mac-korean", Some(Rs(encoding_rs::EUC_KR))),
             ("chinese", Some(Rs(encoding_rs::GBK))),
             ("euccn", Some(Rs(encoding_rs::GBK))),
+            ("eucgb2312_cn", Some(Rs(encoding_rs::GBK))),
+            ("gb2312_80", Some(Rs(encoding_rs::GBK))),
+            ("gb2312_1980", Some(Rs(encoding_rs::GBK))),
+            ("x_mac_simp_chinese", Some(Rs(encoding_rs::GBK))),
+            ("x-mac-simp-chinese", Some(Rs(encoding_rs::GBK))),
             ("936", Some(Rs(encoding_rs::GBK))),
+            ("gb18030_2000", Some(Rs(encoding_rs::GB18030))),
             ("big5_tw", Some(Rs(encoding_rs::BIG5))),
+            ("950", Some(Rs(encoding_rs::BIG5))),
+            ("cp950", Some(Rs(encoding_rs::BIG5))),
+            ("ms950", Some(Rs(encoding_rs::BIG5))),
+            ("big5_hkscs", Some(Rs(encoding_rs::BIG5))),
+            ("big5hkscs", Some(Rs(encoding_rs::BIG5))),
+            ("hkscs", Some(Rs(encoding_rs::BIG5))),
+            ("x_mac_trad_chinese", Some(Rs(encoding_rs::BIG5))),
+            ("x-mac-trad-chinese", Some(Rs(encoding_rs::BIG5))),
+            // Django decodes utf-7; no WHATWG equivalent — accepted gap.
             ("utf-7", None),
             ("bogus-9", None),
         ] {
@@ -2530,6 +2680,37 @@ mod tests {
             Some("windows-1252".to_owned())
         );
         assert_eq!(find_declared_encoding(b"<meta charset=>"), None);
+        // Byte-level pattern fidelity (all Django-probed): the
+        // patterns are ASCII-only — NBSP/`ſ` never match `\s`/`(?i)`,
+        // while raw non-UTF-8 bytes match `[^>]`/`.`.
+        assert_eq!(
+            find_declared_encoding(b"<\xc2\xa0meta charset=\"shift_jis\">"),
+            None
+        );
+        assert_eq!(
+            find_declared_encoding(b"<meta http-equiv=\"\xe9\" charset=\"shift_jis\">"),
+            Some("shift_jis".to_owned())
+        );
+        assert_eq!(
+            find_declared_encoding("<meta char\u{17f}et=\"shift_jis\">".as_bytes()),
+            None
+        );
+        assert_eq!(
+            find_declared_encoding(b"<?xml encoding=\"\xe9nc\"?><meta charset=\"shift_jis\">"),
+            Some("\u{fffd}nc".to_owned())
+        );
+    }
+
+    #[test]
+    fn decode_body_strips_exactly_one_bom() {
+        // Dammit strips one mark; a second decodes as data (U+FEFF),
+        // never re-sniffed (Django-probed, detector-free inputs).
+        let (text, encoding) = decode_body(b"\xef\xbb\xbf\xef\xbb\xbfHi");
+        assert_eq!(text, "\u{feff}Hi");
+        assert_eq!(encoding, PageEncoding::Rs(encoding_rs::UTF_8));
+        let (text, encoding) = decode_body(b"\xff\xfe\xff\xfeA\x00");
+        assert_eq!(text, "\u{feff}A");
+        assert_eq!(encoding, PageEncoding::Rs(encoding_rs::UTF_16LE));
     }
 
     #[test]
