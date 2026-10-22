@@ -411,6 +411,8 @@ export class WebNewDriver implements ParityDriver {
     writes: 0,
   };
 
+  private intakeShellListUrls: string[] = [];
+
   /** Reads a downloaded file; a seam for tests, and for very large backups. */
   private readDownload(path: string): string {
     return readFileSync(path, "utf8");
@@ -28570,83 +28572,188 @@ export class WebNewDriver implements ParityDriver {
     return todo("settingsProfileCycleUserTimezoneDates");
   }
 
-  // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012). Throwing
-  // --- stubs; the build slice that lands this area fills them in.
+  // --- Intake list shell (NEWFRONT-255, INT-001-005/008/012; landed by
+  // --- NEWFRONT-689). The shell renders real tab roles, the list panel,
+  // --- id-anchored title links and one heading per empty situation.
 
-  async intakeShellOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("intakeShellOpen");
+  private intakeShellTab(tab: IntakeShellTab): Locator {
+    return this.page.getByRole("tab", { name: new RegExp(`^${tab === "open" ? "Open" : "Closed"}`) });
   }
 
-  async intakeShellOpenRetiredInbox(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("intakeShellOpenRetiredInbox");
+  private intakeShellRowTitles(): Locator {
+    return this.page.getByTestId("intake-list").getByTestId("intake-row-title");
+  }
+
+  private intakeShellEmptyHeading(): Locator {
+    return this.page
+      .getByTestId("intake-list-pane")
+      .getByRole("heading", {
+        name: /No matching results\.|No requests waiting for triage\.|Nothing has been resolved yet\./,
+      });
+  }
+
+  /** Settle once the shell, the gate, or a load failure committed. */
+  private async intakeShellWaitSettled(): Promise<void> {
+    const tabs = this.page
+      .getByRole("tab", { name: /^Open/ })
+      .first()
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "tabs",
+        () => "lost"
+      );
+    const gate = this.page
+      .getByRole("heading", { name: "Intake is not enabled for the project." })
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "gate",
+        () => "lost"
+      );
+    const broken = this.page
+      .getByText("The project could not be loaded.")
+      .waitFor({ timeout: 120_000 })
+      .then(
+        () => "broken",
+        () => "lost"
+      );
+    const winner = await Promise.race([tabs, gate, broken]);
+    if (winner === "lost") {
+      const body = await this.page.evaluate(() => document.body.innerText.slice(0, 300)).catch(() => "<unreadable>");
+      throw new Error(`[parity] the intake shell never settled at ${this.page.url()} (body: ${JSON.stringify(body)})`);
+    }
+  }
+
+  /** Settle the list pane: rows, an empty heading, or the error body. */
+  private async intakeShellWaitList(): Promise<void> {
+    await Promise.race([
+      this.intakeShellRowTitles().first().waitFor({ timeout: WebNewDriver.WAIT_MS }),
+      this.intakeShellEmptyHeading().first().waitFor({ timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByTestId("intake-list-error").waitFor({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+  }
+
+  async intakeShellOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.intakeShellWaitSettled();
+  }
+
+  async intakeShellOpenRetiredInbox(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/inbox`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.waitForURL(new RegExp(`/projects/${projectId}/intake`), { timeout: 120_000 });
+    await this.intakeShellWaitSettled();
   }
 
   async intakeShellTabLabels(): Promise<string[]> {
-    return todo("intakeShellTabLabels");
+    const labels = await this.page
+      .getByTestId("intake-tabs")
+      .getByRole("tab")
+      .evaluateAll((nodes) => nodes.map((node) => (node.firstElementChild?.textContent ?? "").trim()));
+    return labels.filter((label) => label.length > 0);
   }
 
   async intakeShellActiveTab(): Promise<IntakeShellTab> {
-    return todo("intakeShellActiveTab");
+    const selected = this.page.getByRole("tab", { selected: true }).first();
+    const label = (await selected.textContent()) ?? "";
+    return label.startsWith("Closed") ? "closed" : "open";
   }
 
   async intakeShellOpenCount(): Promise<string | null> {
-    return todo("intakeShellOpenCount");
+    const badge = this.page.getByTestId("intake-open-count");
+    if ((await badge.count()) === 0) return null;
+    const text = ((await badge.first().textContent()) ?? "").trim();
+    return /^\d+$/.test(text) ? text : null;
   }
 
-  async intakeShellClickTab(_tab: IntakeShellTab): Promise<void> {
-    return todo("intakeShellClickTab");
+  async intakeShellClickTab(tab: IntakeShellTab): Promise<void> {
+    await this.intakeShellTab(tab).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (want) => new URL(window.location.href).searchParams.get("currentTab") === want,
+      tab,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
+    await this.intakeShellWaitList();
   }
 
   async intakeShellListTitles(): Promise<string[]> {
-    return todo("intakeShellListTitles");
+    const texts = await this.intakeShellRowTitles().allInnerTexts();
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text.length > 0);
   }
 
   async intakeShellPlaceholderVisible(): Promise<boolean> {
-    return todo("intakeShellPlaceholderVisible");
+    return this.isShown(this.page.getByTestId("intake-placeholder"));
   }
 
   async intakeShellBreadcrumbTrail(): Promise<string[]> {
-    return todo("intakeShellBreadcrumbTrail");
+    const trail = this.page.getByTestId("intake-breadcrumb");
+    await trail.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const text = ((await trail.innerText()) ?? "").replace(/\s+/g, " ").trim();
+    return text.length > 0 ? [text] : [];
   }
 
   async intakeShellBreadcrumbIntakeHref(): Promise<string | null> {
-    return todo("intakeShellBreadcrumbIntakeHref");
+    const link = this.page.getByTestId("intake-breadcrumb").getByRole("link", { name: "Intake" }).first();
+    if ((await link.count()) === 0) return null;
+    return link.getAttribute("href");
   }
 
   async intakeShellPageTitle(): Promise<string> {
-    return todo("intakeShellPageTitle");
+    return this.page.title();
   }
 
   async intakeShellFeatureGateVisible(): Promise<boolean> {
-    return todo("intakeShellFeatureGateVisible");
+    return this.isShown(this.page.getByRole("heading", { name: "Intake is not enabled for the project." }));
   }
 
   async intakeShellFeatureGateActionEnabled(): Promise<boolean> {
-    return todo("intakeShellFeatureGateActionEnabled");
+    const action = this.page.getByRole("button", { name: "Manage features" });
+    await action.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return action.isEnabled();
   }
 
   async intakeShellFeatureGateActionGo(): Promise<string> {
-    return todo("intakeShellFeatureGateActionGo");
+    await this.page.getByRole("button", { name: "Manage features" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(/\/settings\/projects\//, { timeout: WebNewDriver.WAIT_MS });
+    return this.currentPath();
   }
 
   async intakeShellListEmptyHeading(): Promise<string | null> {
-    return todo("intakeShellListEmptyHeading");
+    if ((await this.intakeShellRowTitles().count()) > 0) return null;
+    const heading = this.intakeShellEmptyHeading();
+    if ((await heading.count()) === 0) return null;
+    return ((await heading.first().innerText()) ?? "").trim();
   }
 
   async intakeShellEmptyCreateClick(): Promise<string> {
-    return todo("intakeShellEmptyCreateClick");
+    await this.page.getByRole("button", { name: "Create request" }).click({ timeout: WebNewDriver.WAIT_MS });
+    return this.currentPath();
   }
 
   async intakeShellFilterToggleStatus(_option: "Pending" | "Snoozed"): Promise<void> {
+    // The filter panel is slice B (INT-009); this slice ships no filter UI.
     return todo("intakeShellFilterToggleStatus");
   }
 
   async intakeShellBeginListSpy(): Promise<void> {
-    return todo("intakeShellBeginListSpy");
+    this.intakeShellListUrls = [];
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      if (req.method() === "GET" && /\/(inbox|intake)-issues\/(\?|$)/.test(req.url())) {
+        this.intakeShellListUrls.push(req.url());
+      }
+      await route.continue();
+    });
   }
 
   async intakeShellListQueries(): Promise<IntakeShellListQuery[]> {
-    return todo("intakeShellListQueries");
+    return this.intakeShellListUrls.map((url) => {
+      const params: Record<string, string> = {};
+      for (const [key, value] of new URL(url).searchParams) {
+        params[key] = params[key] === undefined ? value : `${params[key]},${value}`;
+      }
+      return { url, params };
+    });
   }
 
   // --- Live cycles list (NEWFRONT-249, CYC-001–008). Appended; the stubs
