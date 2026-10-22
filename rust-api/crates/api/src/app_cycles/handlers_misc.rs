@@ -509,18 +509,6 @@ pub async fn enqueue_message(pool: &PgPool, message: pidash_jobs::TaskMessage) {
     }
 }
 
-/// `base_host(request, is_app=True)` (`utils/host.py:17-28`):
-/// `WEB_URL` else `APP_BASE_URL`; unset is `ImproperlyConfigured` → 500.
-pub fn request_origin(state: &AppState) -> Result<String, Denial> {
-    state
-        .settings()
-        .urls
-        .web_url
-        .clone()
-        .or_else(|| state.settings().urls.app_base_url.clone())
-        .ok_or(Denial::ServerError)
-}
-
 /// DRF request-body shape for the three cycle write routes: no key is
 /// list-shaped and no scalar treats a present-but-empty form value as
 /// absent (every route only ever `.get`s a scalar).
@@ -1163,7 +1151,7 @@ pub async fn run_transfer(
     // intake pattern); `requested_data` is ALWAYS `{"cycles_list": []}`
     // here, `issue_id` is null, `epoch` is `int(timezone.now()
     // .timestamp())`.
-    let origin = request_origin(state)?;
+    let origin = super::activity_origin(state).ok_or(Denial::ServerError)?;
     let updated: Vec<Value> = moved
         .iter()
         .map(|bridge| {

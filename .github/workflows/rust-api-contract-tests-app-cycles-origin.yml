@@ -1,0 +1,313 @@
+# PIDASHCONV-1181: app_cycles activity `origin` = APP_BASE_URL else WEB_URL
+# else 500, mirroring Django `base_host(request, is_app=True)`
+# (`apps/api/pi_dash/utils/host.py:17-67`).
+#
+# The shared HTTP matrix (rust-api-contract-rust.yml) boots
+# WEB_URL == APP_BASE_URL, so it cannot tell the two apart. The new
+# `app_cycles/test_activity_origin.py` is therefore excluded from that matrix
+# (rust-api/contract-tests/TASK_ORACLE_IGNORES.txt) and runs here under two
+# configurations, each against Django (oracle validity) and then against Rust
+# with every routing flag on:
+#
+#   app_base_url   WEB_URL and a different APP_BASE_URL both set
+#                  -> cycle create/PATCH/destroy + transfer activities carry
+#                     origin == APP_BASE_URL
+#   web_url_only   WEB_URL only (APP_BASE_URL not set at all)
+#                  -> cycle-issue create answers 201 {"message":"success"} and
+#                     destroy 204; activities carry origin == WEB_URL
+#
+# web_url_only leaves APP_BASE_URL out of the environment entirely (an empty
+# string would not do: Django's `get_config` keeps "" as a falsy value while
+# Rust's `validated_base_url` keeps `Some("")`, which the old code read as a
+# set base URL; the reproduction in the issue is the variable being absent).
+# It also needs a Django settings module that does not setdefault
+# APP_BASE_URL: `pi_dash.settings.test` seeds WEB_URL and APP_BASE_URL to
+# http://localhost (`settings/test.py:14-15`), so this config runs both
+# backends under `pi_dash.settings.common` (Profile::Common on the Rust side,
+# no seed default).
+name: rust-api-contract-tests-app-cycles-origin
+
+on:
+  push:
+    branches: [rust-dev]
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-app-cycles-origin.yml"
+  pull_request:
+    paths:
+      - "rust-api/**"
+      - ".github/workflows/rust-api-contract-tests-app-cycles-origin.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  origin:
+    name: app_cycles origin (${{ matrix.config }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: app_base_url
+            app_base_url: http://app.contract.test
+            django_settings: pi_dash.settings.test
+          - config: web_url_only
+            app_base_url: ""
+            django_settings: pi_dash.settings.common
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pidash_contract
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      rabbitmq:
+        image: rabbitmq:3.13.6-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: pi_dash
+          RABBITMQ_DEFAULT_PASS: pi_dash
+          RABBITMQ_DEFAULT_VHOST: pi_dash
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DJANGO_SETTINGS_MODULE: ${{ matrix.django_settings }}
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pidash_contract
+      REDIS_URL: redis://localhost:6379/0
+      CONTRACT_REDIS_URL: redis://localhost:6379/0
+      # Django publishes .delay() side effects here with no consumer; the test
+      # drains it to read the enqueued origin.
+      CELERY_BROKER_URL: redis://localhost:6379/2
+      # Rust app_cycles activities land in Postgres rust_job_queue, but a
+      # reachable broker keeps any other publish path from erroring.
+      AMQP_URL: redis://localhost:6379/1
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: pi_dash
+      RABBITMQ_PASSWORD: pi_dash
+      RABBITMQ_VHOST: pi_dash
+      # Server-side base URLs. The Rust step overrides WEB_URL with :8080 so
+      # each backend's WEB_URL equals the BASE_URL it is tested under.
+      WEB_URL: http://127.0.0.1:8000
+      # APP_BASE_URL is exported only for the app_base_url config, in each
+      # server-start step below; web_url_only must run with it absent.
+      # What the pytest file reads: the backend's APP_BASE_URL ("" when unset).
+      CONTRACT_APP_BASE_URL: ${{ matrix.app_base_url }}
+      DJANGO_BASE_URL: http://127.0.0.1:8000
+      RUST_BASE_URL: http://127.0.0.1:8080
+      EMAIL_HOST: localhost
+      API_KEY_RATE_LIMIT: 100000/minute
+      SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_SECRET_KEY: "contract-tests-fixed-secret"
+      CONTRACT_DJANGO_SECRET_KEY: "contract-tests-fixed-secret"
+      # Cutover edge: Django upstream + EVERY routing flag on (see
+      # rust-api/crates/api/src/edge.rs Prefix::ALL).
+      PIDASH_DJANGO_UPSTREAM: http://127.0.0.1:8000
+      PIDASH_RUST_WEB: "1"
+      PIDASH_RUST_APP: "1"
+      PIDASH_RUST_ASSISTANT: "1"
+      PIDASH_RUST_LOOP: "1"
+      PIDASH_RUST_PROMPTING: "1"
+      PIDASH_RUST_SPACE: "1"
+      PIDASH_RUST_LICENSE: "1"
+      PIDASH_RUST_RUNNER_WEB: "1"
+      PIDASH_RUST_API_V1: "1"
+      PIDASH_RUST_RUNNER: "1"
+      PIDASH_RUST_AUTH: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements/base.txt
+            rust-api/contract-tests/requirements.txt
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust-api
+
+      - name: Install system deps for psycopg-c
+        run: sudo apt-get update -y && sudo apt-get install -y libpq-dev
+
+      - name: Install Django server and contract-test deps
+        run: >-
+          python -m pip install
+          -r apps/api/requirements/base.txt
+          -r rust-api/contract-tests/requirements.txt
+
+      - name: Migrate contract database
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Start live Django server
+        working-directory: apps/api
+        run: |
+          if [ -n "${{ matrix.app_base_url }}" ]; then
+            export APP_BASE_URL="${{ matrix.app_base_url }}"
+          fi
+          nohup python manage.py runserver 127.0.0.1:8000 --noreload \
+            > /tmp/django-contract.log 2>&1 &
+          echo $! > /tmp/django-contract.pid
+          for i in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/8000) >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+      - name: Run app_cycles origin vs Django (oracle validity)
+        working-directory: rust-api/contract-tests
+        run: |
+          set +e
+          LOG="/tmp/pytest-django-origin-${{ matrix.config }}.log"
+          BASE_URL="$DJANGO_BASE_URL" CONTRACT_WEB_URL="$DJANGO_BASE_URL" \
+            python -m pytest app_cycles/test_activity_origin.py \
+            -k "${{ matrix.config }}" -q --tb=short 2>&1 | tee "$LOG"
+          echo "DJANGO_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          echo "DJANGO_SUMMARY=$(tail -n 1 "$LOG")" >> "$GITHUB_ENV"
+
+      - name: Build pidash-api
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        run: cargo build --bin pidash-api
+
+      - name: Stop Django for reset
+        if: env.DJANGO_EXIT == '0'
+        run: |
+          [ -f /tmp/django-contract.pid ] || exit 0
+          pid="$(cat /tmp/django-contract.pid)"
+          kill "$pid" 2>/dev/null || exit 0
+          for i in $(seq 1 30); do
+            kill -0 "$pid" 2>/dev/null || exit 0
+            sleep 1
+          done
+          kill -9 "$pid" 2>/dev/null || true
+
+      - name: Reset database and Redis between backends
+        if: env.DJANGO_EXIT == '0'
+        run: |
+          python - <<'EOF'
+          import psycopg
+          with psycopg.connect("postgresql://postgres:postgres@localhost:5432/postgres",
+                                autocommit=True) as conn:
+              conn.execute(
+                  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                  "WHERE datname = 'pidash_contract' AND pid <> pg_backend_pid()"
+              )
+              conn.execute("DROP DATABASE pidash_contract")
+              conn.execute("CREATE DATABASE pidash_contract")
+          EOF
+          python - <<'EOF'
+          import os
+          import redis
+          redis.Redis.from_url(os.environ["REDIS_URL"]).flushdb()
+          EOF
+
+      - name: Migrate contract database (Rust run)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: apps/api
+        run: python manage.py migrate --noinput
+
+      - name: Restart Django server (Rust upstream)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: apps/api
+        run: |
+          if [ -n "${{ matrix.app_base_url }}" ]; then
+            export APP_BASE_URL="${{ matrix.app_base_url }}"
+          fi
+          nohup python manage.py runserver 127.0.0.1:8000 --noreload \
+            >> /tmp/django-contract.log 2>&1 &
+          for i in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/8000) >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+      - name: Start Rust server (all flags on)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api
+        env:
+          WEB_URL: http://127.0.0.1:8080
+        run: |
+          if [ -n "${{ matrix.app_base_url }}" ]; then
+            export APP_BASE_URL="${{ matrix.app_base_url }}"
+          fi
+          ./target/debug/pidash-api serve --bind 127.0.0.1:8080 > /tmp/rust-serve.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/healthz; then
+              echo "Rust is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Rust did not start:"; tail -n 50 /tmp/rust-serve.log; exit 1
+
+      - name: Run app_cycles origin vs Rust (all flags on)
+        if: env.DJANGO_EXIT == '0'
+        working-directory: rust-api/contract-tests
+        run: |
+          set +e
+          LOG="/tmp/pytest-rust-origin-${{ matrix.config }}.log"
+          BASE_URL="$RUST_BASE_URL" CONTRACT_WEB_URL="$RUST_BASE_URL" \
+            python -m pytest app_cycles/test_activity_origin.py \
+            -k "${{ matrix.config }}" -q --tb=short 2>&1 | tee "$LOG"
+          echo "RUST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          echo "RUST_SUMMARY=$(tail -n 1 "$LOG")" >> "$GITHUB_ENV"
+
+      - name: Report counts
+        if: always()
+        run: |
+          {
+            echo "## app_cycles origin (${{ matrix.config }})"
+            echo ""
+            echo "| backend | exit | summary |"
+            echo "|---|---|---|"
+            echo "| Django (:8000) | ${DJANGO_EXIT:-n/a} | ${DJANGO_SUMMARY:-n/a} |"
+            echo "| Rust (:8080, all flags) | ${RUST_EXIT:-n/a} | ${RUST_SUMMARY:-n/a} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail when a backend failed
+        if: always()
+        run: |
+          if [ "${DJANGO_EXIT:-1}" != "0" ] || [ "${RUST_EXIT:-1}" != "0" ]; then
+            echo "app_cycles origin failed (Django=${DJANGO_EXIT:-n/a} Rust=${RUST_EXIT:-n/a})"
+            exit 1
+          fi
+
+      - name: Upload service logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-app-cycles-origin-${{ matrix.config }}-logs
+          path: |
+            /tmp/django-contract.log
+            /tmp/rust-serve.log
+            /tmp/pytest-django-origin-${{ matrix.config }}.log
+            /tmp/pytest-rust-origin-${{ matrix.config }}.log

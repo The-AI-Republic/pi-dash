@@ -56,3 +56,10 @@ assistant/test_sweep_rust_replay.py
 # is .github/workflows/rust-api-contract-tests-loop-rust.yml (Rust worker;
 # the Django worker stays stopped).
 loop/test_fire_rust_replay.py
+# PIDASHCONV-1181: app_cycles activity-origin configuration tests. The shared
+# HTTP matrix boots WEB_URL == APP_BASE_URL, so this file's "both set and
+# different" / "WEB_URL only" assertions cannot hold there on either backend.
+# Its coverage is
+# .github/workflows/rust-api-contract-tests-app-cycles-origin.yml, which runs
+# each configuration against live Django (oracle validity) and against Rust.
+app_cycles/test_activity_origin.py

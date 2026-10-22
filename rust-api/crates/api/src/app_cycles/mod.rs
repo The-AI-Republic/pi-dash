@@ -132,6 +132,21 @@ pub const COMPLEX_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 /// 'GET')` dict compiler first (`issue.py:111`).
 pub const LEGACY_FILTER_ENDPOINTS: &[&str] = &["cycle-issues"];
 
+/// `base_host(request, is_app=True)` (`utils/host.py:17-67`): the app
+/// origin is `APP_BASE_URL` when truthy, else `WEB_URL` when truthy —
+/// `None` (the caller's 500, Django's `ImproperlyConfigured`) when both
+/// are unset. Empty strings count as unset, matching Python truthiness.
+///
+/// One slice-local helper for the five activity-enqueue sites (cycle
+/// create/PATCH/destroy, transfer, cycle-issue create/destroy).
+pub(crate) fn activity_origin(state: &AppState) -> Option<String> {
+    let urls = &state.settings().urls;
+    urls.app_base_url
+        .clone()
+        .filter(|value| !value.is_empty())
+        .or_else(|| urls.web_url.clone().filter(|value| !value.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
