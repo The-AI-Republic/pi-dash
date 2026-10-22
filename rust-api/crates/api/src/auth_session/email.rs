@@ -595,7 +595,8 @@ async fn user_by_pk(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<Option<UserRo
 // ---------------------------------------------------------------------------
 
 /// `user.check_password(candidate)` (`hashers.py`): `False` on
-/// mismatch *and* on unparsable hashes.
+/// mismatch *and* on unparsable hashes. The setter side effect
+/// (re-hash outdated hashes) lives in `provider_outcome`, not here.
 fn check_password(candidate: &str, encoded: &str) -> bool {
     pidash_auth::password::verify_password(candidate, encoded).unwrap_or(false)
 }
@@ -1469,7 +1470,7 @@ async fn provider_outcome(
     form: kernel::EmailForm,
     normalized: &str,
     raw_password: &str,
-    existing: Option<&UserRow>,
+    existing: Option<&mut UserRow>,
 ) -> Result<kernel::ProviderOutcome, Response> {
     let enable_email_password = config_value(pool, "ENABLE_EMAIL_PASSWORD", None)
         .await
@@ -1484,6 +1485,23 @@ async fn provider_outcome(
                 return Ok(kernel::ProviderOutcome::BadPassword {
                     email: normalized.to_owned(),
                 });
+            }
+            // Django's `check_password` setter (`base_user.py:111-123`): a
+            // correct password on an outdated hash re-encodes with the
+            // default hasher at once (`save(update_fields=["password"])`
+            // writes only that column — no `updated_at` bump). This is the
+            // same row the session tail reads, so the session hash covers
+            // the new field exactly as `login()` does after the setter.
+            if let Some(new_hash) =
+                pidash_auth::password::rehash_if_outdated(raw_password, &user.password)
+            {
+                sqlx::query(r#"UPDATE "users" SET "password" = $1 WHERE "id" = $2"#)
+                    .bind(&new_hash)
+                    .bind(user.id)
+                    .execute(pool)
+                    .await
+                    .map_err(|_| server_error())?;
+                user.password = new_hash;
             }
             Ok(kernel::ProviderOutcome::Ok)
         }
@@ -1566,18 +1584,20 @@ async fn evaluate_attempt(
         kernel::FormField::Missing => "",
     };
     let normalized = kernel::normalize_email(raw_email);
-    let existing = user_by_email(pool, &normalized)
+    let mut existing = user_by_email(pool, &normalized)
         .await
         .map_err(|_| server_error())?;
     let user_exists = existing.is_some();
-    let user_row = existing.clone();
     let provider = if (req.form == kernel::EmailForm::SignIn) != user_exists {
         // The view's own existence pre-check fails: the provider is
         // never constructed (`Q-provider-order`).
         kernel::ProviderOutcome::Ok
     } else {
-        provider_outcome(pool, req.form, &normalized, raw_password, existing.as_ref()).await?
+        provider_outcome(pool, req.form, &normalized, raw_password, existing.as_mut()).await?
     };
+    // Cloned after the provider ran: a sign-in re-hash above already
+    // rewrote `password` in place for the session tail.
+    let user_row = existing.clone();
     let attempt = kernel::EmailAttempt {
         form: req.form,
         instance_ok: true,
