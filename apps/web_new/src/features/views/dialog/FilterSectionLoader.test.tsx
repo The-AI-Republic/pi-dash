@@ -48,8 +48,12 @@ function fakeBuilder(): ReturnType<typeof vi.fn> {
   return vi.fn(
     (): RichFilterBuilderParts => ({
       control: <span data-testid="fake-filter-control" />,
+      conditions: [],
       row: <span data-testid="fake-filter-row" />,
       instanceId: "TEMP-9",
+      addedThisVisit: false,
+      clearFilters: () => {},
+      hasCompleteCondition: false,
     })
   );
 }
