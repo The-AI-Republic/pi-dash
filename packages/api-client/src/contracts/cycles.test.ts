@@ -530,6 +530,43 @@ describe("archived reads", () => {
     });
     await expect(getArchivedCycle(client, WS, PROJECT, CYCLE)).rejects.toThrow();
   });
+
+  it("accepts the point-estimate distribution on archived detail", async () => {
+    const { client } = stubClient({
+      ...ROW,
+      archived_at: "2026-10-15T00:00:00Z",
+      estimate_distribution: {
+        assignees: [{ display_name: "Ada", assignee_id: null, total_estimates: 6, completed_estimates: 2 }],
+        labels: [{ label_name: "api", label_id: null, total_estimates: 6, pending_estimates: 4 }],
+        completion_chart: { "2026-10-01": 6, "2026-10-02": null },
+      },
+      distribution: DISTRIBUTION,
+    });
+    const detail = await getArchivedCycle(client, WS, PROJECT, CYCLE);
+    expect(detail.estimate_distribution).toMatchObject({ completion_chart: { "2026-10-01": 6 } });
+  });
+
+  it("rejects a malformed estimate assignee row", async () => {
+    const { client } = stubClient({
+      ...ROW,
+      archived_at: "2026-10-15T00:00:00Z",
+      estimate_distribution: {
+        assignees: "Ada",
+        labels: [],
+        completion_chart: {},
+      },
+    });
+    await expect(getArchivedCycle(client, WS, PROJECT, CYCLE)).rejects.toThrow();
+  });
+
+  it("rejects an estimate distribution with arbitrary keys", async () => {
+    const { client } = stubClient({
+      ...ROW,
+      archived_at: "2026-10-15T00:00:00Z",
+      estimate_distribution: { surprise: "not part of the serializer" },
+    });
+    await expect(getArchivedCycle(client, WS, PROJECT, CYCLE)).rejects.toThrow();
+  });
 });
 
 describe("workspace cycle reads", () => {
