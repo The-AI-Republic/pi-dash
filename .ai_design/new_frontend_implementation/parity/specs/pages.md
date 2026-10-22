@@ -334,9 +334,9 @@ when the title exceeds **255** characters, and an open-or-restricted
 choice. Cancel discards the draft (no request). Submit creates the page
 (`POST` §11.1) and closes; when the caller asked to continue to the page,
 the client navigates to the new id, otherwise it stays on the list with the
-row present. Errors keep the dialog open with its input for retry (§11.3,
-PAGE-008 has no pinned bug; the "keep input on failure" rule is the
-general mutation rule (§2.4).
+row present. Errors keep the dialog open with its input for retry (§11.3;
+PAGE-008 has no pinned bug — the "keep input on failure" rule is the
+general mutation rule in §2.4).
 
 ### 3.7 Empty and loading variants (PAGE-019)
 
@@ -981,8 +981,8 @@ must add, and what it must not duplicate.
 
 - **`@pidash/kit`** provides the primitives this area needs: `Button`,
   `IconButton`, `Input`, `Textarea`, `Combobox`, `Menu`, `ContextMenu`,
-  `Dialog`, `Popover`, `Tooltip`, `Avatar`, `AvatarGroup`, `Badge`, `Kbd`,
-  `Switch`, `Table`, `VirtualList`, `EmptyState` (four tiers:
+  `Dialog`, `Popover`, `Tooltip`, `Avatar`, `Badge`, `Kbd`,
+  `Switch`, `VirtualList`, `EmptyState` (four tiers:
   illustrated/marketing/detailed/section, each with or without actions),
   `Skeleton`, `Spinner`, `Breadcrumbs`, `PreviewCard`, `UpgradePill`,
   `Markdown`, `Toast`. Do not add a page-specific duplicate of any of these;
@@ -1038,7 +1038,7 @@ must add, and what it must not duplicate.
 | 840 title + mark + toolbar core (026–032)                  | `shared/editor` lazy loader, `Textarea`/`Input`, `Popover`                                                                                       | page title control, mark picker, sticky bar with typography/marks/alignment/lists/quote/code, key hints                                                       |
 | 841 toolbar tables/images/colours (033–036)                | editor image extension (issue set), file upload plumbing (`shared` upload helpers)                                                               | table extension, toolbar image insert, letter/wash colour control + popover                                                                                   |
 | 842 blocks + embeds + mentions (037–044)                   | mention node + `searchMentionPeople`, `RichTextView`, sanitizer                                                                                  | `loadPageExtensions` with callouts, dividers, task lists, code blocks, colors, embed node, slash menu, drag handle, markdown paste, char count, copy-markdown |
-| 843 side pane + outline/assets/info (045–050)              | `resolveFileUrl`, `useWorkspace`, `Avatar`, kit tabs                                                                                             | pane shell, heading preview, outline, assets, stats, attribution (profile links per `parity/specs/profile.md` §3 and §13.3 here)                              |
+| 843 side pane + outline/assets/info (045–050)              | `resolveFileUrl`, `useWorkspace`, `Avatar`; no shared tabs (only feature-local tab sets)                                                        | pane shell + tab pattern (new: no Tabs in kit — kit issue or pane-local), heading preview, outline, assets, stats, attribution (profile links per `parity/specs/profile.md` §3 and §13.3 here) |
 | 844 version timeline + restore (051–054)                   | none                                                                                                                                             | versions contracts wiring, timeline, overlay, restore through the live editor, failure/retry                                                                  |
 | 845 header actions + options menu (055–060)                | `clipboard`, toaster, favourite/access/lock/archive contracts                                                                                    | link copy, star, options menu, archive/restore/delete in detail, full-width/sticky toggles                                                                    |
 | 846 sync/save + export entry (061–064, 074)                | toaster, `preferenceStorage`, the `check-boundaries` heavy list already names `yjs` and `jspdf`                                                  | sync badge, offline pill, fallback persistence, oversized strip, export seam                                                                                  |
@@ -1061,13 +1061,13 @@ import the contracts, never call raw fetch.
 ### 11.1 Pages REST
 
 | Method and path                                 | Body / query                                                                                                                                | Response                                                                                             | Rows                                           |
-| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------- | -------- |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
 | `GET BASE/pages/`                               | — (the collection; the UI sends no filter params — filtering is client-side)                                                                | array of page objects                                                                                | 001–021                                        |
 | `POST BASE/pages/`                              | `name` (string), `access` (0/1), `parent` (id or null), `color` (mark), optional `description_html`/`description_json`/`description_binary` | created page object                                                                                  | 007, 008, 084                                  |
 | `GET BASE/pages/{pageId}/`                      | `track_visit=true` (default true)                                                                                                           | page object, plus `issue_ids` when tracking                                                          | 022                                            |
 | `PATCH BASE/pages/{pageId}/`                    | any subset of `name`, `color`, `access`, `parent`                                                                                           | updated page object; `400 "Page is locked"` while locked                                             | 026, 027, 087                                  |
 | `DELETE BASE/pages/{pageId}/`                   | —                                                                                                                                           | 204; `400 "The page should be archived before deleting"` on a live page; 403 for non-owner non-admin | 016, 089                                       |
-| `POST BASE/pages/{pageId}/access/`              | `{access: 0                                                                                                                                 | 1}`                                                                                                  | 204; 400 when the caller does not own the page | 013, 057 |
+| `POST BASE/pages/{pageId}/access/`              | `{access: 0/1}` (0 open, 1 restricted)                                                                                                        | 204; 400 when the caller does not own the page                                                       | 013, 057                                        |
 | `POST`/`DELETE BASE/pages/{pageId}/lock/`       | —                                                                                                                                           | 204                                                                                                  | 014, 058                                       |
 | `POST BASE/pages/{pageId}/archive/`             | —                                                                                                                                           | 200 `{archived_at}`; archives the whole subtree; drops favourites                                    | 015, 059, 088                                  |
 | `DELETE BASE/pages/{pageId}/archive/`           | —                                                                                                                                           | 204; a page whose parent is still archived is detached to the top level first                        | 015, 059, 088                                  |
@@ -1411,14 +1411,16 @@ dialog. Neither imports the other's internals.
 ### 13.7 NEWFRONT-526 deferred SHELL legs (needs page routes)
 
 NEWFRONT-526 holds six `web_new` skips in
-`shell/palette-search/palette-entity-contextual.spec.ts` and
-`shell/palette-search/shared-empty-states.spec.ts`; the page halves need
-this area's routes and contextual entries.
+`shell/palette-search/palette-entity-contextual.spec.ts` (SHELL-091:
+cycle, module, page) and
+`shell/palette-search/shared-empty-states.spec.ts` (SHELL-104: cycles
+list/detail/modal); only the SHELL-091 page leg needs this area's routes
+and contextual entries.
 
-- **Pages builds:** the list route (835) and detail route (839), the
-  contextual `selectPageContext` mount with real handlers (SHELL-091), and
-  the shared `EmptyState` usage on the list (PAGE-019) — web_new uses the
-  kit tiers (SHELL-104).
+- **Pages builds:** the list route (835) and detail route (839) and the
+  contextual `selectPageContext` mount with real handlers (SHELL-091).
+  (SHELL-104's legs drive cycles routes — the cycles area's, not this
+  area's; pages' own `EmptyState` usage on the list is PAGE-019's.)
 - **NEWFRONT-526 does:** removes its page-related `driver.target ===
 "web_new"` skips once these routes land and runs those legs green; the
   cycle/module halves are that issue's own.
