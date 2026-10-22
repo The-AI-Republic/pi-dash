@@ -304,7 +304,7 @@ export function ModalDescription({
             }
             title="Assistant writing"
           >
-            <div className="flex w-72 flex-col gap-(--space-2)">
+            <div data-testid="modal-ai-panel" className="flex w-72 flex-col gap-(--space-2)">
               {aiAnswer !== null && aiAnswer.html !== "" ? (
                 <div className="flex flex-col gap-(--space-1)">
                   <p className="text-meta font-medium text-(--text)">{AI_RESPONSE_LABEL}</p>

@@ -257,6 +257,16 @@ describe("ModalDescription assistant (ISS-127)", () => {
     expect(screen.queryByRole("button", { name: AI_BUTTON_LABEL })).not.toBeInTheDocument();
   });
 
+  it("exposes the AI panel to parity drivers while open", async () => {
+    const user = userEvent.setup();
+    setup();
+    expect(screen.queryByTestId("modal-ai-panel")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await screen.findByLabelText("Ask the assistant");
+    // The gate's panel-scoped steps locate this node; losing it times them out.
+    expect(screen.getByTestId("modal-ai-panel")).toBeInTheDocument();
+  });
+
   it("reviews a GPT answer before inserting it at the caret", async () => {
     const user = userEvent.setup();
     const h = setup();

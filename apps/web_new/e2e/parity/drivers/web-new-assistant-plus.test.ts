@@ -435,7 +435,7 @@ describe("instance and GPT stubs", () => {
     const route = vi.fn(async () => undefined);
     const driver = new WebNewDriver(pageOf({ route }));
     await driver.assistantStubGptAnswer({ response: "canned", response_html: "<p>canned</p>" });
-    const handler = handlerFor(route, "**/ai-assistant/gpt-assistant/");
+    const handler = handlerFor(route, "**/api/workspaces/*/projects/*/ai-assistant/");
     const seen = stubRoute({ postDataJSON: () => ({ prompt: "", task: "Summarize" }) });
     await handler(seen as unknown as Route);
     expect(seen.fulfill).toHaveBeenCalledWith({
@@ -450,7 +450,7 @@ describe("instance and GPT stubs", () => {
     const route = vi.fn(async () => undefined);
     const driver = new WebNewDriver(pageOf({ route }));
     await driver.assistantFailGptAnswer(429, { error: "quota" });
-    const handler = handlerFor(route, "**/ai-assistant/gpt-assistant/");
+    const handler = handlerFor(route, "**/api/workspaces/*/projects/*/ai-assistant/");
     const failed = stubRoute({ postDataJSON: () => ({ prompt: 5, task: null }) });
     await handler(failed as unknown as Route);
     expect(failed.fulfill).toHaveBeenCalledWith({
@@ -470,7 +470,7 @@ describe("instance and GPT stubs", () => {
     const route = vi.fn(async () => undefined);
     const driver = new WebNewDriver(pageOf({ route }));
     await driver.assistantStubGptAnswer({ response: "x", response_html: "<p>x</p>" });
-    const handler = handlerFor(route, "**/ai-assistant/gpt-assistant/");
+    const handler = handlerFor(route, "**/api/workspaces/*/projects/*/ai-assistant/");
     const seen = stubRoute({ method: () => "GET" });
     await handler(seen as unknown as Route);
     expect(seen.fallback).toHaveBeenCalledTimes(1);
@@ -480,7 +480,7 @@ describe("instance and GPT stubs", () => {
   it("removes the GPT stubs", async () => {
     const unroute = vi.fn(async () => undefined);
     await new WebNewDriver(pageOf({ unroute })).assistantClearGptStubs();
-    expect(unroute).toHaveBeenCalledWith("**/ai-assistant/gpt-assistant/");
+    expect(unroute).toHaveBeenCalledWith("**/api/workspaces/*/projects/*/ai-assistant/");
   });
 });
 

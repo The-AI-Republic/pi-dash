@@ -11520,8 +11520,8 @@ export class WebNewDriver implements ParityDriver {
   private async routeGptStub(): Promise<void> {
     // The issue modal posts the project task endpoint; nothing else on
     // the page shares its trailing segments, so the glob stays exact.
-    await this.page.unroute("**/ai-assistant/gpt-assistant/");
-    await this.page.route("**/ai-assistant/gpt-assistant/", async (route) => {
+    await this.page.unroute("**/api/workspaces/*/projects/*/ai-assistant/");
+    await this.page.route("**/api/workspaces/*/projects/*/ai-assistant/", async (route) => {
       const request = route.request();
       if (request.method() !== "POST") {
         await route.fallback();
@@ -11552,7 +11552,7 @@ export class WebNewDriver implements ParityDriver {
   async assistantClearGptStubs(): Promise<void> {
     this.assistantGptAnswerStub = null;
     this.assistantGptFailure = null;
-    await this.page.unroute("**/ai-assistant/gpt-assistant/");
+    await this.page.unroute("**/api/workspaces/*/projects/*/ai-assistant/");
   }
   async assistantGptRequests(): Promise<{ prompt: string; task: string }[]> {
     return [...this.assistantGptSeen];
