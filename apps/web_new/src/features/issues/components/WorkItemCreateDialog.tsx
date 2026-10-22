@@ -197,6 +197,8 @@ export interface WorkItemCreateDialogProps {
   moveToProject?: boolean | undefined;
   /** Promote write the move entry runs with the named draft payload. */
   onPublish?: ((input: DraftIssueCreateInput) => Promise<void>) | undefined;
+  /** A guest may edit their own draft but may not convert it (DRAFT-025). */
+  canPublish?: boolean | undefined;
 }
 
 /** The draft payload a copy or a blank draft entry opens with. */
@@ -370,6 +372,7 @@ export function WorkItemCreateDialog({
   onCopySaved,
   moveToProject = false,
   onPublish,
+  canPublish = true,
 }: WorkItemCreateDialogProps): React.ReactElement | null {
   const editing = edit !== null;
   // A draft entry (ISS-139/141): the create form writes a draft instead of
@@ -936,6 +939,7 @@ export function WorkItemCreateDialog({
 
   async function publishDraftOnce(): Promise<void> {
     if (busy) return;
+    if (!canPublish) return;
     const id = draftTargetId;
     if (id === null) return;
     if (form.projectId === null || projectId === "") {
@@ -954,7 +958,6 @@ export function WorkItemCreateDialog({
         finishClose();
       } catch {
         submitting.current = false;
-        notifyError(PUBLISH_FAILED_TITLE, PUBLISH_FAILED_BODY);
       }
       return;
     }
@@ -1064,12 +1067,12 @@ export function WorkItemCreateDialog({
                 {SAVE_DRAFT_BUTTON_LABEL}
               </Button>
             )}
-            {moving ? (
+            {moving && canPublish ? (
               <Button type="button" variant="secondary" onClick={() => void publishDraftOnce()} disabled={busy}>
                 {MOVE_TO_PROJECT_BUTTON_LABEL}
               </Button>
             ) : null}
-            {draftTargetId === null || moving ? null : (
+            {draftTargetId === null || moving || !canPublish ? null : (
               <Button variant="secondary" onClick={() => void publishDraftOnce()} disabled={busy}>
                 {PUBLISH_BUTTON_LABEL}
               </Button>

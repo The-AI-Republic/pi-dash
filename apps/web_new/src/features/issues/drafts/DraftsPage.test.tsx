@@ -21,16 +21,18 @@ vi.mock("../../../shared/shell/index.js", () => toasts);
 const session = vi.hoisted(() => ({
   me: { data: { id: ids.ME } as { id: string } | undefined },
   canEdit: true,
+  isAdmin: true,
+  role: 20,
 }));
 
 vi.mock("../../../core/session/index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../core/session/index.js")>()),
   useMe: () => session.me,
   usePermissions: () => ({
-    role: session.canEdit ? 20 : 10,
-    isMember: session.canEdit,
+    role: session.role,
+    isMember: session.role >= 5,
     canEdit: session.canEdit,
-    isAdmin: session.canEdit,
+    isAdmin: session.isAdmin,
   }),
 }));
 
@@ -247,6 +249,8 @@ beforeEach(() => {
   toasts.notifyError.mockReset();
   session.me = { data: { id: ids.ME } };
   session.canEdit = true;
+  session.isAdmin = true;
+  session.role = 20;
 });
 
 afterEach(() => {
@@ -411,17 +415,14 @@ describe("first-run screens", () => {
   it("refuses a draft the viewer has no identity for", async () => {
     session.me = { data: undefined };
     session.canEdit = false;
-    const h = renderPage({
+    session.isAdmin = false;
+    session.role = 5;
+    renderPage({
       pages: [page([draft(DRAFT_1, "One")])],
       projects: [project(PROJECT, "Atlas", { member_role: 15 })],
     });
     expect(await screen.findByText("One")).toBeInTheDocument();
-    fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
-    expect(toasts.notifyError).toHaveBeenCalledWith(
-      "You don't have permission to perform this action",
-      expect.any(String)
-    );
-    expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(screen.queryByRole("button", { name: "Actions for One" })).not.toBeInTheDocument();
   });
 
   it("leaves the code off a draft that holds no project", async () => {
@@ -597,36 +598,18 @@ describe("delete", () => {
     expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
   });
 
-  it("refuses a non-admin who did not create the draft", async () => {
-    session.canEdit = false;
-    const h = renderPage({
+  // DRAFT-025 hides row actions the viewer may not use, so a
+  // non-creator never reaches the UI delete path; the server's refusal
+  // is the observable behavior (duplicate-delete.spec.ts, DRAFT-011).
+  it("refuses a member who did not create the draft", async () => {
+    session.isAdmin = false;
+    session.role = 15;
+    renderPage({
       pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])],
       projects: [project(PROJECT, "Atlas", { member_role: 15 })],
     });
     await screen.findByText("One");
-    fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
-    expect(screen.queryByRole("dialog", { name: "Delete draft" })).not.toBeInTheDocument();
-    expect(toasts.notifyError).toHaveBeenCalledWith(
-      "You don't have permission to perform this action",
-      expect.any(String)
-    );
-    expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
-  });
-
-  it("refuses a project admin who is not a workspace admin", async () => {
-    session.canEdit = false;
-    const h = renderPage({
-      pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])],
-      projects: [project(PROJECT, "Atlas", { member_role: 20 })],
-    });
-    await screen.findByText("One");
-    fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
-    expect(screen.queryByRole("dialog", { name: "Delete draft" })).not.toBeInTheDocument();
-    expect(toasts.notifyError).toHaveBeenCalledWith(
-      "You don't have permission to perform this action",
-      expect.any(String)
-    );
-    expect(h.calls.some((call) => call.method === "DELETE")).toBe(false);
+    expect(screen.queryByRole("button", { name: "Actions for One" })).not.toBeInTheDocument();
   });
 
   it("lets a workspace admin delete someone else's draft from any project standing", async () => {
@@ -639,12 +622,110 @@ describe("delete", () => {
     expect(screen.getByRole("dialog", { name: "Delete draft" })).toBeInTheDocument();
   });
 
+  it("refuses a project-only admin who is not a workspace admin", async () => {
+    session.isAdmin = false;
+    session.role = 15;
+    renderPage({
+      pages: [page([draft(DRAFT_1, "One", { created_by: ids.SOMEONE })])],
+      projects: [project(PROJECT, "Atlas", { member_role: 20 })],
+    });
+    await screen.findByText("One");
+    expect(screen.queryByRole("button", { name: "Actions for One" })).not.toBeInTheDocument();
+  });
+
   it("lets a non-admin creator delete their own draft", async () => {
-    session.canEdit = false;
+    session.isAdmin = false;
+    session.role = 15;
     renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
     await screen.findByText("One");
     fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
     expect(screen.getByRole("dialog", { name: "Delete draft" })).toBeInTheDocument();
+  });
+
+  it("lets a guest edit and delete a draft they created", async () => {
+    session.canEdit = false;
+    session.isAdmin = false;
+    session.role = 5;
+    const h = renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
+    await screen.findByText("One");
+    expect(screen.getByRole("button", { name: "Draft a work item" })).toBeDisabled();
+    const menu = openMenu();
+    expect(menu.queryByRole("menuitem", { name: "Make a copy" })).not.toBeInTheDocument();
+    expect(menu.queryByRole("menuitem", { name: "Move to project" })).not.toBeInTheDocument();
+    fireEvent.click(menu.getByRole("menuitem", { name: "Edit" }));
+    expect(h.dialog.seen.at(-1)?.edit).toMatchObject({ kind: "draft", id: DRAFT_1 });
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete draft" })).toBeInTheDocument();
+  });
+
+  it("passes the guest a dialog that cannot publish", async () => {
+    session.canEdit = false;
+    session.isAdmin = false;
+    session.role = 5;
+    const h = renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
+    await screen.findByText("One");
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Edit" }));
+    expect(h.dialog.seen.at(-1)).toMatchObject({ canPublish: false });
+  });
+
+  it("maps an inline PATCH refusal to the permission notice and rolls back", async () => {
+    createAppClient("https://api.test", (async (url: string, init: { method?: string } = {}) => {
+      const json = (status: number, payload: unknown) => ({
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(payload),
+      });
+      if (url.includes("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+      if (url.includes("/draft-issues/") && (init.method ?? "GET") === "GET") {
+        return json(200, page([draft(DRAFT_1, "One")]));
+      }
+      if (/draft-issues\/[^/?]+\/$/.test(url) && init.method === "PATCH") return json(403, { error: "Forbidden" });
+      if (url.endsWith("/projects/details/")) return json(200, [project()]);
+      return json(200, {});
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DraftsPage workspaceSlug={SLUG} CreateDialog={dialogStub().CreateDialog} onCreateProject={vi.fn()} />
+      </QueryClientProvider>
+    );
+    await screen.findByText("One");
+    fireEvent.click(within(await screen.findByTestId("draft-properties")).getByRole("button", { name: "None" }));
+    fireEvent.click(await screen.findByRole("option", { name: "High" }));
+    await waitFor(() =>
+      expect(toasts.notifyError).toHaveBeenCalledWith(
+        "You don't have permission to perform this action",
+        "Only a workspace admin or this draft's creator can change it."
+      )
+    );
+  });
+
+  it("maps a promote refusal to the permission notice and keeps the dialog", async () => {
+    const h = renderPage({ pages: [page([draft(DRAFT_1, "One")])], promoteStatus: 403 });
+    await screen.findByText("One");
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Move to project" }));
+    const props = h.dialog.seen.at(-1);
+    await act(async () => {
+      await props?.onPublish?.({ name: "One", project_id: PROJECT }).catch(() => undefined);
+    });
+    expect(toasts.notifyError).toHaveBeenCalledWith(
+      "You don't have permission to perform this action",
+      "Only a workspace member or admin can publish a draft."
+    );
+    expect(screen.getByTestId("create-dialog")).toBeInTheDocument();
+  });
+
+  it("explains a generic promote failure and keeps the dialog", async () => {
+    const h = renderPage({ pages: [page([draft(DRAFT_1, "One")])], promoteStatus: 500 });
+    await screen.findByText("One");
+    fireEvent.click(openMenu().getByRole("menuitem", { name: "Move to project" }));
+    const props = h.dialog.seen.at(-1);
+    await act(async () => {
+      await props?.onPublish?.({ name: "One", project_id: PROJECT }).catch(() => undefined);
+    });
+    expect(toasts.notifyError).toHaveBeenCalledWith("Error!", "Failed to move work item to project. Please try again.");
+    expect(screen.getByTestId("create-dialog")).toBeInTheDocument();
   });
 
   it("reads a server permission refusal distinctly", async () => {

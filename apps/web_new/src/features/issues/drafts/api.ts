@@ -39,6 +39,9 @@ export const DRAFT_DELETE_PERMISSION_TITLE = "You don't have permission to perfo
 export const DRAFT_DELETE_PERMISSION_BODY = "Only a workspace admin or the creator can perform this action.";
 export const DRAFT_UPDATE_FAILED_TITLE = "Couldn't save the change";
 const DRAFT_UPDATE_FAILED_BODY = "The draft is unchanged — check your connection and try again.";
+export const DRAFT_UPDATE_PERMISSION_BODY = "Only a workspace admin or this draft's creator can change it.";
+export const DRAFT_PROMOTE_PERMISSION_TITLE = "You don't have permission to perform this action";
+export const DRAFT_PROMOTE_PERMISSION_BODY = "Only a workspace member or admin can publish a draft.";
 export const DRAFT_CREATED_TITLE = "Success!";
 export const DRAFT_CREATED_BODY = "Draft created";
 export const DRAFT_CREATE_FAILED_TITLE = "Error!";
@@ -161,9 +164,13 @@ export function useUpdateDraftField(workspaceSlug: string) {
       paintDraftPatch(queryClient, workspaceSlug, draftId, patch);
       return snapshots;
     },
-    onError: (_error, _input, snapshots) => {
+    onError: (error, _input, snapshots) => {
       if (snapshots !== undefined) rollbackSnapshots(queryClient, snapshots);
-      notifyError(DRAFT_UPDATE_FAILED_TITLE, DRAFT_UPDATE_FAILED_BODY);
+      if (isDraftPermissionRefusal(error)) {
+        notifyError(DRAFT_DELETE_PERMISSION_TITLE, DRAFT_UPDATE_PERMISSION_BODY);
+      } else {
+        notifyError(DRAFT_UPDATE_FAILED_TITLE, DRAFT_UPDATE_FAILED_BODY);
+      }
     },
   });
 }
@@ -194,9 +201,6 @@ export function usePromoteDraft(workspaceSlug: string) {
       removeDraftFromCache(queryClient, workspaceSlug, draftId);
       notifySuccess(DRAFT_PROMOTED_TITLE, DRAFT_PROMOTED_BODY);
       invalidateDrafts(queryClient, workspaceSlug);
-    },
-    onError: () => {
-      notifyError(DRAFT_PROMOTE_FAILED_TITLE, DRAFT_PROMOTE_FAILED_BODY);
     },
   });
 }

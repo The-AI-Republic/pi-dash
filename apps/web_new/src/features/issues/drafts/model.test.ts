@@ -12,6 +12,7 @@ import {
   asPriority,
   assigneePatch,
   canDeleteDraft,
+  draftAbilities,
   copyDraftInput,
   copyDraftTitle,
   cyclePatch,
@@ -207,6 +208,44 @@ describe("canDeleteDraft", () => {
     expect(canDeleteDraft({ created_by: "someone" }, { meId: "user-1", isWorkspaceAdmin: false })).toBe(false);
     expect(canDeleteDraft({ created_by: null }, { meId: null, isWorkspaceAdmin: false })).toBe(false);
     expect(canDeleteDraft({ created_by: null }, { meId: "user-1", isWorkspaceAdmin: false })).toBe(false);
+  });
+});
+
+describe("draftAbilities", () => {
+  const admin = { meId: "user-1", isAdmin: true, canWrite: true };
+  const member = { meId: "user-1", isAdmin: false, canWrite: true };
+  const guest = { meId: "user-1", isAdmin: false, canWrite: false };
+  const pending = { meId: null, isAdmin: false, canWrite: false };
+
+  it("lets the creator manage, copy and convert their own draft", () => {
+    expect(draftAbilities({ created_by: "user-1" }, member)).toEqual({ manage: true, copy: true, convert: true });
+  });
+
+  it("lets a guest manage their own draft but never copy or convert it", () => {
+    expect(draftAbilities({ created_by: "user-1" }, guest)).toEqual({
+      manage: true,
+      copy: false,
+      convert: false,
+    });
+  });
+
+  it("lets a workspace admin manage another creator's draft but not copy or convert it", () => {
+    expect(draftAbilities({ created_by: "someone" }, admin)).toEqual({
+      manage: true,
+      copy: false,
+      convert: false,
+    });
+  });
+
+  it("refuses a member and a guest on another creator's draft", () => {
+    const foreign = { created_by: "someone" };
+    expect(draftAbilities(foreign, member)).toEqual({ manage: false, copy: false, convert: false });
+    expect(draftAbilities(foreign, guest)).toEqual({ manage: false, copy: false, convert: false });
+  });
+
+  it("fails closed while the viewer is unknown or the creator is missing", () => {
+    expect(draftAbilities({ created_by: "user-1" }, pending)).toEqual({ manage: false, copy: false, convert: false });
+    expect(draftAbilities({ created_by: null }, admin)).toEqual({ manage: true, copy: false, convert: false });
   });
 });
 

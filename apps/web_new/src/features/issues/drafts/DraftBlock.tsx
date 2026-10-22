@@ -20,7 +20,7 @@ import * as React from "react";
 import { notifySuccess } from "../../../shared/shell/index.js";
 import { DRAFT_ROW_ACTIONS, type DraftRowActionId } from "./draftActions.js";
 import { DraftProperties } from "./DraftProperties.js";
-import type { DraftFieldPatch } from "./model.js";
+import type { DraftAbilities, DraftFieldPatch } from "./model.js";
 
 export interface DraftBlockProps {
   workspaceSlug: string;
@@ -28,7 +28,8 @@ export interface DraftBlockProps {
   project: ProjectDetails | undefined;
   /** The project's short code, shown beside the name. */
   projectIdentifier: string | null;
-  editable: boolean;
+  /** DRAFT-025: which row actions this viewer may use. */
+  abilities: DraftAbilities;
   onEdit: () => void;
   onCopy: () => void;
   onMove: () => void;
@@ -55,7 +56,7 @@ export function DraftBlock({
   draft,
   project,
   projectIdentifier,
-  editable,
+  abilities,
   onEdit,
   onCopy,
   onMove,
@@ -65,6 +66,7 @@ export function DraftBlock({
   const [menuOpen, setMenuOpen] = React.useState(false);
   const title = draft.name ?? "";
   const identifier = projectIdentifier;
+  const hasActions = abilities.manage || abilities.copy || abilities.convert;
 
   async function copyCode(code: string): Promise<void> {
     const ok = await copyIdentifier(code, globalThis.navigator?.clipboard);
@@ -76,8 +78,9 @@ export function DraftBlock({
       data-draft-block=""
       data-draft-id={draft.id}
       aria-label={`Draft ${title}`}
-      onDoubleClick={onEdit}
+      onDoubleClick={abilities.manage ? onEdit : undefined}
       onContextMenu={(event) => {
+        if (!hasActions) return;
         event.preventDefault();
         setMenuOpen(true);
       }}
@@ -105,36 +108,39 @@ export function DraftBlock({
             {title}
           </p>
         </Tooltip>
-        <div
-          className="relative shrink-0 opacity-0 transition-opacity group-hover/draft:opacity-100 focus-within:opacity-100"
-          onClick={(event) => event.stopPropagation()}
-        >
-          <button
-            type="button"
-            aria-label={`Actions for ${title}`}
-            aria-expanded={menuOpen}
-            aria-haspopup="menu"
-            onClick={() => setMenuOpen((current) => !current)}
-            className="rounded-(--radius-control) p-(--space-1) text-(--text-muted) hover:bg-(--border) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+        {hasActions ? (
+          <div
+            className="relative shrink-0 opacity-0 transition-opacity group-hover/draft:opacity-100 focus-within:opacity-100"
+            onClick={(event) => event.stopPropagation()}
           >
-            <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
-          </button>
-          {menuOpen ? (
-            <DraftMenu
-              onClose={() => setMenuOpen(false)}
-              onEdit={onEdit}
-              onCopy={onCopy}
-              onMove={onMove}
-              onDelete={onDelete}
-            />
-          ) : null}
-        </div>
+            <button
+              type="button"
+              aria-label={`Actions for ${title}`}
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              onClick={() => setMenuOpen((current) => !current)}
+              className="rounded-(--radius-control) p-(--space-1) text-(--text-muted) hover:bg-(--border) hover:text-(--text) focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+            >
+              <Ellipsis size={16} strokeWidth={1.5} aria-hidden="true" />
+            </button>
+            {menuOpen ? (
+              <DraftMenu
+                onClose={() => setMenuOpen(false)}
+                onEdit={onEdit}
+                onCopy={onCopy}
+                onMove={onMove}
+                onDelete={onDelete}
+                abilities={abilities}
+              />
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <DraftProperties
         workspaceSlug={workspaceSlug}
         draft={draft}
         project={project}
-        editable={editable}
+        editable={abilities.manage}
         onWrite={onWrite}
       />
     </article>
@@ -154,18 +160,28 @@ function DraftMenu({
   onCopy,
   onMove,
   onDelete,
+  abilities,
 }: {
   onClose: () => void;
   onEdit: () => void;
   onCopy: () => void;
   onMove: () => void;
   onDelete: () => void;
+  abilities: DraftAbilities;
 }): React.ReactElement {
   const runners: Record<DraftRowActionId, () => void> = {
     edit: onEdit,
     copy: onCopy,
     move: onMove,
     delete: onDelete,
+  };
+  // DRAFT-025: the catalog keeps its pinned order and labels; the
+  // matrix only decides which entries this viewer is offered.
+  const shown: Record<DraftRowActionId, boolean> = {
+    edit: abilities.manage,
+    copy: abilities.copy,
+    move: abilities.convert,
+    delete: abilities.manage,
   };
   return (
     <div
@@ -177,7 +193,7 @@ function DraftMenu({
         if (event.key === "Escape") onClose();
       }}
     >
-      {DRAFT_ROW_ACTIONS.map((action) => {
+      {DRAFT_ROW_ACTIONS.filter((action) => shown[action.id]).map((action) => {
         const Icon = DRAFT_MENU_ICONS[action.id];
         const run = runners[action.id];
         return (
