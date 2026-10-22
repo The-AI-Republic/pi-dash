@@ -518,7 +518,7 @@ describe("browse route", () => {
     const labels = [...widgets.querySelectorAll("[data-widget-section]")].map((node) =>
       node.getAttribute("data-widget-section")
     );
-    expect(labels).toEqual(["Attachments"]);
+    expect(labels).toEqual(["Relations", "Links", "Attachments"]);
   });
 
   it("edits the title inline once membership resolves", async () => {
