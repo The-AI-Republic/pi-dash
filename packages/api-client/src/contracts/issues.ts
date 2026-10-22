@@ -15,6 +15,26 @@ import { AgentStatus, AgentTicker } from "./issue-agent.js";
 
 export const ISSUE_PRIORITIES = ["urgent", "high", "medium", "low", "none"] as const;
 
+/**
+ * The issue's dedicated runner, as the detail read embeds it (hybrid
+ * assignment, design §14.1). Shown to everyone who can see the issue.
+ * Absent (or null) on pod-assigned issues and on backends that predate
+ * the dedicated-runner field.
+ */
+export const AssignedRunnerDetail = z.object({
+  id: uuid(),
+  name: z.string(),
+  status: z.string(),
+  pod: uuid(),
+  owner: uuid(),
+  owner_display_name: z.string(),
+  host_label: z.string(),
+  last_heartbeat_at: nullableDateTime(),
+  is_busy: z.boolean(),
+  queue_depth: z.number(),
+});
+export type AssignedRunnerDetail = z.infer<typeof AssignedRunnerDetail>;
+
 const issueCoreFields = {
   id: uuid(),
   name: z.string(),
@@ -29,6 +49,7 @@ const issueCoreFields = {
   project_id: uuid(),
   parent_id: nullableUuid(),
   cycle_id: nullableUuid(),
+  assigned_runner_id: z.optional(nullableUuid()),
   module_ids: z.array(uuid()),
   label_ids: z.array(uuid()),
   assignee_ids: z.array(uuid()),
@@ -81,6 +102,7 @@ export const Issue = z.object({
   ...issueCoreFields,
   complexity_score: z.number(),
   assigned_pod_id: z.optional(nullableUuid()),
+  assigned_runner_detail: z.optional(z.nullable(AssignedRunnerDetail)),
   agent_executor: z.nullable(z.string()),
   is_synced: z.boolean(),
   description_html: z.string(),
@@ -330,6 +352,7 @@ export const ArchivedIssue = z.object({
   project_id: uuid(),
   parent_id: nullableUuid(),
   assigned_pod_id: z.optional(nullableUuid()),
+  assigned_runner_id: z.optional(nullableUuid()),
   agent_executor: z.nullable(z.string()),
   created_at: dateTime(),
   updated_at: dateTime(),

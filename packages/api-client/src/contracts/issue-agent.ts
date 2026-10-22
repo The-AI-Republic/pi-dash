@@ -7,7 +7,7 @@
 // area; the widgets consume them from there.
 import * as z from "zod/mini";
 import { nullableDateTime, nullableUuid, uuid } from "./fields.js";
-import { RunErrorDiagnostic } from "./runs.js";
+import { DispatchWait, RunErrorDiagnostic } from "./runs.js";
 
 /** The per-issue continuation clock as the detail read carries it. */
 export const AgentTicker = z.object({
@@ -54,6 +54,14 @@ export const AgentRunSummary = z.object({
   queue_position: z.nullable(z.number()),
   runner: nullableUuid(),
   runner_name: z.nullable(z.string()),
+  /**
+   * Hybrid-assignment pin (design §14.3), mirroring the run contract.
+   * Optional so backends that predate the waiting state still parse.
+   */
+  pinned_runner: z.optional(nullableUuid()),
+  pinned_runner_name: z.optional(z.nullable(z.string())),
+  pin_kind: z.optional(z.string()),
+  dispatch_wait: z.optional(z.nullable(DispatchWait)),
   created_at: nullableDateTime(),
   assigned_at: nullableDateTime(),
   started_at: nullableDateTime(),

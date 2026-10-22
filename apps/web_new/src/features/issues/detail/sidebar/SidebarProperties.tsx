@@ -45,16 +45,19 @@ const ROW_VARIANT: ButtonVariant = "ghost";
  * the server resolves it (`issue.agent_executor or
  * project.default_agent_executor`), so the row states where a run will
  * actually go. An agent target renders as that agent; a local target
- * renders the pinned pod, and no pin means the project's default pod.
+ * renders the pinned runner, else the pinned pod, and no pin means
+ * the project's default pod.
  */
 export function selectExecutionSelection(
-  issue: Pick<Issue, "agent_executor" | "assigned_pod_id">,
+  issue: Pick<Issue, "agent_executor" | "assigned_pod_id" | "assigned_runner_id">,
   project: Pick<SidebarProject, "default_agent_executor">
 ): ExecutionSelection | null {
   const executor = issue.agent_executor ?? project.default_agent_executor;
   if (executor === "cloud_agent" || executor === "managed_runner") {
     return { type: "agent", executor };
   }
+  const runnerId = issue.assigned_runner_id ?? null;
+  if (runnerId !== null) return { type: "runner", runnerId, podId: issue.assigned_pod_id ?? "" };
   const podId = issue.assigned_pod_id ?? null;
   return podId === null ? null : { type: "pod", podId };
 }
@@ -130,6 +133,8 @@ export function SidebarProperties({
           variant={ROW_VARIANT}
           placeholder="Select target"
           preload={selection !== null}
+          assignableFor={issue.id}
+          saveError={targetUpdate.validationError}
           onChange={(picked) => targetUpdate.updateExecutionTarget(executionTargetPatch(picked))}
         />
       </SidebarRow>

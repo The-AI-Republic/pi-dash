@@ -93,6 +93,25 @@ export const RunToolPlan = z.object({
 export type RunToolPlan = z.infer<typeof RunToolPlan>;
 
 /**
+ * Why a queued pinned run has not dispatched yet (hybrid assignment,
+ * design §14.3). Computed, never stored; null without a pin. `reason`
+ * stays an open string (runner_offline, runner_busy,
+ * runner_not_permitted, dispatching); `releasable` tells the client
+ * whether the requester may release this run to the pod.
+ */
+export const DispatchWait = z.object({
+  reason: z.string(),
+  pin_kind: z.string(),
+  runner: uuid(),
+  runner_name: z.string(),
+  queued_at: nullableDateTime(),
+  runner_last_seen_at: nullableDateTime(),
+  runs_ahead: z.number(),
+  releasable: z.boolean(),
+});
+export type DispatchWait = z.infer<typeof DispatchWait>;
+
+/**
  * One agent run. `events` rides along only when the detail fetch asks
  * for it; `tool_calls` is empty off the cloud-agent executor.
  */
@@ -108,6 +127,16 @@ export const AgentRun = z.object({
   agent_metadata: z.record(z.string(), z.unknown()),
   runner: nullableUuid(),
   work_item: nullableUuid(),
+  /**
+   * Hybrid-assignment pin (design §14.3): the runner this queued run
+   * waits for, its name, and the pin kind (locality or dedicated);
+   * dispatch_wait explains the wait. Optional so backends that predate
+   * the waiting state still parse.
+   */
+  pinned_runner: z.optional(nullableUuid()),
+  pinned_runner_name: z.optional(z.nullable(z.string())),
+  pin_kind: z.optional(z.string()),
+  dispatch_wait: z.optional(z.nullable(DispatchWait)),
   scheduler_binding: nullableUuid(),
   scheduler_binding_detail: z.nullable(RunSchedulerBinding),
   pod: uuid(),
@@ -260,6 +289,35 @@ export async function cancelRun(client: ApiClient, runId: string, reason?: strin
   const path = `/api/runners/runs/${runId}/cancel/`;
   const envelope = await client.sendJson<unknown>("POST", path, { json: { reason: reason ?? "" } });
   return client.parse(AgentRun, envelope.data, `POST ${path}`);
+}
+
+/**
+ * Release-pin outcome (hybrid assignment, design §12.2): the updated
+ * run — still queued, now unpinned — plus, on newer backends, the
+ * assignment note confirming the issue's dedicated runner is unchanged.
+ */
+export const ReleaseRunPinResult = z.object({
+  ...AgentRun.shape,
+  assignment: z.optional(
+    z.object({
+      assigned_runner_id: nullableUuid(),
+      changed: z.boolean(),
+    })
+  ),
+});
+export type ReleaseRunPinResult = z.infer<typeof ReleaseRunPinResult>;
+
+/**
+ * Release one queued pinned run to its pod's shared queue. Run-scoped:
+ * the issue's dedicated assignment is unchanged (design §12.2). Only
+ * the issue's creator and current assignees may release a dedicated
+ * pin (403 otherwise); non-queued or unpinned runs are refused with
+ * 409. Answers the updated run.
+ */
+export async function releaseRunPin(client: ApiClient, runId: string): Promise<ReleaseRunPinResult> {
+  const path = `/api/runners/runs/${runId}/release-pin/`;
+  const envelope = await client.sendJson<unknown>("POST", path, {});
+  return client.parse(ReleaseRunPinResult, envelope.data, `POST ${path}`);
 }
 
 /**

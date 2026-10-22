@@ -75,6 +75,15 @@ export const Runner = z.object({
   revoked_reason: z.string(),
   created_at: dateTime(),
   updated_at: dateTime(),
+  /**
+   * Hybrid-assignment answers, present only when the list was read with
+   * `assignable_for` (design §7.4). Optional so plain list reads and
+   * older backends still parse.
+   */
+  assignable: z.optional(z.boolean()),
+  not_assignable_code: z.optional(z.string()),
+  is_busy: z.optional(z.boolean()),
+  queue_depth: z.optional(z.number()),
 });
 export type Runner = z.infer<typeof Runner>;
 
@@ -86,6 +95,12 @@ export interface RunnerListScope {
   podId?: string;
   /** Include desktop-bundled runners; they are hidden by default. */
   includeBundled?: boolean;
+  /**
+   * Hybrid-assignment eligibility read (design §7.4): an issue id, or
+   * "new" for the create form. Each row then carries assignable,
+   * not_assignable_code, is_busy and queue_depth.
+   */
+  assignableFor?: string;
 }
 
 /**
@@ -105,6 +120,7 @@ export async function listRunners(
       project: scope.projectId,
       pod: scope.podId,
       include_bundled: scope.includeBundled,
+      assignable_for: scope.assignableFor,
     },
   });
   return client.parse(RunnerList, body, `GET ${path}`);

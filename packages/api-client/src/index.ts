@@ -136,6 +136,8 @@ export { Project, ProjectList, listProjects } from "./contracts/projects.js";
 export { ProjectLite } from "./contracts/project-lite.js";
 export {
   AgentExecutorOption,
+  DEDICATED_RUNNER_LOST_FAIL_TO_BACKLOG,
+  DEDICATED_RUNNER_LOST_FALL_BACK,
   ProjectDetail,
   ProjectDetails,
   ProjectDetailsList,
@@ -246,6 +248,7 @@ export type {
 export {
   ISSUE_PRIORITIES,
   ArchivedIssue,
+  AssignedRunnerDetail,
   GlobalIssueListResponse,
   GlobalIssueRow,
   GroupedIssueListResponse,
@@ -1055,7 +1058,9 @@ export {
   AgentRunCreateResult,
   AgentRunPage,
   AgentRunQueued,
+  DispatchWait,
   EXECUTOR_KINDS,
+  ReleaseRunPinResult,
   RunErrorDiagnostic,
   RunEvent,
   RUN_ERROR_SOURCES,
@@ -1069,6 +1074,7 @@ export {
   createRun,
   getRun,
   listRuns,
+  releaseRunPin,
   reTickIssue,
   ReTickResponse,
   runAi,

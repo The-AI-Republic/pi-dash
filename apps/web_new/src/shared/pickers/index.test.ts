@@ -23,16 +23,24 @@ import {
   pickerIntakeStatesQueryOptions,
   pickerPodsQueryOptions,
   pickerProjectQueryOptions,
+  pickerRunnersQueryOptions,
   PodPicker,
   POD_OPTION_PREFIX,
+  podOptionLabel,
+  RUNNER_OPTION_PREFIX,
+  runnerReasonMessage,
+  runnerStatusLine,
+  runnerWaitNote,
   selectDefaultPod,
   selectEstimateOptions,
   selectIntakeFallback,
+  selectRunnerOwnerName,
   StateGlyph,
   usePickerEstimates,
   usePickerIntakeStates,
   usePickerPods,
   usePickerProject,
+  usePickerRunners,
 } from "./index.js";
 
 describe("pickers barrel", () => {
@@ -46,6 +54,12 @@ describe("pickers barrel", () => {
     expect(selectIntakeFallback).toBeDefined();
     expect(AGENT_OPTION_PREFIX).toBe("agent:");
     expect(POD_OPTION_PREFIX).toBe("pod:");
+    expect(RUNNER_OPTION_PREFIX).toBe("runner:");
+    expect(podOptionLabel).toBeDefined();
+    expect(runnerReasonMessage).toBeDefined();
+    expect(runnerStatusLine).toBeDefined();
+    expect(runnerWaitNote).toBeDefined();
+    expect(selectRunnerOwnerName).toBeDefined();
     expect(AGENT_ROW_LABELS).toBeDefined();
     expect(CLOUD_EXECUTOR).toBe("cloud_agent");
     expect(MANAGED_EXECUTOR).toBe("managed_runner");
@@ -62,9 +76,11 @@ describe("pickers barrel", () => {
     expect(pickerIntakeStatesQueryOptions).toBeDefined();
     expect(pickerPodsQueryOptions).toBeDefined();
     expect(pickerProjectQueryOptions).toBeDefined();
+    expect(pickerRunnersQueryOptions).toBeDefined();
     expect(usePickerEstimates).toBeDefined();
     expect(usePickerIntakeStates).toBeDefined();
     expect(usePickerPods).toBeDefined();
     expect(usePickerProject).toBeDefined();
+    expect(usePickerRunners).toBeDefined();
   });
 });

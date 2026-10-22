@@ -41,6 +41,7 @@ import {
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { isAssistantConfigured, useAssistantConfig } from "../../home/index.js";
 import { useCreateWorkItem } from "../api/create.js";
+import { executionTargetFieldError } from "../api/executionTarget.js";
 import { DiscardDraftDialog } from "../create/DiscardDraftDialog.js";
 import {
   DRAFT_SAVE_FAILED_INLINE_TITLE,
@@ -461,6 +462,7 @@ export function WorkItemCreateDialog({
   // never has one, so its submit always builds a full payload.
   const [baseline, setBaseline] = React.useState<EditBaseline | null>(null);
   const [fieldError, setFieldError] = React.useState<string | null>(null);
+  const [executionError, setExecutionError] = React.useState<string | null>(null);
   const [createMore, setCreateMore] = React.useState(false);
   const [parentHit, setParentHit] = React.useState<IssueSearchHit | null>(seededParent);
   const [discardOpen, setDiscardOpen] = React.useState(false);
@@ -806,6 +808,9 @@ export function WorkItemCreateDialog({
         onSettled: () => {
           submitting.current = false;
         },
+        onError: (error) => {
+          setExecutionError(executionTargetFieldError(error));
+        },
         onSuccess: (created) => {
           clearWorkItemDraft(workspaceSlug);
           onCreated?.(created.id);
@@ -906,10 +911,15 @@ export function WorkItemCreateDialog({
           notifySuccess(UPDATE_SUCCESS_TITLE);
           finishClose();
         },
-        onError: () => {
+        onError: (error) => {
           // The ref opens again so a fix can resubmit.
           submitting.current = false;
-          notifyError(UPDATE_FAILED_TITLE, UPDATE_FAILED_BODY);
+          const fieldError = executionTargetFieldError(error);
+          if (fieldError === null) {
+            notifyError(UPDATE_FAILED_TITLE, UPDATE_FAILED_BODY);
+          } else {
+            setExecutionError(fieldError);
+          }
         },
       }
     );
@@ -1150,8 +1160,12 @@ export function WorkItemCreateDialog({
                 workspaceSlug={workspaceSlug}
                 projectId={projectId}
                 value={form.execution}
-                onChange={(execution: ExecutionSelection) => patch({ execution })}
+                onChange={(execution: ExecutionSelection) => {
+                  setExecutionError(null);
+                  patch({ execution });
+                }}
                 disabled={busy}
+                saveError={executionError}
               />
             </FieldSlot>
             <FieldSlot label="Priority">

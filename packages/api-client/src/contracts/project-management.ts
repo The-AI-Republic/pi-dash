@@ -105,6 +105,11 @@ export interface ProjectUpdateInput {
    * states tab flips it through this same project update.
    */
   members_can_edit_states?: boolean;
+  /**
+   * Lost-runner rule (hybrid assignment, design §6.6): fail_to_backlog
+   * or fall_back. Project admins only, like the other agent settings.
+   */
+  dedicated_runner_lost_action?: string;
 }
 
 /**

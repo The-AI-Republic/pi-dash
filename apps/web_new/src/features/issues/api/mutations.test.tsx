@@ -219,10 +219,12 @@ describe("issue patch updaters", () => {
     const painted = applyIssuePatchDetail(issueRow({ assigned_pod_id: null, agent_executor: "local_runner" }), {
       git_work_branch: "pi-dash/wip",
       assigned_pod_id: "923e4567-e89b-12d3-a456-426614174009",
+      assigned_runner_id: "123e4567-e89b-12d3-a456-426614174000",
       agent_executor: "cloud_agent",
     });
     expect(painted?.agent_executor).toBe("local_runner");
     expect(painted?.assigned_pod_id).toBeNull();
+    expect(painted?.assigned_runner_id).toBeUndefined();
     expect(painted).not.toHaveProperty("git_work_branch");
   });
 

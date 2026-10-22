@@ -18,6 +18,7 @@ import {
   listPods,
   listProjectEstimates,
   listProjects,
+  listRunners,
   listStates,
   listWorkspaceMembers,
   type ApiClient,
@@ -46,6 +47,8 @@ export const pickerKeys = {
   pods: (workspaceSlug: string, projectId: string) => [...pickerKeys.all(workspaceSlug), "pods", projectId] as const,
   project: (workspaceSlug: string, projectId: string) =>
     [...pickerKeys.all(workspaceSlug), "project", projectId] as const,
+  runners: (workspaceSlug: string, projectId: string, assignableFor: string) =>
+    [...pickerKeys.all(workspaceSlug), "runners", projectId, assignableFor] as const,
 };
 
 function referenceOptions<T>(key: readonly unknown[], fetch: () => Promise<T>) {
@@ -167,4 +170,34 @@ export function usePickerPods(workspaceSlug: string, projectId: string, enabled:
 /** Project row carrying the executor options for the execution-target picker. */
 export function usePickerProject(workspaceSlug: string, projectId: string, enabled: boolean) {
   return useQuery({ ...pickerProjectQueryOptions(getAppClient(), workspaceSlug, projectId), enabled });
+}
+
+export function pickerRunnersQueryOptions(
+  client: ApiClient,
+  workspaceSlug: string,
+  workspaceId: string,
+  projectId: string,
+  assignableFor: string
+) {
+  return referenceOptions(pickerKeys.runners(workspaceSlug, projectId, assignableFor), () =>
+    listRunners(client, workspaceId, { projectId, assignableFor })
+  );
+}
+
+/**
+ * Project runners with eligibility answers for the execution-target
+ * picker. `assignableFor` is the issue id, or "new" on the create
+ * form; the read stays off until the workspace id resolves.
+ */
+export function usePickerRunners(
+  workspaceSlug: string,
+  workspaceId: string,
+  projectId: string,
+  assignableFor: string,
+  enabled: boolean
+) {
+  return useQuery({
+    ...pickerRunnersQueryOptions(getAppClient(), workspaceSlug, workspaceId, projectId, assignableFor),
+    enabled: enabled && workspaceId !== "",
+  });
 }

@@ -30,6 +30,12 @@ export interface IssuePatch {
   estimate_point?: string | null;
   /** Execution-target patch (ISS-218): pod pin plus executor override, each nullable. */
   assigned_pod_id?: string | null;
+  /**
+   * Dedicated-runner pin (hybrid assignment, design §14.1): the runner's
+   * pod must travel in assigned_pod_id and the executor must be
+   * local_runner in the same write; null clears back to the pod.
+   */
+  assigned_runner_id?: string | null;
   agent_executor?: string | null;
   start_date?: string | null;
   target_date?: string | null;
@@ -90,6 +96,12 @@ export interface IssueCreateInput {
    */
   assigned_pod_id?: string | null;
   agent_executor?: string | null;
+  /**
+   * Dedicated-runner pin picked in the create dialog (hybrid assignment,
+   * design §14.1): same triple as the patch; absent means the project
+   * default pod with no pin.
+   */
+  assigned_runner_id?: string | null;
 }
 
 /**
