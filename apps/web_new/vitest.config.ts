@@ -80,6 +80,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-billing.test.ts",
       "e2e/parity/drivers/web-new-cloud-session.test.ts",
       "e2e/parity/drivers/web-new-cloud-apps.test.ts",
+      "e2e/parity/drivers/web-new-cloud-tabs.test.ts",
       "e2e/parity/drivers/web-new-workspace-settings.test.ts",
       "e2e/parity/drivers/web-new-workspace-settings-dom.test.ts",
       "e2e/parity/drivers/web-new-members.test.ts",

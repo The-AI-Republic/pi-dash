@@ -57722,6 +57722,11 @@ export class WebDriver implements ParityDriver {
     return texts.map((text) => this.cloudNorm(text)).some((text) => text === "Upgrade" || text === "Migrate plan");
   }
 
+  async cloudPlanBadgeFacts(): Promise<{ label: string; hint: string } | null> {
+    // Absent on the oracle (NEWFRONT-474); the new leg reads its own badge.
+    return null;
+  }
+
   async cloudFocusedControl(): Promise<{ role: string; label: string } | null> {
     return this.page.evaluate(() => {
       const el = document.activeElement as HTMLElement | null;
