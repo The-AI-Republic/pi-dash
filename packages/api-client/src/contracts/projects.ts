@@ -92,6 +92,12 @@ export const DEDICATED_RUNNER_LOST_FALL_BACK = "fall_back";
 
 export const ProjectDetail = z.object({
   ...projectDetailShape,
+  /**
+   * Project timezone (the retrieve serializer answers every model field).
+   * The cycles rows render their date spans in this zone (CYC-002); the
+   * server defaults it to UTC. Optional so older fixtures still parse.
+   */
+  timezone: z.optional(z.string()),
   agent_executor_options: z.array(AgentExecutorOption),
   default_agent_executor: z.string(),
   /**

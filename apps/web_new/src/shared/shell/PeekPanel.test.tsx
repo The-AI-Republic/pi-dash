@@ -117,4 +117,11 @@ describe("PeekPanel", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it("names the panel for non-work-item previews", () => {
+    setup({ label: "Cycle preview", testId: "cycle-preview" });
+    const panel = screen.getByTestId("cycle-preview");
+    expect(panel).toHaveAttribute("aria-label", "Cycle preview");
+    expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
+  });
 });

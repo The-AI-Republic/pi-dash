@@ -117,6 +117,7 @@ describe.skipIf(!contractEnabled)("project detail contract", () => {
     expect(row.id).toBe(id);
     expect(row.identifier).toBe(CONTRACT_PROJECT_IDENTIFIER);
     expect(row.member_role).toBe(20);
+    expect(row.timezone).toEqual(expect.any(String));
   });
 
   it("reports unknown projects as not-found", async () => {
