@@ -243,9 +243,8 @@ describe("cycle issues route", () => {
   });
 
   it("validates search through the issue search parser", () => {
-    const validateSearch = Route.options.validateSearch;
-    if (!validateSearch) throw new Error("missing validateSearch");
-    expect(validateSearch({} as never)).toEqual(parseIssueSearch({}));
+    const validateSearch = Route.options.validateSearch as unknown as (input: Record<string, unknown>) => unknown;
+    expect(validateSearch({})).toEqual(parseIssueSearch({}));
   });
 
   it("renders the list skeleton while pending", () => {
