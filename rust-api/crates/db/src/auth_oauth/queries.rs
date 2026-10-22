@@ -570,9 +570,10 @@ pub mod dev_machine {
     /// `DevMachine.objects.create(id=, owner=, host_label=, label=,
     /// last_seen_at=)` inside `transaction.atomic()` (`device.py:94-101`):
     /// Django fills the remaining columns from field defaults
-    /// (`visibility=PRIVATE`, `provisioning=MANUAL`, `created_at`/`updated_at`
-    /// = now, `last_seen_at`/`revoked_at` = NULL unless set).
-    pub const CREATE_SQL: &str = "INSERT INTO \"dev_machine\" (\"id\", \"owner_id\", \"host_label\", \"label\", \"visibility\", \"provisioning\", \"last_seen_at\", \"revoked_at\", \"created_at\", \"updated_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
+    /// (`visibility=PRIVATE`, `provisioning=MANUAL`, `supported_agents=[]`,
+    /// `created_at`/`updated_at` = now, `last_seen_at`/`revoked_at` = NULL
+    /// unless set).
+    pub const CREATE_SQL: &str = "INSERT INTO \"dev_machine\" (\"id\", \"owner_id\", \"host_label\", \"label\", \"visibility\", \"provisioning\", \"supported_agents\", \"last_seen_at\", \"revoked_at\", \"created_at\", \"updated_at\") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
     /// `machine.save(update_fields=[...])` for each reachable list.
     pub const TOUCH_BASE_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"updated_at\" = $2 WHERE \"dev_machine\".\"id\" = $3";
@@ -774,6 +775,7 @@ pub mod dev_machine {
             .bind(label_from_host_label(&normalized))
             .bind(VISIBILITY_PRIVATE)
             .bind(PROVISIONING_MANUAL)
+            .bind(serde_json::json!([]))
             .bind(now)
             .bind(Option::<chrono::DateTime<chrono::Utc>>::None)
             .bind(now)

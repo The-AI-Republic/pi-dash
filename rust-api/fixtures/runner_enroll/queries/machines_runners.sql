@@ -45,7 +45,7 @@ LEFT OUTER JOIN "runner" r ON (dm."id" = r."dev_machine_id")
 WHERE (dm."id" IN (<M2a>) OR dm."id" IN (<M2b>))
   AND dm."owner_id" = $2 AND dm."visibility" = 0
 GROUP BY dm."id", dm."owner_id", dm."host_label", dm."label",
-         dm."visibility", dm."provisioning", dm."last_seen_at",
+         dm."visibility", dm."provisioning", dm."supported_agents", dm."last_seen_at",
          dm."revoked_at", dm."created_at", dm."updated_at"
 ORDER BY dm."last_seen_at" DESC, dm."created_at" DESC;
 -- Django emits the id lists as subqueries (QuerySet used as IN rhs), not

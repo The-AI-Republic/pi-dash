@@ -883,8 +883,8 @@ async fn touch_dev_machine(
 }
 
 /// D2 insert binds (`:88-94,113-118`): id, owner, host, label,
-/// visibility 0, provisioning manual, last_seen now, revoked NULL,
-/// created/updated now.
+/// visibility 0, provisioning manual, supported_agents `[]`, last_seen
+/// now, revoked NULL, created/updated now.
 async fn insert_dev_machine(
     tx: &mut Transaction<'_, Postgres>,
     id: Uuid,
@@ -899,6 +899,7 @@ async fn insert_dev_machine(
         .bind(enroll_sql::dev_machine_label(host_label))
         .bind(0i16)
         .bind(enums::RUNNER_PROVISIONING_MANUAL)
+        .bind(serde_json::json!([]))
         .bind(now)
         .bind(None::<DateTime<Utc>>)
         .bind(now)

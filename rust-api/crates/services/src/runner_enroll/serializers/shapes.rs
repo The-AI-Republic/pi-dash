@@ -107,7 +107,7 @@ pub const LIVE_STATE_WIRE_FIELDS: [&str; 14] = [
 
 /// `DevMachineSerializer.Meta.fields` (`serializers.py:114-127`), wire
 /// order.
-pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
+pub const DEV_MACHINE_WIRE_FIELDS: [&str; 13] = [
     "id",
     "host_label",
     "label",
@@ -115,6 +115,7 @@ pub const DEV_MACHINE_WIRE_FIELDS: [&str; 12] = [
     "runner_count",
     "online_runner_count",
     "control_online",
+    "supported_agents",
     "last_seen_at",
     "last_heartbeat_at",
     "revoked_at",
@@ -297,7 +298,8 @@ pub fn dev_machine_mini_to_representation<'a>(
 /// `last_heartbeat_at` is tri-state: omitted when unannotated, `null`
 /// when `Max()` over zero rows, else the rendered datetime.
 /// `control_online` defaults to `false` when unannotated
-/// (`BooleanField(default=False)`).
+/// (`BooleanField(default=False)`). `supported_agents` is the model's
+/// `JSONField` (PDASHOSS01-142), rendered as stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DevMachineRow<'a> {
     pub id: &'a str,
@@ -307,6 +309,7 @@ pub struct DevMachineRow<'a> {
     pub runner_count: Option<i64>,
     pub online_runner_count: Option<i64>,
     pub control_online: Option<bool>,
+    pub supported_agents: &'a Value,
     pub last_seen_at: Option<&'a str>,
     pub last_heartbeat_at: Option<Option<&'a str>>,
     pub revoked_at: Option<&'a str>,
@@ -326,6 +329,7 @@ pub struct DevMachineView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online_runner_count: Option<i64>,
     pub control_online: bool,
+    pub supported_agents: &'a Value,
     pub last_seen_at: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_heartbeat_at: Option<Option<&'a str>>,
@@ -344,6 +348,7 @@ pub fn dev_machine_to_representation<'a>(row: &'a DevMachineRow<'a>) -> DevMachi
         runner_count: row.runner_count,
         online_runner_count: row.online_runner_count,
         control_online: row.control_online.unwrap_or(false),
+        supported_agents: row.supported_agents,
         last_seen_at: row.last_seen_at,
         last_heartbeat_at: row.last_heartbeat_at,
         revoked_at: row.revoked_at,
@@ -1232,6 +1237,7 @@ mod tests {
             runner_count: Some(2),
             online_runner_count: Some(1),
             control_online: Some(true),
+            supported_agents: &json!(["codex", "claude-code"]),
             last_seen_at: Some("2026-10-02T01:02:03+00:00"),
             last_heartbeat_at: Some(Some("2026-10-02T01:02:04+00:00")),
             revoked_at: None,
@@ -1243,6 +1249,7 @@ mod tests {
         assert_eq!(body["visibility"], json!(0));
         assert_eq!(body["runner_count"], json!(2));
         assert_eq!(body["control_online"], json!(true));
+        assert_eq!(body["supported_agents"], json!(["codex", "claude-code"]));
         assert_eq!(body["revoked_at"], Value::Null);
     }
 
@@ -1256,6 +1263,7 @@ mod tests {
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            supported_agents: &json!([]),
             last_seen_at: None,
             last_heartbeat_at: None,
             revoked_at: None,
@@ -1271,6 +1279,7 @@ mod tests {
                 "label",
                 "visibility",
                 "control_online",
+                "supported_agents",
                 "last_seen_at",
                 "revoked_at",
                 "created_at",
@@ -1279,6 +1288,8 @@ mod tests {
         );
         // `control_online` renders false (declared default), never omitted.
         assert_eq!(body["control_online"], json!(false));
+        // An older daemon's `[]` renders as an empty list, never omitted.
+        assert_eq!(body["supported_agents"], json!([]));
     }
 
     #[test]
@@ -1291,6 +1302,7 @@ mod tests {
             runner_count: Some(0),
             online_runner_count: Some(0),
             control_online: Some(false),
+            supported_agents: &json!([]),
             last_seen_at: None,
             // Annotated but `Max()` over zero rows: key present, null.
             last_heartbeat_at: Some(None),

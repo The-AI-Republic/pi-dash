@@ -807,6 +807,7 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "supported_agents",
         "last_seen_at",
         "revoked_at",
         "created_at",

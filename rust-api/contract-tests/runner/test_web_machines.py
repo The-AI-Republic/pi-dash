@@ -21,9 +21,18 @@ pytestmark = pytest.mark.contract
 
 MACHINE_KEYS = {
     "id", "host_label", "label", "visibility", "runner_count",
-    "online_runner_count", "control_online", "last_seen_at",
-    "last_heartbeat_at", "revoked_at", "created_at", "updated_at",
+    "online_runner_count", "control_online", "supported_agents",
+    "last_seen_at", "last_heartbeat_at", "revoked_at", "created_at",
+    "updated_at",
 }
+
+# Full wire order (``DevMachineSerializer.Meta.fields``).
+MACHINE_WIRE_ORDER = [
+    "id", "host_label", "label", "visibility", "runner_count",
+    "online_runner_count", "control_online", "supported_agents",
+    "last_seen_at", "last_heartbeat_at", "revoked_at", "created_at",
+    "updated_at",
+]
 
 
 def _machine_id(user_client, daemon_world, machine_flow) -> str:
@@ -45,8 +54,10 @@ def test_web_dev_machine_list_shape(user_client, daemon_world, machine_flow):
     body = response.json()
     assert isinstance(body, list) and len(body) == 1
     machine = body[0]
-    assert MACHINE_KEYS <= set(machine)
+    assert list(machine) == MACHINE_WIRE_ORDER
     assert machine["host_label"] == machine_flow["host_label"]
+    # Never advertised (PDASHOSS01-142): an empty list, never omitted.
+    assert machine["supported_agents"] == []
     assert machine["runner_count"] == 1
     assert machine["online_runner_count"] == 0
     assert machine["control_online"] is False
@@ -85,7 +96,7 @@ def test_web_dev_machine_revoke_shape(user_client, daemon_world, machine_flow, s
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert MACHINE_KEYS <= set(body)
+    assert list(body) == MACHINE_WIRE_ORDER
     assert body["revoked_at"] is not None
     assert (
         seeder.db.fetchval("SELECT revoked_at FROM dev_machine WHERE id = %s", (machine_id,))
@@ -164,6 +175,69 @@ def test_web_dev_machine_create_runner_validates_input(user_client, daemon_world
     )
     assert unknown_project.status_code == 404
     assert unknown_project.json() == {"error": "project_not_found"}
+
+
+def test_web_dev_machine_list_renders_advertised_supported_agents(
+    user_client, daemon_world, machine_flow, seeder
+):
+    machine_id = _machine_id(user_client, daemon_world, machine_flow)
+    seeder.db.execute(
+        "UPDATE dev_machine SET supported_agents = %s::jsonb WHERE id = %s",
+        ('["codex", "muse-code"]', machine_id),
+    )
+    response = user_client.get(
+        f"{WEB}/dev-machines/", params={"workspace": daemon_world["workspace"]["id"]}
+    )
+    assert response.status_code == 200, response.text
+    (machine,) = response.json()
+    assert machine["supported_agents"] == ["codex", "muse-code"]
+    rotated = web_post(
+        user_client,
+        f"{WEB}/dev-machines/{machine_id}/rotate/",
+        {"workspace": daemon_world["workspace"]["id"]},
+    )
+    assert rotated.status_code == 200, rotated.text
+    assert rotated.json()["supported_agents"] == ["codex", "muse-code"]
+
+
+def test_web_dev_machine_create_runner_gates_on_supported_agents(
+    user_client, daemon_world, machine_flow, seeder
+):
+    """PDASHOSS01-142: an agent outside the machine's non-empty advertised
+    set is rejected before enqueue; an advertised one (or an empty set)
+    passes the gate and reaches the offline check of this idle machine."""
+    machine_id = _machine_id(user_client, daemon_world, machine_flow)
+    url = f"{WEB}/dev-machines/{machine_id}/create-runner/"
+    base = {
+        "workspace": daemon_world["workspace"]["id"],
+        "project": daemon_world["project"]["identifier"],
+    }
+    # Empty set (older daemon): gates nothing.
+    passthrough = web_post(user_client, url, dict(base, agent="muse-code"))
+    assert passthrough.status_code == 409
+    assert passthrough.json() == {"error": "machine_offline"}
+    seeder.db.execute(
+        "UPDATE dev_machine SET supported_agents = %s::jsonb WHERE id = %s",
+        ('["codex"]', machine_id),
+    )
+    rejected = web_post(user_client, url, dict(base, agent="muse-code"))
+    assert rejected.status_code == 400
+    assert rejected.content == (
+        b'{"error":"unsupported_agent","error_description":"the runner daemon on this '
+        b"machine does not support agent 'muse-code'; upgrade pidash on the machine to "
+        b'use it"}'
+    )
+    # The default agent (claude-code) is gated too.
+    defaulted = web_post(user_client, url, dict(base))
+    assert defaulted.status_code == 400
+    assert defaulted.json()["error"] == "unsupported_agent"
+    # The allowlist check still runs first.
+    bogus = web_post(user_client, url, dict(base, agent="hal-9000"))
+    assert bogus.status_code == 400
+    assert bogus.json() == {"error": "invalid_agent"}
+    supported = web_post(user_client, url, dict(base, agent="codex"))
+    assert supported.status_code == 409
+    assert supported.json() == {"error": "machine_offline"}
 
 
 def test_web_dev_machine_create_runner_status_unknown_is_404(user_client, daemon_world, machine_flow):

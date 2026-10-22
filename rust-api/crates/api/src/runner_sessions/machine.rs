@@ -103,6 +103,12 @@ const POLL_READ_COUNT: i64 = 100;
 /// here — verified against the FX-RSES-02 machine SQL captures).
 const DEV_MACHINE_TOUCH_SQL: &str =
     "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1 WHERE \"dev_machine\".\"id\" = $2";
+/// The same touch when the daemon advertised a usable agent set
+/// (PDASHOSS01-142): `.update(last_seen_at=…, supported_agents=…)`, in
+/// kwargs order.
+const DEV_MACHINE_TOUCH_AGENTS_SQL: &str = "UPDATE \"dev_machine\" SET \"last_seen_at\" = $1, \"supported_agents\" = $2 WHERE \"dev_machine\".\"id\" = $3";
+/// `_SUPPORTED_AGENTS_MAX` (`machine_sessions.py`).
+const SUPPORTED_AGENTS_MAX: usize = 32;
 /// Django's `custom_404_view` bytes (`app/views/error_404.py`):
 /// `JsonResponse({"error": "Page not found."})`. The `<uuid:>`
 /// converter 404s non-UUID segments before any view runs; axum matches
@@ -185,6 +191,82 @@ fn py_truthy(value: &Value) -> bool {
         Value::Array(items) => !items.is_empty(),
         Value::Object(map) => !map.is_empty(),
     }
+}
+
+/// `_SUPPORTED_AGENT_RE.fullmatch(item)` (`machine_sessions.py`):
+/// `[a-z][a-z0-9-]{0,31}` over the whole string.
+fn is_supported_agent_name(item: &str) -> bool {
+    let mut chars = item.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && item.len() <= 32
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `_sanitize_supported_agents` (`machine_sessions.py`, PDASHOSS01-142):
+/// the body's `supported_agents` list, keeping valid names only,
+/// deduplicated in order and capped at [`SUPPORTED_AGENTS_MAX`]. `None`
+/// (leave the stored set untouched) when the body is not an object, the
+/// key is absent or not a list, or nothing valid is left.
+fn sanitize_supported_agents(body: &Value) -> Option<Vec<String>> {
+    let Some(Value::Array(raw)) = body.as_object().and_then(|map| map.get("supported_agents"))
+    else {
+        return None;
+    };
+    let mut cleaned: Vec<String> = Vec::new();
+    for item in raw {
+        let Some(name) = item.as_str() else {
+            continue;
+        };
+        if !is_supported_agent_name(name) {
+            continue;
+        }
+        if !cleaned.iter().any(|kept| kept == name) {
+            cleaned.push(name.to_owned());
+        }
+        if cleaned.len() >= SUPPORTED_AGENTS_MAX {
+            break;
+        }
+    }
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// `_request_supported_agents` (`machine_sessions.py`): DRF's
+/// `request.data` on the session-open body, where anything DRF cannot
+/// parse counts as "advertised nothing". An empty body is `{}`; only
+/// `JSONParser` can yield a list (`FormParser`/`MultiPartParser` give
+/// string values), and it is selected when the media type matches
+/// `application/json` (wildcards included, case-insensitive);
+/// malformed JSON and other media types (DRF's `ParseError` /
+/// `UnsupportedMediaType`) are `None`.
+///
+/// Approximation: DRF decodes with the header's `charset`; this reads
+/// UTF-8 only, so a non-UTF-8 body is `None` (every accepted name is
+/// ASCII either way).
+fn request_supported_agents(headers: &HeaderMap, body: &[u8]) -> Option<Vec<String>> {
+    if body.is_empty() {
+        return None;
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let (main, sub) = media_type
+        .split_once('/')
+        .unwrap_or((media_type.as_str(), ""));
+    if !matches!(main, "application" | "*") || !matches!(sub, "json" | "*") {
+        return None;
+    }
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    sanitize_supported_agents(&parsed)
 }
 
 /// One ack-list item to its `XACK` id: strings verbatim, numbers via
@@ -365,6 +447,7 @@ pub async fn machine_session_open(
     State(state): State<AppState>,
     Path(raw_mid): Path<String>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     let pool = match pool_of(&state) {
         Ok(pool) => pool.clone(),
@@ -443,13 +526,29 @@ pub async fn machine_session_open(
     {
         return server_error();
     }
-    if sqlx::query(DEV_MACHINE_TOUCH_SQL)
-        .bind(Utc::now())
-        .bind(dev_machine_id)
-        .execute(&mut *tx)
-        .await
-        .is_err()
-    {
+    // Touch, persisting the advertised agent set when there is one
+    // (PDASHOSS01-142 no-clobber: absent/unusable leaves it untouched).
+    // Django skips the column when the set equals the stored one; this
+    // writes it unconditionally — same resulting row.
+    let touch_now = Utc::now();
+    let touched = match request_supported_agents(&headers, &body) {
+        Some(agents) => {
+            sqlx::query(DEV_MACHINE_TOUCH_AGENTS_SQL)
+                .bind(touch_now)
+                .bind(Value::from(agents))
+                .bind(dev_machine_id)
+                .execute(&mut *tx)
+                .await
+        }
+        None => {
+            sqlx::query(DEV_MACHINE_TOUCH_SQL)
+                .bind(touch_now)
+                .bind(dev_machine_id)
+                .execute(&mut *tx)
+                .await
+        }
+    };
+    if touched.is_err() {
         return server_error();
     }
     if tx.commit().await.is_err() {
@@ -1089,6 +1188,81 @@ mod tests {
     /// The `DevMachine` touch this module spells keeps the Django
     /// `.filter(pk=…).update(…)` shape (terms verified against the
     /// FX-RSES-02 machine SQL captures).
+    #[test]
+    fn supported_agents_sanitize_like_the_view() {
+        let body = serde_json::json!({
+            "supported_agents": ["codex", "Not Valid!", 7, "codex", "x".repeat(64), "claude-code", "codex\n", "", "9lives", "muse-code"],
+        });
+        assert_eq!(
+            sanitize_supported_agents(&body),
+            Some(vec![
+                "codex".to_owned(),
+                "claude-code".to_owned(),
+                "muse-code".to_owned()
+            ])
+        );
+        // Exactly 32 chars is the regex ceiling; 33 is out.
+        let max = format!("a{}", "b".repeat(31));
+        assert!(is_supported_agent_name(&max));
+        assert!(!is_supported_agent_name(&format!("{max}c")));
+        // Nothing usable → `None` (no clobber), never `Some([])`.
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"supported_agents": ["???"]}),
+            serde_json::json!({"supported_agents": "codex"}),
+            serde_json::json!({"supported_agents": null}),
+            serde_json::json!(["codex"]),
+        ] {
+            assert_eq!(sanitize_supported_agents(&body), None, "{body}");
+        }
+        // Capped after dedup.
+        let many: Vec<String> = (0..40).map(|i| format!("agent-{i}")).collect();
+        let capped = sanitize_supported_agents(&serde_json::json!({ "supported_agents": many }))
+            .expect("capped list");
+        assert_eq!(capped.len(), SUPPORTED_AGENTS_MAX);
+        assert_eq!(capped[31], "agent-31");
+    }
+
+    #[test]
+    fn supported_agents_read_only_from_json_bodies() {
+        let json_headers = |content_type: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            headers
+        };
+        let body = br#"{"supported_agents": ["codex", "grok"]}"#;
+        let want = Some(vec!["codex".to_owned(), "grok".to_owned()]);
+        for content_type in [
+            "application/json",
+            "Application/JSON; charset=utf-8",
+            "*/*",
+            "application/*",
+        ] {
+            assert_eq!(
+                request_supported_agents(&json_headers(content_type), body),
+                want,
+                "{content_type}"
+            );
+        }
+        for content_type in [
+            "text/plain",
+            "application/x-www-form-urlencoded",
+            "application/vnd.api+json",
+        ] {
+            assert_eq!(
+                request_supported_agents(&json_headers(content_type), body),
+                None,
+                "{content_type}"
+            );
+        }
+        // No content type, empty body, malformed JSON, NaN: all "advertised nothing".
+        assert_eq!(request_supported_agents(&HeaderMap::new(), body), None);
+        let json = json_headers("application/json");
+        assert_eq!(request_supported_agents(&json, b""), None);
+        assert_eq!(request_supported_agents(&json, b"{not json"), None);
+        assert_eq!(request_supported_agents(&json, b"NaN"), None);
+    }
+
     #[test]
     fn dev_machine_touch_keeps_queryset_shape() {
         assert_eq!(

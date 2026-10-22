@@ -214,6 +214,7 @@ pub mod dev_machine {
         "label",
         "visibility",
         "provisioning",
+        "supported_agents",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -227,6 +228,7 @@ pub mod dev_machine {
         Some(""),       // label
         Some("0"),      // visibility (Visibility.PRIVATE)
         Some("manual"), // provisioning (RunnerProvisioning.MANUAL)
+        Some("[]"),     // supported_agents (JSONField default=list)
         None,           // last_seen_at
         None,           // revoked_at
         None,           // created_at (auto_now_add)
@@ -246,6 +248,12 @@ pub mod dev_machine {
     pub const DEFAULT_PROVISIONING: &str = "manual";
     /// `provisioning` carries `db_index=True` (`:359`).
     pub const PROVISIONING_DB_INDEX: bool = true;
+    /// `supported_agents` (PDASHOSS01-142): the kebab-case agent kinds the
+    /// machine's daemon binary understands, advertised on machine-session
+    /// open. `NOT NULL` with no database default (Django's
+    /// `JSONField(default=list)` is Python-side), so every `INSERT` writes
+    /// it; `[]` means "unknown" (an older daemon) and gates nothing.
+    pub const DEFAULT_SUPPORTED_AGENTS: &str = "[]";
     /// Composite index (`:370-373`).
     pub const OWNER_VISIBILITY_INDEX: &str = "dev_machine_owner_vis_idx";
     /// Columns of [`OWNER_VISIBILITY_INDEX`].

@@ -150,7 +150,7 @@ pub const COLLECT_RUNNERS_BY_MACHINE_SQL: &str = "SELECT \"runner\".\"id\", \"ru
 /// Machine-collector root fetch (`:143`; no `ORDER BY`).
 ///
 /// `$1` = machine.
-pub const COLLECT_MACHINE_BY_ID_SQL: &str = "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"visibility\", \"dev_machine\".\"provisioning\", \"dev_machine\".\"last_seen_at\", \"dev_machine\".\"revoked_at\", \"dev_machine\".\"created_at\", \"dev_machine\".\"updated_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1";
+pub const COLLECT_MACHINE_BY_ID_SQL: &str = "SELECT \"dev_machine\".\"id\", \"dev_machine\".\"owner_id\", \"dev_machine\".\"host_label\", \"dev_machine\".\"label\", \"dev_machine\".\"visibility\", \"dev_machine\".\"provisioning\", \"dev_machine\".\"supported_agents\", \"dev_machine\".\"last_seen_at\", \"dev_machine\".\"revoked_at\", \"dev_machine\".\"created_at\", \"dev_machine\".\"updated_at\" FROM \"dev_machine\" WHERE \"dev_machine\".\"id\" = $1";
 
 /// `$1, $2, ...` bind list for an `IN (...)` of `count` ids, in order.
 fn in_placeholders(count: usize) -> String {
@@ -718,7 +718,7 @@ mod tests {
                 select_prefix(dm_cols::TABLE, dm_cols::COLUMNS),
             )
         );
-        assert_eq!(dm_cols::COLUMNS.len(), 10);
+        assert_eq!(dm_cols::COLUMNS.len(), 11);
     }
 
     #[test]

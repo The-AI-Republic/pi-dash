@@ -888,6 +888,7 @@ struct LockedMachine {
     host_label: String,
     label: String,
     visibility: i16,
+    supported_agents: Value,
     last_seen_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -903,10 +904,11 @@ fn decode_locked_machine(row: &sqlx::postgres::PgRow) -> Result<LockedMachine, R
         host_label: row.try_get(2).map_err(|_| server_error())?,
         label: row.try_get(3).map_err(|_| server_error())?,
         visibility: row.try_get(4).map_err(|_| server_error())?,
-        last_seen_at: row.try_get(6).map_err(|_| server_error())?,
-        revoked_at: row.try_get(7).map_err(|_| server_error())?,
-        created_at: row.try_get(8).map_err(|_| server_error())?,
-        updated_at: row.try_get(9).map_err(|_| server_error())?,
+        supported_agents: row.try_get(6).map_err(|_| server_error())?,
+        last_seen_at: row.try_get(7).map_err(|_| server_error())?,
+        revoked_at: row.try_get(8).map_err(|_| server_error())?,
+        created_at: row.try_get(9).map_err(|_| server_error())?,
+        updated_at: row.try_get(10).map_err(|_| server_error())?,
     })
 }
 
@@ -1402,6 +1404,7 @@ struct MachineRender {
     runner_count: Option<i64>,
     online_runner_count: Option<i64>,
     control_online: Option<bool>,
+    supported_agents: Value,
     last_seen_at: Option<String>,
     last_heartbeat_at: Option<Option<String>>,
     revoked_at: Option<String>,
@@ -1419,6 +1422,7 @@ impl MachineRender {
             runner_count: self.runner_count,
             online_runner_count: self.online_runner_count,
             control_online: self.control_online,
+            supported_agents: &self.supported_agents,
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: self
                 .last_heartbeat_at
@@ -1482,6 +1486,7 @@ async fn serialize_machine(
             runner_count: None,
             online_runner_count: None,
             control_online: None,
+            supported_agents: machine.supported_agents.clone(),
             last_seen_at: machine
                 .last_seen_at
                 .as_ref()
@@ -1493,19 +1498,21 @@ async fn serialize_machine(
         }
         .to_json();
     };
-    let last_seen_at: Option<DateTime<Utc>> = row.try_get(6).map_err(|_| server_error())?;
-    let revoked_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| server_error())?;
-    let created_at: DateTime<Utc> = row.try_get(8).map_err(|_| server_error())?;
-    let updated_at: DateTime<Utc> = row.try_get(9).map_err(|_| server_error())?;
-    let last_heartbeat_at: Option<DateTime<Utc>> = row.try_get(12).map_err(|_| server_error())?;
+    let supported_agents: Value = row.try_get(6).map_err(|_| server_error())?;
+    let last_seen_at: Option<DateTime<Utc>> = row.try_get(7).map_err(|_| server_error())?;
+    let revoked_at: Option<DateTime<Utc>> = row.try_get(8).map_err(|_| server_error())?;
+    let created_at: DateTime<Utc> = row.try_get(9).map_err(|_| server_error())?;
+    let updated_at: DateTime<Utc> = row.try_get(10).map_err(|_| server_error())?;
+    let last_heartbeat_at: Option<DateTime<Utc>> = row.try_get(13).map_err(|_| server_error())?;
     MachineRender {
         id: machine.id.to_string(),
         host_label: row.try_get(2).map_err(|_| server_error())?,
         label: row.try_get(3).map_err(|_| server_error())?,
         visibility: i64::from(machine.visibility),
-        runner_count: Some(row.try_get(10).map_err(|_| server_error())?),
-        online_runner_count: Some(row.try_get(11).map_err(|_| server_error())?),
-        control_online: Some(row.try_get(13).map_err(|_| server_error())?),
+        runner_count: Some(row.try_get(11).map_err(|_| server_error())?),
+        online_runner_count: Some(row.try_get(12).map_err(|_| server_error())?),
+        control_online: Some(row.try_get(14).map_err(|_| server_error())?),
+        supported_agents,
         last_seen_at: last_seen_at
             .as_ref()
             .map(crate::serializer::render_datetime),

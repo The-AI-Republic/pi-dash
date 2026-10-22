@@ -506,6 +506,7 @@ struct DevMachineOwned {
     host_label: String,
     label: String,
     visibility: i16,
+    supported_agents: Value,
     last_seen_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
@@ -516,21 +517,22 @@ struct DevMachineOwned {
     control_online: bool,
 }
 
-/// Decode an M3 list row: the 10 machine columns then the 4 annotations.
+/// Decode an M3 list row: the 11 machine columns then the 4 annotations.
 fn decode_machine_list_row(row: &sqlx::postgres::PgRow) -> Result<DevMachineOwned, Response> {
     Ok(DevMachineOwned {
         id: row.try_get(0).map_err(|_| server_error())?,
         host_label: row.try_get(2).map_err(|_| server_error())?,
         label: row.try_get(3).map_err(|_| server_error())?,
         visibility: row.try_get(4).map_err(|_| server_error())?,
-        last_seen_at: row.try_get(6).map_err(|_| server_error())?,
-        revoked_at: row.try_get(7).map_err(|_| server_error())?,
-        created_at: row.try_get(8).map_err(|_| server_error())?,
-        updated_at: row.try_get(9).map_err(|_| server_error())?,
-        runner_count: row.try_get(10).map_err(|_| server_error())?,
-        online_runner_count: row.try_get(11).map_err(|_| server_error())?,
-        last_heartbeat_at: row.try_get(12).map_err(|_| server_error())?,
-        control_online: row.try_get(13).map_err(|_| server_error())?,
+        supported_agents: row.try_get(6).map_err(|_| server_error())?,
+        last_seen_at: row.try_get(7).map_err(|_| server_error())?,
+        revoked_at: row.try_get(8).map_err(|_| server_error())?,
+        created_at: row.try_get(9).map_err(|_| server_error())?,
+        updated_at: row.try_get(10).map_err(|_| server_error())?,
+        runner_count: row.try_get(11).map_err(|_| server_error())?,
+        online_runner_count: row.try_get(12).map_err(|_| server_error())?,
+        last_heartbeat_at: row.try_get(13).map_err(|_| server_error())?,
+        control_online: row.try_get(14).map_err(|_| server_error())?,
     })
 }
 
@@ -840,6 +842,7 @@ struct DevMachineRender {
     runner_count: i64,
     online_runner_count: i64,
     control_online: bool,
+    supported_agents: Value,
     last_seen_at: Option<String>,
     last_heartbeat_at: Option<String>,
     revoked_at: Option<String>,
@@ -857,6 +860,7 @@ impl DevMachineRender {
             runner_count: Some(self.runner_count),
             online_runner_count: Some(self.online_runner_count),
             control_online: Some(self.control_online),
+            supported_agents: &self.supported_agents,
             last_seen_at: self.last_seen_at.as_deref(),
             last_heartbeat_at: Some(self.last_heartbeat_at.as_deref()),
             revoked_at: self.revoked_at.as_deref(),
@@ -877,6 +881,7 @@ fn render_machine(machine: &DevMachineOwned) -> Result<String, Response> {
         runner_count: machine.runner_count,
         online_runner_count: machine.online_runner_count,
         control_online: machine.control_online,
+        supported_agents: machine.supported_agents.clone(),
         last_seen_at: machine
             .last_seen_at
             .as_ref()
@@ -2492,7 +2497,8 @@ mod tests {
     fn join_block_widths() {
         // Positional decode offsets — fail loudly if the column consts move.
         assert_eq!(RUNNER_BLOCK_COLS, 30);
-        assert_eq!(MACHINE_BLOCK_COLS, 10);
+        assert_eq!(MACHINE_BLOCK_COLS, 11);
+        assert_eq!(dm_cols::COLUMNS[6], "supported_agents");
         assert_eq!(pod_cols::COLUMNS.len(), 10);
         assert_eq!(r_cols::COLUMNS[29], "revoked_reason");
         assert_eq!(dm_cols::COLUMNS[2], "host_label");
@@ -2599,6 +2605,7 @@ mod tests {
             host_label: "mac-mini".to_owned(),
             label: String::new(),
             visibility: 0,
+            supported_agents: serde_json::json!(["codex", "claude-code"]),
             last_seen_at: None,
             revoked_at: None,
             created_at: moment("2026-10-01T12:34:56.789012+00:00"),
@@ -2610,7 +2617,7 @@ mod tests {
         };
         assert_eq!(
             render_machine(&machine).unwrap(),
-            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"runner_count":1,"online_runner_count":0,"control_online":false,"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
+            r#"{"id":"55555555-5555-5555-5555-555555555555","host_label":"mac-mini","label":"","visibility":0,"runner_count":1,"online_runner_count":0,"control_online":false,"supported_agents":["codex","claude-code"],"last_seen_at":null,"last_heartbeat_at":null,"revoked_at":null,"created_at":"2026-10-01T12:34:56.789012Z","updated_at":"2026-10-02T01:02:03Z"}"#
         );
     }
 

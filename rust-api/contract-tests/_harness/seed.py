@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import random
 import secrets
 import uuid
@@ -405,6 +406,8 @@ class Seed:
             visibility=0,
             owner_id=owner_id,
             provisioning="manual",
+            # NOT NULL with no DB default (PDASHOSS01-142).
+            supported_agents="[]",
             created_at=_now(),
             updated_at=_now(),
         )
@@ -1874,16 +1877,30 @@ class Seeder:
         return self.create_workspace_member(workspace_id, user_id, role=role)
 
     def create_dev_machine(
-        self, owner_id: str, *, host_label: str | None = None, provisioning: str = "manual"
+        self,
+        owner_id: str,
+        *,
+        host_label: str | None = None,
+        provisioning: str = "manual",
+        supported_agents: list[str] | None = None,
     ) -> dict[str, Any]:
+        """``supported_agents`` is the advertised agent set
+        (PDASHOSS01-142); ``None`` seeds ``[]`` — an older daemon."""
         machine_id = _uid()
         host_label = host_label or f"host-{self.tag}"[:200]
         self.db.execute(
             """INSERT INTO dev_machine
                (id, owner_id, host_label, label, visibility, provisioning,
-                created_at, updated_at)
-               VALUES (%s,%s,%s,%s,0,%s,now(),now())""",
-            (machine_id, owner_id, host_label, host_label[:128], provisioning),
+                supported_agents, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,0,%s,%s::jsonb,now(),now())""",
+            (
+                machine_id,
+                owner_id,
+                host_label,
+                host_label[:128],
+                provisioning,
+                json.dumps(supported_agents or []),
+            ),
         )
         self._put("dev_machine", machine_id)
         return {"id": machine_id, "host_label": host_label}

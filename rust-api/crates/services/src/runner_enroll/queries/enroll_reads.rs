@@ -989,6 +989,7 @@ mod tests {
         "label",
         "visibility",
         "provisioning",
+        "supported_agents",
         "last_seen_at",
         "revoked_at",
         "created_at",
@@ -1514,7 +1515,7 @@ mod tests {
             sql,
             format!(
                 "INSERT INTO \"dev_machine\" ({cols}) VALUES ({})",
-                (1..=10)
+                (1..=11)
                     .map(|i| format!("${i}"))
                     .collect::<Vec<_>>()
                     .join(", "),
