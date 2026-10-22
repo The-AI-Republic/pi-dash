@@ -6,7 +6,8 @@
 // project name plus the ritual phrase arm the destructive button,
 // and anything less keeps it disabled. Correct entries remove the
 // project with a success notice; a refused write toasts and keeps
-// the dialog open. Reached only from archived state.
+// the dialog open. Reached from the project list and the settings
+// danger zone.
 import { Button, Dialog, Input } from "@pidash/kit";
 import * as React from "react";
 

@@ -230,7 +230,7 @@ export function CreateProjectDialog({
             setRepoUrl(event.target.value);
             setFieldErrors((prev) => ({ ...prev, repoUrl: undefined }));
           }}
-          placeholder="Git repository URL (e.g. git@github.com:org/repo.git)"
+          placeholder="Repository URL, e.g. https://github.com/team/project"
           autoComplete="off"
           {...(fieldErrors.repoUrl === undefined ? {} : { error: fieldErrors.repoUrl })}
         />
@@ -242,7 +242,7 @@ export function CreateProjectDialog({
             setBaseBranch(event.target.value);
             setFieldErrors((prev) => ({ ...prev, baseBranch: undefined }));
           }}
-          placeholder="Base branch (leave empty to use remote default)"
+          placeholder="Base branch (blank uses the remote default)"
           autoComplete="off"
           {...(fieldErrors.baseBranch === undefined ? {} : { error: fieldErrors.baseBranch })}
         />

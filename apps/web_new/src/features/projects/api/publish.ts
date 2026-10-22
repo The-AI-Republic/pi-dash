@@ -23,7 +23,7 @@ import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 
 export const PUBLISH_FAILED_TITLE = "Couldn't publish the project";
 export const PUBLISHED_TITLE = "Project published";
-export const PUBLISH_UPDATED_TITLE = "Publish settings updated";
+export const PUBLISH_UPDATED_TITLE = "Publish settings saved";
 export const UNPUBLISH_FAILED_TITLE = "Couldn't unpublish the project";
 export const UNPUBLISHED_TITLE = "Project unpublished";
 
@@ -54,7 +54,7 @@ export function usePublishBoard() {
     mutationFn: async ({ workspaceSlug, projectId, input }) => {
       try {
         const board = await createProjectDeployBoard(getAppClient(), workspaceSlug, projectId, input);
-        notifySuccess(PUBLISHED_TITLE, "Anyone with the link can open the board.");
+        notifySuccess(PUBLISHED_TITLE, "The live link now opens the board.");
         return board;
       } catch (error) {
         notifyError(PUBLISH_FAILED_TITLE, (error as Error).message);

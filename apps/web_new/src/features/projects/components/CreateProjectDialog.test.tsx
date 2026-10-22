@@ -164,8 +164,8 @@ describe("CreateProjectDialog", () => {
     expect((screen.getByPlaceholderText("Project ID") as HTMLInputElement).value).toBe("");
     expect(screen.getByRole("button", { name: "Project template" })).toHaveTextContent("Blank project");
     expect(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Git repository URL (e.g. git@github.com:org/repo.git)")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Base branch (leave empty to use remote default)")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Base branch (blank uses the remote default)")).toBeInTheDocument();
   });
 
   it("derives the short code from the name until hand-edited", () => {
@@ -208,11 +208,11 @@ describe("CreateProjectDialog", () => {
     setup();
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
-    fireEvent.change(screen.getByPlaceholderText("Base branch (leave empty to use remote default)"), {
+    fireEvent.change(screen.getByPlaceholderText("Base branch (blank uses the remote default)"), {
       target: { value: "feat branch" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-    expect(screen.getByText("Only letters, numbers, and . _ / - are allowed.")).toBeInTheDocument();
+    expect(screen.getByText("Base branch may only contain letters, numbers, and . _ / -.")).toBeInTheDocument();
     expect(calls).toHaveLength(0);
   });
 
@@ -221,7 +221,7 @@ describe("CreateProjectDialog", () => {
     setup();
 
     fireEvent.change(screen.getByPlaceholderText("Project name"), { target: { value: "Nebula" } });
-    fireEvent.change(screen.getByPlaceholderText("Git repository URL (e.g. git@github.com:org/repo.git)"), {
+    fireEvent.change(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project"), {
       target: { value: "x".repeat(CREATE_REPO_URL_MAX_LENGTH + 1) },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create project" }));
@@ -245,10 +245,10 @@ describe("CreateProjectDialog", () => {
     fireEvent.change(screen.getByPlaceholderText("Project Context (Will be shown to AI agents)"), {
       target: { value: "Team space" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Git repository URL (e.g. git@github.com:org/repo.git)"), {
+    fireEvent.change(screen.getByPlaceholderText("Repository URL, e.g. https://github.com/team/project"), {
       target: { value: "git@github.com:acme/nebula.git" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Base branch (leave empty to use remote default)"), {
+    fireEvent.change(screen.getByPlaceholderText("Base branch (blank uses the remote default)"), {
       target: { value: "develop" },
     });
 

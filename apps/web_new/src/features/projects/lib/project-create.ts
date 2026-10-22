@@ -134,7 +134,7 @@ export function validateCreateFields(values: CreateFieldValues): CreateFieldErro
   if ((values.baseBranch ?? "").length > CREATE_BASE_BRANCH_MAX_LENGTH) {
     errors.baseBranch = `Keep the base branch to ${CREATE_BASE_BRANCH_MAX_LENGTH} characters.`;
   } else if (!BASE_BRANCH_PATTERN.test(values.baseBranch ?? "")) {
-    errors.baseBranch = "Only letters, numbers, and . _ / - are allowed.";
+    errors.baseBranch = "Base branch may only contain letters, numbers, and . _ / -.";
   }
   return errors;
 }

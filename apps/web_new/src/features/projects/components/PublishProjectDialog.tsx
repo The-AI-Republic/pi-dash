@@ -266,7 +266,7 @@ export function PublishProjectDialog({
               </div>
             </div>
           )}
-          <p className="text-meta text-(--text-muted)">Anyone with the link can view the board.</p>
+          <p className="text-meta text-(--text-muted)">Viewers need only the live link.</p>
         </div>
       )}
     </Dialog>

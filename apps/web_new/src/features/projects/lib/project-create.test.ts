@@ -150,7 +150,7 @@ describe("validateCreateFields", () => {
       String(CREATE_BASE_BRANCH_MAX_LENGTH)
     );
     expect(validateCreateFields({ name: "Nebula", identifier: "NEB", baseBranch: "feat branch" }).baseBranch).toContain(
-      "Only letters"
+      "may only contain"
     );
   });
 });
