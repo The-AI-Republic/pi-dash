@@ -10,6 +10,7 @@ import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { nullableDateTime, uuid } from "./fields.js";
 import { ISSUE_PRIORITIES, IssueListItem } from "./issues.js";
+import type { ModuleMembershipInput } from "./modules.js";
 
 /**
  * Full work-item update (issues area): every field the layouts, modal and
@@ -183,7 +184,7 @@ export async function setIssueModules(
   slug: string,
   projectId: string,
   issueId: string,
-  input: { modules: string[]; removed_modules?: string[] }
+  input: ModuleMembershipInput
 ): Promise<MembershipWriteResult> {
   const envelope = await client.sendJson<unknown>(
     "POST",

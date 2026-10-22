@@ -367,11 +367,17 @@ export const ModuleFavoriteInput = z.object({
 });
 export type ModuleFavoriteInput = z.infer<typeof ModuleFavoriteInput>;
 
-/** Body of the issue-side membership write. */
-export interface ModuleMembershipInput {
-  modules: string[];
-  removed_modules?: string[];
-}
+/**
+ * Body of the work-item-side membership write (`POST
+ * .../issues/{issueId}/modules/`): the modules to add, plus the ones to
+ * drop in the same call. The Issues contract's `setIssueModules` posts it
+ * and stays the only writer.
+ */
+export const ModuleMembershipInput = z.object({
+  modules: z.array(uuid()),
+  removed_modules: z.optional(z.array(uuid())),
+});
+export type ModuleMembershipInput = z.infer<typeof ModuleMembershipInput>;
 
 // ---------------------------------------------------------------- reads
 
@@ -542,7 +548,6 @@ export async function unfavoriteModule(
 ): Promise<void> {
   await client.delete(moduleFavoritePath(slug, projectId, moduleId));
 }
-
 
 /**
  * One row of the archived-modules list (ARCH-020). A flat array, newest

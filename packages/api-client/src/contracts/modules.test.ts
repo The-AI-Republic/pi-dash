@@ -21,6 +21,7 @@ import {
   ModuleLinkList,
   ModuleList,
   ModuleListItem,
+  ModuleMembershipInput,
   ModuleRow,
   ModuleRowList,
   ModuleUpdate,
@@ -514,6 +515,14 @@ describe("archive and error schemas", () => {
     expect(ModuleErrorBody.parse({ name: ["This field may not be blank."] })).toBeTruthy();
     expect(() => ModuleErrorBody.parse({})).toThrow();
     expect(() => ModuleErrorBody.parse({ name: "not a list" })).toThrow();
+  });
+
+  it("parses the work-item membership body and rejects a non-uuid module", () => {
+    const both = ModuleMembershipInput.parse({ modules: [UUID], removed_modules: [UUID2] });
+    expect(both.modules).toEqual([UUID]);
+    expect(ModuleMembershipInput.parse({ modules: [] })).toEqual({ modules: [] });
+    expect(() => ModuleMembershipInput.parse({ modules: ["not-a-uuid"] })).toThrow();
+    expect(() => ModuleMembershipInput.parse({ removed_modules: [UUID] })).toThrow();
   });
 
   it("names the module in the favorites write", () => {
