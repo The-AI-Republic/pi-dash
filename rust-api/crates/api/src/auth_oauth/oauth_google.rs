@@ -191,14 +191,6 @@ pub const TRACK_EVENT_TASK: &str = "pi_dash.bgtasks.event_tracking_task.track_ev
 /// (`utils/analytics_events.py`, `USER_JOINED_WORKSPACE`).
 pub const USER_JOINED_WORKSPACE_EVENT: &str = "user_joined_workspace";
 
-/// `django.contrib.auth.login` backend (`settings/common.py:125`, single
-/// `AUTHENTICATION_BACKENDS` entry; harness `SESSION_BACKEND`).
-pub const LOGIN_BACKEND: &str = "django.contrib.auth.backends.ModelBackend";
-/// Salt for `get_session_auth_hash`
-/// (`AbstractBaseUser.get_session_auth_hash`).
-pub const SESSION_AUTH_HASH_SALT: &str =
-    "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash";
-
 /// `make_password` iteration count under the pinned Django 4.2.30
 /// (`PBKDF2PasswordHasher.iterations`, verified against the installed
 /// Django; the admin port pins the same value).
@@ -1102,13 +1094,6 @@ pub async fn create_user(
         avatar: String::new(),
         avatar_asset_id: None,
     })
-}
-
-/// `user.get_session_auth_hash()`: `salted_hmac(salt, password)` hex
-/// (`django.utils.crypto.salted_hmac`, SHA256) — same construction as the
-/// license-domain verifier.
-pub fn session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    super::login::session_auth_hash(password_field, secret_key)
 }
 
 // ---------------------------------------------------------------------------
