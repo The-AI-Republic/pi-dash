@@ -2620,7 +2620,7 @@ describe("WorkItemCreateDialog tab order (ISS-125)", () => {
 describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
   it("heads a blank draft, hides Create more, and stores it without a title rule", async () => {
     const user = userEvent.setup();
-    const h = setup({}, { onCopySaved: vi.fn(async () => undefined) });
+    const h = setup({}, { onCopySaved: vi.fn(async () => ({ id: "draft-1", project_id: PROJECT_ATLAS })) });
     expect(screen.getByRole("heading", { level: 2 }).textContent).toContain("draft");
     expect(await screen.findByRole("button", { name: "Save to Drafts" })).toBeInTheDocument();
     expect(screen.queryByText("Create more")).not.toBeInTheDocument();
@@ -2635,6 +2635,7 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
     const saves: unknown[] = [];
     const onCopySaved = vi.fn(async (input: unknown) => {
       saves.push(input);
+      return { id: "draft-1", project_id: PROJECT_ATLAS };
     });
     const h = setup({}, { onCopySaved });
     save();
@@ -2651,7 +2652,7 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
           title: "Plan (copy)",
           input: { name: "Plan (copy)", project_id: PROJECT_ATLAS, priority: "high", label_ids: [PARENT_ID] },
         },
-        onCopySaved: vi.fn(async () => undefined),
+        onCopySaved: vi.fn(async () => ({ id: "draft-1", project_id: PROJECT_ATLAS })),
       }
     );
     await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
@@ -2661,7 +2662,7 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
   });
 
   it("saves a copy through the caller's write with the typed name", async () => {
-    const onCopySaved = vi.fn(async () => undefined);
+    const onCopySaved = vi.fn(async () => ({ id: "draft-1", project_id: PROJECT_ATLAS }));
     const h = setup(
       {},
       {
@@ -2784,8 +2785,8 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
   });
 
   it("runs one copy write while the first is still in flight", async () => {
-    let release = (): void => undefined;
-    const pending = new Promise<void>((resolve) => {
+    let release: (ref: { id: string; project_id: string }) => void = () => undefined;
+    const pending = new Promise<{ id: string; project_id: string }>((resolve) => {
       release = resolve;
     });
     const onCopySaved = vi.fn(async () => pending);
@@ -2800,7 +2801,7 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
     save();
     save();
     await waitFor(() => expect(onCopySaved).toHaveBeenCalledTimes(1));
-    release();
+    release({ id: "draft-1", project_id: PROJECT_ATLAS });
   });
 
   it("refuses to move a draft with no project", async () => {
@@ -2823,5 +2824,154 @@ describe("WorkItemCreateDialog draft entry (ISS-139/141)", () => {
       )
     );
     expect(onPublish).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorkItemCreateDialog draft description assets (NEWFRONT-853)", () => {
+  function uploadImage(): void {
+    fireEvent.change(screen.getByLabelText("Attach an image to the description"), {
+      target: { files: [new File(["b"], "shot.png", { type: "image/png" })] },
+    });
+  }
+
+  async function settledUpload(): Promise<void> {
+    await waitFor(() => expect(screen.getByLabelText("Attach an image to the description")).not.toBeDisabled());
+  }
+
+  function grantCall(calls: Array<{ url: string; method: string; body: unknown }>) {
+    return calls.find(
+      (call) => call.method === "POST" && call.url.includes("/api/assets/v2/") && !call.url.endsWith("/bulk/")
+    );
+  }
+
+  function bulkCall(calls: Array<{ url: string; method: string; body: unknown }>) {
+    return calls.find((call) => call.method === "POST" && call.url.endsWith("/bulk/"));
+  }
+
+  it("parks a new draft's image under the draft scope and links it on save", async () => {
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const h = setup({}, { draftSeed: { title: "", input: { name: null, project_id: PROJECT_ATLAS } } });
+    uploadImage();
+    await settledUpload();
+    // A new draft has no row id yet: the upload parks under the draft
+    // scope with an empty identifier, and the save links it after.
+    expect(grantCall(h.calls)?.body).toMatchObject({
+      entity_type: "DRAFT_ISSUE_DESCRIPTION",
+      entity_identifier: "",
+    });
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    // The stub answers a project-less row, so the link falls back to the
+    // project the visit filed (and parked the upload) under.
+    await waitFor(() => expect(bulkCall(h.calls)).toBeDefined());
+    expect(bulkCall(h.calls)?.url).toContain(`/projects/${PROJECT_ATLAS}/${CREATED_ID}/bulk/`);
+    expect(bulkCall(h.calls)?.body).toEqual({ asset_ids: ["asset-1"] });
+    upload.mockRestore();
+  });
+
+  it("links copy-flow uploads to the row the caller's write stored", async () => {
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const onCopySaved = vi.fn(async () => ({ id: "draft-9", project_id: PROJECT_BEACON }));
+    const h = setup(
+      {},
+      {
+        draftSeed: { title: "Plan (copy)", input: { name: "Plan (copy)", project_id: PROJECT_ATLAS } },
+        onCopySaved,
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
+    uploadImage();
+    await settledUpload();
+    save();
+    await waitFor(() => expect(onCopySaved).toHaveBeenCalledTimes(1));
+    // The stored row's project wins over the visit's filing project.
+    await waitFor(() => expect(bulkCall(h.calls)).toBeDefined());
+    expect(bulkCall(h.calls)?.url).toContain(`/projects/${PROJECT_BEACON}/draft-9/bulk/`);
+    expect(bulkCall(h.calls)?.body).toEqual({ asset_ids: ["asset-1"] });
+    upload.mockRestore();
+  });
+
+  it("links uploads kept through the inline Save to Drafts", async () => {
+    const user = userEvent.setup();
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const h = setup();
+    await user.type(titleField(), "Draft inline");
+    uploadImage();
+    await settledUpload();
+    // A live visit parks under the issue scope; the keep-as-draft save
+    // still hands the parked ids to the stored draft.
+    expect(grantCall(h.calls)?.body).toMatchObject({
+      entity_type: "ISSUE_DESCRIPTION",
+      entity_identifier: "",
+    });
+    await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(bulkCall(h.calls)).toBeDefined());
+    expect(bulkCall(h.calls)?.url).toContain(`/projects/${PROJECT_ATLAS}/${CREATED_ID}/bulk/`);
+    expect(bulkCall(h.calls)?.body).toEqual({ asset_ids: ["asset-1"] });
+    upload.mockRestore();
+  });
+
+  it("links uploads kept through the discard guard", async () => {
+    const user = userEvent.setup();
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const h = setup();
+    await user.type(titleField(), "Draft me");
+    uploadImage();
+    await settledUpload();
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(await screen.findByText("Save this draft?")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(bulkCall(h.calls)).toBeDefined());
+    expect(bulkCall(h.calls)?.url).toContain(`/projects/${PROJECT_ATLAS}/${CREATED_ID}/bulk/`);
+    expect(bulkCall(h.calls)?.body).toEqual({ asset_ids: ["asset-1"] });
+    upload.mockRestore();
+  });
+
+  it("uploads a stored draft's images against its id and links nothing on save", async () => {
+    const upload = vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, status: 200 } as Response);
+    const h = setup(
+      {},
+      {
+        draftId: "draft-1",
+        edit: {
+          kind: "draft",
+          id: "draft-1",
+          projectId: PROJECT_ATLAS,
+          snapshot: editRow({ name: "Picture draft" }),
+        },
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Picture draft"));
+    uploadImage();
+    await settledUpload();
+    // The stored row's id travels on the upload itself, so the asset is
+    // already linked before the save runs.
+    expect(grantCall(h.calls)?.body).toMatchObject({
+      entity_type: "DRAFT_ISSUE_DESCRIPTION",
+      entity_identifier: "draft-1",
+    });
+    fireEvent.change(titleField(), { target: { value: "Picture draft v2" } });
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(h.calls.some((call) => call.method === "PATCH" && call.url.includes("/draft-issues/draft-1/"))).toBe(true);
+    expect(bulkCall(h.calls)).toBeUndefined();
+    upload.mockRestore();
+  });
+
+  it("sends no link call when a draft saves without uploads", async () => {
+    const onCopySaved = vi.fn(async () => ({ id: "draft-1", project_id: PROJECT_ATLAS }));
+    const h = setup(
+      {},
+      {
+        draftSeed: { title: "Plan (copy)", input: { name: "Plan (copy)", project_id: PROJECT_ATLAS } },
+        onCopySaved,
+      }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Plan (copy)"));
+    save();
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(bulkCall(h.calls)).toBeUndefined();
   });
 });

@@ -22,7 +22,7 @@ import { getAppClient } from "../../../core/api/client.js";
 import { useMe, usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions } from "../../projects/index.js";
 import { notifyError } from "../../../shared/shell/index.js";
-import type { WorkItemCreateProject, WorkItemEditTarget } from "../components/WorkItemCreateDialog.js";
+import type { SavedDraftRef, WorkItemCreateProject, WorkItemEditTarget } from "../components/WorkItemCreateDialog.js";
 import { selectCreatableProjects } from "../create/createForm.js";
 import {
   DRAFT_DELETE_FAILED_BODY,
@@ -83,7 +83,7 @@ export interface DraftDialogProps {
   /** False for a guest-owned draft: edit is allowed, conversion is not. */
   canPublish?: boolean;
   onPublish?: (input: DraftIssueCreateInput) => Promise<void>;
-  onCopySaved?: (input: DraftIssueCreateInput) => Promise<unknown>;
+  onCopySaved?: (input: DraftIssueCreateInput) => Promise<SavedDraftRef>;
   initialProjectId?: string;
 }
 
@@ -334,7 +334,7 @@ function DraftDialogHost({
   viewer: DraftViewer;
   CreateDialog: React.ComponentType<DraftDialogProps>;
   onClose: () => void;
-  onCopySaved: (input: DraftIssueCreateInput) => Promise<unknown>;
+  onCopySaved: (input: DraftIssueCreateInput) => Promise<SavedDraftRef>;
   onPromote: (draftId: string, input: DraftIssueCreateInput) => Promise<void>;
   onEditChanged: () => void;
 }): React.ReactElement | null {
