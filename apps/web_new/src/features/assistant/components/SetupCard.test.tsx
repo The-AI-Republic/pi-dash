@@ -6,7 +6,25 @@
 // permission scope, and links the provider settings page.
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Stand-in for the router Link (CrossAppLink.test.tsx precedent): the
+// setup action targets a migrated prefix, so it renders as a router
+// link whose navigation is TanStack's own tested behavior.
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...original,
+    Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+      const { to, children, ...rest } = props;
+      return (
+        <a data-router-link="" data-to={to} href={to} {...(rest as React.AnchorHTMLAttributes<HTMLAnchorElement>)}>
+          {children as React.ReactNode}
+        </a>
+      );
+    },
+  };
+});
 
 import { SetupCard } from "./SetupCard.js";
 
@@ -24,6 +42,7 @@ describe("SetupCard", () => {
     render(<SetupCard />);
     const action = screen.getByRole("button", { name: "Configure provider" });
     expect(action).toHaveAttribute("href", "/settings/profile/ai-assistant");
+    expect(action).toHaveAttribute("data-router-link");
   });
 
   it("forwards layout classes", () => {

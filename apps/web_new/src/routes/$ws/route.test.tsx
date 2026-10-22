@@ -235,7 +235,9 @@ describe("WorkspaceDenialNotice", () => {
     expect(screen.getByText("ada@example.com")).toBeVisible();
     const home = screen.getByRole("link", { name: "Go Home" });
     expect(home).toHaveFocus();
-    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute("href", "/settings/profile/general/");
+    // Router-normalized: the prefix migrated (NEWFRONT-586 F-09), so the
+    // cross-app link renders as a router link without the trailing slash.
+    expect(screen.getByRole("link", { name: "Open profile" })).toHaveAttribute("href", "/settings/profile/general");
   });
 
   it("offers creation when the user belongs nowhere", async () => {

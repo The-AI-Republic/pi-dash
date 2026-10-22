@@ -15,7 +15,19 @@ import type { UserProfileSegregation } from "@pidash/api-client";
 
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const original = await importOriginal<typeof import("@tanstack/react-router")>();
-  return { ...original, Link: () => null };
+  // Anchor stand-in (CrossAppLink.test.tsx precedent): the pencil targets
+  // a migrated prefix, so it renders as a router link.
+  return {
+    ...original,
+    Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+      const { to, children, ...rest } = props;
+      return (
+        <a data-router-link="" data-to={to} href={to} {...(rest as React.AnchorHTMLAttributes<HTMLAnchorElement>)}>
+          {children as React.ReactNode}
+        </a>
+      );
+    },
+  };
 });
 
 import {
@@ -153,6 +165,7 @@ describe("ProfileSidebarFrame", () => {
     const pencil = screen.getByTestId("profile-edit-pencil");
     expect(pencil).toHaveAttribute("href", PROFILE_SETTINGS_GENERAL_HREF);
     expect(pencil).toHaveAttribute("href", "/settings/profile/general");
+    expect(pencil).toHaveAttribute("data-router-link");
   });
 
   it("collapses on demand and reopens from the show control", async () => {

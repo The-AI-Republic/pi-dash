@@ -8,6 +8,24 @@ import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Stand-in for the router Link (CrossAppLink.test.tsx precedent): card
+// actions targeting migrated prefixes render as router links, whose
+// navigation is TanStack's own tested behavior.
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...original,
+    Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+      const { to, children, ...rest } = props;
+      return (
+        <a data-router-link="" data-to={to} href={to} {...(rest as React.AnchorHTMLAttributes<HTMLAnchorElement>)}>
+          {children as React.ReactNode}
+        </a>
+      );
+    },
+  };
+});
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { ROLE_ADMIN } from "../../../core/session/index.js";
 import { sessionKeys, setSessionClient } from "../../../core/session/queries.js";
