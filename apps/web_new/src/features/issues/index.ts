@@ -411,11 +411,36 @@ export type { CreateParentPreset } from "./components/WorkItemCreateDialog.js";
 // Saved-view dialog seam (VIEW-013, NEWFRONT-721). The views area builds
 // its create/edit dialog on the rich filter builder, the expression
 // serializers and the snapshot helpers; it never reaches past this
-// barrel into the rich/ modules.
-export { useRichFilterBuilder } from "./filters/rich/RichFilterBuilder.js";
-export type { RichFilterBuilderParts } from "./filters/rich/RichFilterBuilder.js";
+// barrel into the rich/ modules. The builder and its serializer arrive
+// through the loader below: static re-exports would pin the filter
+// subtree into the initial bundle (size gate). The loader lives here,
+// not in an eager module, so its dynamic import stays lazy with its
+// callers. The registry and the snapshot helpers are side-effect-free
+// and stay static.
+export type RichFilterBuilderModule = {
+  useRichFilterBuilder: (typeof import("./filters/rich/RichFilterBuilder.js"))["useRichFilterBuilder"];
+  serializeRichExpression: (typeof import("./filters/rich/RichFilterBuilder.js"))["serializeRichExpression"];
+};
+
+let richFilterBuilderRequest: Promise<RichFilterBuilderModule> | null = null;
+
+/** Start (or reuse) the builder-module request for lazy dialog hosts. */
+export function loadRichFilterBuilder(): Promise<RichFilterBuilderModule> {
+  richFilterBuilderRequest ??= import("./filters/rich/RichFilterBuilder.js").then((builder) => ({
+    useRichFilterBuilder: builder.useRichFilterBuilder,
+    serializeRichExpression: builder.serializeRichExpression,
+  }));
+  return richFilterBuilderRequest;
+}
+
+/** Kick the request while the host list's data is still loading. */
+export function preloadRichFilterBuilder(): void {
+  void loadRichFilterBuilder().catch(() => {
+    // The host's filter section surfaces the failure when it renders.
+  });
+}
+
 export { FieldConfigRegistry } from "./filters/rich/temporary.js";
-export { serializeRichExpression } from "./filters/rich/expression.js";
 export type { RichCondition, RichExpression } from "./filters/rich/expression.js";
 export { buildViewCreate, savedViewKeys } from "./filters/rich/views.js";
 export type { ViewSnapshot } from "./filters/rich/views.js";

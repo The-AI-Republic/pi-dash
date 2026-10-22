@@ -37,6 +37,9 @@ import {
   type RichCondition,
   type RichFilterField,
 } from "./expression.js";
+// Submit-time serializer for lazy hosts (the views dialog reads its
+// temporary registry through the builder-module loader in the barrel).
+export { serializeRichExpression } from "./expression.js";
 import { ConditionPill, conditionField } from "./ConditionPill.js";
 import { FieldPicker } from "./FieldPicker.js";
 import { temporaryInstanceId, useTemporaryFieldConfigs, type FieldConfigRegistry } from "./temporary.js";

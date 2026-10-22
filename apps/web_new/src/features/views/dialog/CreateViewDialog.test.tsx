@@ -147,7 +147,7 @@ afterEach(() => {
 });
 
 describe("CreateViewDialog blank form", () => {
-  it("opens with defaults, an expanded filter builder and no access selector", () => {
+  it("opens with defaults, an expanded filter builder and no access selector", async () => {
     seedSession();
     transport(() => ({ status: 201, body: RECORD }));
     renderDialog();
@@ -156,7 +156,8 @@ describe("CreateViewDialog blank form", () => {
     expect(screen.getByPlaceholderText("Description")).toHaveValue("");
     expect(screen.getByRole("button", { name: "List" })).toBeInTheDocument();
     expect(screen.getByTestId("display-options-trigger")).toBeInTheDocument();
-    expect(screen.getByTestId("rich-filter-add")).toBeInTheDocument();
+    // The filter section arrives with its lazily loaded chunk.
+    expect(await screen.findByTestId("rich-filter-add")).toBeInTheDocument();
     expect(screen.queryByTestId("view-access-field")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create View" })).toHaveAttribute("type", "submit");

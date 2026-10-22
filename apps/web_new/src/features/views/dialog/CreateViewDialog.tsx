@@ -25,13 +25,14 @@ import {
   FieldConfigRegistry,
   IssuesLoaderProvider,
   LayoutPicker,
+  loadRichFilterBuilder,
   mergeDisplayPrefs,
   savedViewKeys,
-  useRichFilterBuilder,
   type DisplayPrefs,
   type IssuesEntity,
 } from "../../issues/index.js";
 import { defaultCreateDisplay, normalizeCreateDisplay, serializeCreateDisplay } from "./createDisplay.js";
+import { FilterSectionLoader } from "./FilterSectionLoader.js";
 import { readRegistryExpression } from "./registryExpression.js";
 import { ViewAccessField, SHARED_ACCESS } from "./ViewAccessField.js";
 import { ViewIconPicker, type ViewLogoProps } from "./ViewIconPicker.js";
@@ -81,15 +82,6 @@ function CreateViewForm({
   const titleRef = React.useRef<HTMLInputElement | null>(null);
   const registry = React.useMemo(() => new FieldConfigRegistry(), []);
   const entity = React.useMemo<IssuesEntity>(() => ({ scope: "project", projectId }), [projectId]);
-  const { control: filterControl, row: filterRow } = useRichFilterBuilder({
-    workspaceSlug,
-    projectId,
-    entity,
-    hideCycle,
-    hideModule,
-    temporary: true,
-    temporaryRegistry: registry,
-  });
 
   // The title takes focus on every open; the form remounts per session and
   // the input is always mounted when this runs.
@@ -112,7 +104,11 @@ function CreateViewForm({
     }
     setPending(true);
     try {
-      const expression = readRegistryExpression(registry);
+      // The builder module is already loaded (its section rendered), so
+      // this reuses the cached request; a failed load keeps the dialog
+      // open through the same failure path as a failed write.
+      const { serializeRichExpression } = await loadRichFilterBuilder();
+      const expression = readRegistryExpression(registry, serializeRichExpression);
       const settings = normalizeCreateDisplay(display);
       const { displayFilters, displayProperties } = serializeCreateDisplay(settings);
       const payload: SavedViewCreate = {
@@ -204,8 +200,14 @@ function CreateViewForm({
         </div>
         <ViewAccessField value={access} onChange={setAccess} disabled={submitting} />
         <section aria-label="View filters" className="flex flex-col gap-(--space-2)">
-          {filterControl}
-          {filterRow}
+          <FilterSectionLoader
+            workspaceSlug={workspaceSlug}
+            projectId={projectId}
+            entity={entity}
+            hideCycle={hideCycle}
+            hideModule={hideModule}
+            registry={registry}
+          />
         </section>
       </div>
       <div className="mt-(--space-6) flex justify-end gap-(--space-3)">

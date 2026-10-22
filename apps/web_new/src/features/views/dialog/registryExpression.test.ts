@@ -4,6 +4,9 @@
 import { describe, expect, it } from "vitest";
 
 import { FieldConfigRegistry, type RichCondition } from "../../issues/index.js";
+// Test-only deep import (checks skip test files): the serializer the
+// dialog receives from the lazily loaded builder module.
+import { serializeRichExpression } from "../../issues/filters/rich/expression.js";
 import { readRegistryExpression } from "./registryExpression.js";
 
 const CONDITION: RichCondition = {
@@ -16,18 +19,18 @@ const CONDITION: RichCondition = {
 
 describe("readRegistryExpression", () => {
   it("reads the empty expression from an untouched registry", () => {
-    expect(readRegistryExpression(new FieldConfigRegistry())).toEqual({});
+    expect(readRegistryExpression(new FieldConfigRegistry(), serializeRichExpression)).toEqual({});
   });
 
   it("serializes the held conditions", () => {
     const registry = new FieldConfigRegistry();
     registry.register("priority", [CONDITION]);
-    expect(readRegistryExpression(registry)).toEqual({ priority__in: "urgent" });
+    expect(readRegistryExpression(registry, serializeRichExpression)).toEqual({ priority__in: "urgent" });
   });
 
   it("drops half-built conditions the serializer rejects", () => {
     const registry = new FieldConfigRegistry();
     registry.register("priority", [{ ...CONDITION, value: null }]);
-    expect(readRegistryExpression(registry)).toEqual({});
+    expect(readRegistryExpression(registry, serializeRichExpression)).toEqual({});
   });
 });
