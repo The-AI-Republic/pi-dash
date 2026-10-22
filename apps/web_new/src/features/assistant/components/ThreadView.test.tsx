@@ -13,12 +13,13 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AssistantMessage, LlmConfig } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { sttConfigKeys } from "../../../shared/dictation/index.js";
 import { assistantKeys } from "../api/keys.js";
 import { transcriptKey } from "../api/threadKeys.js";
 import { ThreadView, followTail } from "./ThreadView.js";
@@ -76,6 +77,10 @@ interface HarnessOptions {
   messageList?: () => Promise<unknown>;
   send?: (body: unknown) => Promise<unknown>;
   cancel?: () => Promise<unknown>;
+  /** Seed for the speech read; unset reads fail and hide the mic. */
+  sttSeed?: unknown;
+  /** Transcription answer; unset uploads fail. */
+  transcribe?: () => Promise<unknown>;
 }
 
 let serverHasActiveTurn = true;
@@ -132,12 +137,17 @@ function renderThread(options: HarnessOptions = {}) {
       const data = options.messageList === undefined ? (options.messages ?? []) : await options.messageList();
       return { status: 200, url, headers: { get: () => "application/json" }, text: async () => JSON.stringify(data) };
     }
+    if (path.endsWith("/transcribe/") && init.method === "POST") {
+      if (options.transcribe !== undefined) return options.transcribe();
+      return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
+    }
     return { status: 500, url, headers: { get: () => null }, text: async () => JSON.stringify({ error: "boom" }) };
   }) as never);
 
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   queryClient.setQueryData(assistantKeys.config("acme"), KEYED);
   queryClient.setQueryData(transcriptKey("acme", THREAD_ID), options.messages ?? []);
+  if (options.sttSeed !== undefined) queryClient.setQueryData(sttConfigKeys.all(), options.sttSeed);
   const rootRoute = createRootRouteWithContext<{ queryClient: QueryClient }>()();
   const wsRoute = createRoute({
     getParentRoute: () => rootRoute,
@@ -446,6 +456,92 @@ describe("ThreadView composer", () => {
     expect(await screen.findByTestId("assistant-error-line")).toHaveTextContent("turn_active");
     expect(screen.getByText("earlier")).toBeInTheDocument();
   });
+});
+
+describe("ThreadView dictation", () => {
+  const STT_KEYED = {
+    base_url: "https://stt.test",
+    model_name: "whisper",
+    has_api_key: true,
+    last_verified_at: null,
+    enabled: true,
+  };
+
+  class FakeRecorder {
+    state: RecordingState = "inactive";
+    mimeType = "audio/webm";
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onstop: (() => void) | null = null;
+
+    start(): void {
+      this.state = "recording";
+    }
+
+    stop(): void {
+      this.state = "inactive";
+      this.ondataavailable?.({ data: new Blob(["audio-bytes"], { type: this.mimeType }) });
+      this.onstop?.();
+    }
+  }
+
+  function stubDevices(): void {
+    const track = { stop: vi.fn() };
+    vi.stubGlobal("navigator", {
+      mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track] }) },
+    });
+    vi.stubGlobal("MediaRecorder", FakeRecorder);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("hides the microphone while the speech read fails", async () => {
+    stubDevices();
+    renderThread();
+    await screen.findByTestId("assistant-empty-hint");
+    expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+  });
+
+  it("offers the microphone once speech is configured", async () => {
+    stubDevices();
+    renderThread({ sttSeed: STT_KEYED });
+    expect(await screen.findByTestId("assistant-mic")).toHaveAttribute("aria-label", "Hold to dictate");
+  });
+
+  it("routes a keyless microphone to dictation settings", async () => {
+    stubDevices();
+    renderThread({ sttSeed: { ...STT_KEYED, has_api_key: false } });
+    const mic = await screen.findByTestId("assistant-mic");
+    expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
+    expect(mic).toHaveAttribute("href", "/settings/profile/ai-assistant#voice-dictation");
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
+  });
+
+  it("transcribes a hold into the draft", async () => {
+    stubDevices();
+    renderThread({
+      sttSeed: STT_KEYED,
+      transcribe: async () => ({
+        status: 200,
+        url: "https://api.test/api/users/me/ai-assistant/transcribe/",
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify({ text: "spoken words" }),
+      }),
+    });
+    const mic = await screen.findByTestId("assistant-mic");
+    fireEvent.pointerDown(mic);
+    await waitFor(() =>
+      expect(screen.getByTestId("assistant-mic")).toHaveAttribute("aria-label", "Release to transcribe")
+    );
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 600));
+    });
+    fireEvent.pointerUp(mic);
+    const box = screen.getByRole("textbox", { name: "Message the assistant" });
+    await waitFor(() => expect(box).toHaveValue("spoken words"));
+  }, 15000);
 });
 
 describe("ThreadView handoff", () => {

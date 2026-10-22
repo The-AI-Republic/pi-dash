@@ -16,6 +16,8 @@ import { MIGRATED_ROUTE_PREFIXES, resolveLinkKind } from "./migrated-routes.js";
 export interface CrossAppLinkProps extends Omit<React.AnchorHTMLAttributes<HTMLAnchorElement>, "href"> {
   /** App path such as "/sign-in" or "/acme/projects/1/issues". */
   to: string;
+  /** Deep-link anchor without the leading "#", such as "voice-dictation". */
+  hash?: string | undefined;
   /** Prefix override for tests and previews; defaults to the bundled list. */
   prefixes?: readonly string[] | undefined;
   children: React.ReactNode;
@@ -30,14 +32,14 @@ export interface CrossAppLinkProps extends Omit<React.AnchorHTMLAttributes<HTMLA
 // here — never widened, never spread piecemeal.
 type RouterLinkProps = Parameters<typeof Link>[0];
 
-export function CrossAppLink({ to, prefixes, children, ...rest }: CrossAppLinkProps): React.ReactElement {
+export function CrossAppLink({ to, hash, prefixes, children, ...rest }: CrossAppLinkProps): React.ReactElement {
   if (resolveLinkKind(to, prefixes ?? MIGRATED_ROUTE_PREFIXES) === "anchor") {
     return (
-      <a href={to} {...rest}>
+      <a href={hash === undefined ? to : `${to}#${hash}`} {...rest}>
         {children}
       </a>
     );
   }
-  const linkProps = { to, ...rest, children } as RouterLinkProps;
+  const linkProps = { to, ...(hash === undefined ? {} : { hash }), ...rest, children } as RouterLinkProps;
   return <Link {...linkProps} />;
 }

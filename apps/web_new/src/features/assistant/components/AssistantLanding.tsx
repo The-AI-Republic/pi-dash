@@ -18,9 +18,11 @@ import * as React from "react";
 
 import { startFailureDetail, useStartConversation } from "../api/mutations.js";
 import { useAssistantConfig } from "../api/queries.js";
+import { useComposerDictation } from "../hooks/useComposerDictation.js";
 import { ASSISTANT_CAPTION, ASSISTANT_HEADLINE, START_FAILED_TITLE } from "../lib/copy.js";
 import { needsLaneSetup } from "../lib/gate.js";
 import { notifyError } from "../../../shared/shell/index.js";
+import { appendDictation } from "../../../shared/dictation/index.js";
 import { Composer } from "./Composer.js";
 import { SetupCard } from "./SetupCard.js";
 
@@ -36,6 +38,10 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
   const start = useStartConversation();
   const navigate = useNavigate();
   const [draft, setDraft] = React.useState("");
+  const appendTranscript = React.useCallback((text: string) => {
+    setDraft((current) => appendDictation(current, text));
+  }, []);
+  const dictation = useComposerDictation(appendTranscript);
 
   const onStart = (message: string): void => {
     // The composer locks while starting, so no guard is needed here.
@@ -80,6 +86,7 @@ export function AssistantLanding({ workspaceSlug }: AssistantLandingProps): Reac
               onSubmit={onStart}
               starting={start.isPending}
               bordered={false}
+              dictation={dictation}
             />
           </>
         )}

@@ -9,6 +9,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import type { DictationHandle } from "../../../shared/dictation/index.js";
+import type { ComposerDictation } from "../lib/dictation.js";
 import { Composer } from "./Composer.js";
 
 function renderComposer(props: Partial<React.ComponentProps<typeof Composer>> = {}) {
@@ -126,5 +128,244 @@ describe("Composer", () => {
     const { onDraftChange } = renderComposer();
     fireEvent.change(screen.getByRole("textbox", { name: "Message the assistant" }), { target: { value: "typed" } });
     expect(onDraftChange).toHaveBeenCalledWith("typed");
+  });
+});
+
+function fakeHandle(overrides: Partial<DictationHandle> = {}): DictationHandle {
+  return {
+    status: "idle",
+    elapsedSeconds: 0,
+    errorMessage: null,
+    captureFailure: null,
+    supported: true,
+    start: vi.fn(async () => undefined),
+    stop: vi.fn(),
+    cancel: vi.fn(),
+    reset: vi.fn(),
+    ...overrides,
+  };
+}
+
+function keyedDictation(handle: DictationHandle): ComposerDictation {
+  return { speech: { enabled: true, has_api_key: true }, handle };
+}
+
+describe("Composer dictation", () => {
+  it("renders no microphone without the dictation cell", () => {
+    renderComposer();
+    expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+  });
+
+  it("hides the microphone while the switch reads off, missing or unread", () => {
+    const handle = fakeHandle();
+    const speeches: ComposerDictation["speech"][] = [
+      undefined,
+      { enabled: false, has_api_key: true },
+      { has_api_key: true },
+      { enabled: true, has_api_key: true },
+    ];
+    for (const speech of speeches.slice(0, 3)) {
+      const { unmount } = render(
+        <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={{ speech, handle }} />
+      );
+      expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+      unmount();
+    }
+    const unsupported = fakeHandle({ supported: false });
+    render(
+      <Composer
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={{ speech: speeches[3], handle: unsupported }}
+      />
+    );
+    expect(screen.queryByTestId("assistant-mic")).not.toBeInTheDocument();
+  });
+
+  it("abandons an in-progress capture when the cell hides", () => {
+    const recording = fakeHandle({ status: "recording" });
+    render(
+      <Composer
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={{ speech: { enabled: false, has_api_key: true }, handle: recording }}
+      />
+    );
+    expect(recording.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("abandons a capture still waiting on the microphone when the cell hides", () => {
+    const requesting = fakeHandle({ status: "requesting" });
+    render(
+      <Composer
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={{ speech: undefined, handle: requesting }}
+      />
+    );
+    expect(requesting.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a settled capture alone when the cell hides", () => {
+    const idle = fakeHandle({ status: "idle" });
+    render(
+      <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={{ speech: undefined, handle: idle }} />
+    );
+    expect(idle.cancel).not.toHaveBeenCalled();
+  });
+
+  it("never cancels a capture the cell still shows", () => {
+    const recording = fakeHandle({ status: "recording", elapsedSeconds: 4 });
+    renderComposer({ dictation: keyedDictation(recording) });
+    expect(recording.cancel).not.toHaveBeenCalled();
+    expect(screen.getByTestId("assistant-mic")).toHaveAttribute("aria-label", "Release to transcribe");
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent(
+      "Recording — release to transcribe · 0:04"
+    );
+  });
+
+  it("offers a ready microphone with no hint when keyed and idle", () => {
+    renderComposer({ dictation: keyedDictation(fakeHandle()) });
+    const mic = screen.getByTestId("assistant-mic");
+    expect(mic.tagName).toBe("BUTTON");
+    expect(mic).toHaveAttribute("aria-label", "Hold to dictate");
+    expect(mic).toHaveAttribute("aria-pressed", "false");
+    expect(mic).toBeEnabled();
+    expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+  });
+
+  it("shows no hint while the microphone prompt is still open", () => {
+    renderComposer({ dictation: keyedDictation(fakeHandle({ status: "requesting" })) });
+    expect(screen.getByTestId("assistant-mic")).toHaveAttribute("aria-label", "Hold to dictate");
+    expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+  });
+
+  it("locks the microphone while an upload runs and says so", () => {
+    renderComposer({ dictation: keyedDictation(fakeHandle({ status: "transcribing" })) });
+    expect(screen.getByTestId("assistant-mic")).toBeDisabled();
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Transcribing…");
+  });
+
+  it("locks a keyed microphone with the composer and stays hintless", () => {
+    renderComposer({ draft: "hello", configured: false, dictation: keyedDictation(fakeHandle()) });
+    const mic = screen.getByTestId("assistant-mic");
+    expect(mic.tagName).toBe("BUTTON");
+    expect(mic).toHaveAttribute("aria-label", "Hold to dictate");
+    expect(mic).toBeDisabled();
+    expect(screen.queryByTestId("assistant-dictation-hint")).not.toBeInTheDocument();
+  });
+
+  it("explains a refused microphone", () => {
+    renderComposer({ dictation: keyedDictation(fakeHandle({ status: "denied" })) });
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent(
+      "Microphone access is blocked. Enable it in your browser's site settings, then try again."
+    );
+  });
+
+  it("names missing hardware and failed capture distinctly", () => {
+    const { unmount } = render(
+      <Composer
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={keyedDictation(fakeHandle({ status: "error", captureFailure: "missing-hardware" }))}
+      />
+    );
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("No microphone found.");
+    unmount();
+    render(
+      <Composer
+        draft=""
+        onDraftChange={() => {}}
+        onSubmit={() => {}}
+        dictation={keyedDictation(fakeHandle({ status: "error", captureFailure: "capture-failed" }))}
+      />
+    );
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Couldn't access the microphone.");
+  });
+
+  it("reads a failed upload through its own message", () => {
+    renderComposer({
+      dictation: keyedDictation(fakeHandle({ status: "error", errorMessage: "provider down" })),
+    });
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("provider down");
+  });
+
+  it("falls back when a failed upload carries no message", () => {
+    renderComposer({ dictation: keyedDictation(fakeHandle({ status: "error" })) });
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice input failed");
+  });
+
+  it("routes a keyless press to dictation settings with its hint", () => {
+    renderComposer({
+      dictation: { speech: { enabled: true, has_api_key: false }, handle: fakeHandle() },
+    });
+    const mic = screen.getByTestId("assistant-mic");
+    expect(mic.tagName).toBe("A");
+    expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
+    expect(mic).toHaveAttribute("href", "/settings/profile/ai-assistant#voice-dictation");
+    expect(screen.getByTestId("assistant-dictation-hint")).toHaveTextContent("Voice dictation isn't set up.");
+    const setup = screen.getByRole("link", { name: "Configure it" });
+    expect(setup).toHaveAttribute("href", "/settings/profile/ai-assistant#voice-dictation");
+  });
+
+  it("keeps a keyless microphone shut while the composer locks", () => {
+    renderComposer({
+      draft: "hello",
+      configured: false,
+      dictation: { speech: { enabled: true, has_api_key: false }, handle: fakeHandle() },
+    });
+    const mic = screen.getByTestId("assistant-mic");
+    expect(mic.tagName).toBe("BUTTON");
+    expect(mic).toHaveAttribute("aria-label", "Set up voice dictation");
+    expect(mic).toBeDisabled();
+  });
+
+  it("records on pointer hold and stops on release", () => {
+    const handle = fakeHandle();
+    renderComposer({ dictation: keyedDictation(handle) });
+    const mic = screen.getByTestId("assistant-mic");
+    fireEvent.pointerDown(mic);
+    expect(handle.reset).toHaveBeenCalledTimes(1);
+    expect(handle.start).toHaveBeenCalledTimes(1);
+    fireEvent.pointerUp(mic);
+    expect(handle.stop).toHaveBeenCalledTimes(1);
+    fireEvent.pointerCancel(mic);
+    expect(handle.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops when the pointer slides off mid-recording only", () => {
+    const recording = fakeHandle({ status: "recording" });
+    const { unmount } = render(
+      <Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={keyedDictation(recording)} />
+    );
+    fireEvent.pointerLeave(screen.getByTestId("assistant-mic"));
+    expect(recording.stop).toHaveBeenCalledTimes(1);
+    unmount();
+    const idle = fakeHandle({ status: "idle" });
+    render(<Composer draft="" onDraftChange={() => {}} onSubmit={() => {}} dictation={keyedDictation(idle)} />);
+    fireEvent.pointerLeave(screen.getByTestId("assistant-mic"));
+    expect(idle.stop).not.toHaveBeenCalled();
+  });
+
+  it("records on keyboard hold and stops on release", () => {
+    const handle = fakeHandle();
+    renderComposer({ dictation: keyedDictation(handle) });
+    const mic = screen.getByTestId("assistant-mic");
+    expect(fireEvent.keyDown(mic, { key: " " })).toBe(false);
+    expect(handle.start).toHaveBeenCalledTimes(1);
+    expect(fireEvent.keyDown(mic, { key: "Enter", repeat: true })).toBe(true);
+    expect(handle.start).toHaveBeenCalledTimes(1);
+    expect(fireEvent.keyDown(mic, { key: "Tab" })).toBe(true);
+    expect(handle.start).toHaveBeenCalledTimes(1);
+    expect(fireEvent.keyUp(mic, { key: " " })).toBe(false);
+    expect(handle.stop).toHaveBeenCalledTimes(1);
+    expect(fireEvent.keyUp(mic, { key: "Tab" })).toBe(true);
+    expect(handle.stop).toHaveBeenCalledTimes(1);
   });
 });

@@ -12,8 +12,8 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@tanstack/react-router", () => ({
   // Plain anchor with a marker: the real Link's navigation is TanStack's
   // own tested behavior. href keeps the testing-library link role.
-  Link: (props: { to?: string; children?: React.ReactNode }) => (
-    <a data-router-link="" data-to={props.to} href={props.to}>
+  Link: (props: { to?: string; hash?: string; children?: React.ReactNode }) => (
+    <a data-router-link="" data-to={props.to} data-hash={props.hash} href={props.to}>
       {props.children}
     </a>
   ),
@@ -56,6 +56,29 @@ describe("CrossAppLink", () => {
       </CrossAppLink>
     );
     expect(screen.getByRole("link", { name: "Issues" })).toHaveAttribute("data-router-link");
+  });
+
+  it("appends a deep-link anchor on a plain anchor", () => {
+    render(
+      <CrossAppLink to="/settings/profile/ai-assistant" hash="voice-dictation">
+        Voice
+      </CrossAppLink>
+    );
+    expect(screen.getByRole("link", { name: "Voice" })).toHaveAttribute(
+      "href",
+      "/settings/profile/ai-assistant#voice-dictation"
+    );
+  });
+
+  it("hands a deep-link anchor to the router link", () => {
+    render(
+      <CrossAppLink to="/settings/profile/ai-assistant" hash="voice-dictation" prefixes={["/settings"]}>
+        Voice
+      </CrossAppLink>
+    );
+    const link = screen.getByRole("link", { name: "Voice" });
+    expect(link).toHaveAttribute("data-router-link");
+    expect(link).toHaveAttribute("data-hash", "voice-dictation");
   });
 
   it("forwards a ref to the anchor", () => {

@@ -16,6 +16,8 @@ import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { markdownHtml } from "../../../shared/markdown/index.js";
+import { appendDictation } from "../../../shared/dictation/index.js";
+import { useComposerDictation } from "../hooks/useComposerDictation.js";
 import { useAssistantChat } from "../hooks/useAssistantChat.js";
 import { EMPTY_CONVERSATION_HINT, HANDOFF_FAILED_TITLE } from "../lib/copy.js";
 import { startFailureDetail } from "../api/mutations.js";
@@ -70,6 +72,11 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
     setDraft("");
     chat.send(content);
   };
+
+  const appendTranscript = React.useCallback((text: string) => {
+    setDraft((current) => appendDictation(current, text));
+  }, []);
+  const dictation = useComposerDictation(appendTranscript);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -126,6 +133,7 @@ export function ThreadView({ workspaceSlug, threadId, state, configured }: Threa
           running={chat.running}
           onStop={chat.stop}
           configured={configured}
+          dictation={dictation}
         />
       </div>
     </div>
