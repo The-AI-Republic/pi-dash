@@ -4,18 +4,26 @@
 // Contract: project estimate writes against live Django — create a system
 // with its points, read it back through the list, delete it, and confirm
 // the 204. The seeded estimate proves the read shape on a system the seed
-// created, not one the test made.
+// created, not one the test made. The second half covers the editing
+// surface: the saved-system update, single-value create/update/delete,
+// and the error matrix around them.
 import { beforeAll, describe, expect, it } from "vitest";
 import { ApiError } from "../errors.js";
 import {
   createEstimate,
+  createProjectEstimatePoint,
   deleteEstimate,
+  deleteProjectEstimatePoint,
   getProjectEstimate,
   listProjectEstimatePoints,
   listProjectEstimates,
   orderEstimatePoints,
   selectActiveEstimate,
+  updateProjectEstimate,
+  updateProjectEstimatePoint,
 } from "../contracts/estimates.js";
+import { getIssue } from "../contracts/issues.js";
+import { createIssue, deleteIssue } from "../contracts/issue-actions.js";
 import { getProject, listProjects } from "../contracts/projects.js";
 import { updateProject } from "../contracts/project-management.js";
 import { signIn } from "../contracts/auth-entry.js";
@@ -355,5 +363,369 @@ describe.skipIf(!contractEnabled)("estimate error shapes", () => {
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(403);
     expect((failure as ApiError).message).toBe("You don't have the required permissions.");
+  });
+});
+
+/** A dormant three-value system the edit tests mutate, then delete. */
+async function threeValueSystem(client: ApiClient, projectId: string, prefix: string) {
+  return createEstimate(client, CONTRACT_WORKSPACE, projectId, {
+    name: uniqueName(prefix),
+    type: "points",
+    last_used: false,
+    points: [
+      { key: 1, value: "1" },
+      { key: 2, value: "2" },
+      { key: 3, value: "3" },
+    ],
+  });
+}
+
+function pointIdOf(system: Awaited<ReturnType<typeof threeValueSystem>>, value: string): string {
+  const found = system.points.find((entry) => entry.value === value);
+  expect(found).toBeDefined();
+  return found?.id ?? "";
+}
+
+describe.skipIf(!contractEnabled)("estimate system update", () => {
+  it("patches the name with the full value set and persists across re-read", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract update");
+    try {
+      const renamed = `${created.name} v2`;
+      const updated = await updateProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id, {
+        name: renamed,
+        points: [
+          { id: pointIdOf(created, "3"), key: 1, value: "3" },
+          { id: pointIdOf(created, "1"), key: 2, value: "1" },
+          { id: pointIdOf(created, "2"), key: 3, value: "two" },
+        ],
+      });
+      expect(updated.name).toBe(renamed);
+      expect(updated.points).toHaveLength(3);
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.name).toBe(renamed);
+      expect(orderEstimatePoints(read.points).map((entry) => entry.key)).toEqual([1, 2, 3]);
+      expect(orderEstimatePoints(read.points).map((entry) => entry.value)).toEqual(["3", "1", "two"]);
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("updates the known ids while ignoring an unknown one", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract update unknown");
+    try {
+      const updated = await updateProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id, {
+        points: [
+          { id: pointIdOf(created, "1"), key: 1, value: "one" },
+          { id: "00000000-0000-4000-8000-000000000000", key: 9, value: "ghost" },
+        ],
+      });
+      // No row created, none deleted: the unknown id simply did nothing.
+      expect(updated.points).toHaveLength(3);
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.points.find((entry) => entry.id === pointIdOf(created, "1"))?.value).toBe("one");
+      expect(read.points.some((entry) => entry.value === "ghost")).toBe(false);
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("400s an empty value set sent raw", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract update empty");
+    try {
+      const path = `/api/workspaces/${CONTRACT_WORKSPACE}/projects/${projectId}/estimates/${created.id}/`;
+      const failure = await client
+        .sendJson("PATCH", path, { json: { estimate: { name: "Empty" }, estimate_points: [] } })
+        .then(
+          () => null,
+          (caught: unknown) => caught
+        );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+      expect((failure as ApiError).body).toEqual({ error: "Estimate points are required" });
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("400s a missing value set sent raw", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract update missing");
+    try {
+      const path = `/api/workspaces/${CONTRACT_WORKSPACE}/projects/${projectId}/estimates/${created.id}/`;
+      const failure = await client.sendJson("PATCH", path, { json: { estimate: { name: "Missing" } } }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+      expect((failure as ApiError).body).toEqual({ error: "Estimate points are required" });
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("200-ignores id-less rows sent raw, leaving the system unchanged", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract update idless");
+    try {
+      const path = `/api/workspaces/${CONTRACT_WORKSPACE}/projects/${projectId}/estimates/${created.id}/`;
+      // A 400 here would throw and fail the test: the raw call must answer 200.
+      await client.sendJson("PATCH", path, { json: { estimate_points: [{ key: 1, value: "ghost" }] } });
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.points).toHaveLength(3);
+      expect(read.points.some((entry) => entry.value === "ghost")).toBe(false);
+      // The silent no-op is why the contract requires an id per row.
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+});
+
+describe.skipIf(!contractEnabled)("estimate point writes", () => {
+  it("creates one value and reads it back on the system", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point create");
+    try {
+      const point = await createProjectEstimatePoint(client, CONTRACT_WORKSPACE, projectId, created.id, {
+        key: 4,
+        value: "8",
+      });
+      expect(point.key).toBe(4);
+      expect(point.value).toBe("8");
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.points.some((entry) => entry.id === point.id && entry.value === "8")).toBe(true);
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("400s a single-point create missing its position, sent raw", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point nokey");
+    try {
+      const path = `/api/workspaces/${CONTRACT_WORKSPACE}/projects/${projectId}/estimates/${created.id}/estimate-points/`;
+      const failure = await client.sendJson("POST", path, { json: { value: "8" } }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+      expect((failure as ApiError).body).toEqual({ error: "Key and value are required" });
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("400s a single-point create missing its text, sent raw", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point novalue");
+    try {
+      const path = `/api/workspaces/${CONTRACT_WORKSPACE}/projects/${projectId}/estimates/${created.id}/estimate-points/`;
+      const failure = await client.sendJson("POST", path, { json: { key: 4 } }).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+      expect((failure as ApiError).body).toEqual({ error: "Key and value are required" });
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("stores an over-long value on single-point create (NEWFRONT-347, pinned gap)", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point long");
+    try {
+      // 200, never 400: this endpoint skips the 20-character cap the bulk
+      // and update paths enforce. The oracle pins the gap; the contract
+      // must not promise the cap here.
+      const long = "y".repeat(21);
+      const point = await createProjectEstimatePoint(client, CONTRACT_WORKSPACE, projectId, created.id, {
+        key: 4,
+        value: long,
+      });
+      expect(point.value).toBe(long);
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("partially updates one value and leaves the other field alone", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point patch");
+    try {
+      const target = pointIdOf(created, "2");
+      const updated = await updateProjectEstimatePoint(client, CONTRACT_WORKSPACE, projectId, created.id, target, {
+        value: "XL",
+      });
+      expect(updated.value).toBe("XL");
+      expect(updated.key).toBe(2);
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.points.find((entry) => entry.id === target)?.value).toBe("XL");
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("400s a point update whose value exceeds the 20-character cap", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point cap");
+    try {
+      const failure = await updateProjectEstimatePoint(
+        client,
+        CONTRACT_WORKSPACE,
+        projectId,
+        created.id,
+        pointIdOf(created, "1"),
+        { value: "x".repeat(21) }
+      ).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+      expect((failure as ApiError).body).toEqual({ non_field_errors: ["Value can't be more than 20 characters"] });
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("400s an empty point update", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point empty");
+    try {
+      const failure = await updateProjectEstimatePoint(
+        client,
+        CONTRACT_WORKSPACE,
+        projectId,
+        created.id,
+        pointIdOf(created, "1"),
+        {}
+      ).then(
+        () => null,
+        (caught: unknown) => caught
+      );
+      expect(failure).toBeInstanceOf(ApiError);
+      expect((failure as ApiError).status).toBe(400);
+      expect((failure as ApiError).body).toEqual({ non_field_errors: ["Estimate points are required"] });
+    } finally {
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("deletes one value with a replacement, moving its items and renumbering", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point reassign");
+    const first = pointIdOf(created, "1");
+    const second = pointIdOf(created, "2");
+    const issue = await createIssue(client, CONTRACT_WORKSPACE, projectId, {
+      name: uniqueName("Contract estimate move"),
+      estimate_point: first,
+    });
+    try {
+      const answer = await deleteProjectEstimatePoint(client, CONTRACT_WORKSPACE, projectId, created.id, first, {
+        newEstimateId: second,
+      });
+      // The answer is the renumbered subset only: values 2 and 3 moved to 1 and 2.
+      expect(answer.map((entry) => entry.key).sort()).toEqual([1, 2]);
+      expect(answer.map((entry) => entry.value).sort()).toEqual(["2", "3"]);
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.points).toHaveLength(2);
+      expect(orderEstimatePoints(read.points).map((entry) => entry.key)).toEqual([1, 2]);
+      const moved = await getIssue(client, CONTRACT_WORKSPACE, projectId, issue.id);
+      expect(moved.estimate_point).toBe(second);
+    } finally {
+      await deleteIssue(client, CONTRACT_WORKSPACE, projectId, issue.id).catch(() => undefined);
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+
+  it("deletes one value without a replacement, clearing its items", async () => {
+    const client = await signedIn();
+    const projectId = await seededProjectId(client);
+    const created = await threeValueSystem(client, projectId, "Contract point clear");
+    const first = pointIdOf(created, "1");
+    const issue = await createIssue(client, CONTRACT_WORKSPACE, projectId, {
+      name: uniqueName("Contract estimate clear"),
+      estimate_point: first,
+    });
+    try {
+      await deleteProjectEstimatePoint(client, CONTRACT_WORKSPACE, projectId, created.id, first);
+      const read = await getProjectEstimate(client, CONTRACT_WORKSPACE, projectId, created.id);
+      expect(read.points).toHaveLength(2);
+      expect(orderEstimatePoints(read.points).map((entry) => entry.key)).toEqual([1, 2]);
+      const cleared = await getIssue(client, CONTRACT_WORKSPACE, projectId, issue.id);
+      expect(cleared.estimate_point).toBeNull();
+    } finally {
+      await deleteIssue(client, CONTRACT_WORKSPACE, projectId, issue.id).catch(() => undefined);
+      await deleteEstimate(client, CONTRACT_WORKSPACE, projectId, created.id).catch(() => 0);
+    }
+  });
+});
+
+describe.skipIf(!contractEnabled)("estimate edit refusals", () => {
+  it("403s the editing endpoints for a project the caller does not belong to", async () => {
+    const projectId = await bareProjectId(await signedIn());
+    const unknown = "00000000-0000-4000-8000-000000000000";
+    const refused = async (call: Promise<unknown>): Promise<ApiError | null> =>
+      call.then(
+        () => null,
+        (caught: unknown) => caught as ApiError
+      );
+
+    const update = await refused(
+      updateProjectEstimate(probe, CONTRACT_WORKSPACE, projectId, unknown, {
+        points: [{ id: unknown, key: 1, value: "1" }],
+      })
+    );
+    const create = await refused(
+      createProjectEstimatePoint(probe, CONTRACT_WORKSPACE, projectId, unknown, { key: 1, value: "1" })
+    );
+    const patch = await refused(
+      updateProjectEstimatePoint(probe, CONTRACT_WORKSPACE, projectId, unknown, unknown, { value: "1" })
+    );
+    const remove = await refused(deleteProjectEstimatePoint(probe, CONTRACT_WORKSPACE, projectId, unknown, unknown));
+    for (const failure of [update, create, patch, remove]) {
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure?.status).toBe(403);
+    }
+  });
+
+  it("401s estimate reads and writes without a session", async () => {
+    const projectId = await seededProjectId(await signedIn());
+    const seeded = await listProjectEstimates(await signedIn(), CONTRACT_WORKSPACE, projectId);
+    const systemId = seeded[0]?.id ?? "00000000-0000-4000-8000-000000000000";
+    const stranger = contractClient();
+    const refused = async (call: Promise<unknown>): Promise<ApiError | null> =>
+      call.then(
+        () => null,
+        (caught: unknown) => caught as ApiError
+      );
+
+    const list = await refused(listProjectEstimates(stranger, CONTRACT_WORKSPACE, projectId));
+    const write = await refused(
+      createProjectEstimatePoint(stranger, CONTRACT_WORKSPACE, projectId, systemId, { key: 1, value: "1" })
+    );
+    for (const failure of [list, write]) {
+      expect(failure).toBeInstanceOf(ApiError);
+      expect(failure?.status).toBe(401);
+    }
   });
 });

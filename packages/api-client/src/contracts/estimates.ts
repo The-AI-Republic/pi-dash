@@ -8,10 +8,14 @@
 // single system for editing; pickers and the shell read the same list and
 // pick the in-use system out of it. Ordering is never taken from the wire:
 // nested values arrive in the model's text order, so every reader that
-// renders values sorts by `key` through this module's selector.
+// renders values sorts by `key` through this module's selector. The second
+// half of the module is the editing surface: the saved-system update,
+// single-value create/update/delete, and the history-entry family the
+// estimate writes record.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
 import { dateTime, nullableUuid, uuid } from "./fields.js";
+import type { IssueActivity } from "./issue-activity.js";
 
 /** Estimate system families the picker formats (points and categories show raw values). */
 export const ESTIMATE_SYSTEM_TIME = "time";
@@ -204,4 +208,186 @@ export async function listProjectEstimatePoints(
   const path = `/api/workspaces/${slug}/projects/${projectId}/project-estimates/`;
   const body = await client.getJson<unknown>(path);
   return client.parse(z.array(EstimatePoint), body, `GET ${path}`);
+}
+
+/**
+ * One value row in a system-update body. `id` is required: the server
+ * matches rows by id and silently keeps any row it does not recognise,
+ * so a row without an id would look saved while nothing changed. The
+ * position and text mirror the stored row; the server writes them
+ * verbatim with no length or content check.
+ */
+export const EstimatePointUpdateRow = z.object({
+  id: uuid(),
+  key: z.number(),
+  value: z.string(),
+});
+export type EstimatePointUpdateRow = z.infer<typeof EstimatePointUpdateRow>;
+
+/**
+ * Request body for PATCH .../estimates/<eid>/. The system object carries
+ * only the fields the server reads from it (name, type); the value list
+ * must be non-empty or the server answers 400. The call updates existing
+ * rows only — added values go through the single-point create and removed
+ * ones through the single-point delete (spec §4.1).
+ */
+export const EstimateUpdateBody = z.object({
+  estimate: z.optional(
+    z.object({
+      name: z.optional(z.string()),
+      type: z.optional(z.string()),
+    })
+  ),
+  estimate_points: z.array(EstimatePointUpdateRow).check(z.minLength(1)),
+});
+export type EstimateUpdateBody = z.infer<typeof EstimateUpdateBody>;
+
+export interface EstimateUpdateInput {
+  name?: string;
+  type?: string;
+  /** Every surviving value with its new position and text; never empty. */
+  points: EstimatePointUpdateRow[];
+}
+
+/**
+ * PATCH .../estimates/<eid>/ answers 200 with the system and its points.
+ * The body is validated here so a caller cannot send an empty set (the
+ * server 400s it) or a row without an id (the server would 200-ignore
+ * it, a silent no-op). Unknown ids are ignored the same way, so callers
+ * send only ids they read back from this system.
+ */
+export async function updateProjectEstimate(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  estimateId: string,
+  input: EstimateUpdateInput
+): Promise<Estimate> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/estimates/${estimateId}/`;
+  const renamed = {
+    ...(input.name === undefined ? {} : { name: input.name }),
+    ...(input.type === undefined ? {} : { type: input.type }),
+  };
+  const body: EstimateUpdateBody = EstimateUpdateBody.parse({
+    ...(Object.keys(renamed).length > 0 ? { estimate: renamed } : {}),
+    estimate_points: input.points,
+  });
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: body });
+  return client.parse(Estimate, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * Body for POST .../estimates/<eid>/estimate-points/. Both fields are
+ * required: the server answers 400 when either is falsy, and a zero
+ * position counts as falsy there, so the caller's position starts at 1.
+ * This shape deliberately promises no value-length cap: the server
+ * stores the text without the 20-character check the bulk and update
+ * paths run (NEWFRONT-347), so callers cap the value themselves and
+ * never rely on this endpoint to refuse it.
+ */
+export const EstimatePointCreateBody = z.object({
+  key: z.int().check(z.minimum(1)),
+  value: z.string().check(z.minLength(1)),
+});
+export type EstimatePointCreateBody = z.infer<typeof EstimatePointCreateBody>;
+
+/**
+ * POST .../estimates/<eid>/estimate-points/ answers 200 with the created
+ * value, id included. New rows from the edit dialog are sent through
+ * here after the system PATCH, in display order.
+ */
+export async function createProjectEstimatePoint(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  estimateId: string,
+  input: EstimatePointCreateBody
+): Promise<EstimatePoint> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/estimates/${estimateId}/estimate-points/`;
+  const body: EstimatePointCreateBody = EstimatePointCreateBody.parse(input);
+  const envelope = await client.sendJson<unknown>("POST", path, { json: body });
+  return client.parse(EstimatePoint, envelope.data, `POST ${path}`);
+}
+
+/**
+ * Partial value update for PATCH .../estimate-points/<ptid>/. Either
+ * field may be sent; the server runs the point serializer over what it
+ * gets, so a value over 20 characters is 400 and an empty object is 400
+ * too. The length cap is the server's to enforce — this shape carries
+ * the text through so the refusal stays observable.
+ */
+export interface EstimatePointPatch {
+  key?: number;
+  value?: string;
+}
+
+/** PATCH .../estimate-points/<ptid>/ answers 200 with the updated value. */
+export async function updateProjectEstimatePoint(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  estimateId: string,
+  pointId: string,
+  input: EstimatePointPatch
+): Promise<EstimatePoint> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/estimates/${estimateId}/estimate-points/${pointId}/`;
+  const envelope = await client.sendJson<unknown>("PATCH", path, { json: input });
+  return client.parse(EstimatePoint, envelope.data, `PATCH ${path}`);
+}
+
+/**
+ * Single-value delete for DELETE .../estimate-points/<ptid>/.
+ * `newEstimateId` names the replacement *value* (a point id, not a
+ * system id): affected work items move to it, and omitting it clears
+ * them. The server renumbers the survivors and answers 200 with only
+ * the rows whose positions changed — not the full remaining set — so
+ * callers re-read the system instead of treating the answer as the new
+ * list.
+ */
+export interface EstimatePointDeleteInput {
+  newEstimateId?: string;
+}
+
+/**
+ * DELETE .../estimate-points/<ptid>/ answers 200 with the renumbered
+ * rows. Present `newEstimateId` reassigns, absent clears.
+ */
+export async function deleteProjectEstimatePoint(
+  client: ApiClient,
+  slug: string,
+  projectId: string,
+  estimateId: string,
+  pointId: string,
+  input: EstimatePointDeleteInput = {}
+): Promise<EstimatePoint[]> {
+  const path = `/api/workspaces/${slug}/projects/${projectId}/estimates/${estimateId}/estimate-points/${pointId}/`;
+  const envelope = await client.sendJson<unknown>(
+    "DELETE",
+    path,
+    input.newEstimateId === undefined ? {} : { json: { new_estimate_id: input.newEstimateId } }
+  );
+  return client.parse(z.array(EstimatePoint), envelope.data, `DELETE ${path}`);
+}
+
+/**
+ * History fields the estimate worker writes (EST-023): one per value
+ * family — `estimate_points`, `estimate_categories`, `estimate_time` —
+ * plus the legacy `estimate_point` on older rows. The feed recognises
+ * the whole family so a future family renders with the generic estimate
+ * treatment instead of vanishing.
+ */
+export type EstimateActivityField = `estimate_${string}`;
+
+/** Whether a history row's field belongs to the estimate family. */
+export function isEstimateActivityField(field: string | null | undefined): field is EstimateActivityField {
+  return typeof field === "string" && field.startsWith("estimate_");
+}
+
+/**
+ * The estimate entries of a history list, in feed order. The read itself
+ * stays with the issues area (`listIssueActivities`); this only picks
+ * the family out of what it answered.
+ */
+export function selectEstimateActivities(activities: readonly IssueActivity[]): IssueActivity[] {
+  return activities.filter((entry) => isEstimateActivityField(entry.field));
 }
