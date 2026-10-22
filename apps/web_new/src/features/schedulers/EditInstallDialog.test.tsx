@@ -29,7 +29,7 @@ vi.mock("../../shared/shell/index.js", () => ({ notifyError: notify.error, notif
 
 import { EditInstallDialog, installDraftFromBinding, installUpdatePayload } from "./EditInstallDialog.js";
 import { bindingKeys, invalidateInstalls } from "./installData.js";
-import { DEFAULT_TZID } from "./schedule.js";
+import { DEFAULT_TZID, isoToLocalStart } from "./schedule.js";
 
 const SLUG = "acme";
 const PROJECT = "p1";
@@ -97,7 +97,7 @@ afterEach(() => {
 describe("installDraftFromBinding", () => {
   it("converts the stored instant to local wall time and passes the rule through", () => {
     const draft = installDraftFromBinding(binding());
-    expect(draft.schedule.startsAt).toBe("2026-10-21T00:30");
+    expect(draft.schedule.startsAt).toBe(isoToLocalStart("2026-10-21T07:30:00Z"));
     expect(draft.schedule.timeZone).toBe("Europe/Berlin");
     expect(draft.schedule.rrule).toBe("FREQ=WEEKLY;BYDAY=MO,WE");
     expect(draft.schedule.projectContext).toBe("Frame the week.");
@@ -151,7 +151,7 @@ describe("EditInstallDialog", () => {
   it("pre-fills every field from the stored install", () => {
     setup({ binding: binding() });
     expect(screen.getByText("Edit scheduler install")).toBeInTheDocument();
-    expect(screen.getByLabelText("Starts at")).toHaveValue("2026-10-21T00:30");
+    expect(screen.getByLabelText("Starts at")).toHaveValue(isoToLocalStart("2026-10-21T07:30:00Z"));
     expect(screen.getByLabelText("Time zone")).toHaveValue("Europe/Berlin");
     expect(screen.getByLabelText("Repeat interval")).toHaveValue(1);
     expect(screen.getByLabelText("Repeat unit")).toHaveValue("week");
