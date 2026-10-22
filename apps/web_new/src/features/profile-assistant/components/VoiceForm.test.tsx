@@ -137,4 +137,12 @@ describe("VoiceForm", () => {
     renderForm(voiceFormFrom(config()), { config: config({ last_verified_at: "2026-10-19T12:00:00Z" }) });
     expect(screen.getByText(/Last verified:/)).toBeInTheDocument();
   });
+
+  it("exposes the dictation deep-link anchor in both shapes", () => {
+    const { result } = renderForm(voiceFormFrom(config()));
+    expect(screen.getByTestId("assistant-voice")).toHaveAttribute("id", "voice-dictation");
+    result.unmount();
+    renderForm(emptyVoiceForm(), { config: config({ enabled: false, has_api_key: true }) });
+    expect(screen.getByTestId("assistant-voice")).toHaveAttribute("id", "voice-dictation");
+  });
 });

@@ -23,6 +23,7 @@ import {
   STT_KEY_PLACEHOLDER_EMPTY,
   STT_MODEL_PLACEHOLDER,
   TEST_LABEL,
+  VOICE_SECTION_ANCHOR,
   VOICE_SECTION_DESCRIPTION,
   VOICE_SECTION_HEADING,
   VOICE_UNAVAILABLE_NOTE,
@@ -78,7 +79,12 @@ export function VoiceForm({
 
   if (shape.kind === "removal-only") {
     return (
-      <SectionFrame heading={VOICE_SECTION_HEADING} description={VOICE_UNAVAILABLE_NOTE} testId="assistant-voice">
+      <SectionFrame
+        heading={VOICE_SECTION_HEADING}
+        description={VOICE_UNAVAILABLE_NOTE}
+        testId="assistant-voice"
+        id={VOICE_SECTION_ANCHOR}
+      >
         <ActionRow>
           <Button variant="danger" loading={removing} onClick={onRemove}>
             {REMOVE_LABEL}
@@ -92,7 +98,12 @@ export function VoiceForm({
   const edit = (patch: Partial<VoiceFormValues>): void => onChange({ ...values, ...patch });
 
   return (
-    <SectionFrame heading={VOICE_SECTION_HEADING} description={VOICE_SECTION_DESCRIPTION} testId="assistant-voice">
+    <SectionFrame
+      heading={VOICE_SECTION_HEADING}
+      description={VOICE_SECTION_DESCRIPTION}
+      testId="assistant-voice"
+      id={VOICE_SECTION_ANCHOR}
+    >
       <div className="flex flex-col gap-(--space-4)">
         <TextField
           id={`${idPrefix}-base-url`}

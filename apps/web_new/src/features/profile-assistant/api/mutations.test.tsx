@@ -19,6 +19,7 @@ const { notifySuccess, notifyError, notifyInfo } = vi.hoisted(() => ({
 vi.mock("../../../shared/shell/toaster.js", () => ({ notifySuccess, notifyError, notifyInfo }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { sttConfigKeys } from "../../../shared/dictation/index.js";
 import {
   CONNECTION_FAILED_TITLE,
   CONNECTION_OK_TITLE,
@@ -300,6 +301,72 @@ describe("voice hooks", () => {
     });
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(notifyError).toHaveBeenCalledWith("Save failed", "boom");
+  });
+
+  it("re-reads both speech reads when the switch refuses a save", async () => {
+    const { transport } = stubTransport(() => ({ status: 404, body: { error: "dictation_disabled" } }));
+    createAppClient("https://api.test", transport);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const probe = ({ children }: { children?: unknown }): React.ReactElement => (
+      <QueryClientProvider client={client}>{children as never}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useSaveAssistantVoice(), { wrapper: probe });
+    act(() => {
+      result.current.mutate({ base_url: "u", model_name: "m", api_key: "k" });
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: assistantSettingsKeys.voice });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: sttConfigKeys.all() });
+  });
+
+  it("leaves the speech reads alone when a save fails for another reason", async () => {
+    const { transport } = stubTransport(() => ({ status: 500, body: { error: "boom" } }));
+    createAppClient("https://api.test", transport);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const probe = ({ children }: { children?: unknown }): React.ReactElement => (
+      <QueryClientProvider client={client}>{children as never}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useSaveAssistantVoice(), { wrapper: probe });
+    act(() => {
+      result.current.mutate({ base_url: "u", model_name: "m", api_key: "k" });
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it("re-reads both speech reads when the switch refuses a probe", async () => {
+    const { transport } = stubTransport(() => ({ status: 404, body: { error: "dictation_disabled" } }));
+    createAppClient("https://api.test", transport);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const probe = ({ children }: { children?: unknown }): React.ReactElement => (
+      <QueryClientProvider client={client}>{children as never}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useTestAssistantVoice(), { wrapper: probe });
+    act(() => {
+      result.current.mutate();
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: assistantSettingsKeys.voice });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: sttConfigKeys.all() });
+  });
+
+  it("leaves the speech reads alone when a probe fails for another reason", async () => {
+    const { transport } = stubTransport(() => ({ status: 502, body: { error: "upstream" } }));
+    createAppClient("https://api.test", transport);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const probe = ({ children }: { children?: unknown }): React.ReactElement => (
+      <QueryClientProvider client={client}>{children as never}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useTestAssistantVoice(), { wrapper: probe });
+    act(() => {
+      result.current.mutate();
+    });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(invalidate).not.toHaveBeenCalled();
   });
 });
 
