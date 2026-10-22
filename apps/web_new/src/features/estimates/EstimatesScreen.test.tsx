@@ -266,6 +266,7 @@ describe("EstimatesScreen", () => {
     expect(rows).toHaveLength(2);
     expect(within(rows[0] as HTMLElement).getAllByRole("button")).toHaveLength(1);
     expect(within(rows[0] as HTMLElement).getByRole("button")).toHaveAccessibleName("Delete Active system");
+    expect(within(rows[0] as HTMLElement).queryByRole("button", { name: /edit/i })).not.toBeInTheDocument();
     expect(screen.getByText(ESTIMATES_ARCHIVED_HEADING)).toBeInTheDocument();
     const archived = screen.getByTestId("estimates-archived-section");
     expect(within(archived).getByText(/older versions/)).toBeInTheDocument();
@@ -274,6 +275,32 @@ describe("EstimatesScreen", () => {
     expect(reference).toHaveAttribute("target", "_blank");
     expect(reference).toHaveAttribute("rel", "noreferrer");
     expect(within(rows[1] as HTMLElement).queryByRole("button")).not.toBeInTheDocument();
+  });
+
+  it("humanizes duration-family values on the active row, never raw minutes", async () => {
+    stubApi({
+      systems: [
+        systemRow({
+          id: ACTIVE_ID,
+          name: "Clock system",
+          type: "time",
+          last_used: true,
+          points: [
+            { id: "aaaaaaaa-0002-4000-8000-000000000002", key: 2, value: "150", description: "" },
+            { id: "aaaaaaaa-0001-4000-8000-000000000001", key: 1, value: "90", description: "" },
+          ],
+        }),
+      ],
+    });
+    renderScreen();
+    const row = await screen.findByTestId("estimate-system-row");
+    expect(row).toHaveTextContent("Clock system");
+    const text = row.textContent ?? "";
+    expect(text).toContain("1h 30m");
+    expect(text).toContain("2h 30m");
+    expect(text.indexOf("1h 30m")).toBeLessThan(text.indexOf("2h 30m"));
+    expect(text).not.toContain("90");
+    expect(text).not.toContain("150");
   });
 
   it("keeps the explainer and reference inside the archived section only", async () => {
@@ -303,6 +330,27 @@ describe("EstimatesScreen", () => {
       { estimate: ACTIVE_ID },
       { estimate: null },
     ]);
+  });
+
+  it("reads the switch from the stored reference and links the active id regardless of list order", async () => {
+    const user = userEvent.setup();
+    const { calls } = stubApi({
+      systems: [
+        systemRow({ id: OLD_ID, name: "Old system", created_at: "2024-06-01T00:00:00Z" }),
+        systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true }),
+      ],
+      estimate: null,
+    });
+    renderScreen();
+    await screen.findByText("Active system");
+    const control = screen.getByRole("switch", { name: /enable estimates/i });
+    // The project stores no reference even though a system is marked
+    // active, so the switch reads off.
+    expect(control).toHaveAttribute("aria-checked", "false");
+    await user.click(control);
+    await waitFor(() => expect(notifySuccess).toHaveBeenCalledWith("Estimates enabled", expect.any(String)));
+    // Enabling links the active system's id, not the first-listed row.
+    expect(calls.filter((call) => call.method === "PATCH").map((call) => call.body)).toEqual([{ estimate: ACTIVE_ID }]);
   });
 
   it("keeps the switch position and notices a refused toggle", async () => {
