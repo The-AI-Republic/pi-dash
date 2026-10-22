@@ -172,6 +172,30 @@ describe("DraftBlock", () => {
     fireEvent.click(screen.getByRole("button", { name: "Actions for Half written" }));
     expect(h.onEdit).not.toHaveBeenCalled();
   });
+
+  it("exposes identical translated entries from the ellipsis and right-click", () => {
+    setup();
+    const block = screen.getByRole("article", { name: "Draft Half written" });
+    const entries = (): string[] =>
+      within(screen.getByRole("menu", { name: "Draft actions" }))
+        .getAllByRole("menuitem")
+        .map((item) => item.textContent ?? "");
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Half written" }));
+    expect(entries()).toEqual(["Edit", "Make a copy", "Move to project", "Delete"]);
+    fireEvent.mouseLeave(screen.getByRole("menu", { name: "Draft actions" }));
+    fireEvent.contextMenu(block);
+    expect(entries()).toEqual(["Edit", "Make a copy", "Move to project", "Delete"]);
+  });
+
+  it("closes the menu on Escape and ignores other keys", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Half written" }));
+    const menu = screen.getByRole("menu", { name: "Draft actions" });
+    fireEvent.keyDown(menu, { key: "Enter" });
+    expect(screen.queryByRole("menu", { name: "Draft actions" })).toBeInTheDocument();
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("menu", { name: "Draft actions" })).not.toBeInTheDocument();
+  });
 });
 
 describe("copyIdentifier", () => {

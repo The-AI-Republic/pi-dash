@@ -7,8 +7,9 @@
 // dialog opened on the draft's snapshot), copy (the same dialog on a
 // duplicated payload), move to project (the dialog in move mode, whose
 // "Add to project" promotes the draft), and delete behind a confirmation
-// gated to the creator or a project admin. No drafts invites the first
-// one; no joined project invites a project instead.
+// gated to the creator or a workspace admin (drafts spec §4.6,
+// DRAFT-011). No drafts invites the first one; no joined project invites
+// a project instead.
 
 import { Button, Skeleton } from "@pidash/kit";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -86,12 +87,6 @@ type OpenDialog =
   | { kind: "copy"; draft: DraftIssue }
   | { kind: "move"; draft: DraftIssue };
 
-/** The caller's role on the draft's project, or null. */
-export function projectRoleOf(projects: readonly ProjectDetails[], projectId: string | null): number | null {
-  if (projectId === null) return null;
-  return projects.find((project) => project.id === projectId)?.member_role ?? null;
-}
-
 /** The short code a draft shows; null when it holds no project. */
 export function identifierOf(projects: readonly ProjectDetails[], projectId: string | null): string | null {
   if (projectId === null) return null;
@@ -153,7 +148,7 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
   function requestDelete(draft: DraftIssue): void {
     const allowed = canDeleteDraft(draft, {
       meId: me.data?.id ?? null,
-      projectRole: projectRoleOf(projects, draft.project_id),
+      isWorkspaceAdmin: permissions.isAdmin,
     });
     if (!allowed) {
       notifyError(DRAFT_DELETE_PERMISSION_TITLE, DRAFT_DELETE_PERMISSION_BODY);
