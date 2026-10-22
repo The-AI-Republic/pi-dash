@@ -29,14 +29,16 @@ pub const TASK_NAMES: [&str; 2] = [RUN_TURN_TASK, SWEEP_TASK];
 
 /// Build the handler table for both assistant tasks. The pool feeds the
 /// sweep's live store; the seam drives the turn pipeline (see
-/// [`run_turn::TurnSeam`] for the port boundary).
+/// [`run_turn::TurnSeam`] for the port boundary). `hard_limit_secs` is the
+/// configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff.
 pub fn register_assistant_tasks<S: TurnSeam + 'static>(
     registry: &mut crate::worker::Registry,
     pool: sqlx::PgPool,
     seam: std::sync::Arc<S>,
+    hard_limit_secs: i64,
 ) {
     register_turn_handler(registry, pool.clone(), seam);
-    register_sweep_handler(registry, pool);
+    register_sweep_handler(registry, pool, hard_limit_secs);
 }
 
 #[cfg(test)]
@@ -163,7 +165,12 @@ mod tests {
         // work, so this runs with no database.
         let pool = sqlx::PgPool::connect_lazy("postgres://localhost/assistant_contract_unused")
             .expect("lazy pool");
-        register_assistant_tasks(&mut registry, pool, Arc::new(NoopSeam));
+        register_assistant_tasks(
+            &mut registry,
+            pool,
+            Arc::new(NoopSeam),
+            run_turn::TURN_HARD_LIMIT_SECS as i64,
+        );
         for name in TASK_NAMES {
             assert!(registry.owns(name), "{name} must run locally");
         }

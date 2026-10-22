@@ -168,6 +168,11 @@ jobs:
       # database; never a real secret) — the other oracles never touch BYOK.
       ASSISTANT_CRYPTO_BACKEND: fernet
       ASSISTANT_ENCRYPTION_KEY: -k26Q_XWFtfq5jzJTSUY483-H3-wrdJ67w2kQgLDmlU=
+      # PIDASHCONV-1248: the sweep honors a non-default hard limit — the
+      # oracle pins both sides of the resulting 960s cutoff. Only the
+      # assistant tasks read this key, and ancient-seeded turns stay stale
+      # under 900, so the other oracles in this job are unaffected.
+      ASSISTANT_TURN_HARD_LIMIT: "900"
       # D-08 event-tracking oracle (PIDASHCONV-1107): the Django worker
       # POSTs track_event captures to the harness PostHog sink
       # (POSTHOG_SINK_BASE default). Test-only key, ephemeral CI database.
