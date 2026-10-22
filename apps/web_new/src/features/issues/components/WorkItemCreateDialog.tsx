@@ -188,8 +188,10 @@ export interface WorkItemCreateDialogProps {
    * Called with the payload to store when a draft entry saves. The
    * caller owns the write and its toast, so a copy on the drafts page
    * re-reads that page rather than switching the form to create mode.
+   * It resolves with the stored row's address so the dialog can link
+   * the description images uploaded during the visit.
    */
-  onCopySaved?: ((input: DraftIssueCreateInput) => Promise<unknown>) | undefined;
+  onCopySaved?: ((input: DraftIssueCreateInput) => Promise<SavedDraftRef>) | undefined;
   /**
    * Move-to-project entry (ISS-139): the edited draft is promoted through
    * the caller's publish write, and the footer names that action.
@@ -205,6 +207,12 @@ export interface WorkItemCreateDialogProps {
 export interface DraftSeed {
   title: string;
   input: DraftIssueCreateInput;
+}
+
+/** The stored row a page-owned draft write hands back: its address. */
+export interface SavedDraftRef {
+  id: string;
+  project_id: string | null;
 }
 
 /** A parent preset the dialog seeds as if the picker had chosen it. */
@@ -863,6 +871,18 @@ export function WorkItemCreateDialog({
     return true;
   }
 
+  /**
+   * Link this visit's description uploads to a freshly stored draft.
+   * A new draft's uploads parked under the draft scope with no row id
+   * yet; the bulk call hands them to the row the create just stored.
+   * The stored row's project wins, falling back to the project the
+   * visit filed (and parked the uploads) under.
+   */
+  function linkDraftAssets(created: SavedDraftRef): void {
+    if (assetIds.length === 0) return;
+    attachAssets.mutate({ projectId: created.project_id ?? projectId, issueId: created.id, assetIds });
+  }
+
   /** Store a new draft (ISS-139/141): the caller handles the write. */
   function createDraftEntry(named: CreateFormState): void {
     if (onCopySaved === undefined) {
@@ -872,7 +892,8 @@ export function WorkItemCreateDialog({
         onSettled: () => {
           submitting.current = false;
         },
-        onSuccess: () => {
+        onSuccess: (created) => {
+          linkDraftAssets(created);
           notifySuccess(DRAFT_SAVED_INLINE_TITLE, "Find it in your drafts when you're ready to finish it.");
           clearWorkItemDraft(workspaceSlug);
           finishClose();
@@ -885,8 +906,9 @@ export function WorkItemCreateDialog({
       return;
     }
     void onCopySaved(buildDraftInput(named)).then(
-      () => {
+      (created) => {
         submitting.current = false;
+        linkDraftAssets(created);
         clearWorkItemDraft(workspaceSlug);
         finishClose();
       },
@@ -980,7 +1002,8 @@ export function WorkItemCreateDialog({
   async function saveAndClose(): Promise<void> {
     setDraftError(null);
     try {
-      await saveDraft.mutateAsync(buildDraftInput(form));
+      const created = await saveDraft.mutateAsync(buildDraftInput(form));
+      linkDraftAssets(created);
     } catch {
       setDraftError("The draft didn't save. Check your connection and try again.");
       return;
@@ -992,7 +1015,8 @@ export function WorkItemCreateDialog({
   async function saveInlineDraft(): Promise<void> {
     setDraftError(null);
     try {
-      await saveDraft.mutateAsync(buildDraftInput(form));
+      const created = await saveDraft.mutateAsync(buildDraftInput(form));
+      linkDraftAssets(created);
     } catch {
       notifyError(DRAFT_SAVE_FAILED_INLINE_TITLE, "Nothing was saved — check your connection and try again.");
       return;
@@ -1029,8 +1053,11 @@ export function WorkItemCreateDialog({
   // An edit diffs against the row it opened with; without one (a draft
   // or issue whose snapshot did not parse) there is nothing to save.
   const saveDisabled = busy || (editing && baseline === null);
+  // A draft visit parks its description images under the draft scope:
+  // a new draft has no row id yet, so the save links them afterwards,
+  // while a stored draft's id travels on the upload itself.
   const assetScope = {
-    entityType: draftTargetId === null ? ISSUE_DESCRIPTION_ENTITY_TYPE : DRAFT_DESCRIPTION_ENTITY_TYPE,
+    entityType: drafting || draftTargetId !== null ? DRAFT_DESCRIPTION_ENTITY_TYPE : ISSUE_DESCRIPTION_ENTITY_TYPE,
     entityId: draftTargetId ?? "",
   } as const;
   // The context surface hides the membership pickers while the route
