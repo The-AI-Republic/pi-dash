@@ -7,21 +7,25 @@
 Mirrors the web app surface in ``pi_dash/app/views/scheduler/`` but for the
 API-key surface the `pidash` CLI and the MCP connector consume. Reads came
 with PDASHOSS01-225; PDASHOSS01-278 added the two binding writes (edit, run
-now) and the definition edit (prompt, name, description). Scoping:
+now) and the definition edit (prompt, name, description); PDASHOSS01-318
+added creating and deleting a definition and installing and uninstalling
+it on a project. Scoping:
 
 - Workspace list: any workspace member; nested bindings are limited to
   projects the caller is an active member of.
 - Project list / detail / runs: any active member of that project
   (``ProjectEntityPermission`` SAFE_METHODS); non-members get the normal
   permission error.
-- Binding edit / run now: project admins only — the same
-  ``allow_permission`` rule as the web app's binding PATCH.
-- Definition edit: workspace admins only — the same rule as the web app's
-  definition PATCH — and never a built-in definition.
+- Install / binding edit / run now / uninstall: project admins only — the
+  same ``allow_permission`` rule as the web app's binding routes.
+- Definition create / edit / delete: workspace admins only — the same rule
+  as the web app's definition routes — and never a built-in definition.
 """
 
+import uuid
+
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Prefetch
 from django.utils.dateparse import parse_datetime
 from django.shortcuts import get_object_or_404
@@ -44,15 +48,28 @@ from pi_dash.app.serializers.scheduler import (
     SchedulerBindingSerializer,
     SchedulerSerializer,
 )
-from pi_dash.db.models import IssueComment, Scheduler, SchedulerBinding
+from pi_dash.db.models import (
+    IssueComment,
+    Project,
+    Scheduler,
+    SchedulerBinding,
+    Workspace,
+)
 from pi_dash.runner.models import AgentRun
 from pi_dash.scheduler.binding_writes import (
     CADENCE_FIELDS,
+    install_binding,
     mark_due_now,
     run_now_conflict,
     update_binding,
 )
-from pi_dash.scheduler.definition_writes import is_builtin, update_definition
+from pi_dash.scheduler.definition_writes import (
+    create_definition,
+    delete_definition,
+    is_builtin,
+    is_builtin_slug,
+    update_definition,
+)
 
 #: Binding fields an API-key caller may edit. Everything else on the binding
 #: is identity (``scheduler`` / ``project``) or runtime state, and the
@@ -76,12 +93,31 @@ BINDING_WRITABLE_FIELDS = tuple(
 )
 
 #: Definition fields an API-key caller may edit. The app serializer also
-#: takes ``slug``, ``color`` and ``is_enabled``; those stay web-app only.
+#: takes ``slug``; renaming the slug stays web-app only.
 DEFINITION_WRITABLE_FIELDS = tuple(
     f
-    for f in ("prompt", "name", "description")
+    for f in ("prompt", "name", "description", "color", "is_enabled")
     if f in SchedulerSerializer.Meta.fields
 )
+
+#: Definition fields an API-key caller may set on create: the editable ones
+#: plus the slug. ``source`` and the rest are server-set.
+DEFINITION_CREATE_FIELDS = tuple(
+    f
+    for f in ("slug", *DEFINITION_WRITABLE_FIELDS)
+    if f in SchedulerSerializer.Meta.fields
+)
+
+#: Fields an API-key caller may set on install: the scheduler (id or slug)
+#: plus everything editable on a binding.
+BINDING_CREATE_FIELDS = ("scheduler", *BINDING_WRITABLE_FIELDS)
+
+#: 409 body for a write to a built-in definition.
+BUILTIN_CONFLICT = {
+    "error": "Built-in schedulers cannot be edited or deleted; put "
+    "per-project instructions in the binding's extra_context instead.",
+    "code": "builtin_scheduler",
+}
 
 #: Optional optimistic-concurrency token in a write's body: the written
 #: row's ``updated_at`` as the caller last read it. Same meaning as
@@ -193,6 +229,37 @@ class WorkspaceSchedulerListAPIEndpoint(BaseAPIView):
         )
 
 
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="WORKSPACE")
+    def post(self, request, slug):
+        """POST /api/v1/workspaces/<slug>/schedulers/ — create a definition.
+
+        Validation is the web app's (``create_definition``), so a duplicate
+        slug is a ``{"slug": [...]}`` field error. A built-in slug is
+        refused: the reseed would take the row over.
+        """
+        if not _feature_enabled():
+            return _disabled_response()
+        if not isinstance(request.data, dict):
+            return _non_object_response()
+        data = dict(request.data)
+        unknown = sorted(k for k in data if k not in DEFINITION_CREATE_FIELDS)
+        if unknown:
+            return _unwritable_response(
+                data, DEFINITION_CREATE_FIELDS, "a new scheduler"
+            )
+        if isinstance(data.get("slug"), str) and is_builtin_slug(data["slug"].strip()):
+            return Response(
+                {"slug": ["This slug is reserved for a built-in scheduler."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        workspace = get_object_or_404(Workspace, slug=slug)
+        scheduler = create_definition(workspace, data)
+        scheduler.visible_bindings = []
+        return Response(
+            SchedulerAPISerializer(scheduler).data, status=status.HTTP_201_CREATED
+        )
+
+
 class ProjectSchedulerListAPIEndpoint(BaseAPIView):
     """GET /api/v1/workspaces/<slug>/projects/<project_id>/schedulers/
 
@@ -235,6 +302,68 @@ class ProjectSchedulerListAPIEndpoint(BaseAPIView):
             on_results=lambda schedulers: SchedulerAPISerializer(
                 schedulers, many=True, fields=self.fields, expand=self.expand
             ).data,
+        )
+
+
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="PROJECT")
+    def post(self, request, slug, project_id):
+        """POST /api/v1/workspaces/<slug>/projects/<project_id>/schedulers/
+
+        Install a scheduler (``scheduler``: its id or slug) on this project.
+        Validation and the first ``next_run_at`` are the web app's
+        (``install_binding``); the caller is recorded as the install's actor.
+        """
+        if not _feature_enabled():
+            return _disabled_response()
+        if not isinstance(request.data, dict):
+            return _non_object_response()
+        data = dict(request.data)
+        unknown = sorted(k for k in data if k not in BINDING_CREATE_FIELDS)
+        if unknown:
+            return _unwritable_response(
+                data, BINDING_CREATE_FIELDS, "a scheduler install"
+            )
+        ref = data.get("scheduler")
+        if not isinstance(ref, str) or not ref.strip():
+            return Response(
+                {"scheduler": ["The scheduler's id or slug is required."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        project = get_object_or_404(Project, pk=project_id, workspace__slug=slug)
+        scheduler = _scheduler_by_ref(project.workspace_id, ref.strip())
+        if scheduler is None:
+            return Response(
+                {"error": "Scheduler not found"}, status=status.HTTP_404_NOT_FOUND
+            )
+        if not scheduler.is_enabled:
+            return Response(
+                {
+                    "error": "The scheduler definition is disabled; enable it "
+                    "before installing it.",
+                    "code": "scheduler_disabled",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        already = Response(
+            {
+                "error": "The scheduler is already installed on this project.",
+                "code": "already_installed",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+        if SchedulerBinding.objects.filter(
+            scheduler=scheduler, project=project, deleted_at__isnull=True
+        ).exists():
+            return already
+        try:
+            with transaction.atomic():
+                binding = install_binding(project, scheduler, data, actor=request.user)
+        except IntegrityError:
+            # A concurrent install won the per-project unique constraint.
+            return already
+        return Response(
+            SchedulerBindingAPISerializer(_binding_queryset().get(pk=binding.pk)).data,
+            status=status.HTTP_201_CREATED,
         )
 
 
@@ -326,6 +455,22 @@ class ProjectSchedulerRunsAPIEndpoint(BaseAPIView):
             default_per_page=30,
             max_per_page=100,
         )
+
+
+def _non_object_response() -> Response:
+    return Response(
+        {"error": "The request body must be a JSON object"},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _scheduler_by_ref(workspace_id, ref: str):
+    """The workspace's live scheduler whose id or slug is ``ref``, or None."""
+    schedulers = Scheduler.objects.filter(workspace_id=workspace_id)
+    try:
+        return schedulers.filter(pk=uuid.UUID(ref)).first()
+    except ValueError:
+        return schedulers.filter(slug=ref).first()
 
 
 def _locked_binding(slug, project_id, scheduler_id) -> SchedulerBinding:
@@ -424,10 +569,7 @@ class ProjectSchedulerBindingAPIEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         if not isinstance(request.data, dict):
-            return Response(
-                {"error": "The request body must be a JSON object"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return _non_object_response()
         data = {k: v for k, v in request.data.items() if k != EXPECTED_UPDATED_AT}
         # Reject rather than ignore: a caller sending `prompt` or
         # `next_run_at` should learn it did nothing, not get a 200.
@@ -450,6 +592,24 @@ class ProjectSchedulerBindingAPIEndpoint(BaseAPIView):
         return Response(
             _binding_payload(binding, previous), status=status.HTTP_200_OK
         )
+
+
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="PROJECT")
+    def delete(self, request, slug, project_id, scheduler_id):
+        """DELETE .../schedulers/<scheduler_id>/binding/ — uninstall.
+
+        Soft-deletes the install, as the web app's uninstall does; the
+        definition and its installs on other projects are untouched.
+        """
+        if not _feature_enabled():
+            return _disabled_response()
+        with transaction.atomic():
+            binding = _locked_binding(slug, project_id, scheduler_id)
+            stale = _precondition_failure(request, binding)
+            if stale is not None:
+                return stale
+            binding.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ProjectSchedulerRunNowAPIEndpoint(BaseAPIView):
@@ -509,10 +669,7 @@ class WorkspaceSchedulerDetailAPIEndpoint(BaseAPIView):
         if not _feature_enabled():
             return _disabled_response()
         if not isinstance(request.data, dict):
-            return Response(
-                {"error": "The request body must be a JSON object"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return _non_object_response()
         data = {k: v for k, v in request.data.items() if k != EXPECTED_UPDATED_AT}
         invalid = _unwritable_response(
             data, DEFINITION_WRITABLE_FIELDS, "a scheduler definition"
@@ -526,15 +683,7 @@ class WorkspaceSchedulerDetailAPIEndpoint(BaseAPIView):
                 workspace__slug=slug,
             )
             if is_builtin(scheduler):
-                return Response(
-                    {
-                        "error": "Built-in schedulers cannot be edited; put "
-                        "per-project instructions in the binding's "
-                        "extra_context instead.",
-                        "code": "builtin_scheduler",
-                    },
-                    status=status.HTTP_409_CONFLICT,
-                )
+                return Response(BUILTIN_CONFLICT, status=status.HTTP_409_CONFLICT)
             stale = _precondition_failure(request, scheduler, "scheduler")
             if stale is not None:
                 return stale
@@ -565,3 +714,27 @@ class WorkspaceSchedulerDetailAPIEndpoint(BaseAPIView):
             },
             status=status.HTTP_200_OK,
         )
+
+    @allow_permission(allowed_roles=[ROLE.ADMIN], level="WORKSPACE")
+    def delete(self, request, slug, scheduler_id):
+        """DELETE /api/v1/workspaces/<slug>/schedulers/<scheduler_id>/
+
+        Soft-delete a user-created definition and every install of it, as
+        the web app's delete does (``delete_definition``). Built-in
+        definitions would be recreated by the reseed and are refused.
+        """
+        if not _feature_enabled():
+            return _disabled_response()
+        with transaction.atomic():
+            scheduler = get_object_or_404(
+                Scheduler.objects.select_for_update(),
+                pk=scheduler_id,
+                workspace__slug=slug,
+            )
+            if is_builtin(scheduler):
+                return Response(BUILTIN_CONFLICT, status=status.HTTP_409_CONFLICT)
+            stale = _precondition_failure(request, scheduler, "scheduler")
+            if stale is not None:
+                return stale
+            delete_definition(scheduler)
+        return Response(status=status.HTTP_204_NO_CONTENT)

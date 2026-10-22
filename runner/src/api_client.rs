@@ -243,6 +243,19 @@ impl ApiClient {
         self.request(Method::DELETE, path, None::<&()>).await
     }
 
+    /// Bodiless DELETE with an `If-Match` precondition: the server answers
+    /// 412 instead of deleting when the row's `updated_at` is not
+    /// `expected`.
+    pub async fn delete_if_match(&self, path: &str, expected: &str) -> Result<Value, CliError> {
+        self.request_with(
+            Method::DELETE,
+            path,
+            None::<&()>,
+            Some(("If-Match", expected)),
+        )
+        .await
+    }
+
     /// POST a multipart/form-data upload to an **absolute** URL (not under
     /// `/api/v1/`), sending no Pi Dash credentials.
     ///
@@ -298,12 +311,25 @@ impl ApiClient {
         path: &str,
         body: Option<&B>,
     ) -> Result<Value, CliError> {
+        self.request_with(method, path, body, None).await
+    }
+
+    async fn request_with<B: Serialize + ?Sized>(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&B>,
+        extra_header: Option<(&str, &str)>,
+    ) -> Result<Value, CliError> {
         let url = self.env.v1(path);
         let mut req = self
             .http
             .request(method.clone(), &url)
             .header("X-Api-Key", &self.env.token)
             .header("Accept", "application/json");
+        if let Some((name, value)) = extra_header {
+            req = req.header(name, value);
+        }
         // Reads are attributed to nobody; every write carries the run id so
         // the cloud knows it came from inside this agent run.
         if method != Method::GET

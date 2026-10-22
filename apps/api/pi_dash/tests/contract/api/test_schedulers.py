@@ -12,6 +12,10 @@ PDASHOSS01-278: a project admin can edit a scheduler's install on the
 project (the binding) and make it run now. Members, guests and non-members
 get 403. A workspace admin can edit a user-created definition's prompt, name
 and description; built-in definitions are rejected.
+
+PDASHOSS01-318: a workspace admin can create and delete a definition, and a
+project admin can install one on a project and uninstall it. Built-in
+definitions can be installed and uninstalled but not deleted.
 """
 
 from datetime import timedelta
@@ -189,9 +193,25 @@ class TestWorkspaceSchedulerList:
         assert response.status_code == http_status.HTTP_403_FORBIDDEN
 
     @pytest.mark.django_db
-    def test_write_methods_rejected(self, api_key_client, workspace, scheduler):
-        response = api_key_client.post(_ws_url(workspace.slug), {}, format="json")
+    @pytest.mark.parametrize("method", ["put", "patch", "delete"])
+    def test_other_write_methods_rejected(
+        self, api_key_client, workspace, scheduler, method
+    ):
+        response = getattr(api_key_client, method)(
+            _ws_url(workspace.slug), {}, format="json"
+        )
         assert response.status_code == http_status.HTTP_405_METHOD_NOT_ALLOWED
+
+    @pytest.mark.django_db
+    def test_builtins_flagged(self, api_key_client, workspace, scheduler):
+        response = api_key_client.get(_ws_url(workspace.slug))
+
+        assert response.status_code == http_status.HTTP_200_OK
+        flags = {row["slug"]: row["is_builtin"] for row in response.data["results"]}
+        # ``source`` reads ``builtin`` for both (PDASHOSS01-290); is_builtin
+        # tells them apart.
+        assert flags["contract-test-scheduler"] is False
+        assert flags["security-audit"] is True
 
 
 @pytest.mark.contract
@@ -873,13 +893,13 @@ def _definition_url(slug, scheduler_id):
 
 @pytest.fixture
 def custom_scheduler(db, scheduler):
-    """``scheduler`` marked as not built-in.
+    """A user-created definition, as the web app stores it.
 
     ``Scheduler.source`` defaults to ``builtin`` even for user-created rows
-    (PDASHOSS01-290), so the editable case has to say so explicitly.
+    (PDASHOSS01-290). Built-ins are told apart by their catalog slug, so
+    this row is editable with its default ``source``.
     """
-    scheduler.source = SchedulerSource.MANIFEST
-    scheduler.save(update_fields=["source"])
+    assert scheduler.source == SchedulerSource.BUILTIN
     return scheduler
 
 
@@ -1018,8 +1038,8 @@ class TestWorkspaceSchedulerDefinitionUpdate:
         "payload",
         [
             {"slug": "renamed"},
-            {"prompt": "ok", "is_enabled": False},
-            {"source": "manifest"},
+            {"prompt": "ok", "source": "manifest"},
+            {"is_builtin": False},
             {"extra_context": "belongs on the binding"},
             {},
         ],
@@ -1034,7 +1054,13 @@ class TestWorkspaceSchedulerDefinitionUpdate:
         )
 
         assert response.status_code == http_status.HTTP_400_BAD_REQUEST
-        assert response.data["writable_fields"] == ["prompt", "name", "description"]
+        assert response.data["writable_fields"] == [
+            "prompt",
+            "name",
+            "description",
+            "color",
+            "is_enabled",
+        ]
         custom_scheduler.refresh_from_db()
         assert custom_scheduler.prompt == "Scan the project for stalled issues."
         assert custom_scheduler.slug == "contract-test-scheduler"
@@ -1147,8 +1173,8 @@ class TestWorkspaceSchedulerDefinitionUpdate:
         assert foreign.prompt == "Theirs."
 
     @pytest.mark.django_db
-    @pytest.mark.parametrize("method", ["put", "post", "delete"])
-    def test_only_patch_is_exposed(
+    @pytest.mark.parametrize("method", ["put", "post"])
+    def test_only_patch_and_delete_are_exposed(
         self, api_key_client, workspace, custom_scheduler, method
     ):
         response = getattr(api_key_client, method)(
@@ -1156,3 +1182,661 @@ class TestWorkspaceSchedulerDefinitionUpdate:
         )
         assert response.status_code == http_status.HTTP_405_METHOD_NOT_ALLOWED
         assert Scheduler.objects.filter(pk=custom_scheduler.pk).exists()
+
+
+# --------------------------------------------------------------------------
+# PDASHOSS01-318: create / delete a definition, install / uninstall it.
+
+
+NEW_SCHEDULER = {
+    "name": "Nightly Bug Scan",
+    "slug": "nightly-bug-scan",
+    "description": "Looks for regressions.",
+    "prompt": "## Nightly\n\nScan for regressions and file issues.",
+}
+
+
+def _install_body(scheduler_ref, **extra):
+    return {
+        "scheduler": scheduler_ref,
+        "dtstart": "2026-01-01T09:00:00Z",
+        "rrule": "FREQ=DAILY",
+        **extra,
+    }
+
+
+@pytest.mark.contract
+class TestWorkspaceSchedulerCreate:
+    @pytest.mark.django_db
+    def test_admin_creates_definition(self, api_key_client, workspace, create_user):
+        response = api_key_client.post(
+            _ws_url(workspace.slug), NEW_SCHEDULER, format="json"
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+        data = response.data
+        for key, value in NEW_SCHEDULER.items():
+            assert data[key] == value
+        assert data["is_enabled"] is True
+        assert data["is_builtin"] is False
+        assert data["color"] == "#3b82f6"
+        assert data["bindings"] == []
+        created = Scheduler.objects.get(pk=data["id"])
+        assert created.workspace_id == workspace.id
+        # Audit: the caller is recorded on the row.
+        assert created.created_by_id == create_user.id
+
+        # The workspace list shows it.
+        listed = api_key_client.get(_ws_url(workspace.slug))
+        assert "nightly-bug-scan" in [r["slug"] for r in listed.data["results"]]
+
+    @pytest.mark.django_db
+    def test_disabled_and_color(self, api_key_client, workspace):
+        response = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "is_enabled": False, "color": "#AABBCC"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+        assert response.data["is_enabled"] is False
+        assert response.data["color"] == "#aabbcc"
+
+    @pytest.mark.django_db
+    def test_duplicate_slug_is_a_field_error(
+        self, api_key_client, workspace, scheduler
+    ):
+        response = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "slug": scheduler.slug},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert "slug" in response.data
+        assert Scheduler.objects.filter(slug=scheduler.slug).count() == 1
+
+    @pytest.mark.django_db
+    def test_slug_of_a_deleted_definition_is_reusable(
+        self, api_key_client, workspace, scheduler
+    ):
+        scheduler.delete()
+
+        response = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "slug": scheduler.slug},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+
+    @pytest.mark.django_db
+    def test_builtin_slug_is_reserved(self, api_key_client, workspace):
+        Scheduler.objects.filter(workspace=workspace, slug="security-audit").delete()
+
+        response = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "slug": "security-audit"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.data == {
+            "slug": ["This slug is reserved for a built-in scheduler."]
+        }
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "missing", ["name", "slug", "prompt"]
+    )
+    def test_required_fields(self, api_key_client, workspace, missing):
+        body = {k: v for k, v in NEW_SCHEDULER.items() if k != missing}
+
+        response = api_key_client.post(_ws_url(workspace.slug), body, format="json")
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert missing in response.data
+        assert not Scheduler.objects.filter(name=NEW_SCHEDULER["name"]).exists()
+
+    @pytest.mark.django_db
+    def test_app_serializer_validation_applies(self, api_key_client, workspace):
+        response = api_key_client.post(
+            _ws_url(workspace.slug),
+            {**NEW_SCHEDULER, "color": "blue"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert "color" in response.data
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "extra", [{"source": "manifest"}, {"id": "x"}, {"bindings": []}]
+    )
+    def test_server_set_fields_rejected(self, api_key_client, workspace, extra):
+        response = api_key_client.post(
+            _ws_url(workspace.slug), {**NEW_SCHEDULER, **extra}, format="json"
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.data["writable_fields"] == [
+            "slug",
+            "prompt",
+            "name",
+            "description",
+            "color",
+            "is_enabled",
+        ]
+        assert not Scheduler.objects.filter(slug="nightly-bug-scan").exists()
+
+    @pytest.mark.django_db
+    def test_non_object_body_rejected(self, api_key_client, workspace):
+        response = api_key_client.post(
+            _ws_url(workspace.slug), ["not", "an", "object"], format="json"
+        )
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.data == {"error": "The request body must be a JSON object"}
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "client_fixture",
+        [
+            "project_admin_client",
+            "member_client",
+            "guest_client",
+            "nonmember_client",
+            "outside_client",
+        ],
+    )
+    def test_non_workspace_admins_denied(self, request, workspace, client_fixture):
+        client = request.getfixturevalue(client_fixture)
+
+        response = client.post(_ws_url(workspace.slug), NEW_SCHEDULER, format="json")
+
+        assert response.status_code == http_status.HTTP_403_FORBIDDEN
+        assert not Scheduler.objects.filter(slug="nightly-bug-scan").exists()
+
+    @pytest.mark.django_db
+    def test_unauthenticated_denied(self, workspace):
+        response = APIClient().post(
+            _ws_url(workspace.slug), NEW_SCHEDULER, format="json"
+        )
+        assert response.status_code == http_status.HTTP_401_UNAUTHORIZED
+        assert not Scheduler.objects.filter(slug="nightly-bug-scan").exists()
+
+
+@pytest.mark.contract
+class TestWorkspaceSchedulerDefinitionEnable:
+    @pytest.mark.django_db
+    def test_admin_disables_and_recolors(
+        self, api_key_client, workspace, custom_scheduler
+    ):
+        response = api_key_client.patch(
+            _definition_url(workspace.slug, custom_scheduler.id),
+            {"is_enabled": False, "color": "#112233"},
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_200_OK
+        assert response.data["is_enabled"] is False
+        assert response.data["previous"] == {"is_enabled": True, "color": "#3b82f6"}
+        custom_scheduler.refresh_from_db()
+        assert custom_scheduler.is_enabled is False
+
+
+@pytest.mark.contract
+class TestWorkspaceSchedulerDelete:
+    @pytest.mark.django_db
+    def test_admin_deletes_definition_and_every_install(
+        self, api_key_client, workspace, sched_project, custom_scheduler, binding,
+        create_user,
+    ):
+        with impersonate(create_user):
+            other = Project.objects.create(
+                name="Another Project", identifier="OTH", workspace=workspace
+            )
+            other_binding = SchedulerBinding.objects.create(
+                scheduler=custom_scheduler,
+                project=other,
+                workspace=workspace,
+                dtstart=timezone.now() - timedelta(days=1),
+                rrule="FREQ=DAILY",
+                tzid="UTC",
+            )
+
+        response = api_key_client.delete(
+            _definition_url(workspace.slug, custom_scheduler.id)
+        )
+
+        assert response.status_code == http_status.HTTP_204_NO_CONTENT
+        # Soft deletes: the rows stay, tombstoned.
+        assert not Scheduler.objects.filter(pk=custom_scheduler.pk).exists()
+        assert Scheduler.all_objects.get(pk=custom_scheduler.pk).deleted_at
+        for b in (binding, other_binding):
+            assert SchedulerBinding.all_objects.get(pk=b.pk).deleted_at is not None
+
+        listed = api_key_client.get(_ws_url(workspace.slug))
+        assert custom_scheduler.slug not in [r["slug"] for r in listed.data["results"]]
+        project_list = api_key_client.get(_list_url(workspace.slug, sched_project.id))
+        assert project_list.data["results"] == []
+
+    @pytest.mark.django_db
+    def test_builtin_rejected(self, api_key_client, workspace):
+        builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+
+        response = api_key_client.delete(_definition_url(workspace.slug, builtin.id))
+
+        assert response.status_code == http_status.HTTP_409_CONFLICT
+        assert response.data["code"] == "builtin_scheduler"
+        assert Scheduler.objects.filter(pk=builtin.pk).exists()
+
+    @pytest.mark.django_db
+    def test_stale_token_is_precondition_failed(
+        self, api_key_client, workspace, custom_scheduler
+    ):
+        url = _definition_url(workspace.slug, custom_scheduler.id)
+
+        response = api_key_client.delete(
+            url, HTTP_IF_MATCH="2020-01-01T00:00:00+00:00"
+        )
+
+        assert response.status_code == http_status.HTTP_412_PRECONDITION_FAILED
+        assert response.data["updated_at"] == custom_scheduler.updated_at.isoformat()
+        assert Scheduler.objects.filter(pk=custom_scheduler.pk).exists()
+
+        current = api_key_client.delete(
+            url, HTTP_IF_MATCH=custom_scheduler.updated_at.isoformat()
+        )
+        assert current.status_code == http_status.HTTP_204_NO_CONTENT
+
+    @pytest.mark.django_db
+    def test_404_for_unknown_or_deleted(self, api_key_client, workspace, scheduler):
+        scheduler.delete()
+        response = api_key_client.delete(_definition_url(workspace.slug, scheduler.id))
+        assert response.status_code == http_status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "client_fixture",
+        [
+            "project_admin_client",
+            "member_client",
+            "guest_client",
+            "nonmember_client",
+            "outside_client",
+        ],
+    )
+    def test_non_workspace_admins_denied(
+        self, request, workspace, custom_scheduler, binding, client_fixture
+    ):
+        client = request.getfixturevalue(client_fixture)
+
+        response = client.delete(_definition_url(workspace.slug, custom_scheduler.id))
+
+        assert response.status_code == http_status.HTTP_403_FORBIDDEN
+        assert Scheduler.objects.filter(pk=custom_scheduler.pk).exists()
+        assert SchedulerBinding.objects.filter(pk=binding.pk).exists()
+
+    @pytest.mark.django_db
+    def test_unauthenticated_denied(self, workspace, custom_scheduler):
+        response = APIClient().delete(
+            _definition_url(workspace.slug, custom_scheduler.id)
+        )
+        assert response.status_code == http_status.HTTP_401_UNAUTHORIZED
+        assert Scheduler.objects.filter(pk=custom_scheduler.pk).exists()
+
+
+@pytest.mark.contract
+class TestProjectSchedulerInstall:
+    @pytest.mark.django_db
+    def test_admin_installs_by_id(
+        self, api_key_client, workspace, sched_project, scheduler, create_user
+    ):
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(str(scheduler.id), extra_context="Only the API."),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+        data = response.data
+        assert str(data["scheduler"]) == str(scheduler.id)
+        assert str(data["project"]) == str(sched_project.id)
+        assert data["scheduler_slug"] == scheduler.slug
+        assert data["rrule"] == "FREQ=DAILY"
+        assert data["extra_context"] == "Only the API."
+        assert data["enabled"] is True
+        # next_run_at is set on install, as the web app does.
+        assert data["next_run_at"] is not None
+        binding = SchedulerBinding.objects.get(pk=data["id"])
+        assert binding.next_run_at > timezone.now()
+        assert binding.actor_id == create_user.id
+
+        listed = api_key_client.get(_list_url(workspace.slug, sched_project.id))
+        rows = listed.data["results"]
+        assert [r["slug"] for r in rows] == [scheduler.slug]
+        assert rows[0]["bindings"][0]["next_run_at"] is not None
+
+    @pytest.mark.django_db
+    def test_admin_installs_builtin_by_slug(
+        self, api_key_client, workspace, sched_project
+    ):
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body("security-audit", tzid="America/New_York", enabled=False),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+        assert response.data["scheduler_slug"] == "security-audit"
+        assert response.data["tzid"] == "America/New_York"
+        assert response.data["enabled"] is False
+
+    @pytest.mark.django_db
+    def test_pod_from_the_project(
+        self, api_key_client, workspace, sched_project, scheduler
+    ):
+        pod = Pod.default_for_project_id(sched_project.id)
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug, pod=str(pod.id)),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+        assert str(response.data["pod"]) == str(pod.id)
+
+    @pytest.mark.django_db
+    def test_reinstall_after_uninstall(
+        self, api_key_client, workspace, sched_project, scheduler, binding
+    ):
+        api_key_client.delete(
+            _binding_url(workspace.slug, sched_project.id, scheduler.id)
+        )
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_201_CREATED
+
+    @pytest.mark.django_db
+    def test_already_installed(
+        self, api_key_client, workspace, sched_project, scheduler, binding
+    ):
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_409_CONFLICT
+        assert response.data["code"] == "already_installed"
+        assert SchedulerBinding.objects.filter(scheduler=scheduler).count() == 1
+
+    @pytest.mark.django_db
+    def test_disabled_definition(
+        self, api_key_client, workspace, sched_project, scheduler
+    ):
+        scheduler.is_enabled = False
+        scheduler.save(update_fields=["is_enabled"])
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_409_CONFLICT
+        assert response.data["code"] == "scheduler_disabled"
+        assert not SchedulerBinding.objects.filter(scheduler=scheduler).exists()
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "ref", ["no-such-scheduler", "00000000-0000-0000-0000-000000000000"]
+    )
+    def test_unknown_scheduler(self, api_key_client, workspace, sched_project, ref):
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(ref),
+            format="json",
+        )
+        assert response.status_code == http_status.HTTP_404_NOT_FOUND
+        assert response.data == {"error": "Scheduler not found"}
+
+    @pytest.mark.django_db
+    def test_another_workspaces_scheduler(
+        self, api_key_client, workspace, sched_project, create_user
+    ):
+        with impersonate(create_user):
+            other_ws = Workspace.objects.create(
+                name="Other Workspace", slug="other-sched-ws", owner=create_user
+            )
+            foreign = Scheduler.objects.create(
+                workspace=other_ws, slug="foreign", name="Foreign", prompt="Theirs."
+            )
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(str(foreign.id)),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_404_NOT_FOUND
+        assert not SchedulerBinding.objects.filter(scheduler=foreign).exists()
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("ref", [None, "", "  ", 5])
+    def test_scheduler_required(
+        self, api_key_client, workspace, sched_project, ref
+    ):
+        body = _install_body(ref)
+        if ref is None:
+            del body["scheduler"]
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id), body, format="json"
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.data == {
+            "scheduler": ["The scheduler's id or slug is required."]
+        }
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "extra, field",
+        [
+            ({"rrule": "FREQ=NEVER"}, "rrule"),
+            ({"tzid": "Mars/Olympus"}, "tzid"),
+            ({"dtstart": "not a date"}, "dtstart"),
+        ],
+    )
+    def test_app_serializer_validation_applies(
+        self, api_key_client, workspace, sched_project, scheduler, extra, field
+    ):
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug, **extra),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert field in response.data
+        assert not SchedulerBinding.objects.filter(scheduler=scheduler).exists()
+
+    @pytest.mark.django_db
+    def test_dtstart_required(
+        self, api_key_client, workspace, sched_project, scheduler
+    ):
+        body = _install_body(scheduler.slug)
+        del body["dtstart"]
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id), body, format="json"
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert "dtstart" in response.data
+
+    @pytest.mark.django_db
+    def test_pod_from_another_project(
+        self, api_key_client, workspace, sched_project, scheduler, create_user
+    ):
+        with impersonate(create_user):
+            other = Project.objects.create(
+                name="Another Project", identifier="OTH", workspace=workspace
+            )
+        foreign_pod = Pod.default_for_project_id(other.id)
+
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug, pod=str(foreign_pod.id)),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert "pod" in response.data
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"project": "00000000-0000-0000-0000-000000000000"},
+            {"next_run_at": "2030-01-01T00:00:00Z"},
+            {"prompt": "belongs on the definition"},
+        ],
+    )
+    def test_non_install_fields_rejected(
+        self, api_key_client, workspace, sched_project, scheduler, extra
+    ):
+        response = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug, **extra),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_400_BAD_REQUEST
+        assert response.data["writable_fields"][0] == "scheduler"
+        assert not SchedulerBinding.objects.filter(scheduler=scheduler).exists()
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "client_fixture",
+        ["member_client", "guest_client", "nonmember_client", "outside_client"],
+    )
+    def test_non_admins_denied(
+        self, request, workspace, sched_project, scheduler, client_fixture
+    ):
+        client = request.getfixturevalue(client_fixture)
+
+        response = client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug),
+            format="json",
+        )
+
+        assert response.status_code == http_status.HTTP_403_FORBIDDEN
+        assert not SchedulerBinding.objects.filter(scheduler=scheduler).exists()
+
+    @pytest.mark.django_db
+    def test_project_admin_who_is_workspace_member_may_install(
+        self, project_admin_client, workspace, sched_project, scheduler
+    ):
+        response = project_admin_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug),
+            format="json",
+        )
+        assert response.status_code == http_status.HTTP_201_CREATED
+
+    @pytest.mark.django_db
+    def test_unauthenticated_denied(self, workspace, sched_project, scheduler):
+        response = APIClient().post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body(scheduler.slug),
+            format="json",
+        )
+        assert response.status_code == http_status.HTTP_401_UNAUTHORIZED
+        assert not SchedulerBinding.objects.filter(scheduler=scheduler).exists()
+
+
+@pytest.mark.contract
+class TestProjectSchedulerUninstall:
+    @pytest.mark.django_db
+    def test_admin_uninstalls(
+        self, api_key_client, workspace, sched_project, scheduler, binding
+    ):
+        response = api_key_client.delete(
+            _binding_url(workspace.slug, sched_project.id, scheduler.id)
+        )
+
+        assert response.status_code == http_status.HTTP_204_NO_CONTENT
+        assert SchedulerBinding.all_objects.get(pk=binding.pk).deleted_at is not None
+        # The definition stays.
+        assert Scheduler.objects.filter(pk=scheduler.pk).exists()
+        listed = api_key_client.get(_list_url(workspace.slug, sched_project.id))
+        assert listed.data["results"] == []
+
+        again = api_key_client.delete(
+            _binding_url(workspace.slug, sched_project.id, scheduler.id)
+        )
+        assert again.status_code == http_status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.django_db
+    def test_builtin_can_be_uninstalled(
+        self, api_key_client, workspace, sched_project
+    ):
+        installed = api_key_client.post(
+            _list_url(workspace.slug, sched_project.id),
+            _install_body("security-audit"),
+            format="json",
+        )
+        builtin_id = installed.data["scheduler"]
+
+        response = api_key_client.delete(
+            _binding_url(workspace.slug, sched_project.id, builtin_id)
+        )
+
+        assert response.status_code == http_status.HTTP_204_NO_CONTENT
+        assert Scheduler.objects.filter(pk=builtin_id).exists()
+
+    @pytest.mark.django_db
+    def test_stale_token_is_precondition_failed(
+        self, api_key_client, workspace, sched_project, scheduler, binding
+    ):
+        response = api_key_client.delete(
+            _binding_url(workspace.slug, sched_project.id, scheduler.id),
+            HTTP_IF_MATCH="2020-01-01T00:00:00+00:00",
+        )
+
+        assert response.status_code == http_status.HTTP_412_PRECONDITION_FAILED
+        assert SchedulerBinding.objects.filter(pk=binding.pk).exists()
+
+    @pytest.mark.django_db
+    @pytest.mark.parametrize(
+        "client_fixture",
+        ["member_client", "guest_client", "nonmember_client", "outside_client"],
+    )
+    def test_non_admins_denied(
+        self, request, workspace, sched_project, scheduler, binding, client_fixture
+    ):
+        client = request.getfixturevalue(client_fixture)
+
+        response = client.delete(
+            _binding_url(workspace.slug, sched_project.id, scheduler.id)
+        )
+
+        assert response.status_code == http_status.HTTP_403_FORBIDDEN
+        assert SchedulerBinding.objects.filter(pk=binding.pk).exists()
+
+    @pytest.mark.django_db
+    def test_unauthenticated_denied(self, workspace, sched_project, scheduler, binding):
+        response = APIClient().delete(
+            _binding_url(workspace.slug, sched_project.id, scheduler.id)
+        )
+        assert response.status_code == http_status.HTTP_401_UNAUTHORIZED
+        assert SchedulerBinding.objects.filter(pk=binding.pk).exists()

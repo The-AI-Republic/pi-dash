@@ -145,9 +145,9 @@ pub enum Command {
     State(state::StateArgs),
 
     /// Project schedulers: `scheduler list` / `scheduler get <id>` /
-    /// `scheduler runs <id>`, for project admins `scheduler update <id>` /
-    /// `scheduler run-now <id>`, and for workspace admins
-    /// `scheduler update <id> --prompt-file <path>`.
+    /// `scheduler runs <id>`; for project admins `scheduler install` /
+    /// `update` / `run-now` / `uninstall`; for workspace admins
+    /// `scheduler create` / `edit` / `delete`.
     Scheduler(scheduler::SchedulerArgs),
 
     /// Read or overwrite the coding agent's per-issue workpad.
