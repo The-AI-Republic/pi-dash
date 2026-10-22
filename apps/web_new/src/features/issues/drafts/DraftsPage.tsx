@@ -35,6 +35,7 @@ import {
   DRAFT_PROMOTE_FAILED_TITLE,
   DRAFT_PROMOTE_PERMISSION_BODY,
   DRAFT_PROMOTE_PERMISSION_TITLE,
+  createDraftWriteQueue,
   draftKeys,
   draftListQueryOptions,
   draftTotalCount,
@@ -161,8 +162,13 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
     void queryClient.invalidateQueries({ queryKey: draftKeys.list(workspaceSlug) });
   }
 
+  // One lane per row: a row's writes run in pick order so two date
+  // saves cannot race (parity/specs/drafts.md §3.2). The mutation owns
+  // the paint, rollback and notice; the queue only orders the PATCHes.
+  const writeQueue = React.useMemo(createDraftWriteQueue, []);
+
   function writeField(draft: DraftIssue, patch: DraftFieldPatch): void {
-    fieldWrite.mutate({ draftId: draft.id, patch });
+    void writeQueue(draft.id, () => fieldWrite.mutateAsync({ draftId: draft.id, patch })).catch(() => undefined);
   }
 
   function requestDelete(draft: DraftIssue): void {
