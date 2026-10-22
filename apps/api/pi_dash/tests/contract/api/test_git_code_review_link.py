@@ -93,7 +93,9 @@ def test_attach_is_idempotent_for_same_issue(api_key_client, workspace, review_p
     assert GitCodeReviewLink.objects.filter(provider="gitlab", namespace="acme", repo_name="web").count() == 1
 
 
-def test_attach_conflict_when_review_linked_to_other_issue(api_key_client, workspace, review_project, issue, create_user):
+def test_attach_conflict_when_review_linked_to_other_issue(
+    api_key_client, workspace, review_project, issue, create_user
+):
     other_issue = Issue.objects.create(
         name="another issue",
         project=review_project,

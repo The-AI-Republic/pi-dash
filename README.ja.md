@@ -139,7 +139,7 @@ Windows では、MSI インストーラーをダウンロードして実行し�
 ```bash
 # 1. ブラウザベースの device-code ログイン（`gh auth login` / `stripe login` のような形式）。
 #    CLI トークンを ~/.config/pidash/config.toml に保存します。
-pidash auth login --url https://your-pidash-instance.com
+pidash login --url https://your-pidash-instance.com
 
 # 2. このホストを runner として登録します。手順 1 のトークンを使用するため、
 #    enrollment-token の貼り付けは不要です。最初の runner では OS サービス
@@ -149,7 +149,7 @@ pidash auth login --url https://your-pidash-instance.com
 pidash runner add --project <project-id>
 ```
 
-`pidash auth login` は、まだ runner が存在しない場合にインラインで runner の追加を促すため、まっさらな開発用ラップトップを単一のコマンドでオンボーディングできます。後から `pidash runner add --project <other-project-id>` でさらに runner を追加できます。
+`pidash login`（`pidash auth login` のエイリアス）は、まだ runner が存在しない場合にインラインで runner の追加を促すため、まっさらな開発用ラップトップを単一のコマンドでオンボーディングできます。後から `pidash runner add --project <other-project-id>` でさらに runner を追加できます。
 
 runner デーモンはバックグラウンドで動作し、割り当てられたタスクをポーリングし、AI エージェントにディスパッチし、結果をプラットフォームに報告します。
 

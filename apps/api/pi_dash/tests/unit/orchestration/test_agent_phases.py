@@ -164,22 +164,21 @@ def test_template_name_for_unregistered_state_falls_back_to_default():
 
 
 @pytest.mark.unit
-def test_every_phase_owns_a_distinct_cadence_pair():
-    """Phases are siblings with independent budgets. Two phases sharing a
-    column pair is the leak this replaced: ``re_tick_ticker`` *writes* the
-    cap override, so a grant made in one phase would inflate the other's.
-    """
+def test_every_phase_owns_a_distinct_interval_column():
+    """Cadence is per stage (rhythm differs), budget is one pool per issue.
+    Each phase resolves its own interval column; there is no per-phase cap
+    column any more."""
     from pi_dash.orchestration.agent_phases import CADENCE_FIELDS, PHASES
 
     keys = [cfg.cadence_key for cfg in PHASES.values()]
     assert len(set(keys)) == len(keys)
     for key in keys:
         assert key in CADENCE_FIELDS
-    columns = [
-        (CADENCE_FIELDS[k].ticker_interval, CADENCE_FIELDS[k].ticker_max_ticks)
-        for k in keys
-    ]
+    columns = [CADENCE_FIELDS[k].project_interval for k in keys]
     assert len(set(columns)) == len(columns)
+    for fields in CADENCE_FIELDS.values():
+        assert not hasattr(fields, "ticker_max_ticks")
+        assert not hasattr(fields, "project_max_ticks")
 
 
 @pytest.mark.unit

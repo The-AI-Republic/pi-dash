@@ -93,8 +93,11 @@ class RunnerLiveStateSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "usage",
             "llm_model",
             "turn_count",
+            "agent_health",
+            "agent_last_activity_at",
             "updated_at",
         ]
         read_only_fields = fields
@@ -189,6 +192,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
+            "paused_at",
+            "paused_by",
             "created_at",
             "updated_at",
         ]
@@ -214,6 +219,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
+            "paused_at",
+            "paused_by",
             "created_at",
             "updated_at",
         ]
@@ -260,6 +267,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
     pod_detail = PodMiniSerializer(source="pod", read_only=True)
     error_diagnostic = serializers.SerializerMethodField()
     tool_calls = AgentRunToolCallSerializer(many=True, read_only=True)
+    scheduler_binding_detail = serializers.SerializerMethodField()
 
     def get_error_diagnostic(self, run: AgentRun):
         # Only the per-run detail drawer renders this block. Skip the
@@ -269,6 +277,23 @@ class AgentRunSerializer(serializers.ModelSerializer):
         if isinstance(self.parent, serializers.ListSerializer):
             return None
         return classify_run_error(run.error)
+
+    def get_scheduler_binding_detail(self, run: AgentRun):
+        # "Fired by scheduler X" for scheduler-triggered runs, so run views
+        # can label the run and link back to the binding detail page. Callers
+        # that serialize lists select_related ``scheduler_binding__scheduler``
+        # to keep this join out of the per-row query count. FK access uses the
+        # base manager, so a soft-deleted (uninstalled) binding still resolves
+        # and its history stays attributed.
+        if run.scheduler_binding_id is None:
+            return None
+        binding = run.scheduler_binding
+        return {
+            "id": str(binding.id),
+            "scheduler_name": binding.scheduler.name,
+            "scheduler_slug": binding.scheduler.slug,
+            "project": str(binding.project_id),
+        }
 
     class Meta:
         model = AgentRun
@@ -281,8 +306,11 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "cancel_reason",
             "prompt",
             "thread_id",
+            "agent_metadata",
             "runner",
             "work_item",
+            "scheduler_binding",
+            "scheduler_binding_detail",
             "pod",
             "pod_detail",
             "created_by",
@@ -301,6 +329,7 @@ class AgentRunSerializer(serializers.ModelSerializer):
             "input_tokens",
             "output_tokens",
             "total_tokens",
+            "usage",
             "tool_plan",
             "tool_calls",
         ]

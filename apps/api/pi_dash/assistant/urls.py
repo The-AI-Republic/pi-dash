@@ -22,6 +22,11 @@ from pi_dash.assistant.views.messages import (
     AssistantCancelEndpoint,
     AssistantMessageListCreateEndpoint,
 )
+from pi_dash.assistant.views.stt_config import (
+    UserSTTConfigEndpoint,
+    UserSTTConfigTestEndpoint,
+)
+from pi_dash.assistant.views.transcribe import AssistantTranscribeEndpoint
 from pi_dash.assistant.views.threads import (
     AssistantThreadDetailEndpoint,
     AssistantThreadListCreateEndpoint,
@@ -61,6 +66,24 @@ urlpatterns = [
         "users/me/ai-assistant/config/test/",
         UserLLMConfigTestEndpoint.as_view(),
         name="ai-assistant-config-test",
+    ),
+    # BYO speech-to-text (dictation) config — mirrors the LLM config above.
+    path(
+        "users/me/ai-assistant/stt-config/",
+        UserSTTConfigEndpoint.as_view(),
+        name="ai-assistant-stt-config",
+    ),
+    path(
+        "users/me/ai-assistant/stt-config/test/",
+        UserSTTConfigTestEndpoint.as_view(),
+        name="ai-assistant-stt-config-test",
+    ),
+    # Voice dictation: forward a recorded audio upload to the resolved STT
+    # provider and return {text}. Per-user (the STT config is per-user).
+    path(
+        "users/me/ai-assistant/transcribe/",
+        AssistantTranscribeEndpoint.as_view(),
+        name="ai-assistant-transcribe",
     ),
     # Desktop-only (IsDesktopSession): what the bundled agent engine should
     # call, and the short-lived credential to call it with.

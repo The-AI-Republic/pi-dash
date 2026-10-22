@@ -31,7 +31,7 @@ This is the first run on this issue — the workpad is empty. You will create it
 2. Write the hierarchical plan in the workpad.
 3. Ensure the workpad includes an environment stamp at the top in a `text` fenced block, format: `<host>:<abs-workdir>@<short-sha>`.
 4. Capture a concrete reproduction signal (command output, failing test, screenshot description) in the workpad `Notes` section before changing code.
-5. Persist the workpad: `pidash workpad update --body-file ./.pidash-workpad.md`. This is your single source of cross-run truth — re-run `pidash workpad update` after every meaningful change throughout the run.
+5. Persist the workpad: `pidash workpad update --body-file ./.pidash-workpad.md`. This is your single source of cross-run truth — re-run `pidash workpad update` after every meaningful change throughout the run. A successful `update` deletes the local `--body-file` (pass `--keep` to retain it), so re-fetch with `pidash workpad get | jq -r .body > ./.pidash-workpad.md` before each subsequent edit — the file being gone after an update is expected, not an error.
 6. **If `task_type == code_change`** (per your Step 0.5 analysis), before any code edits, sync with the repository. Skip this entire sub-step for `noncode` tasks — do not run `git fetch`, `git checkout`, or any other git operation here.
    - `git fetch origin`
 {% if repo.work_branch %}
@@ -44,6 +44,7 @@ This is the first run on this issue — the workpad is empty. You will create it
 {% elif parent %}
      - This issue has a parent ({{ parent.identifier }}) with no implementation branch yet. **Do not treat this as an automatic fall-back to the project base** — route it through the parent-readiness judgment you made in analyze-and-scope (Step 0.5):
        - Parent is a **research / design / spec** issue (no code expected), or an implementation issue whose work is already merged into the base branch: base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — and note in the workpad `Notes` why the parent's lack of a branch is expected here.
+       - Parent is a **tracking issue** (it was split into child issues; it carries no code branch of its own and will never get one): base off the project base — `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}` — **or**, when this child's description says it depends on a sibling child, base off that sibling's work branch (`BASE=$(pidash issue get <sibling> | jq -r '.git_work_branch')`, falling back to the project base if the sibling has no branch yet). Do **not** block on the tracking parent's lack of a branch.
        - Parent is an **implementation** issue still in progress with no branch yet **and this issue depends on its code**: do **not** base off the project base. Treat it as a blocker — follow "Blocking the run" instead of creating a branch, and stop.
 {% else %}
      - This issue is independent (no parent). Use the project base branch: `BASE={% if repo.base_branch %}{{ repo.base_branch }}{% else %}$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'){% endif %}`.

@@ -49,6 +49,9 @@ class AgentModelProfileEndpoint(BaseAPIView):
                 "lane": profile.lane,
                 "base_url": profile.base_url,
                 "model": profile.model,
+                # An edition that replaces the profile type may predate this
+                # field.
+                "top_up_url": getattr(profile, "top_up_url", ""),
                 # The instance switch is part of "can I run here", so fold it in
                 # rather than making the client combine two flags and risk
                 # showing an available engine on a disabled instance.

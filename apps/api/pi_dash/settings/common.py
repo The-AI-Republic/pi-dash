@@ -102,6 +102,12 @@ REST_FRAMEWORK = {
         # AI assistant: the only platform-compute brake in the BYOK-only MVP.
         "assistant_message": "30/hour",
         "assistant_llm_test": "6/minute",
+        "assistant_stt_test": "6/minute",
+        # Voice dictation transcribe. Interactive push-to-talk (one call per
+        # hold/release), so the brake is per-minute rather than per-hour — but
+        # each call spends the user's money / cloud wallet credit, so it is
+        # still capped to bound runaway or abusive use.
+        "assistant_transcribe": "20/minute",
         "assistant_llm_generate_title": "20/minute",
         # Desktop agent credential. Refreshed once per token lifetime in normal
         # use, so a low ceiling still leaves generous headroom for retries.
@@ -183,9 +189,26 @@ else:
 # locks indefinitely — Postgres only releases them at COMMIT/ROLLBACK or
 # when the backend dies. Caps idle time only; statement time (incl.
 # migrations) is unaffected.
+#
+# ``idle_session_timeout`` is the backstop for plain-``idle`` backends, which
+# ``idle_in_transaction_session_timeout`` does NOT cover. With CONN_MAX_AGE=0
+# Django closes a connection only when ``close_old_connections`` runs on the
+# thread that opened it, so any connection opened on a thread that signal
+# never reaches is leaked for the life of the worker (prod 2026-09-23: ~85
+# such backends, some idle 85+ min, exhausting a Postgres host shared with
+# home-page). Call sites are fixed to use ``database_sync_to_async``; this is
+# the belt to that pair of braces, so a future regression self-heals in 10min
+# instead of taking the shared instance down.
+#
+# 10min is deliberately far above any legitimate in-request idle gap: because
+# CONN_MAX_AGE=0, a connection is closed after each request/ORM call rather
+# than parked for reuse, so nothing healthy sits idle anywhere near this long.
+# Long migrations are unaffected — DDL is "active", not "idle".
 DATABASES["default"].setdefault("OPTIONS", {})
 DATABASES["default"]["OPTIONS"]["options"] = (
-    DATABASES["default"]["OPTIONS"].get("options", "") + " -c idle_in_transaction_session_timeout=60000"
+    DATABASES["default"]["OPTIONS"].get("options", "")
+    + " -c idle_in_transaction_session_timeout=60000"
+    + " -c idle_session_timeout=600000"
 ).strip()
 
 
@@ -456,6 +479,11 @@ if _raw_long_poll_secs < _LONG_POLL_MIN_SECS or _raw_long_poll_secs > _LONG_POLL
 LONG_POLL_INTERVAL_SECS = max(_LONG_POLL_MIN_SECS, min(_raw_long_poll_secs, _LONG_POLL_MAX_SECS))
 ACCESS_TOKEN_TTL_SECS = int(get_config("ACCESS_TOKEN_TTL_SECS", 3600))
 RUNNER_OFFLINE_THRESHOLD_SECS = int(get_config("RUNNER_OFFLINE_THRESHOLD_SECS", 50))
+# How long a runner must be silent before runs stranded on it are recovered:
+# QUEUED runs pinned to it go back to the pod queue, and runs it was serving
+# are failed. 0 disables either sweep.
+RUNNER_OFFLINE_PIN_RELEASE_SECS = int(get_config("RUNNER_OFFLINE_PIN_RELEASE_SECS", 300))
+RUNNER_OFFLINE_RUN_FAIL_SECS = int(get_config("RUNNER_OFFLINE_RUN_FAIL_SECS", 3600))
 OFFLINE_STREAM_TTL_SECS = int(get_config("OFFLINE_STREAM_TTL_SECS", 86400))
 OFFLINE_STREAM_MAXLEN = int(get_config("OFFLINE_STREAM_MAXLEN", 1000))
 RUNNER_STREAM_MIN_RETENTION_SECS = int(get_config("RUNNER_STREAM_MIN_RETENTION_SECS", 3600))

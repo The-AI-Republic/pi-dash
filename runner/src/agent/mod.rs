@@ -30,6 +30,35 @@ pub const STDERR_LINE_CAP_BYTES: usize = 512;
 /// to diagnose most failures (auth errors, panics, segfaults).
 pub const STDERR_RING_LINES: usize = 30;
 
+/// Startup budget for an engine: how long `run` / `run_one_shot` / `warm` may
+/// take to finish the handshake (Claude's `system/init`, Codex's
+/// `initialize` and `thread/start`, the ACP `initialize` and `session/new`,
+/// ...) before run setup fails. Callers apply it to the whole call via
+/// [`within_startup_deadline`], so multi-step handshakes get the same total
+/// budget as single-step ones; each bridge also bounds every individual step
+/// by it. Generous on purpose: a cold engine may install itself via `npx`,
+/// authenticate against its provider, and boot MCP servers before it emits
+/// anything. Only covers startup; once a run is live the activity watchdog
+/// takes over.
+pub const ENGINE_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Bound a whole engine startup call by [`ENGINE_STARTUP_TIMEOUT`].
+///
+/// Dropping a startup call part-way leaves the bridge mid-handshake, so a
+/// caller that times out or abandons one must discard the bridge rather than
+/// reuse it.
+pub async fn within_startup_deadline<T>(
+    start: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(ENGINE_STARTUP_TIMEOUT, start).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "engine startup timed out after {}s",
+            ENGINE_STARTUP_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 /// Bounded ring buffer of recent stderr lines from an agent subprocess.
 /// Each agent's `drain_stderr` task pushes here; the supervisor reads
 /// when it needs to enrich a `RunFailed` detail.
@@ -342,6 +371,24 @@ impl AgentCursor {
         }
     }
 
+    /// Which agent CLI produced this run, as the stable wire string the cloud
+    /// stores in ``AgentRun.agent_metadata["agent_kind"]`` (mirrors
+    /// ``AgentChatSession.agent_kind``). Reported on the run-started call so a
+    /// consumer can interpret ``local_session_id`` / ``thread_id``, whose
+    /// meaning is agent-kind dependent (for Claude Code the runner aliases the
+    /// session id as the thread id; for Codex the thread id is a distinct
+    /// concept).
+    pub fn agent_kind(&self) -> &'static str {
+        match self {
+            AgentCursor::Codex(_) => "codex",
+            AgentCursor::ClaudeCode(_) => "claude_code",
+            AgentCursor::CursorAgent(_) => "cursor_agent",
+            AgentCursor::OpenClaw(_) => "openclaw",
+            AgentCursor::Grok(_) => "grok",
+            AgentCursor::MuseCode(_) => "muse_code",
+        }
+    }
+
     pub fn model(&self) -> Option<&str> {
         match self {
             AgentCursor::Codex(c) => c.model.as_deref(),
@@ -363,22 +410,32 @@ impl AgentBridge {
         cwd: &Path,
         model_override: Option<String>,
     ) -> Result<Self> {
-        Self::spawn_from_config_with_resume(runner, cwd, model_override, None).await
+        Self::spawn_from_config_with_resume(runner, cwd, model_override, None, None).await
     }
 
+    /// Spawn the configured agent, optionally resuming a session and, for the
+    /// built-in codex engine, pinning the per-thread approval `mode`. A `None`
+    /// mode keeps the codex bridge's default (historical full-access) posture,
+    /// which is what the cloud path passes so its behaviour is unchanged; only
+    /// the local chat lane supplies an explicit mode.
     pub async fn spawn_from_config_with_resume(
         runner: &RunnerConfig,
         cwd: &Path,
         model_override: Option<String>,
         resume_session_id: Option<&str>,
+        mode: Option<crate::cloud::protocol::ApprovalMode>,
     ) -> Result<Self> {
         match runner.agent.kind {
             AgentKind::Codex => {
+                let engine_settings = mode
+                    .map(crate::approval::engine_thread_settings)
+                    .unwrap_or_default();
                 let b = crate::codex::bridge::Bridge::spawn_with_env(
                     &runner.codex.binary,
                     cwd,
                     selected_model(model_override, runner.codex.model_default.clone()),
                     runner.codex.effort_default.clone(),
+                    engine_settings,
                     &agent_env_for_config(runner),
                 )
                 .await?;

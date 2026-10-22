@@ -98,6 +98,17 @@ def test_managed_runner_online_gauge_counts_only_bundled_online(project, create_
     assert "# TYPE pi_dash_managed_runner_online gauge" in body
 
 
+def test_managed_runner_online_gauge_excludes_paused(project, create_user, api_client):
+    _bundled_runner(project, create_user, status=RunnerStatus.ONLINE)
+    paused = _bundled_runner(project, create_user, status=RunnerStatus.ONLINE)
+    Runner.objects.filter(id=paused.id).update(paused_at=timezone.now())
+    body = api_client.get(METRICS_URL).content.decode()
+    # A paused desktop is connected but not capacity, same as runner_online.
+    assert _series_value(body, "pi_dash_managed_runner_online ") == "1"
+    assert _series_value(body, "pi_dash_runner_online ") == "1"
+    assert _series_value(body, "pi_dash_runner_paused ") == "1"
+
+
 def test_runs_total_counter_labels_every_executor_kind(project, create_user, api_client):
     AgentRun.objects.create(
         workspace=project.workspace,

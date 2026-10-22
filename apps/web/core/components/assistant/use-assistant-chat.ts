@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
-import { AssistantService } from "@pi-dash/services";
+import { AssistantService, createApiEventSource } from "@pi-dash/services";
 import type { IAssistantEvent, IAssistantMessage, IAssistantSkippedServer } from "@pi-dash/types";
 import { bySeq, latestRealMessage, withNotice, type ById } from "@/components/assistant/notices";
 
@@ -144,7 +144,7 @@ export function useAssistantChat(slug: string | undefined, threadId: string | un
   // SSE stream — smooth deltas + immediate lifecycle.
   useEffect(() => {
     if (!slug || !threadId) return;
-    const source = new EventSource(service.eventsUrl(slug, threadId, 0), { withCredentials: true });
+    const source = createApiEventSource(service.eventsUrl(slug, threadId, 0), { withCredentials: true });
     source.addEventListener("chat.event", (raw) => {
       let event: IAssistantEvent;
       try {

@@ -6,8 +6,8 @@ use pidash::approval::{
     router::{ApprovalRecord, ApprovalRouter, ApprovalStatus, DecisionSource},
 };
 use pidash::cloud::protocol::{
-    ApprovalDecision, ApprovalKind, ClientMsg, Envelope, RunEventRecord, RunnerStatus, ServerMsg,
-    WIRE_VERSION,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ClientMsg, Envelope, RunEventRecord, RunnerStatus,
+    ServerMsg, WIRE_VERSION,
 };
 use pidash::config::schema::ApprovalPolicySection;
 use std::path::Path;
@@ -138,7 +138,7 @@ async fn router_resolution_is_idempotent_after_first_writer() {
 #[test]
 fn policy_evaluation_is_deterministic_across_samples() {
     let cfg = ApprovalPolicySection::default();
-    let policy = Policy::new(&cfg, Path::new("/"));
+    let policy = Policy::new(&cfg, Path::new("/"), ApprovalMode::Ask);
     let ls = policy.evaluate(
         ApprovalKind::CommandExecution,
         &serde_json::json!({"command": "ls"}),
