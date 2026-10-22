@@ -331,7 +331,10 @@ const AVATAR_CASE_SQL: &str = "CASE WHEN u.avatar_asset_id IS NOT NULL \
 
 /// Points assignee distribution (`base.py:843-899`): per-assignee
 /// estimate sums ordered by display name. `total_estimates` has no
-/// archived/draft filter (B3); completed/pending do.
+/// archived/draft filter (B3); completed/pending do. Django never
+/// filters on `estimate_point` (a nullable FK), so the ORM emits a LEFT
+/// OUTER JOIN and unestimated issues keep their group with NULL sums
+/// (PIDASHCONV-1185).
 fn points_assignee_sql() -> String {
     format!(
         "SELECT u.display_name, u.id AS assignee_id, {AVATAR_CASE_SQL} AS avatar_url, \
@@ -339,7 +342,7 @@ fn points_assignee_sql() -> String {
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
          {DIST_FROM_SQL} \
-         JOIN estimate_points ep ON ep.id = i.estimate_point_id \
+         LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id \
          LEFT JOIN issue_assignees ia ON ia.issue_id = i.id \
          LEFT JOIN users u ON u.id = ia.assignee_id \
          {DIST_WHERE_SQL} \
@@ -348,7 +351,8 @@ fn points_assignee_sql() -> String {
     )
 }
 
-/// Points label distribution (`base.py:901-931`).
+/// Points label distribution (`base.py:901-931`). LEFT-joins
+/// `estimate_points` like the assignee query above (PIDASHCONV-1185).
 fn points_label_sql() -> String {
     format!(
         "SELECT l.name AS label_name, l.color, l.id AS label_id, \
@@ -356,7 +360,7 @@ fn points_label_sql() -> String {
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NOT NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS completed_estimates, \
          SUM(CAST(ep.value AS DOUBLE PRECISION)) FILTER (WHERE i.completed_at IS NULL AND i.archived_at IS NULL AND i.is_draft = FALSE) AS pending_estimates \
          {DIST_FROM_SQL} \
-         JOIN estimate_points ep ON ep.id = i.estimate_point_id \
+         LEFT JOIN estimate_points ep ON ep.id = i.estimate_point_id \
          LEFT JOIN issue_labels il ON il.issue_id = i.id \
          LEFT JOIN labels l ON l.id = il.label_id \
          {DIST_WHERE_SQL} \
