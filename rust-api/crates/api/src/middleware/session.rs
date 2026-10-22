@@ -529,11 +529,13 @@ impl RequestSession {
     /// The full session dict as JSON. The save path serializes this;
     /// the desktop gate reads its marker from a snapshot's copy (marking
     /// nothing — the snapshot is already detached from the live session).
+    /// `auth_rejected` hides the trio from readers only: Django's
+    /// non-flush anonymous cases never drop keys, so a later save
+    /// persists them.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::Value::Object(
             self.data
                 .iter()
-                .filter(|(key, _)| !(self.auth_rejected && is_auth_key(key)))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         )
@@ -1652,6 +1654,71 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(set_cookies(&response).is_empty());
         assert!(store.deleted_keys().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_session_write_keeps_auth_keys() {
+        // Django's non-flush anonymous cases leave the session dict alone:
+        // a later save persists the auth trio, it does not drop it.
+        async fn write_note(req: Request<Body>) -> Response<Body> {
+            req.extensions()
+                .get::<SessionHandle>()
+                .expect("session handle in extensions")
+                .lock()
+                .set(
+                    "note".to_string(),
+                    serde_json::Value::String("x".to_string()),
+                );
+            Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Body::empty())
+                .expect("inner")
+        }
+        let user_id = "77777777-7777-4777-8777-777777777777";
+        let store = ProbeStore::with_users();
+        seed_session_with(
+            &store,
+            "rejectedwrite1",
+            user_id,
+            "tests.OtherBackend",
+            &auth_hash(),
+        )
+        .await;
+        let inner = axum::Router::new().route("/api/x/", axum::routing::any(write_note));
+        let response = SessionLayer::new(config_for(Some(store.clone())))
+            .layer(inner)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/x/")
+                    .header(header::COOKIE, "session-id=rejectedwrite1")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("serve");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(store.deleted_keys().is_empty());
+        let stored = store
+            .inner
+            .load("rejectedwrite1".to_string())
+            .await
+            .expect("load")
+            .expect("row kept");
+        let signer = Signer::new(SECRET, SESSION_SIGNING_SALT);
+        let saved: serde_json::Value = signer.unsign_object(&stored.session_data).expect("unsign");
+        assert_eq!(
+            saved.get("_auth_user_id").and_then(|v| v.as_str()),
+            Some(user_id)
+        );
+        assert_eq!(
+            saved.get("_auth_user_backend").and_then(|v| v.as_str()),
+            Some("tests.OtherBackend")
+        );
+        assert!(saved
+            .get("_auth_user_hash")
+            .and_then(|v| v.as_str())
+            .is_some());
+        assert_eq!(saved.get("note").and_then(|v| v.as_str()), Some("x"));
     }
 
     #[tokio::test]
