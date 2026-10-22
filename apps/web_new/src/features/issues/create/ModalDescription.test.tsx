@@ -405,6 +405,41 @@ describe("ModalDescription assistant (ISS-127)", () => {
     expect(await screen.findByRole("button", { name: "Generate again" })).toBeInTheDocument();
   });
 
+  it("names the in-flight answer while it generates", async () => {
+    const user = userEvent.setup();
+    setup({ describeDelayMs: 500 });
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    expect(await screen.findByRole("button", { name: "Generating response…" })).toBeDisabled();
+    expect(await screen.findByTestId("modal-ai-response")).toHaveTextContent("assistant words");
+  });
+
+  it("discards the draft when the trigger toggles the popover shut", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "draft task");
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await waitFor(() => expect(screen.queryByLabelText("Ask the assistant")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    expect(await screen.findByLabelText("Ask the assistant")).toHaveValue("");
+    expect(h.calls.some((entry) => entry.url.includes("/ai-assistant/"))).toBe(false);
+  });
+
+  it("inserts the bare answer when no handle exists and the body is empty", async () => {
+    announceHandle = false;
+    const user = userEvent.setup();
+    const h = setup({}, { value: "" });
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    await screen.findByTestId("modal-ai-response");
+    await user.click(screen.getByRole("button", { name: "Use this response" }));
+    await waitFor(() => expect(h.onChange).toHaveBeenCalledWith("<p>assistant words</p>"));
+    expect(handleCalls).toEqual([]);
+  });
+
   it("cleans hostile markup before review and insert", async () => {
     const user = userEvent.setup();
     setup({ describeBody: editorAnswer("<p>ok</p><script>alert(1)</script><img src=x onerror=alert(2)>") });

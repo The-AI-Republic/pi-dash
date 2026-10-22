@@ -203,16 +203,16 @@ export function ModalDescription({
     }
   }
 
-  function useAnswer(): void {
-    if (aiAnswer === null || aiAnswer.html === "") return;
-    const html = aiAnswer.html;
+  // The insert button only renders once an answer with markup exists,
+  // so the answer arrives as an argument instead of a guarded read.
+  function useAnswer(answer: EditorAnswer): void {
     const handle = handleRef.current;
     if (handle !== null) {
       // The old editor inserts at `selection.anchor`; appending would
       // always land the answer at the end of the body (ISS-127).
-      handle.insertHtml(html);
+      handle.insertHtml(answer.html);
     } else {
-      onChange(value.trim() === "" ? html : `${value}${html}`);
+      onChange(value.trim() === "" ? answer.html : `${value}${answer.html}`);
       setRemount((currentKey) => currentKey + 1);
     }
     closeAi();
@@ -346,7 +346,7 @@ export function ModalDescription({
                     variant="primary"
                     size="small"
                     onClick={() => {
-                      useAnswer();
+                      useAnswer(aiAnswer);
                     }}
                   >
                     {AI_USE_RESPONSE_LABEL}
