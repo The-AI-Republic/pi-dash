@@ -66,6 +66,14 @@
 //!
 //! Semantic traps watched: `len(prompt)` counts code points
 //! (`chars().count()`, never byte length); sha256 is over UTF-8 bytes.
+//!
+//! Executor (PIDASHCONV-1268): [`seed_builtin_schedulers`] is the single
+//! copy of the `post_save` receiver's DB edge, lifted here from the api
+//! crate so the ops entry point can call it too. The api workspace-create
+//! handlers call this same copy.
+
+use sqlx::PgPool;
+use uuid::Uuid;
 
 /// `Scheduler.source` value written by the seeder
 /// (`db/models/scheduler.py:25-31`, `SchedulerSource.BUILTIN`).
@@ -258,6 +266,134 @@ pub fn builtin_repaint_sql() -> &'static str {
 /// without touching the database.
 pub fn should_seed_on_workspace_create(created: bool) -> bool {
     created
+}
+
+/// One [`ensure_select_sql`] row: the 14-column `SELECT` in order
+/// (`created_at`, `updated_at`, `created_by_id`, `updated_by_id`,
+/// `deleted_at`, `id`, `workspace_id`, `slug`, `name`, `description`,
+/// `prompt`, `source`, `is_enabled`, `color`).
+type SchedulerSeedRow = (
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<chrono::DateTime<chrono::Utc>>,
+    Uuid,
+    Uuid,
+    String,
+    String,
+    String,
+    String,
+    String,
+    bool,
+    String,
+);
+
+/// Whether a sqlx failure is a Postgres unique violation (23505) — the
+/// `IntegrityError` arm the losing racer takes (`builtins/__init__.py:177`).
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(
+        error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .as_deref(),
+        Some("23505")
+    )
+}
+
+/// `post_save` receiver `_seed_builtins_on_workspace_create`
+/// (`scheduler/signals.py:28-39`): `ensure_builtin_schedulers` runs on
+/// every workspace creation. The receiver swallows every exception
+/// (`logger.exception`), so this edge returns `()` and every error arm
+/// below is a silent stop — seeding can never block workspace creation.
+/// `created_by` is `Some` requesting user on the HTTP paths
+/// (`BaseModel.save` stamps the crum user on the scheduler rows too)
+/// and `None` on crum-less entry points (management commands), where
+/// Django stamps `NULL`. Shared by every workspace-create entry point
+/// (the Django signal fires regardless of entry point).
+pub async fn seed_builtin_schedulers(pool: &PgPool, workspace_id: Uuid, created_by: Option<Uuid>) {
+    if !should_seed_on_workspace_create(true) {
+        return;
+    }
+    for builtin in BUILTINS {
+        let row: Result<Option<SchedulerSeedRow>, sqlx::Error> =
+            sqlx::query_as(ensure_select_sql())
+                .bind(workspace_id)
+                .bind(builtin.slug)
+                .fetch_optional(pool)
+                .await;
+        let row = match row {
+            Ok(row) => row,
+            Err(_) => return,
+        };
+        let view = row.as_ref().map(|row| SchedulerRowView {
+            name: row.8.clone(),
+            description: row.9.clone(),
+            prompt: row.10.clone(),
+            source: row.11.clone(),
+        });
+        match (row, decide_ensure(view.as_ref())) {
+            (Some(row), EnsureAction::Repaint) => {
+                if sqlx::query(builtin_repaint_sql())
+                    .bind(builtin.name)
+                    .bind(builtin.description)
+                    .bind(builtin.prompt)
+                    .bind(row.5)
+                    .execute(pool)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            (None, EnsureAction::Create) => {
+                match sqlx::query(builtin_insert_sql())
+                    .bind(Uuid::new_v4())
+                    .bind(workspace_id)
+                    .bind(builtin.slug)
+                    .bind(builtin.name)
+                    .bind(builtin.description)
+                    .bind(builtin.prompt)
+                    .bind(created_by)
+                    .execute(pool)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) if is_unique_violation(&error) => {
+                        // Lost the race: re-fetch and repaint the
+                        // winner (`builtins/__init__.py:177-186`).
+                        let winner: Result<Option<SchedulerSeedRow>, sqlx::Error> =
+                            sqlx::query_as(ensure_select_sql())
+                                .bind(workspace_id)
+                                .bind(builtin.slug)
+                                .fetch_optional(pool)
+                                .await;
+                        match winner {
+                            Ok(Some(winner)) => {
+                                if sqlx::query(builtin_repaint_sql())
+                                    .bind(builtin.name)
+                                    .bind(builtin.description)
+                                    .bind(builtin.prompt)
+                                    .bind(winner.5)
+                                    .execute(pool)
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(_) => return,
+                        }
+                    }
+                    Err(_) => return,
+                }
+            }
+            // Unreachable by `decide_ensure`'s contract (`Some` repaints,
+            // `None` creates); stop silently like any seeder failure.
+            _ => return,
+        }
+    }
 }
 
 #[cfg(test)]
