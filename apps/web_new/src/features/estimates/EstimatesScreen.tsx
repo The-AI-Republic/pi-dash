@@ -32,6 +32,8 @@ export const ESTIMATES_ARCHIVED_DESCRIPTION =
 /** Where the archived explainer points; it must leave the app. */
 export const ESTIMATES_ARCHIVED_REFERENCE_HREF = "https://github.com/The-AI-Republic/pi-dash#readme";
 export const ESTIMATES_ARCHIVED_REFERENCE_LABEL = "Learn more about estimates";
+export const ESTIMATES_LOAD_ERROR = "Estimates could not be loaded.";
+export const ESTIMATES_RETRY_LABEL = "Try again";
 export const ESTIMATES_EMPTY_TITLE = "No estimates yet";
 export const ESTIMATES_EMPTY_DESCRIPTION = "Create a measurement system to start tracking effort on work items.";
 export const ESTIMATES_ADD_LABEL = "Add estimate system";
@@ -85,6 +87,22 @@ function EstimatesLoader(): React.ReactElement {
   );
 }
 
+/**
+ * Failed systems read (EST-002): a visible error with a retry action,
+ * rendered instead of the empty state or content so a failure never
+ * reads as "no systems".
+ */
+function EstimatesLoadError({ onRetry, retrying }: { onRetry: () => void; retrying: boolean }): React.ReactElement {
+  return (
+    <div role="alert" className="flex flex-col items-start gap-(--space-3)">
+      <p className="text-body text-(--danger)">{ESTIMATES_LOAD_ERROR}</p>
+      <Button variant="secondary" loading={retrying} onClick={onRetry}>
+        {ESTIMATES_RETRY_LABEL}
+      </Button>
+    </div>
+  );
+}
+
 export function EstimatesScreen({ workspaceSlug, projectId, canManage }: EstimatesScreenProps): React.ReactElement {
   const queryClient = useQueryClient();
   const systems = useProjectEstimates(workspaceSlug, projectId);
@@ -95,6 +113,9 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
   const [deleting, setDeleting] = React.useState<Estimate | null>(null);
 
   if (systems.isPending) return <EstimatesLoader />;
+  if (systems.isError) {
+    return <EstimatesLoadError onRetry={() => void systems.refetch()} retrying={systems.isFetching} />;
+  }
 
   const list = systems.data ?? [];
   const active = selectActiveSystem(list);
@@ -108,12 +129,6 @@ export function EstimatesScreen({ workspaceSlug, projectId, canManage }: Estimat
         <h2 className="text-h3 text-(--text)">{ESTIMATES_HEADING}</h2>
         <p className="text-body text-(--text-muted)">{ESTIMATES_DESCRIPTION}</p>
       </div>
-
-      {systems.isError ? (
-        <p className="text-body text-(--danger)" role="alert">
-          Estimates could not be loaded. Reload the page to try again.
-        </p>
-      ) : null}
 
       {active === undefined ? (
         <EmptyState

@@ -19,7 +19,7 @@ import {
 } from "@pidash/api-client";
 
 import { getAppClient } from "../../core/api/client.js";
-import { LIST_STALE_TIME_MS, workspaceScope } from "../../core/query/index.js";
+import { workspaceScope } from "../../core/query/index.js";
 import { authKeys } from "../auth/index.js";
 import { notifyError, notifySuccess } from "../../shared/shell/index.js";
 
@@ -32,8 +32,14 @@ export function projectEstimatesQueryOptions(client: ApiClient, workspaceSlug: s
   return queryOptions<EstimateList>({
     queryKey: estimatesKeys.project(workspaceSlug, projectId),
     queryFn: () => listProjectEstimates(client, workspaceSlug, projectId),
-    staleTime: LIST_STALE_TIME_MS,
-    refetchOnWindowFocus: false,
+    // EST-027: the old client revalidates this read on mount, stale data
+    // and window focus, with no staleness window — a revisit fetches
+    // rather than replaying a cache. The shared client opts out of focus
+    // refetching (ISS-221), so the read opts back in explicitly. There is
+    // still no live channel: an open, focused screen stays stale until a
+    // fetch actually runs.
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
 }
 

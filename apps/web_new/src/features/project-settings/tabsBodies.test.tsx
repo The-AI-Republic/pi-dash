@@ -12,7 +12,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   screenProps: [] as { workspaceSlug: string; projectId: string; canManage: boolean }[],
   cardProps: [] as { workspaceSlug: string; projectId: string; canManage: boolean }[],
-  context: { role: 20 as number | null },
+  context: {
+    role: 20 as number | null,
+    project: null as { name: string; logoProps: Record<string, unknown>; identifier: string } | null,
+  },
 }));
 
 vi.mock("../estimates/EstimatesScreen.js", () => ({
@@ -35,11 +38,11 @@ vi.mock("./components/ProjectSettingsLayout.js", () => ({
     projectId: "223e4567-e89b-12d3-a456-426614174001",
     role: harness.context.role,
     workspaceAdmin: false,
-    project: null,
+    project: harness.context.project,
   }),
 }));
 
-import { EstimatesTab } from "./estimates/EstimatesTab.js";
+import { EstimatesTab, estimatesTabTitle } from "./estimates/EstimatesTab.js";
 import { RepositoryTab } from "./repository/RepositoryTab.js";
 
 function wrap(node: React.ReactElement): React.ReactElement {
@@ -50,6 +53,8 @@ beforeEach(() => {
   harness.screenProps = [];
   harness.cardProps = [];
   harness.context.role = 20;
+  harness.context.project = null;
+  document.title = "";
 });
 
 describe("settings tab bodies", () => {
@@ -65,6 +70,20 @@ describe("settings tab bodies", () => {
     harness.context.role = 15;
     render(wrap(<EstimatesTab />));
     expect(harness.screenProps[0]?.canManage).toBe(false);
+  });
+
+  it("titles the estimates tab with the project name", () => {
+    harness.context.project = { name: "Website relaunch", logoProps: {}, identifier: "WEB" };
+    render(wrap(<EstimatesTab />));
+    expect(screen.getByTestId("estimates-screen-stub")).toBeInTheDocument();
+    expect(document.title).toBe("Website relaunch - Estimates");
+    expect(document.title).toContain("Website relaunch");
+  });
+
+  it("falls back to the area title while the project is unresolved", () => {
+    expect(estimatesTabTitle(null)).toBe("Estimates");
+    render(wrap(<EstimatesTab />));
+    expect(document.title).toBe("Estimates");
   });
 
   it("hands the repository card the project and admin standing", () => {

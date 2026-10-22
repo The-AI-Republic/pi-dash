@@ -17,10 +17,12 @@ import { createAppClient, resetAppClient } from "../../core/api/client.js";
 import { authKeys } from "../auth/index.js";
 import { notifyError, notifySuccess } from "../../shared/shell/index.js";
 import { ESTIMATE_CREATED_TITLE, ESTIMATE_DELETED_TITLE } from "./api.js";
+import { ESTIMATE_DIALOG_TITLE } from "./EstimateCreateDialog.js";
 import {
   ESTIMATES_ADD_LABEL,
   ESTIMATES_ARCHIVED_HEADING,
   ESTIMATES_EMPTY_TITLE,
+  ESTIMATES_RETRY_LABEL,
   EstimatesScreen,
   ESTIMATE_DELETE_DIALOG_TITLE,
 } from "./EstimatesScreen.js";
@@ -222,7 +224,12 @@ describe("EstimatesScreen", () => {
     });
     stubApi({ holdList: held });
     renderScreen();
-    expect(screen.getByRole("status", { name: "Loading estimates" })).toBeInTheDocument();
+    const loader = screen.getByRole("status", { name: "Loading estimates" });
+    expect(loader).toBeInTheDocument();
+    // Row-shaped skeleton set, not a spinner: four skeleton rows.
+    expect(loader.querySelectorAll("span")).toHaveLength(4);
+    expect(screen.queryByText(ESTIMATES_EMPTY_TITLE)).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     release();
     await screen.findByText(ESTIMATES_EMPTY_TITLE);
     expect(screen.queryByRole("status", { name: "Loading estimates" })).not.toBeInTheDocument();
@@ -428,9 +435,90 @@ describe("EstimatesScreen", () => {
   });
 
   it("shows a loader error instead of the empty state when the read fails", async () => {
-    stubApi({ listStatus: 500 });
+    const user = userEvent.setup();
+    const api = { listStatus: 500 };
+    stubApi(api);
     renderScreen();
-    expect(await screen.findByRole("alert")).toHaveTextContent("Estimates could not be loaded");
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Estimates could not be loaded");
+    // A failure never reads as "no systems": no empty state, no rows,
+    // no switch — just the error and its retry.
+    expect(screen.queryByText(ESTIMATES_EMPTY_TITLE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("estimate-system-row")).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("estimates-screen")).not.toBeInTheDocument();
+
+    api.listStatus = 200;
+    await user.click(screen.getByRole("button", { name: ESTIMATES_RETRY_LABEL }));
+    await screen.findByText(ESTIMATES_EMPTY_TITLE);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("opens the creation dialog on step one from the empty-state action", async () => {
+    const user = userEvent.setup();
+    stubApi({ systems: [] });
+    renderScreen();
+    await user.click(await screen.findByRole("button", { name: ESTIMATES_ADD_LABEL }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(ESTIMATE_DIALOG_TITLE);
+  });
+
+  it("pins the absences: no export, filter, search or bulk controls", async () => {
+    stubApi({
+      systems: [
+        systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true }),
+        systemRow({ id: OLD_ID, name: "Old system", created_at: "2023-01-01T00:00:00Z" }),
+      ],
+    });
+    renderScreen();
+    await screen.findByText("Old system");
+    const surface = screen.getByTestId("estimates-screen");
+    expect(within(surface).queryByRole("searchbox")).not.toBeInTheDocument();
+    expect(within(surface).queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(within(surface).queryByRole("button", { name: /export|import|download/i })).not.toBeInTheDocument();
+    expect(within(surface).queryByRole("button", { name: /filter|search/i })).not.toBeInTheDocument();
+    expect(within(surface).queryByRole("button", { name: /bulk|select all/i })).not.toBeInTheDocument();
+    expect(within(surface).queryByRole("menuitem", { name: /export|import|download/i })).not.toBeInTheDocument();
+    expect(surface.querySelector('input[type="search"]')).toBeNull();
+  });
+
+  it("keeps the absent behaviors out of the populated screen text", async () => {
+    stubApi({
+      systems: [
+        systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true }),
+        systemRow({ id: OLD_ID, name: "Old system", created_at: "2023-01-01T00:00:00Z" }),
+      ],
+    });
+    renderScreen();
+    await screen.findByText("Old system");
+    const text = screen.getByTestId("estimates-screen").textContent ?? "";
+    for (const word of ["shortcut", "export", "import", "bulk", "filter", "search"]) {
+      expect(text).not.toMatch(new RegExp(word, "i"));
+    }
+  });
+
+  it("keeps the absent behaviors out of the empty screen text", async () => {
+    stubApi({});
+    renderScreen();
+    await screen.findByText(ESTIMATES_EMPTY_TITLE);
+    const text = screen.getByTestId("estimates-screen").textContent ?? "";
+    for (const word of ["shortcut", "export", "import", "bulk", "filter", "search"]) {
+      expect(text).not.toMatch(new RegExp(word, "i"));
+    }
+  });
+
+  it("ignores shortcut keys on the screen", async () => {
+    const user = userEvent.setup();
+    stubApi({ systems: [systemRow({ id: ACTIVE_ID, name: "Active system", last_used: true })] });
+    renderScreen();
+    await screen.findByText("Active system");
+    await user.keyboard("?");
+    await user.keyboard("c");
+    await user.keyboard("/");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Estimates" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("hides the empty-state action from a non-admin viewer", async () => {

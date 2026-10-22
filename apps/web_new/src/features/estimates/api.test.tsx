@@ -4,8 +4,8 @@
 // See the LICENSE file for details.
 // Estimates data hooks (PSET-049): the list read options, the create
 // payload and the delete-plus-unlink sequence.
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, focusManager } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { TransportResponse } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,7 @@ import {
   projectEstimatesQueryOptions,
   useCreateEstimate,
   useDeleteEstimate,
+  useProjectEstimates,
   useToggleEstimates,
 } from "./api.js";
 
@@ -112,12 +113,13 @@ function system(id: string): Record<string, unknown> {
 
 function stubApi(options: { createStatus?: number; deleteStatus?: number; patchStatus?: number } = {}) {
   const calls: { method: string; url: string; body: unknown }[] = [];
+  let systems: Record<string, unknown>[] = [];
   createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
     const method = init.method ?? "GET";
     const body = init.body === undefined ? undefined : (JSON.parse(init.body) as unknown);
     calls.push({ method, url, body });
     if (url.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
-    if (url === ESTIMATES_PATH && method === "GET") return jsonResponse(url, 200, []);
+    if (url === ESTIMATES_PATH && method === "GET") return jsonResponse(url, 200, systems);
     if (url === ESTIMATES_PATH && method === "POST") {
       if ((options.createStatus ?? 200) !== 200) return jsonResponse(url, options.createStatus ?? 500, {});
       return jsonResponse(url, 200, system("99999999-9999-4999-8999-999999999999"));
@@ -133,7 +135,7 @@ function stubApi(options: { createStatus?: number; deleteStatus?: number; patchS
     if (url === PROJECT_PATH && method === "GET") return jsonResponse(url, 200, projectDetail(null));
     throw new Error(`unexpected fetch ${method} ${url}`);
   }) as never);
-  return { calls };
+  return { calls, setSystems: (rows: Record<string, unknown>[]) => (systems = rows) };
 }
 
 interface WrapperProps {
@@ -153,9 +155,64 @@ afterEach(() => {
 describe("estimates data hooks", () => {
   it("keys and describes the list read", () => {
     expect(estimatesKeys.project(WORKSPACE, PROJECT).slice(0, 3)).toEqual(["ws", WORKSPACE, "estimates"]);
+    expect(estimatesKeys.project(WORKSPACE, PROJECT)).toContain(PROJECT);
     const options = projectEstimatesQueryOptions({} as never, WORKSPACE, PROJECT);
     expect(options.queryKey).toEqual(estimatesKeys.project(WORKSPACE, PROJECT));
-    expect(options.refetchOnWindowFocus).toBe(false);
+    // EST-027: no staleness window and an explicit focus opt-in, so a
+    // revisit or a focus return refetches instead of replaying a cache.
+    expect(options.staleTime).toBe(0);
+    expect(options.refetchOnWindowFocus).toBe(true);
+  });
+
+  it("keeps an external change stale until a refetch runs", async () => {
+    const { calls, setSystems } = stubApi();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: WrapperProps): React.ReactElement => (
+      <QueryClientProvider client={client}>{children as never}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useProjectEstimates(WORKSPACE, PROJECT), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual([]);
+    expect(calls.filter((call) => call.method === "GET")).toHaveLength(1);
+
+    // Mutate behind the hook's back: no live push, so the hook keeps
+    // showing the old state without a new request.
+    setSystems([system("44444444-4444-4444-8444-444444444444")]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(result.current.data).toEqual([]);
+    expect(calls.filter((call) => call.method === "GET")).toHaveLength(1);
+
+    await result.current.refetch();
+    await waitFor(() => expect(result.current.data).toHaveLength(1));
+  });
+
+  it("refetches the list on remount and on window focus", async () => {
+    const { calls, setSystems } = stubApi();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: WrapperProps): React.ReactElement => (
+      <QueryClientProvider client={client}>{children as never}</QueryClientProvider>
+    );
+    const first = renderHook(() => useProjectEstimates(WORKSPACE, PROJECT), { wrapper });
+    await waitFor(() => expect(first.result.current.isSuccess).toBe(true));
+    expect(calls.filter((call) => call.method === "GET")).toHaveLength(1);
+    first.unmount();
+
+    // A revisit mounts fresh: with no staleness window the mount
+    // refetches and picks up the system created while away.
+    setSystems([system("44444444-4444-4444-8444-444444444444")]);
+    const second = renderHook(() => useProjectEstimates(WORKSPACE, PROJECT), { wrapper });
+    await waitFor(() => expect(second.result.current.data).toHaveLength(1));
+    expect(calls.filter((call) => call.method === "GET")).toHaveLength(2);
+
+    // Returning to the window refetches the stale read as well.
+    setSystems([system("44444444-4444-4444-8444-444444444444"), system("55555555-5555-4555-8555-555555555555")]);
+    focusManager.setFocused(false);
+    await act(async () => {
+      focusManager.setFocused(true);
+    });
+    await waitFor(() => expect(second.result.current.data).toHaveLength(2));
+    expect(calls.filter((call) => call.method === "GET")).toHaveLength(3);
+    focusManager.setFocused(undefined);
   });
 
   it("creates the system as active with numbered points", async () => {
