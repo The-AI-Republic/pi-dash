@@ -308,6 +308,41 @@ export function wsSettingsSurfaceSettled(): boolean {
   );
 }
 
+/**
+ * Arms the archives skeleton recorder (NEWFRONT-698, ARCH-030). Installed
+ * as an init script before the navigation under test: a mutation
+ * observer records whether any loading shimmer mounts, including a
+ * mount that unmounts in the same batch (the detail loader flashes too
+ * briefly to poll). Exported so a DOM test can exercise it directly;
+ * Playwright serializes the function into the page, so it must stay
+ * self-contained.
+ */
+export function archivesSkeletonObserverBoot(): void {
+  const win = window as unknown as Record<string, unknown>;
+  win["__paritySkeletonSeen"] = false;
+  const marksSkeleton = (node: Node): boolean => {
+    if (node.nodeType !== 1) return false;
+    const el = node as Element;
+    if (el.classList.contains("animate-shimmer") || el.classList.contains("animate-pulse")) return true;
+    return el.querySelector(".animate-shimmer, .animate-pulse, [data-testid*=skeleton]") !== null;
+  };
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === "attributes" && marksSkeleton(record.target)) {
+        win["__paritySkeletonSeen"] = true;
+        return;
+      }
+      for (const added of Array.from(record.addedNodes)) {
+        if (marksSkeleton(added)) {
+          win["__paritySkeletonSeen"] = true;
+          return;
+        }
+      }
+    }
+  });
+  observer.observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+}
+
 export class WebNewDriver implements ParityDriver {
   readonly target: ParityTarget = "web_new";
   readonly page: Page;
@@ -346,6 +381,30 @@ export class WebNewDriver implements ParityDriver {
 
   /** Every wait below is explicitly bounded; a bare wait would hang to the test timeout. */
   private static readonly WAIT_MS = 30_000;
+
+  // --- Archives shell (NEWFRONT-698, ARCH-001..003). Tab strip and
+  // --- navigation, addresses, titles, badge, back control, skeleton
+  // --- slot, traffic spy and priming. Other slices call these
+  // --- read-only; nobody re-implements them.
+
+  /** Cold dev-server compiles can outlast one settle window; tab opens get two. */
+  private static readonly ARCHIVES_OPEN_MS = 60_000;
+
+  /** Strip labels in tab-key order (ARCH-001). */
+  private static readonly ARCHIVES_TAB_LABELS: Record<ArchivesTab, string> = {
+    issues: "Work items",
+    cycles: "Cycles",
+    modules: "Modules",
+  };
+
+  /** Archived-list traffic counters; reset by archivesBeginTrafficSpy. */
+  private archivesTraffic: ArchivesTrafficCounts = {
+    issuesReads: 0,
+    cyclesReads: 0,
+    modulesReads: 0,
+    detailReads: 0,
+    writes: 0,
+  };
 
   /** Reads a downloaded file; a seam for tests, and for very large backups. */
   private readDownload(path: string): string {
@@ -13183,8 +13242,49 @@ export class WebNewDriver implements ParityDriver {
   async archivesCyclesOpenLive(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("archivesCyclesOpenLive");
   }
+  /** The archives tab strip (NEWFRONT-698 shell). */
+  private archivesStrip(): Locator {
+    return this.page.locator('[data-testid="archives-tab-strip"]').first();
+  }
+
+  /** One archives tab-strip link, by address segment. */
+  private archivesTabLink(tab: ArchivesTab): Locator {
+    return this.page.locator(`[data-testid="archives-tab-strip"] a[href*="/archives/${tab}"]`).first();
+  }
+
+  /** The tab-content slot every archives screen renders into. */
+  private archivesContent(): Locator {
+    return this.page.locator('[data-testid="archives-content"]').first();
+  }
+
+  /**
+   * Open one archives address and settle on the strip. Cold compiles can
+   * stall the first paint, so a stalled open reloads once before the
+   * deadline throws.
+   */
+  private async archivesGotoTab(path: string): Promise<void> {
+    await this.page.goto(path);
+    await this.page.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + WebNewDriver.ARCHIVES_OPEN_MS;
+    let reloaded = false;
+    for (;;) {
+      if (await this.isShown(this.archivesStrip())) return;
+      if (Date.now() > deadline) {
+        throw new Error(`[parity] archives strip never settled on ${path}.`);
+      }
+      if (!reloaded && Date.now() > deadline - WebNewDriver.WAIT_MS) {
+        reloaded = true;
+        await this.page.reload().catch(() => undefined);
+      } else {
+        await this.page.waitForTimeout(1_000);
+      }
+    }
+  }
+
   async archivesCyclesReload(): Promise<void> {
-    return todo("archivesCyclesReload");
+    await this.page.reload();
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.archivesStrip().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesVisibleNames(): Promise<string[]> {
     return todo("archivesCyclesVisibleNames");
@@ -13297,14 +13397,40 @@ export class WebNewDriver implements ParityDriver {
   async archivesOpenCyclesTab(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("archivesOpenCyclesTab");
   }
-  async archivesGoToProjectArchives(_projectId: string): Promise<void> {
-    return todo("archivesGoToProjectArchives");
+  async archivesGoToProjectArchives(projectId: string): Promise<void> {
+    const row = this.page.locator(`li[data-project-row="${projectId}"]`).first();
+    await row.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    await row.hover({ timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    await row.getByTestId("project-row-menu").click({ timeout: WebNewDriver.WAIT_MS });
+    const entry = this.page.getByRole("menuitem", { name: "Archives", exact: true }).first();
+    await entry.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await entry.click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (pid: string) => new URL(location.href).pathname.includes(`/projects/${pid}/archives/issues`),
+      projectId,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
-  async archivesSelectArchivesTab(_tab: "Modules" | "Cycles"): Promise<void> {
-    return todo("archivesSelectArchivesTab");
+  async archivesSelectArchivesTab(tab: "Modules" | "Cycles"): Promise<void> {
+    const slug = tab.toLowerCase();
+    await this.page
+      .locator(`[data-testid="archives-tab-strip"] a[href*="/archives/${slug}"]`)
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      (key: string) => new URL(location.href).pathname.includes(`/archives/${key}`),
+      slug,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
-  async archivesClientNavigate(_path: string): Promise<void> {
-    return todo("archivesClientNavigate");
+  async archivesClientNavigate(path: string): Promise<void> {
+    await this.page.evaluate((target: string) => {
+      window.history.pushState({}, "", target);
+      window.dispatchEvent(new PopStateEvent("popstate", {}));
+    }, path);
+    await this.page.waitForFunction((target: string) => new URL(location.href).pathname.includes(target), path, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
   async archivesOpenLiveModulePeek(_name: string): Promise<void> {
     return todo("archivesOpenLiveModulePeek");
@@ -13315,8 +13441,23 @@ export class WebNewDriver implements ParityDriver {
   async archivesOpenLiveCycles(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("archivesOpenLiveCycles");
   }
-  async archivesDirectLoadRenders(_workspaceSlug: string, _projectId: string): Promise<boolean> {
-    return todo("archivesDirectLoadRenders");
+  async archivesDirectLoadRenders(workspaceSlug: string, projectId: string): Promise<boolean> {
+    // A fresh session carries no live visit: the tab either settles from
+    // its own fetch (fixed) or sits on the loader (NEWFRONT-228).
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/modules`, {
+      waitUntil: "domcontentloaded",
+    });
+    try {
+      await this.archivesStrip().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    } catch {
+      return false;
+    }
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (!(await this.archivesSkeletonVisible())) return true;
+      if (Date.now() >= deadline) return false;
+      await this.page.waitForTimeout(300);
+    }
   }
   async archivesAwaitModuleRow(_name: string): Promise<void> {
     return todo("archivesAwaitModuleRow");
@@ -13435,32 +13576,65 @@ export class WebNewDriver implements ParityDriver {
 
   // Archived work-items list, filters, display, peek (NEWFRONT-222,
   // ARCH-001..007). Oracle stage: web_new has no archives screens yet.
-  async archivesOpenIssuesList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesOpenIssuesList");
+  async archivesOpenIssuesList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.archivesGotoTab(`/${workspaceSlug}/projects/${projectId}/archives/issues`);
   }
-  async archivesOpenTab(_tab: "issues" | "cycles" | "modules"): Promise<void> {
-    return todo("archivesOpenTab");
+  async archivesOpenTab(tab: "issues" | "cycles" | "modules"): Promise<void> {
+    await this.archivesTabLink(tab).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL(`**/archives/${tab}**`, { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesTabNames(): Promise<string[]> {
-    return todo("archivesTabNames");
+    const names: string[] = [];
+    for (const tab of ["issues", "cycles", "modules"] as const) {
+      if ((await this.archivesTabLink(tab).count()) > 0) names.push(WebNewDriver.ARCHIVES_TAB_LABELS[tab]);
+    }
+    return names;
   }
   async archivesActiveTab(): Promise<string> {
-    return todo("archivesActiveTab");
+    // The strip marks active by pathname match, so read the address
+    // rather than the highlight paint: same outcome, no style coupling.
+    const path = new URL(this.page.url()).pathname;
+    for (const tab of ["issues", "cycles", "modules"] as const) {
+      if (path.endsWith(`/archives/${tab}`) || path.includes(`/archives/${tab}/`)) {
+        return WebNewDriver.ARCHIVES_TAB_LABELS[tab];
+      }
+    }
+    throw new Error(`[parity] current address is on no archives tab (${path}).`);
   }
   async archivesBackPresent(): Promise<boolean> {
-    return todo("archivesBackPresent");
+    return (await this.page.locator('[data-testid="archives-back"]').count()) > 0;
   }
   async archivesClickBack(): Promise<void> {
-    return todo("archivesClickBack");
+    await this.page.locator('[data-testid="archives-back"]').first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCountBadge(): Promise<string | null> {
-    return todo("archivesCountBadge");
+    // The badge renders beside the breadcrumb trail only while the count
+    // is positive; at zero the header carries no badge at all.
+    const badges = this.page.locator('[data-testid="archives-count-badge"]');
+    if ((await badges.count()) === 0) return null;
+    const text = (
+      (await badges
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return text === "" ? null : text;
   }
   async archivesCountBadgeTooltip(): Promise<string | null> {
-    return todo("archivesCountBadgeTooltip");
+    const badges = this.page.locator('[data-testid="archives-count-badge"]');
+    if ((await badges.count()) === 0) return null;
+    await badges.first().hover({ timeout: WebNewDriver.WAIT_MS });
+    const tip = this.page.getByRole("tooltip").first();
+    try {
+      await tip.waitFor({ state: "visible", timeout: 10_000 });
+    } catch {
+      return null;
+    }
+    const text = ((await tip.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
   async archivesPageTitle(): Promise<string> {
-    return todo("archivesPageTitle");
+    return this.page.title();
   }
   async archivesVisibleIssueNames(): Promise<string[]> {
     return todo("archivesVisibleIssueNames");
@@ -14255,11 +14429,15 @@ export class WebNewDriver implements ParityDriver {
   async archivesItemFailNextWrite(): Promise<void> {
     return todo("archivesItemFailNextWrite");
   }
-  async archivesTabOpen(_workspaceSlug: string, _projectId: string, _tab: ArchivesTab): Promise<void> {
-    return todo("archivesTabOpen");
+  async archivesTabOpen(workspaceSlug: string, projectId: string, tab: ArchivesTab): Promise<void> {
+    await this.archivesGotoTab(`/${workspaceSlug}/projects/${projectId}/archives/${tab}`);
   }
   async archivesActiveTabKey(): Promise<ArchivesTab> {
-    return todo("archivesActiveTabKey");
+    const after = this.page.url().split("/archives/")[1];
+    if (after === undefined) throw new Error(`[parity] no archives tab is active (${this.page.url()}).`);
+    if (after.startsWith("cycles")) return "cycles";
+    if (after.startsWith("modules")) return "modules";
+    return "issues";
   }
   async archivesRowMenuOpenFirst(_name: string): Promise<void> {
     return todo("archivesRowMenuOpenFirst");
@@ -14283,16 +14461,50 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesDetailBannerText");
   }
   async archivesSkeletonVisible(): Promise<boolean> {
-    return todo("archivesSkeletonVisible");
+    const probe = '.animate-shimmer, .animate-pulse, [data-testid*="skeleton" i]';
+    if ((await this.archivesContent().count()) > 0) {
+      return this.isShown(this.archivesContent().locator(probe).first());
+    }
+    // Before the shell mounts, fall back to a page-wide read.
+    return this.isShown(this.page.locator(probe).first());
   }
-  async archivesDelayNextListReads(_ms: number): Promise<void> {
-    return todo("archivesDelayNextListReads");
+  async archivesDelayNextListReads(ms: number): Promise<void> {
+    let remaining = 12;
+    await this.page.route(
+      (url) => /archived-(issues|cycles|modules)|archive\/$/.test(url.pathname),
+      async (route) => {
+        if (route.request().method() === "GET" && remaining > 0) {
+          remaining -= 1;
+          await new Promise((resolve) => setTimeout(resolve, ms));
+        }
+        await route.continue();
+      }
+    );
   }
   async archivesBeginTrafficSpy(): Promise<void> {
-    return todo("archivesBeginTrafficSpy");
+    this.archivesTraffic = { issuesReads: 0, cyclesReads: 0, modulesReads: 0, detailReads: 0, writes: 0 };
+    await this.page.route("**/api/**", async (route) => {
+      const req = route.request();
+      const url = req.url();
+      const method = req.method();
+      if (method === "GET") {
+        if (/\/archived-issues\/(\?|$)/.test(url)) this.archivesTraffic.issuesReads += 1;
+        else if (/\/archived-cycles\/(\?|$)/.test(url)) this.archivesTraffic.cyclesReads += 1;
+        else if (/\/archived-modules\/(\?|$)/.test(url)) this.archivesTraffic.modulesReads += 1;
+        else if (
+          /\/(issues|cycles|modules)\/[^/]+\/archive\/(\?|$)/.test(url) ||
+          /\/archived-(cycles|modules)\/[^/]+\/(\?|$)/.test(url)
+        ) {
+          this.archivesTraffic.detailReads += 1;
+        }
+      } else if ((method === "POST" || method === "DELETE") && /\/archive\/(\?|$)/.test(url)) {
+        this.archivesTraffic.writes += 1;
+      }
+      await route.continue();
+    });
   }
   async archivesTrafficCounts(): Promise<ArchivesTrafficCounts> {
-    return todo("archivesTrafficCounts");
+    return { ...this.archivesTraffic };
   }
   async archivesFilterControlVisible(): Promise<boolean> {
     return todo("archivesFilterControlVisible");
@@ -14312,11 +14524,15 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async archivesArmSkeletonObserver(): Promise<void> {
-    return todo("archivesArmSkeletonObserver");
+    // An init script survives the full navigation the tab open performs;
+    // it resets the flag on every later navigation, so arm right before.
+    await this.page.addInitScript(archivesSkeletonObserverBoot);
   }
 
   async archivesSkeletonWasSeen(): Promise<boolean> {
-    return todo("archivesSkeletonWasSeen");
+    return this.page
+      .evaluate(() => (window as unknown as Record<string, unknown>)["__paritySkeletonSeen"] === true)
+      .catch(() => false);
   }
   async archivesExportControlVisible(): Promise<boolean> {
     return todo("archivesExportControlVisible");
@@ -14327,14 +14543,34 @@ export class WebNewDriver implements ParityDriver {
   async archivesRowPresent(_name: string): Promise<boolean> {
     return todo("archivesRowPresent");
   }
-  async archivesPageTextPresent(_text: string): Promise<boolean> {
-    return todo("archivesPageTextPresent");
+  async archivesPageTextPresent(text: string): Promise<boolean> {
+    return this.isShown(this.page.getByText(text).first());
   }
-  async archivesPrimeAndEnter(_workspaceSlug: string, _projectId: string, _liveCycleName: string): Promise<void> {
-    return todo("archivesPrimeAndEnter");
+  async archivesPrimeAndEnter(workspaceSlug: string, projectId: string, liveCycleName: string): Promise<void> {
+    // Cold entry settles on web_new without priming; the live visit still
+    // warms the session, and the sidebar entry keeps one UI path into
+    // the archives for every spec that primes.
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles/`);
+    await this.page.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if (await this.archivesPageTextPresent(liveCycleName)) break;
+      if (Date.now() > deadline) {
+        throw new Error(`[parity] live cycle never rendered ${JSON.stringify(liveCycleName)}.`);
+      }
+      await this.page.waitForTimeout(500);
+    }
+    await this.archivesGoToProjectArchives(projectId);
+    await this.archivesStrip().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async archivesTabClick(_tab: ArchivesTab): Promise<void> {
-    return todo("archivesTabClick");
+  async archivesTabClick(tab: ArchivesTab): Promise<void> {
+    await this.archivesTabLink(tab).click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.archivesActiveTabKey()) === tab) return;
+      if (Date.now() > deadline) throw new Error(`[parity] archives tab never landed on ${tab}.`);
+      await this.page.waitForTimeout(300);
+    }
   }
 
   async cyclesEditOpenUpdateDialog(_name: string): Promise<void> {
@@ -14603,8 +14839,15 @@ export class WebNewDriver implements ParityDriver {
   }
   // --- Archived work-item mutations (NEWFRONT-223, ARCH-008..013). ---
 
-  async archivesOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesOpenList");
+  async archivesOpenList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.archivesGotoTab(`/${workspaceSlug}/projects/${projectId}/archives/issues`);
+    // Settle past the first fetch — rows, empty, or no-match, whichever
+    // the tab owns — with a bounded wait so a stuck loader still returns.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    while (Date.now() < deadline) {
+      if (!(await this.archivesSkeletonVisible())) return;
+      await this.page.waitForTimeout(300);
+    }
   }
 
   async archivesMutationVisibleIssueNames(): Promise<string[]> {
