@@ -99,3 +99,20 @@ export {
 } from "./repository/api.js";
 export { GeneralSkeleton, ProjectSettingsGeneralTab, SAVE_LABEL, SAVING_LABEL } from "./general/GeneralTabScreen.js";
 export type { GeneralTabProps } from "./general/GeneralTabScreen.js";
+export {
+  LOST_RUNNER_RULE_SAVE_FAILED_MESSAGE,
+  LOST_RUNNER_RULE_SAVE_FAILED_TITLE,
+  LOST_RUNNER_RULE_SAVED_MESSAGE,
+  LOST_RUNNER_RULE_SAVED_TITLE,
+  useSaveLostRunnerRule,
+} from "./ai-workers/api/mutations.js";
+export { AiWorkersSkeleton, ProjectSettingsAiWorkersTab } from "./ai-workers/AiWorkersTabScreen.js";
+export type { AiWorkersTabProps } from "./ai-workers/AiWorkersTabScreen.js";
+export {
+  DEFAULT_LOST_RUNNER_RULE,
+  LOST_RUNNER_RULE_OPTIONS,
+  buildLostRunnerRulePayload,
+  lostRunnerRuleFrom,
+  lostRunnerRuleLabel,
+} from "./ai-workers/rules.js";
+export type { LostRunnerRule, LostRunnerRuleOption } from "./ai-workers/rules.js";

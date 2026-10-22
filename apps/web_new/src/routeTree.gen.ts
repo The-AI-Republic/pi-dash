@@ -105,6 +105,7 @@ import { Route as WsGatedSettingsWorkspaceMembersIndexRouteImport } from './rout
 import { Route as WsGatedSettingsWorkspaceWebhooksIndexRouteImport } from './routes/$ws/_gated/settings/_workspace/webhooks/index'
 import { Route as WsGatedSettingsWorkspaceWebhooksWebhookIdRouteImport } from './routes/$ws/_gated/settings/_workspace/webhooks/$webhookId'
 import { Route as WsGatedSettingsProjectsProjectIdIndexRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/index'
+import { Route as WsGatedSettingsProjectsProjectIdAiWorkersRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/ai-workers'
 import { Route as WsGatedSettingsProjectsProjectIdAutomationsRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/automations'
 import { Route as WsGatedSettingsProjectsProjectIdEstimatesRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/estimates'
 import { Route as WsGatedSettingsProjectsProjectIdGithubRouteImport } from './routes/$ws/_gated/settings/projects/$projectId/github'
@@ -650,6 +651,12 @@ const WsGatedSettingsProjectsProjectIdIndexRoute =
     path: '/settings/projects/$projectId/',
     getParentRoute: () => WsGatedRouteRoute,
   } as any)
+const WsGatedSettingsProjectsProjectIdAiWorkersRoute =
+  WsGatedSettingsProjectsProjectIdAiWorkersRouteImport.update({
+    id: '/settings/projects/$projectId/ai-workers',
+    path: '/settings/projects/$projectId/ai-workers',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
 const WsGatedSettingsProjectsProjectIdAutomationsRoute =
   WsGatedSettingsProjectsProjectIdAutomationsRouteImport.update({
     id: '/settings/projects/$projectId/automations',
@@ -822,6 +829,7 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/settings/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
+  '/$ws/settings/projects/$projectId/ai-workers': typeof WsGatedSettingsProjectsProjectIdAiWorkersRoute
   '/$ws/settings/projects/$projectId/automations': typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   '/$ws/settings/projects/$projectId/estimates': typeof WsGatedSettingsProjectsProjectIdEstimatesRoute
   '/$ws/settings/projects/$projectId/github': typeof WsGatedSettingsProjectsProjectIdGithubRoute
@@ -921,6 +929,7 @@ export interface FileRoutesByTo {
   '/$ws/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/settings/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
+  '/$ws/settings/projects/$projectId/ai-workers': typeof WsGatedSettingsProjectsProjectIdAiWorkersRoute
   '/$ws/settings/projects/$projectId/automations': typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   '/$ws/settings/projects/$projectId/estimates': typeof WsGatedSettingsProjectsProjectIdEstimatesRoute
   '/$ws/settings/projects/$projectId/github': typeof WsGatedSettingsProjectsProjectIdGithubRoute
@@ -1035,6 +1044,7 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/schedulers/list': typeof WsGatedProjectsProjectIdSchedulersListRoute
   '/$ws/_gated/projects/$projectId/settings/$': typeof WsGatedProjectsProjectIdSettingsSplatRoute
   '/$ws/_gated/settings/_workspace/webhooks/$webhookId': typeof WsGatedSettingsWorkspaceWebhooksWebhookIdRoute
+  '/$ws/_gated/settings/projects/$projectId/ai-workers': typeof WsGatedSettingsProjectsProjectIdAiWorkersRoute
   '/$ws/_gated/settings/projects/$projectId/automations': typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   '/$ws/_gated/settings/projects/$projectId/estimates': typeof WsGatedSettingsProjectsProjectIdEstimatesRoute
   '/$ws/_gated/settings/projects/$projectId/github': typeof WsGatedSettingsProjectsProjectIdGithubRoute
@@ -1148,6 +1158,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/schedulers/list'
     | '/$ws/projects/$projectId/settings/$'
     | '/$ws/settings/webhooks/$webhookId'
+    | '/$ws/settings/projects/$projectId/ai-workers'
     | '/$ws/settings/projects/$projectId/automations'
     | '/$ws/settings/projects/$projectId/estimates'
     | '/$ws/settings/projects/$projectId/github'
@@ -1247,6 +1258,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/schedulers/list'
     | '/$ws/projects/$projectId/settings/$'
     | '/$ws/settings/webhooks/$webhookId'
+    | '/$ws/settings/projects/$projectId/ai-workers'
     | '/$ws/settings/projects/$projectId/automations'
     | '/$ws/settings/projects/$projectId/estimates'
     | '/$ws/settings/projects/$projectId/github'
@@ -1360,6 +1372,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/schedulers/list'
     | '/$ws/_gated/projects/$projectId/settings/$'
     | '/$ws/_gated/settings/_workspace/webhooks/$webhookId'
+    | '/$ws/_gated/settings/projects/$projectId/ai-workers'
     | '/$ws/_gated/settings/projects/$projectId/automations'
     | '/$ws/_gated/settings/projects/$projectId/estimates'
     | '/$ws/_gated/settings/projects/$projectId/github'
@@ -2088,6 +2101,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedSettingsProjectsProjectIdIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/$ws/_gated/settings/projects/$projectId/ai-workers': {
+      id: '/$ws/_gated/settings/projects/$projectId/ai-workers'
+      path: '/settings/projects/$projectId/ai-workers'
+      fullPath: '/$ws/settings/projects/$projectId/ai-workers'
+      preLoaderRoute: typeof WsGatedSettingsProjectsProjectIdAiWorkersRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
     '/$ws/_gated/settings/projects/$projectId/automations': {
       id: '/$ws/_gated/settings/projects/$projectId/automations'
       path: '/settings/projects/$projectId/automations'
@@ -2396,6 +2416,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedSettingsAccountSplatRoute: typeof WsGatedSettingsAccountSplatRoute
   WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
   WsGatedSettingsProjectsIndexRoute: typeof WsGatedSettingsProjectsIndexRoute
+  WsGatedSettingsProjectsProjectIdAiWorkersRoute: typeof WsGatedSettingsProjectsProjectIdAiWorkersRoute
   WsGatedSettingsProjectsProjectIdAutomationsRoute: typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   WsGatedSettingsProjectsProjectIdEstimatesRoute: typeof WsGatedSettingsProjectsProjectIdEstimatesRoute
   WsGatedSettingsProjectsProjectIdGithubRoute: typeof WsGatedSettingsProjectsProjectIdGithubRoute
@@ -2433,6 +2454,8 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedSettingsAccountSplatRoute: WsGatedSettingsAccountSplatRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
   WsGatedSettingsProjectsIndexRoute: WsGatedSettingsProjectsIndexRoute,
+  WsGatedSettingsProjectsProjectIdAiWorkersRoute:
+    WsGatedSettingsProjectsProjectIdAiWorkersRoute,
   WsGatedSettingsProjectsProjectIdAutomationsRoute:
     WsGatedSettingsProjectsProjectIdAutomationsRoute,
   WsGatedSettingsProjectsProjectIdEstimatesRoute:
