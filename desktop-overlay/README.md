@@ -78,6 +78,9 @@ desktop/src-tauri/dist/
 - `apps/web/core/components/desktop-update-button.tsx` — the corner button
   beside the sidebar's user menu while an app update is waiting (found by
   the daily check, or deferred at launch); clicking it installs and restarts.
+- `apps/web/core/components/desktop-about-button.tsx` — the About button in
+  that same corner; its dialog shows the app version and the licence texts
+  bundled under `desktop/src-tauri/licenses/`.
 - `apps/web/core/utils/desktop-web-url.ts` — resolves an in-app path against
   `VITE_WEB_BASE_URL` (baked by `dev-prep.sh`, defaulting to `PI_DASH_URL`).
   Bundled pages run on a Tauri-owned origin, so anything that builds a
