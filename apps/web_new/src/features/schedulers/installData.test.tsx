@@ -14,6 +14,8 @@ const { contracts } = vi.hoisted(() => ({
   contracts: {
     createSchedulerBinding: vi.fn(),
     deleteSchedulerBinding: vi.fn(),
+    getSchedulerBinding: vi.fn(),
+    listBindingRuns: vi.fn(),
     listSchedulerBindings: vi.fn(),
     updateSchedulerBinding: vi.fn(),
   },
@@ -27,9 +29,12 @@ vi.mock("../../shared/shell/index.js", () => ({ notifyError: vi.fn(), notifySucc
 
 import { notifyError, notifySuccess } from "../../shared/shell/index.js";
 import {
+  bindingDetailQueryOptions,
   bindingKeys,
+  bindingRunsQueryOptions,
   bindingsQueryOptions,
   invalidateInstalls,
+  RUNS_POLL_INTERVAL_MS,
   schedulerCatalogKey,
   useInstallSchedulerBinding,
   useSchedulerBindings,
@@ -101,6 +106,28 @@ describe("binding keys and query", () => {
     const [clientArg, slug, projectId] = contracts.listSchedulerBindings.mock.calls[0] as unknown[];
     expect(clientArg).toBe(client);
     expect([slug, projectId]).toEqual([SLUG, PROJECT]);
+  });
+
+  it("reads one install through the contract", async () => {
+    const row = binding();
+    contracts.getSchedulerBinding.mockResolvedValue(row);
+    const client = { getJson: vi.fn(), parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = bindingDetailQueryOptions(client, SLUG, PROJECT, "b1");
+    expect(options.queryKey).toEqual(bindingKeys.detail(SLUG, PROJECT, "b1"));
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(row);
+    expect(contracts.getSchedulerBinding).toHaveBeenCalledWith(client, SLUG, PROJECT, "b1");
+  });
+
+  it("re-reads run history on the fifteen-second poll", async () => {
+    const page = { results: [], total_count: 0, total_pages: 1 };
+    contracts.listBindingRuns.mockResolvedValue(page);
+    const client = { getJson: vi.fn(), parse: (_schema: unknown, data: unknown) => data } as never;
+    const options = bindingRunsQueryOptions(client, SLUG, PROJECT, "b1", 2);
+    expect(options.queryKey).toEqual(bindingKeys.runs(SLUG, PROJECT, "b1", 2));
+    expect(RUNS_POLL_INTERVAL_MS).toBe(15_000);
+    expect(options.refetchInterval).toBe(RUNS_POLL_INTERVAL_MS);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual(page);
+    expect(contracts.listBindingRuns).toHaveBeenCalledWith(client, SLUG, PROJECT, "b1", { page: 2 });
   });
 
   it("subscribes a hook to the same query", async () => {
