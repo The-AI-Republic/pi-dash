@@ -85,7 +85,10 @@ no-auth 500).
 - `fx-run-08-handlers-web.golden.json` — FX-RUN-08 — `runner/views/runs.py:1-695`
   (list :131-219, create :221-345, run_ai :347-388, comment_and_run :420-466,
   re-tick :482-523, detail :530-542, cancel :549-639, release-pin :656-695);
-  `runner/views/approvals.py:1-105`; `runner/views/metrics.py:1-105`;
+  `runner/views/approvals.py:1-105`; `runner/views/metrics.py:1-105`
+  (`metrics` re-recorded for MR-11 / PDASHOSS01-119 from `metrics.py` at
+  `d6676db8`: managed-runner online gauge, `pi_dash_runs_total` counter,
+  queued-wait histogram + five `histogram_cases`);
   `runner/signals.py:1-66` (`create_default_pod_for_new_project` :32-66 —
   "ensure-default-pod" in the issue is descriptive only); serializer shapes
   `runner/serializers.py` run :260-317 + approval :320-339.

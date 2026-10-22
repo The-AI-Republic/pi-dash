@@ -103,7 +103,7 @@
 //! * [`runs`] — run list / create (`comment_and_run`, `run_ai`, direct),
 //!   re-tick, detail (`+include_events`), cancel, release-pin.
 //! * [`approvals`] — creator-routed approval list + decide.
-//! * [`metrics`] — the five Prometheus gauges (AllowAny, `text/plain`).
+//! * [`metrics`] — the Prometheus series (AllowAny, `text/plain`).
 //! * [`signals`] — `create_default_pod_for_new_project` as an explicit
 //!   post-commit fn (the project-creation owner wires the call; that
 //!   wiring belongs to that domain's split, not this issue).

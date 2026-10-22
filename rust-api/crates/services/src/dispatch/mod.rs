@@ -6,6 +6,8 @@
 //!   (`cloud_agent/admission.py`, `cloud_agent/api.py`,
 //!   `cloud_agent/checks.py`, `managed_runner/policy.py`,
 //!   `managed_runner/checks.py`, `managed_runner/permissions.py`).
+//! * [`events`] — managed-runner run-creation events
+//!   (`managed_runner/signals.py`).
 //! * [`tools`] — run toolset: `build_tools` gate, tool closures, GitHub
 //!   adapter, model routing, CE seams (`cloud_agent/tools.py`,
 //!   `cloud_agent/github_mcp.py`, `cloud_agent/model.py`,
@@ -23,6 +25,7 @@
 //! Ported from `01a93e17216faea7bfc156b0f864cbbe420d1c52`.
 
 pub mod admission;
+pub mod events;
 pub mod policy;
 pub mod tools;
 
