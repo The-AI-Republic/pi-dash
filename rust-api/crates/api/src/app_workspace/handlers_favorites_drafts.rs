@@ -3379,9 +3379,7 @@ fn compile_draft_filters(
                 }
             }
             "created_at" => compile_date_param(&mut insert, "created_at__date", raw, now),
-            // BUG: the `updated_at` param filters `created_at`
-            // (`issue_filters.py:236`), overwriting that param's keys.
-            "updated_at" => compile_date_param(&mut insert, "created_at__date", raw, now),
+            "updated_at" => compile_date_param(&mut insert, "updated_at__date", raw, now),
             "start_date" => compile_date_param(&mut insert, "start_date", raw, now),
             "target_date" => compile_date_param(&mut insert, "target_date", raw, now),
             "completed_at" => compile_date_param(&mut insert, "completed_at__date", raw, now),
@@ -3556,6 +3554,7 @@ fn compile_date_param(
     }
     let column = match term {
         "created_at__date" => "CAST(draft_issues.created_at AS DATE)",
+        "updated_at__date" => "CAST(draft_issues.updated_at AS DATE)",
         "completed_at__date" => "CAST(draft_issues.completed_at AS DATE)",
         "start_date" => "draft_issues.start_date",
         "target_date" => "draft_issues.target_date",

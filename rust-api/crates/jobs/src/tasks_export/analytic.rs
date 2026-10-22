@@ -405,6 +405,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "created_at__date" => "\"issues\".\"created_at\"::date",
+        "updated_at__date" => "\"issues\".\"updated_at\"::date",
         "completed_at__date" => "\"issues\".\"completed_at\"::date",
         "start_date" => "\"issues\".\"start_date\"",
         "target_date" => "\"issues\".\"target_date\"",
@@ -486,6 +487,7 @@ fn filter_text_sql(binds: &mut Binds, name: &str, text: &str) -> Result<String, 
     };
     let column = match term {
         "created_at__date" => "\"issues\".\"created_at\"::date",
+        "updated_at__date" => "\"issues\".\"updated_at\"::date",
         "completed_at__date" => "\"issues\".\"completed_at\"::date",
         "start_date" => "\"issues\".\"start_date\"",
         "target_date" => "\"issues\".\"target_date\"",

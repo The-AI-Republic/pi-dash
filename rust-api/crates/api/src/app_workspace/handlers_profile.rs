@@ -1423,8 +1423,8 @@ fn insert_stats_joins(statement: String, joins: &str) -> Result<String, Denial> 
 
 /// Compile the legacy predicates for the Q7 subscriber scope
 /// (`user.py:484-494`): the SAME `**filters` dict, resolved against
-/// `IssueSubscriber`. Only `created_by`, `project` and `created_at`
-/// lookups resolve there; every other name is a Django `FieldError` →
+/// `IssueSubscriber`. Only `created_by`, `project`, `created_at` and
+/// `updated_at` lookups resolve there; every other name is a Django `FieldError` →
 /// generic 500. Date validation mirrors the pilot compiler (garbage
 /// bounds are `ValidationError` → 400 invalid detail).
 fn subscriber_legacy_sql(
@@ -1468,9 +1468,11 @@ fn subscriber_legacy_sql(
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => "sub.created_at",
+                "updated_at__date" => "sub.updated_at",
+                _ => return Err(Denial::ServerError),
+            };
             if text.parse::<chrono::NaiveDate>().is_err()
                 && chrono::DateTime::parse_from_rfc3339(text).is_err()
             {
@@ -1483,12 +1485,12 @@ fn subscriber_legacy_sql(
                         .replace('%', "\\%")
                         .replace('_', "\\_");
                     let holder = binder.bind_string(format!("%{escaped}%"));
-                    Ok(format!("sub.created_at::text LIKE {holder}"))
+                    Ok(format!("{column}::text LIKE {holder}"))
                 }
                 "gte" | "lte" => {
                     let holder = binder.bind_string(text.clone());
                     let operator = if operator == "gte" { ">=" } else { "<=" };
-                    Ok(format!("sub.created_at::date {operator} {holder}::date"))
+                    Ok(format!("{column}::date {operator} {holder}::date"))
                 }
                 _ => Err(Denial::ServerError),
             }
@@ -1498,16 +1500,18 @@ fn subscriber_legacy_sql(
             let Some((term, operator)) = name.rsplit_once("__") else {
                 return Err(Denial::ServerError);
             };
-            if term != "created_at__date" {
-                return Err(Denial::ServerError);
-            }
+            let column = match term {
+                "created_at__date" => "sub.created_at",
+                "updated_at__date" => "sub.updated_at",
+                _ => return Err(Denial::ServerError),
+            };
             let operator = match operator {
                 "gte" => ">=",
                 "lte" => "<=",
                 _ => return Err(Denial::ServerError),
             };
             let holder = binder.bind_string(day.to_string());
-            Ok(format!("sub.created_at::date {operator} {holder}::date"))
+            Ok(format!("{column}::date {operator} {holder}::date"))
         }
         FilterValue::Null => {
             if name != "created_by" {

@@ -12,7 +12,6 @@
 //!
 //! Ported bugs (also listed in the PR):
 //!
-//! - `filter_updated_at` writes `created_at__date`, never `updated_at__date`.
 //! - `filter_intake_status` on POST reads the `inbox_status` param.
 //! - The `"" not in ...` guard is dead for UUID filters: it runs on parsed
 //!   `Uuid` values, which never equal `""`, so trailing commas do not veto.
@@ -568,7 +567,6 @@ pub fn issue_filters_get(
                     filter_name_value(&mut out, prefix, FilterValue::Text(name.clone()));
                 }
             }
-            // Ported bug: updated_at writes created_at__date.
             "created_at" => get_date_param(
                 &mut out,
                 params,
@@ -580,7 +578,7 @@ pub fn issue_filters_get(
                 &mut out,
                 params,
                 "updated_at",
-                &format!("{prefix}created_at__date"),
+                &format!("{prefix}updated_at__date"),
                 today,
             )?,
             "start_date" => get_date_param(
@@ -722,7 +720,6 @@ pub fn issue_filters_post(
                 }
                 _ => {}
             },
-            // Ported bug: updated_at writes created_at__date.
             "created_at" => post_date_param(
                 &mut out,
                 params,
@@ -734,7 +731,7 @@ pub fn issue_filters_post(
                 &mut out,
                 params,
                 "updated_at",
-                &format!("{prefix}created_at__date"),
+                &format!("{prefix}updated_at__date"),
                 today,
             )?,
             // POST stores the value raw (`issue_filter[...] =
@@ -1035,12 +1032,38 @@ mod tests {
     }
 
     #[test]
-    fn updated_at_writes_created_at_date() {
-        let filter =
-            issue_filters_get(&get_map(&[("updated_at", "2024-01-01;after")]), "", today())
-                .unwrap();
-        assert!(filter.get("created_at__date__gte").is_some());
-        assert!(filter.get("updated_at__date__gte").is_none());
+    fn updated_at_writes_updated_at_date() {
+        let range = "2024-01-01;after,2024-01-02;before";
+        let filter = issue_filters_get(&get_map(&[("updated_at", range)]), "", today()).unwrap();
+        assert!(filter.get("created_at__date__gte").is_none());
+        assert!(filter.get("updated_at__date__gte").is_some());
+        assert!(filter.get("updated_at__date__lte").is_some());
+        let intake =
+            issue_filters_get(&get_map(&[("updated_at", range)]), "issue__", today()).unwrap();
+        assert!(intake.get("issue__updated_at__date__gte").is_some());
+        assert!(intake.get("issue__created_at__date__gte").is_none());
+    }
+
+    #[test]
+    fn post_updated_at_writes_updated_at_date() {
+        let range = PostVal::List(vec![
+            "2024-01-01;after".to_owned(),
+            "2024-01-02;before".to_owned(),
+        ]);
+        for prefix in ["", "issue__"] {
+            let filter =
+                issue_filters_post(&post_map(&[("updated_at", range.clone())]), prefix, today())
+                    .unwrap();
+            assert!(filter
+                .get(&format!("{prefix}updated_at__date__gte"))
+                .is_some());
+            assert!(filter
+                .get(&format!("{prefix}updated_at__date__lte"))
+                .is_some());
+            assert!(filter
+                .get(&format!("{prefix}created_at__date__gte"))
+                .is_none());
+        }
     }
 
     #[test]

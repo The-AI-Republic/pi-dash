@@ -4090,6 +4090,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -4134,6 +4135,7 @@ fn compile_text_predicate(
     };
     let column = match term {
         "issue__created_at__date" => "\"issues\".\"created_at\"::date",
+        "issue__updated_at__date" => "\"issues\".\"updated_at\"::date",
         "issue__completed_at__date" => "\"issues\".\"completed_at\"::date",
         "issue__start_date" => "\"issues\".\"start_date\"",
         "issue__target_date" => "\"issues\".\"target_date\"",
@@ -6192,6 +6194,26 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn updated_at_predicates_hit_the_issue_updated_column() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let (mut binds, mut next) = (Vec::new(), 1);
+        let sql = compile_predicate(
+            "issue__updated_at__date__gte",
+            &FilterValue::Day(day),
+            &mut binds,
+            &mut next,
+        )
+        .expect("compiles")
+        .expect("known key");
+        assert_eq!(sql, "\"issues\".\"updated_at\"::date >= $1::date");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql = compile_predicate("issue__updated_at__date__lte", &text, &mut binds, &mut next)
+            .expect("compiles")
+            .expect("known key");
+        assert!(sql.starts_with("\"issues\".\"updated_at\"::date"), "{sql}");
+    }
 
     #[test]
     fn validate_datetime_iso8601_literal_fallback() {

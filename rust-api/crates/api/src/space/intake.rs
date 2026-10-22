@@ -63,8 +63,6 @@
 //!   Django, not the builder.
 //! * QUIRK-pop-mutates (`:197`): a missing/non-dict `issue` key raises
 //!   (`AttributeError`) → the 500 envelope (verified live).
-//! * QUIRK-updated_at-filter (`utils/issue_filters.py`): `updated_at`
-//!   filters `created_at` (owned by [`super::filters`]).
 //! * Dead `allow_triage_state`/`project_id` serializer context (`:215`):
 //!   accepted and ignored — the app `validate` reads `allow_triage_state`
 //!   but the 3-key subset never carries `state`, and `update` never reads

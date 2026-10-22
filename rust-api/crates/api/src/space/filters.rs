@@ -14,8 +14,6 @@
 //!
 //! Ported quirks (translate, don't redesign):
 //!
-//! * `updated_at` filters `created_at` (`filter_updated_at` passes
-//!   `date_term="created_at__date"`).
 //! * `type` scopes `state__group__in` only when the key is present
 //!   (`issue_filters.py:462-466`); absent adds nothing, so triage-state
 //!   rows stay listed. Present-but-unknown (incl. `"all"`) means the seven
@@ -485,8 +483,7 @@ impl Compiler {
     }
 
     fn key_updated_at(&mut self, query: &QueryMap) -> Result<(), FilterError> {
-        // PORTED BUG: filters `created_at`, not `updated_at`.
-        self.date_list(query, "updated_at", "created_at__date", false)
+        self.date_list(query, "updated_at", "updated_at__date", false)
     }
 
     fn key_start_date(&mut self, query: &QueryMap) -> Result<(), FilterError> {
@@ -642,6 +639,7 @@ impl Compiler {
 fn date_column(date_term: &str, is_date_column: bool) -> String {
     let base = match date_term {
         "created_at__date" => "\"issues\".\"created_at\" AT TIME ZONE UTC",
+        "updated_at__date" => "\"issues\".\"updated_at\" AT TIME ZONE UTC",
         "completed_at__date" => "\"issues\".\"completed_at\" AT TIME ZONE UTC",
         _ => date_term,
     };

@@ -1038,6 +1038,7 @@ fn day_comparison(name: &str) -> Option<(&'static str, &'static str)> {
     let (term, operator) = name.rsplit_once("__")?;
     let column = match term {
         "created_at__date" => "issue.created_at::date",
+        "updated_at__date" => "issue.updated_at::date",
         "completed_at__date" => "issue.completed_at::date",
         "start_date" => "issue.start_date",
         "target_date" => "issue.target_date",
@@ -1076,6 +1077,7 @@ fn legacy_text_sql(binder: &mut Binder, name: &str, text: &str) -> Result<String
         };
         let column = match term {
             "created_at__date" => "issue.created_at::date",
+            "updated_at__date" => "issue.updated_at::date",
             "completed_at__date" => "issue.completed_at::date",
             "start_date" => "issue.start_date",
             "target_date" => "issue.target_date",
@@ -3241,6 +3243,18 @@ mod tests {
         let id = uuid::Uuid::nil();
         let sql = legacy_sql(&mut binder, "state__in", &FilterValue::Uuids(vec![id])).expect("sql");
         assert!(sql.starts_with("issue.state_id IN ($"));
+    }
+
+    #[test]
+    fn legacy_updated_at_predicates_hit_the_updated_column() {
+        let mut binder = Binder::new();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 1, 12).expect("day");
+        let sql =
+            legacy_sql(&mut binder, "updated_at__date__gte", &FilterValue::Day(day)).expect("sql");
+        assert!(sql.starts_with("issue.updated_at::date >= "), "{sql}");
+        let text = FilterValue::Text("2026-01-12".to_owned());
+        let sql = legacy_sql(&mut binder, "updated_at__date__lte", &text).expect("sql");
+        assert!(sql.starts_with("issue.updated_at::date"), "{sql}");
     }
 
     #[test]
