@@ -610,6 +610,15 @@ def seed():
 
     from pi_dash.db.models import Cycle, Module, Page, ProjectPage  # noqa: E402
 
+    # The cycles contracts (NEWFRONT-706) create, edit and archive cycles
+    # through the project routes, and the API refuses those writes unless
+    # the project enables cycles. Existing scratch workspaces are repaired
+    # here rather than only on first creation.
+    if not project.cycle_view:
+        project.cycle_view = True
+        project.save(update_fields=["cycle_view"])
+    note("project-cycle-view", project.identifier, not project_created)
+
     cycle, cycle_created = Cycle.objects.get_or_create(
         workspace=workspace,
         project=project,
