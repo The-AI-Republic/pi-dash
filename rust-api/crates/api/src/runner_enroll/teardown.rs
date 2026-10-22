@@ -2379,11 +2379,17 @@ async fn fire_bundle(pool: &PgPool, state: &AppState, bundle: EffectBundle) -> R
 /// The self-revoke row delete (`enrollment.py:533`):
 /// `Runner.objects.filter(pk).delete()` runs Django's collector over the
 /// one row — same sequence as `delete_collected_runner_rows` (restated
-/// order, shared builders), on the pool (no tx on this path).
+/// order, shared builders). Like `QuerySet.delete()`, the whole cascade
+/// runs inside one transaction: `Collector.delete` wraps every
+/// cascade/SET_NULL/delete statement in `transaction.atomic(using,
+/// savepoint=False)` (`django/db/models/deletion.py`), so a failure on any
+/// statement rolls the lot back. Running the statements autocommit on the
+/// pool left partial deletes committed when a later one failed.
 async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), ()> {
+    let mut tx = pool.begin().await.map_err(|_| ())?;
     let root: Option<sqlx::postgres::PgRow> = sqlx::query(delete_kernel::COLLECT_RUNNER_BY_ID_SQL)
         .bind(runner_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|_| ())?;
     if root.is_none() {
@@ -2391,7 +2397,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
     }
     let chat_ids: Vec<Uuid> = sqlx::query_scalar(&delete_kernel::collect_chat_ids_sql(1))
         .bind(runner_id)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|_| ())?;
     let mut message_ids: Vec<Uuid> = Vec::new();
@@ -2401,7 +2407,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for chat_id in &chat_ids {
             fetched = fetched.bind(*chat_id);
         }
-        message_ids = fetched.fetch_all(pool).await.map_err(|_| ())?;
+        message_ids = fetched.fetch_all(&mut *tx).await.map_err(|_| ())?;
         let events_sql = delete_kernel::delete_chat_events_sql(chat_ids.len());
         let approvals_sql = delete_kernel::delete_chat_approvals_sql(chat_ids.len());
         let dedupes_sql = delete_kernel::delete_chat_dedupes_sql(chat_ids.len());
@@ -2413,33 +2419,33 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
             approvals = approvals.bind(*chat_id);
             dedupes = dedupes.bind(*chat_id);
         }
-        events.execute(pool).await.map_err(|_| ())?;
-        approvals.execute(pool).await.map_err(|_| ())?;
-        dedupes.execute(pool).await.map_err(|_| ())?;
+        events.execute(&mut *tx).await.map_err(|_| ())?;
+        approvals.execute(&mut *tx).await.map_err(|_| ())?;
+        dedupes.execute(&mut *tx).await.map_err(|_| ())?;
     }
     sqlx::query(&delete_kernel::delete_runner_sessions_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::delete_force_refresh_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::delete_live_state_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::null_run_runners_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     sqlx::query(&delete_kernel::null_run_pins_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
     if !message_ids.is_empty() {
@@ -2448,7 +2454,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for message_id in &message_ids {
             nulls = nulls.bind(*message_id);
         }
-        nulls.execute(pool).await.map_err(|_| ())?;
+        nulls.execute(&mut *tx).await.map_err(|_| ())?;
     }
     if !message_ids.is_empty() {
         let deletes_sql = delete_kernel::delete_chat_messages_sql(message_ids.len());
@@ -2456,7 +2462,7 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for message_id in &message_ids {
             deletes = deletes.bind(*message_id);
         }
-        deletes.execute(pool).await.map_err(|_| ())?;
+        deletes.execute(&mut *tx).await.map_err(|_| ())?;
     }
     if !chat_ids.is_empty() {
         let deletes_sql = delete_kernel::delete_chat_sessions_sql(chat_ids.len());
@@ -2464,13 +2470,16 @@ async fn delete_collected_runner(pool: &PgPool, runner_id: Uuid) -> Result<(), (
         for chat_id in &chat_ids {
             deletes = deletes.bind(*chat_id);
         }
-        deletes.execute(pool).await.map_err(|_| ())?;
+        deletes.execute(&mut *tx).await.map_err(|_| ())?;
     }
     sqlx::query(&delete_kernel::delete_runner_rows_sql(1))
         .bind(runner_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
+    if tx.commit().await.is_err() {
+        return Err(());
+    }
     Ok(())
 }
 
