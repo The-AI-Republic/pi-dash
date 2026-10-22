@@ -30,6 +30,7 @@ import {
   type IssueTypeExtensionProps,
 } from "../create/issueTypeSeam.js";
 import { loadWorkItemDraft } from "../lib/createDraft.js";
+import { AI_BUTTON_LABEL } from "../create/ModalDescription.js";
 import { CREATE_DIALOG_TITLE, WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
 // These cases drive the whole strip through real menus, calendars and a
@@ -294,6 +295,10 @@ interface StubOptions {
   issueDetail?: Record<string, unknown>;
   /** Hold a description image upload so the editor's busy state shows. */
   uploadDelayMs?: number;
+  /** The instance bootstrap's editor-AI flag; unset answers keyless. */
+  instanceLlm?: boolean;
+  /** Answer the bootstrap as an unprovisioned instance (no envelope). */
+  instanceUnprovisioned?: boolean;
 }
 
 interface Call {
@@ -403,6 +408,52 @@ function stubTransport(options: StubOptions = {}) {
         updated_by: null,
         created_at: "2026-01-01T00:00:00Z",
         updated_at: "2026-01-01T00:00:00Z",
+      });
+    }
+    if (url.endsWith("/api/instances/")) {
+      if (options.instanceUnprovisioned === true) {
+        return json(200, { is_activated: false, is_setup_done: false });
+      }
+      return json(200, {
+        config: {
+          enable_signup: false,
+          is_workspace_creation_disabled: false,
+          is_google_enabled: false,
+          is_github_enabled: false,
+          is_gitlab_enabled: false,
+          is_gitea_enabled: false,
+          is_magic_login_enabled: false,
+          is_email_password_enabled: true,
+          is_smtp_configured: false,
+          is_self_managed: true,
+          instance_changelog_url: "",
+          has_llm_configured: options.instanceLlm ?? false,
+        },
+        instance: {
+          id: "33333333-3333-4333-8333-333333333333",
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+          created_by: null,
+          updated_by: null,
+          deleted_at: null,
+          instance_name: "test",
+          whitelist_emails: null,
+          instance_id: "test",
+          current_version: "1.0.0",
+          latest_version: null,
+          edition: "oss",
+          domain: "test",
+          last_checked_at: "2026-01-01T00:00:00Z",
+          namespace: null,
+          is_telemetry_enabled: false,
+          is_support_required: false,
+          is_setup_done: true,
+          is_signup_screen_visited: true,
+          is_verified: false,
+          is_test: true,
+          is_current_version_deprecated: false,
+          workspaces_exist: true,
+        },
       });
     }
     if (url.endsWith("/api/users/me/ai-assistant/config/")) {
@@ -1176,6 +1227,25 @@ describe("WorkItemCreateDialog full field strip (ISS-117)", () => {
     );
     expect(posts(h.sent)).toHaveLength(1);
     expect(h.onCreated).toHaveBeenCalledWith(CREATED_ID);
+  });
+});
+
+describe("WorkItemCreateDialog writing help (AGT-063)", () => {
+  it("offers the description helper only when the instance holds an LLM key", async () => {
+    setup({ instanceLlm: true });
+    expect(await screen.findByRole("button", { name: AI_BUTTON_LABEL })).toBeInTheDocument();
+  });
+
+  it("hides the helper on a keyless instance even with a member provider key", async () => {
+    setup({ assistant: { model_name: "pilot", has_api_key: true } });
+    await waitFor(() => expect(screen.getByRole("heading", { name: CREATE_DIALOG_TITLE })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("button", { name: AI_BUTTON_LABEL })).not.toBeInTheDocument());
+  });
+
+  it("hides the helper while the instance stays unprovisioned", async () => {
+    setup({ instanceUnprovisioned: true });
+    await waitFor(() => expect(screen.getByRole("heading", { name: CREATE_DIALOG_TITLE })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("button", { name: AI_BUTTON_LABEL })).not.toBeInTheDocument());
   });
 });
 

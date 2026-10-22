@@ -257,20 +257,27 @@ describe("ModalDescription assistant (ISS-127)", () => {
     expect(screen.queryByRole("button", { name: AI_BUTTON_LABEL })).not.toBeInTheDocument();
   });
 
-  it("inserts a GPT answer at the caret", async () => {
+  it("reviews a GPT answer before inserting it at the caret", async () => {
     const user = userEvent.setup();
     const h = setup();
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
     const prompt = await screen.findByLabelText("Ask the assistant");
     await user.type(prompt, "Make it shorter");
-    await user.click(screen.getByRole("button", { name: "Insert" }));
+    expect(screen.queryByTestId("modal-ai-response")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    const review = await screen.findByTestId("modal-ai-response");
+    expect(review).toHaveTextContent("assistant words");
+    expect(handleCalls).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "Use this response" }));
     // The reply goes through the editor handle so it lands where the
     // caret is; concatenating onto `value` would always append it.
     await waitFor(() => expect(handleCalls).toEqual([{ kind: "html", value: "<p>assistant words</p>" }]));
     expect(h.onChange).not.toHaveBeenCalled();
     expect(notifySuccess).toHaveBeenCalledWith("Inserted", expect.any(String));
     const call = h.calls.find((entry) => entry.url.includes("/ai-assistant/"));
-    expect(call?.body).toEqual({ task: "Make it shorter" });
+    // The draft stays out of the request: the wire carries the typed
+    // task with an empty prompt.
+    expect(call?.body).toEqual({ task: "Make it shorter", prompt: "" });
   });
 
   it("inserts a bare answer into an empty body", async () => {
@@ -278,29 +285,36 @@ describe("ModalDescription assistant (ISS-127)", () => {
     const h = setup({}, { value: "" });
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
     await user.type(await screen.findByLabelText("Ask the assistant"), "go");
-    await user.click(screen.getByRole("button", { name: "Insert" }));
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    await screen.findByTestId("modal-ai-response");
+    await user.click(screen.getByRole("button", { name: "Use this response" }));
     await waitFor(() => expect(handleCalls).toEqual([{ kind: "html", value: "<p>assistant words</p>" }]));
     expect(h.onChange).not.toHaveBeenCalled();
   });
 
-  it("keeps Insert disabled without a prompt and on an empty answer", async () => {
+  it("asks for a task instead of generating from an empty box", async () => {
     const user = userEvent.setup();
     const h = setup({}, {});
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
-    const insert = await screen.findByRole("button", { name: "Insert" });
-    expect(insert).toBeDisabled();
-    await user.type(screen.getByLabelText("Ask the assistant"), "prompt");
-    expect(insert).toBeEnabled();
+    const generate = await screen.findByRole("button", { name: "Generate response" });
+    expect(generate).toBeEnabled();
+    await user.click(generate);
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith("Error!", "Please enter some task to get AI assistance.")
+    );
     expect(h.calls.some((entry) => entry.url.includes("/ai-assistant/"))).toBe(false);
   });
 
-  it("reports an empty GPT answer as a failure", async () => {
+  it("marks an empty GPT answer invalid without inserting it", async () => {
     const user = userEvent.setup();
     const h = setup({ describeBody: editorAnswer("") });
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
     await user.type(await screen.findByLabelText("Ask the assistant"), "go");
-    await user.click(screen.getByRole("button", { name: "Insert" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    expect(await screen.findByTestId("modal-ai-invalid")).toBeInTheDocument();
+    expect(screen.queryByTestId("modal-ai-response")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use this response" })).not.toBeInTheDocument();
+    expect(notifyError).not.toHaveBeenCalled();
     expect(handleCalls).toEqual([]);
     expect(h.onChange).not.toHaveBeenCalled();
   });
@@ -310,9 +324,23 @@ describe("ModalDescription assistant (ISS-127)", () => {
     const h = setup({ answerStatus: 500 });
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
     await user.type(await screen.findByLabelText("Ask the assistant"), "go");
-    await user.click(screen.getByRole("button", { name: "Insert" }));
-    await waitFor(() => expect(notifyError).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Error!", expect.any(String)));
     expect(h.onChange).not.toHaveBeenCalled();
+  });
+
+  it("reads a 429 as the monthly quota", async () => {
+    const user = userEvent.setup();
+    setup({ answerStatus: 429 });
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith(
+        "Error!",
+        "You have reached the maximum number of requests of 50 requests per month per user."
+      )
+    );
   });
 
   it("falls back to the form value when no editor handle exists yet", async () => {
@@ -321,9 +349,75 @@ describe("ModalDescription assistant (ISS-127)", () => {
     const h = setup();
     await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
     await user.type(await screen.findByLabelText("Ask the assistant"), "go");
-    await user.click(screen.getByRole("button", { name: "Insert" }));
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    await screen.findByTestId("modal-ai-response");
+    await user.click(screen.getByRole("button", { name: "Use this response" }));
     await waitFor(() => expect(h.onChange).toHaveBeenCalledWith("<p>start</p><p>assistant words</p>"));
     expect(handleCalls).toEqual([]);
+  });
+
+  it("discards the draft request when the popover closes", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "draft task");
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    expect(await screen.findByLabelText("Ask the assistant")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    await waitFor(() =>
+      expect(notifyError).toHaveBeenCalledWith("Error!", "Please enter some task to get AI assistance.")
+    );
+    expect(h.calls.some((entry) => entry.url.includes("/ai-assistant/"))).toBe(false);
+  });
+
+  it("generates on Enter and keeps Shift+Enter for new lines", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    const prompt = await screen.findByLabelText("Ask the assistant");
+    await user.type(prompt, "line");
+    await user.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(await screen.findByLabelText("Ask the assistant")).toHaveValue("line\n");
+    expect(screen.queryByTestId("modal-ai-response")).not.toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(await screen.findByTestId("modal-ai-response")).toHaveTextContent("assistant words");
+  });
+
+  it("closes on Escape without reaching the dialog", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    const prompt = await screen.findByLabelText("Ask the assistant");
+    await user.type(prompt, "draft task");
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByLabelText("Ask the assistant")).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    expect(await screen.findByLabelText("Ask the assistant")).toHaveValue("");
+  });
+
+  it("offers to generate again once an answer shows", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    expect(await screen.findByRole("button", { name: "Generate again" })).toBeInTheDocument();
+  });
+
+  it("cleans hostile markup before review and insert", async () => {
+    const user = userEvent.setup();
+    setup({ describeBody: editorAnswer("<p>ok</p><script>alert(1)</script><img src=x onerror=alert(2)>") });
+    await user.click(screen.getByRole("button", { name: AI_BUTTON_LABEL }));
+    await user.type(await screen.findByLabelText("Ask the assistant"), "go");
+    await user.click(screen.getByRole("button", { name: "Generate response" }));
+    const review = await screen.findByTestId("modal-ai-response");
+    expect(review).toHaveTextContent("ok");
+    expect(review.innerHTML).not.toContain("script");
+    expect(review.innerHTML).not.toContain("onerror");
+    await user.click(screen.getByRole("button", { name: "Use this response" }));
+    await waitFor(() => expect(handleCalls).toHaveLength(1));
+    expect(handleCalls[0]?.value).not.toContain("script");
   });
 });
 

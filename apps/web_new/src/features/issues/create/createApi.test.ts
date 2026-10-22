@@ -8,6 +8,7 @@
 // description helpers (AI task, mentions, upload/link). The dialog
 // tests cover the hooks end to end.
 
+import { ApiError } from "@pidash/api-client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -16,7 +17,12 @@ import {
   applyCreateMembership,
   DESCRIBE_MONTHLY_LIMIT,
   DESCRIBE_TASK,
+  EDITOR_EMPTY_ANSWER,
+  EDITOR_FAILED_BODY,
+  EDITOR_QUOTA_EXCEEDED_BODY,
   draftInputFromPatch,
+  editorFailureMessage,
+  isAssistantRateLimited,
   MENTION_RESULT_LIMIT,
   mentionSearchKey,
   PARENT_SEARCH_DEBOUNCE_MS,
@@ -525,14 +531,88 @@ describe("description assistant", () => {
     expect(calls[0]?.body).toEqual({ task: DESCRIBE_TASK, prompt: "Fix the thing" });
   });
 
-  it("runs a free-form prompt with no title", async () => {
-    const { calls, client } = recorder({ response_html: "<p>answer</p>" });
-    await expect(requestEditorAnswer(client, "acme", PROJECT, "Make it shorter")).resolves.toBe("<p>answer</p>");
-    expect(calls[0]?.body).toEqual({ task: "Make it shorter" });
+  it("runs a free-form prompt with an empty prompt on the wire", async () => {
+    const { calls, client } = recorder({ response: "answer", response_html: "  <p>answer</p>  " });
+    await expect(requestEditorAnswer(client, "acme", PROJECT, "Make it shorter")).resolves.toEqual({
+      text: "answer",
+      html: "<p>answer</p>",
+    });
+    expect(calls[0]?.body).toEqual({ task: "Make it shorter", prompt: "" });
   });
 
   it("publishes the monthly limit constant used in the toast", () => {
     expect(DESCRIBE_MONTHLY_LIMIT).toBe(50);
+  });
+
+  it("reads the quota line for a bare 429 and the server message when one rides along", () => {
+    expect(editorFailureMessage(new ApiError({ status: 429, code: "http", message: "{}", body: {} }))).toBe(
+      EDITOR_QUOTA_EXCEEDED_BODY
+    );
+    expect(
+      editorFailureMessage(new ApiError({ status: 429, code: "http", message: "slow down", body: { error: "slow" } }))
+    ).toBe("slow");
+    expect(
+      editorFailureMessage(
+        new ApiError({ status: 429, code: "http", message: "slow down", body: { detail: "slow down" } })
+      )
+    ).toBe("slow down");
+    expect(
+      editorFailureMessage(
+        new ApiError({
+          status: 429,
+          code: "http",
+          message: "both",
+          body: { detail: "detail wins", error: "code loses" },
+        })
+      )
+    ).toBe("detail wins");
+    expect(editorFailureMessage(new ApiError({ status: 429, code: "http", message: "", body: { error: "" } }))).toBe(
+      EDITOR_QUOTA_EXCEEDED_BODY
+    );
+    expect(editorFailureMessage(new ApiError({ status: 429, code: "http", message: "", body: { detail: "" } }))).toBe(
+      EDITOR_QUOTA_EXCEEDED_BODY
+    );
+  });
+
+  it("reads any other failure through the server's own line", () => {
+    expect(
+      editorFailureMessage(
+        new ApiError({
+          status: 400,
+          code: "http",
+          message: "LLM provider API key and model are required",
+          body: { error: "LLM provider API key and model are required" },
+        })
+      )
+    ).toBe("LLM provider API key and model are required");
+    expect(
+      editorFailureMessage(
+        new ApiError({ status: 500, code: "http", message: "server says", body: { detail: "server says" } })
+      )
+    ).toBe("server says");
+  });
+
+  it("falls back when a failure carries no server line", () => {
+    expect(editorFailureMessage(new ApiError({ status: 500, code: "http", message: "", body: null }))).toBe(
+      EDITOR_FAILED_BODY
+    );
+    expect(editorFailureMessage(new ApiError({ status: 500, code: "http", message: "{}", body: {} }))).toBe(
+      EDITOR_FAILED_BODY
+    );
+    expect(editorFailureMessage(new ApiError({ status: 500, code: "http", message: "lifted", body: "oops" }))).toBe(
+      EDITOR_FAILED_BODY
+    );
+    expect(editorFailureMessage(new Error("network down"))).toBe(EDITOR_FAILED_BODY);
+    expect(editorFailureMessage(null)).toBe(EDITOR_FAILED_BODY);
+    expect(editorFailureMessage("boom")).toBe(EDITOR_FAILED_BODY);
+    expect(EDITOR_EMPTY_ANSWER).not.toBe("");
+  });
+
+  it("reads quota only off a 429 status", () => {
+    expect(isAssistantRateLimited(new ApiError({ status: 429, code: "http", message: "x", body: {} }))).toBe(true);
+    expect(isAssistantRateLimited(new ApiError({ status: 500, code: "http", message: "x", body: {} }))).toBe(false);
+    expect(isAssistantRateLimited(null)).toBe(false);
+    expect(isAssistantRateLimited("nope")).toBe(false);
   });
 });
 
