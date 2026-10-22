@@ -66,6 +66,7 @@ export default defineConfig({
       "e2e/parity/drivers/web-new-runners.test.ts",
       "e2e/parity/drivers/web-new-assistant.test.ts",
       "e2e/parity/drivers/web-new-assistant-core.test.ts",
+      "e2e/parity/drivers/web-new-assistant-plus.test.ts",
       "e2e/parity/drivers/web-new-billing.test.ts",
       "e2e/parity/drivers/web-new-cloud-session.test.ts",
       "e2e/parity/drivers/web-new-workspace-settings.test.ts",

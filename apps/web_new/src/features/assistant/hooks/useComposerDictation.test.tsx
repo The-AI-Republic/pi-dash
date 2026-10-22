@@ -65,8 +65,8 @@ function setup(transcribe: (url: string) => Response) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const onResult = vi.fn();
   const view = renderHook(() => useComposerDictation(onResult), {
-    wrapper: ({ children }: { children: React.ReactNode }) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    wrapper: ({ children }: { children?: unknown }) => (
+      <QueryClientProvider client={queryClient}>{children as never}</QueryClientProvider>
     ),
   });
   return { view, onResult, queryClient, seen };
