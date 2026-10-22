@@ -972,10 +972,12 @@ pub fn base_url_blocked(state: &AppState, base_url: &str) -> bool {
 }
 
 /// `last_verified_at.isoformat()` (`llm_config.py:37`,
-/// `stt_config.py:40`): UTC renders `+00:00`; microseconds appear only
-/// when nonzero (chrono `AutoSi` matches both halves).
+/// `stt_config.py:40`): UTC renders `+00:00`; microseconds print as
+/// exactly six digits when nonzero, and no fraction when zero.
+/// chrono `AutoSi` trims trailing zeros (`.123`), so this shares the
+/// [`py_iso`] rendering instead of `to_rfc3339_opts`.
 pub fn isoformat(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false)
+    py_iso(dt)
 }
 
 /// `workspace_role_by_slug` (`core/permissions.py:48-56`): the caller's
@@ -1194,6 +1196,11 @@ mod tests {
             .expect("parses")
             .with_timezone(&chrono::Utc);
         assert_eq!(isoformat(&whole), "2026-09-29T13:50:51+00:00");
+        // Trailing-zero micros keep six digits (PIDASHCONV-1246).
+        let trailing = chrono::DateTime::parse_from_rfc3339("2026-10-18T12:00:05.123+00:00")
+            .expect("parses")
+            .with_timezone(&chrono::Utc);
+        assert_eq!(isoformat(&trailing), "2026-10-18T12:00:05.123000+00:00");
     }
 }
 
