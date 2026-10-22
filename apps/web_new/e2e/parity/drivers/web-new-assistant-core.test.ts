@@ -329,3 +329,168 @@ describe("one-shot delay stubs", () => {
     expect(unroute).toHaveBeenCalledWith("**/api/workspaces/*/ai-assistant/threads/*/messages/");
   });
 });
+
+function transcriptPage(rows: StubLocator[]): Page {
+  return pageOf({
+    locator: (selector: string) =>
+      selector === '[data-testid="assistant-transcript"]'
+        ? locator({
+            locator: (inner: string) =>
+              inner === ":scope > li"
+                ? locator({ count: async () => rows.length, nth: (i) => rows[i] as never })
+                : locator(),
+          })
+        : locator(),
+  });
+}
+
+describe("transcript read fallbacks", () => {
+  it("falls back to the assistant role when the role read fails", async () => {
+    const page = transcriptPage([
+      locator({
+        getAttribute: async () => {
+          throw new Error("detached");
+        },
+        innerText: async () => "Hello",
+      }),
+    ]);
+    await expect(new WebNewDriver(page).assistantBubbles()).resolves.toEqual([{ role: "assistant", text: "Hello" }]);
+  });
+
+  it("skips a bubble whose text read fails", async () => {
+    const page = transcriptPage([
+      locator({
+        getAttribute: async () => "assistant",
+        innerText: async () => {
+          throw new Error("detached");
+        },
+      }),
+    ]);
+    await expect(new WebNewDriver(page).assistantBubbles()).resolves.toEqual([]);
+  });
+
+  it("skips a bubble whose text read returns nothing", async () => {
+    const page = transcriptPage([
+      locator({
+        getAttribute: async () => "assistant",
+        innerText: async () => null as unknown as string,
+      }),
+    ]);
+    await expect(new WebNewDriver(page).assistantBubbles()).resolves.toEqual([]);
+  });
+
+  it("reads an empty tint when the row has no document view", async () => {
+    const evaluate = vi.fn(async (fn: (node: Element) => unknown) =>
+      fn({ ownerDocument: { defaultView: null } } as unknown as Element)
+    );
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-transcript"]'
+          ? locator({ locator: () => locator({ locator: () => locator({ evaluate }) }) })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).assistantErrorTint(0)).resolves.toBe("");
+  });
+
+  it("reports no empty state when the body text read fails", async () => {
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '[data-testid="assistant-transcript"]') return locator({ count: async () => 0 });
+        if (selector === '[data-testid="assistant-thread-body"]') {
+          return locator({
+            innerText: async () => {
+              throw new Error("detached");
+            },
+          });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).assistantEmptyState()).resolves.toBeNull();
+  });
+
+  it("reports no empty state when the body holds only whitespace", async () => {
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '[data-testid="assistant-transcript"]') return locator({ count: async () => 0 });
+        if (selector === '[data-testid="assistant-thread-body"]') {
+          return locator({ innerText: async () => "  " });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).assistantEmptyState()).resolves.toBeNull();
+  });
+
+  it("reports no empty state when the body text read returns nothing", async () => {
+    const page = pageOf({
+      locator: (selector: string) => {
+        if (selector === '[data-testid="assistant-transcript"]') return locator({ count: async () => 0 });
+        if (selector === '[data-testid="assistant-thread-body"]') {
+          return locator({ innerText: async () => null as unknown as string });
+        }
+        return locator();
+      },
+    });
+    await expect(new WebNewDriver(page).assistantEmptyState()).resolves.toBeNull();
+  });
+
+  it("reports not-at-bottom when the thread body is absent", async () => {
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="assistant-thread-body"]' ? locator({ count: async () => 0 }) : locator(),
+    });
+    await expect(new WebNewDriver(page).assistantIsScrolledToBottom()).resolves.toBe(false);
+  });
+});
+
+describe("stream stub fallbacks", () => {
+  it("serves keepalive to a request racing the stub teardown", async () => {
+    const route = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route }));
+    await driver.assistantStubStream("t1", [
+      { seq: 4, kind: "assistant_delta", message: "m1", payload: { params: { delta: "Hi" } } },
+    ]);
+    const handler = handlerFor(route, "**/ai-assistant/threads/t1/events**");
+    await driver.assistantClearStreamStub("t1");
+    const stub = stubRoute("GET", "https://api.test/api/workspaces/acme/ai-assistant/threads/t1/events/");
+    await handler(stub as unknown as Route);
+    expect(stub.abort).not.toHaveBeenCalled();
+    const options = stub.fulfill.mock.calls[0]?.[0] as { body: string };
+    expect(options.body).toContain("keepalive");
+  });
+
+  it("serves a null message for turn-level frames", async () => {
+    const route = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route }));
+    await driver.assistantStubStream("t1", [{ seq: 1, kind: "turn_started", payload: { turn_id: "t" } }]);
+    const handler = handlerFor(route, "**/ai-assistant/threads/t1/events**");
+    const stub = stubRoute("GET", "https://api.test/api/workspaces/acme/ai-assistant/threads/t1/events/");
+    await handler(stub as unknown as Route);
+    const options = stub.fulfill.mock.calls[0]?.[0] as { body: string };
+    expect(options.body).toContain('"message":null');
+  });
+
+  it("reports no stream URLs for a thread that was never stubbed", async () => {
+    const driver = new WebNewDriver(pageOf({}));
+    await expect(driver.assistantStreamRequestUrls("never")).resolves.toEqual([]);
+  });
+
+  it("keeps the queued frames when blocking after a stub", async () => {
+    const route = vi.fn(async () => undefined);
+    const driver = new WebNewDriver(pageOf({ route }));
+    await driver.assistantStubStream("t1", [
+      { seq: 4, kind: "assistant_delta", message: "m1", payload: { params: { delta: "Hi" } } },
+    ]);
+    await driver.assistantBlockStream("t1");
+    const handler = handlerFor(route, "**/ai-assistant/threads/t1/events**");
+    const blocked = stubRoute("GET", "https://api.test/api/workspaces/acme/ai-assistant/threads/t1/events/");
+    await handler(blocked as unknown as Route);
+    expect(blocked.abort).toHaveBeenCalledTimes(1);
+    await driver.assistantClearStreamBlock("t1");
+    const open = stubRoute("GET", "https://api.test/api/workspaces/acme/ai-assistant/threads/t1/events/");
+    await handler(open as unknown as Route);
+    const options = open.fulfill.mock.calls[0]?.[0] as { body: string };
+    expect(options.body).toContain('"kind":"assistant_delta"');
+  });
+});
