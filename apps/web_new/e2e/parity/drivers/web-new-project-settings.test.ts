@@ -9,6 +9,7 @@
 import type { Page, Route } from "@playwright/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { SettingsGeneralField } from "./parity-driver";
 import { WebNewDriver } from "./web-new";
 
 afterEach(() => vi.restoreAllMocks());
@@ -478,5 +479,968 @@ describe("WebNewDriver create feature step", () => {
   it("reports a step when the dialog offers its open-project exit", async () => {
     const stub = pageDouble({ createDialog: true, createStep: true });
     await expect(new WebNewDriver(stub.page).isCreateFeatureStepVisible()).resolves.toBe(true);
+  });
+});
+
+interface GeneralFakeState {
+  count?: number;
+  visible?: boolean;
+  text?: string;
+  input?: string;
+  checked?: boolean;
+  disabled?: boolean;
+  attr?: Record<string, string | null>;
+  items?: GeneralFakeLocator[];
+  waitRejects?: boolean;
+}
+
+type GeneralLocatorQuery = (selector: string) => GeneralFakeLocator;
+type GeneralTestIdQuery = (testId: string) => GeneralFakeLocator;
+type GeneralRoleQuery = (role: string, options?: { name?: string | RegExp; exact?: boolean }) => GeneralFakeLocator;
+type GeneralLabelQuery = (label: string) => GeneralFakeLocator;
+type GeneralPlaceholderQuery = (text: string) => GeneralFakeLocator;
+
+class GeneralFakeLocator {
+  readonly click = vi.fn(async () => undefined);
+  readonly fill = vi.fn(async (_value: string) => undefined);
+  readonly press = vi.fn(async (_key: string) => undefined);
+  readonly pressSequentially = vi.fn(async (_value: string) => undefined);
+  readonly setChecked = vi.fn(async (_checked: boolean) => undefined);
+  readonly hover = vi.fn(async () => undefined);
+  readonly scrollIntoViewIfNeeded = vi.fn(async () => undefined);
+  readonly dragTo = vi.fn(async (_target: unknown, _options?: unknown) => undefined);
+  readonly evaluate = vi.fn(async (_fn: unknown) => undefined);
+  readonly boundingBox = vi.fn(async () => null);
+  readonly waitFor = vi.fn(async (_options?: unknown) => {
+    if (this.state.waitRejects === true) throw new Error("timed out");
+  });
+  readonly state: GeneralFakeState;
+  private readonly queries: {
+    locator?: GeneralLocatorQuery;
+    testId?: GeneralTestIdQuery;
+    role?: GeneralRoleQuery;
+    label?: GeneralLabelQuery;
+    placeholder?: GeneralPlaceholderQuery;
+  };
+
+  constructor(
+    state: GeneralFakeState = {},
+    queries: {
+      locator?: GeneralLocatorQuery;
+      testId?: GeneralTestIdQuery;
+      role?: GeneralRoleQuery;
+      label?: GeneralLabelQuery;
+      placeholder?: GeneralPlaceholderQuery;
+    } = {}
+  ) {
+    this.state = { attr: {}, ...state };
+    this.queries = queries;
+  }
+
+  count(): Promise<number> {
+    return Promise.resolve(this.state.items?.length ?? this.state.count ?? 1);
+  }
+
+  isVisible(): Promise<boolean> {
+    return Promise.resolve(this.state.visible ?? true);
+  }
+
+  isChecked(): Promise<boolean> {
+    return Promise.resolve(this.state.checked ?? false);
+  }
+
+  isDisabled(): Promise<boolean> {
+    return Promise.resolve(this.state.disabled ?? false);
+  }
+
+  isEnabled(): Promise<boolean> {
+    return Promise.resolve(!(this.state.disabled ?? false));
+  }
+
+  innerText(): Promise<string> {
+    return Promise.resolve(this.state.text ?? "");
+  }
+
+  textContent(): Promise<string | null> {
+    return Promise.resolve(this.state.text ?? null);
+  }
+
+  inputValue(): Promise<string> {
+    return Promise.resolve(this.state.input ?? "");
+  }
+
+  getAttribute(name: string): Promise<string | null> {
+    return Promise.resolve(this.state.attr?.[name] ?? null);
+  }
+
+  first(): GeneralFakeLocator {
+    return this.state.items?.[0] ?? this;
+  }
+
+  last(): GeneralFakeLocator {
+    return this.state.items?.at(-1) ?? this;
+  }
+
+  nth(index: number): GeneralFakeLocator {
+    return this.state.items?.[index] ?? generalAbsent();
+  }
+
+  locator(selector: string): GeneralFakeLocator {
+    return this.queries.locator?.(selector) ?? generalAbsent();
+  }
+
+  getByTestId(testId: string): GeneralFakeLocator {
+    return this.queries.testId?.(testId) ?? generalAbsent();
+  }
+
+  getByRole(role: string, options?: { name?: string | RegExp; exact?: boolean }): GeneralFakeLocator {
+    return this.queries.role?.(role, options) ?? generalAbsent();
+  }
+
+  getByLabel(label: string): GeneralFakeLocator {
+    return this.queries.label?.(label) ?? generalAbsent();
+  }
+
+  getByPlaceholder(text: string): GeneralFakeLocator {
+    return this.queries.placeholder?.(text) ?? generalAbsent();
+  }
+}
+
+function generalAbsent(): GeneralFakeLocator {
+  return new GeneralFakeLocator({ count: 0, visible: false, waitRejects: true });
+}
+
+interface GeneralPageHooks {
+  locator?: GeneralLocatorQuery;
+  testId?: GeneralTestIdQuery;
+  role?: GeneralRoleQuery;
+  response?: "resolve" | "reject";
+  responseStatus?: number;
+}
+
+function generalSettingsPageDouble(hooks: GeneralPageHooks = {}) {
+  const calls = { locators: [] as string[], testIds: [] as string[], pressed: [] as string[] };
+  const routes: Array<{ pattern: unknown; action: "route" | "unroute" }> = [];
+  const page = {
+    goto: vi.fn(async (_url: string) => undefined),
+    waitForLoadState: vi.fn(async (_state: string) => undefined),
+    waitForTimeout: vi.fn(async (_ms: number) => undefined),
+    waitForEvent: vi.fn(async (_event: string) => undefined),
+    waitForResponse: vi.fn(async () => {
+      if (hooks.response === "reject") throw new Error("no request fired");
+      return { status: () => hooks.responseStatus ?? 200, url: () => "https://parity.test/repository/bind/" };
+    }),
+    route: vi.fn(async (pattern: unknown, _handler?: unknown) => {
+      routes.push({ pattern, action: "route" });
+    }),
+    unroute: vi.fn(async (pattern: unknown) => {
+      routes.push({ pattern, action: "unroute" });
+    }),
+    keyboard: { press: vi.fn(async (key: string) => calls.pressed.push(key)) },
+    locator: vi.fn((selector: string) => {
+      calls.locators.push(selector);
+      return hooks.locator?.(selector) ?? generalAbsent();
+    }),
+    getByTestId: vi.fn((testId: string) => {
+      calls.testIds.push(testId);
+      return hooks.testId?.(testId) ?? generalAbsent();
+    }),
+    getByRole: vi.fn((role: string, options?: { name?: string | RegExp; exact?: boolean }) => {
+      return hooks.role?.(role, options) ?? generalAbsent();
+    }),
+  };
+  return { page: page as unknown as Page, pageObject: page, calls, routes };
+}
+
+describe("WebNewDriver general tab open and state", () => {
+  it("opens the tab address and settles on the name field", async () => {
+    const stub = generalSettingsPageDouble({ locator: () => new GeneralFakeLocator() });
+    await new WebNewDriver(stub.page).settingsGeneralOpen("acme", "p1");
+    expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/settings/projects/p1");
+  });
+
+  it("reads the form, skeleton and danger zone presence", async () => {
+    const present = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      testId: () => new GeneralFakeLocator(),
+    });
+    const driver = new WebNewDriver(present.page);
+    await expect(driver.settingsGeneralFormVisible()).resolves.toBe(true);
+    await expect(driver.settingsGeneralSkeletonVisible()).resolves.toBe(true);
+    await expect(driver.settingsGeneralDangerVisible()).resolves.toBe(true);
+
+    const missing = generalSettingsPageDouble();
+    const missingDriver = new WebNewDriver(missing.page);
+    await expect(missingDriver.settingsGeneralFormVisible()).resolves.toBe(false);
+    await expect(missingDriver.settingsGeneralSkeletonVisible()).resolves.toBe(false);
+    await expect(missingDriver.settingsGeneralDangerVisible()).resolves.toBe(false);
+  });
+
+  it("reads the dimmed marker off the form class", async () => {
+    const dimmed = generalSettingsPageDouble({
+      locator: (selector) =>
+        selector.startsWith("form") ? new GeneralFakeLocator({ attr: { class: "flex opacity-60" } }) : generalAbsent(),
+    });
+    await expect(new WebNewDriver(dimmed.page).settingsGeneralFormDimmed()).resolves.toBe(true);
+
+    const bright = generalSettingsPageDouble({
+      locator: (selector) =>
+        selector.startsWith("form") ? new GeneralFakeLocator({ attr: { class: "flex" } }) : generalAbsent(),
+    });
+    await expect(new WebNewDriver(bright.page).settingsGeneralFormDimmed()).resolves.toBe(false);
+
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralFormDimmed()).resolves.toBe(false);
+  });
+});
+
+describe("WebNewDriver general tab fields", () => {
+  const FIELD_IDS: Record<SettingsGeneralField, string> = {
+    name: "name",
+    description: "description",
+    identifier: "identifier",
+    repoUrl: "repoUrl",
+    baseBranch: "baseBranch",
+    budget: "agent_default_max_ticks",
+  };
+
+  it("addresses every field by its input id", async () => {
+    for (const [field, id] of Object.entries(FIELD_IDS) as Array<[SettingsGeneralField, string]>) {
+      const stub = generalSettingsPageDouble({ locator: () => new GeneralFakeLocator({ input: "v", disabled: true }) });
+      const driver = new WebNewDriver(stub.page);
+      await expect(driver.settingsGeneralFieldValue(field)).resolves.toBe("v");
+      await expect(driver.settingsGeneralFieldDisabled(field)).resolves.toBe(true);
+      await driver.settingsGeneralFill(field, "w");
+      expect(stub.calls.locators).toContain(`#${id}`);
+    }
+  });
+
+  it("reads the inline error or empty when the slot is generalAbsent", async () => {
+    const failing = generalSettingsPageDouble({ locator: () => new GeneralFakeLocator({ text: "  Required  " }) });
+    await expect(new WebNewDriver(failing.page).settingsGeneralFieldError("name")).resolves.toBe("Required");
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralFieldError("name")).resolves.toBe(
+      ""
+    );
+  });
+});
+
+describe("WebNewDriver general tab header reads", () => {
+  it("reads the banner, network, timezone and creation stamp", async () => {
+    const texts: Record<string, string> = {
+      banner: "Forge  FRG Private",
+      network: "Private",
+      timezone: "UTC",
+      created: "Created on Oct 1, 2026",
+    };
+    const stub = generalSettingsPageDouble({
+      locator: (selector) =>
+        selector === '[data-testid="general-banner"]'
+          ? new GeneralFakeLocator({ text: texts.banner })
+          : generalAbsent(),
+      testId: (testId) => {
+        if (testId === "general-network") return new GeneralFakeLocator({ text: texts.network });
+        if (testId === "general-timezone") return new GeneralFakeLocator({ text: texts.timezone });
+        if (testId === "general-created") return new GeneralFakeLocator({ text: texts.created });
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsGeneralHeaderText()).resolves.toBe(texts.banner);
+    await expect(driver.settingsGeneralNetworkText()).resolves.toBe("Private");
+    await expect(driver.settingsGeneralTimezoneText()).resolves.toBe("UTC");
+    await expect(driver.settingsGeneralCreatedText()).resolves.toBe("Created on Oct 1, 2026");
+  });
+
+  it("reports no cover when the banner carries only the mark", async () => {
+    const banner = new GeneralFakeLocator(
+      {},
+      {
+        role: () => generalAbsent(),
+        locator: (selector) =>
+          selector === 'img:not([data-testid="project-mark-image"])'
+            ? new GeneralFakeLocator({ count: 0 })
+            : generalAbsent(),
+      }
+    );
+    const clean = generalSettingsPageDouble({
+      locator: (selector) => (selector === '[data-testid="general-banner"]' ? banner : generalAbsent()),
+    });
+    await expect(new WebNewDriver(clean.page).settingsGeneralCoverVisible()).resolves.toBe(false);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralCoverVisible()).resolves.toBe(false);
+  });
+
+  it("reports a cover when a control or a non-mark image renders", async () => {
+    const withControl = new GeneralFakeLocator({}, { role: () => new GeneralFakeLocator() });
+    const controlStub = generalSettingsPageDouble({
+      locator: (selector) => (selector === '[data-testid="general-banner"]' ? withControl : generalAbsent()),
+    });
+    await expect(new WebNewDriver(controlStub.page).settingsGeneralCoverVisible()).resolves.toBe(true);
+
+    const withImage = new GeneralFakeLocator(
+      {},
+      { locator: () => new GeneralFakeLocator(), role: () => generalAbsent() }
+    );
+    const imageStub = generalSettingsPageDouble({
+      locator: (selector) => (selector === '[data-testid="general-banner"]' ? withImage : generalAbsent()),
+    });
+    await expect(new WebNewDriver(imageStub.page).settingsGeneralCoverVisible()).resolves.toBe(true);
+  });
+});
+
+describe("WebNewDriver general tab execution", () => {
+  it("maps the executor label back to its kind", async () => {
+    for (const [kind, label] of [
+      ["local_runner", "Local runner"],
+      ["cloud_agent", "Cloud agent"],
+      ["managed_runner", "Desktop agent"],
+    ]) {
+      const stub = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ text: ` ${label} ` }) });
+      await expect(new WebNewDriver(stub.page).settingsGeneralExecutorValue()).resolves.toBe(kind);
+    }
+    const unknown = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ text: "Pooled" }) });
+    await expect(new WebNewDriver(unknown.page).settingsGeneralExecutorValue()).resolves.toBe("Pooled");
+  });
+
+  it("reads option disablement and closes the picker", async () => {
+    const option = new GeneralFakeLocator({ disabled: true });
+    const listbox = new GeneralFakeLocator({}, { role: () => option });
+    const stub = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator(),
+      role: (role) => (role === "listbox" ? listbox : generalAbsent()),
+    });
+    await expect(new WebNewDriver(stub.page).settingsGeneralExecutorOptionDisabled("cloud_agent")).resolves.toBe(true);
+    expect(stub.calls.pressed).toEqual(["Escape"]);
+  });
+
+  it("sets the executor through the picker option", async () => {
+    const option = new GeneralFakeLocator();
+    const listbox = new GeneralFakeLocator({}, { role: () => option });
+    const trigger = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => (testId === "general-executor-trigger" ? trigger : generalAbsent()),
+      role: (role) => (role === "listbox" ? listbox : generalAbsent()),
+    });
+    await new WebNewDriver(stub.page).settingsGeneralSetExecutor("managed_runner");
+    expect(trigger.click).toHaveBeenCalledTimes(1);
+    expect(option.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the ticking switch and flips it only when needed", async () => {
+    const on = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator({ attr: { "aria-checked": "true" } }),
+    });
+    await expect(new WebNewDriver(on.page).settingsGeneralTickingOn()).resolves.toBe(true);
+    const off = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator({ attr: { "aria-checked": "false" } }),
+    });
+    await expect(new WebNewDriver(off.page).settingsGeneralTickingOn()).resolves.toBe(false);
+
+    const toggle = new GeneralFakeLocator({ attr: { "aria-checked": "false" } });
+    toggle.click.mockImplementation(async () => {
+      toggle.state.attr = { "aria-checked": "true" };
+    });
+    const flip = generalSettingsPageDouble({ testId: () => toggle });
+    await new WebNewDriver(flip.page).settingsGeneralSetTicking(true);
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+
+    const settled = new GeneralFakeLocator({ attr: { "aria-checked": "true" } });
+    const noop = generalSettingsPageDouble({ testId: () => settled });
+    await new WebNewDriver(noop.page).settingsGeneralSetTicking(true);
+    expect(settled.click).not.toHaveBeenCalled();
+  });
+
+  it("reads the budget and types replacements keystroke by keystroke", async () => {
+    const input = new GeneralFakeLocator({ input: "7" });
+    const stub = generalSettingsPageDouble({ locator: () => input });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsGeneralBudgetValue()).resolves.toBe("7");
+    await driver.settingsGeneralSetBudget("12");
+    expect(input.press).toHaveBeenCalledWith("ControlOrMeta+a", { timeout: 30_000 });
+    expect(input.pressSequentially).toHaveBeenCalledWith("12", { timeout: 30_000 });
+    await driver.settingsGeneralSetBudget("");
+    expect(input.press).toHaveBeenCalledWith("Backspace", { timeout: 30_000 });
+  });
+
+  it("checks the no-cap box", async () => {
+    const box = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => (testId === "general-nocap" ? box : generalAbsent()),
+    });
+    await new WebNewDriver(stub.page).settingsGeneralSetNoCap(true);
+    expect(box.setChecked).toHaveBeenCalledWith(true, { timeout: 30_000 });
+  });
+
+  it("reads the cadence caption and picks presets by label", async () => {
+    const caption = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ text: "6 hours" }) });
+    await expect(new WebNewDriver(caption.page).settingsGeneralCadenceText()).resolves.toBe("6 hours");
+
+    const option = new GeneralFakeLocator();
+    const listbox = new GeneralFakeLocator({}, { role: () => option });
+    const trigger = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => (testId === "general-cadence-trigger" ? trigger : generalAbsent()),
+      role: (role) => (role === "listbox" ? listbox : generalAbsent()),
+    });
+    await new WebNewDriver(stub.page).settingsGeneralSetCadence("6 hours");
+    expect(trigger.click).toHaveBeenCalledTimes(1);
+    expect(option.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves through the submit control and rides out the loading label", async () => {
+    const submit = new GeneralFakeLocator();
+    const form = new GeneralFakeLocator({}, { role: () => submit });
+    const stub = generalSettingsPageDouble({ locator: () => form });
+    await new WebNewDriver(stub.page).settingsGeneralSave();
+    expect(submit.click).toHaveBeenCalledTimes(1);
+    expect(stub.pageObject.waitForTimeout).toHaveBeenCalledWith(500);
+  });
+});
+
+describe("WebNewDriver general tab repository bind", () => {
+  it("reads the bound pill or the bind control", async () => {
+    const bound = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ disabled: true }) });
+    await expect(new WebNewDriver(bound.page).settingsGeneralBindState()).resolves.toBe("bound");
+    const enabled = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator({ disabled: false }) });
+    await expect(new WebNewDriver(enabled.page).settingsGeneralBindState()).resolves.toBe("bind");
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralBindState()).resolves.toBe("bind");
+  });
+
+  it("returns after the client-side refusal when no request fires", async () => {
+    const toast = new GeneralFakeLocator({ text: "Bind failed" });
+    const stub = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator(),
+      locator: (selector) =>
+        selector === '[data-testid="toast-notification"]'
+          ? new GeneralFakeLocator({ items: [toast] })
+          : generalAbsent(),
+      response: "reject",
+    });
+    await new WebNewDriver(stub.page).settingsGeneralBind();
+    expect(stub.pageObject.waitForEvent).not.toHaveBeenCalled();
+  });
+
+  it("settles on the bound pill after a successful bind", async () => {
+    const pill = new GeneralFakeLocator({ disabled: true });
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => (testId === "general-repo-bound" ? pill : new GeneralFakeLocator()),
+      locator: () => new GeneralFakeLocator({ count: 0 }),
+      response: "resolve",
+      responseStatus: 200,
+    });
+    await new WebNewDriver(stub.page).settingsGeneralBind();
+    expect(stub.pageObject.waitForEvent).not.toHaveBeenCalled();
+  });
+
+  it("rides the reload hop on the provider-missing 401", async () => {
+    const stub = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator(),
+      locator: () => new GeneralFakeLocator(),
+      response: "resolve",
+      responseStatus: 401,
+    });
+    await new WebNewDriver(stub.page).settingsGeneralBind();
+    expect(stub.pageObject.waitForEvent).toHaveBeenCalled();
+    expect(stub.calls.locators).toContain("#name");
+  });
+});
+
+describe("WebNewDriver general tab emblem", () => {
+  it("opens the picker and reports its visibility", async () => {
+    const openButton = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "general-emblem-open") return openButton;
+        if (testId === "general-emblem-picker") return new GeneralFakeLocator();
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsGeneralEmblemOpen();
+    expect(openButton.click).toHaveBeenCalledTimes(1);
+    await expect(driver.settingsGeneralEmblemPickerVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralEmblemPickerVisible()).resolves.toBe(
+      false
+    );
+  });
+
+  it("picks the alphabet choice matching the glyph", async () => {
+    const choice = new GeneralFakeLocator();
+    const search = new GeneralFakeLocator();
+    const dialog = new GeneralFakeLocator(
+      {},
+      {
+        testId: () => new GeneralFakeLocator(),
+        label: () => search,
+        role: () => choice,
+      }
+    );
+    const stub = generalSettingsPageDouble({ testId: () => dialog });
+    await new WebNewDriver(stub.page).settingsGeneralEmblemPick("🚀");
+    expect(search.fill).toHaveBeenCalledWith("🚀", { timeout: 30_000 });
+    expect(choice.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the typed-extra entry outside the alphabet", async () => {
+    const typed = new GeneralFakeLocator();
+    const dialog = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => (testId === "general-emblem-typed" ? typed : new GeneralFakeLocator()),
+        label: () => new GeneralFakeLocator(),
+        role: () => generalAbsent(),
+      }
+    );
+    const stub = generalSettingsPageDouble({ testId: () => dialog });
+    await new WebNewDriver(stub.page).settingsGeneralEmblemPick("🛸");
+    expect(typed.click).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WebNewDriver general tab danger confirmations", () => {
+  it("opens the delete dialog from the danger zone", async () => {
+    const deleteButton = new GeneralFakeLocator();
+    const zone = new GeneralFakeLocator({}, { role: () => deleteButton });
+    const dialog = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      locator: (selector) => (selector === '[data-testid="general-danger-zone"]' ? zone : generalAbsent()),
+      role: (role) => (role === "dialog" ? dialog : generalAbsent()),
+    });
+    await new WebNewDriver(stub.page).settingsGeneralOpenDelete();
+    expect(deleteButton.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("fills the project name scoped to the delete dialog", async () => {
+    const nameInput = new GeneralFakeLocator();
+    const dialog = new GeneralFakeLocator(
+      {},
+      { placeholder: (text) => (text === "Project name" ? nameInput : generalAbsent()) }
+    );
+    const stub = generalSettingsPageDouble({ role: (role) => (role === "dialog" ? dialog : generalAbsent()) });
+    await new WebNewDriver(stub.page).settingsGeneralFillDeleteName("Forge");
+    expect(nameInput.fill).toHaveBeenCalledWith("Forge", { timeout: 30_000 });
+  });
+
+  it("reads the confirm modal text or empty while closed", async () => {
+    const dialog = new GeneralFakeLocator({ text: "  Archive Forge?  " });
+    const open = generalSettingsPageDouble({ role: (role) => (role === "dialog" ? dialog : generalAbsent()) });
+    await expect(new WebNewDriver(open.page).settingsGeneralConfirmModalText()).resolves.toBe("Archive Forge?");
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsGeneralConfirmModalText()).resolves.toBe(
+      ""
+    );
+  });
+});
+
+describe("WebNewDriver general tab fetch stalls", () => {
+  it("aborts and releases the details-carrying fetches", async () => {
+    const stub = generalSettingsPageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsGeneralStallDetails();
+    await driver.settingsGeneralReleaseStall();
+    expect(stub.routes).toHaveLength(2);
+    expect(stub.routes[0]?.action).toBe("route");
+    expect(stub.routes[1]?.action).toBe("unroute");
+    expect(String(stub.routes[0]?.pattern)).toBe(String(stub.routes[1]?.pattern));
+    // Single, bulk and bare-list project reads stall; sub-resources stay live.
+    const pattern = stub.routes[0]?.pattern as RegExp;
+    expect(pattern.test("/api/workspaces/acme/projects/p1/")).toBe(true);
+    expect(pattern.test("/api/workspaces/acme/projects/?ids=p1")).toBe(true);
+    expect(pattern.test("/api/workspaces/acme/projects/")).toBe(true);
+    expect(pattern.test("/api/workspaces/acme/projects/p1/members/")).toBe(false);
+  });
+});
+
+describe("WebNewDriver states tab groups", () => {
+  function cardDouble(group: string, hooks: { body?: boolean; heads?: string[]; addDisabled?: boolean } = {}) {
+    const body = new GeneralFakeLocator({ count: hooks.body === false ? 0 : 1 });
+    return new GeneralFakeLocator(
+      { attr: { "data-group": group } },
+      {
+        testId: (testId) => {
+          if (testId === "state-group-body") return body;
+          if (testId === "state-group-toggle" || testId === "state-group-add") {
+            return new GeneralFakeLocator({
+              disabled: testId === "state-group-add" ? (hooks.addDisabled ?? false) : false,
+            });
+          }
+          return generalAbsent();
+        },
+        locator: (selector) => {
+          if (selector === "h4") {
+            return new GeneralFakeLocator({
+              items: (hooks.heads ?? []).map((text) => new GeneralFakeLocator({ text })),
+            });
+          }
+          return generalAbsent();
+        },
+      }
+    );
+  }
+
+  it("opens the states address and settles on the cards", async () => {
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      role: () => new GeneralFakeLocator(),
+    });
+    await new WebNewDriver(stub.page).settingsStatesOpen("acme", "p1");
+    expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/settings/projects/p1/states");
+  });
+
+  it("reads group keys in DOM order, skipping blanks", async () => {
+    const cards = new GeneralFakeLocator({
+      items: [
+        new GeneralFakeLocator({ attr: { "data-group": "backlog" } }),
+        new GeneralFakeLocator({ attr: { "data-group": null } }),
+        new GeneralFakeLocator({ attr: { "data-group": "unstarted" } }),
+      ],
+    });
+    const stub = generalSettingsPageDouble({ locator: () => cards });
+    await expect(new WebNewDriver(stub.page).settingsStatesGroupNames()).resolves.toEqual(["backlog", "unstarted"]);
+  });
+
+  it("reads expansion off the card body and toggles it", async () => {
+    let expanded = true;
+    const toggle = new GeneralFakeLocator();
+    toggle.click.mockImplementation(async () => {
+      expanded = !expanded;
+    });
+    const card = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "state-group-body") return new GeneralFakeLocator({ count: expanded ? 1 : 0 });
+          if (testId === "state-group-toggle") return toggle;
+          return generalAbsent();
+        },
+      }
+    );
+    const stub = generalSettingsPageDouble({ locator: () => card });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsStatesGroupExpanded("backlog")).resolves.toBe(true);
+    await driver.settingsStatesToggleGroup("backlog");
+    await expect(driver.settingsStatesGroupExpanded("backlog")).resolves.toBe(false);
+  });
+
+  it("reads row names and the add control state per card", async () => {
+    const card = cardDouble("backlog", { heads: ["Backlog", "", "Triage"], addDisabled: false });
+    const stub = generalSettingsPageDouble({ locator: () => card });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsStatesStateNames("backlog")).resolves.toEqual(["Backlog", "Triage"]);
+    await expect(driver.settingsStatesAddEnabled("backlog")).resolves.toBe(true);
+    const locked = cardDouble("backlog", { addDisabled: true });
+    const lockedStub = generalSettingsPageDouble({ locator: () => locked });
+    await expect(new WebNewDriver(lockedStub.page).settingsStatesAddEnabled("backlog")).resolves.toBe(false);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesAddEnabled("x")).resolves.toBe(false);
+  });
+
+  it("opens creation and reports the form", async () => {
+    const add = new GeneralFakeLocator();
+    const card = new GeneralFakeLocator(
+      {},
+      { testId: (testId) => (testId === "state-group-add" ? add : generalAbsent()) }
+    );
+    const stub = generalSettingsPageDouble({
+      locator: () => card,
+      testId: (testId) => (testId === "state-form-name" ? new GeneralFakeLocator() : generalAbsent()),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsStatesOpenCreate("backlog");
+    expect(add.click).toHaveBeenCalledTimes(1);
+    await expect(driver.settingsStatesFormVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesFormVisible()).resolves.toBe(false);
+  });
+});
+
+describe("WebNewDriver states tab form", () => {
+  it("fills and reads the name and description", async () => {
+    const name = new GeneralFakeLocator({ input: "  Beta  " });
+    const description = new GeneralFakeLocator({ input: "blurb" });
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "state-form-name") return name;
+        if (testId === "state-form-description") return description;
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsStatesFillName("Gamma");
+    await driver.settingsStatesFillDescription("new blurb");
+    expect(name.fill).toHaveBeenCalledWith("Gamma", { timeout: 30_000 });
+    expect(description.fill).toHaveBeenCalledWith("new blurb", { timeout: 30_000 });
+    await expect(driver.settingsStatesNameValue()).resolves.toBe("Beta");
+    await expect(driver.settingsStatesDescriptionValue()).resolves.toBe("blurb");
+    const empty = generalSettingsPageDouble();
+    await expect(new WebNewDriver(empty.page).settingsStatesNameValue()).resolves.toBe("");
+    await expect(new WebNewDriver(empty.page).settingsStatesDescriptionValue()).resolves.toBe("");
+  });
+
+  it("reads the inline form error or empty", async () => {
+    const alert = new GeneralFakeLocator({ text: "Name is taken" });
+    const form = new GeneralFakeLocator({}, { role: () => alert });
+    const stub = generalSettingsPageDouble({ testId: () => form });
+    await expect(new WebNewDriver(stub.page).settingsStatesFormError()).resolves.toBe("Name is taken");
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesFormError()).resolves.toBe("");
+  });
+
+  it("submits, cancels and attempts through the form buttons", async () => {
+    const create = new GeneralFakeLocator();
+    const update = new GeneralFakeLocator();
+    const cancel = new GeneralFakeLocator();
+    const form = new GeneralFakeLocator(
+      {},
+      {
+        role: (_role, options) => {
+          const name = String(options?.name ?? "");
+          if (name === "Create state") return create;
+          if (name === "Save changes") return update;
+          if (name === "Cancel") return cancel;
+          return generalAbsent();
+        },
+      }
+    );
+    const stub = generalSettingsPageDouble({
+      testId: () => form,
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsStatesSubmitCreate();
+    await driver.settingsStatesSubmitUpdate();
+    await driver.settingsStatesCancelForm();
+    await driver.settingsStatesAttemptSubmit();
+    expect(create.click).toHaveBeenCalledTimes(2);
+    expect(update.click).toHaveBeenCalledTimes(1);
+    expect(cancel.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("attempts the update button when no create button renders", async () => {
+    const update = new GeneralFakeLocator();
+    const form = new GeneralFakeLocator(
+      {},
+      {
+        role: (_role, options) => (String(options?.name ?? "") === "Create state" ? generalAbsent() : update),
+      }
+    );
+    const stub = generalSettingsPageDouble({ testId: () => form });
+    await new WebNewDriver(stub.page).settingsStatesAttemptSubmit();
+    expect(update.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the swatch color and picks palette members", async () => {
+    const swatch = new GeneralFakeLocator();
+    swatch.evaluate.mockResolvedValue("rgb(255, 105, 0)");
+    const form = new GeneralFakeLocator(
+      {},
+      { testId: (testId) => (testId === "state-form-swatch" ? swatch : generalAbsent()) }
+    );
+    const palette = new GeneralFakeLocator(
+      {},
+      {
+        testId: () =>
+          new GeneralFakeLocator({
+            items: [
+              new GeneralFakeLocator({ attr: { "data-color": "#9CA3AF" } }),
+              new GeneralFakeLocator({ attr: { "data-color": "#3B82F6" } }),
+            ],
+          }),
+      }
+    );
+    const stub = generalSettingsPageDouble({
+      testId: () => form,
+      role: (role) => (role === "group" ? palette : generalAbsent()),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsStatesDotColor()).resolves.toBe("rgb(255, 105, 0)");
+    await driver.settingsStatesOpenColorPicker();
+    await driver.settingsStatesPickColor("#3b82f6");
+    await expect(driver.settingsStatesPickColor("#0693E3")).rejects.toThrow('no swatch matching "#0693E3"');
+  });
+});
+
+describe("WebNewDriver states tab rows", () => {
+  function rowDouble(overrides: { grip?: boolean; gripVisible?: boolean; marker?: boolean } = {}) {
+    const grip =
+      overrides.grip === false ? generalAbsent() : new GeneralFakeLocator({ visible: overrides.gripVisible ?? true });
+    return new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "state-row-grip") return grip;
+          if (testId === "state-promote") return new GeneralFakeLocator();
+          if (testId === "state-default-marker") {
+            return overrides.marker === true ? new GeneralFakeLocator() : generalAbsent();
+          }
+          return generalAbsent();
+        },
+        role: () => new GeneralFakeLocator({ disabled: false }),
+      }
+    );
+  }
+
+  it("opens the editor and reports the grip", async () => {
+    const row = rowDouble();
+    const stub = generalSettingsPageDouble({
+      locator: () => row,
+      testId: () => new GeneralFakeLocator(),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsStatesOpenEdit("Beta");
+    await expect(driver.settingsStatesGripVisible("Beta")).resolves.toBe(true);
+    expect(stub.calls.locators[0]).toContain('data-state-name="Beta"');
+
+    const quoted = generalSettingsPageDouble({ locator: () => rowDouble() });
+    await new WebNewDriver(quoted.page).settingsStatesGripVisible('Qu"ote\\x');
+    expect(quoted.calls.locators[0]).toContain('data-state-name="Qu\\"ote\\\\x"');
+  });
+
+  it("reports no grip when the control is missing or hidden", async () => {
+    const missing = generalSettingsPageDouble({ locator: () => rowDouble({ grip: false }) });
+    await expect(new WebNewDriver(missing.page).settingsStatesGripVisible("Solo")).resolves.toBe(false);
+    const hidden = generalSettingsPageDouble({ locator: () => rowDouble({ gripVisible: false }) });
+    await expect(new WebNewDriver(hidden.page).settingsStatesGripVisible("Solo")).resolves.toBe(false);
+  });
+
+  it("drags the grip onto the target edge", async () => {
+    const grip = new GeneralFakeLocator();
+    const row = new GeneralFakeLocator(
+      {},
+      { testId: (testId) => (testId === "state-row-grip" ? grip : generalAbsent()) }
+    );
+    const target = new GeneralFakeLocator();
+    target.boundingBox.mockResolvedValue({ x: 0, y: 0, width: 100, height: 40 });
+    let calls = 0;
+    const stub = generalSettingsPageDouble({
+      locator: () => {
+        calls += 1;
+        return calls % 2 === 1 ? row : target;
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsStatesDragAbove("one", "two");
+    expect(grip.dragTo).toHaveBeenCalledWith(target, { targetPosition: { x: 50, y: 6 } });
+    await driver.settingsStatesDragBelow("one", "two");
+    expect(grip.dragTo).toHaveBeenCalledWith(target, { targetPosition: { x: 50, y: 34 } });
+  });
+
+  it("marks the default and reads the marker", async () => {
+    const promote = new GeneralFakeLocator();
+    const row = new GeneralFakeLocator(
+      {},
+      { testId: (testId) => (testId === "state-promote" ? promote : generalAbsent()) }
+    );
+    const stub = generalSettingsPageDouble({ locator: () => row });
+    await new WebNewDriver(stub.page).settingsStatesMarkDefault("Beta");
+    expect(promote.click).toHaveBeenCalledTimes(1);
+
+    const marked = generalSettingsPageDouble({ locator: () => rowDouble({ marker: true }) });
+    await expect(new WebNewDriver(marked.page).settingsStatesIsDefault("Beta")).resolves.toBe(true);
+    const plain = generalSettingsPageDouble({ locator: () => rowDouble() });
+    await expect(new WebNewDriver(plain.page).settingsStatesIsDefault("Beta")).resolves.toBe(false);
+  });
+});
+
+describe("WebNewDriver states tab delete", () => {
+  function deleteRowDouble(disabled: boolean) {
+    const button = new GeneralFakeLocator({ disabled });
+    return new GeneralFakeLocator({}, { role: () => button });
+  }
+
+  it("reads disablement and opens the dialog", async () => {
+    const stub = generalSettingsPageDouble({
+      locator: () => deleteRowDouble(true),
+      testId: () => new GeneralFakeLocator(),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsStatesDeleteDisabled("Beta")).resolves.toBe(true);
+    await driver.settingsStatesDelete("Beta");
+  });
+
+  it("reads the modal text or empty while closed", async () => {
+    const message = new GeneralFakeLocator({ text: "  Beta\nwill be removed  " });
+    const stub = generalSettingsPageDouble({ testId: () => message });
+    await expect(new WebNewDriver(stub.page).settingsStatesDeleteModalText()).resolves.toBe("Beta will be removed");
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesDeleteModalText()).resolves.toBe("");
+  });
+
+  it("confirms, cancels and attempts deletion", async () => {
+    const confirm = new GeneralFakeLocator();
+    const cancel = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator(),
+      role: (_role, options) => {
+        const name = String(options?.name ?? "");
+        if (name === "Delete state") return confirm;
+        if (name === "Cancel") return cancel;
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsStatesDeleteConfirm();
+    await driver.settingsStatesDeleteCancel();
+    await driver.settingsStatesAttemptDeleteConfirm();
+    expect(confirm.click).toHaveBeenCalledTimes(2);
+    expect(cancel.click).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WebNewDriver states tab toggle, skeleton and notes", () => {
+  it("reads and flips the member toggle", async () => {
+    const visible = generalSettingsPageDouble({ testId: () => new GeneralFakeLocator() });
+    await expect(new WebNewDriver(visible.page).settingsStatesMemberToggleVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesMemberToggleVisible()).resolves.toBe(
+      false
+    );
+
+    const on = generalSettingsPageDouble({
+      testId: () => new GeneralFakeLocator({ attr: { "aria-checked": "true" } }),
+    });
+    await expect(new WebNewDriver(on.page).settingsStatesMemberToggleOn()).resolves.toBe(true);
+
+    const toggle = new GeneralFakeLocator({ attr: { "aria-checked": "false" } });
+    const stub = generalSettingsPageDouble({ testId: () => toggle });
+    await new WebNewDriver(stub.page).settingsStatesSetMemberToggle(true);
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+    const settled = new GeneralFakeLocator({ attr: { "aria-checked": "true" } });
+    const noop = generalSettingsPageDouble({ testId: () => settled });
+    await new WebNewDriver(noop.page).settingsStatesSetMemberToggle(true);
+    expect(settled.click).not.toHaveBeenCalled();
+  });
+
+  it("denies outsiders on either heading", async () => {
+    const denied = generalSettingsPageDouble({ role: () => new GeneralFakeLocator() });
+    await expect(new WebNewDriver(denied.page).settingsStatesAccessDenied()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesAccessDenied()).resolves.toBe(false);
+  });
+
+  it("shows the skeleton only with four bones up", async () => {
+    const bones = new GeneralFakeLocator({
+      items: [new GeneralFakeLocator(), new GeneralFakeLocator(), new GeneralFakeLocator(), new GeneralFakeLocator()],
+    });
+    const skeleton = new GeneralFakeLocator({}, { locator: () => bones });
+    const stub = generalSettingsPageDouble({ testId: () => skeleton });
+    await expect(new WebNewDriver(stub.page).settingsStatesSkeletonVisible()).resolves.toBe(true);
+    const thin = new GeneralFakeLocator({}, { locator: () => new GeneralFakeLocator({ count: 2 }) });
+    const thinStub = generalSettingsPageDouble({ testId: () => thin });
+    await expect(new WebNewDriver(thinStub.page).settingsStatesSkeletonVisible()).resolves.toBe(false);
+  });
+
+  it("holds list reads and reads the empty note", async () => {
+    const stub = generalSettingsPageDouble();
+    await new WebNewDriver(stub.page).settingsStatesDelayLoad(5);
+    expect(stub.pageObject.route).toHaveBeenCalledTimes(1);
+    const hold = stub.pageObject.route.mock.calls[0]?.[1] as (route: {
+      request: () => { method: () => string };
+      continue: () => Promise<void>;
+    }) => Promise<void>;
+    const getRoute = { request: () => ({ method: () => "GET" }), continue: vi.fn(async () => undefined) };
+    await hold(getRoute);
+    expect(getRoute.continue).toHaveBeenCalledTimes(1);
+    const postRoute = { request: () => ({ method: () => "POST" }), continue: vi.fn(async () => undefined) };
+    await hold(postRoute);
+    expect(postRoute.continue).toHaveBeenCalledTimes(1);
+
+    const note = new GeneralFakeLocator({ text: "No states\navailable" });
+    const card = new GeneralFakeLocator({}, { testId: () => note });
+    const noteStub = generalSettingsPageDouble({ locator: () => card });
+    await expect(new WebNewDriver(noteStub.page).settingsStatesEmptyNote("cancelled")).resolves.toBe(
+      "No states available"
+    );
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesEmptyNote("x")).resolves.toBe("");
   });
 });
