@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Bulk write hook (parity/specs/issues.md §10, ISS-112–115). One request
-// per action across the whole selection, then every list under the
-// project is revalidated so grouping and counts settle. Update, subscribe
-// and delete toasts name the outcome; archive reports the recoverable
-// archive. Failures keep the selection and report a retryable notice.
+// per action across the whole selection, then every issue list in the
+// workspace is revalidated so project, cycle, module and epic views all
+// settle. Update, subscribe and delete toasts name the outcome; archive
+// reports the recoverable archive. Failures keep the selection and report
+// a retryable notice.
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -38,7 +39,10 @@ export interface BulkMutationContext {
 export function useBulkMutations({ workspaceSlug, projectId }: BulkMutationContext) {
   const queryClient = useQueryClient();
   const refresh = (): void => {
-    void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug, projectId) });
+    // The same layout is mounted by project, cycle, module and epic screens,
+    // each under its own prefix beneath `lists` (see issueKeys.lists), so
+    // invalidate the whole list subtree rather than just `projectId`.
+    void queryClient.invalidateQueries({ queryKey: issueKeys.lists(workspaceSlug) });
   };
   const fail = (error: unknown): void => notifyError(BULK_FAILED_TITLE, bulkFailureDescription(error));
 

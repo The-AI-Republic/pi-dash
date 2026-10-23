@@ -25,6 +25,8 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
 const SLUG = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const ID1 = "123e4567-e89b-12d3-a456-426614174000";
+const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
+const MODULE = "423e4567-e89b-12d3-a456-426614174003";
 
 let calls: Array<{ url: string; method: string; body: string }> = [];
 let fail = false;
@@ -97,13 +99,32 @@ describe("useBulkMutations", () => {
     expect(notifySuccess).toHaveBeenCalledWith("Subscribed to work items");
   });
 
-  it("invalidates the project lists after a write", async () => {
+  it("invalidates every list under the workspace after a write", async () => {
     const { result, client } = setup();
+    const projectKey = issueKeys.lists(SLUG, PROJECT);
+    const cycleKey = issueKeys.lists(SLUG, "cycle", PROJECT, CYCLE);
+    const moduleKey = issueKeys.lists(SLUG, "module", PROJECT, MODULE);
+    for (const queryKey of [projectKey, cycleKey, moduleKey]) {
+      client.setQueryData(queryKey, { pages: [], pageParams: [] });
+    }
     const invalidate = vi.spyOn(client, "invalidateQueries");
     await act(async () => {
       await result.current.remove.mutateAsync([ID1]);
     });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.lists(SLUG, PROJECT) });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: issueKeys.lists(SLUG) });
+    for (const queryKey of [projectKey, cycleKey, moduleKey]) {
+      expect(client.getQueryCache().find({ queryKey })?.state.isInvalidated).toBe(true);
+    }
+  });
+
+  it("marks a cycle list stale after a bulk archive", async () => {
+    const { result, client } = setup();
+    const cycleKey = issueKeys.lists(SLUG, "cycle", PROJECT, CYCLE);
+    client.setQueryData(cycleKey, { pages: [], pageParams: [] });
+    await act(async () => {
+      await result.current.archive.mutateAsync([ID1]);
+    });
+    expect(client.getQueryCache().find({ queryKey: cycleKey })?.state.isInvalidated).toBe(true);
   });
 
   it("reports the server detail and keeps the selection on failure", async () => {
