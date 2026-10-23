@@ -106,6 +106,20 @@ fn py_float(number: &serde_json::Number) -> String {
     if rendered.contains('e') || rendered.contains('E') {
         return py_exponent(&rendered);
     }
+    if !rendered.contains('.') {
+        // Integer literal: Python ints are unbounded, so `json.dumps`
+        // echoes the exact digits at any magnitude — never scientific
+        // notation (PIDASHCONV-1332). The i64/u64 arms normalize
+        // spellings like `-0` to `0`; past them the literal (exact under
+        // `arbitrary_precision`) echoes verbatim.
+        if let Some(int) = number.as_i64() {
+            return int.to_string();
+        }
+        if let Some(uint) = number.as_u64() {
+            return uint.to_string();
+        }
+        return rendered;
+    }
     let (negative, digits) = match rendered.strip_prefix('-') {
         Some(rest) => (true, rest),
         None => (false, rendered.as_str()),
@@ -465,6 +479,25 @@ mod tests {
             assert_eq!(py_float(&number), *expected, "value {value}");
         }
         assert_eq!(py_float(&serde_json::Number::from(7)), "7");
+    }
+
+    #[test]
+    fn py_float_echoes_big_integers_verbatim() {
+        // Python ints are unbounded: `json.dumps` echoes exact digits at
+        // any magnitude, never scientific notation (PIDASHCONV-1332 —
+        // the runner outbox enqueue path renders through here).
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"big": 18446744073709551616, "neg": -9223372036854775809}"#)
+                .expect("valid JSON");
+        assert_eq!(
+            py_dumps(&value),
+            r#"{"big": 18446744073709551616, "neg": -9223372036854775809}"#
+        );
+        let neg_zero: serde_json::Value = serde_json::from_str("-0").expect("int");
+        assert_eq!(py_dumps(&neg_zero), "0");
+        // Float-syntax literals still take the `repr` path.
+        let float: serde_json::Value = serde_json::from_str("1e19").expect("float");
+        assert_eq!(py_dumps(&float), "1e+19");
     }
 
     #[test]
