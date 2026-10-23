@@ -14,11 +14,13 @@ describe("intake public API", () => {
       "IntakeScreen",
       "IntakeGate",
       "IntakeEmptyState",
+      "IntakeCreateDialog",
       "IntakeTabs",
       "IntakeDetail",
       "IntakeDetailHeader",
       "IntakeProperties",
       "useIntakeList",
+      "useCreateIntakeRequest",
       "prefetchIntakeList",
       "intakeListQueryOptions",
       "intakeRows",
@@ -48,6 +50,14 @@ describe("intake public API", () => {
       "shouldShowOpenBadge",
       "intakeDocumentTitle",
       "selectIntakeEmptyState",
+      "emptyIntakeCreateForm",
+      "resetIntakeCreateForm",
+      "buildIntakeCreatePayload",
+      "intakeTitleError",
+      "isIntakeTitleSubmittable",
+      "INTAKE_CREATE_DIALOG_TITLE",
+      "INTAKE_CREATE_SUBMIT_LABEL",
+      "INTAKE_CREATE_MORE_LABEL",
     ]) {
       expect(intake, name).toHaveProperty(name);
     }

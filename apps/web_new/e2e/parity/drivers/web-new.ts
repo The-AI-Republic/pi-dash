@@ -419,6 +419,14 @@ export class WebNewDriver implements ParityDriver {
 
   private intakeShellListUrls: string[] = [];
 
+  private intakeCreateUploadStall:
+    | {
+        matches: (url: URL) => boolean;
+        handler: (route: Route) => Promise<void>;
+        held: Route[];
+      }
+    | undefined;
+
   /** Reads a downloaded file; a seam for tests, and for very large backups. */
   private readDownload(path: string): string {
     return readFileSync(path, "utf8");
@@ -4176,40 +4184,114 @@ export class WebNewDriver implements ParityDriver {
       .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async intakeCreateOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("intakeCreateOpen");
+  // --- Intake create dialog (NEWFRONT-257, INT-013-017/033; landed by
+  // --- NEWFRONT-691; the same modal serves the ISS-217 picker
+  // --- scenarios). The dialog renders a titled form: the title input,
+  // --- the shared description panel, one group per inline property, the
+  // --- create-another switch and the Cancel/Create actions.
+
+  /** The open create dialog, scoped by its heading. */
+  private intakeCreateDialog(): Locator {
+    return this.page.getByRole("dialog", { name: "New intake request" });
+  }
+
+  private intakeCreateStateTrigger(): Locator {
+    return this.intakeCreateDialog().getByRole("group", { name: "Intake state" }).getByRole("button");
+  }
+
+  private intakeCreatePriorityTrigger(): Locator {
+    return this.intakeCreateDialog().getByRole("group", { name: "Priority" }).getByRole("button");
+  }
+
+  /** The shared combobox option list, portalled at the document root. */
+  private intakeCreateOptionList(): Locator {
+    return this.page.getByRole("listbox");
+  }
+
+  private intakeCreateEditor(): Locator {
+    return this.intakeCreateDialog().getByLabel("Description");
+  }
+
+  async intakeCreateOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.intakeShellWaitSettled();
+    await this.page.getByTestId("intake-header-create").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeStateValue(): Promise<string> {
-    return todo("intakeStateValue");
+    // The picker reads lazily on open and shows the triage fallback once
+    // its read lands, so one open/close cycle settles the trigger first.
+    // Escape closes only the picker popup; the dialog stays open.
+    const trigger = this.intakeCreateStateTrigger();
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await Promise.race([
+      this.page.getByRole("option", { name: "Triage" }).first().waitFor({ timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByRole("status").first().waitFor({ timeout: WebNewDriver.WAIT_MS }),
+    ]).catch(() => undefined);
+    await this.page.keyboard.press("Escape");
+    await this.intakeCreateOptionList()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    return ((await trigger.innerText().catch(() => "")) ?? "").trim();
   }
 
   async intakeStateOpenPicker(): Promise<void> {
-    return todo("intakeStateOpenPicker");
+    await this.intakeCreateStateTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateOptionList().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeStateOptionTexts(): Promise<string[]> {
-    return todo("intakeStateOptionTexts");
+    const options = this.intakeCreateOptionList().getByRole("option");
+    const total = await options.count();
+    const out: string[] = [];
+    for (let index = 0; index < total; index += 1) {
+      out.push(
+        (
+          (await options
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim()
+      );
+    }
+    return out.filter((text) => text.length > 0);
   }
 
-  async intakeStateSearch(_query: string): Promise<void> {
-    return todo("intakeStateSearch");
+  async intakeStateSearch(query: string): Promise<void> {
+    await this.page
+      .getByRole("combobox", { name: "Search intake states" })
+      .fill(query, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeStateEmptyText(): Promise<string> {
-    return todo("intakeStateEmptyText");
+    const empty = this.page.getByRole("status");
+    await empty.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (
+      (await empty
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
-  async intakeStatePick(_text: string): Promise<void> {
-    return todo("intakeStatePick");
+  async intakeStatePick(text: string): Promise<void> {
+    await this.intakeCreateOptionList()
+      .getByRole("option", { name: text })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async intakeCreateFillTitle(_title: string): Promise<void> {
-    return todo("intakeCreateFillTitle");
+  async intakeCreateFillTitle(title: string): Promise<void> {
+    await this.intakeCreateDialog().getByTestId("intake-create-title").fill(title, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeCreateSubmit(): Promise<void> {
-    return todo("intakeCreateSubmit");
+    await this.intakeCreateDialog().getByTestId("intake-create-submit").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "New intake request" })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeTriageStateDisabled(): Promise<boolean> {
@@ -15527,71 +15609,167 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeCreateDialogOpen(): Promise<boolean> {
-    return todo("intakeCreateDialogOpen");
+    const dialog = this.intakeCreateDialog();
+    if ((await dialog.count()) === 0) return false;
+    return dialog
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   async intakeCreateTitleValue(): Promise<string> {
-    return todo("intakeCreateTitleValue");
+    return this.intakeCreateDialog().getByTestId("intake-create-title").inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeCreateTitleHint(): Promise<string> {
-    return todo("intakeCreateTitleHint");
+    const hint = this.intakeCreateDialog().getByRole("alert");
+    if ((await hint.count()) === 0) return "";
+    return (
+      (await hint
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async intakeCreateSubmitDisabled(): Promise<boolean> {
-    return todo("intakeCreateSubmitDisabled");
+    const submit = this.intakeCreateDialog().getByTestId("intake-create-submit");
+    await submit.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return submit.isDisabled();
   }
 
-  async intakeCreateFillDescription(_text: string): Promise<void> {
-    return todo("intakeCreateFillDescription");
+  async intakeCreateFillDescription(text: string): Promise<void> {
+    const editor = this.intakeCreateEditor();
+    await editor.click({ timeout: WebNewDriver.WAIT_MS });
+    await editor.pressSequentially(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeCreateDescriptionText(): Promise<string> {
-    return todo("intakeCreateDescriptionText");
+    const editor = this.intakeCreateEditor();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await editor.innerText().catch(() => "")) ?? "").trim();
   }
 
   async intakeCreatePriorityValue(): Promise<string> {
-    return todo("intakeCreatePriorityValue");
+    const trigger = this.intakeCreatePriorityTrigger();
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await trigger.innerText().catch(() => "")) ?? "").trim();
   }
 
-  async intakeCreateSetPriority(_label: string): Promise<void> {
-    return todo("intakeCreateSetPriority");
+  async intakeCreateSetPriority(label: string): Promise<void> {
+    await this.intakeCreatePriorityTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateOptionList().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeCreateOptionList()
+      .getByRole("option", { name: label })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeCreateMoreOn(): Promise<boolean> {
-    return todo("intakeCreateMoreOn");
+    const toggle = this.intakeCreateDialog().getByRole("switch");
+    await toggle.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return (await toggle.getAttribute("aria-checked")) === "true";
   }
 
   async intakeCreateToggleMore(): Promise<void> {
-    return todo("intakeCreateToggleMore");
+    const before = await this.intakeCreateMoreOn();
+    await this.intakeCreateDialog().getByRole("switch").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(async () => this.intakeCreateMoreOn(), { timeout: 10_000 }).toBe(!before);
   }
 
   async intakeCreateDiscard(): Promise<void> {
-    return todo("intakeCreateDiscard");
+    await this.intakeCreateDialog().getByRole("button", { name: "Cancel" }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeCreatePressEscape(): Promise<void> {
-    return todo("intakeCreatePressEscape");
+    await this.page.keyboard.press("Escape");
   }
 
   async intakeCreateSubmitStayingOpen(): Promise<void> {
-    return todo("intakeCreateSubmitStayingOpen");
+    // Create-another keeps the dialog mounted, so the creation toast (not
+    // the dialog close) is the completion signal.
+    await this.intakeCreateDialog().getByTestId("intake-create-submit").click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.isToastVisible("Request created"), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
   async intakeCreateStallNextUpload(): Promise<void> {
-    return todo("intakeCreateStallNextUpload");
+    // Hold the description-asset grant POST unanswered (the byte upload
+    // and the completion never start), so the editor's busy flag stays
+    // set until the release call. Only intake-create uploads run in these
+    // scenarios, so holding every matching POST is the same as the next.
+    const stall = {
+      matches: (url: URL) => /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/$/.test(url.pathname),
+      handler: async (route: Route) => {
+        if (route.request().method() !== "POST") {
+          await route.continue().catch(() => undefined);
+          return;
+        }
+        stall.held.push(route);
+      },
+      held: [] as Route[],
+    };
+    this.intakeCreateUploadStall = stall;
+    await this.page.route(stall.matches, stall.handler);
   }
 
   async intakeCreateReleaseUpload(): Promise<void> {
-    return todo("intakeCreateReleaseUpload");
+    const current = this.intakeCreateUploadStall;
+    this.intakeCreateUploadStall = undefined;
+    if (current === undefined) return;
+    await this.page.unroute(current.matches, current.handler).catch(() => undefined);
+    for (const route of current.held) {
+      // Wait for the upload's completion answer so callers observe a
+      // settled editor (the grant answer and the rendered image both race
+      // the busy flag flip).
+      const settled = this.page
+        .waitForResponse(
+          (response) =>
+            response.request().method() === "PATCH" &&
+            /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/.+\/$/.test(new URL(response.url()).pathname),
+          { timeout: 60_000 }
+        )
+        .catch(() => null);
+      await route.continue().catch(() => undefined);
+      await settled;
+    }
   }
 
-  async intakeCreateInsertImage(_file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
-    return todo("intakeCreateInsertImage");
+  async intakeCreateInsertImage(file: { name: string; mime: string; bytes: Buffer }): Promise<void> {
+    const stalled = this.intakeCreateUploadStall !== undefined;
+    // Registered before the file is supplied: when stalled, the grant
+    // POST being observed (still held) is the return signal; otherwise
+    // the upload's completion answer proves the editor settled (the
+    // rendered image alone races the busy flag flip).
+    const uploadSeen = stalled
+      ? this.page.waitForRequest(
+          (request) =>
+            request.method() === "POST" &&
+            /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/$/.test(new URL(request.url()).pathname),
+          { timeout: WebNewDriver.WAIT_MS }
+        )
+      : this.page.waitForResponse(
+          (response) =>
+            response.request().method() === "PATCH" &&
+            /\/api\/assets\/v2\/workspaces\/.+\/projects\/.+\/.+\/$/.test(new URL(response.url()).pathname),
+          { timeout: 60_000 }
+        );
+    const chooserWait = this.page.waitForEvent("filechooser", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
+    await this.intakeCreateDialog().getByRole("button", { name: "Add image" }).click({ timeout: WebNewDriver.WAIT_MS });
+    const chooser = await chooserWait;
+    if (chooser !== null) {
+      await chooser.setFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+    } else {
+      const input = this.intakeCreateDialog().locator('input[type="file"]');
+      await input.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+      await input.setInputFiles([{ name: file.name, mimeType: file.mime, buffer: file.bytes }]);
+    }
+    await uploadSeen;
   }
 
   async intakeCreateEditorImageCount(): Promise<number> {
-    return todo("intakeCreateEditorImageCount");
+    const editor = this.intakeCreateEditor();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return editor.locator("img").count();
   }
 
   // --- NEWFRONT-253 (cycles detail/sidebar, CYC-032-039). Stage 0
