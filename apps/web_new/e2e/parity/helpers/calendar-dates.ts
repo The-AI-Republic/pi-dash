@@ -63,6 +63,30 @@ export function localTodayISO(now: Date = new Date()): string {
 }
 
 /**
+ * Today's `yyyy-MM-dd` in a project timezone (`now` is injectable for
+ * tests). A missing or unknown zone degrades to the runner's local day,
+ * mirroring the app's system-time fallback.
+ */
+export function zonedTodayISO(timeZone: string | null, now: Date = new Date()): string {
+  if (timeZone !== null) {
+    try {
+      const rendered = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      })
+        .formatToParts(now)
+        .reduce<Record<string, string>>((acc, part) => ({ ...acc, [part.type]: part.value }), {});
+      return `${rendered["year"]}-${rendered["month"]}-${rendered["day"]}`;
+    } catch {
+      // Fall through to the runner-local day below.
+    }
+  }
+  return localTodayISO(now);
+}
+
+/**
  * The calendar tile's accessible name for an ISO day, in a fixed
  * month-name vocabulary (the grid labels each tile "Month D, YYYY"
  * regardless of locale).

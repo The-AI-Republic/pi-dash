@@ -65,6 +65,18 @@ describe("Dialog", () => {
     await waitFor(() => expect(screen.getByLabelText("Name")).toHaveFocus());
   });
 
+  it("moves no focus on open when the caller passes initialFocus={false}", async () => {
+    render(
+      <Dialog title="Rename" open onOpenChange={() => undefined} initialFocus={false}>
+        <input aria-label="Name" />
+      </Dialog>
+    );
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+    // Past Base UI's deferred initial-focus pass: focus stays put.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it("leaves the header close control out when the caller orders its own actions", () => {
     render(
       <Dialog title="Key created" open onOpenChange={() => undefined} closeButton={false}>

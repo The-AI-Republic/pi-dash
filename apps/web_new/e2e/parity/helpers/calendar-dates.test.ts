@@ -9,6 +9,7 @@ import {
   isWeekendISO,
   pickFutureWeekdayISO,
   pickPastWeekdayISO,
+  zonedTodayISO,
 } from "./calendar-dates.js";
 
 describe("isoDayOffset", () => {
@@ -93,5 +94,25 @@ describe("elapsedHalfHour", () => {
   it("returns null once both grids are exhausted", () => {
     expect(elapsedHalfHour(new Date(2026, 9, 20, 23, 30))).toBeNull();
     expect(elapsedHalfHour(new Date(2026, 9, 20, 23, 59))).toBeNull();
+  });
+});
+
+describe("zonedTodayISO", () => {
+  it("reads the day in the given zone across the date boundary", () => {
+    // Noon UTC October 15: UTC reads the 15th, Auckland (NZDT, UTC+13)
+    // already reads the 16th, Honolulu (UTC-10) still reads the 15th.
+    const noon = new Date("2026-10-15T12:00:00Z");
+    expect(zonedTodayISO("UTC", noon)).toBe("2026-10-15");
+    expect(zonedTodayISO("Pacific/Auckland", noon)).toBe("2026-10-16");
+    expect(zonedTodayISO("Pacific/Honolulu", noon)).toBe("2026-10-15");
+    expect(zonedTodayISO("Pacific/Honolulu", new Date("2026-10-15T09:00:00Z"))).toBe("2026-10-14");
+  });
+
+  it("degrades to the runner-local day for a missing or unknown zone", () => {
+    // Local noon: the runner's own calendar day, in any machine zone.
+    const localNoon = new Date(2026, 9, 15, 12, 0, 0);
+    expect(zonedTodayISO(null, localNoon)).toBe("2026-10-15");
+    expect(zonedTodayISO("Not/AZone", localNoon)).toBe("2026-10-15");
+    expect(zonedTodayISO("", localNoon)).toBe("2026-10-15");
   });
 });

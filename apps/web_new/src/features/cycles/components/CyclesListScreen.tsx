@@ -17,8 +17,10 @@ import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
 import { cyclesListQueryOptions } from "../api/queries.js";
+import { CreateCycleDialog } from "../dialog/CycleDialog.js";
 import { CYCLES_CRUMB, cyclesFeatureHref, cyclesTitle, resolveCyclesBody } from "../lib/cycleScreen.js";
 import { CyclesFeatureGate } from "./CyclesFeatureGate.js";
+import { CyclesListHeader } from "./CyclesListHeader.js";
 import { CyclesListSkeleton } from "./CyclesListSkeleton.js";
 import { CyclesLoadError } from "./CyclesLoadError.js";
 import { CyclesZeroState } from "./CyclesZeroState.js";
@@ -62,12 +64,22 @@ export function CyclesListScreen({
     cycleCount: cycles.data?.length ?? 0,
   });
 
+  // The header and the zero state share one opener (CYC-014): the
+  // explicit prop when a host overrides it, else the screen's own
+  // dialog. The header renders over the zero-state and the list only.
+  const [createOpen, setCreateOpen] = React.useState(false);
+  const openCreateCycle = onCreateCycle ?? (() => setCreateOpen(true));
+  const canCreate = isProjectAuthorized(role);
+
   return (
     <section
       aria-label={CYCLES_CRUMB}
       data-testid="cycles-list-screen"
       className="flex min-h-0 flex-1 flex-col gap-(--space-4) p-(--space-4)"
     >
+      {state === "zero" || state === "list" ? (
+        <CyclesListHeader canCreate={canCreate} onCreateCycle={openCreateCycle} />
+      ) : null}
       {state === "skeleton" ? (
         <CyclesListSkeleton />
       ) : state === "error" ? (
@@ -85,9 +97,18 @@ export function CyclesListScreen({
           }}
         />
       ) : state === "zero" ? (
-        <CyclesZeroState canCreate={isProjectAuthorized(role)} onCreateCycle={onCreateCycle} />
+        <CyclesZeroState canCreate={canCreate} onCreateCycle={openCreateCycle} />
       ) : (
         children
+      )}
+      {project.data === undefined ? null : (
+        <CreateCycleDialog
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          currentProject={{ id: projectId, name: project.data.name, identifier: project.data.identifier }}
+        />
       )}
     </section>
   );

@@ -184,7 +184,11 @@ export async function listCycleRows(
   return client.parse(CycleRows, body, `GET cycle rows ${projectId}`);
 }
 
-/** Create body: name is required; dates are both-or-neither (§6). */
+/**
+ * Create body: name is required; dates are both-or-neither (the POST
+ * endpoint refuses a single date; spec §6). Edits differ: PATCH accepts
+ * one date alone, so CyclePatch carries no such rule (spec §7).
+ */
 export interface CycleCreateInput {
   name: string;
   description?: string;

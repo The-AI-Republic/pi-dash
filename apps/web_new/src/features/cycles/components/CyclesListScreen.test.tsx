@@ -21,7 +21,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { CYCLES_PROJECT_ID, jsonResponse, makeCycleRow, makeProjectRow } from "../testing.js";
+import { CYCLES_PROJECT_ID, jsonResponse, makeCycleRow, makeProjectDetails, makeProjectRow } from "../testing.js";
 import { CyclesListScreen } from "./CyclesListScreen.js";
 
 interface Harness {
@@ -65,6 +65,7 @@ beforeEach(() => {
       return jsonResponse(url, harness.projectStatus, harness.project);
     }
     if (url.endsWith("/project-roles/")) return jsonResponse(url, 200, harness.roles);
+    if (url.endsWith("/projects/details/")) return jsonResponse(url, 200, [makeProjectDetails()]);
     if (url.endsWith(`/api/workspaces/acme/projects/${CYCLES_PROJECT_ID}/cycles/`)) {
       harness.cyclesCalls += 1;
       if (harness.cyclesDelayMs > 0) await sleep(harness.cyclesDelayMs);
@@ -175,6 +176,53 @@ describe("CyclesListScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByTestId("cycles-zero-state")).toBeInTheDocument();
     expect(harness.cyclesCalls).toBeGreaterThan(1);
+  });
+
+  it("opens the screen dialog from the header action over the zero-state", async () => {
+    renderScreen();
+    expect(await screen.findByTestId("cycles-zero-state")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-list-header")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add cycle" }));
+    expect(await screen.findByRole("heading", { name: "Create cycle" })).toBeInTheDocument();
+  });
+
+  it("opens the screen dialog from the zero-state shortcut", async () => {
+    renderScreen();
+    expect(await screen.findByTestId("cycles-zero-state")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Set your first cycle" }));
+    expect(await screen.findByRole("heading", { name: "Create cycle" })).toBeInTheDocument();
+  });
+
+  it("shows the header over the list", async () => {
+    harness.cycles = [makeCycleRow({ name: "Cycle 7" })];
+    renderScreen();
+    expect(await screen.findByTestId("cycles-list-body")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-list-header")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add cycle" })).toBeInTheDocument();
+  });
+
+  it("hides the header while gated", async () => {
+    harness.project = makeProjectRow({ cycle_view: false });
+    renderScreen();
+    expect(await screen.findByTestId("cycles-feature-gate")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycles-list-header")).not.toBeInTheDocument();
+  });
+
+  it("renders no header creation action for guests", async () => {
+    harness.roles = { [CYCLES_PROJECT_ID]: 5 };
+    renderScreen();
+    expect(await screen.findByTestId("cycles-zero-state")).toBeInTheDocument();
+    expect(screen.getByTestId("cycles-list-header")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add cycle" })).not.toBeInTheDocument();
+  });
+
+  it("prefers an explicit opener over the screen dialog", async () => {
+    const onCreateCycle = vi.fn();
+    renderScreen({ onCreateCycle });
+    expect(await screen.findByTestId("cycles-zero-state")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add cycle" }));
+    expect(onCreateCycle).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("heading", { name: "Create cycle" })).not.toBeInTheDocument();
   });
 
   it("keeps the rows while a background refetch runs", async () => {

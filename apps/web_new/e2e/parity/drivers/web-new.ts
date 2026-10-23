@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
-import { calendarDayLabel, localTodayISO } from "../helpers/calendar-dates.js";
+import { calendarDayLabel, isoDayOffset, localTodayISO, zonedTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
   AdminAbsenceFacts,
@@ -3804,7 +3804,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async pickerPressEscape(): Promise<void> {
-    return todo("pickerPressEscape");
+    await this.page.keyboard.press("Escape");
   }
 
   async pickerClickOutside(): Promise<void> {
@@ -3914,44 +3914,108 @@ export class WebNewDriver implements ParityDriver {
     return todo("rangeMergedCellClear");
   }
 
+  /**
+   * The open range calendar (NEWFRONT-710, shared with the Issues
+   * range-calendar scenarios). Closed popovers unmount, so a mounted
+   * calendar root is the open one; `.last()` mirrors the old driver
+   * when two mount during a transition.
+   */
+  private webNewRangeCalendar(): Locator {
+    return this.page.locator('[data-testid$="-calendar"]').last();
+  }
+
+  /** One in-month day cell of the open range calendar. */
+  private webNewRangeDay(day: number): Locator {
+    const suffix = `-${String(day).padStart(2, "0")}`;
+    return this.webNewRangeCalendar().locator(`button[data-in-month="true"][data-day$="${suffix}"]`).first();
+  }
+
   async rangeCalendarVisible(): Promise<boolean> {
-    return todo("rangeCalendarVisible");
+    return (await this.page.locator('[data-testid$="-calendar"]').count()) > 0;
   }
 
-  async rangeCalendarPickDay(_day: number): Promise<void> {
-    return todo("rangeCalendarPickDay");
+  async rangeCalendarPickDay(day: number): Promise<void> {
+    await this.webNewRangeDay(day).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async rangeCalendarDayDisabled(_day: number): Promise<boolean> {
-    return todo("rangeCalendarDayDisabled");
+  async rangeCalendarDayDisabled(day: number): Promise<boolean> {
+    const button = this.webNewRangeDay(day);
+    await button.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return button.isDisabled();
   }
 
-  async rangeCalendarSelectMonth(_monthLabel: string): Promise<void> {
-    return todo("rangeCalendarSelectMonth");
+  async rangeCalendarSelectMonth(monthLabel: string): Promise<void> {
+    await this.webNewRangeCalendar()
+      .getByLabel("Month", { exact: true })
+      .selectOption({ label: monthLabel }, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async rangeCalendarSelectYear(_yearLabel: string): Promise<void> {
-    return todo("rangeCalendarSelectYear");
+  async rangeCalendarSelectYear(yearLabel: string): Promise<void> {
+    await this.webNewRangeCalendar()
+      .getByLabel("Year", { exact: true })
+      .selectOption({ label: yearLabel }, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async cycleCreateOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("cycleCreateOpen");
+  /** The open cycle create/update dialog (NEWFRONT-710, CYC-014-021). */
+  private cycleDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: /^(Create cycle|Update cycle)$/ }) });
+  }
+
+  /** The open create dialog (the cyclesCreate* scenarios never open edit). */
+  private cycleCreateDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByRole("heading", { name: "Create cycle" }) });
+  }
+
+  async cycleCreateOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByRole("button", { name: "Add cycle" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("heading", { name: "Create cycle" }).waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cycleFormRangePlaceholders(): Promise<{ from: string; to: string }> {
-    return todo("cycleFormRangePlaceholders");
+    const trigger = this.cycleDialog().getByTestId("cycle-date-range-trigger");
+    await trigger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The last two spans are the from/to labels; outer wrappers come first.
+    const spans = trigger.locator("span");
+    const count = await spans.count();
+    const from = (
+      (await spans
+        .nth(count - 2)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const to = (
+      (await spans
+        .nth(count - 1)
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return { from, to };
   }
 
   async cycleFormRangeOpen(): Promise<void> {
-    return todo("cycleFormRangeOpen");
+    await this.cycleDialog()
+      .getByTestId("cycle-date-range-trigger")
+      .locator("span")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("cycle-date-range-calendar")
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async cycleFormFillName(_name: string): Promise<void> {
-    return todo("cycleFormFillName");
+  async cycleFormFillName(name: string): Promise<void> {
+    await this.cycleDialog().locator('input[name="name"]').fill(name, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async cycleFormSubmit(): Promise<void> {
-    return todo("cycleFormSubmit");
+    await this.cycleDialog().getByRole("button", { name: "Create cycle" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "Create cycle" })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async intakeCreateOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
@@ -14277,40 +14341,74 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesEditOpenUpdateDialog");
   }
 
-  async cyclesEditOpenListRaw(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("cyclesEditOpenListRaw");
+  async cyclesEditOpenListRaw(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
 
   async cyclesEditDialogHeading(): Promise<string | null> {
-    return todo("cyclesEditDialogHeading");
+    if ((await this.page.getByRole("heading", { name: "Create cycle" }).count()) > 0) return "Create cycle";
+    if ((await this.page.getByRole("heading", { name: "Update cycle" }).count()) > 0) return "Update cycle";
+    return null;
   }
 
-  async cyclesEditFillName(_text: string): Promise<void> {
-    return todo("cyclesEditFillName");
+  async cyclesEditFillName(text: string): Promise<void> {
+    await this.cycleDialog().locator('input[name="name"]').fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
-  async cyclesEditFillDescription(_text: string): Promise<void> {
-    return todo("cyclesEditFillDescription");
+  async cyclesEditFillDescription(text: string): Promise<void> {
+    await this.cycleDialog().locator('textarea[name="description"]').fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEditRangeOpen(): Promise<void> {
-    return todo("cyclesEditRangeOpen");
+    await this.cycleDialog()
+      .getByTestId("cycle-date-range-trigger")
+      .locator("span")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("cycle-date-range-calendar")
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEditSubmitUpdate(): Promise<void> {
-    return todo("cyclesEditSubmitUpdate");
+    await this.cycleDialog().getByRole("button", { name: "Update cycle" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("heading", { name: "Update cycle" })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesEditSubmitCountingDateChecks(): Promise<{ dateChecks: number }> {
-    return todo("cyclesEditSubmitCountingDateChecks");
+    let dateChecks = 0;
+    const listener = (request: { method(): string; url(): string }): void => {
+      if (request.method() === "POST" && request.url().includes("/cycles/date-check/")) dateChecks += 1;
+    };
+    this.page.on("request", listener);
+    try {
+      await this.cyclesEditSubmitUpdate();
+    } finally {
+      this.page.off("request", listener);
+    }
+    return { dateChecks };
   }
 
   async cyclesEditStoredCycleTab(): Promise<string | null> {
-    return todo("cyclesEditStoredCycleTab");
+    return this.page.evaluate(() => {
+      try {
+        const raw = window.localStorage.getItem("cycle_tab");
+        if (raw === null) return null;
+        const parsed: unknown = JSON.parse(raw);
+        return typeof parsed === "string" ? parsed : null;
+      } catch {
+        return null;
+      }
+    });
   }
 
   async cyclesEditClearStoredCycleTab(): Promise<void> {
-    return todo("cyclesEditClearStoredCycleTab");
+    await this.page.evaluate(() => {
+      window.localStorage.removeItem("cycle_tab");
+    });
   }
 
   async cyclesEditHeroCycleName(): Promise<string | null> {
@@ -14318,23 +14416,47 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cyclesEditPressEscape(): Promise<void> {
-    return todo("cyclesEditPressEscape");
+    await this.page.keyboard.press("Escape");
   }
 
   async cyclesEditTitleFocused(): Promise<boolean> {
-    return todo("cyclesEditTitleFocused");
+    return this.page.evaluate(() => {
+      const el = document.activeElement;
+      return el instanceof HTMLInputElement && el.getAttribute("name") === "name";
+    });
   }
 
-  async cyclesEditFocusTrail(_steps: number): Promise<string[]> {
-    return todo("cyclesEditFocusTrail");
+  async cyclesEditFocusTrail(steps: number): Promise<string[]> {
+    // Records the focused control's label now, then after each Tab press
+    // (same accessible-label style as the views dialog trail).
+    const trail: string[] = [];
+    for (let index = 0; index <= steps; index += 1) {
+      if (index > 0) await this.page.keyboard.press("Tab");
+      const label = await this.page
+        .evaluate(() => {
+          const el = document.activeElement as HTMLElement | null;
+          if (!el) return "";
+          const input = el as HTMLInputElement;
+          const label = el.getAttribute("aria-label") ?? input.placeholder ?? el.innerText ?? "";
+          return label.replace(/\s+/g, " ").trim().slice(0, 60);
+        })
+        .catch(() => "");
+      trail.push(label);
+    }
+    return trail;
   }
 
   async cyclesEditCreateButtonVisible(): Promise<boolean> {
-    return todo("cyclesEditCreateButtonVisible");
+    return (await this.page.getByRole("button", { name: "Add cycle" }).count()) > 0;
   }
 
   async cyclesEditEmptyCreateState(): Promise<{ visible: boolean; disabled: boolean }> {
-    return todo("cyclesEditEmptyCreateState");
+    const button = this.page.getByRole("button", { name: "Set your first cycle" });
+    if ((await button.count()) === 0) return { visible: false, disabled: false };
+    const target = button.first();
+    const disabled = await target.isDisabled().catch(() => false);
+    const ariaDisabled = await target.getAttribute("aria-disabled").catch(() => null);
+    return { visible: true, disabled: disabled || ariaDisabled === "true" };
   }
 
   async cyclesEditOpenPeek(_name: string): Promise<void> {
@@ -14841,43 +14963,135 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cyclesCreateOpenFromHeader(): Promise<void> {
-    return todo("cyclesCreateOpenFromHeader");
+    await this.page.getByRole("button", { name: "Add cycle" }).first().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cycleCreateDialog().locator('input[name="name"]').waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesCreateDialogOpen(): Promise<boolean> {
-    return todo("cyclesCreateDialogOpen");
+    // Attachment, not visibility: closed dialogs unmount, while an open
+    // dialog keeps its fields mounted once the heading renders.
+    return (await this.cycleCreateDialog().locator('input[name="name"]').count()) > 0;
   }
 
   async cyclesCreateDialogCancel(): Promise<void> {
-    return todo("cyclesCreateDialogCancel");
+    await this.cycleCreateDialog().getByRole("button", { name: "Cancel" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cycleCreateDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
-  async cyclesCreateFillTitle(_title: string): Promise<void> {
-    return todo("cyclesCreateFillTitle");
+  async cyclesCreateFillTitle(title: string): Promise<void> {
+    await this.cycleCreateDialog().locator('input[name="name"]').fill(title);
   }
 
-  async cyclesCreateFillDescription(_text: string): Promise<void> {
-    return todo("cyclesCreateFillDescription");
+  async cyclesCreateFillDescription(text: string): Promise<void> {
+    await this.cycleCreateDialog().locator('textarea[name="description"]').fill(text);
   }
 
   async cyclesCreateTitleError(): Promise<string | null> {
-    return todo("cyclesCreateTitleError");
+    // Kit fields render their inline error as an alert.
+    const error = this.cycleCreateDialog().getByRole("alert").first();
+    if ((await error.count()) === 0) return null;
+    const text = ((await error.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
-  async cyclesCreatePickDateRange(_startISO: string, _endISO: string): Promise<void> {
-    return todo("cyclesCreatePickDateRange");
+  /** Click one day cell in the dialog's open range calendar for an ISO date. */
+  private async cyclesCreatePickDay(iso: string): Promise<void> {
+    const target = new Date(`${iso}T12:00:00`);
+    const calendar = this.page.getByTestId("cycle-date-range-calendar");
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await calendar
+      .getByLabel("Month", { exact: true })
+      .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+    await calendar.getByLabel("Year", { exact: true }).selectOption({ label: String(target.getFullYear()) });
+    await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async cyclesCreatePickDateRange(startISO: string, endISO: string): Promise<void> {
+    await this.cycleCreateDialog()
+      .getByTestId("cycle-date-range-trigger")
+      .locator("span")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.cyclesCreatePickDay(startISO);
+    await this.cyclesCreatePickDay(endISO);
+    await this.page.keyboard.press("Escape");
   }
 
   async cyclesCreatePastDayDisabled(): Promise<boolean> {
-    return todo("cyclesCreatePastDayDisabled");
+    await this.cycleCreateDialog()
+      .getByTestId("cycle-date-range-trigger")
+      .locator("span")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const calendar = this.page.getByTestId("cycle-date-range-calendar");
+    await calendar.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    // The dialog disables past days against the project's today, so both
+    // boundary days derive from the project timezone, not the runner's.
+    const timeZone = await this.cyclesDialogProjectTimezone();
+    const today = zonedTodayISO(timeZone);
+    const yesterdayDisabled = await this.cycleRangeDayDisabled(calendar, isoDayOffset(today, -1));
+    const todayEnabled = !(await this.cycleRangeDayDisabled(calendar, today));
+    await this.page.keyboard.press("Escape");
+    return yesterdayDisabled && todayEnabled;
   }
 
-  async cyclesCreatePickProject(_projectName: string): Promise<void> {
-    return todo("cyclesCreatePickProject");
+  /** Whether one ISO day cell is disabled, navigating the month grid to it. */
+  private async cycleRangeDayDisabled(calendar: Locator, iso: string): Promise<boolean> {
+    const target = new Date(`${iso}T12:00:00`);
+    await calendar
+      .getByLabel("Month", { exact: true })
+      .selectOption({ label: target.toLocaleString("en-US", { month: "long" }) });
+    await calendar.getByLabel("Year", { exact: true }).selectOption({ label: String(target.getFullYear()) });
+    const cell = calendar.locator(`button[data-day="${iso}"]`);
+    await cell.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return cell.isDisabled();
+  }
+
+  /** The open dialog's project timezone from the workspace details read. */
+  private async cyclesDialogProjectTimezone(): Promise<string | null> {
+    const match = this.page.url().match(/\/([^/]+)\/projects\/([^/]+)\/cycles/);
+    const slug = match?.[1];
+    const projectId = match?.[2];
+    if (slug === undefined || projectId === undefined) {
+      throw new Error("[parity] the past-day probe needs a project cycles page.");
+    }
+    const response = await this.page.request.get(`/api/workspaces/${slug}/projects/details/`);
+    if (!response.ok()) throw new Error(`[parity] projects/details read failed with HTTP ${response.status()}.`);
+    const rows = (await response.json()) as Array<Record<string, unknown>>;
+    const zone = rows.find((row) => row["id"] === projectId)?.["timezone"];
+    return typeof zone === "string" && zone.length > 0 ? zone : null;
+  }
+
+  async cyclesCreatePickProject(projectName: string): Promise<void> {
+    // The project field is the dialog's first control, ahead of the
+    // title; its popup lists one option per creatable project.
+    await this.cycleCreateDialog()
+      .getByTestId("cycle-project-field")
+      .getByRole("button")
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option", { name: projectName, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("listbox", { name: "Projects" })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   async cyclesCreateSubmit(): Promise<void> {
-    return todo("cyclesCreateSubmit");
+    await this.cycleCreateDialog()
+      .getByRole("button", { name: "Create cycle" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // Settle on whichever outcome the submit takes: the dialog closing
+    // (saved), a toast (saved or date-check refused), or an inline
+    // title error (client-side validation refused).
+    await expect
+      .poll(
+        async () =>
+          !(await this.cyclesCreateDialogOpen()) ||
+          (await this.rulesLastToast()) !== null ||
+          (await this.cycleCreateDialog().getByRole("alert").count()) > 0,
+        { timeout: 60_000 }
+      )
+      .toBe(true);
   }
 
   // --- Cycles archive/menu/transfer acceptance (NEWFRONT-252, CYC-025-031
