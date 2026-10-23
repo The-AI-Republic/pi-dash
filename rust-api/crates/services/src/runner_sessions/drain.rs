@@ -17,6 +17,8 @@
 //!   [`plan_assignment`] + [`DrainEffect::SendAssign`].
 //! * `drain_for_runner_by_id` (`:298-304`) →
 //!   [`DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL`].
+//! * `release_runner_if_idle` (`:306-328`, PDASHOSS01-231) →
+//!   [`RELEASE_RUNNER_IF_IDLE_SQL`].
 //!
 //! Out of scope here (sibling sub-issue PIDASHCONV-555):
 //! `HEARTBEAT_GRACE` / `NON_TERMINAL_STATUSES` / `BUSY_STATUSES`
@@ -299,6 +301,23 @@ pub const DRAIN_POD_BY_ID_LOOKUP_SQL: &str = "SELECT \"pod\".\"id\", \"pod\".\"w
 /// return `false`, no transaction.
 pub const DRAIN_FOR_RUNNER_BY_ID_LOOKUP_SQL: &str = "SELECT \"runner\".\"id\", \"runner\".\"owner_id\", \"runner\".\"workspace_id\", \"runner\".\"dev_machine_id\", \"runner\".\"pod_id\", \"runner\".\"name\", \"runner\".\"host_label\", \"runner\".\"provisioning\", \"runner\".\"visibility\", \"runner\".\"refresh_token_hash\", \"runner\".\"refresh_token_fingerprint\", \"runner\".\"refresh_token_generation\", \"runner\".\"previous_refresh_token_hash\", \"runner\".\"access_token_signing_key_version\", \"runner\".\"enrollment_token_hash\", \"runner\".\"enrollment_token_fingerprint\", \"runner\".\"enrolled_at\", \"runner\".\"capabilities\", \"runner\".\"status\", \"runner\".\"os\", \"runner\".\"arch\", \"runner\".\"runner_version\", \"runner\".\"dev_metadata\", \"runner\".\"protocol_version\", \"runner\".\"last_heartbeat_at\", \"runner\".\"free_worktrees\", \"runner\".\"created_at\", \"runner\".\"updated_at\", \"runner\".\"revoked_at\", \"runner\".\"revoked_reason\" FROM \"runner\" WHERE \"runner\".\"id\" = $1 ORDER BY \"runner\".\"last_heartbeat_at\" DESC, \"runner\".\"created_at\" DESC LIMIT 1";
 
+/// `release_runner_if_idle` (`matcher.py:306-328`, PDASHOSS01-231):
+/// `Runner.objects.filter(pk=runner_id, status=BUSY)
+/// .exclude(agent_runs__status__in=BUSY_STATUSES)
+/// .update(status=ONLINE)`. `$1` is the runner id; the rows-affected
+/// count is the Python `bool(...)` return. Strictly `busy` →
+/// `online`: `offline` / `revoked` rows never match, and a runner
+/// still holding a busy-status run (values in [`BUSY_STATUSES`]
+/// order, `ASSIGNED` included so a run awaiting redelivery keeps it
+/// busy) is left alone. `.update()` never stamps `updated_at`.
+///
+/// Every terminal-effects capacity release runs it right before
+/// `drain_for_runner_by_id`, and session open runs it inside the
+/// open transaction when the hello reports no `in_flight_run`.
+///
+/// [`BUSY_STATUSES`]: super::guards::BUSY_STATUSES
+pub const RELEASE_RUNNER_IF_IDLE_SQL: &str = "UPDATE \"runner\" SET \"status\" = 'online' WHERE (\"runner\".\"id\" = $1 AND \"runner\".\"status\" = 'busy' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', 'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1)))";
+
 // ---------------------------------------------------------------------------
 // Assignment plan + post-commit effect
 // ---------------------------------------------------------------------------
@@ -537,12 +556,32 @@ mod tests {
             SELECT_RUNNER_IN_POD_SQL,
             DRAIN_POD_IDLE_RUNNERS_SQL,
             DRAIN_FOR_RUNNER_LOCK_SQL,
+            RELEASE_RUNNER_IF_IDLE_SQL,
         ] {
             assert!(
                 sql.contains(&format!("U1.\"status\" IN ({list})")),
                 "NOT EXISTS arm pins BUSY_STATUSES order"
             );
         }
+    }
+
+    /// Django's compiled `release_runner_if_idle` update
+    /// (`UpdateQuery.get_compiler().as_sql()`, params inlined as the
+    /// sibling consts do): strictly `busy` → `online`, gated on no
+    /// busy-status run.
+    #[test]
+    fn release_runner_if_idle_sql_matches_django() {
+        assert_eq!(
+            RELEASE_RUNNER_IF_IDLE_SQL,
+            "UPDATE \"runner\" SET \"status\" = 'online' WHERE (\"runner\".\"id\" = $1 \
+             AND \"runner\".\"status\" = 'busy' AND NOT (EXISTS(SELECT 1 AS \"a\" FROM \
+             \"agent_run\" U1 WHERE (U1.\"status\" IN ('assigned', 'waiting_for_worktree', \
+             'running', 'cancel_requested', 'awaiting_approval', 'awaiting_reauth') AND \
+             U1.\"runner_id\" = (\"runner\".\"id\")) LIMIT 1)))"
+        );
+        assert!(RELEASE_RUNNER_IF_IDLE_SQL
+            .contains(&format!("SET \"status\" = '{RUNNER_STATUS_ONLINE}'")));
+        assert!(!RELEASE_RUNNER_IF_IDLE_SQL.contains("updated_at"));
     }
 
     // -- next_queued_run_for_pod ------------------------------------------
