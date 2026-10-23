@@ -1040,12 +1040,12 @@ pub async fn execute_terminal_effects(
     run_id: Uuid,
 ) -> Result<bool, TerminalEffectsError> {
     let db = |error: sqlx::Error| TerminalEffectsError::Database(error.to_string());
-    let mut hooks = pool.begin().await.map_err(db)?;
+    let mut hooks = pidash_db::tx::Transaction::begin(pool).await.map_err(db)?;
     // Lock order: issue → run (`finalization.py:115-125`).
     let work_item_id: Option<Uuid> =
         sqlx::query_scalar(finalize_kernel::select_run_work_item_id_sql())
             .bind(run_id)
-            .fetch_optional(&mut *hooks)
+            .fetch_optional(&mut **hooks.inner())
             .await
             .map_err(db)?
             .flatten();
@@ -1055,7 +1055,7 @@ pub async fn execute_terminal_effects(
                ORDER BY "issues"."created_at" DESC LIMIT 1 FOR UPDATE OF "issues""#,
         )
         .bind(issue_id)
-        .fetch_optional(&mut *hooks)
+        .fetch_optional(&mut **hooks.inner())
         .await
         .map_err(db)?;
     }
@@ -1074,7 +1074,7 @@ pub async fn execute_terminal_effects(
     .bind(TERMINAL_RUN_STATUSES[2].value())
     .bind(TERMINAL_RUN_STATUSES[3].value())
     .bind(TERMINAL_RUN_STATUSES[4].value())
-    .fetch_optional(&mut *hooks)
+    .fetch_optional(&mut **hooks.inner())
     .await
     .map_err(db)?;
     let Some((status, run_config, error, refusal_category, binding_id, hooks_applied_at)) = locked
@@ -1091,24 +1091,24 @@ pub async fn execute_terminal_effects(
             // database failure must not poison the hooks
             // transaction or strand terminal capacity.
             sqlx::query("SAVEPOINT failure_comment")
-                .execute(&mut *hooks)
+                .execute(&mut **hooks.inner())
                 .await
                 .map_err(db)?;
-            let commented = post_failure_comment(&mut hooks, ports, run_id, &error).await;
+            let commented = post_failure_comment(hooks.inner(), ports, run_id, &error).await;
             match commented {
                 Ok(()) => {
                     sqlx::query("RELEASE SAVEPOINT failure_comment")
-                        .execute(&mut *hooks)
+                        .execute(&mut **hooks.inner())
                         .await
                         .map_err(db)?;
                 }
                 Err(error) => {
                     sqlx::query("ROLLBACK TO SAVEPOINT failure_comment")
-                        .execute(&mut *hooks)
+                        .execute(&mut **hooks.inner())
                         .await
                         .map_err(db)?;
                     sqlx::query("RELEASE SAVEPOINT failure_comment")
-                        .execute(&mut *hooks)
+                        .execute(&mut **hooks.inner())
                         .await
                         .map_err(db)?;
                     tracing::error!(
@@ -1121,36 +1121,43 @@ pub async fn execute_terminal_effects(
         }
         if handoff {
             pending_handoff = true;
-        } else if let Err(error) = ports.post_run_orchestration(run_id).await {
-            // Unisolated in Python (the isolation lives inside the
-            // three sub-calls): abort the hooks transaction and
+        } else {
+            // `_apply_post_run_orchestration` runs inside Django's
+            // `transaction.atomic()`; the deferred pause re-locks the
+            // issue row this transaction already holds, so it runs on
+            // this transaction (a second connection self-deadlocks).
+            // Its sub-calls are isolated (log + continue), so a port
+            // error is the source's unisolated retire: abort and
             // propagate to the `_publish_effects` log.
-            return Err(TerminalEffectsError::Ports(format!("{error:?}")));
+            hooks = ports
+                .post_run_orchestration_in_tx(hooks, pool, run_id)
+                .await
+                .map_err(|error| TerminalEffectsError::Ports(format!("{error:?}")))?;
         }
         if let Some(binding_id) = binding_id {
             // The savepoint pair always runs around the hook call;
             // the `UPDATE` only when the hook rewrites `last_error`.
             sqlx::query("SAVEPOINT scheduler_hook")
-                .execute(&mut *hooks)
+                .execute(&mut **hooks.inner())
                 .await
                 .map_err(db)?;
             let hooked =
-                apply_scheduler_hook(&mut hooks, binding_id, status, &refusal_category, &error)
+                apply_scheduler_hook(hooks.inner(), binding_id, status, &refusal_category, &error)
                     .await;
             match hooked {
                 Ok(()) => {
                     sqlx::query("RELEASE SAVEPOINT scheduler_hook")
-                        .execute(&mut *hooks)
+                        .execute(&mut **hooks.inner())
                         .await
                         .map_err(db)?;
                 }
                 Err(error) => {
                     sqlx::query("ROLLBACK TO SAVEPOINT scheduler_hook")
-                        .execute(&mut *hooks)
+                        .execute(&mut **hooks.inner())
                         .await
                         .map_err(db)?;
                     sqlx::query("RELEASE SAVEPOINT scheduler_hook")
-                        .execute(&mut *hooks)
+                        .execute(&mut **hooks.inner())
                         .await
                         .map_err(db)?;
                     tracing::error!(
@@ -1164,7 +1171,7 @@ pub async fn execute_terminal_effects(
         let marked = sqlx::query(finalize_kernel::update_hooks_marker_sql())
             .bind(Utc::now())
             .bind(run_id)
-            .execute(&mut *hooks)
+            .execute(&mut **hooks.inner())
             .await
             .map_err(db)?;
         if marked.rows_affected() == 0 {
@@ -1367,9 +1374,9 @@ async fn apply_scheduler_hook(
 ///   isolated with `_publish_effects`' log lines; `DrainTasks`-style
 ///   chat effects never appear here.
 ///
-/// With [`LivePorts`] every port call succeeds, so the `Err` arms are
-/// unreachable in production — they exist for the D-14/D-12/D-11
-/// providers and for fakes in tests.
+/// The returns are the source's isolation semantics, not dead arms: a
+/// real drain (or dispatch) failure propagates (`server_error()`), and
+/// the isolated effects log and continue.
 pub async fn drain_lifecycle_effects(
     pool: &PgPool,
     ports: &impl RunnerPorts,
