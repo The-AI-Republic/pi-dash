@@ -12,7 +12,10 @@
 //!   with `{error, reason}`, 403 from inside an agent run.
 //! * `AgentRunYieldAPIEndpoint.post` (`:1255-1327`, `3869a226`) — record the run outcome
 //!   plus the optional `stop_ticking` flag
-//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write).
+//!   (`RUN_OUTCOMES` / `normalize_outcome` + `done_payload` write). A run
+//!   with no work item (a scheduler run, or a direct run) yields too
+//!   (PDASHOSS01-276): `run_kind` says which, and `stop_ticking` is not
+//!   stored for it — it has no ticking clock.
 //!
 //! Registered by [`super::routes`] at the four
 //! `apps/api/pi_dash/api/urls/work_item.py:133-151` paths.
@@ -736,6 +739,8 @@ pub struct YieldRun {
     pub facts: RunFacts,
     pub workspace_id: Uuid,
     pub done_payload: Option<Value>,
+    /// `AgentRun.scheduler_binding_id` (nullable; set on scheduler runs).
+    pub scheduler_binding_id: Option<Uuid>,
 }
 
 async fn fetch_yield_run(
@@ -746,7 +751,7 @@ async fn fetch_yield_run(
     let row: Option<sqlx::postgres::PgRow> = sqlx::query(
         r#"SELECT r."id", r."created_by_id", r."owner_id", r."runner_id",
                   ru."owner_id" AS "runner_owner_id", r."work_item_id", r."status",
-                  r."workspace_id", r."done_payload"
+                  r."workspace_id", r."done_payload", r."scheduler_binding_id"
            FROM "agent_run" r JOIN "workspaces" w ON w."id" = r."workspace_id"
            LEFT JOIN "runner" ru ON ru."id" = r."runner_id"
            WHERE r."id" = $1 AND w."slug" = $2 LIMIT 1"#,
@@ -765,6 +770,9 @@ async fn fetch_yield_run(
                 .map_err(|e| db_error(e, "fetch-yield-run"))?,
             done_payload: row
                 .try_get("done_payload")
+                .map_err(|e| db_error(e, "fetch-yield-run"))?,
+            scheduler_binding_id: row
+                .try_get("scheduler_binding_id")
                 .map_err(|e| db_error(e, "fetch-yield-run"))?,
         })
     })
@@ -1370,23 +1378,78 @@ pub fn run_ai_created(run_id: Uuid, status: &str, executor_kind: &str) -> (Statu
     (StatusCode::CREATED, body)
 }
 
-/// The yield success (`:1318-1327`, `3869a226`):
-/// `{"ok","run_id","work_item_id","outcome","stop_ticking"}`. Always 200.
+/// Which sort of run yielded — the response's `run_kind`
+/// (`views/issue.py`, PDASHOSS01-276).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YieldRunKind {
+    /// An issue run: the only kind with a ticking clock.
+    Issue(Uuid),
+    /// A scheduler run, carrying its `scheduler_binding_id`.
+    Scheduler(Uuid),
+    /// A run with neither a work item nor a scheduler binding.
+    Direct,
+}
+
+impl YieldRunKind {
+    /// `work_item_id` first, then `scheduler_binding_id`, as Python checks
+    /// `run.work_item_id is not None` before `run.scheduler_binding_id`.
+    pub fn of(work_item_id: Option<Uuid>, scheduler_binding_id: Option<Uuid>) -> Self {
+        match (work_item_id, scheduler_binding_id) {
+            (Some(work_item_id), _) => YieldRunKind::Issue(work_item_id),
+            (None, Some(binding_id)) => YieldRunKind::Scheduler(binding_id),
+            (None, None) => YieldRunKind::Direct,
+        }
+    }
+
+    /// Only an issue run has a ticker for `stop_ticking` to stop.
+    pub fn has_clock(self) -> bool {
+        matches!(self, YieldRunKind::Issue(_))
+    }
+}
+
+/// The yield success (`:1318-1346`, PDASHOSS01-276):
+/// `{"ok","run_id","work_item_id","outcome","stop_ticking","run_kind"}`,
+/// plus `scheduler_binding_id` for a scheduler run and a `detail` when a
+/// run without a clock was sent `stop_ticking: true`. Always 200.
 pub fn yield_response(
     run_id: Uuid,
-    work_item_id: Uuid,
+    kind: YieldRunKind,
     outcome: &str,
     stop_ticking: bool,
 ) -> (StatusCode, String) {
-    let mut map = serde_json::Map::with_capacity(5);
+    let mut map = serde_json::Map::with_capacity(8);
     map.insert("ok".to_owned(), Value::Bool(true));
     map.insert("run_id".to_owned(), Value::String(run_id.to_string()));
-    map.insert(
-        "work_item_id".to_owned(),
-        Value::String(work_item_id.to_string()),
-    );
+    let work_item_id = match kind {
+        YieldRunKind::Issue(work_item_id) => Value::String(work_item_id.to_string()),
+        _ => Value::Null,
+    };
+    map.insert("work_item_id".to_owned(), work_item_id);
     map.insert("outcome".to_owned(), Value::String(outcome.to_owned()));
-    map.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
+    map.insert(
+        "stop_ticking".to_owned(),
+        Value::Bool(stop_ticking && kind.has_clock()),
+    );
+    let (run_kind, subject) = match kind {
+        YieldRunKind::Issue(_) => ("issue", None),
+        YieldRunKind::Scheduler(_) => ("scheduler", Some("scheduled runs have")),
+        YieldRunKind::Direct => ("direct", Some("a run without a work item has")),
+    };
+    map.insert("run_kind".to_owned(), Value::String(run_kind.to_owned()));
+    if let YieldRunKind::Scheduler(binding_id) = kind {
+        map.insert(
+            "scheduler_binding_id".to_owned(),
+            Value::String(binding_id.to_string()),
+        );
+    }
+    if let (Some(subject), true) = (subject, stop_ticking) {
+        map.insert(
+            "detail".to_owned(),
+            Value::String(format!(
+                "outcome recorded; {subject} no ticking clock, so stop_ticking was ignored"
+            )),
+        );
+    }
     let body = serde_json::to_string(&Value::Object(map)).expect("yield body");
     (StatusCode::OK, body)
 }
@@ -1836,7 +1899,6 @@ async fn yield_inner(
     }
     let run = fetch_yield_run(&pre.pool, slug, run_id)
         .await?
-        .filter(|run| run.facts.work_item_id.is_some())
         .ok_or(Denial::NotFoundError("run not found".to_owned()))?;
     if !is_workspace_member(&pre.pool, &pre.actor.id, &run.workspace_id).await? {
         return Err(Denial::NotFoundError("run not found".to_owned()));
@@ -1861,7 +1923,8 @@ async fn yield_inner(
             payload.insert("note".to_owned(), Value::String(note));
         }
     }
-    if let Some(stop_ticking) = stop_ticking {
+    let kind = YieldRunKind::of(run.facts.work_item_id, run.scheduler_binding_id);
+    if let (Some(stop_ticking), true) = (stop_ticking, kind.has_clock()) {
         payload.insert("stop_ticking".to_owned(), Value::Bool(stop_ticking));
     }
     sqlx::query(r#"UPDATE "agent_run" SET "done_payload" = $1 WHERE "id" = $2"#)
@@ -1870,13 +1933,7 @@ async fn yield_inner(
         .execute(&pre.pool)
         .await
         .map_err(|error| db_error(error, "yield-write"))?;
-    let work_item_id = run.facts.work_item_id.expect("checked above");
-    let (status, body) = yield_response(
-        run.facts.id,
-        work_item_id,
-        outcome,
-        stop_ticking.unwrap_or(false),
-    );
+    let (status, body) = yield_response(run.facts.id, kind, outcome, stop_ticking.unwrap_or(false));
     Ok(json_response(status, body))
 }
 
@@ -1980,7 +2037,12 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "progressed", false);
+        let (status, body) = yield_response(
+            run_id,
+            YieldRunKind::Issue(work_item_id),
+            "progressed",
+            false,
+        );
         let (fx_status, fx_body) = call_body("yield_ok");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
@@ -1994,10 +2056,67 @@ mod tests {
         let work_item_id: Uuid = "a9b6c9f9-2817-4967-a501-1e26caf4abea"
             .parse()
             .expect("uuid");
-        let (status, body) = yield_response(run_id, work_item_id, "done", true);
+        let (status, body) =
+            yield_response(run_id, YieldRunKind::Issue(work_item_id), "done", true);
         let (fx_status, fx_body) = call_body("yield_stop_true");
         assert_eq!(status.as_u16(), fx_status);
         assert_eq!(body, fx_body);
+    }
+
+    // Runs with no work item (PDASHOSS01-276): byte pins of the Django
+    // bodies (`views/issue.py` dict order: the base five keys, `run_kind`,
+    // then `scheduler_binding_id`, then `detail`).
+
+    #[test]
+    fn yield_scheduler_run_body() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let binding_id: Uuid = "427731d7-0000-4000-8000-000000000001"
+            .parse()
+            .expect("uuid");
+        let kind = YieldRunKind::of(None, Some(binding_id));
+        assert_eq!(kind, YieldRunKind::Scheduler(binding_id));
+        let (status, body) = yield_response(run_id, kind, "done", false);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"427731d7-0000-4000-8000-000000000001"}"#
+        );
+        let (_, body) = yield_response(run_id, kind, "done", true);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"done","stop_ticking":false,"run_kind":"scheduler","scheduler_binding_id":"427731d7-0000-4000-8000-000000000001","detail":"outcome recorded; scheduled runs have no ticking clock, so stop_ticking was ignored"}"#
+        );
+    }
+
+    #[test]
+    fn yield_direct_run_body() {
+        let run_id: Uuid = "640d8cdf-08fb-4772-82d3-2c693d0e105f"
+            .parse()
+            .expect("uuid");
+        let kind = YieldRunKind::of(None, None);
+        assert_eq!(kind, YieldRunKind::Direct);
+        assert!(!kind.has_clock());
+        let (_, body) = yield_response(run_id, kind, "progressed", false);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"progressed","stop_ticking":false,"run_kind":"direct"}"#
+        );
+        let (_, body) = yield_response(run_id, kind, "progressed", true);
+        assert_eq!(
+            body,
+            r#"{"ok":true,"run_id":"640d8cdf-08fb-4772-82d3-2c693d0e105f","work_item_id":null,"outcome":"progressed","stop_ticking":false,"run_kind":"direct","detail":"outcome recorded; a run without a work item has no ticking clock, so stop_ticking was ignored"}"#
+        );
+    }
+
+    #[test]
+    fn yield_work_item_wins_over_binding() {
+        // `has_clock = run.work_item_id is not None` is checked first.
+        let work_item_id = Uuid::nil();
+        let kind = YieldRunKind::of(Some(work_item_id), Some(Uuid::nil()));
+        assert_eq!(kind, YieldRunKind::Issue(work_item_id));
+        assert!(kind.has_clock());
     }
 
     #[test]

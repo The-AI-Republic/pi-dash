@@ -1838,25 +1838,60 @@ class Seeder:
         workspace_id: str,
         created_by_id: str,
         pod_id: str,
-        work_item_id: str,
+        work_item_id: str | None,
         *,
         status: str = "running",
+        # A scheduler run (PDASHOSS01-276) passes work_item_id=None plus
+        # its binding; trigger follows, as dispatch_scheduler_run sets it.
+        scheduler_binding_id: str | None = None,
     ) -> dict[str, Any]:
         run_id = _uid()
+        trigger = "scheduler" if scheduler_binding_id else "human"
         self.db.execute(
             """INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
                 error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 refusal_category, trigger, executor_kind, dispatch_attempts,
                 cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
+                usage, scheduler_binding_id, created_at)
                VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
-                       %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
-            (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
+                       %s,%s,%s,%s,'contract-model','', %s, 'local_runner', 0,
+                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}',
+                       %s, now())""",
+            (
+                run_id, status, workspace_id, work_item_id, pod_id, created_by_id,
+                trigger, scheduler_binding_id,
+            ),
         )
         self._put("agent_run", run_id)
         return {"id": run_id}
+
+    def create_scheduler_binding(
+        self, workspace_id: str, project_id: str, actor_id: str
+    ) -> dict[str, Any]:
+        """A workspace scheduler installed (enabled) on the project."""
+        scheduler_id = _uid()
+        self.db.execute(
+            """INSERT INTO schedulers
+               (id, workspace_id, slug, name, description, prompt, source,
+                is_enabled, color, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,'contract scheduler','Scan the project.',
+                       'manifest', true, '#3b82f6', now(), now())""",
+            (scheduler_id, workspace_id, self._slug("ct-sched"), "Contract scheduler"),
+        )
+        self._put("schedulers", scheduler_id)
+        binding_id = _uid()
+        self.db.execute(
+            """INSERT INTO scheduler_bindings
+               (id, workspace_id, project_id, scheduler_id, actor_id, dtstart,
+                tzid, rrule, rdates, exdates, extra_context, enabled, last_error,
+                outcome_mode, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,now(),'UTC','FREQ=HOURLY','[]','[]','',
+                       true,'','create_issue',now(),now())""",
+            (binding_id, workspace_id, project_id, scheduler_id, actor_id),
+        )
+        self._put("scheduler_bindings", binding_id)
+        return {"id": binding_id, "scheduler_id": scheduler_id}
 
     # -- runner daemon domain (PIDASHCONV-97) --------------------------------
     # Factories for the daemon-facing runner API (``/api/v1/runner/``):
