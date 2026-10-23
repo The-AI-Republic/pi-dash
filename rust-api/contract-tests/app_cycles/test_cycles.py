@@ -413,21 +413,36 @@ def test_cycle_issue_create_requires_issues(admin):
     assert r.json() == {"error": "Issues are required"}
 
 
-def test_cycle_issue_detail_broken_upstream(admin):
-    # PORTED BUG (app/views/cycle/issue.py): CycleIssueViewSet implements
-    # only list/create/destroy, so the retrieve/update/partial_update actions
-    # the URLconf maps fall through to the ModelViewSet defaults, which die
-    # with a 500 for every caller. Pinned byte for byte like the favorite
-    # list bug above.
+def test_cycle_issue_retrieve(admin):
+    # PDASHOSS01-310: retrieve returns the list's flat row for a work item
+    # in the cycle, and the ObjectDoesNotExist 404 body otherwise.
+    urls = cycle_urls(admin)
+    pk = admin["cycle"]["id"]
+    issue = create_issue_for(admin, name="Detail issue")
+    outside = create_issue_for(admin, name="Detail outside issue")
+    admin["client"].post(urls["cycle_issues"](pk), json={"issues": [issue["id"]]})
+    r = admin["client"].get(urls["cycle_issue_detail"](pk, issue["id"]))
+    assert r.status_code == 200, r.text[:500]
+    rows = admin["client"].get(urls["cycle_issues"](pk)).json()["results"]
+    assert r.json() == next(row for row in rows if row["id"] == issue["id"])
+    assert r.json()["cycle_id"] == pk
+    r = admin["client"].get(urls["cycle_issue_detail"](pk, outside["id"]))
+    assert r.status_code == 404, r.text[:500]
+    assert r.json() == {"error": "The required object does not exist."}
+
+
+def test_cycle_issue_detail_writes_broken_upstream(admin):
+    # PORTED BUG (app/views/cycle/issue.py): update/partial_update pass the
+    # MEMBER gate and then run the ModelViewSet defaults, which die with a
+    # 500 (the URL kwarg is issue_id, the default lookup is pk). Pinned byte
+    # for byte like the favorite list bug above.
     urls = cycle_urls(admin)
     pk = admin["cycle"]["id"]
     issue = create_issue_for(admin, name="Detail bug issue")
     admin["client"].post(urls["cycle_issues"](pk), json={"issues": [issue["id"]]})
     url = urls["cycle_issue_detail"](pk, issue["id"])
-    for method in ("get", "patch", "put"):
-        if method == "get":
-            r = admin["client"].get(url)
-        elif method == "patch":
+    for method in ("patch", "put"):
+        if method == "patch":
             r = admin["client"].patch(url, json={"name": "x"})
         else:
             r = admin["client"].put(url, json={"name": "x"})

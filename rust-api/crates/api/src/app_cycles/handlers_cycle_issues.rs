@@ -2,13 +2,17 @@
 //!
 //! Ports `apps/api/pi_dash/app/views/cycle/issue.py`:
 //!
-//! - `CycleIssueViewSet.list` (`:108-221`): the issue-list pipeline scoped to
-//!   one cycle — legacy `issue_filters(params, 'GET')` (`:111`),
+//! - `CycleIssueViewSet.list` (`:131-240`): the issue-list pipeline scoped to
+//!   one cycle (`cycle_issue_queryset`, `:108-129`, including the guest
+//!   `created_by` scoping) — legacy `issue_filters(params, 'GET')`,
 //!   `ComplexFilterBackend` + `IssueFilterSet` (`:43-44, :119`), the
 //!   `apply_annotations` columns (`:77-106`), `order_issue_queryset`
 //!   (`:130-134`), the grouped / sub-grouped / plain paginators
 //!   (`:136-221`) with `issue_on_results` shaping.
-//! - `CycleIssueViewSet.create` (`:223-297`): `issues` required (`:227-228`),
+//! - `CycleIssueViewSet.retrieve` (`:242-254`): one flat list row for a
+//!   work item in the cycle (same scope, no filters), else the 404
+//!   `ObjectDoesNotExist` body.
+//! - `CycleIssueViewSet.create` (`:264-338`): `issues` required,
 //!   completed-cycle refusal (`:232-236`), move-vs-`bulk_create`
 //!   (`:239-279`, batches 10 / 100), `issue_activity` publish (`:281-295`),
 //!   201 `{"message": "success"}` (`:297`).
@@ -33,10 +37,10 @@
 //!
 //! * `destroy` on a missing bridge still answers 204: `filter().delete()`
 //!   on an empty set with no existence check (`:301-320`).
-//! * `retrieve` / `update` / `partial_update` on the detail path fall
-//!   through to the `ModelViewSet` defaults, which die with a 500 for
-//!   every caller (contract `test_cycle_issue_detail_broken_upstream`).
-//!   Those methods proxy to Django, which reproduces the 500 itself.
+//! * `update` / `partial_update` on the detail path pass the MEMBER gate
+//!   and then run the `ModelViewSet` defaults, which die with a 500
+//!   (contract `test_cycle_issue_detail_writes_broken_upstream`). Those
+//!   methods proxy to Django, which reproduces the gate and the 500.
 //! * Non-UUID path segments: Django's `<uuid:>` converter rejects them at
 //!   URL resolve (HTML 404, unreachable through the JSON edge); here they
 //!   answer the `ValidationError` 400, the same body the kernels render
@@ -62,10 +66,10 @@ use crate::v1_cycles_modules::body as shared_body;
 use crate::v1_cycles_modules::json_cpython::{self, JsonFail};
 use pidash_auth::permissions::allow::AllowFacts;
 
-/// `GET` + `POST` on the collection path; `DELETE` on the detail path.
-/// Every other method falls through to Django: the detail
-/// retrieve/update/partial_update are undecorated `ModelViewSet` defaults
-/// (500 upstream, gate `Authenticated`), which the proxy reproduces.
+/// `GET` + `POST` on the collection path; `GET` + `DELETE` on the detail
+/// path. Every other method falls through to Django: the detail
+/// update/partial_update are MEMBER-gated `ModelViewSet` defaults (500
+/// upstream), which the proxy reproduces.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -81,10 +85,11 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/",
             axum::routing::delete(cycle_issue_destroy)
-                .get(crate::edge::proxy)
+                .get(cycle_issue_retrieve)
                 .put(crate::edge::proxy)
                 .patch(crate::edge::proxy)
                 .post(crate::edge::proxy)
+                .head(crate::edge::proxy)
                 .options(crate::edge::proxy),
         )
 }
@@ -261,11 +266,26 @@ pub(crate) fn parse_uuid_or_invalid(raw: &str) -> Result<uuid::Uuid, Denial> {
 /// Membership facts for one `(user, slug, project)` over the same rows the
 /// decorator reads (`app/permissions/base.py:19-86`): active project and
 /// workspace memberships scoped by slug/project, soft-deleted rows excluded.
+/// The role facts are computed against `[ADMIN, MEMBER]`; gates with
+/// another role list use [`fetch_allow_facts_for`].
 pub(crate) async fn fetch_allow_facts(
     pool: &sqlx::PgPool,
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
+) -> Result<AllowFacts, Denial> {
+    use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
+    fetch_allow_facts_for(pool, slug, project_id, user_id, &[ROLE_ADMIN, ROLE_MEMBER]).await
+}
+
+/// [`fetch_allow_facts`] with the role facts computed against `allowed`
+/// (the gate's own role list).
+pub(crate) async fn fetch_allow_facts_for(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+    allowed: &[i32],
 ) -> Result<AllowFacts, Denial> {
     let project_role: Option<(i16,)> = sqlx::query_as(
         r#"SELECT pm.role FROM project_members pm
@@ -290,8 +310,7 @@ pub(crate) async fn fetch_allow_facts(
     .fetch_optional(pool)
     .await
     .map_err(|_| Denial::ServerError)?;
-    use pidash_auth::permissions::{ROLE_ADMIN, ROLE_MEMBER};
-    let allowed = [ROLE_ADMIN, ROLE_MEMBER];
+    use pidash_auth::permissions::ROLE_ADMIN;
     Ok(AllowFacts {
         workspace: pidash_types::WorkspaceId::from(slug),
         authenticated: true,
@@ -341,8 +360,8 @@ pub(crate) async fn enqueue_activity(pool: &sqlx::PgPool, kwargs: serde_json::Ma
     }
 }
 
-/// Common preamble for the three cycle-issue actions: session auth, project
-/// rewrite, the route's MEMBER gate. Returns `(pool, user_id, project_id)`.
+/// Common preamble for the cycle-issue actions: session auth, project
+/// rewrite, the route's role gate. Returns `(pool, user_id, project_id)`.
 async fn cycle_issue_context(
     state: &AppState,
     slug: &str,
@@ -353,9 +372,52 @@ async fn cycle_issue_context(
     let pool = pool_of(state)?;
     let user_id = actor_user_id(extension)?;
     let project_id = resolve_project_id(&pool, slug, project_raw).await?;
-    let facts = fetch_allow_facts(&pool, slug, &project_id, &user_id).await?;
+    let roles = match gate {
+        gates::Gate::Project { roles } | gates::Gate::ProjectCreator { roles } => *roles,
+        gates::Gate::Authenticated => &[],
+    };
+    let facts = fetch_allow_facts_for(&pool, slug, &project_id, &user_id, roles).await?;
     check_gate(gate, slug, &facts)?;
     Ok((pool, user_id, project_id))
+}
+
+/// The guest half of `cycle_issue_queryset` (`issue.py:116-127`): an active
+/// GUEST project membership on a project without `guest_view_all_features`
+/// sees only the work items it created. Returns the creator to scope to.
+async fn guest_creator_scope(
+    pool: &sqlx::PgPool,
+    slug: &str,
+    project_id: &uuid::Uuid,
+    user_id: &uuid::Uuid,
+) -> Result<Option<uuid::Uuid>, Denial> {
+    let (scoped,): (bool,) = sqlx::query_as(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM project_members pm
+             JOIN workspaces w ON w.id = pm.workspace_id
+             WHERE pm.member_id = $1 AND pm.project_id = $2 AND w.slug = $3
+               AND pm.role = 5 AND pm.is_active AND pm.deleted_at IS NULL
+           ) AND NOT EXISTS (
+             SELECT 1 FROM projects p
+             JOIN workspaces w ON w.id = p.workspace_id
+             WHERE p.id = $2 AND w.slug = $3
+               AND p.guest_view_all_features AND p.deleted_at IS NULL
+           )"#,
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .bind(slug)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    Ok(scoped.then_some(*user_id))
+}
+
+/// Row scope on top of the cycle bridge: the guest creator restriction
+/// and, for retrieve, the one work item asked for.
+#[derive(Default)]
+struct RowScope {
+    created_by: Option<uuid::Uuid>,
+    issue_id: Option<uuid::Uuid>,
 }
 
 fn gate_for_list() -> &'static gates::Gate {
@@ -364,6 +426,15 @@ fn gate_for_list() -> &'static gates::Gate {
         "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
     )
     .expect("cycle-issues list gate")
+    .gate
+}
+
+fn gate_for_retrieve() -> &'static gates::Gate {
+    &gates::gate_for(
+        "GET",
+        "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+    )
+    .expect("cycle-issues retrieve gate")
     .gate
 }
 
@@ -614,12 +685,15 @@ fn bind_values<'a>(
 /// (`issue_cycle__cycle_id`, bridge live) + tenant (workspace slug,
 /// project, active membership — the `get_queryset` `:61-68` filters, kept
 /// although the gate already enforces them) + the `ComplexFilterBackend`
-/// tree + the legacy `issue_filters(params, 'GET')` predicates.
+/// tree + the legacy `issue_filters(params, 'GET')` predicates, narrowed
+/// by `scope` (guest creator, retrieve's work item).
+#[allow(clippy::too_many_arguments)]
 fn cycle_filtered_set(
     slug: &str,
     project_id: &uuid::Uuid,
     user_id: &uuid::Uuid,
     cycle_id: &uuid::Uuid,
+    scope: &RowScope,
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
@@ -640,6 +714,14 @@ fn cycle_filtered_set(
                      WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
                        AND pm.is_active AND pm.deleted_at IS NULL)"#
     )];
+    if let Some(creator) = scope.created_by {
+        let holder = binder.bind_uuid(creator);
+        fragments.push(format!("issue.created_by_id = {holder}"));
+    }
+    if let Some(issue_id) = scope.issue_id {
+        let holder = binder.bind_uuid(issue_id);
+        fragments.push(format!("issue.id = {holder}"));
+    }
     if let Some(cond) = complex_filter(query)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
@@ -707,7 +789,7 @@ fn cycle_filtered_set(
     })
 }
 
-/// `CycleIssueViewSet.list` (`issue.py:108-221`).
+/// `CycleIssueViewSet.list` (`issue.py:131-240`).
 async fn cycle_issue_list(
     State(state): State<AppState>,
     Path((slug, project_raw, cycle_raw)): Path<(String, String, String)>,
@@ -748,11 +830,16 @@ async fn cycle_issue_list(
     }
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
+    let scope = RowScope {
+        created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
+        issue_id: None,
+    };
     let filtered = cycle_filtered_set(
         &slug,
         &project_id,
         &user_id,
         &cycle_id,
+        &scope,
         &query,
         group_by,
         sub_group_by,
@@ -789,7 +876,51 @@ async fn cycle_issue_list(
     cycle_flat_response(&pool, &filtered, &key_expr, direction, per_page, cursor).await
 }
 
-/// Plain `paginate` branch (`issue.py:213-221`): distinct rows, the
+/// `CycleIssueViewSet.retrieve` (`issue.py:242-254`): the list's flat row
+/// (`issue_on_results`, ungrouped) for one work item in the cycle — the
+/// same bridge, manager, tenant and guest scope as the list, no filters —
+/// or the 404 `{"error": "The required object does not exist."}`.
+async fn cycle_issue_retrieve(
+    State(state): State<AppState>,
+    Path((slug, project_raw, cycle_raw, issue_raw)): Path<(String, String, String, String)>,
+    extension: Option<axum::Extension<crate::middleware::SessionHandle>>,
+) -> HandlerResult {
+    let (pool, user_id, project_id) =
+        cycle_issue_context(&state, &slug, &project_raw, gate_for_retrieve(), extension).await?;
+    let cycle_id = parse_uuid_or_invalid(&cycle_raw)?;
+    let issue_id = parse_uuid_or_invalid(&issue_raw)?;
+    let scope = RowScope {
+        created_by: guest_creator_scope(&pool, &slug, &project_id, &user_id).await?,
+        issue_id: Some(issue_id),
+    };
+    let filtered = cycle_filtered_set(
+        &slug,
+        &project_id,
+        &user_id,
+        &cycle_id,
+        &scope,
+        &empty_query_map(),
+        None,
+        None,
+    )?;
+    let sql = format!(
+        "SELECT DISTINCT {} {} LIMIT 1",
+        cycle_row_selects(None),
+        filtered.from_where
+    );
+    let rows = fetch_json_rows(&pool, &sql, filtered.values).await?;
+    let row = rows.first().ok_or(Denial::NotFound)?;
+    Ok(json_response(
+        StatusCode::OK,
+        shape_row(row, &flat_row_fields(None, None), &chrono_tz::UTC, false),
+    ))
+}
+
+fn empty_query_map() -> QueryMap {
+    QueryMap::new()
+}
+
+/// Plain `paginate` branch (`issue.py:232-240`): distinct rows, the
 /// rewritten order key `NULLS LAST` plus `-created_at`, offset window.
 async fn cycle_flat_response(
     pool: &sqlx::PgPool,
@@ -1455,25 +1586,37 @@ mod tests {
     }
 
     #[test]
-    fn gates_cover_the_three_owned_actions() {
+    fn gates_cover_the_owned_actions() {
         let list = gates::gate_for(
             "GET",
             "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
         )
         .expect("list gate");
-        assert_eq!(list.source, "issue.py:109 (CycleIssueViewSet.list)");
+        assert_eq!(list.source, "issue.py:132 (CycleIssueViewSet.list)");
         let create = gates::gate_for(
             "POST",
             "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
         )
         .expect("create gate");
-        assert_eq!(create.source, "issue.py:223 (CycleIssueViewSet.create)");
+        assert_eq!(create.source, "issue.py:264 (CycleIssueViewSet.create)");
         let destroy = gates::gate_for(
             "DELETE",
             "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
         )
         .expect("destroy gate");
-        assert_eq!(destroy.source, "issue.py:299 (CycleIssueViewSet.destroy)");
+        assert_eq!(destroy.source, "issue.py:340 (CycleIssueViewSet.destroy)");
+        let retrieve = gates::gate_for(
+            "GET",
+            "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
+        )
+        .expect("retrieve gate");
+        assert_eq!(retrieve.source, "issue.py:242 (CycleIssueViewSet.retrieve)");
+        for row in [list, retrieve] {
+            assert!(matches!(
+                row.gate,
+                gates::Gate::Project { roles } if roles.contains(&pidash_auth::permissions::ROLE_GUEST)
+            ));
+        }
         for row in [list, create, destroy] {
             assert!(matches!(row.gate, gates::Gate::Project { .. }));
         }
@@ -1663,9 +1806,17 @@ mod tests {
         let project = uuid::Uuid::new_v4();
         let user = uuid::Uuid::new_v4();
         let cycle = uuid::Uuid::new_v4();
-        let filtered =
-            cycle_filtered_set("acme", &project, &user, &cycle, &empty_query(), None, None)
-                .expect("scope");
+        let filtered = cycle_filtered_set(
+            "acme",
+            &project,
+            &user,
+            &cycle,
+            &RowScope::default(),
+            &empty_query(),
+            None,
+            None,
+        )
+        .expect("scope");
         for needle in [
             "JOIN cycle_issues AS bridge ON bridge.issue_id = issue.id",
             "bridge.cycle_id = ",
@@ -1683,6 +1834,31 @@ mod tests {
         }
         assert_eq!(filtered.values.len(), 4);
         assert!(filtered.referenced.contains(&"bridge"));
+    }
+
+    #[test]
+    fn filtered_set_applies_the_row_scope() {
+        let project = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
+        let cycle = uuid::Uuid::new_v4();
+        let scope = RowScope {
+            created_by: Some(user),
+            issue_id: Some(uuid::Uuid::new_v4()),
+        };
+        let filtered = cycle_filtered_set(
+            "acme",
+            &project,
+            &user,
+            &cycle,
+            &scope,
+            &empty_query(),
+            None,
+            None,
+        )
+        .expect("scope");
+        assert!(filtered.from_where.contains("issue.created_by_id = "));
+        assert!(filtered.from_where.contains("issue.id = "));
+        assert_eq!(filtered.values.len(), 6);
     }
 
     #[test]

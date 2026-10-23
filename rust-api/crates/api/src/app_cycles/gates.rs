@@ -1,12 +1,13 @@
 //! D-27 permission gates (stage 5, PIDASHCONV-290).
 //!
 //! Ports the `@allow_permission` gates on all 14 D-27 cycle routes (26
-//! method+path rows: 19 decorated actions plus the 7 undecorated
-//! fallthroughs that reach `BaseViewSet`/`ModelViewSet` defaults), from:
+//! method+path rows: 22 decorated actions over 24 rows plus the 2
+//! undecorated fallthroughs that reach `BaseViewSet`/`ModelViewSet`
+//! defaults), from:
 //!
 //! - `apps/api/pi_dash/app/views/cycle/base.py` (13 gated units)
 //! - `apps/api/pi_dash/app/views/cycle/archive.py` (3 gates)
-//! - `apps/api/pi_dash/app/views/cycle/issue.py` (3 gates)
+//! - `apps/api/pi_dash/app/views/cycle/issue.py` (6 gates)
 //!
 //! Fixture id: F-C27-07 (`rust-api/fixtures/app_cycles/perms.json` +
 //! `TRACE.md`).
@@ -34,9 +35,11 @@
 //! - Undecorated fallthroughs ([`Gate::Authenticated`]): PUT
 //!   `cycles/<uuid>/` reaches `UpdateModelMixin.update` with
 //!   `CycleSerializer` (all fields read-only: body ignored, 200 with the
-//!   current representation — fixture `undecorated_put_update`); issue
-//!   retrieve/update and the favorites GET list reach the `ModelViewSet`
-//!   defaults. No role check on these paths beyond `IsAuthenticated`.
+//!   current representation — fixture `undecorated_put_update`); the
+//!   favorites GET list reaches the `ModelViewSet` default. No role check
+//!   on these paths beyond `IsAuthenticated`. The cycle-issue detail
+//!   GET/PUT/PATCH are decorated (PDASHOSS01-310): retrieve is GUEST,
+//!   update/partial_update are MEMBER.
 //!   The handler issues own the body behavior; this table pins the gate
 //!   half (any authenticated caller passes).
 //! - `WorkspaceViewerPermission` is explicitly OUT of scope: it guards
@@ -82,8 +85,8 @@ pub const ANON_BODY: &str = r#"{"detail":"Authentication credentials were not pr
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gate {
     /// No decorator: the `IsAuthenticated` default is the whole gate
-    /// (undecorated PUT-update, issue retrieve/update, favorites GET
-    /// list). Any authenticated caller reaches the handler body; anon
+    /// (undecorated PUT-update, favorites GET list). Any authenticated
+    /// caller reaches the handler body; anon
     /// denies first with [`ANON_BODY`].
     Authenticated,
     /// `@allow_permission(...)` at the default `"PROJECT"` level: active
@@ -163,9 +166,9 @@ pub static GATES: &[RouteGate] = &[
         method: "GET",
         path: "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/",
         gate: Gate::Project {
-            roles: ADMIN_MEMBER,
+            roles: ADMIN_MEMBER_GUEST,
         },
-        source: "issue.py:109 (CycleIssueViewSet.list)",
+        source: "issue.py:132 (CycleIssueViewSet.list)",
     },
     RouteGate {
         method: "POST",
@@ -173,25 +176,31 @@ pub static GATES: &[RouteGate] = &[
         gate: Gate::Project {
             roles: ADMIN_MEMBER,
         },
-        source: "issue.py:223 (CycleIssueViewSet.create)",
+        source: "issue.py:264 (CycleIssueViewSet.create)",
     },
     RouteGate {
         method: "GET",
         path: "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
-        gate: Gate::Authenticated,
-        source: "issue.py (no def retrieve; falls to ModelViewSet default)",
+        gate: Gate::Project {
+            roles: ADMIN_MEMBER_GUEST,
+        },
+        source: "issue.py:242 (CycleIssueViewSet.retrieve)",
     },
     RouteGate {
         method: "PUT",
         path: "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
-        gate: Gate::Authenticated,
-        source: "issue.py (no def update; falls to UpdateModelMixin.update)",
+        gate: Gate::Project {
+            roles: ADMIN_MEMBER,
+        },
+        source: "issue.py:256 (CycleIssueViewSet.update)",
     },
     RouteGate {
         method: "PATCH",
         path: "workspaces/<slug>/projects/<id>/cycles/<uuid>/cycle-issues/<uuid>/",
-        gate: Gate::Authenticated,
-        source: "issue.py (no def partial_update; falls to the update default)",
+        gate: Gate::Project {
+            roles: ADMIN_MEMBER,
+        },
+        source: "issue.py:260 (CycleIssueViewSet.partial_update)",
     },
     RouteGate {
         method: "DELETE",
@@ -199,7 +208,7 @@ pub static GATES: &[RouteGate] = &[
         gate: Gate::Project {
             roles: ADMIN_MEMBER,
         },
-        source: "issue.py:299 (CycleIssueViewSet.destroy)",
+        source: "issue.py:340 (CycleIssueViewSet.destroy)",
     },
     RouteGate {
         method: "POST",
@@ -495,11 +504,11 @@ mod tests {
         ("PUT", CYCLE, true, true, true),
         ("PATCH", CYCLE, true, true, false),
         ("DELETE", CYCLE, true, false, false),
-        ("GET", ISSUES, true, true, false),
+        ("GET", ISSUES, true, true, true),
         ("POST", ISSUES, true, true, false),
         ("GET", ISSUE, true, true, true),
-        ("PUT", ISSUE, true, true, true),
-        ("PATCH", ISSUE, true, true, true),
+        ("PUT", ISSUE, true, true, false),
+        ("PATCH", ISSUE, true, true, false),
         ("DELETE", ISSUE, true, true, false),
         ("POST", DATE_CHECK, true, true, false),
         ("GET", FAVS, true, true, true),
@@ -660,11 +669,11 @@ mod tests {
                 }
             }
         }
-        // 19 decorated actions over 21 rows: archive GET serves three
+        // 22 decorated actions over 24 rows: archive GET serves three
         // paths (`archive/`, `archived-cycles/`,
         // `archived-cycles/<uuid>/`), so every protected action is
         // probed at least once.
-        assert_eq!(protected, 21, "one isolation probe per protected row");
+        assert_eq!(protected, 24, "one isolation probe per protected row");
     }
 
     #[test]
