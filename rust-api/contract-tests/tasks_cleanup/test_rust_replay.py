@@ -98,6 +98,8 @@ def _old(days: int = 60) -> str:
 
 
 def test_rust_delete_api_logs(db_conn, broker_url):
+    # Non-NULL ip_address: the column is Postgres inet and every real row
+    # has one (PIDASHCONV-1289). A NULL here would skip the inet decode path.
     row = insert_row(
         db_conn,
         "api_activity_logs",
@@ -106,6 +108,7 @@ def test_rust_delete_api_logs(db_conn, broker_url):
             "path": "/contract/old",
             "method": "GET",
             "response_code": 200,
+            "ip_address": "10.0.0.1",
             "created_at": _old(),
         },
     )
