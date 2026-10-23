@@ -236,7 +236,13 @@ export {
 export type { ParentWriteScope } from "./api/parent.js";
 export { IssuePropertiesSidebar } from "./detail/sidebar/index.js";
 export type { IssuePropertiesSidebarProps } from "./detail/sidebar/index.js";
-export { SidebarRow, dateBounds, isDueDateOverdue } from "./detail/sidebar/index.js";
+export {
+  SIDEBAR_ROW_CLASS,
+  SIDEBAR_ROW_LABEL_CLASS,
+  SidebarRow,
+  dateBounds,
+  isDueDateOverdue,
+} from "./detail/sidebar/index.js";
 export type { SidebarRowProps } from "./detail/sidebar/index.js";
 export { AttachmentsWidget } from "./detail/widgets/attachments/AttachmentsWidget.js";
 export type { AttachmentsWidgetProps } from "./detail/widgets/attachments/AttachmentsWidget.js";
