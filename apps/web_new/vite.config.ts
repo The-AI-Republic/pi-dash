@@ -190,7 +190,7 @@ export default defineConfig(({ mode }) => {
           // lazy-only as well: its schemas' module-scope initializers
           // otherwise pin the unused contract into the initial chunk
           // through the api-client barrel (NEWFRONT-870, size gate).
-          // no state to reset. The scheduler calendar modules are pure
+          // The scheduler calendar modules are pure
           // views and helpers reached only through the schedulers barrel;
           // the calendar route loads its body lazily, so without the
           // listing the barrel pins the grids, rail and panel into the
