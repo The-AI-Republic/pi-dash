@@ -7,7 +7,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import * as React from "react";
 
-import { ProjectSettingsGeneralTab, ProjectSettingsScreen } from "../../../../../../features/project-settings/index.js";
+import {
+  GeneralSkeleton,
+  ProjectSettingsGeneralTab,
+  ProjectSettingsScreen,
+} from "../../../../../../features/project-settings/index.js";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/")({
   component: SettingsRouteComponent,
@@ -16,7 +20,12 @@ export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/"
 function SettingsRouteComponent(): React.ReactElement {
   const { ws, projectId } = Route.useParams();
   return (
-    <ProjectSettingsScreen workspaceSlug={ws} projectId={projectId} tabKey="general">
+    <ProjectSettingsScreen
+      workspaceSlug={ws}
+      projectId={projectId}
+      tabKey="general"
+      pendingFallback={<GeneralSkeleton />}
+    >
       <ProjectSettingsGeneralTab workspaceSlug={ws} projectId={projectId} />
     </ProjectSettingsScreen>
   );

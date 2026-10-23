@@ -163,9 +163,13 @@ export function cadenceLabel(choice: string): string {
   return preset?.label ?? CUSTOM_CADENCE_LABEL;
 }
 
-/** Short code as typed: non-alphanumerics dropped, uppercased, length-capped. */
+/**
+ * Short code as typed: non-alphanumerics dropped, uppercased. Over-long
+ * input stays so the field error can name it (PSET-006); nothing here
+ * truncates.
+ */
 export function shapeIdentifier(value: string): string {
-  return value.replace(NON_ALPHANUMERIC, "").toUpperCase().slice(0, GENERAL_IDENTIFIER_MAX_LENGTH);
+  return value.replace(NON_ALPHANUMERIC, "").toUpperCase();
 }
 
 /** Whole, non-negative budget characters only; empty stays empty. */

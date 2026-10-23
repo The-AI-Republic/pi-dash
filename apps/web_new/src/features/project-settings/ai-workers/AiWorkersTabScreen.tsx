@@ -35,8 +35,11 @@ export const SAVING_LABEL = "Saving";
 
 /**
  * The rule form, rendered once the stored row resolves. A stored row
- * arriving after the first render (or replaced by a save) wins over
- * the draft; a save in flight never resets the form.
+ * arriving after the first render wins over the draft; a save in
+ * flight never resets the form. The save's own reseed is skipped too:
+ * the PATCH response does not carry the field yet (PDASHOSS01-297/304),
+ * so the seeded row would read back the default over the just-saved
+ * pick (PSET-064).
  */
 function AiWorkersTabBody({
   workspaceSlug,
@@ -49,16 +52,25 @@ function AiWorkersTabBody({
   );
   const save = useSaveLostRunnerRule(workspaceSlug, projectId);
   const lastStored = React.useRef(stored);
+  const justSaved = React.useRef(false);
   React.useEffect(() => {
     if (lastStored.current === stored || save.isPending) return;
     lastStored.current = stored;
+    if (justSaved.current) {
+      justSaved.current = false;
+      return;
+    }
     setValue(lostRunnerRuleFrom(stored.dedicated_runner_lost_action));
   }, [stored, save.isPending]);
 
   function submit(event: React.FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     if (!canEdit || save.isPending) return;
-    save.mutate(buildLostRunnerRulePayload(value));
+    save.mutate(buildLostRunnerRulePayload(value), {
+      onSuccess: () => {
+        justSaved.current = true;
+      },
+    });
   }
 
   const formClass = canEdit ? "flex flex-col gap-(--space-6)" : "flex flex-col gap-(--space-6) opacity-60";

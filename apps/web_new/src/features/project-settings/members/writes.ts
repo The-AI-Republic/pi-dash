@@ -71,10 +71,14 @@ export function rolesForWorkspaceRole(workspaceRole: number): MemberRoleOption[]
   return ROLES_LOW_TO_HIGH.filter((option) => option.role <= ROLE_GUEST);
 }
 
-/** The roles a guest row offers its editor: guest only. */
-export function rolesForTarget(workspaceRole: number, projectRole: number): MemberRoleOption[] {
-  if (workspaceRole <= ROLE_GUEST || projectRole <= ROLE_GUEST)
-    return ROLES_LOW_TO_HIGH.filter((option) => option.role === ROLE_GUEST);
+/**
+ * The roles a row offers its editor: a workspace guest is capped at
+ * Guest, everyone else gets every role. The cap follows the workspace
+ * role only — a demoted project guest still offers Member and Admin so
+ * the grant restores (PSET-023, NEWFRONT-606).
+ */
+export function rolesForTarget(workspaceRole: number): MemberRoleOption[] {
+  if (workspaceRole <= ROLE_GUEST) return ROLES_LOW_TO_HIGH.filter((option) => option.role === ROLE_GUEST);
   return [...ROLES_LOW_TO_HIGH];
 }
 

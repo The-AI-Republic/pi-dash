@@ -222,10 +222,10 @@ export function MemberTable({
               key={row.membershipId}
               data-testid="member-roster-row"
               data-user-id={row.userId}
-              className="border-b border-(--border) last:border-b-0"
+              className="group border-b border-(--border) last:border-b-0"
             >
               <td className="py-(--space-2) pr-(--space-4)">
-                <span className="group flex items-center gap-(--space-2)">
+                <span className="flex items-center gap-(--space-2)">
                   <ProfileAvatar workspaceSlug={workspaceSlug} row={row} resolveAvatar={resolveAvatar} />
                   <span className="truncate">{row.fullName}</span>
                   <span className="invisible inline-flex group-focus-within:visible group-hover:visible">

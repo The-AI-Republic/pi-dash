@@ -172,7 +172,7 @@ export function MembersSettings({ workspaceSlug, projectId, resolveAvatar }: Mem
   const controls: MemberRowControls = {
     canEditRole: (row) =>
       canEditMemberRole(editor, { userId: row.userId, workspaceRole: rolesByUser.get(row.userId) ?? null }),
-    roleOptions: (row) => rolesForTarget(rolesByUser.get(row.userId) ?? 0, row.role),
+    roleOptions: (row) => rolesForTarget(rolesByUser.get(row.userId) ?? 0),
     roleOverride: (row) => roleOverrides[row.membershipId] ?? null,
     onPickRole: (row, role) => {
       setRoleOverrides((current) => ({ ...current, [row.membershipId]: role }));
