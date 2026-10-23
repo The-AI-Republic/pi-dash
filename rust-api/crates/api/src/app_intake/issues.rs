@@ -2463,7 +2463,10 @@ fn classify_run_error(error: &str) -> Option<serde_json::Value> {
             "action": "Choose a model the agent account can access, then retry the run.",
         }));
     }
-    if lowered.contains("runner_not_found") || lowered.contains("run_not_owned_by_runner") {
+    if lowered.contains("runner_not_found")
+        || lowered.contains("runner_gone")
+        || lowered.contains("run_not_owned_by_runner")
+    {
         return Some(serde_json::json!({
             "source": "pidash_cloud",
             "source_label": "Pi Dash cloud",
@@ -6192,6 +6195,14 @@ fn render_created_issue(rows: &CreatedRows, timezone: chrono_tz::Tz) -> serde_js
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn classify_run_error_runner_gone_is_registration() {
+        // PDASHOSS01-306 (`diagnostics.py:212`).
+        let detail = classify_run_error("runner_gone").expect("classifies");
+        assert_eq!(detail["kind"], "runner_registration");
+        assert_eq!(detail["source"], "pidash_cloud");
+    }
 
     #[test]
     fn validate_datetime_iso8601_literal_fallback() {
