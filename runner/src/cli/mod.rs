@@ -16,7 +16,7 @@ pub mod managed;
 pub mod label;
 // `pub` so the CLI contract tests can drive the page subcommands directly.
 pub mod page;
-mod project;
+pub mod project;
 mod remove;
 pub mod resolve;
 mod restart;
