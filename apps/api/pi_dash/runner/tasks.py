@@ -358,7 +358,14 @@ def reconcile_unsatisfiable_pins() -> int:
 
     pod_ids = matcher.reconcile_unsatisfiable_pins()
     for pod_id in pod_ids:
-        matcher.drain_pod_by_id(pod_id)
+        # The pins are already cleared and the runners released, so the
+        # next pass will not come back to these pods: one pod's failed
+        # drain (e.g. ``RunnerOfflineError`` on the Assign send) must not
+        # skip the others.
+        try:
+            matcher.drain_pod_by_id(pod_id)
+        except Exception:
+            logger.exception("reconcile_unsatisfiable_pins: drain failed for pod %s", pod_id)
     return len(pod_ids)
 
 

@@ -221,6 +221,34 @@ def test_pin_auto_release_clears_parent_resume_hint(db, create_user, workspace, 
 
 
 @pytest.mark.unit
+def test_failed_drain_does_not_skip_other_pods(db, create_user, workspace, pod, project):
+    """Each affected pod drains on its own: the recovered pins are not
+    revisited by the next pass, so one failed drain must not strand the
+    other pods' runs."""
+    from pi_dash.runner.services import matcher
+
+    other_pod = Pod.objects.create(workspace=workspace, project=project, name="second", created_by=create_user)
+    for target_pod in (pod, other_pod):
+        dead = _make_runner(
+            create_user, workspace, target_pod, f"gone-{target_pod.pk}", status=RunnerStatus.OFFLINE, heartbeat_age=STALE
+        )
+        _make_pinned_run(create_user, workspace, target_pod, dead, age=PAST_BOUND)
+
+    drained = []
+
+    def flaky_drain(pod_id):
+        drained.append(pod_id)
+        if len(drained) == 1:
+            raise RuntimeError("boom")
+        return 0
+
+    with patch.object(matcher, "drain_pod_by_id", side_effect=flaky_drain):
+        assert reconcile_unsatisfiable_pins_task() == 2
+
+    assert set(drained) == {pod.id, other_pod.id}
+
+
+@pytest.mark.unit
 def test_pin_within_bound_kept(db, create_user, workspace, pod):
     dead = _make_runner(create_user, workspace, pod, "gone", status=RunnerStatus.OFFLINE, heartbeat_age=STALE)
     _make_runner(create_user, workspace, pod, "healthy", status=RunnerStatus.ONLINE)
