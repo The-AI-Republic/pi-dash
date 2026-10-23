@@ -51,10 +51,15 @@ export function RunnersTabStrip({ scope, pathname }: RunnersTabStripProps): Reac
       {RUNNERS_TABS.map((tab) => {
         const href = tab.child === "" ? base : `${base}/${tab.child}`;
         const selected = tab.key === active;
+        // The router marks fuzzy-active links aria-current="page" itself,
+        // overriding the explicit marker: without exact matching the
+        // overview link stays marked on every child route (NEWFRONT-557).
+        // Runs stays fuzzy so a run detail still selects it.
         return (
           <Link
             key={tab.key}
             to={href}
+            activeOptions={tab.key === "runs" ? { exact: false } : { exact: true }}
             aria-current={selected ? "page" : undefined}
             className={`text-body flex h-9 items-center border-b-2 px-(--space-3) font-medium ${
               selected

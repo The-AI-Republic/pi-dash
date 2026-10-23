@@ -442,7 +442,7 @@ test(
           .toMatchObject({ warm: 1, sessionCreate: 1 });
         // Slow server reads prove the counts stay put (de-duplicated).
         expect(await serverListChatSessions(wsId, online.id, session)).toHaveLength(1);
-        expect(await driver.runnerChatHistoryItems()).toHaveLength(1);
+        await expect.poll(() => driver.runnerChatHistoryItems(), { timeout: 15_000 }).toHaveLength(1);
         expect(await driver.runnerChatApiCounts()).toMatchObject({ warm: 1, sessionCreate: 1 });
       });
 
@@ -453,7 +453,7 @@ test(
           .poll(() => driver.runnerChatApiCounts(), { timeout: 20_000 })
           .toMatchObject({ warm: before.warm + 1, sessionCreate: before.sessionCreate + 1 });
         expect(await serverListChatSessions(wsId, busy.id, session)).toHaveLength(1);
-        expect(await driver.runnerChatHistoryItems()).toHaveLength(1);
+        await expect.poll(() => driver.runnerChatHistoryItems(), { timeout: 15_000 }).toHaveLength(1);
         expect(await driver.runnerChatApiCounts()).toMatchObject({
           warm: before.warm + 1,
           sessionCreate: before.sessionCreate + 1,
@@ -492,7 +492,7 @@ test(
         await expect
           .poll(() => driver.runnerChatApiCounts().then((counts) => counts.sessionList), { timeout: 15_000 })
           .toBeGreaterThanOrEqual(1);
-        expect(await driver.runnerChatHistoryItems()).toHaveLength(1);
+        await expect.poll(() => driver.runnerChatHistoryItems(), { timeout: 15_000 }).toHaveLength(1);
         expect(await serverListChatSessions(wsId, offline.id, session)).toHaveLength(1);
         expect(await driver.runnerChatApiCounts()).toMatchObject({ warm: 0, sessionCreate: 0 });
       });
@@ -563,7 +563,11 @@ test(
           for (const bubble of await driver.runnerChatMessageBubbles()) {
             if (bubble.role === "assistant") expect(bubble.text).not.toBe("");
           }
-          expect(await driver.runnerChatAssistantBubbleHtml(0)).toContain("<strong>");
+          // Each app keeps its own markdown rendering (NEWFRONT-557, same
+          // treatment as the runs labels in NEWFRONT-545).
+          expect(await driver.runnerChatAssistantBubbleHtml(0)).toContain(
+            driver.target === "web_new" ? '<strong class="font-semibold">' : "<strong>"
+          );
           // The bubble came from the stream: the server holds no assistant
           // message for this session.
           expect(await serverChatMessages(chat.id, session)).toHaveLength(1);

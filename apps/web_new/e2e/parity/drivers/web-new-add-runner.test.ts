@@ -224,6 +224,46 @@ describe("addRunner picks and inputs", () => {
     expect(name.fill).toHaveBeenCalledWith("my-runner", { timeout: 30_000 });
     expect(working.fill).toHaveBeenCalledWith("/tmp/work", { timeout: 30_000 });
   });
+
+  it("only Escapes a visibly open picker (NEWFRONT-557)", async () => {
+    // A stale hidden option must not eat an Escape: with no listbox open
+    // it falls through to the dialog and closes the whole modal mid-form.
+    const button = stubLocator();
+    const dialog = stubLocator({ getByRole: vi.fn(() => button) });
+    const press = vi.fn(async () => undefined);
+    const hidden = stubLocator({ count: vi.fn(async () => 1), isVisible: vi.fn(async () => false) });
+    const hiddenPage = pageStub({
+      getByRole: vi.fn((role: string) => (role === "dialog" ? dialog : hidden)),
+      keyboard: { press },
+    });
+    await new WebNewDriver(hiddenPage).addRunnerPickProject("Parity Project");
+    expect(press).not.toHaveBeenCalled();
+
+    const shown = stubLocator({
+      count: vi.fn(async () => 1),
+      isVisible: vi.fn(async () => true),
+      waitFor: vi.fn(async () => undefined),
+    });
+    const shownPage = pageStub({
+      getByRole: vi.fn((role: string) => (role === "dialog" ? dialog : shown)),
+      keyboard: { press },
+    });
+    await new WebNewDriver(shownPage).addRunnerPickProject("Parity Project");
+    expect(press).toHaveBeenCalledWith("Escape");
+  });
+
+  it("waits out the listbox close before the post-pick shut (NEWFRONT-557)", async () => {
+    const button = stubLocator();
+    const dialog = stubLocator({ getByRole: vi.fn(() => button) });
+    const options = stubLocator({
+      count: vi.fn(async () => 1),
+      isVisible: vi.fn(async () => false),
+      waitFor: vi.fn(async () => undefined),
+    });
+    const page = pageStub({ getByRole: vi.fn((role: string) => (role === "dialog" ? dialog : options)) });
+    await new WebNewDriver(page).addRunnerPickProject("Parity Project");
+    expect(options.waitFor).toHaveBeenCalledWith({ state: "detached", timeout: 5_000 });
+  });
 });
 
 describe("addRunner close and phases", () => {

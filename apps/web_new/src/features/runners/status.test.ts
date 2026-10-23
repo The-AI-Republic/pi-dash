@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Runner status presentation (NEWFRONT-540, RUN-011). Four display states,
-// one tone map; a never-enrolled row reads offline.
+// one tone map; the server status renders verbatim.
 import { describe, expect, it } from "vitest";
 
 import { RUNNER_STATUSES, RUNNER_STATUS_LABELS, RUNNER_STATUS_TONES, runnerDisplayStatus } from "./status.js";
@@ -25,14 +25,18 @@ describe("runner status vocabulary", () => {
 });
 
 describe("runnerDisplayStatus", () => {
-  it("reports the server status once enrolled", () => {
+  it("reports the server status verbatim", () => {
     for (const status of RUNNER_STATUSES) {
-      expect(runnerDisplayStatus({ status, enrolled_at: "2024-01-01T00:00:00Z" })).toBe(status);
+      expect(runnerDisplayStatus({ status })).toBe(status);
     }
   });
 
-  it("reads a never-enrolled row as offline whatever its server status", () => {
-    expect(runnerDisplayStatus({ status: "online", enrolled_at: null })).toBe("offline");
-    expect(runnerDisplayStatus({ status: "busy", enrolled_at: null })).toBe("offline");
+  it("has no enrolment gate: the old surfaces render raw status (NEWFRONT-557)", () => {
+    // Never-enrolled rows read as offline because the server reports
+    // them offline; a live row reports its own state whatever enrolled_at
+    // says, matching the oracle-pinned chat fixtures.
+    expect(runnerDisplayStatus({ status: "online" })).toBe("online");
+    expect(runnerDisplayStatus({ status: "busy" })).toBe("busy");
+    expect(runnerDisplayStatus({ status: "offline" })).toBe("offline");
   });
 });
