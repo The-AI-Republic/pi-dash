@@ -616,6 +616,9 @@ test(
   specTitle(["WSET-007"], "tab titles carry the workspace and section names"),
   { tag: specTags(["WSET-007"]) },
   async ({ driver, seed }) => {
+    // Three identities each walk every section after a sign-out and
+    // sign-in, so the default budget leaves no room for a slow paint.
+    test.setTimeout(600_000);
     const session = await signInSession(seed.email, seed.password);
     const guest = requireGuest(seed);
     const member = await provisionMember(seed, session, "nf410-titles");
