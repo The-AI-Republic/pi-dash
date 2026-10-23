@@ -194,7 +194,8 @@ describe("bundled list", () => {
     expect(isMigratedPath("/api")).toBe(false);
     // /god-mode is a migrated literal since the admin area gate (NEWFRONT-521).
     expect(isMigratedPath("/god-mode")).toBe(true);
-    expect(isMigratedPath("/profile/me")).toBe(false);
+    // /profile is a migrated literal since the Profile area gate (NEWFRONT-586).
+    expect(isMigratedPath("/profile/me")).toBe(true);
     expect(isMigratedPath("/settings/acme")).toBe(false);
     expect(isMigratedPath("/spaces/acme")).toBe(false);
   });
