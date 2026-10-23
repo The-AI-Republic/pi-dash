@@ -1446,3 +1446,17 @@ export type {
   SpaceSignInInput,
   SpaceSignUpInput,
 } from "./contracts/space-auth.js";
+export {
+  EXPORT_PROVIDERS,
+  EXPORT_STATUSES,
+  ExportProvider,
+  ExportStatus,
+  WorkspaceExport,
+  WorkspaceExportReceipt,
+  WorkspaceExportsPage,
+  createWorkspaceExport,
+  isKnownExportProvider,
+  isKnownExportStatus,
+  listWorkspaceExports,
+} from "./contracts/exports.js";
+export type { CreateWorkspaceExportInput, WorkspaceExportsQuery } from "./contracts/exports.js";
