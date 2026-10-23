@@ -8,6 +8,7 @@ import {
   buildViewCreate,
   buildViewPatch,
   entityViewContext,
+  isExpressionDirty,
   isViewDirty,
   offersSaveAs,
   offersSaveView,
@@ -91,15 +92,35 @@ describe("buildViewPatch", () => {
 });
 
 describe("save offers", () => {
-  it("offers Save view on a bare list and Save as on an unlocked saved view", () => {
+  it("offers Save view on a bare list and never Save as there", () => {
     expect(offersSaveView(entityViewContext())).toBe(true);
-    expect(offersSaveAs(entityViewContext())).toBe(false);
+    expect(offersSaveAs(entityViewContext(), SNAPSHOT)).toBe(false);
     expect(offersSaveView(saved())).toBe(false);
-    expect(offersSaveAs(saved())).toBe(true);
   });
 
-  it("refuses Save as on a locked view", () => {
-    expect(offersSaveAs(saved({ is_locked: true }))).toBe(false);
+  it("offers Save as only once an unlocked saved view is dirty", () => {
+    // Clean, even with a stored expression: no fork of an unchanged record.
+    expect(offersSaveAs(saved(), SNAPSHOT)).toBe(false);
+    // A changed expression forks.
+    expect(offersSaveAs(saved(), { ...SNAPSHOT, expression: { priority__in: "low" } })).toBe(true);
+    // A layout-only change forks too: the carried expression rides along.
+    expect(offersSaveAs(saved(), { ...SNAPSHOT, displayFilters: { layout: "kanban", group_by: null } })).toBe(true);
+  });
+
+  it("refuses Save as on a locked view, dirty or not", () => {
+    expect(offersSaveAs(saved({ is_locked: true }), SNAPSHOT)).toBe(false);
+    expect(offersSaveAs(saved({ is_locked: true }), { ...SNAPSHOT, expression: {} })).toBe(false);
+  });
+});
+
+describe("isExpressionDirty", () => {
+  it("notices only expression changes", () => {
+    const context = saved();
+    expect(isExpressionDirty(context, SNAPSHOT)).toBe(false);
+    expect(isExpressionDirty(context, { ...SNAPSHOT, expression: {} })).toBe(true);
+    expect(isExpressionDirty(context, { ...SNAPSHOT, displayFilters: { layout: "kanban", group_by: null } })).toBe(
+      false
+    );
   });
 });
 

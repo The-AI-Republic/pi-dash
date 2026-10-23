@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import { makeView } from "../testing.js";
-import { savedViewDocumentTitle, savedViewLayout, savedViewTitle, showsPrivateLock } from "./model.js";
+import { saveAsTitle, savedViewDocumentTitle, savedViewLayout, savedViewTitle, showsPrivateLock } from "./model.js";
 
 describe("saved view detail model", () => {
   it("builds the tab title from the project and view names", () => {
@@ -41,5 +41,16 @@ describe("saved view detail model", () => {
     expect(showsPrivateLock({ access: 0 })).toBe(true);
     expect(showsPrivateLock({ access: 2 })).toBe(true);
     expect(showsPrivateLock({ access: 1 })).toBe(false);
+  });
+
+  it("suffixes the record name flatly for a Save-as duplicate", () => {
+    expect(saveAsTitle("Triage")).toBe("Triage 2");
+    // Flat, not a counter: an existing copy forks the same way again.
+    expect(saveAsTitle("Triage 2")).toBe("Triage 2 2");
+  });
+
+  it("opens a nameless record on the placeholder instead of a copied string", () => {
+    expect(saveAsTitle("")).toBe("Untitled");
+    expect(saveAsTitle("   ")).toBe("Untitled");
   });
 });

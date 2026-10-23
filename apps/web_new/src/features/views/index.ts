@@ -22,6 +22,7 @@ export {
   MISSING_VIEW_BACK_LABEL,
   MISSING_VIEW_DESCRIPTION,
   MISSING_VIEW_TITLE,
+  saveAsTitle,
   savedViewDocumentTitle,
   savedViewLayout,
   savedViewTitle,
@@ -40,7 +41,7 @@ export { WorkspaceViewsTabStrip } from "./components/WorkspaceViewsTabStrip.js";
 export type { WorkspaceViewsTabStripProps } from "./components/WorkspaceViewsTabStrip.js";
 export type { ProjectViewsListScreenProps } from "./components/ProjectViewsListScreen.js";
 export { CreateViewDialog, UpdateViewDialog } from "./dialog/CreateViewDialog.js";
-export type { CreateViewDialogProps, UpdateViewDialogProps } from "./dialog/CreateViewDialog.js";
+export type { CreateViewDialogProps, SaveViewPrefill, UpdateViewDialogProps } from "./dialog/CreateViewDialog.js";
 export { WorkspaceViewDialog } from "./dialog/WorkspaceViewDialog.js";
 export type { WorkspaceViewDialogProps } from "./dialog/WorkspaceViewDialog.js";
 export { DeleteWorkspaceViewDialog } from "./dialog/DeleteWorkspaceViewDialog.js";

@@ -63,6 +63,11 @@ export interface IssuesLayoutRootProps {
   filterControl?: React.ReactNode;
   /** Analytics entry from the filter-inputs slice (ISS-107). */
   analyticsControl?: React.ReactNode;
+  /**
+   * Hide the layout switcher on both headers while still rendering the
+   * resolved layout (a locked saved view, parity/specs/views.md §1).
+   */
+  hideSwitcher?: boolean | undefined;
 }
 
 export function IssuesLayoutRoot(props: IssuesLayoutRootProps): React.ReactElement {
@@ -92,6 +97,7 @@ function IssuesLayoutRootInner({
   displayControl,
   filterControl,
   analyticsControl,
+  hideSwitcher,
 }: IssuesLayoutRootProps): React.ReactElement {
   const { data: record } = useSuspenseQuery(prefsQueryOptions(getAppClient(), workspaceSlug, entity));
   const prefs = display ?? selectDisplayPrefs(record);
@@ -117,6 +123,7 @@ function IssuesLayoutRootInner({
             {headerActions}
           </>
         }
+        hideSwitcher={hideSwitcher}
       />
       <MobileIssuesHeader
         offered={offered}
@@ -125,6 +132,7 @@ function IssuesLayoutRootInner({
         displayControl={displayControl}
         filterControl={filterControl}
         analyticsControl={analyticsControl}
+        hideSwitcher={hideSwitcher}
       />
       {filterRow}
       {isMutationLoading ? <MutationSpinner /> : null}

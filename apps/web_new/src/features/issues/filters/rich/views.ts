@@ -3,11 +3,12 @@
 // See the LICENSE file for details.
 // Saved-view actions on the filter row (parity/specs/issues.md §9,
 // ISS-104). Save snapshots the live expression with the entity's display
-// settings into the create payload; update is offered only to the owner
-// of an unlocked view whose stored expression or display settings differ
-// from what the row currently edits. Workspace defaults never update.
-// The views area owns full view management; this module only carries the
-// row's two entries.
+// settings into the create payload; Save as offers only on an unlocked
+// view with unsaved changes (parity/specs/views.md §8, VIEW-048), and
+// update is offered only to the owner of an unlocked view whose stored
+// expression or display settings differ from what the row currently
+// edits. Workspace defaults never update. The views area owns full view
+// management; this module only carries the row's two entries.
 
 import type { SavedView, SavedViewCreate, SavedViewPatch } from "@pidash/api-client";
 import { issueKeys } from "../../api/keys.js";
@@ -74,9 +75,14 @@ export function offersSaveView(context: ViewContext): boolean {
   return !context.isView;
 }
 
-/** Whether "Save as" offers (a saved view the caller may fork). */
-export function offersSaveAs(context: ViewContext): boolean {
-  return context.isView && !context.locked;
+/**
+ * Whether "Save as" offers: an unlocked saved view with unsaved changes
+ * (parity/specs/views.md §8, VIEW-048). A clean view offers no fork, even
+ * when it stores an expression; duplicating an unchanged record is not an
+ * offer. The row additionally requires forkable content (see ViewActions).
+ */
+export function offersSaveAs(context: ViewContext, snapshot: ViewSnapshot): boolean {
+  return context.isView && !context.locked && isViewDirty(context, snapshot);
 }
 
 /**
@@ -88,6 +94,11 @@ export function offersUpdateView(context: ViewContext, snapshot: ViewSnapshot, m
   if (context.locked || context.isDefault) return false;
   if (context.ownerId === null || meId === null || context.ownerId !== meId) return false;
   return isViewDirty(context, snapshot);
+}
+
+/** Whether the live expression differs from what the view stores. */
+export function isExpressionDirty(context: ViewContext, snapshot: ViewSnapshot): boolean {
+  return stableJson(context.storedExpression) !== stableJson(snapshot.expression);
 }
 
 /** Compare the live snapshot with the view's stored values. */

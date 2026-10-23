@@ -45,8 +45,8 @@ vi.mock("../../../core/edition/index.js", () => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import type { ViewAccessFieldProps } from "../../../core/edition/index.js";
-import { loadRichFilterBuilder } from "../../issues/index.js";
-import { CreateViewDialog } from "../index.js";
+import { loadRichFilterBuilder, parseDisplayPrefs } from "../../issues/index.js";
+import { CreateViewDialog, type SaveViewPrefill } from "../index.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const VIEW_ID = "323e4567-e89b-12d3-a456-426614174002";
@@ -106,7 +106,9 @@ function transport(respond: (call: Call) => { status: number; body: unknown }): 
   return calls;
 }
 
-function renderDialog(options: { open?: boolean; onOpenChange?: (open: boolean) => void } = {}): {
+function renderDialog(
+  options: { open?: boolean; onOpenChange?: (open: boolean) => void; prefill?: SaveViewPrefill } = {}
+): {
   onOpenChange: ReturnType<typeof vi.fn>;
   queryClient: QueryClient;
   rerenderOpen: (open: boolean) => void;
@@ -122,6 +124,7 @@ function renderDialog(options: { open?: boolean; onOpenChange?: (open: boolean) 
         projectId={PROJECT}
         hideCycle={false}
         hideModule={false}
+        prefill={options.prefill}
       />
     </QueryClientProvider>
   );
@@ -168,6 +171,63 @@ describe("CreateViewDialog blank form", () => {
     transport(() => ({ status: 201, body: RECORD }));
     renderDialog();
     expect(screen.getByPlaceholderText("Title")).toHaveFocus();
+  });
+});
+
+describe("CreateViewDialog save-as prefill", () => {
+  const PREFILL: SaveViewPrefill = {
+    title: "Triage 2",
+    display: parseDisplayPrefs({ layout: "kanban", group_by: "state" }, { priority: true }),
+    expression: { priority__in: "urgent" },
+  };
+
+  it("opens on the duplicate title, display and seeded expression", async () => {
+    seedSession();
+    transport(() => ({ status: 201, body: RECORD }));
+    renderDialog({ prefill: PREFILL });
+    expect(screen.getByPlaceholderText("Title")).toHaveValue("Triage 2");
+    // Description, icon and access stay at the create defaults.
+    expect(screen.getByPlaceholderText("Description")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Board" })).toBeInTheDocument();
+    expect(screen.queryByTestId("view-access-field")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+  });
+
+  it("submits the snapshot untouched with the same payload keys", async () => {
+    const user = userEvent.setup();
+    seedSession();
+    const calls = transport(() => ({ status: 201, body: RECORD }));
+    const { onOpenChange } = renderDialog({ prefill: PREFILL });
+    // Wait for the seeded builder so the expression the prefill carries
+    // is what the payload snapshots.
+    expect(await screen.findByTestId("rich-filter-row")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create View" }));
+    await waitFor(() => expect(notify.notifySuccess).toHaveBeenCalledWith("View created successfully"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toEqual({
+      name: "Triage 2",
+      rich_filters: { priority__in: "urgent" },
+      display_filters: expect.objectContaining({ layout: "kanban", group_by: "state" }),
+      display_properties: expect.objectContaining({ priority: true }),
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(router.navigate).toHaveBeenCalledWith({
+      to: "/$ws/projects/$projectId/views/$viewId",
+      params: { ws: "acme", projectId: PROJECT, viewId: VIEW_ID },
+    });
+  });
+
+  it("reopening resets the form to the prefill", async () => {
+    const user = userEvent.setup();
+    seedSession();
+    transport(() => ({ status: 201, body: RECORD }));
+    const { rerenderOpen } = renderDialog({ prefill: PREFILL });
+    await user.clear(screen.getByPlaceholderText("Title"));
+    await user.type(screen.getByPlaceholderText("Title"), "Edited");
+    rerenderOpen(false);
+    rerenderOpen(true);
+    expect(screen.getByPlaceholderText("Title")).toHaveValue("Triage 2");
+    expect(screen.getByRole("button", { name: "Board" })).toBeInTheDocument();
   });
 });
 

@@ -9,7 +9,7 @@
 // record, and the record's stored layout, expression and order reaching the
 // body.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueListResponse, Project } from "@pidash/api-client";
 import * as React from "react";
@@ -42,15 +42,29 @@ vi.mock("../../issues/layouts/IssuesLayoutRoot.js", () => ({
     onDisplayChange?: (layout: string) => void;
     emptyState: React.ReactNode;
     noMatchState: React.ReactNode;
+    hideSwitcher?: boolean;
+    headerActions?: React.ReactNode;
+    displayControl?: React.ReactNode;
+    filterControl?: React.ReactNode;
+    filterRow?: React.ReactNode;
   }) => {
     const prefs = props.display ?? { layout: "list", orderBy: "" };
     return (
-      <div data-testid="layout-root" data-offered={props.offered.join(",")} data-display={props.display?.layout ?? ""}>
+      <div
+        data-testid="layout-root"
+        data-offered={props.offered.join(",")}
+        data-display={props.display?.layout ?? ""}
+        data-hide-switcher={String(props.hideSwitcher ?? false)}
+      >
         <h2>{props.title}</h2>
         <span data-testid="root-total">{props.totalCount}</span>
         <button type="button" onClick={() => props.onDisplayChange?.("calendar")}>
           switch-calendar
         </button>
+        <div data-testid="root-header-actions">{props.headerActions}</div>
+        <div data-testid="root-display">{props.displayControl}</div>
+        <div data-testid="root-filter-control">{props.filterControl}</div>
+        <div data-testid="root-filter-row">{props.filterRow}</div>
         <div data-testid="root-empty">{props.totalCount === 0 ? props.emptyState : null}</div>
         <div data-testid="root-nomatch">{props.totalCount === 0 ? null : props.noMatchState}</div>
         {props.renderLayout(props.display?.layout ?? "list", prefs)}
@@ -74,6 +88,86 @@ vi.mock("../../issues/components/WorkItemCreateDialog.js", () => ({
     <div data-testid="create-dialog" data-open={String(props.open)}>
       <button type="button" onClick={() => props.onOpenChange(false)}>
         close-create
+      </button>
+    </div>
+  ),
+}));
+// The filter builder is issues-owned; this suite pins what the detail hands
+// it (the record, the live display, the feature flag) and where its parts
+// land, through a synchronous stand-in for the lazy boundary.
+const filterHarness = vi.hoisted(
+  () =>
+    ({
+      view: null,
+      viewDisplay: null,
+      viewsEnabled: undefined,
+      onSavePress: null,
+      onViewUpdated: null,
+    }) as {
+      view: unknown;
+      viewDisplay: unknown;
+      viewsEnabled: boolean | undefined;
+      onSavePress: ((snapshot: unknown) => void) | null;
+      onViewUpdated: ((view: unknown) => void) | null;
+    }
+);
+vi.mock("../../issues/filters/rich/lazy.js", () => ({
+  loadIssueFilters: () => Promise.resolve({ default: () => null }),
+  preloadIssueFilters: () => {},
+  LazyIssueFilters: (props: {
+    view?: unknown;
+    viewDisplay?: unknown;
+    viewsEnabled?: boolean;
+    onSavePress?: (snapshot: unknown) => void;
+    onViewUpdated?: (view: unknown) => void;
+    children: (parts: { control: React.ReactNode; row: React.ReactNode }) => React.ReactNode;
+  }) => {
+    filterHarness.view = props.view;
+    filterHarness.viewDisplay = props.viewDisplay;
+    filterHarness.viewsEnabled = props.viewsEnabled;
+    filterHarness.onSavePress = props.onSavePress ?? null;
+    filterHarness.onViewUpdated = props.onViewUpdated ?? null;
+    return (
+      <>
+        {props.children({
+          control: (
+            <button type="button" data-testid="filter-toggle-stub">
+              toggle
+            </button>
+          ),
+          row: <div data-testid="filter-row-stub">row</div>,
+        })}
+      </>
+    );
+  },
+}));
+vi.mock("../../issues/display/DisplayControl.js", () => ({
+  DisplayControl: (props: { display?: { layout: string }; onDisplayChange?: (next: { layout: string }) => void }) => (
+    <button
+      type="button"
+      data-testid="display-control-stub"
+      data-layout={props.display?.layout ?? ""}
+      onClick={() => props.onDisplayChange?.({ ...(props.display as { layout: string }), layout: "calendar" })}
+    >
+      display
+    </button>
+  ),
+}));
+vi.mock("../dialog/CreateViewDialog.js", () => ({
+  CreateViewDialog: (props: {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    prefill?: { title: string; expression: unknown; display: { layout: string } };
+  }) => (
+    <div
+      data-testid="save-view-dialog"
+      data-open={String(props.open)}
+      data-title={props.prefill?.title ?? ""}
+      data-layout={props.prefill?.display.layout ?? ""}
+      data-expression={JSON.stringify(props.prefill?.expression ?? null)}
+    >
+      <button type="button" onClick={() => props.onOpenChange(false)}>
+        close-save
       </button>
     </div>
   ),
@@ -178,6 +272,11 @@ beforeEach(() => {
   bodyHarness.layout = "";
   bodyHarness.expression = null;
   routerHarness.navigate.mockReset();
+  filterHarness.view = null;
+  filterHarness.viewDisplay = null;
+  filterHarness.viewsEnabled = undefined;
+  filterHarness.onSavePress = null;
+  filterHarness.onViewUpdated = null;
   harness = {
     project: projectRow(),
     projectListStatus: 200,
@@ -334,8 +433,114 @@ describe("SavedViewScreen", () => {
     expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "kanban");
     fireEvent.click(screen.getByRole("button", { name: "switch-calendar" }));
     await waitFor(() => expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "calendar"));
-    // No write path exists in this slice; the record stays untouched.
+    // The record stays untouched until Update view persists the live copy.
     expect(harness.view).toMatchObject({ display_filters: { layout: "kanban" } });
+  });
+
+  it("hosts the filter toggle, display and add entry on an unlocked view", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(screen.getByTestId("layout-root")).toHaveAttribute("data-hide-switcher", "false");
+    // The toggle and the row land in their slots; the row edits the record.
+    expect(screen.getByTestId("filter-toggle-stub")).toBeInTheDocument();
+    expect(screen.getByTestId("filter-row-stub")).toBeInTheDocument();
+    expect(filterHarness.view).toMatchObject({ id: VIEW_ID, name: "Triage" });
+    expect(filterHarness.viewDisplay).toMatchObject({ layout: "kanban" });
+    expect(filterHarness.viewsEnabled).toBe(true);
+    // Display rides both the desktop actions and the mobile slot.
+    expect(screen.getAllByTestId("display-control-stub")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Add work item" })).toBeInTheDocument();
+  });
+
+  it("hides the switcher, display and filter toggle on a locked view", async () => {
+    harness.view = {
+      ...makeView({
+        id: VIEW_ID,
+        project: PROJECT_ID,
+        name: "Triage",
+        is_locked: true,
+        display_filters: { layout: "kanban", order_by: "sort_order" },
+      }),
+    };
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(screen.getByTestId("layout-root")).toHaveAttribute("data-hide-switcher", "true");
+    expect(screen.queryByTestId("filter-toggle-stub")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("filter-row-stub")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("display-control-stub")).not.toBeInTheDocument();
+    // The stored layout still renders, and the member keeps the Add entry.
+    expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "kanban");
+    expect(screen.getByRole("button", { name: "Add work item" })).toBeInTheDocument();
+  });
+
+  it("hides the Add entry from guests while keeping the toggle and display", async () => {
+    harness.project = projectRow({ member_role: 5 });
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Add work item" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("filter-toggle-stub")).toBeInTheDocument();
+    expect(screen.getAllByTestId("display-control-stub")).toHaveLength(2);
+  });
+
+  it("opens the issues create dialog from the header Add entry", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add work item" }));
+    expect(await screen.findByTestId("create-dialog")).toHaveAttribute("data-open", "true");
+    fireEvent.click(screen.getByRole("button", { name: "close-create" }));
+    await waitFor(() => expect(screen.queryByTestId("create-dialog")).toBeNull());
+  });
+
+  it("edits the live display copy through the Display control", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "kanban");
+    fireEvent.click(screen.getAllByTestId("display-control-stub")[0]!);
+    await waitFor(() => expect(screen.getByTestId("view-body")).toHaveAttribute("data-layout", "calendar"));
+    // The record stays untouched until Update view persists the live copy.
+    expect(harness.view).toMatchObject({ display_filters: { layout: "kanban" } });
+  });
+
+  it("opens Save as with the live snapshot and the suffixed title", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(filterHarness.onSavePress).not.toBeNull();
+    const snapshot = {
+      expression: { priority__in: "urgent" },
+      displayFilters: { layout: "kanban" },
+      displayProperties: {},
+    };
+    act(() => {
+      filterHarness.onSavePress!(snapshot);
+    });
+    const dialog = await screen.findByTestId("save-view-dialog");
+    expect(dialog).toHaveAttribute("data-open", "true");
+    expect(dialog).toHaveAttribute("data-title", "Triage 2");
+    expect(dialog).toHaveAttribute("data-layout", "kanban");
+    expect(dialog).toHaveAttribute("data-expression", JSON.stringify({ priority__in: "urgent" }));
+    fireEvent.click(screen.getByRole("button", { name: "close-save" }));
+    await waitFor(() => expect(screen.queryByTestId("save-view-dialog")).toBeNull());
+  });
+
+  it("adopts an Update-view echo into the record and the live copy", async () => {
+    renderScreen();
+    await waitFor(() => expect(screen.getByTestId("layout-root")).toBeInTheDocument());
+    expect(filterHarness.onViewUpdated).not.toBeNull();
+    const echo = {
+      ...makeView({ id: VIEW_ID, project: PROJECT_ID, name: "Triage" }),
+      display_filters: { layout: "calendar", order_by: "sort_order" },
+      display_properties: {},
+      rich_filters: { priority__in: "low" },
+    };
+    act(() => {
+      filterHarness.onViewUpdated!(echo);
+    });
+    // The live copy follows the echo.
+    await waitFor(() =>
+      expect(screen.getAllByTestId("display-control-stub")[0]).toHaveAttribute("data-layout", "calendar")
+    );
+    // And the cached record the row edits is the echo.
+    await waitFor(() => expect(filterHarness.view).toMatchObject({ rich_filters: { priority__in: "low" } }));
   });
 
   it("opens the project from the first crumb", async () => {

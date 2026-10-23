@@ -56,6 +56,7 @@ function renderRoot(
     onDisplayChange?: (next: LayoutKind) => void;
     totalCount?: number;
     resultCount?: number;
+    hideSwitcher?: boolean;
     slots?: {
       headerActions?: React.ReactNode;
       displayControl?: React.ReactNode;
@@ -129,6 +130,7 @@ function renderRoot(
           filterControl={options.slots?.filterControl}
           filterRow={options.slots?.filterRow}
           analyticsControl={options.slots?.analyticsControl}
+          hideSwitcher={options.hideSwitcher}
         />
       </React.Suspense>
     </QueryClientProvider>
@@ -294,5 +296,15 @@ describe("IssuesLayoutRoot", () => {
     expect(screen.getByRole("button", { name: "Display" })).toBeInTheDocument();
     // Desktop header and the compact mobile bar both host the entry.
     expect(screen.getAllByRole("button", { name: "Analytics" })).toHaveLength(2);
+  });
+
+  it("hides both switchers while still rendering the resolved layout", async () => {
+    renderRoot({ hideSwitcher: true });
+    expect(await screen.findByText("layout:kanban")).toBeInTheDocument();
+    expect(screen.getByTestId("issues-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("layout-switcher-segmented")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("layout-switcher-dropdown")).not.toBeInTheDocument();
+    // No trailing control either, so the mobile bar renders nothing.
+    expect(screen.queryByTestId("issues-mobile-header")).not.toBeInTheDocument();
   });
 });

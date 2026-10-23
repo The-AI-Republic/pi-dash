@@ -321,6 +321,12 @@ export {
   isDatePreset,
 } from "./filters/rich/legacyDimensions.js";
 export type { CustomDateMode, DatePreset } from "./filters/rich/legacyDimensions.js";
+// Saved-view detail seam (VIEW-025/026, NEWFRONT-724). The views area hosts
+// the row through the lazy boundary, never a static edge into rich/: the
+// loader module carries only the dynamic import, so the filter graph stays
+// out of eager closures. The parts type is compile-time only.
+export { LazyIssueFilters, loadIssueFilters, preloadIssueFilters } from "./filters/rich/lazy.js";
+export type { RichFilterBuilderParts } from "./filters/rich/RichFilterBuilder.js";
 export { ISSUE_DATES_FAILED_TITLE, useUpdateIssueDates, withIssueDates } from "./api/dates.js";
 export type { IssueDatesInput } from "./api/dates.js";
 export {

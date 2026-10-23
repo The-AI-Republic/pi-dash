@@ -23,6 +23,12 @@ export interface MobileIssuesHeaderProps {
   filterControl?: React.ReactNode;
   /** Analytics entry from the filter-inputs slice (ISS-107). */
   analyticsControl?: React.ReactNode;
+  /**
+   * Hide the layout menu (a locked saved view renders its stored layout
+   * with no switcher, parity/specs/views.md §1). With no trailing control
+   * either, the bar renders nothing instead of an empty strip.
+   */
+  hideSwitcher?: boolean | undefined;
 }
 
 export function MobileIssuesHeader({
@@ -32,22 +38,28 @@ export function MobileIssuesHeader({
   displayControl,
   filterControl,
   analyticsControl,
-}: MobileIssuesHeaderProps): React.ReactElement {
+  hideSwitcher = false,
+}: MobileIssuesHeaderProps): React.ReactElement | null {
   const kinds = mobileOfferedLayouts(offered);
+  if (hideSwitcher && displayControl === undefined && filterControl === undefined && analyticsControl === undefined) {
+    return null;
+  }
   return (
     <div
       data-testid="issues-mobile-header"
       className="flex shrink-0 items-center gap-(--space-2) border-b border-(--border) px-(--space-3) py-(--space-2) md:hidden"
     >
-      <Menu
-        trigger={
-          <Button variant="secondary" size="small" data-testid="mobile-layout-trigger">
-            <LayoutIcon kind={active} />
-            {LAYOUT_LABELS[active]}
-          </Button>
-        }
-        items={layoutMenuItems(kinds, active, onSwitch)}
-      />
+      {hideSwitcher ? null : (
+        <Menu
+          trigger={
+            <Button variant="secondary" size="small" data-testid="mobile-layout-trigger">
+              <LayoutIcon kind={active} />
+              {LAYOUT_LABELS[active]}
+            </Button>
+          }
+          items={layoutMenuItems(kinds, active, onSwitch)}
+        />
+      )}
       <div className="ml-auto flex items-center gap-(--space-2)">
         {filterControl}
         {displayControl}

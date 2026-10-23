@@ -15,6 +15,7 @@ import type { SavedView } from "@pidash/api-client";
 import type { DisplayPrefs } from "../../prefs/displayPrefs.js";
 import type { IssuesEntity } from "../../prefs/entities.js";
 import { useRichFilterBuilder, type RichFilterBuilderParts } from "./RichFilterBuilder.js";
+import type { ViewSnapshot } from "./views.js";
 
 export interface IssueFiltersProps {
   workspaceSlug: string;
@@ -30,6 +31,12 @@ export interface IssueFiltersProps {
   viewDisplay?: DisplayPrefs | undefined;
   onViewCreated?: ((view: SavedView) => void) | undefined;
   onViewUpdated?: ((view: SavedView) => void) | undefined;
+  /**
+   * Views-owned save dialog (parity/specs/views.md §8, VIEW-048). When the
+   * host provides it, the row's Save view/Save as entry hands it the live
+   * snapshot instead of opening the minimal form.
+   */
+  onSavePress?: ((snapshot: ViewSnapshot) => void) | undefined;
   children: (parts: RichFilterBuilderParts) => React.ReactNode;
 }
 
@@ -44,6 +51,7 @@ export default function IssueFilters({
   viewDisplay,
   onViewCreated,
   onViewUpdated,
+  onSavePress,
   children,
 }: IssueFiltersProps): React.ReactElement {
   // Stable identity: the builder resets its local copy whenever the record
@@ -60,6 +68,7 @@ export default function IssueFilters({
     viewDisplay,
     onViewCreated,
     onViewUpdated,
+    onSavePress,
   });
   return <React.Fragment>{children(parts)}</React.Fragment>;
 }
