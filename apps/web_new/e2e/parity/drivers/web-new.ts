@@ -27390,8 +27390,9 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017). Throwing
-  // --- stubs per the shared driver contract; the new app implements them later.
+  // --- Project lifecycle oracles (NEWFRONT-390, PSET-013..017; new-app
+  // --- surface NEWFRONT-606). The publish dialog, the restriction join
+  // --- view and the leave ordering pin.
   async isCreateFeatureStepVisible(): Promise<boolean> {
     // Creation closes the dialog outright; the post-create feature step
     // was removed upstream, so this read only has to prove its absence.
@@ -27408,79 +27409,187 @@ export class WebNewDriver implements ParityDriver {
     return (await switches.count()) > 0;
   }
   async isProjectRestrictionVisible(): Promise<boolean> {
-    return todo("isProjectRestrictionVisible");
+    return this.isShown(this.page.getByTestId("project-settings-restriction"));
   }
   async restrictionJoinLabel(): Promise<string | null> {
-    return todo("restrictionJoinLabel");
+    const join = this.page.getByTestId("project-settings-join");
+    if ((await join.count()) === 0) return null;
+    return ((await join.first().innerText({ timeout: 30_000 })) ?? "").trim() || null;
   }
   async clickRestrictionJoin(): Promise<void> {
-    return todo("clickRestrictionJoin");
+    await this.page.getByTestId("project-settings-join").click({ timeout: 30_000 });
   }
-  async submitLeaveHoldingWrite(_holdMs: number): Promise<void> {
-    return todo("submitLeaveHoldingWrite");
+  async submitLeaveHoldingWrite(holdMs: number): Promise<void> {
+    // Hold the leave write so the test can observe the navigation landing
+    // while the endpoint is still pending: the dialog pushes the list
+    // route first and fires the write after, never awaiting it.
+    await this.page.route("**/members/leave/", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+      await route.continue();
+    });
+    await this.page.getByRole("button", { name: "Leave project", exact: true }).click();
   }
-  async openPublishProjectModal(_workspaceSlug: string, _projectId: string, _projectName: string): Promise<void> {
-    return todo("openPublishProjectModal");
+  private publishModal(): Locator {
+    return this.page.getByRole("dialog");
+  }
+  async openPublishProjectModal(workspaceSlug: string, projectId: string, _projectName: string): Promise<void> {
+    // The sidebar project row hosts the admin-only quick actions with the
+    // publish entry; the row keys off the project id.
+    await this.openProjectTab(workspaceSlug, projectId, "issues");
+    const row = this.page.locator(`li[data-project-row="${projectId}"]`);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.getByTestId("project-row-menu").click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem", { name: "Publish project", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Publish project", exact: true }).waitFor({ timeout: 30_000 });
   }
   async isPublishModalVisible(): Promise<boolean> {
-    return todo("isPublishModalVisible");
+    return this.isShown(this.publishModal().getByRole("heading", { name: "Publish project", exact: true }));
   }
   async isPublishModalLoading(): Promise<boolean> {
-    return todo("isPublishModalLoading");
+    return this.isShown(this.publishModal().getByRole("status"));
+  }
+  private publishLayoutBoxes() {
+    return this.publishModal().locator("fieldset", { hasText: "Layouts" }).getByRole("checkbox");
   }
   async publishLayoutOptions(): Promise<string[]> {
-    return todo("publishLayoutOptions");
+    const boxes = this.publishLayoutBoxes();
+    const total = await boxes.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const label = ((await boxes.nth(i).getAttribute("aria-label")) ?? "").trim();
+      if (label !== "") labels.push(label);
+    }
+    return labels;
   }
   async publishSelectedLayouts(): Promise<string[]> {
-    return todo("publishSelectedLayouts");
+    const boxes = this.publishLayoutBoxes();
+    const total = await boxes.count();
+    const labels: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const box = boxes.nth(i);
+      if (!(await box.isChecked().catch(() => false))) continue;
+      const label = ((await box.getAttribute("aria-label")) ?? "").trim();
+      if (label !== "") labels.push(label);
+    }
+    return labels;
   }
-  async publishToggleLayout(_label: string): Promise<void> {
-    return todo("publishToggleLayout");
+  async publishToggleLayout(label: string): Promise<void> {
+    await this.publishModal().getByRole("checkbox", { name: label, exact: true }).click({ timeout: 30_000 });
   }
-  async publishToggleState(_name: "comments" | "reactions" | "voting"): Promise<boolean> {
-    return todo("publishToggleState");
+  async publishToggleState(name: "comments" | "reactions" | "voting"): Promise<boolean> {
+    const toggle = this.publishModal().getByTestId(`publish-toggle-${name}`);
+    await toggle.waitFor({ timeout: 30_000 });
+    return (await toggle.getAttribute("aria-checked")) === "true";
   }
-  async setPublishToggle(_name: "comments" | "reactions" | "voting", _on: boolean): Promise<void> {
-    return todo("setPublishToggle");
+  async setPublishToggle(name: "comments" | "reactions" | "voting", on: boolean): Promise<void> {
+    const toggle = this.publishModal().getByTestId(`publish-toggle-${name}`);
+    await toggle.waitFor({ timeout: 30_000 });
+    if ((await this.publishToggleState(name)) !== on) await toggle.click({ timeout: 30_000 });
   }
   async submitPublish(): Promise<void> {
-    return todo("submitPublish");
+    await this.publishModal().getByRole("button", { name: "Publish", exact: true }).click({ timeout: 30_000 });
   }
   async publishLiveLink(): Promise<string | null> {
-    return todo("publishLiveLink");
+    // The live URL rides the read-only link field; the beside anchor only
+    // reads "Open", so the field carries the contract.
+    const field = this.publishModal().getByTestId("publish-live-link");
+    if ((await field.count()) === 0) return null;
+    return ((await field.first().inputValue({ timeout: 30_000 })) ?? "").trim() || null;
   }
   async publishLiveLinkTarget(): Promise<string | null> {
-    return todo("publishLiveLinkTarget");
+    const link = this.publishModal().getByRole("link", { name: "Open published board" });
+    if ((await link.count()) === 0) return null;
+    return link.first().getAttribute("target");
   }
   async clickPublishCopyLink(): Promise<void> {
-    return todo("clickPublishCopyLink");
+    // Clipboard writes need the permission up front; grant it here so
+    // the scenario stays on the driver surface.
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await this.publishModal()
+      .getByRole("button", { name: "Copy published link", exact: true })
+      .click({ timeout: 30_000 });
   }
   async isPublishUpdateVisible(): Promise<boolean> {
-    return todo("isPublishUpdateVisible");
+    return this.isShown(this.publishModal().getByRole("button", { name: /^(Update|Publishing)/ }));
   }
   async submitPublishUpdate(): Promise<void> {
-    return todo("submitPublishUpdate");
+    await this.publishModal().getByRole("button", { name: "Update", exact: true }).click({ timeout: 30_000 });
   }
   async isPublishUnpublishVisible(): Promise<boolean> {
-    return todo("isPublishUnpublishVisible");
+    return this.isShown(this.publishModal().getByRole("button", { name: /^(Unpublish|Unpublishing)/ }));
   }
   async clickPublishUnpublish(): Promise<void> {
-    return todo("clickPublishUnpublish");
+    await this.publishModal().getByRole("button", { name: "Unpublish", exact: true }).click({ timeout: 30_000 });
   }
   async isPublishUnpublishing(): Promise<boolean> {
-    return todo("isPublishUnpublishing");
+    return this.isShown(this.publishModal().getByRole("button", { name: /Unpublishing/ }));
+  }
+  private listSearchSpyKey(): string {
+    return "__parityListSearchRequests";
   }
   async armListSearchRequestSpy(): Promise<void> {
-    return todo("armListSearchRequestSpy");
+    // Count data-API requests from this point on; the expanding search box
+    // filters the already-loaded list locally, so typing must add none.
+    await this.page.evaluate((key) => {
+      (window as unknown as Record<string, string[]>)[key] = [];
+    }, this.listSearchSpyKey());
+    this.page.on("request", (req) => {
+      const url = req.url();
+      if (!url.includes("/api/")) return;
+      void this.page
+        .evaluate(
+          ([key, path]) => {
+            const seen = (window as unknown as Record<string, string[]>)[key] ?? [];
+            seen.push(path);
+            (window as unknown as Record<string, string[]>)[key] = seen;
+          },
+          [this.listSearchSpyKey(), new URL(url).pathname] as [string, string]
+        )
+        .catch(() => {});
+    });
   }
   async listSearchRequestPaths(): Promise<string[]> {
-    return todo("listSearchRequestPaths");
+    const key = this.listSearchSpyKey();
+    return this.page
+      .evaluate((k) => {
+        try {
+          return ((window as unknown as Record<string, string[]>)[k] ?? []).slice();
+        } catch {
+          return [];
+        }
+      }, key)
+      .catch(() => []);
   }
-  async delayNextPublishRead(_ms: number): Promise<void> {
-    return todo("delayNextPublishRead");
+  private static publishBoardUrl(url: string): boolean {
+    return /\/projects\/[^/]+\/project-deploy-boards\//.test(url);
   }
-  async delayNextPublishWrite(_ms: number): Promise<void> {
-    return todo("delayNextPublishWrite");
+  async delayNextPublishRead(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route("**/project-deploy-boards/**", async (route) => {
+      const req = route.request();
+      if (armed && req.method() === "GET" && WebNewDriver.publishBoardUrl(req.url())) {
+        armed = false;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
+  }
+  async delayNextPublishWrite(ms: number): Promise<void> {
+    let armed = true;
+    await this.page.route("**/project-deploy-boards/**", async (route) => {
+      const req = route.request();
+      if (
+        armed &&
+        (req.method() === "POST" || req.method() === "PATCH" || req.method() === "DELETE") &&
+        WebNewDriver.publishBoardUrl(req.url())
+      ) {
+        armed = false;
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }
+      await route.continue();
+    });
   }
 
   // --- Project-settings shell oracle (NEWFRONT-388, PSET-001/002/003/004/062/063).

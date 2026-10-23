@@ -622,6 +622,7 @@ interface GeneralPageHooks {
 function generalSettingsPageDouble(hooks: GeneralPageHooks = {}) {
   const calls = { locators: [] as string[], testIds: [] as string[], pressed: [] as string[] };
   const routes: Array<{ pattern: unknown; action: "route" | "unroute" }> = [];
+  const grantPermissions = vi.fn(async (_perms: string[]) => undefined);
   const page = {
     goto: vi.fn(async (_url: string) => undefined),
     waitForLoadState: vi.fn(async (_state: string) => undefined),
@@ -653,13 +654,16 @@ function generalSettingsPageDouble(hooks: GeneralPageHooks = {}) {
       return hooks.text?.(text) ?? generalAbsent();
     }),
     evaluate: vi.fn(async () => "none"),
+    on: vi.fn((_event: string, _handler: (arg: never) => void) => undefined),
+    off: vi.fn((_event: string, _handler: (arg: never) => void) => undefined),
     mouse: {
       move: vi.fn(async (_x: number, _y: number) => undefined),
       down: vi.fn(async () => undefined),
       up: vi.fn(async () => undefined),
     },
+    context: () => ({ grantPermissions }),
   };
-  return { page: page as unknown as Page, pageObject: page, calls, routes };
+  return { page: page as unknown as Page, pageObject: page, calls, routes, grantPermissions };
 }
 
 describe("WebNewDriver general tab open and state", () => {
@@ -1876,5 +1880,224 @@ describe("WebNewDriver labels tab groups and drag", () => {
     await new WebNewDriver(stub.page).settingsLabelsDelayLoad(5);
     expect(stub.pageObject.route).toHaveBeenCalledTimes(2);
     expect(stub.routes.map((entry) => entry.pattern)).toEqual(["**/issue-labels/*", "**/api/workspaces/*/labels/"]);
+  });
+});
+
+describe("WebNewDriver lifecycle restriction and leave", () => {
+  it("reads the restriction view and joins from it", async () => {
+    const join = new GeneralFakeLocator({ text: "  Join project  " });
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "project-settings-restriction") return new GeneralFakeLocator();
+        if (testId === "project-settings-join") return join;
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.isProjectRestrictionVisible()).resolves.toBe(true);
+    await expect(driver.restrictionJoinLabel()).resolves.toBe("Join project");
+    await driver.clickRestrictionJoin();
+    expect(join.click).toHaveBeenCalledTimes(1);
+
+    const bare = generalSettingsPageDouble();
+    const bareDriver = new WebNewDriver(bare.page);
+    await expect(bareDriver.isProjectRestrictionVisible()).resolves.toBe(false);
+    await expect(bareDriver.restrictionJoinLabel()).resolves.toBeNull();
+  });
+
+  it("holds the leave write while submitting", async () => {
+    const leave = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({ role: () => leave });
+    await new WebNewDriver(stub.page).submitLeaveHoldingWrite(5);
+    expect(stub.pageObject.route).toHaveBeenCalledTimes(1);
+    expect(leave.click).toHaveBeenCalledTimes(1);
+    const hold = stub.pageObject.route.mock.calls[0]?.[1] as (route: {
+      request: () => { method: () => string };
+      continue: () => Promise<void>;
+    }) => Promise<void>;
+    const post = { request: () => ({ method: () => "POST" }), continue: vi.fn(async () => undefined) };
+    await hold(post);
+    expect(post.continue).toHaveBeenCalledTimes(1);
+    const get = { request: () => ({ method: () => "GET" }), continue: vi.fn(async () => undefined) };
+    await hold(get);
+    expect(get.continue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WebNewDriver publish dialog", () => {
+  function publishStub() {
+    const dialog = new GeneralFakeLocator(
+      {},
+      { role: () => new GeneralFakeLocator(), testId: () => new GeneralFakeLocator() }
+    );
+    return generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      testId: (testId) => (testId === "project-row-menu" ? new GeneralFakeLocator() : dialog),
+      role: (role) => (role === "dialog" ? dialog : new GeneralFakeLocator()),
+    });
+  }
+
+  it("opens the dialog from the sidebar row menu", async () => {
+    const menu = new GeneralFakeLocator();
+    const row = new GeneralFakeLocator({}, { testId: () => menu });
+    const entry = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      locator: (selector) => (selector === "#main-sidebar" ? new GeneralFakeLocator() : row),
+      testId: (testId) => (testId === "project-row-menu" ? menu : generalAbsent()),
+      role: (role) => entry,
+    });
+    await new WebNewDriver(stub.page).openPublishProjectModal("acme", "p1", "Forge");
+    expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/projects/p1/issues");
+    expect(menu.click).toHaveBeenCalledTimes(1);
+    expect(entry.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads modal visibility and the loading state", async () => {
+    const shown = publishStub();
+    const driver = new WebNewDriver(shown.page);
+    await expect(driver.isPublishModalVisible()).resolves.toBe(true);
+    await expect(driver.isPublishModalLoading()).resolves.toBe(true);
+    const bare = generalSettingsPageDouble();
+    const bareDriver = new WebNewDriver(bare.page);
+    await expect(bareDriver.isPublishModalVisible()).resolves.toBe(false);
+    await expect(bareDriver.isPublishModalLoading()).resolves.toBe(false);
+  });
+
+  it("reads layout options and the checked subset", async () => {
+    const list = new GeneralFakeLocator({ checked: true, attr: { "aria-label": "List" } });
+    const kanban = new GeneralFakeLocator({ checked: false, attr: { "aria-label": "Kanban" } });
+    const fieldset = new GeneralFakeLocator({}, { role: () => new GeneralFakeLocator({ items: [list, kanban] }) });
+    const dialog = new GeneralFakeLocator({}, { locator: () => fieldset });
+    const stub = generalSettingsPageDouble({ role: () => dialog });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.publishLayoutOptions()).resolves.toEqual(["List", "Kanban"]);
+    await expect(driver.publishSelectedLayouts()).resolves.toEqual(["List"]);
+
+    const toggle = new GeneralFakeLocator();
+    const toggleDialog = new GeneralFakeLocator({}, { role: () => toggle });
+    const toggleStub = generalSettingsPageDouble({ role: () => toggleDialog });
+    await new WebNewDriver(toggleStub.page).publishToggleLayout("Kanban");
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads and flips the interaction toggles", async () => {
+    const toggle = new GeneralFakeLocator({ attr: { "aria-checked": "false" } });
+    toggle.click.mockImplementation(async () => {
+      toggle.state.attr = { "aria-checked": "true" };
+    });
+    const dialog = new GeneralFakeLocator({}, { testId: () => toggle });
+    const stub = generalSettingsPageDouble({ role: () => dialog });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.publishToggleState("comments")).resolves.toBe(false);
+    await driver.setPublishToggle("comments", true);
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+    await driver.setPublishToggle("comments", true);
+    expect(toggle.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("submits, reads the live link, and copies it", async () => {
+    const publish = new GeneralFakeLocator();
+    const field = new GeneralFakeLocator({ input: "https://boards.test/b/abc" });
+    const link = new GeneralFakeLocator({ attr: { target: "_blank" } });
+    const copy = new GeneralFakeLocator();
+    const dialog = new GeneralFakeLocator(
+      {},
+      {
+        role: (_role, options) => {
+          const name = String(options?.name ?? "");
+          if (name === "Publish") return publish;
+          if (name === "Open published board") return link;
+          if (name === "Copy published link") return copy;
+          return generalAbsent();
+        },
+        testId: (testId) => (testId === "publish-live-link" ? field : generalAbsent()),
+      }
+    );
+    const stub = generalSettingsPageDouble({ role: () => dialog });
+    const driver = new WebNewDriver(stub.page);
+    await driver.submitPublish();
+    expect(publish.click).toHaveBeenCalledTimes(1);
+    await expect(driver.publishLiveLink()).resolves.toBe("https://boards.test/b/abc");
+    await expect(driver.publishLiveLinkTarget()).resolves.toBe("_blank");
+    await driver.clickPublishCopyLink();
+    expect(copy.click).toHaveBeenCalledTimes(1);
+    expect(stub.grantPermissions).toHaveBeenCalledWith(["clipboard-read", "clipboard-write"]);
+
+    const bare = generalSettingsPageDouble();
+    const bareDriver = new WebNewDriver(bare.page);
+    await expect(bareDriver.publishLiveLink()).resolves.toBeNull();
+    await expect(bareDriver.publishLiveLinkTarget()).resolves.toBeNull();
+  });
+
+  it("updates only when visible and unpublishes with progress", async () => {
+    const update = new GeneralFakeLocator();
+    const unpublish = new GeneralFakeLocator();
+    const dialog = new GeneralFakeLocator(
+      {},
+      {
+        role: (_role, options) => {
+          const name = String(options?.name ?? "");
+          if (name.includes("Update")) return update;
+          if (name.includes("Unpublish")) return unpublish;
+          return generalAbsent();
+        },
+      }
+    );
+    const stub = generalSettingsPageDouble({ role: () => dialog });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.isPublishUpdateVisible()).resolves.toBe(true);
+    await driver.submitPublishUpdate();
+    expect(update.click).toHaveBeenCalledTimes(1);
+    await expect(driver.isPublishUnpublishVisible()).resolves.toBe(true);
+    await driver.clickPublishUnpublish();
+    expect(unpublish.click).toHaveBeenCalledTimes(1);
+    await expect(driver.isPublishUnpublishing()).resolves.toBe(true);
+  });
+
+  it("arms the list-search spy and reads its paths", async () => {
+    const stub = generalSettingsPageDouble();
+    await new WebNewDriver(stub.page).armListSearchRequestSpy();
+    const registrations = stub.pageObject.on.mock.calls.filter((call) => call[0] === "request");
+    expect(registrations).toHaveLength(1);
+    stub.pageObject.evaluate.mockResolvedValue(["/api/workspaces/acme/projects/"]);
+    await expect(new WebNewDriver(stub.page).listSearchRequestPaths()).resolves.toEqual([
+      "/api/workspaces/acme/projects/",
+    ]);
+  });
+
+  it("delays the next publish read and write once each", async () => {
+    const stub = generalSettingsPageDouble();
+    const driver = new WebNewDriver(stub.page);
+    await driver.delayNextPublishRead(5);
+    await driver.delayNextPublishWrite(5);
+    expect(stub.pageObject.route).toHaveBeenCalledTimes(2);
+
+    const readHold = stub.pageObject.route.mock.calls[0]?.[1] as (route: {
+      request: () => { method: () => string; url: () => string };
+      continue: () => Promise<void>;
+    }) => Promise<void>;
+    const boardGet = {
+      request: () => ({ method: () => "GET", url: () => "https://api.test/projects/p1/project-deploy-boards/x/" }),
+      continue: vi.fn(async () => undefined),
+    };
+    await readHold(boardGet);
+    expect(boardGet.continue).toHaveBeenCalledTimes(1);
+    const otherGet = {
+      request: () => ({ method: () => "GET", url: () => "https://api.test/projects/p1/" }),
+      continue: vi.fn(async () => undefined),
+    };
+    await readHold(otherGet);
+    expect(otherGet.continue).toHaveBeenCalledTimes(1);
+
+    const writeHold = stub.pageObject.route.mock.calls[1]?.[1] as (route: {
+      request: () => { method: () => string; url: () => string };
+      continue: () => Promise<void>;
+    }) => Promise<void>;
+    const boardPost = {
+      request: () => ({ method: () => "POST", url: () => "https://api.test/projects/p1/project-deploy-boards/" }),
+      continue: vi.fn(async () => undefined),
+    };
+    await writeHold(boardPost);
+    expect(boardPost.continue).toHaveBeenCalledTimes(1);
   });
 });
