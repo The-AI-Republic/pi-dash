@@ -20,7 +20,6 @@ from pi_dash.assistant.models import (
 )
 from pi_dash.assistant.runtime import events
 from pi_dash.ee.assistant.model_provider import has_usable_llm_config
-from pi_dash.assistant.serializers import AssistantThreadSerializer
 from pi_dash.assistant.tasks import cancel_key, run_assistant_turn
 from pi_dash.assistant.views._base import AssistantBaseView
 from pi_dash.settings.redis import redis_instance

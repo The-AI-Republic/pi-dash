@@ -11,7 +11,6 @@ See .ai_design/github_sync/design.md §6.3 (full-scan sync) and §6.5
 from __future__ import annotations
 
 import logging
-from typing import Iterable
 
 from celery import shared_task
 from django.conf import settings
