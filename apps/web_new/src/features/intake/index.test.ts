@@ -1,0 +1,43 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// The feature's public surface: every name a route or a sibling slice
+// imports from here resolves (NEWFRONT-689). Importing the barrel is the
+// whole assertion; a missing export fails the module load.
+import { describe, expect, it } from "vitest";
+
+import * as intake from "./index.js";
+
+describe("intake public API", () => {
+  it("exports the shell, gate, tabs, data layer and pure model", () => {
+    for (const name of [
+      "IntakeScreen",
+      "IntakeGate",
+      "IntakeEmptyState",
+      "IntakeTabs",
+      "useIntakeList",
+      "prefetchIntakeList",
+      "intakeListQueryOptions",
+      "intakeRows",
+      "intakeTotal",
+      "listStatuses",
+      "intakeKeys",
+      "intakeHref",
+      "retiredInboxHref",
+      "intakeFeatureSettingsHref",
+      "parseIntakeSearch",
+      "intakeSearchFor",
+      "settleIntakeSearch",
+      "parseIntakeTab",
+      "statusParamForTab",
+      "shouldShowOpenBadge",
+      "intakeDocumentTitle",
+      "selectIntakeEmptyState",
+    ]) {
+      expect(intake, name).toHaveProperty(name);
+    }
+    expect(intake.DEFAULT_INTAKE_SEARCH).toEqual({ currentTab: "open" });
+    expect(intake.INTAKE_AREA_LABEL).toBe("Intake");
+    expect(intake.INTAKE_LIST_PANEL_ID).toBe("intake-list-panel");
+  });
+});

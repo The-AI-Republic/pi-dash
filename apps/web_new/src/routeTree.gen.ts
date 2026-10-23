@@ -84,6 +84,7 @@ import { Route as GodModeDashboardWorkspaceCreateRouteImport } from './routes/go
 import { Route as WsGatedProfileUserIdIndexRouteImport } from './routes/$ws/_gated/profile/$userId/index'
 import { Route as WsGatedProfileUserIdTabIdRouteImport } from './routes/$ws/_gated/profile/$userId/$tabId'
 import { Route as WsGatedProjectsProjectIdIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/index'
+import { Route as WsGatedProjectsProjectIdInboxRouteImport } from './routes/$ws/_gated/projects/$projectId/inbox'
 import { Route as WsGatedProjectsProjectIdRunnersRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/runners/route'
 import { Route as WsGatedProjectsProjectIdSchedulersRouteRouteImport } from './routes/$ws/_gated/projects/$projectId/schedulers/route'
 import { Route as WsGatedProjectsArchivesIndexRouteImport } from './routes/$ws/_gated/projects/archives/index'
@@ -536,6 +537,12 @@ const WsGatedProjectsProjectIdIndexRoute =
     path: '/',
     getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
   } as any)
+const WsGatedProjectsProjectIdInboxRoute =
+  WsGatedProjectsProjectIdInboxRouteImport.update({
+    id: '/inbox',
+    path: '/inbox',
+    getParentRoute: () => WsGatedProjectsProjectIdRouteRoute,
+  } as any)
 const WsGatedProjectsProjectIdRunnersRouteRoute =
   WsGatedProjectsProjectIdRunnersRouteRouteImport.update({
     id: '/runners',
@@ -938,6 +945,7 @@ export interface FileRoutesByFullPath {
   '/$ws/projects/$projectId/runners': typeof WsGatedProjectsProjectIdRunnersRouteRouteWithChildren
   '/$ws/projects/$projectId/schedulers': typeof WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren
   '/$ws/profile/$userId/$tabId': typeof WsGatedProfileUserIdTabIdRoute
+  '/$ws/projects/$projectId/inbox': typeof WsGatedProjectsProjectIdInboxRoute
   '/$ws/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
   '/$ws/runners/runs/$id': typeof WsGatedRunnersRunsIdRoute
@@ -1054,6 +1062,7 @@ export interface FileRoutesByTo {
   '/god-mode/loop': typeof GodModeDashboardLoopIndexRoute
   '/god-mode/workspace': typeof GodModeDashboardWorkspaceIndexRoute
   '/$ws/profile/$userId/$tabId': typeof WsGatedProfileUserIdTabIdRoute
+  '/$ws/projects/$projectId/inbox': typeof WsGatedProjectsProjectIdInboxRoute
   '/$ws/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
   '/$ws/runners/runs/$id': typeof WsGatedRunnersRunsIdRoute
@@ -1187,6 +1196,7 @@ export interface FileRoutesById {
   '/$ws/_gated/projects/$projectId/runners': typeof WsGatedProjectsProjectIdRunnersRouteRouteWithChildren
   '/$ws/_gated/projects/$projectId/schedulers': typeof WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren
   '/$ws/_gated/profile/$userId/$tabId': typeof WsGatedProfileUserIdTabIdRoute
+  '/$ws/_gated/projects/$projectId/inbox': typeof WsGatedProjectsProjectIdInboxRoute
   '/$ws/_gated/runners/chat/$runnerId': typeof WsGatedRunnersChatRunnerIdRoute
   '/$ws/_gated/runners/detail/$runnerId': typeof WsGatedRunnersDetailRunnerIdRoute
   '/$ws/_gated/runners/runs/$id': typeof WsGatedRunnersRunsIdRoute
@@ -1318,6 +1328,7 @@ export interface FileRouteTypes {
     | '/$ws/projects/$projectId/runners'
     | '/$ws/projects/$projectId/schedulers'
     | '/$ws/profile/$userId/$tabId'
+    | '/$ws/projects/$projectId/inbox'
     | '/$ws/runners/chat/$runnerId'
     | '/$ws/runners/detail/$runnerId'
     | '/$ws/runners/runs/$id'
@@ -1434,6 +1445,7 @@ export interface FileRouteTypes {
     | '/god-mode/loop'
     | '/god-mode/workspace'
     | '/$ws/profile/$userId/$tabId'
+    | '/$ws/projects/$projectId/inbox'
     | '/$ws/runners/chat/$runnerId'
     | '/$ws/runners/detail/$runnerId'
     | '/$ws/runners/runs/$id'
@@ -1566,6 +1578,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/projects/$projectId/runners'
     | '/$ws/_gated/projects/$projectId/schedulers'
     | '/$ws/_gated/profile/$userId/$tabId'
+    | '/$ws/_gated/projects/$projectId/inbox'
     | '/$ws/_gated/runners/chat/$runnerId'
     | '/$ws/_gated/runners/detail/$runnerId'
     | '/$ws/_gated/runners/runs/$id'
@@ -2174,6 +2187,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedProjectsProjectIdIndexRouteImport
       parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
     }
+    '/$ws/_gated/projects/$projectId/inbox': {
+      id: '/$ws/_gated/projects/$projectId/inbox'
+      path: '/inbox'
+      fullPath: '/$ws/projects/$projectId/inbox'
+      preLoaderRoute: typeof WsGatedProjectsProjectIdInboxRouteImport
+      parentRoute: typeof WsGatedProjectsProjectIdRouteRoute
+    }
     '/$ws/_gated/projects/$projectId/runners': {
       id: '/$ws/_gated/projects/$projectId/runners'
       path: '/runners'
@@ -2679,6 +2699,7 @@ const WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren =
 interface WsGatedProjectsProjectIdRouteRouteChildren {
   WsGatedProjectsProjectIdRunnersRouteRoute: typeof WsGatedProjectsProjectIdRunnersRouteRouteWithChildren
   WsGatedProjectsProjectIdSchedulersRouteRoute: typeof WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren
+  WsGatedProjectsProjectIdInboxRoute: typeof WsGatedProjectsProjectIdInboxRoute
   WsGatedProjectsProjectIdIndexRoute: typeof WsGatedProjectsProjectIdIndexRoute
   WsGatedProjectsProjectIdCyclesCycleIdRoute: typeof WsGatedProjectsProjectIdCyclesCycleIdRoute
   WsGatedProjectsProjectIdIssuesIssueIdRoute: typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
@@ -2704,6 +2725,7 @@ const WsGatedProjectsProjectIdRouteRouteChildren: WsGatedProjectsProjectIdRouteR
       WsGatedProjectsProjectIdRunnersRouteRouteWithChildren,
     WsGatedProjectsProjectIdSchedulersRouteRoute:
       WsGatedProjectsProjectIdSchedulersRouteRouteWithChildren,
+    WsGatedProjectsProjectIdInboxRoute: WsGatedProjectsProjectIdInboxRoute,
     WsGatedProjectsProjectIdIndexRoute: WsGatedProjectsProjectIdIndexRoute,
     WsGatedProjectsProjectIdCyclesCycleIdRoute:
       WsGatedProjectsProjectIdCyclesCycleIdRoute,
