@@ -1327,6 +1327,13 @@ pub async fn post_direct(
         };
         return rollback_then(tx, denial).await;
     }
+    // `post_save(AgentRun, created=True)` → `managed_runner/signals.py`.
+    pidash_services::dispatch::events::log_managed_run_created(
+        run_id,
+        fields.executor_kind,
+        &error_code,
+        fields.pinned_runner_id,
+    );
     // `build_direct_turn` (`:293-299`): local and managed runs keep the
     // raw prompt verbatim with a null manifest; cloud runs compose.
     let prompt_text = py_str_json(&prompt_raw);

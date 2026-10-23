@@ -1514,6 +1514,13 @@ pub async fn create_and_dispatch_run<S: CreationSeam + FinalizeAgentRunSeam>(
             now: req.now,
         })
         .await?;
+    // `post_save(AgentRun, created=True)` → `managed_runner/signals.py`.
+    crate::dispatch::events::log_managed_run_created(
+        run.id,
+        run.executor_kind,
+        &run.error_code,
+        run.pinned_runner_id,
+    );
     if let Some(admission) = admission_error {
         let failed = seam
             .finalize_failed_run(run.id, &admission.code, &admission.detail, req.now)
@@ -1645,6 +1652,13 @@ pub async fn create_continuation_run<S: CreationSeam + FinalizeAgentRunSeam>(
             now: req.now,
         })
         .await?;
+    // `post_save(AgentRun, created=True)` → `managed_runner/signals.py`.
+    crate::dispatch::events::log_managed_run_created(
+        run.id,
+        run.executor_kind,
+        &run.error_code,
+        run.pinned_runner_id,
+    );
     if let Some(admission) = admission_error {
         let failed = seam
             .finalize_failed_run(run.id, &admission.code, &admission.detail, req.now)
@@ -1763,6 +1777,13 @@ pub async fn create_project_move_handoff_run<S: CreationSeam + FinalizeAgentRunS
             now: req.now,
         })
         .await?;
+    // `post_save(AgentRun, created=True)` → `managed_runner/signals.py`.
+    crate::dispatch::events::log_managed_run_created(
+        run.id,
+        run.executor_kind,
+        &run.error_code,
+        run.pinned_runner_id,
+    );
     if let Some(admission) = admission_error {
         return seam
             .finalize_failed_run(run.id, &admission.code, &admission.detail, req.now)

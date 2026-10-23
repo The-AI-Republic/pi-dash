@@ -671,13 +671,84 @@
  "metrics": {
   "status": 200,
   "content_type": "text/plain; version=0.0.4",
-  "body": "# HELP pi_dash_runner_online Runners currently online.\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 1\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 8\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 2\n",
+  "scenario": {
+   "runners": {
+    "online_manual": 1,
+    "online_desktop_bundled": 1,
+    "offline_desktop_bundled": 1,
+    "busy_manual": 1,
+    "offline_manual": 1
+   },
+   "runs": [
+    [
+     "local_runner",
+     "running"
+    ],
+    [
+     "local_runner",
+     "queued"
+    ],
+    [
+     "managed_runner",
+     "running"
+    ]
+   ],
+   "approvals_pending": 0
+  },
+  "body": "# HELP pi_dash_runner_online Runners currently online.\n# TYPE pi_dash_runner_online gauge\npi_dash_runner_online 2\n# HELP pi_dash_runner_busy Runners currently executing a run.\n# TYPE pi_dash_runner_busy gauge\npi_dash_runner_busy 1\n# HELP pi_dash_runner_offline Runners that have dropped their heartbeat (excludes revoked).\n# TYPE pi_dash_runner_offline gauge\npi_dash_runner_offline 2\n# HELP pi_dash_managed_runner_online Desktop-bundled (managed) runners currently online.\n# TYPE pi_dash_managed_runner_online gauge\npi_dash_managed_runner_online 1\n# HELP pi_dash_runs_active AgentRuns in an in-flight status.\n# TYPE pi_dash_runs_active gauge\npi_dash_runs_active 2\n# HELP pi_dash_runs_total AgentRuns created, by executor kind.\n# TYPE pi_dash_runs_total counter\npi_dash_runs_total{executor_kind=\"local_runner\"} 2\npi_dash_runs_total{executor_kind=\"cloud_agent\"} 0\npi_dash_runs_total{executor_kind=\"managed_runner\"} 1\n# HELP pi_dash_managed_runner_queued_wait_seconds Age of managed runs currently queued waiting for a desktop.\n# TYPE pi_dash_managed_runner_queued_wait_seconds histogram\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"60\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"300\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"900\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"3600\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"10800\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"21600\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"43200\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"+Inf\"} 0\npi_dash_managed_runner_queued_wait_seconds_sum 0\npi_dash_managed_runner_queued_wait_seconds_count 0\n# HELP pi_dash_approvals_pending ApprovalRequests waiting for a decision.\n# TYPE pi_dash_approvals_pending gauge\npi_dash_approvals_pending 0\n",
+  "histogram_cases": [
+   {
+    "observations": [],
+    "rendered": "# HELP pi_dash_managed_runner_queued_wait_seconds Age of managed runs currently queued waiting for a desktop.\n# TYPE pi_dash_managed_runner_queued_wait_seconds histogram\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"60\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"300\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"900\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"3600\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"10800\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"21600\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"43200\"} 0\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"+Inf\"} 0\npi_dash_managed_runner_queued_wait_seconds_sum 0\npi_dash_managed_runner_queued_wait_seconds_count 0\n"
+   },
+   {
+    "observations": [
+     0.1,
+     0.1,
+     0.1,
+     0.1,
+     0.1,
+     0.1,
+     0.1,
+     0.1,
+     0.1,
+     0.1
+    ],
+    "rendered": "# HELP pi_dash_managed_runner_queued_wait_seconds Age of managed runs currently queued waiting for a desktop.\n# TYPE pi_dash_managed_runner_queued_wait_seconds histogram\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"60\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"300\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"900\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"3600\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"10800\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"21600\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"43200\"} 10\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"+Inf\"} 10\npi_dash_managed_runner_queued_wait_seconds_sum 1.0\npi_dash_managed_runner_queued_wait_seconds_count 10\n"
+   },
+   {
+    "observations": [
+     59.999999,
+     60.0,
+     300.000001,
+     4000.5,
+     43200.0,
+     50000.25
+    ],
+    "rendered": "# HELP pi_dash_managed_runner_queued_wait_seconds Age of managed runs currently queued waiting for a desktop.\n# TYPE pi_dash_managed_runner_queued_wait_seconds histogram\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"60\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"300\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"900\"} 3\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"3600\"} 3\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"10800\"} 4\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"21600\"} 4\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"43200\"} 5\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"+Inf\"} 6\npi_dash_managed_runner_queued_wait_seconds_sum 97620.75\npi_dash_managed_runner_queued_wait_seconds_count 6\n"
+   },
+   {
+    "observations": [
+     1e+16,
+     1.0,
+     -1e+16
+    ],
+    "rendered": "# HELP pi_dash_managed_runner_queued_wait_seconds Age of managed runs currently queued waiting for a desktop.\n# TYPE pi_dash_managed_runner_queued_wait_seconds histogram\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"60\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"300\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"900\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"3600\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"10800\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"21600\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"43200\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"+Inf\"} 3\npi_dash_managed_runner_queued_wait_seconds_sum 1.0\npi_dash_managed_runner_queued_wait_seconds_count 3\n"
+   },
+   {
+    "observations": [
+     1891.912345,
+     0.000123
+    ],
+    "rendered": "# HELP pi_dash_managed_runner_queued_wait_seconds Age of managed runs currently queued waiting for a desktop.\n# TYPE pi_dash_managed_runner_queued_wait_seconds histogram\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"60\"} 1\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"300\"} 1\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"900\"} 1\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"3600\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"10800\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"21600\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"43200\"} 2\npi_dash_managed_runner_queued_wait_seconds_bucket{le=\"+Inf\"} 2\npi_dash_managed_runner_queued_wait_seconds_sum 1891.912468\npi_dash_managed_runner_queued_wait_seconds_count 2\n"
+   }
+  ],
   "auth_classes": [],
   "perm_classes": [
    "AllowAny"
   ]
  },
- "metrics_rule": "AllowAny + no authN; HttpResponse text/plain; version=0.0.4; 5 gauges (online/busy/offline-excl-revoked counts; active=assigned+running+cancel_requested+awaiting_approval+awaiting_reauth; pending approvals)",
+ "metrics_rule": "AllowAny + no authN; HttpResponse text/plain; version=0.0.4; gauges online/busy/offline-excl-revoked + managed_runner_online (provisioning=desktop_bundled AND status=online) + runs_active (assigned+running+cancel_requested+awaiting_approval+awaiting_reauth); counter pi_dash_runs_total{executor_kind} zero-filled in AgentExecutorKind.values order; histogram pi_dash_managed_runner_queued_wait_seconds over (now - created_at).total_seconds() of executor_kind=managed_runner AND status=queued runs, buckets 60/300/900/3600/10800/21600/43200/+Inf, _sum = Python 3.12 sum() (int 0 when empty, else compensated float repr); approvals_pending last. MR-11 re-record (PDASHOSS01-119): body + histogram_cases from metrics.py at d6676db8 (probe /tmp/mr119-main/.../zz_probe/test_probe_mr11.py; py3.12.10, pi_dash.settings.test).",
  "signals": {
   "auto": {
    "count": 1,
