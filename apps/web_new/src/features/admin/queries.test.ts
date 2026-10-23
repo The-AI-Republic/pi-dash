@@ -141,6 +141,9 @@ describe("admin session query", () => {
   it("never retries, refetches, or goes stale (ADM-009 single check)", () => {
     const options = adminSessionQueryOptions({} as never);
     expect(options.retry).toBe(false);
+    // A failed check settles on the error screen: a remount of a second
+    // consumer must not re-issue the read behind it (ADM-078).
+    expect(options.retryOnMount).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
@@ -244,6 +247,7 @@ describe("cloud auth probe query", () => {
   it("never retries, refetches, or goes stale (ADM-079 one shot)", () => {
     const options = cloudAuthProbeQueryOptions({} as never);
     expect(options.retry).toBe(false);
+    expect(options.retryOnMount).toBe(false);
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);

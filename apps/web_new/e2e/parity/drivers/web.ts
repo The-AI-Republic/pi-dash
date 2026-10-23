@@ -53726,6 +53726,10 @@ export class WebDriver implements ParityDriver {
     this.adminCloudAdminCheckFault = { times, status };
   }
 
+  async adminCloudReleaseAdminCheckFault(): Promise<void> {
+    this.adminCloudAdminCheckFault = { times: 0, status: 500 };
+  }
+
   async adminCloudFailAuthProbe(times: number, status: number): Promise<void> {
     await this.adminCloudEnsureGateRoutes();
     this.adminCloudProbeFault = { times, status };

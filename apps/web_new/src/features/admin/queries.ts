@@ -140,6 +140,12 @@ export function adminSessionQueryOptions(client: ApiClient) {
     queryFn: () => getAdminSession(client),
     ...adminQueryDefaults,
     retry: false,
+    // A failed check is a verdict, not a cache miss: the error screen
+    // and its retry own the next read. Without this, every remount of
+    // a consumer (the guard and the cloud resolver both mount it)
+    // re-issued the read, so an outage spun refetch → render → refetch
+    // forever and never settled on the retry screen (ADM-078).
+    retryOnMount: false,
   });
 }
 
@@ -157,6 +163,9 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
     queryFn: () => probeCloudAuthSession(client),
     ...adminQueryDefaults,
     retry: false,
+    // One shot, like the check: a settled probe is the classification
+    // the gate branches on, so a remount never re-probes behind it.
+    retryOnMount: false,
   });
 }
 

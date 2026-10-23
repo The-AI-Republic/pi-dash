@@ -65,6 +65,8 @@
 	reverse_proxy /downloads/* web_new:3000
 	redir /pricing /pricing/ permanent
 	reverse_proxy /pricing/* web_new:3000
+	redir /god-mode /god-mode/ permanent
+	reverse_proxy /god-mode/* web_new:3000
 	# END MIGRATED ROUTES
 	reverse_proxy /* web:3000
 }

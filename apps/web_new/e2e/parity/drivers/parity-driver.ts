@@ -8584,6 +8584,8 @@ export interface ParityDriver {
   adminCloudOpenRootWithCookies(cookies: ParityBrowserCookie[]): Promise<void>;
   /** Fail the next `times` admin-check reads with `status`, then pass through. */
   adminCloudFailAdminCheck(times: number, status: number): Promise<void>;
+  /** Stop failing admin-check reads (a held fault, released before a retry). */
+  adminCloudReleaseAdminCheckFault(): Promise<void>;
   /** Fail the next `times` auth-probe reads with `status`, then pass through. */
   adminCloudFailAuthProbe(times: number, status: number): Promise<void>;
   /** Delay the next admin-check read by `ms` (one-shot; the spinner then shows deterministically). */

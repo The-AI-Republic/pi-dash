@@ -23,6 +23,13 @@
 // branches are dead. A genuinely transient admin check does surface
 // the retry screen, and retrying re-runs the check: recovery lands an
 // admin on general settings with no deny and no bounce.
+//
+// The web_new leg asserts the intended classification instead (the
+// gate builds it, per NEWFRONT-496): a session-less 401 bounces
+// through the provider handoff carrying the console path back, a 403
+// probes the session once and either denies terminally or bounces, a
+// failed check or an inconclusive probe retries, and a retry resets
+// both verdicts. The oracle leg keeps the observed old behavior above.
 import { test, expect } from "../fixtures";
 import {
   cloudBrowserCookies,
@@ -53,15 +60,25 @@ test(
   specTitle(["ADM-074"], "cloud entry never shows a password or setup form and password endpoints stay shadowed"),
   { tag: specTags(["ADM-074"]) },
   async ({ driver }: { driver: ParityDriver }) => {
+    // The settled screens differ by target: the old console lands everyone
+    // it cannot classify on the retry screen, while web_new hands a
+    // session-less visitor to the provider (ADM-076) and a signed-in
+    // non-admin to the terminal denied screen (ADM-077). Neither renders a
+    // credential form, which is what this row pins.
+    await driver.cloudArmSignInCapture();
     await driver.adminCloudOpenRootWithCookies([]);
-    await driver.adminCloudWaitForHomeBranch("error");
+    if (driver.target === "web_new") {
+      await driver.cloudAwaitSignInRequest(0);
+    } else {
+      await driver.adminCloudWaitForHomeBranch("error");
+    }
     let facts = await driver.adminCloudHomeFacts();
     expect(facts.passwordFields).toBe(0);
     expect(facts.setupFields).toBe(0);
 
     const user = await cloudDevLogin(uniqueEmail("parity-446-gate"));
     await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(user.cookie));
-    await driver.adminCloudWaitForHomeBranch("error");
+    await driver.adminCloudWaitForHomeBranch(driver.target === "web_new" ? "denied" : "error");
     facts = await driver.adminCloudHomeFacts();
     expect(facts.passwordFields).toBe(0);
     expect(facts.setupFields).toBe(0);
@@ -102,20 +119,33 @@ test(
     await driver.cloudArmSignInCapture();
     await driver.adminCloudStartGateFetchSpy();
     await driver.adminCloudOpenRootWithCookies([]);
-    await driver.adminCloudWaitForHomeBranch("error");
-    const facts = await driver.adminCloudHomeFacts();
-    expect(facts.heading).toBe("Something went wrong");
-    expect(facts.retryVisible).toBe(true);
-    const counts = await driver.adminCloudGateFetchCounts();
-    expect(counts.adminCheck).toBeGreaterThanOrEqual(1);
-    expect(counts.probe).toBe(0);
-    expect(await driver.cloudSignInRequests()).toEqual([]);
-    // Retry re-runs the admin check and stays put: no bounce on the loop.
-    await driver.adminCloudRetry();
-    await sleep(1500);
-    expect((await driver.adminCloudHomeFacts()).branch).toBe("error");
-    expect((await driver.adminCloudGateFetchCounts()).adminCheck).toBeGreaterThan(counts.adminCheck);
-    expect(await driver.cloudSignInRequests()).toEqual([]);
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-496): the anonymous 401 is already proof of
+      // no session, so the gate replaces the history entry with the
+      // provider handoff — carrying the console path as a relative
+      // return_to — and reads nothing further.
+      const handoff = await driver.cloudAwaitSignInRequest(0);
+      expect(new URL(handoff).pathname).toBe("/api/auth/sign-in/");
+      expect(new URL(handoff).searchParams.get("return_to")).toBe("/god-mode/");
+      const counts = await driver.adminCloudGateFetchCounts();
+      expect(counts.adminCheck).toBe(1);
+      expect(counts.probe).toBe(0);
+    } else {
+      await driver.adminCloudWaitForHomeBranch("error");
+      const facts = await driver.adminCloudHomeFacts();
+      expect(facts.heading).toBe("Something went wrong");
+      expect(facts.retryVisible).toBe(true);
+      const counts = await driver.adminCloudGateFetchCounts();
+      expect(counts.adminCheck).toBeGreaterThanOrEqual(1);
+      expect(counts.probe).toBe(0);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+      // Retry re-runs the admin check and stays put: no bounce on the loop.
+      await driver.adminCloudRetry();
+      await sleep(1500);
+      expect((await driver.adminCloudHomeFacts()).branch).toBe("error");
+      expect((await driver.adminCloudGateFetchCounts()).adminCheck).toBeGreaterThan(counts.adminCheck);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+    }
     // Server half: no session (the case the bounce was designed for)
     // and the admin check rejects the anonymous read.
     expect((await serverCloudAuthMe("")).status).toBe(401);
@@ -136,17 +166,31 @@ test(
     await driver.cloudArmSignInCapture();
     await driver.adminCloudStartGateFetchSpy();
     await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(session.cookie));
-    await driver.adminCloudWaitForHomeBranch("error");
-    const facts = await driver.adminCloudHomeFacts();
-    expect(facts.heading).toBe("Something went wrong");
-    expect(facts.retryVisible).toBe(true);
-    expect(facts.deniedHref).toBe(null);
-    expect((await driver.adminCloudGateFetchCounts()).probe).toBe(0);
-    expect(await driver.cloudSignInRequests()).toEqual([]);
-    await driver.adminCloudRetry();
-    await sleep(1500);
-    expect((await driver.adminCloudHomeFacts()).branch).toBe("error");
-    expect(await driver.cloudSignInRequests()).toEqual([]);
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-496): the 403 is classified by exactly one
+      // session probe — authenticated, so the screen is terminal: no
+      // redirect, no bounce, no retry button, one root link.
+      await driver.adminCloudWaitForHomeBranch("denied");
+      const facts = await driver.adminCloudHomeFacts();
+      expect(facts.heading).toBe("Access denied");
+      expect(facts.deniedHref).toBe("/");
+      expect(facts.retryVisible).toBe(false);
+      expect((await driver.adminCloudGateFetchCounts()).probe).toBe(1);
+      expect(await driver.page.getByRole("button").count()).toBe(0);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+    } else {
+      await driver.adminCloudWaitForHomeBranch("error");
+      const facts = await driver.adminCloudHomeFacts();
+      expect(facts.heading).toBe("Something went wrong");
+      expect(facts.retryVisible).toBe(true);
+      expect(facts.deniedHref).toBe(null);
+      expect((await driver.adminCloudGateFetchCounts()).probe).toBe(0);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+      await driver.adminCloudRetry();
+      await sleep(1500);
+      expect((await driver.adminCloudHomeFacts()).branch).toBe("error");
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+    }
   }
 );
 
@@ -157,16 +201,40 @@ test(
     const { cookie } = await adminFixture("parity-446-gate-flaky");
     await driver.cloudArmSignInCapture();
     await driver.adminCloudStartGateFetchSpy();
-    await driver.adminCloudFailAdminCheck(1, 500);
-    await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(cookie));
-    await driver.adminCloudWaitForHomeBranch("error");
-    expect((await driver.adminCloudHomeFacts()).heading).toBe("Something went wrong");
-    expect((await driver.adminCloudGateFetchCounts()).adminCheck).toBe(1);
-    // Retry re-runs the admin check: success lands the admin on
-    // general settings — never a deny, never a bounce.
-    await driver.adminCloudRetry();
-    await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/god-mode/general/");
-    expect((await driver.adminCloudGateFetchCounts()).adminCheck).toBe(2);
+    if (driver.target === "web_new") {
+      // Hold the check failing rather than handing out one bad answer:
+      // the entry mounts under React strict mode, and the guard plus the
+      // resolver both read the same query, so a single-shot fault is too
+      // easy to consume before the screen can settle. The rule under
+      // test is that a transient failure reads as retry, and that the
+      // screen stays put until the visitor retries — the outage lasts
+      // until the retry below.
+      await driver.adminCloudFailAdminCheck(Number.POSITIVE_INFINITY, 500);
+      await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(cookie));
+      await driver.adminCloudWaitForHomeBranch("error");
+      expect((await driver.adminCloudHomeFacts()).heading).toBe("Something went wrong");
+      expect((await driver.adminCloudGateFetchCounts()).probe).toBe(0);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+      // Retry re-runs the admin check: with the outage over, success
+      // lands the admin — never a deny, never a bounce.
+      await driver.adminCloudReleaseAdminCheckFault();
+      await driver.adminCloudRetry();
+      await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/god-mode/general/");
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+    } else {
+      await driver.adminCloudFailAdminCheck(1, 500);
+      await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(cookie));
+      await driver.adminCloudWaitForHomeBranch("error");
+      expect((await driver.adminCloudHomeFacts()).heading).toBe("Something went wrong");
+      expect((await driver.adminCloudGateFetchCounts()).adminCheck).toBe(1);
+      // Retry re-runs the admin check: success lands the admin on
+      // general settings — never a deny, never a bounce.
+      await driver.adminCloudRetry();
+      await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/god-mode/general/");
+      expect((await driver.adminCloudGateFetchCounts()).adminCheck).toBe(2);
+      expect(await driver.cloudSignInRequests()).toEqual([]);
+    }
+    await driver.adminCloudReleaseAdminCheckFault();
     expect(await driver.cloudSignInRequests()).toEqual([]);
   }
 );
@@ -180,12 +248,34 @@ test(
     // never to a guessed anonymous. Observed: the probe never runs —
     // failures reach the retry screen unclassified.
     await driver.adminCloudStartGateFetchSpy();
+    const user = await cloudDevLogin(uniqueEmail("parity-446-gate-probe"));
+    const admin = await adminFixture("parity-446-gate-probe-admin");
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-496): each verdict reaches its own branch —
+      // an anonymous 401 bounces without probing, a 403 probes once and
+      // denies an authenticated visitor, and an admin never probes.
+      await driver.cloudArmSignInCapture();
+      await driver.adminCloudOpenRootWithCookies([]);
+      await driver.cloudAwaitSignInRequest(0);
+      let counts = await driver.adminCloudGateFetchCounts();
+      expect(counts.adminCheck).toBe(1);
+      expect(counts.probe).toBe(0);
+      await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(user.cookie));
+      await driver.adminCloudWaitForHomeBranch("denied");
+      counts = await driver.adminCloudGateFetchCounts();
+      expect(counts.adminCheck).toBe(2);
+      expect(counts.probe).toBe(1);
+      await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(admin.cookie));
+      await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/god-mode/general/");
+      counts = await driver.adminCloudGateFetchCounts();
+      expect(counts.adminCheck).toBe(3);
+      expect(counts.probe).toBe(1);
+      return;
+    }
     await driver.adminCloudOpenRootWithCookies([]);
     await driver.adminCloudWaitForHomeBranch("error");
-    const user = await cloudDevLogin(uniqueEmail("parity-446-gate-probe"));
     await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(user.cookie));
     await driver.adminCloudWaitForHomeBranch("error");
-    const admin = await adminFixture("parity-446-gate-probe-admin");
     await driver.adminCloudOpenRootWithCookies(cloudBrowserCookies(admin.cookie));
     await expect.poll(async () => driver.adminCurrentPath(), { timeout: 30_000 }).toBe("/god-mode/general/");
     const counts = await driver.adminCloudGateFetchCounts();

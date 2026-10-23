@@ -28356,8 +28356,14 @@ export class WebNewDriver implements ParityDriver {
     if (this.adminCloudRoutesInstalled) return;
     this.adminCloudRoutesInstalled = true;
     await this.page.route(
-      (url) => this.adminIsInstancePath(url, "/api/instances/admins/me"),
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/admins/me"),
       async (route) => {
+        // The dev server calls the API cross-origin, so a CORS preflight
+        // reaches this route first; only the read itself is the check.
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
         this.adminCloudCheckSeen += 1;
         if (this.adminCloudCheckDelayMs > 0) {
           const wait = this.adminCloudCheckDelayMs;
@@ -28377,8 +28383,12 @@ export class WebNewDriver implements ParityDriver {
       }
     );
     await this.page.route(
-      (url) => this.adminIsInstancePath(url, "/api/auth/me"),
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/auth/me"),
       async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
         this.adminCloudProbeSeen += 1;
         if (this.adminCloudProbeFault.times > 0) {
           this.adminCloudProbeFault.times -= 1;
@@ -28446,6 +28456,11 @@ export class WebNewDriver implements ParityDriver {
   async adminCloudFailAdminCheck(times: number, status: number): Promise<void> {
     await this.adminEnsureCloudGateRoutes();
     this.adminCloudCheckFault = { times, status };
+  }
+
+  async adminCloudReleaseAdminCheckFault(): Promise<void> {
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudCheckFault = { times: 0, status: 500 };
   }
 
   async adminCloudFailAuthProbe(times: number, status: number): Promise<void> {
