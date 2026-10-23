@@ -45,6 +45,15 @@ After the final gate and a human acceptance pass: remove `apps/web`, `apps/admin
 ## Coexistence
 
 - **Web:** `apps/proxy` Caddyfiles route migrated path prefixes to `apps/web_new` and everything else to `apps/web`. Same origin and session cookie; crossing between apps is a full page load. The migrated-route list is one file per deployment and grows each phase.
+- **Route entries (F-09).** `apps/web_new/migrated-routes.json` lists the routes the proxy serves from `apps/web_new`; every other path goes to `apps/web`. Each entry is a segment pattern:
+  - a literal path (`/sign-in`, `/auth/device`) serves that path and its whole subtree;
+  - `/{ws}` matches one variable segment at exactly that depth — the workspace home — and `/{ws}/projects` or `/{ws}/browse/{workItem}` add literals at a fixed depth;
+  - a trailing `*` (`/{ws}/projects/*`) claims the subtree below the pattern;
+  - `/` is the catch-all and is only used once everything has moved.
+
+  A workspace-scoped entry is exact unless it ends in `*`, so a workspace route never sweeps in areas that have not migrated. A variable first segment never matches a reserved top-level name (`api`, `auth`, `static`, `live`, `ws`, `god-mode`, `spaces`, `profile`, `settings`, the reserved workspace slugs and every literal entry's own first segment), case-insensitively, and never matches a segment containing a dot. Those paths stay on the old app, the admin console, public boards or the backend.
+
+- **Generation and matching.** `pnpm --filter web_new coexistence:generate` writes the marked blocks in `apps/proxy/Caddyfile.ce` and `Caddyfile.aio.ce` from that list: literal entries become an exact-path redirect plus subtree proxy, workspace entries become a named matcher (`path_regexp` with the reserved exclusion). The AIO build serves them with `handle`, never `handle_path`, so the workspace segment reaches the SPA intact. `isMigratedPath` in `apps/web_new/src/shared/coexistence/migrated-routes.ts` applies the same rules for link routing, and a shared path matrix in its tests runs both implementations so they cannot drift. `coexistence:generate --check` gates staleness.
 - **Links to unmigrated screens** from `apps/web_new` are plain `<a href>` generated from the same route list, so they flip automatically when a screen moves.
 - **Desktop:** switches at the end of Phase 2; screens not yet moved open in the system browser via `platform.openExternal`.
 - **Backend:** unchanged. If a feature needs a backend change, file it in PDASHOSS01 (OSS) or PRIVATEPI1 (cloud) and relate it as a blocker.
