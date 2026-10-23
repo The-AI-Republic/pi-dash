@@ -307,7 +307,11 @@ describe("ListRow selection", () => {
     const onExpandedChange = vi.fn();
     const onChildrenChange = vi.fn();
     const child = issue({ id: "child-1", name: "Child", sequence_id: 43, parent_id: ISSUE, sub_issues_count: null });
-    queryMock.useQuery.mockReturnValue({ data: { sub_issues: [child] }, isFetching: false });
+    queryMock.useQuery.mockImplementation((options: { queryKey: readonly unknown[] }) =>
+      options.queryKey[0] === "ws" && options.queryKey.includes("projects")
+        ? { data: [], isFetching: false }
+        : { data: { sub_issues: [child] }, isFetching: false }
+    );
     render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), onExpandedChange, onChildrenChange })} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
     expect(onExpandedChange).toHaveBeenCalledWith(ISSUE, true);
@@ -340,7 +344,11 @@ describe("ListRow selection", () => {
 
   it("reports an empty child list when the expanded payload omits sub-issues", () => {
     const onChildrenChange = vi.fn();
-    queryMock.useQuery.mockReturnValue({ data: {}, isFetching: false });
+    queryMock.useQuery.mockImplementation((options: { queryKey: readonly unknown[] }) =>
+      options.queryKey[0] === "ws" && options.queryKey.includes("projects")
+        ? { data: [], isFetching: false }
+        : { data: {}, isFetching: false }
+    );
     render(<ListRow {...props({ issue: issue({ sub_issues_count: 1 }), onChildrenChange })} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand sub-work items of Fix login" }));
     expect(onChildrenChange).toHaveBeenCalledWith(ISSUE, []);
