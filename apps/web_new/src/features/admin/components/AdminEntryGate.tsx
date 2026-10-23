@@ -6,10 +6,15 @@
 // the loader while unresolved, the failure screen on error, the
 // setup form when setup is not done, or the sign-in form when it is.
 // OSS-only: the cloud edition replaces this screen (ADM-074).
+//
+// The read is the console's own once-only entry query (no retry, no
+// focus or reconnect refetch), not the app-startup reader whose
+// background backoff would refetch behind the failure screen's back
+// (ADM-003). It accepts the backend's bare setup flags the same way.
 
 import * as React from "react";
 
-import { useAppInstanceBootstrap } from "../../instance/index.js";
+import { useInstanceEntryBootstrap } from "../hooks.js";
 import { AdminBrandLoader } from "./AdminBrandLoader.js";
 import { AdminSetupForm } from "./AdminSetupForm.js";
 import { AdminSignInForm } from "./AdminSignInForm.js";
@@ -28,9 +33,10 @@ export interface AdminEntrySearch {
 }
 
 export function AdminEntryGate({ search }: { search: AdminEntrySearch }): React.ReactElement {
-  // The startup read accepts the backend's unprovisioned envelope, so a
-  // fresh instance reaches the setup form instead of the failure screen.
-  const bootstrap = useAppInstanceBootstrap();
+  // The backend's unprovisioned envelope parses as "setup unfinished",
+  // so a fresh instance reaches the setup form instead of the failure
+  // screen.
+  const bootstrap = useInstanceEntryBootstrap();
   const setupDone = bootstrap.data?.setupDone;
   if (setupDone !== undefined) {
     return setupDone ? <AdminSignInForm search={search} /> : <AdminSetupForm search={search} />;

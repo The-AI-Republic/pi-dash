@@ -51,6 +51,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceEntryQueryOptions,
   instanceRunnersQueryOptions,
   instanceWorkspacesQueryOptions,
   loopJobDetailQueryOptions,
@@ -79,12 +80,21 @@ import {
 } from "./workspaceCreate.js";
 
 /**
- * The single instance-info read the entry gate branches on. Pending
- * while unresolved, errored when the fetch fails, settled after —
- * never refetched behind the screens' backs.
+ * The instance-info read the dashboard pages reuse. Pending while
+ * unresolved, errored when the fetch fails, settled after — never
+ * refetched behind the screens' backs.
  */
 export function useInstanceBootstrap() {
   return useQuery(instanceBootstrapQueryOptions(getAppClient()));
+}
+
+/**
+ * The entry gate's one-shot instance read: issued once, no retry and no
+ * background recheck, so the failure screen stays put until the manual
+ * reload (ADM-003).
+ */
+export function useInstanceEntryBootstrap() {
+  return useQuery(instanceEntryQueryOptions(getAppClient()));
 }
 
 /** The forgery token the native setup/sign-in POSTs carry. */

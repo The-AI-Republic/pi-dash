@@ -53,12 +53,12 @@ function BootLoader(): React.ReactElement {
   );
 }
 
-export function InstanceAppGate({ children }: InstanceAppGateProps): React.ReactElement {
-  React.useLayoutEffect(() => {
-    markInstanceBootScheme();
-  }, []);
+/**
+ * The startup decision for every non-administrator route: one instance
+ * read then a branch on it.
+ */
+function StartupGate({ children }: InstanceAppGateProps): React.ReactElement {
   const bootstrap = useAppInstanceBootstrap();
-  if (isAdminEntryPath(globalThis.window.location.pathname)) return <>{children}</>;
   const branch = decideAppInstanceGate({
     isPending: bootstrap.isPending,
     isError: bootstrap.isError,
@@ -80,4 +80,17 @@ export function InstanceAppGate({ children }: InstanceAppGateProps): React.React
     );
   }
   return <>{children}</>;
+}
+
+export function InstanceAppGate({ children }: InstanceAppGateProps): React.ReactElement {
+  React.useLayoutEffect(() => {
+    markInstanceBootScheme();
+  }, []);
+  // The administrator subtree renders before the startup read is even
+  // asked for: its own gate owns the only instance read on those
+  // routes (ADM-001/ADM-003), and the startup reader's background
+  // retry would otherwise refetch behind that screen's back. Deciding
+  // here also keeps the startup read from firing on a failed entry.
+  if (isAdminEntryPath(globalThis.window.location.pathname)) return <>{children}</>;
+  return <StartupGate>{children}</StartupGate>;
 }

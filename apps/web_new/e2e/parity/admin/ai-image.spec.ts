@@ -187,15 +187,20 @@ test(
   { tag: specTags(["ADM-048"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await driver.adminEnsureSignedIn(seed.email, seed.password);
-    await driver.adminDelayConfigFetch(3000);
-    await driver.adminOpenPath("/ai/");
-    await driver.adminWaitForRootBranch("dashboard");
-    await expect.poll(async () => (await driver.adminAiFacts()).skeletonVisible, { timeout: 15_000 }).toBe(true);
-    const during = await driver.adminAiFacts();
-    expect(during.formVisible).toBe(false);
-    expect(during.skeletonBlocks).toBeGreaterThan(0);
-    await driver.adminClearConfigFetchFault();
-    await expect.poll(async () => (await driver.adminAiFacts()).formVisible, { timeout: 15_000 }).toBe(true);
+    // The read is held until the fault is cleared, so a cold route
+    // compile on the new console cannot outlast the skeleton window.
+    await driver.adminDelayConfigFetch(driver.target === "web_new" ? 120_000 : 3000);
+    try {
+      await driver.adminOpenPath("/ai/");
+      await driver.adminWaitForRootBranch("dashboard");
+      await expect.poll(async () => (await driver.adminAiFacts()).skeletonVisible, { timeout: 15_000 }).toBe(true);
+      const during = await driver.adminAiFacts();
+      expect(during.formVisible).toBe(false);
+      expect(during.skeletonBlocks).toBeGreaterThan(0);
+    } finally {
+      await driver.adminClearConfigFetchFault();
+    }
+    await expect.poll(async () => (await driver.adminAiFacts()).formVisible, { timeout: 90_000 }).toBe(true);
     const after = await driver.adminAiFacts();
     expect(after.skeletonVisible).toBe(false);
   }
@@ -209,6 +214,24 @@ test(
     await driver.adminOpenPath("/workspace/");
     await driver.adminWaitForRootBranch("dashboard");
     let facts = await driver.adminImageFacts();
+    if (driver.target === "web_new") {
+      // Intended (main#523): the image area is gone — no rail entry and
+      // no page behind its address, which falls to the catch-all.
+      expect(facts.sidebarEntryVisible).toBe(false);
+      expect(facts.sidebarHref).toBeNull();
+      await driver.adminOpenPath("/image/");
+      const notFound = await driver.adminNotFoundFacts();
+      expect(notFound.illustrationVisible).toBe(true);
+      expect(notFound.messageVisible).toBe(true);
+      expect(await driver.adminCurrentPath()).toBe("/god-mode/image/");
+      expect(await driver.adminDashboardVisible()).toBe(false);
+      facts = await driver.adminImageFacts();
+      expect(facts.pageTitle).toBeNull();
+      expect(facts.keyFieldVisible).toBe(false);
+      expect(facts.saveVisible).toBe(false);
+      expect(facts.skeletonVisible).toBe(false);
+      return;
+    }
     expect(facts.sidebarEntryVisible).toBe(true);
     expect(facts.sidebarHref).toContain("/image/");
     await driver.adminOpenPath("/image/");
@@ -226,6 +249,20 @@ test(
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await driver.adminEnsureSignedIn(seed.email, seed.password);
     await driver.adminDelayConfigFetch(3000);
+    if (driver.target === "web_new") {
+      // No image page means no image skeleton, even under a stalled
+      // configurations read: the address stays on the catch-all.
+      await driver.adminOpenPath("/image/");
+      expect((await driver.adminNotFoundFacts()).messageVisible).toBe(true);
+      const during = await driver.adminImageFacts();
+      expect(during.skeletonVisible).toBe(false);
+      expect(during.keyFieldVisible).toBe(false);
+      await driver.adminClearConfigFetchFault();
+      await driver.adminOpenPath("/ai/");
+      await driver.adminWaitForRootBranch("dashboard");
+      await expect.poll(async () => (await driver.adminAiFacts()).formVisible, { timeout: 15_000 }).toBe(true);
+      return;
+    }
     await driver.adminOpenPath("/image/");
     await driver.adminWaitForRootBranch("dashboard");
     await expect.poll(async () => (await driver.adminImageFacts()).skeletonVisible, { timeout: 15_000 }).toBe(true);

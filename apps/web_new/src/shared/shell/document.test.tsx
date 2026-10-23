@@ -285,6 +285,30 @@ describe("markInitialColorScheme", () => {
     expect(document.documentElement.style.getPropertyValue("color-scheme")).toBe("dark");
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
+
+  it("keeps a stored light choice over an OS that prefers dark", () => {
+    mockColorScheme(true);
+    localStorage.setItem("theme", "light");
+    expect(markInitialColorScheme()).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    localStorage.removeItem("theme");
+  });
+
+  it("keeps a stored dark choice over an OS that prefers light", () => {
+    mockColorScheme(false);
+    localStorage.setItem("theme", "dark");
+    expect(markInitialColorScheme()).toBe("dark");
+    expect(document.documentElement.style.getPropertyValue("color-scheme")).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    localStorage.removeItem("theme");
+  });
+
+  it("follows the OS again once the stored choice is system", () => {
+    mockColorScheme(true);
+    localStorage.setItem("theme", "system");
+    expect(markInitialColorScheme()).toBe("dark");
+    localStorage.removeItem("theme");
+  });
 });
 
 describe("OverlayPortal", () => {

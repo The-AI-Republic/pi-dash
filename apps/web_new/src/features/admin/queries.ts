@@ -13,6 +13,7 @@ import {
   getAdminSession,
   getCsrfToken,
   getInstanceBootstrap,
+  getInstanceBootstrapForStartup,
   getLoopJob,
   listInstanceAdmins,
   listInstanceConfigurations,
@@ -28,7 +29,9 @@ import {
 
 export const adminKeys = {
   root: ["admin"],
-  /** The single instance-info read the entry gate branches on. */
+  /** The entry gate's one-shot instance read (unprovisioned-safe). */
+  entryBootstrap: ["admin", "instance", "entry"],
+  /** The single instance-info read the dashboard pages reuse. */
   bootstrap: ["admin", "instance", "bootstrap"],
   /** The admins list the general page reads its first email from. */
   admins: ["admin", "instance", "admins"],
@@ -88,6 +91,18 @@ export const adminQueryDefaults = {
  * exactly once — no retry, no focus or reconnect refetch — and never
  * stale, so remounts reuse it instead of re-issuing the read.
  */
+export function instanceEntryQueryOptions(client: ApiClient) {
+  return queryOptions({
+    queryKey: adminKeys.entryBootstrap,
+    // A fresh install answers only the bare setup flags; the startup
+    // reader folds that envelope into "setup unfinished" while still
+    // validating every provisioned answer against the full contract.
+    queryFn: () => getInstanceBootstrapForStartup(client),
+    ...adminQueryDefaults,
+    retry: false,
+  });
+}
+
 export function instanceBootstrapQueryOptions(client: ApiClient) {
   return queryOptions({
     queryKey: adminKeys.bootstrap,
@@ -125,6 +140,12 @@ export function adminSessionQueryOptions(client: ApiClient) {
     queryFn: () => getAdminSession(client),
     ...adminQueryDefaults,
     retry: false,
+    // A failed check is a verdict, not a cache miss: the error screen
+    // and its retry own the next read. Without this, every remount of
+    // a consumer (the guard and the cloud resolver both mount it)
+    // re-issued the read, so an outage spun refetch → render → refetch
+    // forever and never settled on the retry screen (ADM-078).
+    retryOnMount: false,
   });
 }
 
@@ -142,6 +163,9 @@ export function cloudAuthProbeQueryOptions(client: ApiClient) {
     queryFn: () => probeCloudAuthSession(client),
     ...adminQueryDefaults,
     retry: false,
+    // One shot, like the check: a settled probe is the classification
+    // the gate branches on, so a remount never re-probes behind it.
+    retryOnMount: false,
   });
 }
 

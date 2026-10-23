@@ -8526,6 +8526,8 @@ export interface ParityDriver {
   adminClearLoopJobDeleteFault(): Promise<void>;
   /** Runners presence snapshot (bug-pinned until the runners page lands). */
   adminRunnersFacts(): Promise<AdminRunnersFacts>;
+  /** Runners page body facts (page root, heading, table, failure state). */
+  adminRunnersPageFacts(): Promise<AdminRunnersPageFacts>;
 
   // --- Admin dashboard shell + negatives (NEWFRONT-446, ADM-062..073). ---
   /** Sidebar entries with active state, plus collapse facts. */
@@ -8582,6 +8584,8 @@ export interface ParityDriver {
   adminCloudOpenRootWithCookies(cookies: ParityBrowserCookie[]): Promise<void>;
   /** Fail the next `times` admin-check reads with `status`, then pass through. */
   adminCloudFailAdminCheck(times: number, status: number): Promise<void>;
+  /** Stop failing admin-check reads (a held fault, released before a retry). */
+  adminCloudReleaseAdminCheckFault(): Promise<void>;
   /** Fail the next `times` auth-probe reads with `status`, then pass through. */
   adminCloudFailAuthProbe(times: number, status: number): Promise<void>;
   /** Delay the next admin-check read by `ms` (one-shot; the spinner then shows deterministically). */
@@ -12443,6 +12447,8 @@ export interface AdminGeneralFacts {
   saveLabel: string;
   /** Whether the save control is disabled. */
   saveDisabled: boolean;
+  /** Inline required-name message, or null when none shows. */
+  nameError: string | null;
 }
 
 /** Email-page shell facts (NEWFRONT-442, ADM-018/022). */
@@ -12489,6 +12495,8 @@ export interface AdminEmailFormFacts {
   saveLabel: string;
   /** Whether the send-test-email control is disabled. */
   testEmailDisabled: boolean;
+  /** Save-first hint shown while the form carries unsaved edits, or null. */
+  saveFirstHint: string | null;
 }
 
 /** Send-test-email modal step (NEWFRONT-442, ADM-021). */
@@ -13168,6 +13176,20 @@ export interface AdminLoopTargetRow {
   tokens: string;
   /** Last skip reason cell text as rendered. */
   lastSkip: string;
+}
+
+/** Runners page body facts (ADM-080, target behavior per NEWFRONT-518). */
+export interface AdminRunnersPageFacts {
+  /** Whether the page root is showing. */
+  pageVisible: boolean;
+  /** Page heading text. */
+  title: string;
+  /** Whether the runners table is showing. */
+  tableVisible: boolean;
+  /** Whether the failure state is showing. */
+  errorVisible: boolean;
+  /** Whether the failure state offers its retry. */
+  retryVisible: boolean;
 }
 
 /** Runners presence snapshot (NEWFRONT-445, ADM-080; bug-pinned until the page lands). */

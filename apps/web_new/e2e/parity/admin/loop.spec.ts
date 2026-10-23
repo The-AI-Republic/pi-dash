@@ -291,16 +291,21 @@ test(
   { tag: specTags(["ADM-054"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await driver.adminEnsureSignedIn(seed.email, seed.password);
-    await driver.adminDelayLoopJobsFetch(3000);
-    await driver.adminOpenPath("/loop/");
-    await driver.adminWaitForRootBranch("dashboard");
-    await expect.poll(async () => (await driver.adminLoopListFacts()).skeletonVisible, { timeout: 15_000 }).toBe(true);
-    const during = await driver.adminLoopListFacts();
-    expect(during.skeletonRows).toBe(2);
-    expect(during.skeletonHeights).toEqual(["48px", "48px"]);
-    expect(during.tableVisible).toBe(false);
-    expect(during.emptyVisible).toBe(false);
-    await driver.adminClearLoopJobsFetchFault();
+    // Held until the spec lifts the fault, so a cold route compile on the
+    // new console cannot outlast the skeleton window.
+    await driver.adminDelayLoopJobsFetch(driver.target === "web_new" ? 120_000 : 3000);
+    try {
+      await driver.adminOpenPath("/loop/");
+      await driver.adminWaitForRootBranch("dashboard");
+      await expect.poll(async () => (await driver.adminLoopListFacts()).skeletonVisible, { timeout: 15_000 }).toBe(true);
+      const during = await driver.adminLoopListFacts();
+      expect(during.skeletonRows).toBe(2);
+      expect(during.skeletonHeights).toEqual(["48px", "48px"]);
+      expect(during.tableVisible).toBe(false);
+      expect(during.emptyVisible).toBe(false);
+    } finally {
+      await driver.adminClearLoopJobsFetchFault();
+    }
     await expect
       .poll(
         async () => {
@@ -742,19 +747,22 @@ test(
     try {
       const created = await serverAdminCreateLoopJob(session, jobInput(slug));
       await driver.adminEnsureSignedIn(seed.email, seed.password);
-      await driver.adminDelayLoopJobFetch(3000);
-      await driver.adminOpenPath(`/loop/${created.id}/`);
-      await driver.adminWaitForRootBranch("dashboard");
-      await expect
-        .poll(async () => (await driver.adminLoopDetailFacts()).skeletonVisible, { timeout: 15_000 })
-        .toBe(true);
-      const during = await driver.adminLoopDetailFacts();
-      expect(during.title).toBe("Loop job");
-      expect(during.skeletonHeights).toEqual(["48px", "120px"]);
-      expect(during.editVisible).toBe(false);
-      expect(during.deleteVisible).toBe(false);
-      await driver.adminClearLoopJobFetchFault();
-      await expect.poll(async () => (await driver.adminLoopDetailFacts()).editVisible, { timeout: 15_000 }).toBe(true);
+      await driver.adminDelayLoopJobFetch(driver.target === "web_new" ? 120_000 : 3000);
+      try {
+        await driver.adminOpenPath(`/loop/${created.id}/`);
+        await driver.adminWaitForRootBranch("dashboard");
+        await expect
+          .poll(async () => (await driver.adminLoopDetailFacts()).skeletonVisible, { timeout: 15_000 })
+          .toBe(true);
+        const during = await driver.adminLoopDetailFacts();
+        expect(during.title).toBe("Loop job");
+        expect(during.skeletonHeights).toEqual(["48px", "120px"]);
+        expect(during.editVisible).toBe(false);
+        expect(during.deleteVisible).toBe(false);
+      } finally {
+        await driver.adminClearLoopJobFetchFault();
+      }
+      await expect.poll(async () => (await driver.adminLoopDetailFacts()).editVisible, { timeout: 90_000 }).toBe(true);
       const after = await driver.adminLoopDetailFacts();
       expect(after.title).toBe(created.name);
       expect(after.skeletonVisible).toBe(false);

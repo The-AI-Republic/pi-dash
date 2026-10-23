@@ -8,6 +8,8 @@
 // theme mark) stay put. No third-party recorder is loaded here (D14).
 
 import { applyTheme, resolveTheme } from "@pidash/kit";
+
+import { readStoredTheme } from "../../core/theme/theme.js";
 import * as React from "react";
 import { createPortal } from "react-dom";
 
@@ -180,12 +182,15 @@ export function useDocumentHead({ title, robots, fallback = false, tags }: Docum
 }
 
 /**
- * Mark the root with the resolved initial color scheme (kit default: follow
- * the OS). Runs once at boot; theme preference switching belongs to the
- * appearance slice, which reuses this mark.
+ * Mark the root with the scheme the visitor asked for at boot: their
+ * stored choice when one exists, otherwise the OS preference. A console
+ * that pins light or dark on mount must not be repainted by this mark,
+ * so the stored value wins here too. Sign-out drops the stored choice,
+ * which is what makes the reset to system stick on the next boot.
  */
 export function markInitialColorScheme(): "light" | "dark" {
-  const scheme = resolveTheme("system");
+  const stored = readStoredTheme();
+  const scheme = stored === "light" || stored === "dark" ? stored : resolveTheme("system");
   if (typeof document === "undefined") return scheme;
   document.documentElement.style.setProperty("color-scheme", scheme);
   applyTheme(scheme);

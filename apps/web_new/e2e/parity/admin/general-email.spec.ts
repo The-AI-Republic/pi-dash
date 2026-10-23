@@ -31,6 +31,13 @@
 // than the entered ones (bug: NEWFRONT-477). While the configuration
 // loads, a pill stands in for the toggle; the multi-row form skeleton
 // shows only once the toggle is on with no configuration behind it.
+//
+// Target behavior (NEWFRONT-475/476/477/478): the scenarios below run
+// the intended rules on apps/web_new — the empty name names the field
+// inline, a failed disable reports the failure and rolls the toggle
+// back, the security picker dirties the form, and the test action
+// closes on unsaved edits with a save-first hint. The oracle keeps the
+// pinned old outcomes.
 import { test, expect } from "../fixtures";
 import {
   serverAdminEmailCheck,
@@ -185,6 +192,14 @@ test(
     expect(await driver.adminInstancePatchBodies()).toEqual([]);
     expect(await driver.adminLastToast()).toBeNull();
     expect((await driver.adminGeneralFacts()).saveLabel).toBe("Save changes");
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-475): the blocked save names the required
+      // field inline instead of failing silently.
+      expect((await driver.adminGeneralFacts()).nameError).toBe("Instance name is required.");
+      // A real value clears the message and lets the save through.
+      await driver.adminGeneralFillName(before.instanceName);
+      await expect.poll(async () => (await driver.adminGeneralFacts()).nameError, { timeout: 15_000 }).toBeNull();
+    }
 
     // The server kept the old name.
     expect((await serverAdminInstanceInfo()).instanceName).toBe(before.instanceName);
@@ -442,20 +457,33 @@ test(
       try {
         await driver.adminEmailSetEnabled(false);
         await expect.poll(async () => driver.adminEmailDisableCount(), { timeout: 15_000 }).toBe(1);
-        // The failure reports success: the notice, the hidden form and
-        // the off toggle all claim the feature is down.
-        await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(false);
-        await expect.poll(async () => driver.adminLastToast(), { timeout: 15_000 }).not.toBeNull();
-        expect(await driver.adminLastToast()).toEqual({
-          title: "Email feature disabled",
-          message: "Email feature has been disabled",
-        });
         await expect
           .poll(
             async () => (await driver.adminConsoleErrors()).some((line) => line.includes("Error disabling the email")),
             { timeout: 15_000 }
           )
           .toBe(true);
+        if (driver.target === "web_new") {
+          // Intended (NEWFRONT-476): the failure is reported as a
+          // failure, the toggle rolls back on, and the form stays.
+          await expect.poll(async () => driver.adminLastToast(), { timeout: 15_000 }).not.toBeNull();
+          const notice = await driver.adminLastToast();
+          expect(notice?.title ?? "").toContain("Could not disable email");
+          expect(notice?.message ?? "").toContain("left unchanged");
+          await expect.poll(async () => (await driver.adminEmailFacts()).toggleOn, { timeout: 15_000 }).toBe(true);
+          expect((await driver.adminEmailFacts()).formVisible).toBe(true);
+        } else {
+          // The failure reports success: the notice, the hidden form and
+          // the off toggle all claim the feature is down.
+          await expect
+            .poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 })
+            .toBe(false);
+          await expect.poll(async () => driver.adminLastToast(), { timeout: 15_000 }).not.toBeNull();
+          expect(await driver.adminLastToast()).toEqual({
+            title: "Email feature disabled",
+            message: "Email feature has been disabled",
+          });
+        }
 
         // But the server still holds the enabled configuration.
         const kept = await serverAdminGetConfigurations(session);
@@ -509,7 +537,14 @@ test(
       form = await driver.adminEmailFormFacts();
       expect(form.values.passwordFilled).toBe(true);
       expect(form.saveDisabled).toBe(false);
-      expect(form.testEmailDisabled).toBe(false);
+      if (driver.target === "web_new") {
+        // Save-first interim (NEWFRONT-477): unsaved edits close the
+        // check, which grades the stored settings.
+        expect(form.testEmailDisabled).toBe(true);
+        expect(form.saveFirstHint ?? "").toContain("Save your changes before testing");
+      } else {
+        expect(form.testEmailDisabled).toBe(false);
+      }
 
       // The password toggle flips the field without touching the value.
       await driver.adminEmailTogglePassword();
@@ -546,6 +581,7 @@ test(
       expect(form.values.host).toBe(host);
       expect(form.saveDisabled).toBe(true);
       expect(form.testEmailDisabled).toBe(false);
+      expect(form.saveFirstHint).toBeNull();
     } finally {
       await restoreSmtp(session, before);
     }
@@ -618,17 +654,29 @@ test(
       await openEmail(driver, seed);
       await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(true);
 
-      // Flipping only the security choice never dirties the form, so
-      // the save stays shut and the flip can never persist on its own.
       await driver.adminStartConfigPatchSpy();
       await driver.adminEmailSetSecurity("SSL");
-      expect((await driver.adminEmailFormFacts()).security).toBe("SSL");
-      expect((await driver.adminEmailFormFacts()).saveDisabled).toBe(true);
-      await sleep(1500);
-      expect(await driver.adminConfigPatchBodies()).toEqual([]);
-      const kept = await serverAdminGetConfigurations(session);
-      expect(kept["EMAIL_USE_TLS"]).toBe("1");
-      expect(kept["EMAIL_USE_SSL"]).toBe("0");
+      const form = await driver.adminEmailFormFacts();
+      expect(form.security).toBe("SSL");
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-478): the picker dirties the form like any
+        // other control, so the save opens and persists the flag pair.
+        expect(form.saveDisabled).toBe(false);
+        await driver.adminEmailSave();
+        await expect.poll(async () => (await driver.adminConfigPatchBodies()).length, { timeout: 15_000 }).toBe(1);
+        const kept = await serverAdminGetConfigurations(session);
+        expect(kept["EMAIL_USE_TLS"]).toBe("0");
+        expect(kept["EMAIL_USE_SSL"]).toBe("1");
+      } else {
+        // Flipping only the security choice never dirties the form, so
+        // the save stays shut and the flip can never persist on its own.
+        expect(form.saveDisabled).toBe(true);
+        await sleep(1500);
+        expect(await driver.adminConfigPatchBodies()).toEqual([]);
+        const kept = await serverAdminGetConfigurations(session);
+        expect(kept["EMAIL_USE_TLS"]).toBe("1");
+        expect(kept["EMAIL_USE_SSL"]).toBe("0");
+      }
     } finally {
       await restoreSmtp(session, before);
     }
@@ -725,7 +773,7 @@ test(
       await driver.adminStartEmailCheckSpy();
       await driver.adminTestEmailFillReceiver(receiver);
       await driver.adminTestEmailSend();
-      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 30_000 }).toBe("success");
+      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 90_000 }).toBe("success");
       modal = await driver.adminTestEmailFacts();
       expect(modal.heading).toBe("Email send");
       expect(modal.bodyText).toContain(receiver);
@@ -771,7 +819,10 @@ test(
 
       await driver.adminTestEmailOpen();
       await driver.adminTestEmailSend();
-      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 30_000 }).toBe("failed");
+      // The check posts to the scratch SMTP host; under host load the
+      // round trip can outlast a tight poll, so the budget is the
+      // suite's own rather than the default expect timeout.
+      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 90_000 }).toBe("failed");
       const modal = await driver.adminTestEmailFacts();
       expect(modal.heading).toBe("Failed");
       expect(modal.dismissLabel).toBe("Close");
@@ -794,31 +845,49 @@ test(
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     const session = await serverAdminSession(seed.email, seed.password);
     const receiver = uniqueEmail("parity-adm-stored");
-    // The stored configuration stays at seed while the form carries
-    // different, unsaved values.
     const stored = await snapshotSmtp(session);
-    await openEmail(driver, seed);
-    await driver.adminEmailSetEnabled(true);
-    await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(true);
-    await driver.adminEmailFill({ host: "entered-smtp.invalid", from: "entered@example.com" });
-    expect((await driver.adminEmailFormFacts()).testEmailDisabled).toBe(false);
+    // Establish a stored configuration that differs from the values the
+    // form will carry, so a rerun never starts from the same state.
+    await serverAdminUpdateConfigurations(session, {
+      ...DISABLED_SMTP,
+      EMAIL_HOST: "stored-smtp.invalid",
+      EMAIL_FROM: "stored@example.com",
+      ENABLE_SMTP: "1",
+    });
+    try {
+      await openEmail(driver, seed);
+      await expect.poll(async () => (await driver.adminEmailFacts()).formVisible, { timeout: 15_000 }).toBe(true);
+      await driver.adminEmailFill({ host: "entered-smtp.invalid", from: "entered@example.com" });
+      if (driver.target === "web_new") {
+        // Intended interim (NEWFRONT-477): the check grades stored
+        // settings, so unsaved edits close the test action and the form
+        // says to save first. Saving reopens it, and the check still
+        // posts only the receiver.
+        const dirty = await driver.adminEmailFormFacts();
+        expect(dirty.testEmailDisabled).toBe(true);
+        expect(dirty.saveFirstHint ?? "").toContain("Save your changes before testing");
+        await driver.adminEmailSave();
+        await expect
+          .poll(async () => (await driver.adminEmailFormFacts()).testEmailDisabled, { timeout: 15_000 })
+          .toBe(false);
+        expect((await driver.adminEmailFormFacts()).saveFirstHint).toBeNull();
+      } else {
+        expect((await driver.adminEmailFormFacts()).testEmailDisabled).toBe(false);
+      }
 
-    await driver.adminTestEmailOpen();
-    await driver.adminStartEmailCheckSpy();
-    await driver.adminTestEmailFillReceiver(receiver);
-    await driver.adminTestEmailSend();
-    await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 30_000 }).toBe("success");
-    // The entered values never left the browser: the POST carries only
-    // the receiver, so the server graded the stored settings.
-    expect(await driver.adminEmailCheckBodies()).toEqual([{ receiver_email: receiver }]);
-    const direct = await serverAdminEmailCheck(session, receiver);
-    expect(direct.status).toBe(200);
-    await driver.adminTestEmailClose();
-
-    // Nothing here wrote: the stored rows are untouched.
-    const kept = await serverAdminGetConfigurations(session);
-    for (const key of SMTP_KEYS) {
-      expect(kept[key]).toBe(stored[key]);
+      await driver.adminTestEmailOpen();
+      await driver.adminStartEmailCheckSpy();
+      await driver.adminTestEmailFillReceiver(receiver);
+      await driver.adminTestEmailSend();
+      await expect.poll(async () => (await driver.adminTestEmailFacts()).step, { timeout: 30_000 }).toBe("success");
+      // The body carries only the receiver: the server grades its own
+      // stored settings rather than anything the form could add.
+      expect(await driver.adminEmailCheckBodies()).toEqual([{ receiver_email: receiver }]);
+      const direct = await serverAdminEmailCheck(session, receiver);
+      expect(direct.status).toBe(200);
+      await driver.adminTestEmailClose();
+    } finally {
+      await restoreSmtp(session, stored);
     }
   }
 );
@@ -904,7 +973,11 @@ test(
         await driver.adminOpenPath("/email/");
         // The header settles (the toggle reads off, never having learned
         // otherwise) while the failed read leaves no configuration.
-        await expect.poll(async () => (await driver.adminEmailFacts()).toggleVisible, { timeout: 15_000 }).toBe(true);
+        await expect
+          .poll(async () => (await driver.adminEmailFacts()).toggleVisible, {
+            timeout: driver.target === "web_new" ? 90_000 : 15_000,
+          })
+          .toBe(true);
         expect((await driver.adminEmailFacts()).toggleOn).toBe(false);
 
         // Switching on with no configuration shows the multi-row

@@ -20,6 +20,8 @@ import type {
   AdminAuthDiscardFacts,
   AdminAuthFormFacts,
   AdminAuthLandingFacts,
+  AdminAuthMethodCard,
+  AdminAuthMethodControl,
   AdminAuthProviderFacts,
   AdminBreadcrumbFacts,
   AdminCloudGateFetchCounts,
@@ -45,6 +47,7 @@ import type {
   AdminNotFoundFacts,
   AdminRootBranch,
   AdminRunnersFacts,
+  AdminRunnersPageFacts,
   AdminSetupFacts,
   AdminSetupFields,
   AdminShortcutProbeFacts,
@@ -275,6 +278,9 @@ const WEBHOOKS_LOAD_FAILED = "Couldn't load the webhooks.";
 
 /** Bounded waits for the layouts/scenario surfaces (the oracle uses 300 s). */
 const WEB_NEW_LAYOUTS_WAIT_MS = 300_000;
+
+/** Navigation budget for god-mode pages (cold Vite compiles included). */
+const ADMIN_NAV_WAIT_MS = 180_000;
 
 /** Literal text for a RegExp built around a caller-provided label. */
 function escapeRegExp(value: string): string {
@@ -751,6 +757,26 @@ export class WebNewDriver implements ParityDriver {
   private async isShown(locator: Locator): Promise<boolean> {
     if ((await locator.count()) === 0) return false;
     return locator.first().isVisible();
+  }
+
+  /** An attribute of a testid element, or null when it is not in the DOM yet. */
+  private async adminMaybeAttribute(testId: string, attribute: string): Promise<string | null> {
+    const node = this.page.getByTestId(testId);
+    if ((await node.count()) === 0) return null;
+    return node.first().getAttribute(attribute);
+  }
+
+  /** Text of the field's described-by message, or null when it has none. */
+  private async adminFieldMessage(field: Locator): Promise<string | null> {
+    const describedBy = await field.getAttribute("aria-describedby");
+    if (describedBy === null || describedBy === "") return null;
+    return this.adminShownText(this.page.locator(`[id="${describedBy}"]`));
+  }
+
+  /** Trimmed text of a visible element, or null when absent or hidden. */
+  private async adminShownText(locator: Locator): Promise<string | null> {
+    if (!(await this.isShown(locator))) return null;
+    return (await locator.first().innerText()).trim();
   }
 
   async awaitWorkspaceStep(): Promise<void> {
@@ -25830,612 +25856,2628 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Instance-admin entry/session oracle (NEWFRONT-441, ADM-001..012).
+  // --- Written against web_new's own entry gate, forms, guards and shell
+  // --- (src/features/admin/**), never against the old app's components.
+  private static readonly ADMIN_MOUNT = "/god-mode";
+
+  private adminInstanceFetchSeen = 0;
+  private adminInstanceFetchRouteInstalled = false;
+  private adminInstanceFetchFault: { mode: "none" | "fail" | "delay" | "stub-empty"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminSessionDelayMs = 0;
+  private adminSessionRouteInstalled = false;
+
+  private adminPath(path: string): string {
+    const suffix = path.startsWith("/") ? path : `/${path}`;
+    return `${WebNewDriver.ADMIN_MOUNT}${suffix}`;
+  }
+
+  /** The instance read carries the entry branch plus the write spies later slices share. */
+  private async adminEnsureInstanceRoute(): Promise<void> {
+    if (this.adminInstanceFetchRouteInstalled) return;
+    this.adminInstanceFetchRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        if (url.origin !== new URL(this.page.url()).origin) return false;
+        return url.pathname.replace(/\/+$/, "") === "/api/instances";
+      },
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          if (route.request().method() === "PATCH") {
+            const fault = this.adminInstancePatchFault;
+            if (fault.mode === "fail") {
+              this.adminInstancePatchSeen.push(this.adminPostData(route));
+              await route.fulfill({
+                status: 500,
+                contentType: "application/json",
+                body: JSON.stringify({ error: "parity-probe-failure" }),
+              });
+              return;
+            }
+            if (fault.mode === "delay") {
+              await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+            }
+            const patchResponse = await route.fetch();
+            this.adminInstancePatchSeen.push(this.adminPostData(route));
+            await route.fulfill({ response: patchResponse });
+            return;
+          }
+          await route.continue();
+          return;
+        }
+        this.adminInstanceFetchSeen += 1;
+        const fault = this.adminInstanceFetchFault;
+        if (fault.mode === "fail") {
+          await route.abort("failed");
+          return;
+        }
+        if (fault.mode === "delay") {
+          await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+        }
+        if (fault.mode === "stub-empty") {
+          const live = await route.fetch();
+          const payload = (await live.json().catch(() => ({}))) as { instance?: Record<string, unknown> };
+          if (payload.instance !== undefined) {
+            payload.instance["workspaces_exist"] = false;
+          }
+          await route.fulfill({ status: live.status(), contentType: "application/json", body: JSON.stringify(payload) });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  private async adminPollBranch(branch: AdminRootBranch, timeoutMs: number = WebNewDriver.WAIT_MS): Promise<void> {
+    const started = Date.now();
+    let last: AdminRootBranch = "unknown";
+    while (Date.now() - started < timeoutMs) {
+      last = await this.adminRootBranch();
+      if (last === branch) return;
+      await this.page.waitForTimeout(250);
+    }
+    throw new Error(`[parity] admin branch never reached "${branch}" (last "${last}").`);
+  }
+
   async adminOpenRoot(): Promise<void> {
-    return todo("adminOpenRoot");
+    await this.adminNavigate(this.adminPath("/"));
   }
-  async adminOpenPath(_path: string): Promise<void> {
-    return todo("adminOpenPath");
+
+  async adminOpenPath(path: string): Promise<void> {
+    await this.adminNavigate(this.adminPath(path));
   }
+
+  /**
+   * Open one god-mode address. The dev server compiles route chunks on
+   * first visit, so a cold area can push the document past the default
+   * wait; the budget here is the suite's own, and a parse-level settle
+   * keeps a late sub-resource from stalling an already interactive page.
+   */
+  private async adminNavigate(url: string): Promise<void> {
+    await this.page.goto(url, { timeout: ADMIN_NAV_WAIT_MS, waitUntil: "domcontentloaded" });
+  }
+
   async adminRootBranch(): Promise<AdminRootBranch> {
-    return todo("adminRootBranch");
+    if (await this.isShown(this.page.getByTestId("admin-dashboard"))) return "dashboard";
+    if (await this.isShown(this.page.getByTestId("admin-setup-form"))) return "setup";
+    if (await this.isShown(this.page.getByTestId("admin-sign-in-form"))) return "sign-in";
+    if (await this.isShown(this.page.getByTestId("admin-failure"))) return "failure";
+    if (await this.isShown(this.page.getByTestId("admin-loader"))) return "loader";
+    return "unknown";
   }
-  async adminWaitForRootBranch(_branch: AdminRootBranch): Promise<void> {
-    return todo("adminWaitForRootBranch");
+
+  async adminWaitForRootBranch(branch: AdminRootBranch): Promise<void> {
+    await this.adminPollBranch(branch);
   }
+
   async adminCurrentPath(): Promise<string> {
-    return todo("adminCurrentPath");
+    return new URL(this.page.url()).pathname;
   }
+
   async adminCurrentSearch(): Promise<string> {
-    return todo("adminCurrentSearch");
+    return new URL(this.page.url()).search;
   }
+
   async adminHistoryLength(): Promise<number> {
-    return todo("adminHistoryLength");
+    return this.page.evaluate(() => window.history.length);
   }
+
   async adminStartInstanceFetchSpy(): Promise<void> {
-    return todo("adminStartInstanceFetchSpy");
+    await this.adminEnsureInstanceRoute();
+    this.adminInstanceFetchSeen = 0;
   }
+
   async adminInstanceFetchCount(): Promise<number> {
-    return todo("adminInstanceFetchCount");
+    return this.adminInstanceFetchSeen;
   }
+
   async adminFailInstanceFetch(): Promise<void> {
-    return todo("adminFailInstanceFetch");
+    await this.adminEnsureInstanceRoute();
+    this.adminInstanceFetchFault = { mode: "fail", delayMs: 0 };
   }
-  async adminDelayInstanceFetch(_ms: number): Promise<void> {
-    return todo("adminDelayInstanceFetch");
+
+  async adminDelayInstanceFetch(ms: number): Promise<void> {
+    await this.adminEnsureInstanceRoute();
+    this.adminInstanceFetchFault = { mode: "delay", delayMs: ms };
   }
+
   async adminClearInstanceFetchFault(): Promise<void> {
-    return todo("adminClearInstanceFetchFault");
+    this.adminInstanceFetchFault = { mode: "none", delayMs: 0 };
   }
+
   async adminFailureFacts(): Promise<AdminFailureFacts> {
-    return todo("adminFailureFacts");
+    const screen = this.page.getByTestId("admin-failure");
+    await screen.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const retry = screen.getByRole("button", { name: "Retry", exact: true });
+    return {
+      illustrationVisible: await this.isShown(screen.locator("img")),
+      retryVisible: await this.isShown(retry),
+      retryLabel: (await retry.count()) === 0 ? null : (await retry.innerText()).trim(),
+    };
   }
+
   async adminFailureRetry(): Promise<void> {
-    return todo("adminFailureRetry");
+    const retry = this.page.getByTestId("admin-failure").getByRole("button", { name: "Retry", exact: true });
+    await Promise.all([
+      this.page.waitForLoadState("load", { timeout: 60_000 }).catch(() => undefined),
+      retry.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
   }
+
   async adminLoaderFacts(): Promise<{ visible: boolean; formVisible: boolean }> {
-    return todo("adminLoaderFacts");
+    return {
+      visible: await this.isShown(this.page.getByTestId("admin-loader")),
+      formVisible:
+        (await this.isShown(this.page.getByTestId("admin-setup-form"))) ||
+        (await this.isShown(this.page.getByTestId("admin-sign-in-form"))) ||
+        (await this.isShown(this.page.getByTestId("admin-dashboard"))),
+    };
   }
+
   async adminSetupFacts(): Promise<AdminSetupFacts> {
-    return todo("adminSetupFacts");
+    const form = this.page.getByTestId("admin-setup-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const value = async (id: string): Promise<string> => form.locator(`#${id}`).inputValue();
+    const type = async (id: string): Promise<string | null> => form.locator(`#${id}`).getAttribute("type");
+    const errorText = async (id: string): Promise<string | null> => {
+      const node = this.page.locator(`#${id}-error`);
+      return (await node.count()) === 0 ? null : (await node.first().innerText()).trim();
+    };
+    const submit = this.page.getByTestId("admin-setup-submit");
+    const strength = this.page.getByTestId("admin-setup-strength");
+    const strengthMessage = this.page.getByTestId("admin-setup-strength-message");
+    const banner = this.page.getByTestId("admin-setup-banner");
+    return {
+      values: {
+        firstName: await value("first_name"),
+        lastName: await value("last_name"),
+        email: await value("email"),
+        company: await value("company_name"),
+      },
+      shown: { password: (await type("password")) === "text", confirm: (await type("confirm_password")) === "text" },
+      submitDisabled: await submit.isDisabled(),
+      submitBusy: (await submit.getAttribute("aria-busy")) === "true",
+      telemetryChecked: await form.locator("#is_telemetry_enabled").isChecked(),
+      strengthVisible: await this.isShown(strength),
+      strengthMessage: (await strengthMessage.count()) === 0 ? null : (await strengthMessage.first().innerText()).trim(),
+      mismatchVisible: await this.isShown(this.page.getByTestId("admin-setup-mismatch")),
+      bannerText: (await banner.count()) === 0 ? null : (await banner.first().innerText()).trim(),
+      inlineErrors: { email: await errorText("email"), password: await errorText("password") },
+    };
   }
-  async adminSetupFill(_fields: AdminSetupFields): Promise<void> {
-    return todo("adminSetupFill");
+
+  async adminSetupFill(fields: AdminSetupFields): Promise<void> {
+    const form = this.page.getByTestId("admin-setup-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const fill = async (id: string, value: string | undefined): Promise<void> => {
+      if (value === undefined) return;
+      const field = form.locator(`#${id}`);
+      await field.fill(value);
+    };
+    await fill("first_name", fields.firstName);
+    await fill("last_name", fields.lastName);
+    await fill("email", fields.email);
+    await fill("company_name", fields.company);
+    await fill("password", fields.password);
+    await fill("confirm_password", fields.confirmPassword);
   }
-  async adminSetupSetTelemetry(_on: boolean): Promise<void> {
-    return todo("adminSetupSetTelemetry");
+
+  async adminSetupSetTelemetry(on: boolean): Promise<void> {
+    const box = this.page.getByTestId("admin-setup-form").locator("#is_telemetry_enabled");
+    await box.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if ((await box.isChecked()) !== on) {
+      await box.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async adminSetupFocus(_field: "password" | "confirm"): Promise<void> {
-    return todo("adminSetupFocus");
+
+  async adminSetupFocus(field: "password" | "confirm"): Promise<void> {
+    const id = field === "password" ? "password" : "confirm_password";
+    await this.page.getByTestId("admin-setup-form").locator(`#${id}`).focus();
   }
+
   async adminSetupBlur(): Promise<void> {
-    return todo("adminSetupBlur");
+    // The heading is not focusable, so clicking it drops focus to the body
+    // and both password fields fire their blur.
+    await this.page.getByTestId("admin-setup-heading").click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async adminSetupTogglePassword(_field: "password" | "confirm"): Promise<void> {
-    return todo("adminSetupTogglePassword");
+
+  async adminSetupTogglePassword(field: "password" | "confirm"): Promise<void> {
+    const testId = field === "password" ? "admin-setup-toggle-password" : "admin-setup-toggle-confirm";
+    await this.page.getByTestId(testId).click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminSetupSubmit(): Promise<void> {
-    return todo("adminSetupSubmit");
+    await this.page.getByTestId("admin-setup-submit").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
   }
+
   async adminSignInFacts(): Promise<AdminSignInFacts> {
-    return todo("adminSignInFacts");
+    const form = this.page.getByTestId("admin-sign-in-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const submit = this.page.getByTestId("admin-sign-in-submit");
+    const generic = this.page.getByTestId("admin-sign-in-error");
+    const notice = this.page.getByTestId("admin-sign-in-notice");
+    const password = form.locator("#password");
+    const noticeShown = await this.isShown(notice);
+    const link = notice.getByRole("link");
+    return {
+      email: await form.locator("#email").inputValue(),
+      passwordFilled: (await password.inputValue()).length > 0,
+      passwordShown: (await password.getAttribute("type")) === "text",
+      submitDisabled: await submit.isDisabled(),
+      submitBusy: (await submit.getAttribute("aria-busy")) === "true",
+      genericBanner: (await generic.count()) === 0 ? null : (await generic.first().innerText()).trim(),
+      mappedBanner: noticeShown
+        ? {
+            text: (await notice.innerText()).replace(/\s+/g, " ").trim(),
+            linkHref: (await link.count()) === 0 ? null : await link.first().getAttribute("href"),
+          }
+        : null,
+    };
   }
-  async adminSignInFill(_email: string, _password: string): Promise<void> {
-    return todo("adminSignInFill");
+
+  async adminSignInFill(email: string, password: string): Promise<void> {
+    const form = this.page.getByTestId("admin-sign-in-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await form.locator("#email").fill(email);
+    await form.locator("#password").fill(password);
   }
+
   async adminSignInTogglePassword(): Promise<void> {
-    return todo("adminSignInTogglePassword");
+    await this.page.getByTestId("admin-sign-in-toggle-password").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminSignInSubmit(): Promise<void> {
-    return todo("adminSignInSubmit");
+    await this.page.getByTestId("admin-sign-in-submit").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
   }
+
   async adminSignInDismissMappedBanner(): Promise<void> {
-    return todo("adminSignInDismissMappedBanner");
+    const notice = this.page.getByTestId("admin-sign-in-notice");
+    await notice.getByRole("button", { name: "Dismiss notice", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await notice.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
-  async adminEnsureSignedIn(_email: string, _password: string): Promise<void> {
-    return todo("adminEnsureSignedIn");
+
+  async adminEnsureSignedIn(email: string, password: string): Promise<void> {
+    await this.adminOpenRoot();
+    await this.adminPollBranch("sign-in");
+    const branch = await this.adminRootBranch();
+    if (branch === "sign-in") {
+      await this.adminSignInFill(email, password);
+      await this.adminSignInSubmit();
+    }
+    await this.adminPollBranch("dashboard");
   }
+
   async adminDashboardVisible(): Promise<boolean> {
-    return todo("adminDashboardVisible");
+    return this.isShown(this.page.getByTestId("admin-dashboard"));
   }
+
   async adminOpenAccountMenu(): Promise<void> {
-    return todo("adminOpenAccountMenu");
+    // Same idempotent open as adminAccountOpen (the trigger toggles, so a
+    // blind second click would close a menu the theme flow already opened).
+    await this.adminAccountOpen();
   }
+
   async adminAccountMenuFacts(): Promise<AdminAccountMenuFacts> {
-    return todo("adminAccountMenuFacts");
+    const menu = this.page.getByRole("menu").first();
+    const email = this.page.getByTestId("admin-account-email");
+    const themeEntry = menu.getByRole("menuitem", { name: /^Switch to (dark|light) mode$/ });
+    return {
+      email: (await email.count()) === 0 ? null : (await email.first().innerText()).trim(),
+      themeLabel: (await themeEntry.count()) === 0 ? null : (await themeEntry.first().innerText()).trim(),
+      signOutVisible: await this.isShown(this.page.getByTestId("admin-sign-out")),
+    };
   }
+
+  /**
+   * Sign out through the account menu. The sign-out control lives in
+   * the menu, so it only exists while that menu is open; the press is
+   * dispatched rather than clicked because the native post navigates
+   * away mid-press.
+   */
   async adminSidebarSignOut(): Promise<void> {
-    return todo("adminSidebarSignOut");
+    if (!(await this.isShown(this.page.getByTestId("admin-sign-out")))) {
+      await this.adminOpenAccountMenu();
+    }
+    await this.page.getByTestId("admin-sign-out").dispatchEvent("click", { timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForLoadState("domcontentloaded", { timeout: 60_000 }).catch(() => undefined);
   }
+
   async adminThemeFacts(): Promise<{ stored: string | null; resolved: "light" | "dark" }> {
-    return todo("adminThemeFacts");
+    return this.page.evaluate(() => {
+      const stored = window.localStorage.getItem("theme");
+      const root = window.document.documentElement;
+      const resolved = root.getAttribute("data-theme") === "dark" ? "dark" : "light";
+      return { stored, resolved };
+    });
   }
-  async adminSetTheme(_mode: "light" | "dark"): Promise<void> {
-    return todo("adminSetTheme");
+
+  private adminResolvedTheme(): Promise<"light" | "dark"> {
+    return this.adminThemeFacts().then((facts) => facts.resolved);
   }
+
+  async adminSetTheme(mode: "light" | "dark"): Promise<void> {
+    // The popup re-renders when the trigger's subtree changes, which
+    // detaches the menuitem mid-click; a fresh open and click retry is
+    // the honest read of a portal-backed menu.
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      await this.adminOpenAccountMenu();
+      if ((await this.adminResolvedTheme()) === mode) {
+        await this.page.keyboard.press("Escape");
+        break;
+      }
+      const pressed = await this.page
+        .getByRole("menu")
+        .first()
+        .getByRole("menuitem", { name: `Switch to ${mode} mode` })
+        .click({ timeout: 5_000 })
+        .then(() => true, () => false);
+      if (pressed || Date.now() >= deadline) break;
+      await this.page.waitForTimeout(250);
+    }
+    await expect.poll(() => this.adminResolvedTheme(), { timeout: WebNewDriver.WAIT_MS }).toBe(mode);
+  }
+
   async adminNotFoundFacts(): Promise<AdminNotFoundFacts> {
-    return todo("adminNotFoundFacts");
+    const screen = this.page.getByTestId("admin-not-found");
+    await screen.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const action = screen.getByRole("link", { name: "Go to general settings", exact: true });
+    return {
+      illustrationVisible: await this.isShown(screen.locator("img")),
+      messageVisible: await this.isShown(screen.getByRole("heading", { name: "Oops! Something went wrong." })),
+      actionLabel: (await action.count()) === 0 ? null : (await action.first().innerText()).trim(),
+    };
   }
+
   async adminNotFoundFollowAction(): Promise<void> {
-    return todo("adminNotFoundFollowAction");
+    await this.page.getByTestId("admin-not-found").getByRole("link", { name: "Go to general settings" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.pathname === "/god-mode/general/", { timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminFirstWorkspacePopupFacts(): Promise<{ visible: boolean; createHref: string | null }> {
-    return todo("adminFirstWorkspacePopupFacts");
+    const popup = this.page.getByTestId("admin-first-workspace-popup");
+    const visible = await this.isShown(popup);
+    if (!visible) return { visible: false, createHref: null };
+    const link = popup.getByRole("link", { name: "Create workspace", exact: true });
+    return { visible: true, createHref: await link.first().getAttribute("href") };
   }
+
   async adminFirstWorkspacePopupDismiss(): Promise<void> {
-    return todo("adminFirstWorkspacePopupDismiss");
+    const popup = this.page.getByTestId("admin-first-workspace-popup");
+    await popup.getByRole("button", { name: "Close", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await popup.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminFirstWorkspacePopupFollowCreate(): Promise<void> {
-    return todo("adminFirstWorkspacePopupFollowCreate");
+    await this.page
+      .getByTestId("admin-first-workspace-popup")
+      .getByRole("link", { name: "Create workspace", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.pathname === "/god-mode/workspace/create/", { timeout: WebNewDriver.WAIT_MS });
   }
-  async adminSetupToggleTabIndex(_field: "password" | "confirm"): Promise<string | null> {
-    return todo("adminSetupToggleTabIndex");
+
+  async adminSetupToggleTabIndex(field: "password" | "confirm"): Promise<string | null> {
+    const testId = field === "password" ? "admin-setup-toggle-password" : "admin-setup-toggle-confirm";
+    return this.page.getByTestId(testId).getAttribute("tabindex");
   }
+
   async adminSignInEmailFocused(): Promise<boolean> {
-    return todo("adminSignInEmailFocused");
+    return this.page.evaluate(() => window.document.activeElement?.id === "email");
   }
-  async adminDelaySessionFetch(_ms: number): Promise<void> {
-    return todo("adminDelaySessionFetch");
+
+  private async adminEnsureSessionRoute(): Promise<void> {
+    if (this.adminSessionRouteInstalled) return;
+    this.adminSessionRouteInstalled = true;
+    await this.page.route(
+      (url) => url.pathname.replace(/\/+$/, "") === "/api/instances/admins/me",
+      async (route) => {
+        if (route.request().method() === "GET" && this.adminSessionDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, this.adminSessionDelayMs));
+        }
+        await route.continue();
+      }
+    );
   }
+
+  async adminDelaySessionFetch(ms: number): Promise<void> {
+    await this.adminEnsureSessionRoute();
+    this.adminSessionDelayMs = ms;
+  }
+
   async adminClearSessionFetchDelay(): Promise<void> {
-    return todo("adminClearSessionFetchDelay");
+    this.adminSessionDelayMs = 0;
   }
+
   async adminStubNoWorkspaces(): Promise<void> {
-    return todo("adminStubNoWorkspaces");
+    await this.adminEnsureInstanceRoute();
+    this.adminInstanceFetchFault = { mode: "stub-empty", delayMs: 0 };
   }
-  // --- Instance-admin general/email oracle (NEWFRONT-442, ADM-013..022). ---
+  // --- Instance-admin general/email oracle (NEWFRONT-442, ADM-013..022).
+  // --- From web_new's general and email pages: the shared instance PATCH,
+  // --- the configurations map, the SMTP form and the test-email modal.
+
+  private adminInstancePatchSeen: unknown[] = [];
+  private adminInstancePatchFault: { mode: "none" | "fail" | "delay"; delayMs: number } = { mode: "none", delayMs: 0 };
+  private adminConfigBodiesSeen: unknown[] = [];
+  private adminConfigFault: { mode: "none" | "fail" | "delay"; delayMs: number } = { mode: "none", delayMs: 0 };
+  private adminConfigRouteInstalled = false;
+  private adminConfigFetchSeen = 0;
+  private adminEmailDisableSeen = 0;
+  private adminEmailDisableFault = "none";
+  private adminEmailDisableRouteInstalled = false;
+  private adminEmailCheckBodiesSeen: unknown[] = [];
+  private adminEmailCheckRouteInstalled = false;
+  private adminConsoleLines: string[] = [];
+  private adminConsoleListening = false;
+
+  private adminPostData(route: Route): unknown {
+    try {
+      return route.request().postDataJSON();
+    } catch {
+      return route.request().postData();
+    }
+  }
+
+  private static adminIsInstancePath(url: URL, path: string): boolean {
+    return url.pathname.replace(/\/+$/, "") === path;
+  }
+
+  /** The configurations route: GET faults plus the PATCH spy and faults. */
+  private async adminEnsureConfigRoute(): Promise<void> {
+    if (this.adminConfigRouteInstalled) return;
+    this.adminConfigRouteInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/configurations"),
+      async (route) => {
+        const method = route.request().method();
+        if (method === "GET") {
+          this.adminConfigFetchSeen += 1;
+          const fault = this.adminConfigFault;
+          if (fault.mode === "fail") {
+            await route.abort("failed");
+            return;
+          }
+          if (fault.mode === "delay") {
+            // Hold the read until the delay elapses OR the spec lifts the
+            // fault, so a cold route compile never outlasts the window a
+            // skeleton scenario needs to observe.
+            const deadline = Date.now() + fault.delayMs;
+            while (Date.now() < deadline && this.adminConfigFault.mode === "delay") {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
+          await route.continue();
+          return;
+        }
+        if (method === "PATCH") {
+          const fault = this.adminConfigFault;
+          if (fault.mode === "fail") {
+            this.adminConfigBodiesSeen.push(this.adminPostData(route));
+            await route.fulfill({
+              status: 500,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "parity-probe-failure" }),
+            });
+            return;
+          }
+          if (fault.mode === "delay") {
+            // Hold until the budget elapses OR the spec lifts the fault, so
+            // a busy host cannot finish the write under a facts read that
+            // still expects the page locked.
+            const deadline = Date.now() + fault.delayMs;
+            while (Date.now() < deadline && this.adminConfigFault.mode === "delay") {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
+          const response = await route.fetch();
+          this.adminConfigBodiesSeen.push(this.adminPostData(route));
+          await route.fulfill({ response });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminGeneralFacts(): Promise<AdminGeneralFacts> {
-    return todo("adminGeneralFacts");
+    const form = this.page.getByTestId("admin-general-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const name = this.page.getByTestId("admin-general-name");
+    const email = this.page.getByTestId("admin-general-email");
+    const instanceId = this.page.getByTestId("admin-general-instance-id");
+    const toggle = this.page.getByTestId("admin-general-telemetry");
+    const policy = form.getByRole("link", { name: "Learn more", exact: true });
+    const save = this.page.getByTestId("admin-general-save");
+    return {
+      name: await name.inputValue(),
+      nameDisabled: await name.isDisabled(),
+      email: await email.inputValue(),
+      emailDisabled: await email.isDisabled(),
+      instanceId: await instanceId.inputValue(),
+      instanceIdDisabled: await instanceId.isDisabled(),
+      telemetryOn: (await toggle.getAttribute("aria-checked")) === "true",
+      telemetryDisabled: await toggle.isDisabled(),
+      telemetryPolicyHref: (await policy.count()) === 0 ? null : await policy.first().getAttribute("href"),
+      telemetryPolicyTarget: (await policy.count()) === 0 ? null : await policy.first().getAttribute("target"),
+      saveLabel: (await save.innerText()).trim(),
+      saveDisabled: await save.isDisabled(),
+      // The kit field wires its message through aria-describedby. Only
+      // an error sets it (a hint would too, and this field has none).
+      nameError: await this.adminFieldMessage(name),
+    };
   }
-  async adminGeneralFillName(_name: string): Promise<void> {
-    return todo("adminGeneralFillName");
+
+  async adminGeneralFillName(name: string): Promise<void> {
+    const field = this.page.getByTestId("admin-general-name");
+    await field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await field.fill(name);
   }
-  async adminGeneralSetTelemetry(_on: boolean): Promise<void> {
-    return todo("adminGeneralSetTelemetry");
+
+  async adminGeneralSetTelemetry(on: boolean): Promise<void> {
+    const toggle = this.page.getByTestId("admin-general-telemetry");
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminGeneralSave(): Promise<void> {
-    return todo("adminGeneralSave");
+    const save = this.page.getByTestId("admin-general-save");
+    await save.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await save.click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminStartInstancePatchSpy(): Promise<void> {
-    return todo("adminStartInstancePatchSpy");
+    await this.adminEnsureInstanceRoute();
+    this.adminInstancePatchSeen = [];
   }
+
   async adminInstancePatchBodies(): Promise<unknown[]> {
-    return todo("adminInstancePatchBodies");
+    return [...this.adminInstancePatchSeen];
   }
+
+  /** Install the PATCH branch of the instance route (the spy route carries it too). */
+  private async adminEnsureInstancePatchRoute(): Promise<void> {
+    await this.adminEnsureInstanceRoute();
+  }
+
   async adminFailInstancePatch(): Promise<void> {
-    return todo("adminFailInstancePatch");
+    await this.adminEnsureInstancePatchRoute();
+    this.adminInstancePatchFault = { mode: "fail", delayMs: 0 };
   }
-  async adminDelayInstancePatch(_ms: number): Promise<void> {
-    return todo("adminDelayInstancePatch");
+
+  async adminDelayInstancePatch(ms: number): Promise<void> {
+    await this.adminEnsureInstancePatchRoute();
+    this.adminInstancePatchFault = { mode: "delay", delayMs: ms };
   }
+
   async adminClearInstancePatchFault(): Promise<void> {
-    return todo("adminClearInstancePatchFault");
+    this.adminInstancePatchFault = { mode: "none", delayMs: 0 };
   }
+
   async adminLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("adminLastToast");
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    const total = await cards.count();
+    for (let index = 0; index < total; index += 1) {
+      const card = cards.nth(index);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      const text = (await card.innerText().catch(() => "")).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      return { title: lines[0] ?? "", message: lines.slice(1).join(" ") };
+    }
+    return null;
   }
+
   async adminStartConsoleSpy(): Promise<void> {
-    return todo("adminStartConsoleSpy");
+    this.adminConsoleLines = [];
+    if (this.adminConsoleListening) return;
+    this.adminConsoleListening = true;
+    this.page.on("console", (message) => {
+      if (message.type() === "error") this.adminConsoleLines.push(message.text());
+    });
   }
+
   async adminConsoleErrors(): Promise<string[]> {
-    return todo("adminConsoleErrors");
+    return [...this.adminConsoleLines];
   }
+
+  private adminEmailToggle(): Locator {
+    return this.page.getByTestId("admin-email-toggle");
+  }
+
   async adminEmailFacts(): Promise<AdminEmailFacts> {
-    return todo("adminEmailFacts");
+    const toggle = this.adminEmailToggle();
+    const formSkeleton = this.page.getByTestId("admin-email-form-skeleton");
+    return {
+      toggleVisible: await this.isShown(toggle),
+      toggleOn: (await toggle.count()) === 0 ? false : (await toggle.getAttribute("aria-checked")) === "true",
+      toggleDisabled: (await toggle.count()) === 0 ? false : await toggle.isDisabled(),
+      formVisible: await this.isShown(this.page.getByTestId("admin-email-form")),
+      headerSkeletonVisible: await this.isShown(this.page.getByTestId("admin-email-header-skeleton")),
+      formSkeletonVisible: await this.isShown(formSkeleton),
+      formSkeletonRows: await formSkeleton.getByTestId("admin-email-form-skeleton-row").count(),
+    };
   }
-  async adminEmailSetEnabled(_on: boolean): Promise<void> {
-    return todo("adminEmailSetEnabled");
+
+  async adminEmailSetEnabled(on: boolean): Promise<void> {
+    const toggle = this.adminEmailToggle();
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminEmailFormFacts(): Promise<AdminEmailFormFacts> {
-    return todo("adminEmailFormFacts");
+    const form = this.page.getByTestId("admin-email-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const password = this.page.getByTestId("admin-email-password");
+    const securityInputs = {
+      TLS: this.page.getByTestId("admin-email-security-tls"),
+      SSL: this.page.getByTestId("admin-email-security-ssl"),
+      none: this.page.getByTestId("admin-email-security-none"),
+    };
+    let security: AdminEmailSecurity = "none";
+    for (const choice of ["TLS", "SSL", "none"] as const) {
+      if (await securityInputs[choice].isChecked()) {
+        security = choice;
+        break;
+      }
+    }
+    const save = this.page.getByTestId("admin-email-save");
+    const testEmail = this.page.getByTestId("admin-email-test-email");
+    return {
+      values: {
+        host: await this.page.getByTestId("admin-email-host").inputValue(),
+        port: await this.page.getByTestId("admin-email-port").inputValue(),
+        from: await this.page.getByTestId("admin-email-from").inputValue(),
+        user: await this.page.getByTestId("admin-email-user").inputValue(),
+        passwordFilled: (await password.inputValue()).length > 0,
+      },
+      passwordShown: (await password.getAttribute("type")) === "text",
+      security,
+      saveDisabled: await save.isDisabled(),
+      saveLabel: (await save.innerText()).trim(),
+      testEmailDisabled: await testEmail.isDisabled(),
+      saveFirstHint: await this.adminShownText(this.page.getByTestId("admin-email-save-first-hint")),
+    };
   }
-  async adminEmailFill(_fields: AdminEmailFields): Promise<void> {
-    return todo("adminEmailFill");
+
+  async adminEmailFill(fields: AdminEmailFields): Promise<void> {
+    const form = this.page.getByTestId("admin-email-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const fill = async (testId: string, value: string | undefined): Promise<void> => {
+      if (value === undefined) return;
+      await this.page.getByTestId(testId).fill(value);
+    };
+    await fill("admin-email-host", fields.host);
+    await fill("admin-email-port", fields.port);
+    await fill("admin-email-from", fields.from);
+    await fill("admin-email-user", fields.user);
+    await fill("admin-email-password", fields.password);
   }
+
   async adminEmailTogglePassword(): Promise<void> {
-    return todo("adminEmailTogglePassword");
+    await this.page.getByTestId("admin-email-toggle-password").click({ timeout: WebNewDriver.WAIT_MS });
   }
-  async adminEmailSetSecurity(_which: AdminEmailSecurity): Promise<void> {
-    return todo("adminEmailSetSecurity");
+
+  async adminEmailSetSecurity(which: AdminEmailSecurity): Promise<void> {
+    const testId =
+      which === "TLS" ? "admin-email-security-tls" : which === "SSL" ? "admin-email-security-ssl" : "admin-email-security-none";
+    const option = this.page.getByTestId(testId);
+    await option.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (!(await option.isChecked())) {
+      await option.check({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminEmailSave(): Promise<void> {
-    return todo("adminEmailSave");
+    const save = this.page.getByTestId("admin-email-save");
+    await save.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await save.click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminStartConfigPatchSpy(): Promise<void> {
-    return todo("adminStartConfigPatchSpy");
+    await this.adminEnsureConfigRoute();
+    this.adminConfigBodiesSeen = [];
   }
+
   async adminConfigPatchBodies(): Promise<unknown[]> {
-    return todo("adminConfigPatchBodies");
+    return [...this.adminConfigBodiesSeen];
   }
+
   async adminFailConfigPatch(): Promise<void> {
-    return todo("adminFailConfigPatch");
+    await this.adminEnsureConfigRoute();
+    this.adminConfigFault = { mode: "fail", delayMs: 0 };
   }
-  async adminDelayConfigPatch(_ms: number): Promise<void> {
-    return todo("adminDelayConfigPatch");
+
+  async adminDelayConfigPatch(ms: number): Promise<void> {
+    await this.adminEnsureConfigRoute();
+    this.adminConfigFault = { mode: "delay", delayMs: ms };
   }
+
   async adminClearConfigPatchFault(): Promise<void> {
-    return todo("adminClearConfigPatchFault");
+    this.adminConfigFault = { mode: "none", delayMs: 0 };
   }
-  async adminDelayConfigFetch(_ms: number): Promise<void> {
-    return todo("adminDelayConfigFetch");
+
+  async adminDelayConfigFetch(ms: number): Promise<void> {
+    await this.adminEnsureConfigRoute();
+    this.adminConfigFault = { mode: "delay", delayMs: ms };
   }
+
   async adminFailConfigFetch(): Promise<void> {
-    return todo("adminFailConfigFetch");
+    await this.adminEnsureConfigRoute();
+    this.adminConfigFault = { mode: "fail", delayMs: 0 };
   }
+
   async adminClearConfigFetchFault(): Promise<void> {
-    return todo("adminClearConfigFetchFault");
+    this.adminConfigFault = { mode: "none", delayMs: 0 };
   }
+
+  private async adminEnsureEmailDisableRoute(): Promise<void> {
+    if (this.adminEmailDisableRouteInstalled) return;
+    this.adminEmailDisableRouteInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/configurations/disable-email-feature"),
+      async (route) => {
+        if (this.adminEmailDisableFault === "fail") {
+          this.adminEmailDisableSeen += 1;
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        const response = await route.fetch();
+        this.adminEmailDisableSeen += 1;
+        await route.fulfill({ response });
+      }
+    );
+  }
+
   async adminStartEmailDisableSpy(): Promise<void> {
-    return todo("adminStartEmailDisableSpy");
+    await this.adminEnsureEmailDisableRoute();
+    this.adminEmailDisableSeen = 0;
+    this.adminEmailDisableFault = "none";
   }
+
   async adminEmailDisableCount(): Promise<number> {
-    return todo("adminEmailDisableCount");
+    return this.adminEmailDisableSeen;
   }
+
   async adminFailEmailDisable(): Promise<void> {
-    return todo("adminFailEmailDisable");
+    await this.adminEnsureEmailDisableRoute();
+    this.adminEmailDisableFault = "fail";
   }
+
   async adminClearEmailDisableFault(): Promise<void> {
-    return todo("adminClearEmailDisableFault");
+    this.adminEmailDisableFault = "none";
   }
+
+  /**
+   * The modal itself, distinguished from the shared toast host: flow
+   * toasts also carry role="dialog", so scope through the modal's step
+   * node instead of matching the first dialog on the page.
+   */
+  private adminTestEmailDialog(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByTestId("admin-test-email-step") });
+  }
+
   async adminTestEmailOpen(): Promise<void> {
-    return todo("adminTestEmailOpen");
+    await this.page.getByTestId("admin-email-test-email").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.adminTestEmailDialog().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminTestEmailFacts(): Promise<AdminTestEmailFacts> {
-    return todo("adminTestEmailFacts");
+    const dialog = this.adminTestEmailDialog();
+    if (!(await this.isShown(dialog))) {
+      return { open: false, step: "compose", receiver: "", heading: "", bodyText: "", sendLabel: null, dismissLabel: "" };
+    }
+    const heading = (await dialog.getByRole("heading").first().innerText()).trim();
+    const stepNode = dialog.getByTestId("admin-test-email-step");
+    const step = ((await stepNode.getAttribute("data-step")) ?? "compose") as AdminTestEmailStep;
+    const receiver = dialog.getByTestId("admin-test-email-receiver");
+    const body = dialog.getByTestId("admin-test-email-body");
+    const send = dialog.getByTestId("admin-test-email-send");
+    const dismiss = dialog.getByTestId("admin-test-email-dismiss");
+    return {
+      open: true,
+      step,
+      receiver: (await receiver.count()) === 0 ? "" : await receiver.inputValue(),
+      heading,
+      bodyText: (await body.count()) === 0 ? "" : (await body.first().innerText()).trim(),
+      sendLabel: (await send.count()) === 0 ? null : (await send.innerText()).trim(),
+      dismissLabel: (await dismiss.count()) === 0 ? "" : (await dismiss.innerText()).trim(),
+    };
   }
-  async adminTestEmailFillReceiver(_email: string): Promise<void> {
-    return todo("adminTestEmailFillReceiver");
+
+  async adminTestEmailFillReceiver(email: string): Promise<void> {
+    await this.adminTestEmailDialog().getByTestId("admin-test-email-receiver").fill(email);
   }
+
   async adminTestEmailSend(): Promise<void> {
-    return todo("adminTestEmailSend");
+    await this.adminTestEmailDialog().getByTestId("admin-test-email-send").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminTestEmailClose(): Promise<void> {
-    return todo("adminTestEmailClose");
+    await this.adminTestEmailDialog().getByTestId("admin-test-email-dismiss").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.adminTestEmailDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
+  private async adminEnsureEmailCheckRoute(): Promise<void> {
+    if (this.adminEmailCheckRouteInstalled) return;
+    this.adminEmailCheckRouteInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/email-credentials-check"),
+      async (route) => {
+        const response = await route.fetch();
+        this.adminEmailCheckBodiesSeen.push(this.adminPostData(route));
+        await route.fulfill({ response });
+      }
+    );
+  }
+
   async adminStartEmailCheckSpy(): Promise<void> {
-    return todo("adminStartEmailCheckSpy");
+    await this.adminEnsureEmailCheckRoute();
+    this.adminEmailCheckBodiesSeen = [];
   }
+
   async adminEmailCheckBodies(): Promise<unknown[]> {
-    return todo("adminEmailCheckBodies");
+    return [...this.adminEmailCheckBodiesSeen];
   }
   // --- Admin authentication landing + provider sub-pages (NEWFRONT-443, ADM-023..036). ---
+  // --- Read from apps/web_new's own auth components: the landing cards in
+  // --- their registry order, the per-provider shell + credential form over
+  // --- the shared configurations map, and the copy fields whose help
+  // --- target derives from the live credential draft.
+
+  /** Landing method cards, in DOM order, keyed off their own testids. */
+  private adminAuthCardLocator(name: string): Locator {
+    return this.page
+      .locator('[data-testid^="admin-auth-card-"]')
+      .filter({ has: this.page.locator(`[id="admin-auth-name-${WebNewDriver.adminAuthCardKey(name)}"]`) });
+  }
+
+  /** Card key for a registry display name (the card testid suffix). */
+  private static adminAuthCardKey(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  }
+
   async adminAuthLandingFacts(): Promise<AdminAuthLandingFacts> {
-    return todo("adminAuthLandingFacts");
+    const landing = this.page.getByTestId("admin-auth-landing");
+    const skeleton = this.page.getByTestId("admin-auth-skeleton");
+    const signup = this.page.getByTestId("admin-auth-signup");
+    const skeletonVisible = await this.isShown(skeleton);
+    const signupVisible = await this.isShown(signup);
+    const loaded = signupVisible && (await this.isShown(this.page.locator("main, #root")));
+    const cards: AdminAuthMethodCard[] = [];
+    if (loaded) {
+      const cardNodes = landing.locator('[data-testid^="admin-auth-card-"]');
+      for (let index = 0; index < (await cardNodes.count()); index += 1) {
+        const card = cardNodes.nth(index);
+        const toggle = card.getByTestId(/^admin-auth-toggle-/);
+        const link = card.locator('a[data-testid^="admin-auth-link-"]');
+        const hasToggle = (await toggle.count()) > 0;
+        const hasLink = (await link.count()) > 0;
+        const control: AdminAuthMethodControl = hasToggle
+          ? hasLink
+            ? "edit-toggle"
+            : "toggle"
+          : "configure";
+        cards.push({
+          name: (await card.locator('[id^="admin-auth-name-"]').innerText()).trim(),
+          description: (
+            await card.locator('[id^="admin-auth-name-"]').locator("xpath=following-sibling::span[1]").innerText()
+          ).trim(),
+          hasIcon: (await card.locator("img, svg").count()) > 0,
+          control,
+          toggleOn: hasToggle ? (await toggle.getAttribute("aria-checked")) === "true" : null,
+          toggleDisabled: hasToggle ? await toggle.first().isDisabled() : false,
+          linkHref: hasLink ? await link.first().getAttribute("href") : null,
+        });
+      }
+    }
+    return {
+      loaded,
+      skeletonVisible,
+      skeletonBars: skeletonVisible ? await skeleton.locator(":scope > *").count() : 0,
+      signupOn: signupVisible ? (await signup.getAttribute("aria-checked")) === "true" : false,
+      signupDisabled: signupVisible ? await signup.isDisabled() : false,
+      cards,
+    };
   }
-  async adminAuthSetSignup(_on: boolean): Promise<void> {
-    return todo("adminAuthSetSignup");
+
+  async adminAuthSetSignup(on: boolean): Promise<void> {
+    const toggle = this.page.getByTestId("admin-auth-signup");
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async adminAuthSetMethodEnabled(_name: string, _on: boolean): Promise<void> {
-    return todo("adminAuthSetMethodEnabled");
+
+  async adminAuthSetMethodEnabled(name: string, on: boolean): Promise<void> {
+    const toggle = this.adminAuthCardLocator(name).locator('[data-testid^="admin-auth-toggle-"]');
+    if ((await toggle.count()) === 0) {
+      throw new Error(`[parity] auth method ${JSON.stringify(name)} shows no toggle.`);
+    }
+    await toggle.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.first().getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
-  async adminAuthMethodIconSrc(_name: string): Promise<string | null> {
-    return todo("adminAuthMethodIconSrc");
+
+  async adminAuthMethodIconSrc(name: string): Promise<string | null> {
+    const image = this.adminAuthCardLocator(name).locator("img");
+    if ((await image.count()) === 0) return null;
+    return image.first().getAttribute("src");
   }
+
   async adminAuthProviderFacts(): Promise<AdminAuthProviderFacts> {
-    return todo("adminAuthProviderFacts");
+    const skeleton = this.page.getByTestId("admin-auth-provider-skeleton");
+    const form = this.page.getByTestId("admin-auth-provider-form");
+    const toggle = this.page.getByTestId("admin-auth-provider-toggle");
+    const skeletonVisible = await this.isShown(skeleton);
+    return {
+      name: (await this.page.getByTestId("admin-auth-provider-name").innerText()).trim(),
+      description: (await this.page.getByTestId("admin-auth-provider-description").innerText()).trim(),
+      hasIcon: (await this.page.getByTestId("admin-auth-provider-card").locator("img, svg").count()) > 0,
+      toggleOn: (await toggle.getAttribute("aria-checked")) === "true",
+      toggleDisabled: await toggle.isDisabled(),
+      formVisible: await this.isShown(form),
+      skeletonVisible,
+      skeletonBars: skeletonVisible ? await skeleton.locator(":scope > *").count() : 0,
+      title: await this.page.title(),
+    };
   }
-  async adminAuthProviderSetEnabled(_on: boolean): Promise<void> {
-    return todo("adminAuthProviderSetEnabled");
+
+  async adminAuthProviderSetEnabled(on: boolean): Promise<void> {
+    const toggle = this.page.getByTestId("admin-auth-provider-toggle");
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminAuthFormFacts(): Promise<AdminAuthFormFacts> {
-    return todo("adminAuthFormFacts");
+    const form = this.page.getByTestId("admin-auth-provider-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const values: Record<string, string> = {};
+    const placeholders: Record<string, string> = {};
+    const types: Record<string, string> = {};
+    const inputs = form.locator('input[id^="GIT"], input[id="GOOGLE_CLIENT_ID"], input[id="GOOGLE_CLIENT_SECRET"]');
+    for (let index = 0; index < (await inputs.count()); index += 1) {
+      const input = inputs.nth(index);
+      const id = (await input.getAttribute("id")) ?? "";
+      if (id === "") continue;
+      values[id] = await input.inputValue();
+      placeholders[id] = (await input.getAttribute("placeholder")) ?? "";
+      types[id] = (await input.getAttribute("type")) ?? "text";
+    }
+    const sync = this.page.getByTestId("admin-auth-provider-sync");
+    const syncLabelId = (await sync.getAttribute("aria-labelledby")) ?? "";
+    const save = this.page.getByTestId("admin-auth-provider-save");
+    return {
+      values,
+      placeholders,
+      types,
+      syncLabel: syncLabelId === "" ? "" : (await this.page.locator(`[id="${syncLabelId}"]`).innerText()).trim(),
+      syncOn: (await sync.getAttribute("aria-checked")) === "true",
+      saveDisabled: await save.isDisabled(),
+      saveLabel: (await save.innerText()).trim(),
+      backHref: await this.adminMaybeAttribute("admin-auth-provider-back", "href"),
+    };
   }
-  async adminAuthFormFill(_values: Record<string, string>): Promise<void> {
-    return todo("adminAuthFormFill");
+
+  async adminAuthFormFill(values: Record<string, string>): Promise<void> {
+    const form = this.page.getByTestId("admin-auth-provider-form");
+    for (const [id, value] of Object.entries(values)) {
+      const field = form.locator(`input[id="${id}"]`);
+      if ((await field.count()) === 0) {
+        throw new Error(`[parity] provider form has no field ${JSON.stringify(id)}.`);
+      }
+      await field.first().fill(value);
+    }
   }
-  async adminAuthFormSetSync(_on: boolean): Promise<void> {
-    return todo("adminAuthFormSetSync");
+
+  async adminAuthFormSetSync(on: boolean): Promise<void> {
+    const sync = this.page.getByTestId("admin-auth-provider-sync");
+    await sync.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await sync.getAttribute("aria-checked")) === "true") !== on) {
+      await sync.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminAuthFormSave(): Promise<void> {
-    return todo("adminAuthFormSave");
+    await this.page.getByTestId("admin-auth-provider-save").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminAuthFormBack(): Promise<void> {
-    return todo("adminAuthFormBack");
+    await this.page.getByTestId("admin-auth-provider-back").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private adminAuthDiscardDialog(): Locator {
+    // Toasts also carry the dialog role; scope to the discard modal.
+    return this.page.getByRole("dialog").filter({ has: this.page.getByTestId("admin-auth-discard-leave") });
+  }
+
   async adminAuthDiscardFacts(): Promise<AdminAuthDiscardFacts> {
-    return todo("adminAuthDiscardFacts");
+    const dialog = this.adminAuthDiscardDialog();
+    if (!(await this.isShown(dialog))) {
+      return { open: false, title: "", body: "", keepLabel: "", backLabel: "", backHref: null };
+    }
+    const leave = dialog.getByTestId("admin-auth-discard-leave");
+    return {
+      open: true,
+      title: (await dialog.getByRole("heading").first().innerText()).trim(),
+      body: (
+        await dialog
+          .locator("p")
+          .first()
+          .innerText()
+          .catch(() => "")
+      ).trim(),
+      keepLabel: (await dialog.getByTestId("admin-auth-discard-keep").innerText()).trim(),
+      backLabel: (await leave.innerText()).trim(),
+      backHref: await leave.getAttribute("href"),
+    };
   }
+
   async adminAuthDiscardKeep(): Promise<void> {
-    return todo("adminAuthDiscardKeep");
+    await this.adminAuthDiscardDialog().getByTestId("admin-auth-discard-keep").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.adminAuthDiscardDialog().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminAuthDiscardLeave(): Promise<void> {
-    return todo("adminAuthDiscardLeave");
+    await this.adminAuthDiscardDialog().getByTestId("admin-auth-discard-leave").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminAuthCopyFacts(): Promise<AdminAuthCopyFact[]> {
-    return todo("adminAuthCopyFacts");
+    const fields = this.page.locator('[data-testid^="admin-auth-copy-"]');
+    const facts: AdminAuthCopyFact[] = [];
+    for (let index = 0; index < (await fields.count()); index += 1) {
+      const field = fields.nth(index);
+      if (!(await field.isVisible().catch(() => false))) continue;
+      facts.push({
+        label: (await field.locator("xpath=..").locator("p").first().innerText()).trim(),
+        url: (await field.locator("span").first().innerText()).trim(),
+      });
+    }
+    return facts;
   }
-  async adminAuthCopyField(_label: string): Promise<void> {
-    return todo("adminAuthCopyField");
+
+  private adminAuthCopyFieldLocator(label: string): Locator {
+    return this.page.getByTestId(`admin-auth-copy-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`);
   }
-  async adminAuthCopyHelpHref(_label: string): Promise<string | null> {
-    return todo("adminAuthCopyHelpHref");
+
+  async adminAuthCopyField(label: string): Promise<void> {
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    const field = this.adminAuthCopyFieldLocator(label);
+    await field.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await field.click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  async adminAuthCopyHelpHref(label: string): Promise<string | null> {
+    const link = this.adminAuthCopyFieldLocator(label).locator("xpath=..").getByRole("link");
+    if ((await link.count()) === 0) return null;
+    return link.first().getAttribute("href");
+  }
+
   async adminAuthReadClipboard(): Promise<string> {
-    return todo("adminAuthReadClipboard");
+    await this.page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    return this.page.evaluate(() => navigator.clipboard.readText());
   }
-  // --- Admin workspaces + AI + image oracle (NEWFRONT-444, ADM-037..050). ---
+  // --- Admin workspaces (NEWFRONT-444, ADM-037..045). ---
+  // --- Read from web_new's workspace page: the restriction switch over
+  // --- the paginated instance-workspace list, and the create form whose
+  // --- slug probe runs before the POST.
+
+  private adminWorkspaceFetchUrlsSeen: string[] = [];
+  private adminWorkspaceFetchFault: { mode: "none" | "fail" | "delay" | "empty"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminWorkspaceFetchRouteInstalled = false;
+  private adminSlugCheckRouteInstalled = false;
+  private adminSlugCheckSeen: string[] = [];
+  private adminSlugCheckFault = "none";
+  private adminWorkspaceCreateRouteInstalled = false;
+  private adminWorkspaceCreateSeen: unknown[] = [];
+  private adminWorkspaceCreateFault: { mode: "none" | "fail" | "delay"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+
+  private async adminEnsureWorkspacesFetchRoute(): Promise<void> {
+    if (this.adminWorkspaceFetchRouteInstalled) return;
+    this.adminWorkspaceFetchRouteInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/workspaces"),
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        this.adminWorkspaceFetchUrlsSeen.push(route.request().url());
+        const fault = this.adminWorkspaceFetchFault;
+        if (fault.mode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        if (fault.mode === "empty") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              grouped_by: null,
+              sub_grouped_by: null,
+              total_count: 0,
+              next_cursor: "",
+              prev_cursor: "",
+              next_page_results: false,
+              prev_page_results: false,
+              count: 0,
+              total_results: 0,
+              results: [],
+            }),
+          });
+          return;
+        }
+        if (fault.mode === "delay") {
+          await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+        }
+        await route.continue();
+      }
+    );
+  }
+
+  private adminWorkspaceToggle(): Locator {
+    // The row's heading labels the section by id as well as the switch, so
+    // a label lookup matches both; the control itself is the switch.
+    return this.page.getByRole("switch", { name: "Restrict workspace creation", exact: true });
+  }
+
   async adminWorkspaceListFacts(): Promise<AdminWorkspaceListFacts> {
-    return todo("adminWorkspaceListFacts");
+    const toggle = this.adminWorkspaceToggle();
+    const toggleVisible = await this.isShown(toggle);
+    const toggleSkeleton = this.page.getByTestId("admin-workspace-toggle-skeleton");
+    const listSkeleton = this.page.getByTestId("admin-workspace-list-skeleton");
+    const countNode = this.page.getByTestId("admin-workspace-count");
+    const listSkeletonVisible = await this.isShown(listSkeleton);
+    const loadMore = this.page.getByTestId("admin-workspace-load-more");
+    return {
+      toggleVisible,
+      toggleOn: toggleVisible ? (await toggle.getAttribute("aria-checked")) === "true" : false,
+      toggleDisabled: toggleVisible ? await toggle.isDisabled() : false,
+      toggleSkeletonVisible: await this.isShown(toggleSkeleton),
+      count: (await this.isShown(countNode)) ? Number.parseInt((await countNode.innerText()).trim(), 10) : null,
+      countSpinnerVisible: await this.isShown(this.page.getByTestId("admin-workspace-count-spinner")),
+      listSkeletonVisible,
+      listSkeletonRows: listSkeletonVisible ? await listSkeleton.locator(":scope > *").count() : 0,
+      helperVisible: await this.isShown(this.page.getByTestId("admin-workspace-helper")),
+      createHref: await this.page.getByTestId("admin-workspace-create").getAttribute("href"),
+      loadMoreVisible: await this.isShown(loadMore),
+      loadMoreDisabled: await this.isShown(loadMore) ? await loadMore.isDisabled() : true,
+      loadMoreLabel: (await this.isShown(loadMore)) ? (await loadMore.innerText()).trim() : null,
+    };
   }
+
   async adminWorkspaceRows(): Promise<AdminWorkspaceRow[]> {
-    return todo("adminWorkspaceRows");
+    const rows = this.page.getByTestId("admin-workspace-row");
+    const facts: AdminWorkspaceRow[] = [];
+    for (let index = 0; index < (await rows.count()); index += 1) {
+      const row = rows.nth(index);
+      if (!(await row.isVisible().catch(() => false))) continue;
+      const owner = row.getByTestId("admin-workspace-row-owner");
+      const counts = row.getByTestId("admin-workspace-row-counts");
+      const logo = row.getByTestId("admin-workspace-row-logo");
+      const letter = row.getByTestId("admin-workspace-row-letter");
+      const countsText = (await counts.count()) === 0 ? null : (await counts.innerText()).trim();
+      const projects = countsText === null ? null : /(\d+)\s+projects?/.exec(countsText);
+      const members = countsText === null ? null : /(\d+)\s+members?/.exec(countsText);
+      const ownerText = (await owner.count()) === 0 ? null : (await owner.innerText()).trim();
+      facts.push({
+        name: (await row.getByTestId("admin-workspace-row-name").innerText()).trim(),
+        slug: (await row.getByTestId("admin-workspace-row-slug").innerText()).trim(),
+        href: await row.getAttribute("href"),
+        target: await row.getAttribute("target"),
+        rel: await row.getAttribute("rel"),
+        ownerEmail: ownerText === null ? null : ownerText.replace(/^Owner\s+/, ""),
+        totalProjects: projects === null ? null : Number.parseInt(projects[1] ?? "", 10),
+        totalMembers: members === null ? null : Number.parseInt(members[1] ?? "", 10),
+        logoImageVisible: (await logo.count()) > 0,
+        logoLetter: (await letter.count()) === 0 ? null : (await letter.innerText()).trim(),
+        exposesMutation: (await row.locator("button").count()) > 0,
+      });
+    }
+    return facts;
   }
-  async adminWorkspaceSetCreationRestricted(_on: boolean): Promise<void> {
-    return todo("adminWorkspaceSetCreationRestricted");
+
+  async adminWorkspaceSetCreationRestricted(on: boolean): Promise<void> {
+    const toggle = this.adminWorkspaceToggle();
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminWorkspaceLoadMore(): Promise<void> {
-    return todo("adminWorkspaceLoadMore");
+    const more = this.page.getByTestId("admin-workspace-load-more");
+    await more.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await more.click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminStartWorkspacesFetchSpy(): Promise<void> {
-    return todo("adminStartWorkspacesFetchSpy");
+    await this.adminEnsureWorkspacesFetchRoute();
+    this.adminWorkspaceFetchUrlsSeen = [];
+    this.adminWorkspaceFetchFault = { mode: "none", delayMs: 0 };
   }
+
   async adminWorkspacesFetchUrls(): Promise<string[]> {
-    return todo("adminWorkspacesFetchUrls");
+    return [...this.adminWorkspaceFetchUrlsSeen];
   }
-  async adminDelayWorkspacesFetch(_ms: number): Promise<void> {
-    return todo("adminDelayWorkspacesFetch");
+
+  async adminDelayWorkspacesFetch(ms: number): Promise<void> {
+    await this.adminEnsureWorkspacesFetchRoute();
+    this.adminWorkspaceFetchFault = { mode: "delay", delayMs: ms };
   }
+
   async adminFailWorkspacesFetch(): Promise<void> {
-    return todo("adminFailWorkspacesFetch");
+    await this.adminEnsureWorkspacesFetchRoute();
+    this.adminWorkspaceFetchFault = { mode: "fail", delayMs: 0 };
   }
+
   async adminStubEmptyWorkspaces(): Promise<void> {
-    return todo("adminStubEmptyWorkspaces");
+    await this.adminEnsureWorkspacesFetchRoute();
+    this.adminWorkspaceFetchFault = { mode: "empty", delayMs: 0 };
   }
+
   async adminClearWorkspacesFetchFault(): Promise<void> {
-    return todo("adminClearWorkspacesFetchFault");
+    this.adminWorkspaceFetchFault = { mode: "none", delayMs: 0 };
   }
+
+  private async adminEnsureSlugCheckRoute(): Promise<void> {
+    if (this.adminSlugCheckRouteInstalled) return;
+    this.adminSlugCheckRouteInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/workspace-slug-check"),
+      async (route) => {
+        this.adminSlugCheckSeen.push(route.request().url());
+        if (this.adminSlugCheckFault === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminWorkspaceCreateFacts(): Promise<AdminWorkspaceCreateFacts> {
-    return todo("adminWorkspaceCreateFacts");
+    const form = this.page.getByTestId("admin-workspace-create-form");
+    await form.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const name = this.page.getByTestId("admin-workspace-create-name");
+    const slug = this.page.getByTestId("admin-workspace-create-slug");
+    const size = this.page.getByTestId("admin-workspace-create-org-size");
+    const submit = this.page.getByTestId("admin-workspace-create-submit");
+    const nameError = this.page.locator("#workspace-create-name-error");
+    const slugError = this.page.locator("#workspace-create-slug-error");
+    const sizeError = this.page.locator("#workspace-create-org-size-error");
+    const shownText = async (locator: Locator): Promise<string | null> =>
+      (await this.isShown(locator)) ? (await locator.innerText()).trim() : null;
+    const selected = await size.inputValue();
+    return {
+      name: await name.inputValue(),
+      slug: await slug.inputValue(),
+      slugPrefix: (await this.page.getByTestId("admin-workspace-create-slug-prefix").innerText()).trim(),
+      orgSize: selected === "" ? null : selected,
+      submitDisabled: await submit.isDisabled(),
+      submitLabel: (await submit.innerText()).trim(),
+      nameError: await shownText(nameError),
+      slugError: await shownText(slugError),
+      slugTakenVisible: await this.isShown(this.page.getByTestId("admin-workspace-create-slug-taken")),
+      invalidSlugVisible: await this.isShown(this.page.getByTestId("admin-workspace-create-slug-invalid")),
+      orgSizeError: await shownText(sizeError),
+      backHref: await this.page.getByTestId("admin-workspace-create-back").getAttribute("href"),
+    };
   }
-  async adminWorkspaceCreateFillName(_name: string): Promise<void> {
-    return todo("adminWorkspaceCreateFillName");
+
+  async adminWorkspaceCreateFillName(name: string): Promise<void> {
+    await this.page.getByTestId("admin-workspace-create-name").fill(name);
   }
-  async adminWorkspaceCreateFillSlug(_slug: string): Promise<void> {
-    return todo("adminWorkspaceCreateFillSlug");
+
+  async adminWorkspaceCreateFillSlug(slug: string): Promise<void> {
+    await this.page.getByTestId("admin-workspace-create-slug").fill(slug);
   }
-  async adminWorkspaceCreateSelectOrgSize(_size: string): Promise<void> {
-    return todo("adminWorkspaceCreateSelectOrgSize");
+
+  async adminWorkspaceCreateSelectOrgSize(size: string): Promise<void> {
+    await this.page.getByTestId("admin-workspace-create-org-size").selectOption({ label: size });
   }
+
   async adminWorkspaceCreateSubmit(): Promise<void> {
-    return todo("adminWorkspaceCreateSubmit");
+    await this.page.getByTestId("admin-workspace-create-submit").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminStartSlugCheckSpy(): Promise<void> {
-    return todo("adminStartSlugCheckSpy");
+    await this.adminEnsureSlugCheckRoute();
+    this.adminSlugCheckSeen = [];
+    this.adminSlugCheckFault = "none";
   }
+
   async adminSlugCheckSlugs(): Promise<string[]> {
-    return todo("adminSlugCheckSlugs");
+    return this.adminSlugCheckSeen.map((url) => new URL(url).searchParams.get("slug") ?? "");
   }
+
   async adminFailSlugCheck(): Promise<void> {
-    return todo("adminFailSlugCheck");
+    await this.adminEnsureSlugCheckRoute();
+    this.adminSlugCheckFault = "fail";
   }
+
   async adminClearSlugCheckFault(): Promise<void> {
-    return todo("adminClearSlugCheckFault");
+    this.adminSlugCheckFault = "none";
   }
+
+  private async adminEnsureWorkspaceCreateRoute(): Promise<void> {
+    if (this.adminWorkspaceCreateRouteInstalled) return;
+    this.adminWorkspaceCreateRouteInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/workspaces"),
+      async (route) => {
+        if (route.request().method() !== "POST") {
+          await route.continue();
+          return;
+        }
+        this.adminWorkspaceCreateSeen.push(this.adminPostData(route));
+        const fault = this.adminWorkspaceCreateFault;
+        if (fault.mode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        if (fault.mode === "delay") {
+          await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminStartWorkspaceCreateSpy(): Promise<void> {
-    return todo("adminStartWorkspaceCreateSpy");
+    await this.adminEnsureWorkspaceCreateRoute();
+    this.adminWorkspaceCreateSeen = [];
+    this.adminWorkspaceCreateFault = { mode: "none", delayMs: 0 };
   }
+
   async adminWorkspaceCreateBodies(): Promise<unknown[]> {
-    return todo("adminWorkspaceCreateBodies");
+    return [...this.adminWorkspaceCreateSeen];
   }
+
   async adminFailWorkspaceCreate(): Promise<void> {
-    return todo("adminFailWorkspaceCreate");
+    await this.adminEnsureWorkspaceCreateRoute();
+    this.adminWorkspaceCreateFault = { mode: "fail", delayMs: 0 };
   }
-  async adminDelayWorkspaceCreate(_ms: number): Promise<void> {
-    return todo("adminDelayWorkspaceCreate");
+
+  async adminDelayWorkspaceCreate(ms: number): Promise<void> {
+    await this.adminEnsureWorkspaceCreateRoute();
+    this.adminWorkspaceCreateFault = { mode: "delay", delayMs: ms };
   }
+
   async adminClearWorkspaceCreateFault(): Promise<void> {
-    return todo("adminClearWorkspaceCreateFault");
+    this.adminWorkspaceCreateFault = { mode: "none", delayMs: 0 };
   }
+  // --- Admin AI + image (NEWFRONT-444, ADM-046..050; image absence is the
+  // --- main#523 target: no route, page, sidebar entry, key field, or
+  // --- skeleton anywhere; /god-mode/image/ falls through to not-found).
+
   async adminAiFacts(): Promise<AdminAiFacts> {
-    return todo("adminAiFacts");
+    const skeleton = this.page.getByTestId("admin-ai-skeleton");
+    const form = this.page.getByTestId("admin-ai-form");
+    const model = this.page.locator("#LLM_MODEL");
+    const key = this.page.locator("#LLM_API_KEY");
+    const save = this.page.getByTestId("admin-ai-save");
+    const callout = this.page.getByTestId("admin-ai-callout");
+    const skeletonVisible = await this.isShown(skeleton);
+    return {
+      formVisible: await this.isShown(form),
+      model: (await model.count()) === 0 ? "" : await model.inputValue(),
+      keyFilled: (await key.count()) === 0 ? false : (await key.inputValue()) !== "",
+      keyShown: (await key.count()) === 0 ? false : (await key.getAttribute("type")) === "text",
+      saveLabel: (await save.count()) === 0 ? "" : (await save.innerText()).trim(),
+      saveDisabled: (await save.count()) === 0 ? true : await save.isDisabled(),
+      // The helper links and callout belong to the loaded form; while the
+      // skeleton stands they are absent, and a bare getAttribute would
+      // wait for them and stall the facts read.
+      modelHelpHref: await this.adminMaybeAttribute("admin-ai-model-help", "href"),
+      keyHelpHref: await this.adminMaybeAttribute("admin-ai-key-help", "href"),
+      calloutVisible: await this.isShown(callout),
+      calloutHref: await this.adminMaybeAttribute("admin-ai-callout-link", "href"),
+      skeletonVisible,
+      skeletonBlocks: skeletonVisible ? await skeleton.locator(":scope > *").count() : 0,
+    };
   }
-  async adminAiFill(_model: string, _key: string): Promise<void> {
-    return todo("adminAiFill");
+
+  async adminAiFill(model: string, key: string): Promise<void> {
+    await this.page.locator("#LLM_MODEL").fill(model);
+    await this.page.locator("#LLM_API_KEY").fill(key);
   }
+
   async adminAiToggleKeyVisibility(): Promise<void> {
-    return todo("adminAiToggleKeyVisibility");
+    await this.page.getByTestId("admin-ai-key-toggle").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminAiSave(): Promise<void> {
-    return todo("adminAiSave");
+    await this.page.getByTestId("admin-ai-save").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminImageFacts(): Promise<AdminImageFacts> {
-    return todo("adminImageFacts");
+    const sidebarEntry = this.page.locator('[data-testid="admin-nav-image"]');
+    const title = /Third-party image libraries|Image/i;
+    const heading = this.page.getByRole("heading", { name: title });
+    return {
+      sidebarEntryVisible: await this.isShown(sidebarEntry),
+      sidebarHref: (await sidebarEntry.count()) === 0 ? null : await sidebarEntry.getAttribute("href"),
+      pageTitle: (await this.isShown(heading)) ? (await heading.first().innerText()).trim() : null,
+      keyFieldVisible: await this.isShown(this.page.locator('input[id*="UNSPLASH" i]')),
+      saveVisible: await this.isShown(this.page.getByRole("button", { name: /Save/i })),
+      skeletonVisible: await this.isShown(this.page.getByTestId("admin-image-skeleton")),
+    };
   }
 
   // --- Admin loop jobs + runners (NEWFRONT-445, ADM-051..061 + ADM-080). ---
+  // --- Read from web_new's loop pages: the jobs table with its inline
+  // --- enable switch, the create/edit modal over the jobs endpoint, and
+  // --- the detail page with stat tiles, the skip-reason filter, the
+  // --- targets table, and an immediate delete. Fixtures ride the shared
+  // --- /api/instances/loop/jobs/ routes.
+
+  private adminLoopJobsFault: { mode: "none" | "fail" | "delay" | "empty"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminLoopJobsRouteInstalled = false;
+  private adminLoopJobRouteInstalled = false;
+  private adminLoopJobFault: { mode: "none" | "fail" | "delay"; delayMs: number } = { mode: "none", delayMs: 0 };
+  private adminLoopTargetsRouteInstalled = false;
+  private adminLoopTargetsUrlsSeen: string[] = [];
+  private adminLoopJobsUrlsSeen: string[] = [];
+  private adminLoopJobUrlsSeen: string[] = [];
+  private adminLoopCreateSeen: unknown[] = [];
+  private adminLoopCreateRouteInstalled = false;
+  private adminLoopCreateFault: { mode: "none" | "fail"; delayMs: number } = { mode: "none", delayMs: 0 };
+  private adminLoopUpdateSeen: unknown[] = [];
+  private adminLoopUpdateRouteInstalled = false;
+  private adminLoopUpdateFault: { mode: "none" | "fail" | "delay"; delayMs: number } = {
+    mode: "none",
+    delayMs: 0,
+  };
+  private adminLoopDeleteSeen = 0;
+  private adminLoopDeleteRouteInstalled = false;
+  private adminLoopDeleteFault: { mode: "none" | "fail"; delayMs: number } = { mode: "none", delayMs: 0 };
+
+  /** Path segments of /api/instances/loop/jobs or a job (optionally its targets). */
+  private static adminLoopPath(url: URL): string[] | null {
+    const match = /^\/api\/instances\/loop\/jobs(?:\/([^/]+))?(?:\/(targets))?\/?$/.exec(url.pathname);
+    if (match === null) return null;
+    return [match[1] ?? "", match[2] ?? ""];
+  }
+
+  private async adminEnsureLoopJobsRoute(): Promise<void> {
+    if (this.adminLoopJobsRouteInstalled) return;
+    this.adminLoopJobsRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        const parts = WebNewDriver.adminLoopPath(url);
+        return parts !== null && parts[0] === "" && parts[1] === "";
+      },
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        this.adminLoopJobsUrlsSeen.push(route.request().url());
+        const fault = this.adminLoopJobsFault;
+        if (fault.mode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        if (fault.mode === "empty") {
+          await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+          return;
+        }
+        if (fault.mode === "delay") {
+          // Hold until the budget elapses or the spec lifts the fault: a
+          // cold route compile can outlast a short window.
+          const deadline = Date.now() + fault.delayMs;
+          while (Date.now() < deadline && this.adminLoopJobsFault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminLoopListFacts(): Promise<AdminLoopListFacts> {
-    return todo("adminLoopListFacts");
+    const skeleton = this.page.getByTestId("loop-jobs-skeleton");
+    const table = this.page.getByTestId("loop-jobs-table");
+    const empty = this.page.getByTestId("loop-jobs-empty");
+    const skeletonVisible = await this.isShown(skeleton);
+    const tableVisible = await this.isShown(table);
+    const emptyVisible = await this.isShown(empty);
+    const headers: string[] = [];
+    if (tableVisible) {
+      const nodes = table.locator("thead th");
+      for (let index = 0; index < (await nodes.count()); index += 1) {
+        headers.push((await nodes.nth(index).innerText()).trim());
+      }
+    }
+    let skeletonHeights: string[] = [];
+    if (skeletonVisible) {
+      skeletonHeights = await skeleton.locator(":scope > *").evaluateAll((nodes) =>
+        nodes.map((node) => `${Math.round(node.getBoundingClientRect().height)}px`)
+      );
+    }
+    return {
+      titleVisible: await this.isShown(this.page.getByRole("heading", { name: "Loop jobs", exact: true })),
+      descriptionVisible: await this.isShown(
+        this.page.getByText("Automatic jobs that run on a schedule across workspaces.")
+      ),
+      createVisible: await this.isShown(this.page.getByTestId("loop-jobs-create")),
+      skeletonVisible,
+      skeletonRows: skeletonVisible ? await skeleton.locator(":scope > *").count() : 0,
+      skeletonHeights,
+      emptyVisible,
+      emptyText: emptyVisible ? (await empty.innerText()).trim() : null,
+      tableVisible,
+      headers,
+    };
   }
+
+  private async adminLoopRowLocator(slug: string): Promise<Locator> {
+    // Row-relative: a `has` filter is re-rooted at each candidate row, so
+    // its inner locator must be a plain descendant selector (a testid
+    // chain would look for the whole table inside the row).
+    return this.page.getByTestId("loop-jobs-table").locator("tbody tr").filter({ hasText: slug });
+  }
+
   async adminLoopRows(): Promise<AdminLoopRow[]> {
-    return todo("adminLoopRows");
+    const table = this.page.getByTestId("loop-jobs-table");
+    const rows: AdminLoopRow[] = [];
+    if (!(await this.isShown(table))) return rows;
+    const bodies = table.locator("tbody tr");
+    for (let index = 0; index < (await bodies.count()); index += 1) {
+      const row = bodies.nth(index);
+      const cells = row.locator("td");
+      const link = cells.nth(0).locator("a");
+      if ((await link.count()) === 0) continue;
+      const toggle = row.getByRole("switch");
+      rows.push({
+        name: (await link.innerText()).trim(),
+        href: await link.getAttribute("href"),
+        slug: (await cells.nth(1).innerText()).trim(),
+        rrule: (await cells.nth(2).innerText()).trim(),
+        minRoleLabel: (await cells.nth(3).innerText()).trim(),
+        builtin: (await cells.nth(4).innerText()).trim() === "Yes",
+        enabled: (await toggle.getAttribute("aria-checked")) === "true",
+      });
+    }
+    return rows;
   }
-  async adminLoopSetEnabled(_slug: string, _on: boolean): Promise<void> {
-    return todo("adminLoopSetEnabled");
+
+  async adminLoopSetEnabled(slug: string, on: boolean): Promise<void> {
+    const toggle = (await this.adminLoopRowLocator(slug)).getByRole("switch");
+    await toggle.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (((await toggle.first().getAttribute("aria-checked")) === "true") !== on) {
+      await toggle.first().click({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async adminLoopOpenCreate(): Promise<void> {
-    return todo("adminLoopOpenCreate");
+    await this.page.getByTestId("loop-jobs-create").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminLoopModalFacts(): Promise<AdminLoopModalFacts> {
-    return todo("adminLoopModalFacts");
+    // Painted in one browser task so a save that closes the dialog
+    // mid-read reads as closed instead of stalling on a vanished input.
+    const read = async (): Promise<Omit<AdminLoopModalFacts, "cancelVisible"> | null> => {
+      const dialog = this.page.getByRole("dialog").filter({ has: this.page.getByTestId("loop-job-modal-form") });
+      if ((await dialog.count()) === 0) return null;
+      const snapshot = await dialog
+        .first()
+        .evaluate((root) => {
+          if (!(root instanceof HTMLElement)) return null;
+          const box = root.getBoundingClientRect();
+          const style = window.getComputedStyle(root);
+          if (box.width === 0 || box.height === 0 || style.visibility === "hidden") return null;
+          const value = (testId: string): string => {
+            const node = root.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+            return (node as HTMLInputElement | null)?.value ?? node?.textContent ?? "";
+          };
+          const slug = root.querySelector<HTMLInputElement>('[data-testid="loop-job-modal-slug"]');
+          const save = root.querySelector<HTMLButtonElement>('[data-testid="loop-job-modal-save"]');
+          const body = root.querySelector<HTMLElement>('[data-testid="loop-job-modal-body"]');
+          return {
+            heading: root.querySelector("h2, h3")?.textContent?.trim() ?? "",
+            slug: value("loop-job-modal-slug"),
+            name: value("loop-job-modal-name"),
+            publicName: value("loop-job-modal-public-name"),
+            publicDescription: value("loop-job-modal-public-description"),
+            prompt: value("loop-job-modal-prompt"),
+            minRole: value("loop-job-modal-min-role"),
+            tzid: value("loop-job-modal-tzid"),
+            rrule: value("loop-job-modal-rrule"),
+            slugDisabled: slug?.disabled ?? false,
+            saveDisabled: save?.disabled ?? true,
+            bodyScrollable: body === null ? false : body.scrollHeight > body.clientHeight,
+            bodyMaxHeight: (() => {
+              if (body === null) return null;
+              const max = window.getComputedStyle(body).maxHeight;
+              return max === "" || max === "none" ? null : max;
+            })(),
+          };
+        })
+        .catch(() => null);
+      if (snapshot === null) return null;
+      return {
+        open: true,
+        title: snapshot.heading,
+        fields: {
+          slug: snapshot.slug,
+          name: snapshot.name,
+          publicName: snapshot.publicName,
+          publicDescription: snapshot.publicDescription,
+          prompt: snapshot.prompt,
+          minRole: snapshot.minRole === "" ? null : Number.parseInt(snapshot.minRole, 10),
+          tzid: snapshot.tzid,
+          rrule: snapshot.rrule,
+        },
+        slugDisabled: snapshot.slugDisabled,
+        saveDisabled: snapshot.saveDisabled,
+        bodyScrollable: snapshot.bodyScrollable,
+        bodyMaxHeight: snapshot.bodyMaxHeight,
+      };
+    };
+    const facts = await read();
+    if (facts === null) {
+      return {
+        open: false,
+        title: null,
+        fields: {
+          slug: "",
+          name: "",
+          publicName: "",
+          publicDescription: "",
+          prompt: "",
+          minRole: null,
+          tzid: "",
+          rrule: "",
+        },
+        slugDisabled: false,
+        saveDisabled: true,
+        cancelVisible: false,
+        bodyScrollable: false,
+        bodyMaxHeight: null,
+      };
+    }
+    const dialog = this.page.getByRole("dialog").filter({ has: this.page.getByTestId("loop-job-modal-form") });
+    return { ...facts, cancelVisible: await this.isShown(dialog.getByTestId("loop-job-modal-cancel")) };
   }
-  async adminLoopModalFill(_fields: Partial<AdminLoopModalFields>): Promise<void> {
-    return todo("adminLoopModalFill");
+
+  async adminLoopModalFill(fields: Partial<AdminLoopModalFields>): Promise<void> {
+    const dialog = this.page.getByRole("dialog").filter({ has: this.page.getByTestId("loop-job-modal-form") });
+    const mapping: Array<[keyof AdminLoopModalFields, string]> = [
+      ["slug", "loop-job-modal-slug"],
+      ["name", "loop-job-modal-name"],
+      ["publicName", "loop-job-modal-public-name"],
+      ["publicDescription", "loop-job-modal-public-description"],
+      ["prompt", "loop-job-modal-prompt"],
+      ["tzid", "loop-job-modal-tzid"],
+      ["rrule", "loop-job-modal-rrule"],
+    ];
+    for (const [key, testId] of mapping) {
+      const value = fields[key];
+      if (value === undefined) continue;
+      await dialog.getByTestId(testId).fill(String(value));
+    }
+    if (fields.minRole !== undefined && fields.minRole !== null) {
+      await dialog.getByTestId("loop-job-modal-min-role").selectOption({ value: String(fields.minRole) });
+    }
   }
+
   async adminLoopModalSave(): Promise<void> {
-    return todo("adminLoopModalSave");
+    await this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByTestId("loop-job-modal-form") })
+      .getByTestId("loop-job-modal-save")
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminLoopModalCancel(): Promise<void> {
-    return todo("adminLoopModalCancel");
+    const dialog = this.page.getByRole("dialog").filter({ has: this.page.getByTestId("loop-job-modal-form") });
+    await dialog.getByTestId("loop-job-modal-cancel").click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminLoopDetailFacts(): Promise<AdminLoopDetailFacts> {
-    return todo("adminLoopDetailFacts");
+    const skeleton = this.page.getByTestId("loop-job-detail-skeleton");
+    const skeletonVisible = await this.isShown(skeleton);
+    const title = this.page.getByTestId("loop-job-detail-title");
+    const description = this.page.getByTestId("loop-job-detail-description");
+    const edit = this.page.getByTestId("loop-job-detail-edit");
+    const remove = this.page.getByTestId("loop-job-detail-delete");
+    const filter = this.page.getByTestId("loop-job-detail-skip-filter");
+    const table = this.page.getByTestId("loop-job-detail-targets");
+    const empty = this.page.getByTestId("loop-job-detail-targets-empty");
+    const headers: string[] = [];
+    if (await this.isShown(table)) {
+      const nodes = table.locator("thead th");
+      for (let index = 0; index < (await nodes.count()); index += 1) {
+        headers.push((await nodes.nth(index).innerText()).trim());
+      }
+    }
+    let skeletonHeights: string[] = [];
+    if (skeletonVisible) {
+      skeletonHeights = await skeleton.locator(":scope > *").evaluateAll((nodes) =>
+        nodes.map((node) => `${Math.round(node.getBoundingClientRect().height)}px`)
+      );
+    }
+    let stats: AdminLoopStats | null = null;
+    if (await this.isShown(this.page.getByTestId("loop-job-detail-stats"))) {
+      const read = async (testId: string): Promise<number> => {
+        const node = this.page.getByTestId(testId).locator("div").first();
+        return Number.parseInt((await node.innerText()).trim(), 10);
+      };
+      stats = {
+        targets: await read("loop-job-detail-stat-targets"),
+        completed: await read("loop-job-detail-stat-completed"),
+        failed: await read("loop-job-detail-stat-failed"),
+        skipped: await read("loop-job-detail-stat-skipped"),
+      };
+    }
+    const emptyVisible = await this.isShown(empty);
+    let skipOptions: string[] = [];
+    let skipSelected = "";
+    if (await this.isShown(filter)) {
+      skipOptions = await filter.locator("option").evaluateAll((nodes) =>
+        nodes.map((node) => (node as HTMLOptionElement).value)
+      );
+      skipSelected = await filter.inputValue();
+    }
+    return {
+      title: (await this.isShown(title)) ? (await title.innerText()).trim() : null,
+      description: (await this.isShown(description)) ? (await description.innerText()).trim() : null,
+      skeletonVisible,
+      skeletonHeights,
+      editVisible: await this.isShown(edit),
+      deleteVisible: await this.isShown(remove),
+      skipOptions,
+      skipSelected,
+      stats,
+      targetsTableVisible: await this.isShown(table),
+      targetsHeaders: headers,
+      targetsEmptyVisible: emptyVisible,
+      targetsEmptyText: emptyVisible ? (await empty.innerText()).trim() : null,
+    };
   }
+
   async adminLoopDetailRows(): Promise<AdminLoopTargetRow[]> {
-    return todo("adminLoopDetailRows");
+    const table = this.page.getByTestId("loop-job-detail-targets");
+    const rows: AdminLoopTargetRow[] = [];
+    if (!(await this.isShown(table))) return rows;
+    const bodies = table.locator("tbody tr");
+    for (let index = 0; index < (await bodies.count()); index += 1) {
+      const row = bodies.nth(index);
+      const cells = row.locator("td");
+      if ((await row.getByTestId("loop-job-detail-targets-empty").count()) > 0) continue;
+      if ((await cells.count()) < 6) continue;
+      const text = async (cell: number): Promise<string> => (await cells.nth(cell).innerText()).trim();
+      rows.push({
+        workspace: await text(0),
+        user: await text(1),
+        nextRun: await text(2),
+        lastRun: await text(3),
+        tokens: await text(4),
+        lastSkip: await text(5),
+      });
+    }
+    return rows;
   }
-  async adminLoopSetSkipFilter(_reason: string): Promise<void> {
-    return todo("adminLoopSetSkipFilter");
+
+  async adminLoopSetSkipFilter(reason: string): Promise<void> {
+    await this.page.getByTestId("loop-job-detail-skip-filter").selectOption({ value: reason });
   }
+
   async adminLoopOpenEdit(): Promise<void> {
-    return todo("adminLoopOpenEdit");
+    await this.page.getByTestId("loop-job-detail-edit").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminLoopDelete(): Promise<void> {
-    return todo("adminLoopDelete");
+    await this.page.getByTestId("loop-job-detail-delete").click({ timeout: WebNewDriver.WAIT_MS });
   }
+
+  private async adminEnsureLoopJobRoute(): Promise<void> {
+    if (this.adminLoopJobRouteInstalled) return;
+    this.adminLoopJobRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        const parts = WebNewDriver.adminLoopPath(url);
+        return parts !== null && parts[0] !== "" && parts[1] === "";
+      },
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        const fault = this.adminLoopJobFault;
+        if (fault.mode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        if (fault.mode === "delay") {
+          const deadline = Date.now() + fault.delayMs;
+          while (Date.now() < deadline && this.adminLoopJobFault.mode === "delay") {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        this.adminLoopJobUrlsSeen.push(route.request().url());
+        await route.continue();
+      }
+    );
+  }
+
+  private async adminEnsureLoopTargetsRoute(): Promise<void> {
+    if (this.adminLoopTargetsRouteInstalled) return;
+    this.adminLoopTargetsRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        const parts = WebNewDriver.adminLoopPath(url);
+        return parts !== null && parts[0] !== "" && parts[1] === "targets";
+      },
+      async (route) => {
+        this.adminLoopTargetsUrlsSeen.push(route.request().url());
+        await route.continue();
+      }
+    );
+  }
+
   async adminStartLoopJobsSpy(): Promise<void> {
-    return todo("adminStartLoopJobsSpy");
+    await this.adminEnsureLoopJobsRoute();
+    this.adminLoopJobsUrlsSeen = [];
+    this.adminLoopJobsFault = { mode: "none", delayMs: 0 };
   }
+
   async adminLoopJobsUrls(): Promise<string[]> {
-    return todo("adminLoopJobsUrls");
+    return [...this.adminLoopJobsUrlsSeen];
   }
-  async adminDelayLoopJobsFetch(_ms: number): Promise<void> {
-    return todo("adminDelayLoopJobsFetch");
+
+  async adminDelayLoopJobsFetch(ms: number): Promise<void> {
+    await this.adminEnsureLoopJobsRoute();
+    this.adminLoopJobsFault = { mode: "delay", delayMs: ms };
   }
+
   async adminFailLoopJobsFetch(): Promise<void> {
-    return todo("adminFailLoopJobsFetch");
+    await this.adminEnsureLoopJobsRoute();
+    this.adminLoopJobsFault = { mode: "fail", delayMs: 0 };
   }
+
   async adminStubEmptyLoopJobs(): Promise<void> {
-    return todo("adminStubEmptyLoopJobs");
+    await this.adminEnsureLoopJobsRoute();
+    this.adminLoopJobsFault = { mode: "empty", delayMs: 0 };
   }
+
   async adminClearLoopJobsFetchFault(): Promise<void> {
-    return todo("adminClearLoopJobsFetchFault");
+    this.adminLoopJobsFault = { mode: "none", delayMs: 0 };
   }
+
   async adminStartLoopJobSpy(): Promise<void> {
-    return todo("adminStartLoopJobSpy");
+    await this.adminEnsureLoopJobRoute();
+    this.adminLoopJobUrlsSeen = [];
+    this.adminLoopJobFault = { mode: "none", delayMs: 0 };
   }
+
   async adminLoopJobUrls(): Promise<string[]> {
-    return todo("adminLoopJobUrls");
+    return [...this.adminLoopJobUrlsSeen];
   }
-  async adminDelayLoopJobFetch(_ms: number): Promise<void> {
-    return todo("adminDelayLoopJobFetch");
+
+  async adminDelayLoopJobFetch(ms: number): Promise<void> {
+    await this.adminEnsureLoopJobRoute();
+    this.adminLoopJobFault = { mode: "delay", delayMs: ms };
   }
+
   async adminFailLoopJobFetch(): Promise<void> {
-    return todo("adminFailLoopJobFetch");
+    await this.adminEnsureLoopJobRoute();
+    this.adminLoopJobFault = { mode: "fail", delayMs: 0 };
   }
+
   async adminClearLoopJobFetchFault(): Promise<void> {
-    return todo("adminClearLoopJobFetchFault");
+    this.adminLoopJobFault = { mode: "none", delayMs: 0 };
   }
+
   async adminStartLoopTargetsSpy(): Promise<void> {
-    return todo("adminStartLoopTargetsSpy");
+    await this.adminEnsureLoopTargetsRoute();
+    this.adminLoopTargetsUrlsSeen = [];
   }
+
   async adminLoopTargetsUrls(): Promise<string[]> {
-    return todo("adminLoopTargetsUrls");
+    return [...this.adminLoopTargetsUrlsSeen];
   }
+
+  private async adminEnsureLoopCreateRoute(): Promise<void> {
+    if (this.adminLoopCreateRouteInstalled) return;
+    this.adminLoopCreateRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        const parts = WebNewDriver.adminLoopPath(url);
+        return parts !== null && parts[0] === "" && parts[1] === "";
+      },
+      async (route) => {
+        if (route.request().method() !== "POST") {
+          await route.continue();
+          return;
+        }
+        this.adminLoopCreateSeen.push(this.adminPostData(route));
+        if (this.adminLoopCreateFault.mode === "fail") {
+          await route.fulfill({
+            status: 400,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminStartLoopJobCreateSpy(): Promise<void> {
-    return todo("adminStartLoopJobCreateSpy");
+    await this.adminEnsureLoopCreateRoute();
+    this.adminLoopCreateSeen = [];
+    this.adminLoopCreateFault = { mode: "none", delayMs: 0 };
   }
+
   async adminLoopJobCreateBodies(): Promise<unknown[]> {
-    return todo("adminLoopJobCreateBodies");
+    return [...this.adminLoopCreateSeen];
   }
+
   async adminFailLoopJobCreate(): Promise<void> {
-    return todo("adminFailLoopJobCreate");
+    await this.adminEnsureLoopCreateRoute();
+    this.adminLoopCreateFault = { mode: "fail", delayMs: 0 };
   }
+
   async adminClearLoopJobCreateFault(): Promise<void> {
-    return todo("adminClearLoopJobCreateFault");
+    this.adminLoopCreateFault = { mode: "none", delayMs: 0 };
   }
+
+  private async adminEnsureLoopUpdateRoute(): Promise<void> {
+    if (this.adminLoopUpdateRouteInstalled) return;
+    this.adminLoopUpdateRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        const parts = WebNewDriver.adminLoopPath(url);
+        return parts !== null && parts[0] !== "" && parts[1] === "";
+      },
+      async (route) => {
+        if (route.request().method() !== "PATCH") {
+          await route.continue();
+          return;
+        }
+        this.adminLoopUpdateSeen.push(this.adminPostData(route));
+        const fault = this.adminLoopUpdateFault;
+        if (fault.mode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        if (fault.mode === "delay") {
+          await new Promise((resolve) => setTimeout(resolve, fault.delayMs));
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminStartLoopJobUpdateSpy(): Promise<void> {
-    return todo("adminStartLoopJobUpdateSpy");
+    await this.adminEnsureLoopUpdateRoute();
+    this.adminLoopUpdateSeen = [];
+    this.adminLoopUpdateFault = { mode: "none", delayMs: 0 };
   }
+
   async adminLoopJobUpdateBodies(): Promise<unknown[]> {
-    return todo("adminLoopJobUpdateBodies");
+    return [...this.adminLoopUpdateSeen];
   }
+
   async adminFailLoopJobUpdate(): Promise<void> {
-    return todo("adminFailLoopJobUpdate");
+    await this.adminEnsureLoopUpdateRoute();
+    this.adminLoopUpdateFault = { mode: "fail", delayMs: 0 };
   }
-  async adminDelayLoopJobUpdate(_ms: number): Promise<void> {
-    return todo("adminDelayLoopJobUpdate");
+
+  async adminDelayLoopJobUpdate(ms: number): Promise<void> {
+    await this.adminEnsureLoopUpdateRoute();
+    this.adminLoopUpdateFault = { mode: "delay", delayMs: ms };
   }
+
   async adminClearLoopJobUpdateFault(): Promise<void> {
-    return todo("adminClearLoopJobUpdateFault");
+    this.adminLoopUpdateFault = { mode: "none", delayMs: 0 };
   }
+
+  private async adminEnsureLoopDeleteRoute(): Promise<void> {
+    if (this.adminLoopDeleteRouteInstalled) return;
+    this.adminLoopDeleteRouteInstalled = true;
+    await this.page.route(
+      (url) => {
+        const parts = WebNewDriver.adminLoopPath(url);
+        return parts !== null && parts[0] !== "" && parts[1] === "";
+      },
+      async (route) => {
+        if (route.request().method() !== "DELETE") {
+          await route.continue();
+          return;
+        }
+        this.adminLoopDeleteSeen += 1;
+        if (this.adminLoopDeleteFault.mode === "fail") {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "parity-probe-failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminStartLoopJobDeleteSpy(): Promise<void> {
-    return todo("adminStartLoopJobDeleteSpy");
+    await this.adminEnsureLoopDeleteRoute();
+    this.adminLoopDeleteSeen = 0;
+    this.adminLoopDeleteFault = { mode: "none", delayMs: 0 };
   }
+
   async adminLoopJobDeleteCount(): Promise<number> {
-    return todo("adminLoopJobDeleteCount");
+    return this.adminLoopDeleteSeen;
   }
+
   async adminFailLoopJobDelete(): Promise<void> {
-    return todo("adminFailLoopJobDelete");
+    await this.adminEnsureLoopDeleteRoute();
+    this.adminLoopDeleteFault = { mode: "fail", delayMs: 0 };
   }
+
   async adminClearLoopJobDeleteFault(): Promise<void> {
-    return todo("adminClearLoopJobDeleteFault");
+    this.adminLoopDeleteFault = { mode: "none", delayMs: 0 };
   }
+
+  async adminRunnersPageFacts(): Promise<AdminRunnersPageFacts> {
+    const root = this.page.getByTestId("runners-page");
+    const shown = await this.isShown(root);
+    const retry = this.page.getByTestId("runners-error").getByRole("button", { name: "Retry", exact: true });
+    return {
+      pageVisible: shown,
+      title: shown ? (await this.page.getByTestId("runners-title").innerText()).trim() : "",
+      tableVisible: await this.isShown(this.page.getByTestId("runners-table")),
+      errorVisible: await this.isShown(this.page.getByTestId("runners-error")),
+      retryVisible: await this.isShown(retry),
+    };
+  }
+
   async adminRunnersFacts(): Promise<AdminRunnersFacts> {
-    return todo("adminRunnersFacts");
+    const entry = this.page.locator('[data-testid="admin-nav-runners"]');
+    return {
+      sidebarEntryVisible: await this.isShown(entry),
+      sidebarHref: (await entry.count()) === 0 ? null : await entry.getAttribute("href"),
+    };
   }
-  // --- Admin dashboard shell + negatives (NEWFRONT-446, ADM-062..073). ---
+
+  // --- Admin dashboard shell (NEWFRONT-446, ADM-062..073). ---
+  // --- Read from web_new's shell components: the fixed settings rail with
+  // --- its collapse mechanics, the account menu over the session, the
+  // --- breadcrumb trail, the help footer, and the absence rows.
+
+  private adminSidebar() {
+    return this.page.getByTestId("admin-sidebar");
+  }
+
+  private adminFooter() {
+    return this.page.getByTestId("admin-help-footer");
+  }
+
   async adminSidebarFacts(): Promise<AdminSidebarFacts> {
-    return todo("adminSidebarFacts");
+    const links = this.adminSidebar().locator('a[data-testid^="admin-nav-"]');
+    const entries: AdminSidebarEntry[] = [];
+    for (let index = 0; index < (await links.count()); index += 1) {
+      const link = links.nth(index);
+      const lines = (await link.innerText())
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "");
+      entries.push({
+        name: lines[0] ?? "",
+        description: lines.slice(1).join(" "),
+        href: (await link.getAttribute("href")) ?? "",
+        active: (await link.getAttribute("aria-current")) === "page",
+      });
+    }
+    // Collapsed, every entry renders its icon alone, so a blank first
+    // entry reads the rail state without touching storage.
+    const collapsed = entries.length > 0 && entries[0]?.name === "";
+    const persistedRaw = await this.page.evaluate(() =>
+      window.localStorage.getItem("god_mode_sidebar_collapsed")
+    );
+    return {
+      entries,
+      collapsed,
+      persistedCollapsed: persistedRaw === null ? null : persistedRaw === "true",
+      x: (await this.adminSidebar().boundingBox())?.x ?? null,
+    };
   }
-  async adminSidebarFollowEntry(_name: string): Promise<void> {
-    return todo("adminSidebarFollowEntry");
+
+  async adminSidebarFollowEntry(name: string): Promise<void> {
+    const link = this.adminSidebar().locator('a[data-testid^="admin-nav-"]').filter({ hasText: name });
+    await link.first().click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      const facts = await this.adminSidebarFacts();
+      if (facts.entries.some((entry) => entry.name === name && entry.active)) return;
+      if (Date.now() >= deadline) {
+        throw new Error(`[parity] sidebar entry ${JSON.stringify(name)} never activated.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
-  async adminSidebarEntryTooltip(_href: string, _name: string): Promise<string | null> {
-    return todo("adminSidebarEntryTooltip");
+
+  /** Whether a visible tooltip renders `text`; a short poll covers the open animation. */
+  private async adminTooltipText(text: string): Promise<string | null> {
+    const deadline = Date.now() + 3_000;
+    for (;;) {
+      const tip = this.page.getByRole("tooltip").filter({ hasText: text });
+      if ((await tip.count()) > 0 && (await tip.first().isVisible().catch(() => false))) {
+        return (await tip.first().innerText()).trim() || null;
+      }
+      if (Date.now() >= deadline) return null;
+      await this.page.waitForTimeout(100);
+    }
   }
-  async adminFooterTooltip(_control: AdminFooterControl, _label: string): Promise<string | null> {
-    return todo("adminFooterTooltip");
+
+  async adminSidebarEntryTooltip(href: string, name: string): Promise<string | null> {
+    const link = this.adminSidebar().locator(`a[href="${href}"]`).first();
+    await link.hover({ timeout: WebNewDriver.WAIT_MS });
+    return this.adminTooltipText(name);
   }
+
+  async adminFooterTooltip(control: AdminFooterControl, label: string): Promise<string | null> {
+    const footer = this.adminFooter();
+    const target =
+      control === "redirect"
+        ? footer.getByTestId("admin-help-redirect")
+        : footer.getByTestId(control === "help" ? "admin-help-trigger" : "admin-sidebar-toggle");
+    await target.hover({ timeout: WebNewDriver.WAIT_MS });
+    return this.adminTooltipText(label);
+  }
+
   async adminSidebarToggleCollapse(): Promise<void> {
-    return todo("adminSidebarToggleCollapse");
+    const before = (await this.adminSidebarFacts()).collapsed;
+    await this.page
+      .getByTestId("admin-sidebar-toggle")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.adminSidebarFacts()).collapsed !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] sidebar collapse toggle never flipped.");
+      await this.page.waitForTimeout(250);
+    }
   }
+
   async adminSidebarOutsideClick(): Promise<void> {
-    return todo("adminSidebarOutsideClick");
+    const box = await this.page.getByTestId("admin-main").boundingBox();
+    if (!box) throw new Error("[parity] dashboard main has no box to click outside into.");
+    await this.page.mouse.click(box.x + box.width - 40, box.y + 30);
   }
+
   async adminAccountFacts(): Promise<AdminAccountFacts> {
-    return todo("adminAccountFacts");
+    const label = this.page.getByTestId("admin-account-label");
+    const trigger = this.page.getByTestId("admin-account-trigger");
+    const menu = this.page.getByRole("menu");
+    const menuOpen = await this.isShown(menu);
+    const email = this.page.getByTestId("admin-account-email");
+    const theme = menu.getByRole("menuitem").filter({ hasText: /^Switch to (light|dark) mode$/ });
+    const signOut = menu.getByTestId("admin-sign-out");
+    const form = menu.getByTestId("admin-sign-out-form");
+    const token = form.locator('input[name="csrfmiddlewaretoken"]');
+    return {
+      labelVisible: await this.isShown(label),
+      avatarVisible: await this.isShown(trigger),
+      menuOpen,
+      email: menuOpen && (await this.isShown(email)) ? (await email.innerText()).trim() : null,
+      themeItemLabel: menuOpen && (await theme.count()) > 0 ? (await theme.first().innerText()).trim() : null,
+      signOutVisible: menuOpen && (await this.isShown(signOut)),
+      signOutAction: menuOpen && (await form.count()) > 0 ? await form.first().getAttribute("action") : null,
+      csrfTokenPresent: (await token.count()) > 0 && ((await token.first().getAttribute("value")) ?? "") !== "",
+    };
   }
+
   async adminAccountOpen(): Promise<void> {
-    return todo("adminAccountOpen");
+    const menu = this.page.getByRole("menu");
+    if (await this.isShown(menu)) return;
+    const trigger = this.page.getByTestId("admin-account-trigger");
+    await trigger.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await menu.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminBreadcrumbFacts(): Promise<AdminBreadcrumbFacts> {
-    return todo("adminBreadcrumbFacts");
+    const items = this.page.getByTestId("admin-breadcrumbs").locator("li");
+    const crumbs: AdminBreadcrumbItem[] = [];
+    for (let index = 0; index < (await items.count()); index += 1) {
+      const item = items.nth(index);
+      const link = item.locator("a");
+      crumbs.push({
+        label: (await link.first().innerText()).trim(),
+        href: (await link.count()) === 0 ? null : await link.first().getAttribute("href"),
+      });
+    }
+    return { items: crumbs };
   }
-  async adminBreadcrumbTooltip(_label: string): Promise<string | null> {
-    return todo("adminBreadcrumbTooltip");
+
+  async adminBreadcrumbTooltip(label: string): Promise<string | null> {
+    const crumb = this.page.getByTestId("admin-breadcrumbs").locator("li", { hasText: label }).first();
+    await crumb.locator("a").first().hover({ timeout: WebNewDriver.WAIT_MS });
+    return this.adminTooltipText(label);
   }
+
+  /**
+   * The help panel: the kit popover portals it to the document body, so it
+   * is neither inside the footer nor identifiable by testid. Its one
+   * stable marker is the bug-report link every panel carries; other
+   * dialogs (toasts) and the page's own outbound links cannot match.
+   */
+  private adminHelpPanel(): Locator {
+    return this.page.getByRole("dialog").filter({ has: this.page.getByRole("link", { name: "Report a bug" }) });
+  }
+
   async adminHelpFacts(): Promise<AdminHelpFacts> {
-    return todo("adminHelpFacts");
+    const footer = this.adminFooter();
+    const redirect = footer.getByTestId("admin-help-redirect");
+    const links = this.adminHelpPanel().locator('a[target="_blank"]');
+    const open = (await links.count()) > 0 && (await links.first().isVisible().catch(() => false));
+    const out: AdminHelpLink[] = [];
+    if (open) {
+      for (let index = 0; index < (await links.count()); index += 1) {
+        const link = links.nth(index);
+        out.push({
+          name: (await link.innerText()).trim(),
+          href: await link.getAttribute("href"),
+          target: await link.getAttribute("target"),
+        });
+      }
+    }
+    const version = this.adminHelpPanel().getByTestId("admin-help-version");
+    return {
+      redirectHref: (await redirect.count()) === 0 ? null : await redirect.getAttribute("href"),
+      popoverOpen: open,
+      links: out,
+      versionText: !open || (await version.count()) === 0 ? null : (await version.first().innerText()).trim(),
+    };
   }
+
   async adminHelpOpen(): Promise<void> {
-    return todo("adminHelpOpen");
+    const footer = this.adminFooter();
+    const trigger = footer.getByTestId("admin-help-trigger");
+    const panel = this.adminHelpPanel();
+    // The trigger toggles, so a second open must not close a live panel.
+    if ((await panel.count()) > 0 && (await this.isShown(panel))) return;
+    await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    await panel.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async adminHamburgerFacts(): Promise<AdminHamburgerFacts> {
-    return todo("adminHamburgerFacts");
+    return { visible: await this.isShown(this.page.getByTestId("admin-hamburger")) };
   }
+
   async adminHamburgerToggle(): Promise<void> {
-    return todo("adminHamburgerToggle");
+    const before = (await this.adminSidebarFacts()).collapsed;
+    await this.page.getByTestId("admin-hamburger").click({ timeout: WebNewDriver.WAIT_MS });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await this.adminSidebarFacts()).collapsed !== before) return;
+      if (Date.now() >= deadline) throw new Error("[parity] hamburger toggle never flipped the sidebar.");
+      await this.page.waitForTimeout(250);
+    }
   }
+
+  private adminShellConfigFetchSeen = 0;
+  private adminShellConfigSpyInstalled = false;
+
   async adminStartConfigFetchSpy(): Promise<void> {
-    return todo("adminStartConfigFetchSpy");
+    this.adminShellConfigFetchSeen = 0;
+    if (this.adminShellConfigSpyInstalled) return;
+    this.adminShellConfigSpyInstalled = true;
+    // A passive listener beside the PATCH route: only one route handler
+    // runs per request, so counting rides the side instead of racing.
+    this.page.on("request", (request) => {
+      try {
+        if (new URL(request.url()).pathname.replace(/\/+$/, "") === "/api/instances/configurations") {
+          this.adminShellConfigFetchSeen += 1;
+        }
+      } catch {
+        // Non-HTTP(S) URLs never match the spy path.
+      }
+    });
   }
+
   async adminConfigFetchCount(): Promise<number> {
-    return todo("adminConfigFetchCount");
+    return this.adminShellConfigFetchSeen;
   }
+
+  private adminTransportWsSeen = 0;
+  private adminTransportStreamsSeen = 0;
+  private adminTransportSpyInstalled = false;
+
   async adminStartTransportSpy(): Promise<void> {
-    return todo("adminStartTransportSpy");
+    this.adminTransportWsSeen = 0;
+    this.adminTransportStreamsSeen = 0;
+    if (this.adminTransportSpyInstalled) return;
+    this.adminTransportSpyInstalled = true;
+    this.page.on("websocket", () => {
+      this.adminTransportWsSeen += 1;
+    });
+    this.page.on("request", (request) => {
+      if ((request.headers()["accept"] ?? "").includes("text/event-stream")) {
+        this.adminTransportStreamsSeen += 1;
+      }
+    });
   }
+
   async adminTransportFacts(): Promise<AdminTransportFacts> {
-    return todo("adminTransportFacts");
+    return { websockets: this.adminTransportWsSeen, eventStreams: this.adminTransportStreamsSeen };
   }
+
   async adminAbsenceFacts(): Promise<AdminAbsenceFacts> {
-    return todo("adminAbsenceFacts");
+    // Word boundaries: a bare /import/ would also match "important".
+    const transfer = /\bimport\b|\bexport\b/i;
+    const desktop = /\bdesktop\b/i;
+    return {
+      draggable: await this.page.locator('[draggable="true"]').count(),
+      fileInputs: await this.page.locator('input[type="file"]').count(),
+      transferControls:
+        (await this.page.getByRole("button", { name: transfer }).count()) +
+        (await this.page.getByRole("link", { name: transfer }).count()),
+      desktopMentions:
+        (await this.page.getByRole("button", { name: desktop }).count()) +
+        (await this.page.getByRole("link", { name: desktop }).count()),
+    };
   }
-  async adminShortcutProbe(_keys: string[]): Promise<AdminShortcutProbeFacts> {
-    return todo("adminShortcutProbe");
+
+  async adminShortcutProbe(keys: string[]): Promise<AdminShortcutProbeFacts> {
+    const pathBefore = await this.adminCurrentPath();
+    const dialogsBefore = await this.page.getByRole("dialog").count();
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(150);
+    }
+    return {
+      pathBefore,
+      pathAfter: await this.adminCurrentPath(),
+      dialogsOpened: Math.max(0, (await this.page.getByRole("dialog").count()) - dialogsBefore),
+    };
   }
+
   async adminLoopDeleteWatchDialogs(): Promise<AdminDeleteWatchFacts> {
-    return todo("adminLoopDeleteWatchDialogs");
+    let nativeDialogs = 0;
+    const onDialog = async (dialog: import("@playwright/test").Dialog): Promise<void> => {
+      nativeDialogs += 1;
+      await dialog.dismiss();
+    };
+    this.page.on("dialog", onDialog);
+    try {
+      await this.page.getByTestId("loop-job-detail-delete").click({ timeout: WebNewDriver.WAIT_MS });
+      // A gating confirm would still be open here; toasts carry the
+      // dialog role too, so only a confirm with buttons counts.
+      const gated = this.page.getByRole("dialog").filter({ has: this.page.getByRole("button") });
+      const modalDialogs = await gated.count();
+      await this.page.waitForURL((url) => url.pathname === "/god-mode/loop/", { timeout: WebNewDriver.WAIT_MS });
+      return { nativeDialogs, modalDialogs };
+    } finally {
+      this.page.off("dialog", onDialog);
+    }
   }
+
   async adminWorkspaceDeleteFacts(): Promise<AdminWorkspaceDeleteFacts> {
-    return todo("adminWorkspaceDeleteFacts");
+    const pattern = /\bdelete\b|\bremove\b/i;
+    return {
+      deleteControls:
+        (await this.page.getByRole("button", { name: pattern }).count()) +
+        (await this.page.getByRole("link", { name: pattern }).count()),
+    };
   }
+
   // --- Admin cloud entry gate (NEWFRONT-446, ADM-074..079). ---
+  // web_new resolves entry from the 401/403/5xx admin check plus a
+  // one-shot session probe, so this counts both reads and injects the
+  // transient faults the retry rows pin. Everything reads the gate's
+  // own testids (admin-cloud-denied / admin-cloud-error / admin-loader)
+  // rather than copy.
+
+  private adminCloudCheckSeen = 0;
+  private adminCloudProbeSeen = 0;
+  private adminCloudCheckFault = { times: 0, status: 500 };
+  private adminCloudProbeFault = { times: 0, status: 500 };
+  private adminCloudCheckDelayMs = 0;
+  private adminCloudRoutesInstalled = false;
+
+  private async adminEnsureCloudGateRoutes(): Promise<void> {
+    if (this.adminCloudRoutesInstalled) return;
+    this.adminCloudRoutesInstalled = true;
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/instances/admins/me"),
+      async (route) => {
+        // The dev server calls the API cross-origin, so a CORS preflight
+        // reaches this route first; only the read itself is the check.
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        this.adminCloudCheckSeen += 1;
+        if (this.adminCloudCheckDelayMs > 0) {
+          const wait = this.adminCloudCheckDelayMs;
+          this.adminCloudCheckDelayMs = 0;
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+        if (this.adminCloudCheckFault.times > 0) {
+          this.adminCloudCheckFault.times -= 1;
+          await route.fulfill({
+            status: this.adminCloudCheckFault.status,
+            contentType: "application/json",
+            body: "{}",
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+    await this.page.route(
+      (url) => WebNewDriver.adminIsInstancePath(url, "/api/auth/me"),
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
+        this.adminCloudProbeSeen += 1;
+        if (this.adminCloudProbeFault.times > 0) {
+          this.adminCloudProbeFault.times -= 1;
+          await route.fulfill({
+            status: this.adminCloudProbeFault.status,
+            contentType: "application/json",
+            body: "{}",
+          });
+          return;
+        }
+        await route.continue();
+      }
+    );
+  }
+
   async adminCloudHomeFacts(): Promise<AdminCloudHomeFacts> {
-    return todo("adminCloudHomeFacts");
+    const denied = this.page.getByTestId("admin-cloud-denied");
+    const deniedShown = await this.isShown(denied);
+    const errorShown = !deniedShown && (await this.isShown(this.page.getByTestId("admin-cloud-error")));
+    const retry = this.page.getByRole("button", { name: "Try again", exact: true });
+    const backLink = denied.getByRole("link");
+    const rootHeading = this.page.locator("main h1").first();
+    const denorm = (value: string | null): string | null => {
+      const text = (value ?? "").replace(/\s+/g, " ").trim();
+      return text === "" ? null : text;
+    };
+    return {
+      branch: deniedShown ? "denied" : errorShown ? "error" : "spinner",
+      heading: await this.isShown(rootHeading) ? denorm(await rootHeading.innerText()) : null,
+      deniedHref:
+        !deniedShown || (await backLink.count()) === 0 ? null : await backLink.first().getAttribute("href"),
+      retryVisible: (await retry.count()) > 0 && (await retry.first().isVisible()),
+      passwordFields: await this.page.locator('input[type="password"]').count(),
+      setupFields: await this.page.getByLabel("First name").count(),
+    };
   }
-  async adminCloudWaitForHomeBranch(_branch: AdminCloudHomeBranch): Promise<void> {
-    return todo("adminCloudWaitForHomeBranch");
+
+  async adminCloudWaitForHomeBranch(branch: AdminCloudHomeBranch): Promise<void> {
+    const started = Date.now();
+    let last: AdminCloudHomeBranch = "spinner";
+    while (Date.now() - started < WebNewDriver.WAIT_MS) {
+      last = (await this.adminCloudHomeFacts()).branch;
+      if (last === branch) return;
+      await this.page.waitForTimeout(250);
+    }
+    throw new Error(`[parity] cloud gate never settled on "${branch}" (last "${last}").`);
   }
-  async adminCloudOpenRootWithCookies(_cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("adminCloudOpenRootWithCookies");
+
+  async adminCloudOpenRootWithCookies(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.page.context().clearCookies();
+    if (cookies.length > 0) await this.page.context().addCookies(cookies);
+    await this.adminOpenRoot();
   }
-  async adminCloudFailAdminCheck(_times: number, _status: number): Promise<void> {
-    return todo("adminCloudFailAdminCheck");
-  }
-  async adminCloudFailAuthProbe(_times: number, _status: number): Promise<void> {
-    return todo("adminCloudFailAuthProbe");
-  }
-  async adminCloudDelayAdminCheck(_ms: number): Promise<void> {
-    return todo("adminCloudDelayAdminCheck");
-  }
-  async adminCloudGateFetchCounts(): Promise<AdminCloudGateFetchCounts> {
-    return todo("adminCloudGateFetchCounts");
-  }
+
   async adminCloudStartGateFetchSpy(): Promise<void> {
-    return todo("adminCloudStartGateFetchSpy");
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudCheckSeen = 0;
+    this.adminCloudProbeSeen = 0;
   }
+
+  async adminCloudGateFetchCounts(): Promise<AdminCloudGateFetchCounts> {
+    return { adminCheck: this.adminCloudCheckSeen, probe: this.adminCloudProbeSeen };
+  }
+
+  async adminCloudFailAdminCheck(times: number, status: number): Promise<void> {
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudCheckFault = { times, status };
+  }
+
+  async adminCloudReleaseAdminCheckFault(): Promise<void> {
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudCheckFault = { times: 0, status: 500 };
+  }
+
+  async adminCloudFailAuthProbe(times: number, status: number): Promise<void> {
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudProbeFault = { times, status };
+  }
+
+  async adminCloudDelayAdminCheck(ms: number): Promise<void> {
+    await this.adminEnsureCloudGateRoutes();
+    this.adminCloudCheckDelayMs = ms;
+  }
+
   async adminCloudRetry(): Promise<void> {
-    return todo("adminCloudRetry");
+    await this.page
+      .getByTestId("admin-cloud-error")
+      .getByRole("button", { name: "Try again", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
   // --- Space navbar & chrome (NEWFRONT-448, SPC-010..019 + SPC-065). ---
   async spaceChromeNavbarIdentity(): Promise<SpaceChromeNavbarIdentity> {
