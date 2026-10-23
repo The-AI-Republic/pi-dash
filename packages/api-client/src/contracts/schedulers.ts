@@ -158,6 +158,12 @@ export const SchedulerBindingDetail = z.extend(SchedulerBinding, {
   run_count: z.number(),
   scheduler_source: z.enum(SCHEDULER_SOURCES),
   scheduler_is_enabled: z.boolean(),
+  /**
+   * The API's exhausted-series signal (main#559 target). Absent while the
+   * server does not report it, which is every build before that lands;
+   * the detail page only badges Completed when the field says true.
+   */
+  series_exhausted: z.optional(z.boolean()),
 });
 export type SchedulerBindingDetail = z.infer<typeof SchedulerBindingDetail>;
 

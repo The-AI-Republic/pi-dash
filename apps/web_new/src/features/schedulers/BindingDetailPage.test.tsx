@@ -353,6 +353,14 @@ describe("BindingDetailBody", () => {
     expect(await screen.findByText(/This scheduler install is not available/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Back to schedulers/ })).toBeInTheDocument();
   });
+
+  it("explains an unreadable run history as a possibly removed install with a way back", async () => {
+    setup({ runs: new Error("404") });
+    const history = await screen.findByRole("region", { name: "Run history" });
+    const alert = within(history).getByRole("alert");
+    expect(alert).toHaveTextContent("may have been removed");
+    expect(within(alert).getByRole("link", { name: /Back to schedulers/ })).toBeInTheDocument();
+  });
 });
 
 describe("BindingDetailPage", () => {

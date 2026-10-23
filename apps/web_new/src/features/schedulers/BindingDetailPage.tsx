@@ -292,6 +292,18 @@ export function BindingDetailBody({
                   </td>
                 </tr>
               ) : null}
+              {runs.isError ? (
+                <tr>
+                  <td colSpan={6} className="px-(--space-3) py-(--space-8)">
+                    <div role="alert" className="flex flex-col items-center gap-(--space-3)">
+                      <p className="text-body text-(--text-muted)">
+                        The run history could not be read. This scheduler install may have been removed.
+                      </p>
+                      <BackLink workspaceSlug={workspaceSlug} projectId={projectId} />
+                    </div>
+                  </td>
+                </tr>
+              ) : null}
               {runPage !== undefined && runPage.results.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="px-(--space-3) py-(--space-8) text-center text-(--text-muted)">
