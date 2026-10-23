@@ -555,6 +555,12 @@ pub struct IntakeIssueListQuery<'a> {
     pub issue_filters_sql: Option<&'a str>,
     /// Number of binds inside `issue_filters_sql`.
     pub issue_filter_binds: usize,
+    /// Extra JOINs the fragment's predicates need (states, assignees,
+    /// mentions, cycles, modules, subscribers); empty when the fragment
+    /// touches only the base tables. Spliced after the label JOINs, as
+    /// the count query does — without them Postgres rejects the
+    /// statement (`missing FROM-clause entry`).
+    pub joins: &'a str,
     /// Guest `created_by` narrowing (`base.py:204-214`, handlers-owned
     /// decision): `true` appends `AND created_by_id = $N`.
     pub guest_created_by: bool,
@@ -578,13 +584,18 @@ pub struct IntakeIssueListQuery<'a> {
 /// (Django's `FieldError` path); the handler answers the generic 500.
 pub fn intake_issue_list_sql(q: &IntakeIssueListQuery<'_>) -> Option<String> {
     let mut sql = format!(
-        r#"SELECT "{t}".*, {labels} AS "label_ids" FROM "{t}" LEFT OUTER JOIN "{i}" ON ("{t}"."issue_id" = "{i}"."id") LEFT OUTER JOIN "{lt}" ON ("{i}"."id" = "{lt}"."issue_id") LEFT OUTER JOIN "{l}" ON ("{lt}"."label_id" = "{l}"."id") WHERE ("{t}"."intake_id" = $1 AND "{t}"."project_id" = $2 AND "{t}"."deleted_at" IS NULL"#,
+        r#"SELECT "{t}".*, {labels} AS "label_ids" FROM "{t}" LEFT OUTER JOIN "{i}" ON ("{t}"."issue_id" = "{i}"."id") LEFT OUTER JOIN "{lt}" ON ("{i}"."id" = "{lt}"."issue_id") LEFT OUTER JOIN "{l}" ON ("{lt}"."label_id" = "{l}"."id")"#,
         t = intake_issue::TABLE,
         i = ISSUE_TABLE,
         lt = ISSUE_LABEL_TABLE,
         l = LABEL_TABLE,
         labels = label_ids_fragment(),
     );
+    sql.push_str(q.joins);
+    sql.push_str(&format!(
+        r#" WHERE ("{t}"."intake_id" = $1 AND "{t}"."project_id" = $2 AND "{t}"."deleted_at" IS NULL"#,
+        t = intake_issue::TABLE
+    ));
     let mut next_bind = 3;
     if let Some(fragment) = q.issue_filters_sql {
         sql.push_str(&format!(" AND ({fragment})"));
@@ -1023,6 +1034,7 @@ mod tests {
             statuses: parse_intake_status(None).expect("default parses"),
             issue_filters_sql: None,
             issue_filter_binds: 0,
+            joins: "",
             guest_created_by: false,
             limit: 50,
             offset: 0,
@@ -1245,6 +1257,23 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("OFFSET 50"), "{sql}");
+    }
+
+    #[test]
+    fn list_splices_filter_joins_after_label_joins() {
+        let q = IntakeIssueListQuery {
+            joins: " INNER JOIN \"issue_assignees\" ON (\"issue_assignees\".\"issue_id\" = \"issues\".\"id\")",
+            ..default_list_query()
+        };
+        let sql = intake_issue_list_sql(&q).expect("default order renders");
+        let labels = sql
+            .find("LEFT OUTER JOIN \"labels\"")
+            .expect("label join present");
+        let extra = sql
+            .find("INNER JOIN \"issue_assignees\"")
+            .expect("joins spliced");
+        let where_at = sql.find(" WHERE (").expect("where present");
+        assert!(labels < extra && extra < where_at, "{sql}");
     }
 
     #[test]
