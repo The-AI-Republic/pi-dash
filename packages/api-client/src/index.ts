@@ -929,6 +929,7 @@ export {
   ModuleRow,
   ModuleRowList,
   ModuleUpdate,
+  ModuleWriteEcho,
   WorkspaceModuleList,
   WorkspaceModuleRow,
   archivedModulePath,

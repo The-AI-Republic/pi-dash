@@ -17,6 +17,7 @@ import {
   removeIssueFromModule,
   ModuleRow,
   ModuleDetail,
+  ModuleWriteEcho,
 } from "./index.js";
 import type { ProjectUpdateInput } from "./index.js";
 import {
@@ -55,6 +56,7 @@ import {
   listModules as moduleListModules,
   ModuleDetail as ModuleDetailSchema,
   ModuleRow as ModuleRowSchema,
+  ModuleWriteEcho as ModuleWriteEchoSchema,
   removeIssueFromModule as moduleRemoveIssueFromModule,
   replaceModule as moduleReplaceModule,
 } from "./contracts/modules.js";
@@ -106,5 +108,6 @@ describe("@pidash/api-client entry", () => {
     expect(removeIssueFromModule).toBe(moduleRemoveIssueFromModule);
     expect(ModuleRow).toBe(ModuleRowSchema);
     expect(ModuleDetail).toBe(ModuleDetailSchema);
+    expect(ModuleWriteEcho).toBe(ModuleWriteEchoSchema);
   });
 });

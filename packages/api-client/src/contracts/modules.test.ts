@@ -25,6 +25,7 @@ import {
   ModuleRow,
   ModuleRowList,
   ModuleUpdate,
+  ModuleWriteEcho,
   archivedModulePath,
   archivedModulesPath,
   archiveModule,
@@ -325,6 +326,38 @@ const DETAIL = {
   estimate_distribution: {},
 } as const;
 
+/**
+ * What PUT really answers: the write serializer's representation, with
+ * relations under their model names and none of the read annotations.
+ */
+const PUT_ECHO = {
+  id: MODULE,
+  workspace: WORKSPACE,
+  project: PROJECT,
+  name: "Checkout revamp",
+  description: "Rework the checkout flow",
+  description_text: null,
+  description_html: null,
+  start_date: "2026-09-01",
+  target_date: "2026-10-31",
+  status: "in-progress",
+  lead: USER,
+  lead_id: USER,
+  members: [USER],
+  member_ids: [USER],
+  view_props: { layout: "list" },
+  logo_props: {},
+  sort_order: 1024,
+  external_source: null,
+  external_id: null,
+  created_at: "2026-08-20T10:00:00Z",
+  updated_at: "2026-10-16T15:32:05.479661+09:00",
+  created_by: USER,
+  updated_by: USER,
+  deleted_at: null,
+  archived_at: null,
+} as const;
+
 interface Call {
   url: string;
   init: TransportInit;
@@ -475,6 +508,24 @@ describe("module detail schemas", () => {
     expect(ModuleDistribution.parse(DISTRIBUTION).labels).toHaveLength(1);
     expect(ModuleEstimateDistribution.parse({})).toEqual({});
     expect(ModuleCompletionChart.parse({ "2026-09-01": 3.5 })).toEqual({ "2026-09-01": 3.5 });
+  });
+});
+
+describe("ModuleWriteEcho", () => {
+  it("parses the write serializer's answer with cleared optionals", () => {
+    const echo = ModuleWriteEcho.parse({ ...PUT_ECHO, workspace: WORKSPACE, created_by: null, deleted_at: null });
+    expect(echo.workspace).toBe(WORKSPACE);
+    expect(echo.created_by).toBeNull();
+    expect(echo.members).toEqual([USER]);
+  });
+
+  it("rejects a read row, a missing name and a bad audit stamp", () => {
+    expect(() => ModuleWriteEcho.parse(ROW)).toThrow();
+    const { name: _name, ...nameless } = PUT_ECHO;
+    void _name;
+    expect(() => ModuleWriteEcho.parse(nameless)).toThrow();
+    expect(() => ModuleWriteEcho.parse({ ...PUT_ECHO, created_at: "yesterday" })).toThrow();
+    expect(() => ModuleWriteEcho.parse({ ...PUT_ECHO, project: "not-a-uuid" })).toThrow();
   });
 });
 
@@ -629,8 +680,8 @@ describe("module writes", () => {
     expect(JSON.parse(requests(updated.calls)[0]?.init.body ?? "{}")).toEqual({ status: "paused" });
   });
 
-  it("replaces a module with the full body", async () => {
-    const replaced = client(ROW);
+  it("replaces a module with the full body and reads the write echo", async () => {
+    const replaced = client(PUT_ECHO);
     const input = {
       name: "Checkout revamp",
       description: "Rework",
@@ -640,9 +691,42 @@ describe("module writes", () => {
       lead_id: USER,
       member_ids: [USER],
     };
-    await replaceModule(replaced.client, SLUG, PROJECT, MODULE, input);
+    const echo = await replaceModule(replaced.client, SLUG, PROJECT, MODULE, input);
+    expect(echo.id).toBe(MODULE);
+    expect(echo.project).toBe(PROJECT);
+    expect(echo.member_ids).toEqual([USER]);
     expect(requests(replaced.calls)[0]?.init.method).toBe("PUT");
+    expect(requests(replaced.calls)[0]?.url).toBe(`/api/workspaces/acme/projects/${PROJECT}/modules/${MODULE}/`);
     expect(JSON.parse(requests(replaced.calls)[0]?.init.body ?? "{}")).toEqual(input);
+  });
+
+  it("rejects a PUT answer that is a read row rather than the write echo", async () => {
+    // A list row has the annotations but not the write echo's relation keys;
+    // parsing it as the echo must fail instead of silently mistyping it.
+    const { project: _project, ...withoutProject } = PUT_ECHO;
+    void _project;
+    const wrong = client(withoutProject);
+    await expect(
+      replaceModule(wrong.client, SLUG, PROJECT, MODULE, {
+        name: "Checkout revamp",
+        status: "in-progress",
+        lead_id: USER,
+        member_ids: [USER],
+      })
+    ).rejects.toThrow();
+  });
+
+  it("rejects a write echo with an unknown status or a malformed date", async () => {
+    await expect(
+      replaceModule(client({ ...PUT_ECHO, status: "archived" }).client, SLUG, PROJECT, MODULE, {
+        name: "Checkout revamp",
+      })
+    ).rejects.toThrow();
+    await expect(
+      replaceModule(client({ ...PUT_ECHO, target_date: "31/10/2026" }).client, SLUG, PROJECT, MODULE, {
+        name: "Checkout revamp",
+      })
+    ).rejects.toThrow();
   });
 
   it("deletes a module and detaches a work item", async () => {

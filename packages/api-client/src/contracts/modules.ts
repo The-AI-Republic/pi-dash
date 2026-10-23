@@ -275,6 +275,43 @@ export const ModuleDetail = z.object({
 export type ModuleDetail = z.infer<typeof ModuleDetail>;
 
 /**
+ * The body a full replace answers. Unlike every read, PUT falls through to
+ * the framework's default update handler, which echoes the write serializer:
+ * the relations arrive under their model names (`workspace`, `project`,
+ * `lead`, `members`), `deleted_at` is present, and the read-only annotations
+ * (favorite flag, issue counts, estimate sums) are absent. Callers that need
+ * the annotated row re-read the detail after replacing.
+ */
+export const ModuleWriteEcho = z.object({
+  id: uuid(),
+  workspace: uuid(),
+  project: uuid(),
+  name: z.string(),
+  description: z.string(),
+  description_text: z.nullable(z.unknown()),
+  description_html: z.nullable(z.unknown()),
+  start_date: nullableDate(),
+  target_date: nullableDate(),
+  status: z.enum(MODULE_STATUSES),
+  lead: nullableUuid(),
+  lead_id: nullableUuid(),
+  members: z.array(uuid()),
+  member_ids: z.array(uuid()),
+  view_props: z.record(z.string(), z.unknown()),
+  logo_props: z.record(z.string(), z.unknown()),
+  sort_order: z.number(),
+  external_source: z.nullable(z.string()),
+  external_id: z.nullable(z.string()),
+  created_at: dateTime(),
+  updated_at: dateTime(),
+  created_by: nullableUuid(),
+  updated_by: nullableUuid(),
+  deleted_at: nullableDateTime(),
+  archived_at: nullableDateTime(),
+});
+export type ModuleWriteEcho = z.infer<typeof ModuleWriteEcho>;
+
+/**
  * Archive/restore refusal body. The server's explicit check names the rule
  * it enforced; the UI shows that sentence and never reports success.
  */
@@ -454,17 +491,20 @@ export async function updateModule(
   return client.parse(ModuleUpdate, envelope.data, `PATCH ${path}`);
 }
 
-/** Full replace for the edit form's submit; answers 200 with the row. */
+/**
+ * Full replace for the edit form's submit. Answers 200 with the write echo,
+ * not the annotated read row, so callers re-read for counts and favorites.
+ */
 export async function replaceModule(
   client: ApiClient,
   slug: string,
   projectId: string,
   moduleId: string,
   input: ModuleReplaceInput
-): Promise<ModuleRow> {
+): Promise<ModuleWriteEcho> {
   const path = moduleDetailPath(slug, projectId, moduleId);
   const envelope = await client.sendJson<unknown>("PUT", path, { json: input });
-  return client.parse(ModuleRow, envelope.data, `PUT ${path}`);
+  return client.parse(ModuleWriteEcho, envelope.data, `PUT ${path}`);
 }
 
 /** Delete a module. Answers 204; the server 403s a non-creator member. */
