@@ -304,7 +304,7 @@ pub const ROUTES: &[RouteRow] = &[
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/",
         owned: &["GET", "POST"], proxied: &["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/cycle-issues/{issue_id}/",
-        owned: &["DELETE"], proxied: &["GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
+        owned: &["GET", "DELETE"], proxied: &["POST", "PUT", "PATCH", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/progress/",
         owned: &["GET"], proxied: &["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
     RouteRow { group: "app", path: "/api/workspaces/{slug}/projects/{project_id}/cycles/{cycle_id}/transfer-issues/",
