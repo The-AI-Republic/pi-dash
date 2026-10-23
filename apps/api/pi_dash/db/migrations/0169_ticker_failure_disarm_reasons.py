@@ -16,7 +16,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0167_wait_budget"),
+        ("db", "0168_ticker_stop_signal_disarm_reason"),
     ]
 
     operations = [
@@ -31,6 +31,7 @@ class Migration(migrations.Migration):
                     ("cap_hit", "Cap Hit"),
                     ("pool_spent", "Pool Spent"),
                     ("terminal_signal", "Terminal Signal"),
+                    ("stop_signal", "Stop Signal"),
                     ("user_disabled", "User Disabled"),
                     ("failure_needs_human", "Failure Needs Human"),
                     ("repeated_failure", "Repeated Failure"),

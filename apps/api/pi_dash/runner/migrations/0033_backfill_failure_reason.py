@@ -44,7 +44,7 @@ def clear_failure_reason(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("runner", "0030_agentrun_failure_reason"),
+        ("runner", "0032_agentrun_failure_reason"),
     ]
 
     operations = [

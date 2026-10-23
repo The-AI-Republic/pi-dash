@@ -605,7 +605,7 @@ def test_backfill_migration_classifies_existing_failed_rows(
         error="agent stalled: no events for >360s", failure_reason=""
     )
 
-    migration = import_module("pi_dash.runner.migrations.0031_backfill_failure_reason")
+    migration = import_module("pi_dash.runner.migrations.0033_backfill_failure_reason")
     migration.backfill_failure_reason(django_apps, None)
 
     auth_run.refresh_from_db()

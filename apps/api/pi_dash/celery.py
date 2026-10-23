@@ -84,6 +84,16 @@ app.conf.beat_schedule = {
         "task": "runner.mark_offline_runners",
         "schedule": crontab(minute="*/1"),
     },
+    # Recover runs stranded on a runner that stopped heartbeating; without
+    # these a stranded run blocks its issue indefinitely.
+    "runner-release-pins-on-offline-runners": {
+        "task": "runner.release_pins_on_offline_runners",
+        "schedule": crontab(minute="*/1"),
+    },
+    "runner-fail-runs-on-offline-runners": {
+        "task": "runner.fail_runs_on_offline_runners",
+        "schedule": crontab(minute="*/1"),
+    },
     # Per-active-run agent stall watchdog. Backstop for the runner's own
     # internal 5-minute stall timer; see
     # `.ai_design/runner_agent_bridge/design.md` §4.5.3. 30s gives ~12

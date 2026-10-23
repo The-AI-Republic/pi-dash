@@ -1344,6 +1344,8 @@ class IssueDetailSerializer(IssueSerializer):
             "total_tokens": state.total_tokens,
             "llm_model": state.llm_model,
             "turn_count": state.turn_count,
+            "agent_health": state.agent_health,
+            "agent_last_activity_at": self._serialize_datetime(state.agent_last_activity_at),
             "updated_at": self._serialize_datetime(state.updated_at),
         }
 
