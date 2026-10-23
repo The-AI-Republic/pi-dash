@@ -56,6 +56,12 @@ orchestration/test_ticker_tasks.py
 # (Process note on PIDASHCONV-1.)
 runner/test_offline_runner_recovery.py
 runner/test_offline_runner_sweeps.py
+# PDASHOSS01-278: the v1 scheduler write routes (binding PATCH, run-now,
+# definition PATCH) exist only on origin/main (PR #1365), so the frozen
+# checkout Django answers 404 and the oracle run cannot pass. The file
+# passes locally against main-Django + Rust (89/89 with v1_schedulers).
+# Delete this line when main is next merged into rust-dev (no worker needed).
+v1_schedulers/test_writes.py
 # PIDASHCONV-1137: the Rust replay of the sweep half of the assistant turn
 # oracle (assistant/test_tasks_turn.py). It seeds rust_job_queue rows and waits
 # for `pidash-api worker` to settle them, so the HTTP matrix cannot run it on
