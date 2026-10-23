@@ -3,11 +3,14 @@
 // See the LICENSE file for details.
 // Project-side "New Scheduler": install an eligible catalog definition
 // (parity/specs/agents.md §2, AGT-008) or author a definition and install
-// it in one submit (AGT-009). Both paths share one schedule. The create
-// path exists only for workspace admins, opens by itself when nothing is
-// installable, maps handle conflicts onto the handle field, and when the
-// definition saves but its install fails it flips to the install path with
-// the fresh entry picked so nothing is left orphaned in the catalog.
+// it in one submit (AGT-009). Both paths share one schedule and the same
+// install configuration — what the runs do with their findings and which
+// pod they land on (AGT-018, AGT-019; project-settings PSET-058). The
+// create path exists only for workspace admins, opens by itself when
+// nothing is installable, maps handle conflicts onto the handle field, and
+// when the definition saves but its install fails it flips to the install
+// path with the fresh entry picked so nothing is left orphaned in the
+// catalog.
 
 import { createScheduler, isApiError, type Scheduler } from "@pidash/api-client";
 import { Button, Dialog, Input, Textarea } from "@pidash/kit";
@@ -19,6 +22,8 @@ import { useSchedulers } from "./api.js";
 import { DEFAULT_SCHEDULER_COLOR, deriveSchedulerHandle, validateSchedulerDefinition } from "./definition.js";
 import { eligibleDefinitions } from "./installResults.js";
 import { useInstallSchedulerBinding } from "./installData.js";
+import { DEFAULT_OUTCOME_MODE, OutcomeModeField, type OutcomeMode } from "./OutcomeModeField.js";
+import { PodField } from "./PodField.js";
 import type { SchedulePayload } from "./schedule.js";
 import { emptySchedule } from "./schedule.js";
 import { ScheduleFields, useScheduleDraft } from "./ScheduleFields.js";
@@ -98,6 +103,18 @@ export function validateDefinitionDraft(draft: DefinitionDraft): DefinitionError
   return mapped;
 }
 
+/** Inline text for a submit that has no definition picked (PSET-061). */
+export const MISSING_SCHEDULER_MESSAGE = "Choose a scheduler to install.";
+
+/**
+ * Inline error for the install path, or undefined when the choice is
+ * usable. The picker preselects the first eligible entry, so this only
+ * fires when the catalog emptied after the dialog opened.
+ */
+export function installSchedulerError(mode: InstallMode, definitionId: string): string | undefined {
+  return mode === "install" && definitionId === "" ? MISSING_SCHEDULER_MESSAGE : undefined;
+}
+
 interface InstallFormProps {
   workspaceSlug: string;
   projectId: string;
@@ -130,6 +147,11 @@ export function InstallForm({
   const [handleTouched, setHandleTouched] = React.useState(false);
   const [definitionErrors, setDefinitionErrors] = React.useState<DefinitionErrors>({});
   const schedule = useScheduleDraft(emptySchedule());
+  const [outcomeMode, setOutcomeMode] = React.useState<OutcomeMode>(DEFAULT_OUTCOME_MODE);
+  const [pod, setPod] = React.useState<string | null>(null);
+  // A submit on the install path with nothing picked keeps the dialog open
+  // and flags the picker rather than reaching for an empty id (PSET-061).
+  const [schedulerError, setSchedulerError] = React.useState<string | undefined>();
   // The author path waits on the definition write before it can install, so
   // that leg needs its own in-flight flag for the submit label and lockout.
   const [authoring, setAuthoring] = React.useState(false);
@@ -144,7 +166,10 @@ export function InstallForm({
   const installEmpty = options.length === 0;
   const definitionId = chosenId ?? options[0]?.id ?? "";
 
-  const switchMode = (next: "install" | "create"): void => setMode(next);
+  const switchMode = (next: "install" | "create"): void => {
+    setMode(next);
+    setSchedulerError(undefined);
+  };
 
   const changeDefinition = <K extends keyof DefinitionDraft>(field: K, value: DefinitionDraft[K]): void => {
     setDefinition((current) => ({ ...current, [field]: value }));
@@ -155,7 +180,7 @@ export function InstallForm({
     try {
       await install.mutateAsync({
         projectId,
-        input: { scheduler: schedulerId, ...payload, outcome_mode: "create_issue" },
+        input: { scheduler: schedulerId, ...payload, outcome_mode: outcomeMode, pod },
       });
       notifySuccess("Scheduler installed", "It will fire on the configured schedule.");
       onInstalled();
@@ -191,7 +216,7 @@ export function InstallForm({
     try {
       await install.mutateAsync({
         projectId,
-        input: { scheduler: created.id, ...payload, outcome_mode: "create_issue" },
+        input: { scheduler: created.id, ...payload, outcome_mode: outcomeMode, pod },
       });
       notifySuccess("Scheduler created and installed", "It will fire on the configured schedule.");
       onInstalled();
@@ -217,6 +242,11 @@ export function InstallForm({
       if (Object.keys(errors).length > 0) return;
     }
     if (!schedule.validate()) return;
+    const missing = installSchedulerError(mode, definitionId);
+    if (missing !== undefined) {
+      setSchedulerError(missing);
+      return;
+    }
     const payload = schedule.payload();
     if (mode === "create") {
       await authorAndInstall(payload);
@@ -281,9 +311,16 @@ export function InstallForm({
 
       {mode === "install" ? (
         installEmpty ? (
-          <p className="text-body text-(--text-muted)">
-            Every enabled workspace scheduler is already installed here. Create a new one to schedule more work.
-          </p>
+          <div className="flex flex-col gap-(--space-2)">
+            <p className="text-body text-(--text-muted)">
+              Every enabled workspace scheduler is already installed here. Create a new one to schedule more work.
+            </p>
+            {schedulerError === undefined ? null : (
+              <p role="alert" className="text-meta text-(--danger)">
+                {schedulerError}
+              </p>
+            )}
+          </div>
         ) : (
           <div className="flex flex-col gap-(--space-2)">
             <label htmlFor="binding-scheduler" className="text-body font-medium text-(--text)">
@@ -375,6 +412,9 @@ export function InstallForm({
         disabled={pending}
         onChange={schedule.change}
       />
+
+      <OutcomeModeField idPrefix="project-install" value={outcomeMode} disabled={pending} onChange={setOutcomeMode} />
+      <PodField workspaceSlug={workspaceSlug} projectId={projectId} value={pod} disabled={pending} onChange={setPod} />
 
       <div className="flex justify-end gap-(--space-3)">
         <Button variant="ghost" disabled={pending} onClick={onClose}>

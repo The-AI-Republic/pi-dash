@@ -327,6 +327,14 @@ describe("InstallsList", () => {
     expect(screen.getByText(/Scheduled instructions installed on this project/)).toBeInTheDocument();
   });
 
+  it("names the creation control in the settings empty row", async () => {
+    setup({ role: ROLE_ADMIN, projectRole: 20, props: { variant: "settings" }, bindings: [] });
+    expect(await screen.findByText("No schedulers installed on this project yet")).toBeInTheDocument();
+    expect(
+      screen.getByText("Use New Scheduler to install a catalog definition or write a new one.")
+    ).toBeInTheDocument();
+  });
+
   it("falls back to the slug when the project row is unknown", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     queryClient.setQueryData(sessionKeys.workspaces, []);

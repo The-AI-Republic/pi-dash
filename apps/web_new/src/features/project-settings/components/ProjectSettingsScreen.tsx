@@ -29,6 +29,12 @@ export interface ProjectSettingsScreenProps {
   pageHeader?: boolean;
   /** Defaults to the shell's tab gate; `body` lets the screen refuse. */
   gate?: ProjectSettingsGate;
+  /**
+   * Body the shell shows inside the content column while the project and
+   * role reads are unresolved (PSET-061; automations opts in with its
+   * skeleton). Omitted keeps the shell blank until both settle.
+   */
+  pendingFallback?: React.ReactNode;
   children: React.ReactNode;
 }
 
@@ -38,12 +44,17 @@ export function ProjectSettingsScreen({
   tabKey,
   pageHeader = true,
   gate = "tab",
+  pendingFallback,
   children,
 }: ProjectSettingsScreenProps): React.ReactElement {
   const title = findTabByKey(tabKey)?.label ?? tabKey;
   const page = pageHeader ? <ProjectSettingsPage title={title}>{children}</ProjectSettingsPage> : children;
   return (
-    <ProjectSettingsShell workspaceSlug={workspaceSlug} projectId={projectId}>
+    <ProjectSettingsShell
+      workspaceSlug={workspaceSlug}
+      projectId={projectId}
+      {...(pendingFallback === undefined ? {} : { pendingFallback })}
+    >
       {gate === "body" ? page : <ProjectSettingsTabGate tabKey={tabKey}>{page}</ProjectSettingsTabGate>}
     </ProjectSettingsShell>
   );

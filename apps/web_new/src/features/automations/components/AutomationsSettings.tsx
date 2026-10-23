@@ -160,7 +160,8 @@ function RowSkeleton(): React.ReactElement {
   );
 }
 
-function AutomationsSkeleton(): React.ReactElement {
+/** Loading shape the settings shell shows while the project read resolves. */
+export function AutomationsSkeleton(): React.ReactElement {
   return (
     <section aria-label={AUTOMATIONS_HEADING} role="status" aria-busy="true" className="flex flex-col">
       <RowSkeleton />

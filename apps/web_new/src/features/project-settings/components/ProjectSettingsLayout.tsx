@@ -98,12 +98,20 @@ export interface ProjectSettingsShellProps {
   workspaceSlug: string;
   projectId: string;
   children: React.ReactNode;
+  /**
+   * Body shown inside the content column while the project read and the
+   * standing reads are unresolved. Omitted means the shell renders
+   * nothing until they settle; a tab that must show a loading shape of
+   * its own (automations, PSET-061) opts in with its skeleton.
+   */
+  pendingFallback?: React.ReactNode;
 }
 
 export function ProjectSettingsShell({
   workspaceSlug,
   projectId,
   children,
+  pendingFallback,
 }: ProjectSettingsShellProps): React.ReactElement | null {
   const project = useProjectRow(workspaceSlug, projectId);
   const roles = useProjectRoles(workspaceSlug);
@@ -130,7 +138,16 @@ export function ProjectSettingsShell({
     setDrawerOpen(false);
   }, [pathname]);
 
-  if (project.isPending || rolePending) return null;
+  if (project.isPending || rolePending) {
+    if (pendingFallback === undefined) return null;
+    return (
+      <div className="flex h-full min-h-0 w-full flex-col" data-testid="project-settings-shell">
+        <main aria-label="Settings content" className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+          {pendingFallback}
+        </main>
+      </div>
+    );
+  }
 
   if (!project.isSuccess) {
     const status = isApiError(project.error) ? project.error.status : undefined;

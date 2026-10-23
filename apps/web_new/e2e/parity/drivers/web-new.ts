@@ -9414,21 +9414,6 @@ export class WebNewDriver implements ParityDriver {
   async schedulerProjectCreateSubmit(): Promise<void> {
     return todo("schedulerProjectCreateSubmit");
   }
-  async schedulerProjectCreateFillName(_name: string): Promise<void> {
-    return todo("schedulerProjectCreateFillName");
-  }
-  async schedulerProjectCreateHandleValue(): Promise<string> {
-    return todo("schedulerProjectCreateHandleValue");
-  }
-  async schedulerProjectCreateFillHandle(_handle: string): Promise<void> {
-    return todo("schedulerProjectCreateFillHandle");
-  }
-  async schedulerProjectCreateErrors(): Promise<string[]> {
-    return todo("schedulerProjectCreateErrors");
-  }
-  async schedulerCloseProjectCreate(): Promise<void> {
-    return todo("schedulerCloseProjectCreate");
-  }
   async schedulerOpenInstall(_handle: string): Promise<void> {
     return todo("schedulerOpenInstall");
   }
@@ -9455,9 +9440,6 @@ export class WebNewDriver implements ParityDriver {
   }
   async schedulerCloseInstall(): Promise<void> {
     return todo("schedulerCloseInstall");
-  }
-  async schedulerVisibleToasts(): Promise<{ title: string; message: string }[]> {
-    return todo("schedulerVisibleToasts");
   }
   async schedulerOpenPrompts(_workspaceSlug: string): Promise<void> {
     return todo("schedulerOpenPrompts");
@@ -9982,221 +9964,855 @@ export class WebNewDriver implements ParityDriver {
     }
   }
 
-  async schedulerOpenProjectList(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("schedulerOpenProjectList");
+  // --- Project scheduler installs + detail (NEWFRONT-604, PSET-055–061;
+  // --- behavior read from the old app, selectors pinned to apps/web_new).
+  // --- The settings tab and the project-surface list share the installs
+  // --- table; the install/detail dialogs and the schedule fields are the
+  // --- same components. Locators read the rendered roles and copy so the
+  // --- scenarios stay behavior-level.
+
+  /** The open kit dialog (base-ui portal renders one popup at a time). */
+  private schedulerDialog(): Locator {
+    return this.page.getByRole("dialog").last();
   }
+
+  /** One install-list row, matched on its exact handle cell. */
+  private schedulerProjectRow(handle: string): Locator {
+    const exact = new RegExp(`^${handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+    return this.page.locator("tbody tr").filter({ has: this.page.locator("code", { hasText: exact }) });
+  }
+
+  /** Visible field-level and refusal messages inside the dialog. */
+  private async schedulerModalErrors(dialog: Locator): Promise<string[]> {
+    const errors = dialog.locator('[role="alert"]');
+    const total = await errors.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      if (
+        !(await errors
+          .nth(i)
+          .isVisible()
+          .catch(() => false))
+      )
+        continue;
+      const text = (
+        (await errors
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") texts.push(text);
+    }
+    return texts;
+  }
+
+  private async schedulerScheduleValues(dialog: Locator): Promise<SchedulerScheduleValues> {
+    const toggle = dialog.getByRole("switch").first();
+    return {
+      dtstart: await dialog.getByLabel("Starts at").inputValue(),
+      tzid: await dialog.getByLabel("Time zone").inputValue(),
+      rrule: await dialog.getByLabel("Recurrence (RRULE)").inputValue(),
+      extraContext: await dialog.getByLabel("Project context (optional)").inputValue(),
+      enabled: (await toggle.getAttribute("aria-checked")) === "true",
+    };
+  }
+
+  private async schedulerFillSchedule(
+    dialog: Locator,
+    input: { dtstart?: string; tzid?: string; rrule?: string; extraContext?: string }
+  ): Promise<void> {
+    if (input.dtstart !== undefined) await dialog.getByLabel("Starts at").fill(input.dtstart);
+    if (input.tzid !== undefined) await dialog.getByLabel("Time zone").selectOption(input.tzid);
+    if (input.rrule !== undefined) await dialog.getByLabel("Recurrence (RRULE)").fill(input.rrule);
+    if (input.extraContext !== undefined)
+      await dialog.getByLabel("Project context (optional)").fill(input.extraContext);
+  }
+
+  private async schedulerHumanizer(dialog: Locator): Promise<string> {
+    // The live sentence is the tinted span in the help line under the
+    // builder; the line also carries static guidance text.
+    const line = dialog.locator("p").filter({ hasText: "Leave the rule empty" }).first();
+    const sentence = line.locator("span").first();
+    await sentence.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await sentence.innerText().catch(() => "")) ?? "").trim();
+  }
+
+  private async schedulerSetModalEnabled(dialog: Locator, enabled: boolean): Promise<void> {
+    const toggle = dialog.getByRole("switch").first();
+    const current = (await toggle.getAttribute("aria-checked")) === "true";
+    if (current !== enabled) await toggle.click();
+  }
+
+  async schedulerOpenProjectList(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/schedulers/list`);
+    await this.page
+      .getByRole("columnheader", { name: "Scheduler", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async schedulerProjectRows(): Promise<SchedulerProjectRow[]> {
-    return todo("schedulerProjectRows");
+    const rows = this.page.locator("tbody tr");
+    const total = await rows.count();
+    const out: SchedulerProjectRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      // The empty state renders one guidance row spanning every column;
+      // data-row reads skip it.
+      if ((await row.locator("td[colspan]").count()) > 0) continue;
+      const cells = row.locator("td");
+      const cellText = async (index: number): Promise<string> =>
+        (
+          (await cells
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+      const first = cells.nth(0);
+      const scheduleCell = cells.nth(1);
+      out.push({
+        name: (
+          (await first
+            .locator("div")
+            .first()
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+        handle: (
+          (await first
+            .locator("code")
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+        schedule: await cellText(1),
+        scheduleTitle: (await scheduleCell.getAttribute("title").catch(() => null)) ?? "",
+        nextRun: await cellText(2),
+        lastRun: await cellText(3),
+        status: await cellText(4),
+        updated: await cellText(5),
+        manageVisible: (await cells.nth(6).getByRole("button").count()) > 0,
+      });
+    }
+    return out;
   }
+
   async schedulerProjectEmptyVisible(): Promise<boolean> {
-    return todo("schedulerProjectEmptyVisible");
+    return this.isShown(this.page.getByText("No schedulers installed on this project yet", { exact: false }));
   }
+
   async schedulerProjectNewVisible(): Promise<boolean> {
-    return todo("schedulerProjectNewVisible");
+    return this.isShown(this.page.getByRole("button", { name: "New Scheduler", exact: true }));
   }
-  async schedulerProjectRowOpen(_handle: string): Promise<void> {
-    return todo("schedulerProjectRowOpen");
+
+  async schedulerProjectRowOpen(handle: string): Promise<void> {
+    await this.schedulerProjectRow(handle).click();
+    await this.page
+      .getByRole("heading", { name: "Configuration", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async schedulerProjectToggleState(_handle: string): Promise<{ checked: boolean; disabled: boolean }> {
-    return todo("schedulerProjectToggleState");
+
+  async schedulerProjectToggleState(handle: string): Promise<{ checked: boolean; disabled: boolean }> {
+    const toggle = this.schedulerProjectRow(handle).getByRole("switch");
+    return {
+      checked: (await toggle.getAttribute("aria-checked")) === "true",
+      disabled: await toggle.isDisabled().catch(() => false),
+    };
   }
-  async schedulerProjectToggle(_handle: string): Promise<void> {
-    return todo("schedulerProjectToggle");
+
+  async schedulerProjectToggle(handle: string): Promise<void> {
+    // The list flips optimistically; scenarios poll the switch and the
+    // server row for the settled result.
+    await this.schedulerProjectRow(handle).getByRole("switch").click();
   }
-  async schedulerProjectToggleFlightGated(_handle: string): Promise<boolean> {
-    return todo("schedulerProjectToggleFlightGated");
+
+  async schedulerProjectToggleFlightGated(handle: string): Promise<boolean> {
+    // Hold the toggle PATCH mid-flight so the row's in-flight gate stays
+    // observable instead of resolving before the read.
+    const pattern = "**/scheduler-bindings/**";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue().catch(() => undefined);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.schedulerProjectRow(handle).getByRole("switch").click();
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const state = await this.schedulerProjectToggleState(handle).catch(() => null);
+        if (state !== null && state.disabled) return true;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(100);
+      }
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+    }
   }
-  async schedulerProjectOpenEdit(_handle: string): Promise<void> {
-    return todo("schedulerProjectOpenEdit");
+
+  async schedulerProjectOpenEdit(handle: string): Promise<void> {
+    await this.schedulerProjectRow(handle).getByRole("button", { name: "Edit", exact: true }).click();
+    const dialog = this.schedulerDialog();
+    await dialog.getByText("Edit scheduler install", { exact: false }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Starts at").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
-  async schedulerProjectOpenUninstall(_handle: string): Promise<void> {
-    return todo("schedulerProjectOpenUninstall");
+
+  async schedulerProjectOpenUninstall(handle: string): Promise<void> {
+    await this.schedulerProjectRow(handle).getByRole("button", { name: "Uninstall", exact: true }).click();
+    await this.schedulerDialog()
+      .getByRole("heading", { name: "Uninstall scheduler?", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerUninstallDialogText(): Promise<string> {
-    return todo("schedulerUninstallDialogText");
+    return (
+      (await this.schedulerDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
+
   async schedulerConfirmUninstall(): Promise<void> {
-    return todo("schedulerConfirmUninstall");
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("button", { name: "Uninstall", exact: true }).click();
+    // Either the dialog closes (removed) or a failure notice shows while
+    // it stays open; race the two so a toast is never waited past.
+    const heading = dialog.getByRole("heading", { name: "Uninstall scheduler?", exact: true });
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      if ((await heading.count()) === 0) return;
+      const toast = await this.rulesLastToast();
+      if (toast !== null && toast.title === "Something went wrong") return;
+      if (Date.now() > deadline) throw new Error("[parity] uninstall confirmation settled on neither outcome.");
+      await this.page.waitForTimeout(500);
+    }
   }
+
   async schedulerUninstallOpen(): Promise<boolean> {
-    return todo("schedulerUninstallOpen");
+    return (
+      (await this.schedulerDialog().getByRole("heading", { name: "Uninstall scheduler?", exact: true }).count()) > 0
+    );
   }
+
   async schedulerCancelUninstall(): Promise<void> {
-    return todo("schedulerCancelUninstall");
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog
+      .getByRole("heading", { name: "Uninstall scheduler?", exact: true })
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerOpenProjectInstall(): Promise<void> {
-    return todo("schedulerOpenProjectInstall");
+    await this.page.getByRole("button", { name: "New Scheduler", exact: true }).click();
+    const dialog = this.schedulerDialog();
+    await dialog
+      .getByText("New Scheduler", { exact: true })
+      .or(dialog.getByText("No schedulers available", { exact: false }))
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerProjectInstallMode(): Promise<"install" | "create" | "dead-end"> {
-    return todo("schedulerProjectInstallMode");
+    const dialog = this.schedulerDialog();
+    if ((await dialog.getByText("No schedulers available", { exact: false }).count()) > 0) return "dead-end";
+    const tabs = dialog.getByRole("tab");
+    if ((await tabs.count()) === 0) return "install";
+    const selected = dialog.getByRole("tab", { selected: true });
+    return ((await selected.innerText().catch(() => "")) ?? "").trim() === "Create new" ? "create" : "install";
   }
+
   async schedulerProjectInstallDeadEndText(): Promise<string> {
-    return todo("schedulerProjectInstallDeadEndText");
+    return (
+      (await this.schedulerDialog()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
+
   async schedulerProjectInstallTabs(): Promise<string[]> {
-    return todo("schedulerProjectInstallTabs");
+    const tabs = this.schedulerDialog().getByRole("tab");
+    const total = await tabs.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await tabs
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
-  async schedulerProjectInstallSelectTab(_tab: "Install existing" | "Create new"): Promise<void> {
-    return todo("schedulerProjectInstallSelectTab");
+
+  async schedulerProjectInstallSelectTab(tab: "Install existing" | "Create new"): Promise<void> {
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("tab", { name: tab, exact: true }).click();
+    if (tab === "Create new") {
+      await dialog.getByLabel("Slug").waitFor({ timeout: WebNewDriver.WAIT_MS });
+    } else {
+      await dialog
+        .locator("#binding-scheduler")
+        .or(dialog.getByText("Every enabled workspace scheduler is already installed", { exact: false }))
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS });
+    }
   }
+
   async schedulerProjectInstallOptions(): Promise<SchedulerProjectInstallOption[]> {
-    return todo("schedulerProjectInstallOptions");
+    const select = this.schedulerDialog().locator("#binding-scheduler");
+    // With nothing installable the picker is replaced by guidance text;
+    // the count guard keeps that an empty read instead of a wait.
+    if ((await select.count()) === 0) return [];
+    const current = await select.inputValue().catch(() => "");
+    const options = select.locator("option");
+    const total = await options.count();
+    const out: SchedulerProjectInstallOption[] = [];
+    for (let i = 0; i < total; i++) {
+      // Options render as "Display name (handle)".
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      const match = /^(.*)\s+\(([^()]+)\)$/.exec(text);
+      if (match === null) continue;
+      const value =
+        (await options
+          .nth(i)
+          .getAttribute("value")
+          .catch(() => null)) ?? "";
+      out.push({ name: (match[1] ?? "").trim(), handle: (match[2] ?? "").trim(), selected: value === current });
+    }
+    return out;
   }
-  async schedulerProjectInstallSelect(_handle: string): Promise<void> {
-    return todo("schedulerProjectInstallSelect");
+
+  async schedulerProjectInstallSelect(handle: string): Promise<void> {
+    // Option values are definition ids (unknown to the scenario), so the
+    // handle suffix of the visible label resolves the value first.
+    const select = this.schedulerDialog().locator("#binding-scheduler");
+    const options = select.locator("option");
+    const total = await options.count();
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text.endsWith(`(${handle})`)) {
+        const value = (await options.nth(i).getAttribute("value")) ?? "";
+        await select.selectOption(value);
+        return;
+      }
+    }
+    throw new Error(`[parity] install picker offers no definition with handle ${handle}.`);
   }
-  async schedulerProjectInstallFillSchedule(_input: {
+
+  async schedulerProjectInstallFillSchedule(input: {
     dtstart?: string;
     tzid?: string;
     rrule?: string;
     extraContext?: string;
   }): Promise<void> {
-    return todo("schedulerProjectInstallFillSchedule");
+    await this.schedulerFillSchedule(this.schedulerDialog(), input);
   }
+
   async schedulerProjectInstallScheduleValues(): Promise<SchedulerScheduleValues> {
-    return todo("schedulerProjectInstallScheduleValues");
+    return this.schedulerScheduleValues(this.schedulerDialog());
   }
+
   async schedulerProjectInstallHumanizer(): Promise<string> {
-    return todo("schedulerProjectInstallHumanizer");
+    return this.schedulerHumanizer(this.schedulerDialog());
   }
-  async schedulerProjectInstallSetEnabled(_enabled: boolean): Promise<void> {
-    return todo("schedulerProjectInstallSetEnabled");
+
+  async schedulerProjectInstallSetEnabled(enabled: boolean): Promise<void> {
+    await this.schedulerSetModalEnabled(this.schedulerDialog(), enabled);
   }
+
   async schedulerProjectInstallErrors(): Promise<string[]> {
-    return todo("schedulerProjectInstallErrors");
+    return this.schedulerModalErrors(this.schedulerDialog());
   }
+
   async schedulerProjectInstallSubmit(): Promise<void> {
-    return todo("schedulerProjectInstallSubmit");
+    // No close wait: a rejected submit keeps the dialog open so the
+    // scenario can read the inline refusal.
+    await this.schedulerDialog().locator('button[type="submit"]').click();
   }
+
   async schedulerProjectInstallSubmitDisabled(): Promise<boolean> {
-    return todo("schedulerProjectInstallSubmitDisabled");
+    return this.schedulerDialog().locator('button[type="submit"]').isDisabled();
   }
+
   async schedulerProjectInstallOpen(): Promise<boolean> {
-    return todo("schedulerProjectInstallOpen");
+    const dialog = this.schedulerDialog();
+    return (
+      (await dialog.getByText("New Scheduler", { exact: true }).count()) > 0 ||
+      (await dialog.getByText("No schedulers available", { exact: false }).count()) > 0
+    );
   }
+
   async schedulerCloseProjectInstall(): Promise<void> {
-    return todo("schedulerCloseProjectInstall");
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect.poll(() => this.schedulerProjectInstallOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
-  async schedulerProjectCreateFillDescription(_description: string): Promise<void> {
-    return todo("schedulerProjectCreateFillDescription");
+
+  async schedulerProjectCreateFillName(name: string): Promise<void> {
+    await this.schedulerDialog().getByLabel("Name").fill(name);
   }
-  async schedulerProjectCreateFillPrompt(_prompt: string): Promise<void> {
-    return todo("schedulerProjectCreateFillPrompt");
+
+  async schedulerProjectCreateHandleValue(): Promise<string> {
+    return this.schedulerDialog().getByLabel("Slug").inputValue();
   }
+
+  async schedulerProjectCreateFillHandle(handle: string): Promise<void> {
+    await this.schedulerDialog().getByLabel("Slug").fill(handle);
+  }
+
+  async schedulerProjectCreateErrors(): Promise<string[]> {
+    return this.schedulerModalErrors(this.schedulerDialog());
+  }
+
+  async schedulerCloseProjectCreate(): Promise<void> {
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await dialog.getByLabel("Slug").waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async schedulerProjectCreateFillDescription(description: string): Promise<void> {
+    await this.schedulerDialog().getByLabel("Description").fill(description);
+  }
+
+  async schedulerProjectCreateFillPrompt(prompt: string): Promise<void> {
+    await this.schedulerDialog().getByLabel("Prompt").fill(prompt);
+  }
+
   async schedulerProjectEditValues(): Promise<SchedulerBindingValues> {
-    return todo("schedulerProjectEditValues");
+    const dialog = this.schedulerDialog();
+    const schedule = await this.schedulerScheduleValues(dialog);
+    const checked = dialog.getByRole("radio", { checked: true });
+    return {
+      ...schedule,
+      outcomeLabel: (
+        (await checked
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      pod: await dialog.getByLabel("Pod").inputValue(),
+    };
   }
-  async schedulerProjectEditFill(_input: {
+
+  async schedulerProjectEditFill(input: {
     dtstart?: string;
     tzid?: string;
     rrule?: string;
     extraContext?: string;
   }): Promise<void> {
-    return todo("schedulerProjectEditFill");
+    await this.schedulerFillSchedule(this.schedulerDialog(), input);
   }
-  async schedulerProjectEditSetEnabled(_enabled: boolean): Promise<void> {
-    return todo("schedulerProjectEditSetEnabled");
+
+  async schedulerProjectEditSetEnabled(enabled: boolean): Promise<void> {
+    await this.schedulerSetModalEnabled(this.schedulerDialog(), enabled);
   }
+
   async schedulerProjectEditHumanizer(): Promise<string> {
-    return todo("schedulerProjectEditHumanizer");
+    return this.schedulerHumanizer(this.schedulerDialog());
   }
+
   async schedulerProjectEditErrors(): Promise<string[]> {
-    return todo("schedulerProjectEditErrors");
+    return this.schedulerModalErrors(this.schedulerDialog());
   }
+
   async schedulerProjectEditSubmit(): Promise<void> {
-    return todo("schedulerProjectEditSubmit");
+    // A rejected submit keeps the dialog open; no close wait.
+    await this.schedulerDialog().locator('button[type="submit"]').click();
   }
+
   async schedulerProjectEditOpen(): Promise<boolean> {
-    return todo("schedulerProjectEditOpen");
+    return (await this.schedulerDialog().getByText("Edit scheduler install", { exact: false }).count()) > 0;
   }
+
   async schedulerCloseProjectEdit(): Promise<void> {
-    return todo("schedulerCloseProjectEdit");
+    const dialog = this.schedulerDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect.poll(() => this.schedulerProjectEditOpen(), { timeout: WebNewDriver.WAIT_MS }).toBe(false);
   }
+
   async schedulerOutcomeState(): Promise<{ options: { label: string; checked: boolean }[]; help: string }> {
-    return todo("schedulerOutcomeState");
+    const dialog = this.schedulerDialog();
+    const group = dialog.getByRole("radiogroup", { name: "What to do with findings" });
+    const radios = group.getByRole("radio");
+    const total = await radios.count();
+    const options: { label: string; checked: boolean }[] = [];
+    for (let i = 0; i < total; i++) {
+      options.push({
+        label: (
+          (await radios
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+        checked: await radios
+          .nth(i)
+          .isChecked()
+          .catch(() => false),
+      });
+    }
+    // The help line is the paragraph right after the option row.
+    const help = group.locator("xpath=following-sibling::p[1]");
+    return { options, help: ((await help.innerText().catch(() => "")) ?? "").trim() };
   }
-  async schedulerOutcomeSelect(_label: string): Promise<void> {
-    return todo("schedulerOutcomeSelect");
+
+  async schedulerOutcomeSelect(label: string): Promise<void> {
+    await this.schedulerDialog()
+      .getByRole("radiogroup", { name: "What to do with findings" })
+      .getByRole("radio", { name: label, exact: true })
+      .click();
   }
+
   async schedulerPodOptions(): Promise<{ value: string; label: string; selected: boolean }[]> {
-    return todo("schedulerPodOptions");
+    const select = this.schedulerDialog().getByLabel("Pod");
+    const current = await select.inputValue();
+    const options = select.locator("option");
+    const total = await options.count();
+    const out: { value: string; label: string; selected: boolean }[] = [];
+    for (let i = 0; i < total; i++) {
+      const value =
+        (await options
+          .nth(i)
+          .getAttribute("value")
+          .catch(() => null)) ?? "";
+      out.push({
+        value,
+        label: (
+          (await options
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim(),
+        selected: value === current,
+      });
+    }
+    return out;
   }
-  async schedulerPodSelect(_value: string): Promise<void> {
-    return todo("schedulerPodSelect");
+
+  async schedulerPodSelect(value: string): Promise<void> {
+    await this.schedulerDialog().getByLabel("Pod").selectOption(value);
   }
+
   async schedulerPodDisabled(): Promise<boolean> {
-    return todo("schedulerPodDisabled");
+    return this.schedulerDialog().getByLabel("Pod").isDisabled();
   }
+
   async schedulerPodLoadingObserved(): Promise<boolean> {
-    return todo("schedulerPodLoadingObserved");
+    // Hold the pod listing mid-flight so the loading gate stays observable.
+    const pattern = "**/api/runners/pods/**";
+    await this.page.route(pattern, async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue().catch(() => undefined);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.page.getByRole("button", { name: "New Scheduler", exact: true }).click();
+      const dialog = this.schedulerDialog();
+      await dialog.getByText("New Scheduler", { exact: true }).first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        if (await this.schedulerPodDisabled().catch(() => false)) return true;
+        if (Date.now() > deadline) return false;
+        await this.page.waitForTimeout(100);
+      }
+    } finally {
+      await this.page.unroute(pattern).catch(() => undefined);
+      if (await this.schedulerProjectInstallOpen().catch(() => false)) {
+        await this.schedulerCloseProjectInstall().catch(() => undefined);
+      }
+    }
   }
-  async schedulerOpenProjectBinding(_workspaceSlug: string, _projectId: string, _bindingId: string): Promise<void> {
-    return todo("schedulerOpenProjectBinding");
+
+  /** The install-detail header: the header element above the config section. */
+  private schedulerDetailHeader(): Locator {
+    return this.page
+      .getByRole("heading", { name: "Configuration", exact: true })
+      .locator("xpath=ancestor::section[1]")
+      .locator("xpath=preceding-sibling::header[1]");
   }
+
+  /** The run-history section (the ancestor of its heading). */
+  private schedulerRunsSection(): Locator {
+    return this.page.getByRole("heading", { name: "Run history", exact: true }).locator("xpath=ancestor::section[1]");
+  }
+
+  async schedulerOpenProjectBinding(workspaceSlug: string, projectId: string, bindingId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/schedulers/${bindingId}`);
+    await this.page
+      .getByRole("heading", { name: "Configuration", exact: true })
+      .or(this.page.getByText("This scheduler install is not available", { exact: false }))
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
   async schedulerBindingHeader(): Promise<SchedulerBindingHeader> {
-    return todo("schedulerBindingHeader");
+    const header = this.schedulerDetailHeader();
+    const badges: string[] = [];
+    // The origin mark renders the raw source value; the workspace-disabled
+    // mark renders its sentence. Both are presence reads.
+    for (const mark of ["builtin", "manifest", "Disabled for the whole workspace"]) {
+      if ((await header.getByText(mark, { exact: true }).count()) > 0) badges.push(mark);
+    }
+    return {
+      name: (
+        (await header
+          .getByRole("heading", { level: 1 })
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      handle: (
+        (await header
+          .locator("code")
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      badges,
+      workspaceLinkVisible: await this.isShown(header.getByRole("link", { name: "View workspace definition" })),
+      editVisible: await this.isShown(header.getByRole("button", { name: "Edit", exact: true })),
+      uninstallVisible: await this.isShown(header.getByRole("button", { name: "Uninstall", exact: true })),
+    };
   }
+
   async schedulerBindingConfig(): Promise<{ label: string; value: string }[]> {
-    return todo("schedulerBindingConfig");
+    const grid = this.page
+      .getByRole("heading", { name: "Configuration", exact: true })
+      .locator("xpath=following-sibling::dl[1]");
+    const labels = grid.locator(":scope > div > dt");
+    const total = await labels.count();
+    const out: { label: string; value: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      // Labels render through a CSS uppercase transform, so the source
+      // text comes from textContent (innerText would return SCHEDULE).
+      const label = (
+        (await labels
+          .nth(i)
+          .textContent()
+          .catch(() => "")) ?? ""
+      ).trim();
+      // The Enabled row's value cell holds the switch plus the state word;
+      // the switch contributes no text, so the read stays uniform.
+      const valueCell = labels.nth(i).locator("xpath=following-sibling::dd[1]");
+      const value = ((await valueCell.innerText().catch(() => "")) ?? "").trim();
+      if (label !== "") out.push({ label, value });
+    }
+    return out;
   }
+
   async schedulerBindingScheduleTitle(): Promise<string> {
-    return todo("schedulerBindingScheduleTitle");
+    const grid = this.page
+      .getByRole("heading", { name: "Configuration", exact: true })
+      .locator("xpath=following-sibling::dl[1]");
+    const valueCell = grid.locator("dt", { hasText: "Schedule" }).locator("xpath=following-sibling::dd[1]");
+    return (await valueCell.getAttribute("title").catch(() => null)) ?? "";
   }
+
   async schedulerBindingLastError(): Promise<string | null> {
-    return todo("schedulerBindingLastError");
+    const mark = this.page.getByText("Last error", { exact: true });
+    if ((await mark.count()) === 0) return null;
+    const panel = mark.locator("xpath=ancestor::div[1]");
+    return (
+      (await panel
+        .locator("pre")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
+
   async schedulerBindingExtraContext(): Promise<string | null> {
-    return todo("schedulerBindingExtraContext");
+    const mark = this.page.getByText(/project context/i);
+    if ((await mark.count()) === 0) return null;
+    const block = mark.first().locator("xpath=ancestor::div[1]");
+    return (
+      (await block
+        .locator("pre")
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
+
   async schedulerBindingPromptState(): Promise<{ toggleVisible: boolean; revealed: boolean }> {
-    return todo("schedulerBindingPromptState");
+    const show = this.page.getByRole("button", { name: "Show resolved prompt", exact: true });
+    const hide = this.page.getByRole("button", { name: "Hide resolved prompt", exact: true });
+    const revealed =
+      (await hide.count()) > 0 &&
+      (await hide
+        .first()
+        .isVisible()
+        .catch(() => false));
+    const toggleVisible =
+      revealed ||
+      ((await show.count()) > 0 &&
+        (await show
+          .first()
+          .isVisible()
+          .catch(() => false)));
+    return { toggleVisible, revealed };
   }
+
   async schedulerBindingPromptToggle(): Promise<void> {
-    return todo("schedulerBindingPromptToggle");
+    const state = await this.schedulerBindingPromptState();
+    if (state.revealed) {
+      await this.page.getByRole("button", { name: "Hide resolved prompt", exact: true }).click();
+    } else {
+      await this.page.getByRole("button", { name: "Show resolved prompt", exact: true }).click();
+    }
   }
+
   async schedulerBindingPromptText(): Promise<string> {
-    return todo("schedulerBindingPromptText");
+    const toggle = this.page.getByRole("button", { name: "Hide resolved prompt", exact: true });
+    const body = toggle.locator("xpath=following-sibling::pre[1]");
+    await body.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await body.innerText().catch(() => "")) ?? "").trim();
   }
+
   async schedulerBindingRuns(): Promise<SchedulerBindingRunRow[]> {
-    return todo("schedulerBindingRuns");
+    const rows = this.schedulerRunsSection().locator("tbody tr");
+    const total = await rows.count();
+    const out: SchedulerBindingRunRow[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      // Guidance and loader rows span every column; data reads skip them.
+      if ((await row.locator("td[colspan]").count()) > 0) continue;
+      const cells = row.locator("td");
+      const cellText = async (index: number): Promise<string> =>
+        (
+          (await cells
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim();
+      out.push({
+        started: await cellText(0),
+        ended: await cellText(1),
+        status: await cellText(2),
+        duration: await cellText(3),
+        pod: await cellText(4),
+        result: await cellText(5),
+      });
+    }
+    return out;
   }
+
   async schedulerBindingRunsEmpty(): Promise<string | null> {
-    return todo("schedulerBindingRunsEmpty");
+    // Immediate read: the loader row also spans every column, so callers
+    // poll until the text settles on an empty state (or rows appear).
+    const cell = this.schedulerRunsSection().locator("tbody tr td[colspan]");
+    if ((await cell.count()) === 0) return null;
+    return (
+      (await cell
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
+
   async schedulerBindingRunsCount(): Promise<string> {
-    return todo("schedulerBindingRunsCount");
+    const bar = this.page.getByRole("heading", { name: "Run history", exact: true }).locator("xpath=ancestor::div[1]");
+    const count = bar.locator("span").first();
+    return ((await count.innerText().catch(() => "")) ?? "").trim();
   }
+
   async schedulerBindingRunsPager(): Promise<{
     text: string;
     prevDisabled: boolean;
     nextDisabled: boolean;
   } | null> {
-    return todo("schedulerBindingRunsPager");
+    const section = this.schedulerRunsSection();
+    const mark = section.getByText(/^Page \d+ of \d+$/);
+    if ((await mark.count()) === 0) return null;
+    const bar = mark.locator("xpath=ancestor::div[1]");
+    return {
+      text: (
+        (await mark
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim(),
+      prevDisabled: await bar.getByRole("button", { name: "Previous", exact: true }).isDisabled(),
+      nextDisabled: await bar.getByRole("button", { name: "Next", exact: true }).isDisabled(),
+    };
   }
-  async schedulerBindingRunsPage(_direction: "next" | "prev"): Promise<void> {
-    return todo("schedulerBindingRunsPage");
+
+  async schedulerBindingRunsPage(direction: "next" | "prev"): Promise<void> {
+    const section = this.schedulerRunsSection();
+    const before = (
+      (await section
+        .getByText(/^Page \d+ of \d+$/)
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    const button = section.getByRole("button", { name: direction === "next" ? "Next" : "Previous", exact: true });
+    if (await button.isDisabled()) throw new Error(`[parity] run-history pager cannot step ${direction} here.`);
+    await button.click();
+    await expect
+      .poll(
+        () =>
+          section
+            .getByText(/^Page \d+ of \d+$/)
+            .first()
+            .innerText()
+            .catch(() => before),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .not.toBe(before);
   }
+
   async schedulerBindingWaitRunsRefetch(): Promise<void> {
-    return todo("schedulerBindingWaitRunsRefetch");
+    await this.page.waitForResponse(/scheduler-bindings\/[^/]+\/runs\//, { timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerBindingRemovedVisible(): Promise<boolean> {
-    return todo("schedulerBindingRemovedVisible");
+    return this.isShown(this.page.getByText("This scheduler install is not available", { exact: false }));
   }
+
   async schedulerBindingBackToList(): Promise<void> {
-    return todo("schedulerBindingBackToList");
+    await this.page.getByRole("link", { name: "Back to schedulers" }).first().click();
+    await this.page
+      .getByRole("columnheader", { name: "Scheduler", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerBindingToggleState(): Promise<{ checked: boolean; disabled: boolean }> {
-    return todo("schedulerBindingToggleState");
+    // The detail carries exactly one switch (the config Enabled row).
+    const toggle = this.page.getByRole("switch");
+    return {
+      checked: (await toggle.getAttribute("aria-checked")) === "true",
+      disabled: await toggle.isDisabled().catch(() => false),
+    };
   }
+
   async schedulerBindingToggle(): Promise<void> {
-    return todo("schedulerBindingToggle");
+    await this.page.getByRole("switch").click();
   }
+
   async schedulerBindingOpenEdit(): Promise<void> {
-    return todo("schedulerBindingOpenEdit");
+    await this.schedulerDetailHeader().getByRole("button", { name: "Edit", exact: true }).click();
+    const dialog = this.schedulerDialog();
+    await dialog.getByText("Edit scheduler install", { exact: false }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Starts at").waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerBindingOpenUninstall(): Promise<void> {
-    return todo("schedulerBindingOpenUninstall");
+    await this.schedulerDetailHeader().getByRole("button", { name: "Uninstall", exact: true }).click();
+    await this.schedulerDialog()
+      .getByRole("heading", { name: "Uninstall scheduler?", exact: true })
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerOpenProjectCalendar(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("schedulerOpenProjectCalendar");
   }
@@ -10302,14 +10918,40 @@ export class WebNewDriver implements ParityDriver {
   async schedulerSectionOpenTab(_tab: "List" | "Calendar"): Promise<void> {
     return todo("schedulerSectionOpenTab");
   }
-  async schedulerOpenSettingsSchedulers(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("schedulerOpenSettingsSchedulers");
+  async schedulerOpenSettingsSchedulers(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/schedulers`);
+    // The settings shell carries no workspace sidebar; settle on the panel
+    // headers for admins, or the refusal heading for everyone else.
+    await this.page
+      .getByRole("columnheader", { name: "Scheduler", exact: true })
+      .or(this.page.getByRole("heading", { name: "Oops! You are not authorized to view this page" }))
+      .first()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async schedulerSettingsPanelVisible(): Promise<boolean> {
-    return todo("schedulerSettingsPanelVisible");
+    return this.isShown(this.page.getByRole("columnheader", { name: "Scheduler", exact: true }));
   }
-  async schedulerRunsExportControls(): Promise<string[]> {
-    return todo("schedulerRunsExportControls");
+
+  async schedulerVisibleToasts(): Promise<{ title: string; message: string }[]> {
+    // The kit renders newest-first inside the Notifications viewport and
+    // auto-dismisses; only currently visible cards with text count.
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    const total = await cards.count();
+    const out: { title: string; message: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const card = cards.nth(i);
+      if (!(await card.isVisible().catch(() => false))) continue;
+      const text = (await card.innerText().catch(() => "")).trim();
+      if (text === "") continue;
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      const title = lines[0] as string;
+      out.push({ title, message: lines.slice(1).join(" ") });
+    }
+    return out;
   }
 
   // --- Runner chat on cloud/web (NEWFRONT-549 shell; messaging lands with

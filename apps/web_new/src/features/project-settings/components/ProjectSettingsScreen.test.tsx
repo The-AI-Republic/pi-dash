@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const harness = vi.hoisted(() => ({
   role: 20,
   workspaceRole: 20,
+  rowPending: false,
   pathname: "/acme/settings/projects/223e4567-e89b-12d3-a456-426614174001/",
 }));
 
@@ -40,12 +41,20 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
 
 vi.mock("../../auth/index.js", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  useProjectRow: () => ({
-    status: "success",
-    data: { id: "223e4567-e89b-12d3-a456-426614174001", name: "Website relaunch", identifier: "WEB", logo_props: {} },
-    isPending: false,
-    isSuccess: true,
-  }),
+  useProjectRow: () =>
+    harness.rowPending
+      ? { status: "pending", data: undefined, isPending: true, isSuccess: false }
+      : {
+          status: "success",
+          data: {
+            id: "223e4567-e89b-12d3-a456-426614174001",
+            name: "Website relaunch",
+            identifier: "WEB",
+            logo_props: {},
+          },
+          isPending: false,
+          isSuccess: true,
+        },
   useProjectRoles: () => ({
     status: "success",
     data: { "223e4567-e89b-12d3-a456-426614174001": harness.role },
@@ -78,6 +87,7 @@ function renderScreen(props: { pageHeader?: boolean; tabKey?: "members" | "githu
 afterEach(() => {
   harness.role = 20;
   harness.workspaceRole = 20;
+  harness.rowPending = false;
 });
 
 describe("ProjectSettingsScreen", () => {
@@ -98,6 +108,24 @@ describe("ProjectSettingsScreen", () => {
     harness.workspaceRole = 15;
     renderScreen({ tabKey: "estimates" });
     expect(screen.getByTestId("project-settings-denied")).toBeInTheDocument();
+  });
+
+  it("renders the tab's pending fallback while the project read resolves", () => {
+    harness.rowPending = true;
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <ProjectSettingsScreen
+          workspaceSlug="acme"
+          projectId={PID}
+          tabKey="members"
+          pendingFallback={<p>settings skeleton</p>}
+        >
+          <p>tab body</p>
+        </ProjectSettingsScreen>
+      </QueryClientProvider>
+    );
+    expect(screen.getByText("settings skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("tab body")).not.toBeInTheDocument();
   });
 
   it("falls back to the key for an unknown tab", () => {

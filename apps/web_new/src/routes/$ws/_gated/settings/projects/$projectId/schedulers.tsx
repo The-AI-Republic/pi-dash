@@ -1,10 +1,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Project-settings schedulers (parity/specs/agents.md §2, AGT-007): the
-// project page's install panel behind the project-admin gate, inside the
-// settings shell. Members read the installs list on the project page; this
-// address refuses them, while the shell keeps its rail and page chrome.
+// Project-settings schedulers (parity/specs/project-settings-part-f.md,
+// PSET-055–061): the installs table behind the project-admin gate, inside
+// the settings shell, plus the two-path install dialog and the prefilled
+// edit / uninstall pair the rows open. Members read the installs list on
+// the project page; this address refuses them while the shell keeps its
+// rail and page chrome.
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
@@ -15,7 +17,13 @@ import {
   ProjectSettingsShell,
   useProjectSettings,
 } from "../../../../../../features/project-settings/index.js";
-import { InstallsList, InstallDialog, useSchedulerBindings } from "../../../../../../features/schedulers/index.js";
+import {
+  EditInstallDialog,
+  InstallsList,
+  InstallDialog,
+  UninstallInstallDialog,
+  useSchedulerBindings,
+} from "../../../../../../features/schedulers/index.js";
 import type { SchedulerBinding } from "@pidash/api-client";
 
 export const Route = createFileRoute("/$ws/_gated/settings/projects/$projectId/schedulers")({
@@ -66,6 +74,8 @@ function SchedulersSettingsPanel({
   const navigate = useNavigate();
   const bindings = useSchedulerBindings(workspaceSlug, projectId);
   const [creating, setCreating] = React.useState(false);
+  const [editing, setEditing] = React.useState<SchedulerBinding | null>(null);
+  const [uninstalling, setUninstalling] = React.useState<SchedulerBinding | null>(null);
 
   return (
     <>
@@ -77,6 +87,8 @@ function SchedulersSettingsPanel({
           void navigate({ href: `/${workspaceSlug}/projects/${projectId}/schedulers/${binding.id}` });
         }}
         onCreate={() => setCreating(true)}
+        onEditInstall={setEditing}
+        onUninstallInstall={setUninstalling}
       />
       <InstallDialog
         workspaceSlug={workspaceSlug}
@@ -89,6 +101,21 @@ function SchedulersSettingsPanel({
         onInstalled={() => {
           void bindings.refetch();
         }}
+      />
+      <EditInstallDialog
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        binding={editing}
+        onClose={() => setEditing(null)}
+        onSaved={() => {
+          void bindings.refetch();
+        }}
+      />
+      <UninstallInstallDialog
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        binding={uninstalling}
+        onClose={() => setUninstalling(null)}
       />
     </>
   );
