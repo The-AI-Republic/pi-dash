@@ -1241,6 +1241,7 @@ struct ProjectRow {
     agent_test_default_interval_seconds: i32,
     agent_ticking_enabled: bool,
     default_agent_executor: String,
+    default_work_type: String,
     members_can_edit_states: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -1298,6 +1299,7 @@ impl ProjectRow {
                 .try_get("agent_test_default_interval_seconds")?,
             agent_ticking_enabled: row.try_get("agent_ticking_enabled")?,
             default_agent_executor: row.try_get("default_agent_executor")?,
+            default_work_type: row.try_get("default_work_type")?,
             members_can_edit_states: row.try_get("members_can_edit_states")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -1365,7 +1367,7 @@ async fn fetch_project_row_opts(
               p.agent_default_interval_seconds, p.agent_default_max_ticks,
               p.agent_review_default_interval_seconds, p.agent_test_default_interval_seconds,
               p.agent_ticking_enabled,
-              p.default_agent_executor, p.members_can_edit_states,
+              p.default_agent_executor, p.default_work_type, p.members_can_edit_states,
               p.created_at, p.updated_at, p.created_by_id, p.updated_by_id, p.deleted_at,
               EXISTS (SELECT 1 FROM user_favorites uf
                       WHERE uf.deleted_at IS NULL AND uf.user_id = $2
@@ -1825,6 +1827,7 @@ async fn render_list_row(
         agent_test_default_interval_seconds: i64::from(row.agent_test_default_interval_seconds),
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
+        default_work_type: row.default_work_type.clone(),
         agent_executor_options: options.to_vec(),
         next_work_item_sequence: sequence,
         members_can_edit_states: row.members_can_edit_states,
@@ -1933,6 +1936,7 @@ async fn render_current_instance(
         agent_test_default_interval_seconds: i64::from(row.agent_test_default_interval_seconds),
         agent_ticking_enabled: row.agent_ticking_enabled,
         default_agent_executor: row.default_agent_executor.clone(),
+        default_work_type: row.default_work_type.clone(),
         members_can_edit_states: row.members_can_edit_states,
     };
     let value = serde_json::to_value(&read).map_err(|_| Denial::ServerError)?;
@@ -3451,6 +3455,7 @@ struct Validated {
     agent_test_default_interval_seconds: Option<i64>,
     agent_ticking_enabled: Option<bool>,
     default_agent_executor: Option<String>,
+    default_work_type: Option<String>,
     members_can_edit_states: Option<bool>,
     /// Writable on update (`update()` persists it; `save()` overwrites
     /// only `updated_by` — `models/base.py`). On create the crum
@@ -3525,6 +3530,7 @@ const WRITE_FIELDS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -3932,6 +3938,23 @@ async fn validate_one_field(
                 Err(message) => return fail(message),
             }
         }
+        // `CharField(max_length=32, blank=True)`, then
+        // `validate_default_work_type` — a `ProjectSerializer` method, so
+        // the PUT (`ProjectListSerializer`) skips it (PDASHOSS01-234).
+        "default_work_type" => match validate_char(value, Some(32), true) {
+            Ok(text) => {
+                if mode != ValidateMode::Full
+                    && !text.is_empty()
+                    && !pidash_services::prompting::work_types::is_known(&text)
+                {
+                    return fail(
+                        pidash_services::prompting::work_types::unknown_work_type_message(),
+                    );
+                }
+                out.default_work_type = Some(text);
+            }
+            Err(messages) => return fail_many(messages),
+        },
         "members_can_edit_states" => match validate_bool(value) {
             Ok(flag) => out.members_can_edit_states = Some(flag),
             Err(message) => return fail(message),
@@ -4362,6 +4385,14 @@ async fn insert_project(
             }
         }
     };
+    // `Project.save()` on create: a blank `default_work_type` resolves from
+    // the repo binding (PDASHOSS01-234).
+    let default_work_type = match validated.default_work_type.as_deref() {
+        Some(work_type) if !work_type.is_empty() => work_type,
+        _ => pidash_services::prompting::work_types::default_for_new_project(
+            validated.repo_url.as_deref(),
+        ),
+    };
     let id = uuid::Uuid::new_v4();
     let name = validated.name.as_deref().expect("required on create");
     // `int4` columns: out-of-range `IntegerField` values 500 at the
@@ -4406,7 +4437,8 @@ async fn insert_project(
               repo_url, base_branch,
               agent_default_interval_seconds, agent_default_max_ticks,
               agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-              agent_ticking_enabled, default_agent_executor, members_can_edit_states)
+              agent_ticking_enabled, default_agent_executor, members_can_edit_states,
+              default_work_type)
            VALUES ($1, $2, $2, $3, NULL, NULL,
               $4, $5, $6, $7, $8, $9, $10,
               $11, $12, $13, $14,
@@ -4416,7 +4448,8 @@ async fn insert_project(
               $29, $30, $31, $32, $33, $34,
               $35, $36,
               $37, $38, $39, $40,
-              $41, $42, $43)"#,
+              $41, $42, $43,
+              $44)"#,
     )
     .bind(id)
     .bind(now)
@@ -4461,6 +4494,7 @@ async fn insert_project(
     .bind(validated.agent_ticking_enabled.unwrap_or(true))
     .bind(default_executor)
     .bind(validated.members_can_edit_states.unwrap_or(true))
+    .bind(default_work_type)
     .execute(&mut *tx)
     .await
     .map_err(db_denial)?;
@@ -4690,7 +4724,8 @@ async fn apply_update(
              agent_ticking_enabled = $37, default_agent_executor = $38,
              members_can_edit_states = $39,
              workspace_id = $40, deleted_at = $41,
-             updated_at = $42, updated_by_id = $43, created_by_id = $44
+             updated_at = $42, updated_by_id = $43, created_by_id = $44,
+             default_work_type = $46
            WHERE id = $45"#,
     )
     .bind(validated.name.as_deref().unwrap_or(&instance.name))
@@ -4822,6 +4857,12 @@ async fn apply_update(
     // it; `save()` overwrites only `updated_by` — `models/base.py`).
     .bind(validated.created_by.unwrap_or(instance.created_by_id))
     .bind(instance.id)
+    .bind(
+        validated
+            .default_work_type
+            .as_deref()
+            .unwrap_or(&instance.default_work_type),
+    )
     .execute(&mut *tx)
     .await
     .map_err(db_denial)?;
@@ -5192,7 +5233,8 @@ fn project_columns() -> &'static str {
      p.repo_url, p.base_branch, \
      p.agent_default_interval_seconds, p.agent_default_max_ticks, \
      p.agent_review_default_interval_seconds, p.agent_test_default_interval_seconds, \
-     p.agent_ticking_enabled, p.default_agent_executor, p.members_can_edit_states, \
+     p.agent_ticking_enabled, p.default_agent_executor, p.default_work_type, \
+     p.members_can_edit_states, \
      p.created_at, p.updated_at, p.created_by_id, p.updated_by_id, p.deleted_at"
 }
 
@@ -5283,6 +5325,7 @@ fn order_column(key: &str) -> Result<&'static str, Denial> {
         "agent_test_default_interval_seconds" => Ok("p.agent_test_default_interval_seconds"),
         "agent_ticking_enabled" => Ok("p.agent_ticking_enabled"),
         "default_agent_executor" => Ok("p.default_agent_executor"),
+        "default_work_type" => Ok("p.default_work_type"),
         "created_by" => Ok("p.created_by_id"),
         "updated_by" => Ok("p.updated_by_id"),
         "is_favorite" => Ok("is_favorite"),
@@ -6824,7 +6867,7 @@ mod tests {
         assert!(position("identifier") < position("workspace"));
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 1], "default_state");
         assert_eq!(WRITE_FIELDS[WRITE_FIELDS.len() - 6], "workspace");
-        assert_eq!(WRITE_FIELDS.len(), 43);
+        assert_eq!(WRITE_FIELDS.len(), 44);
     }
 
     #[test]

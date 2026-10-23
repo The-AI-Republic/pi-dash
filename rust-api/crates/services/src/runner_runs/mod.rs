@@ -442,6 +442,7 @@ pub(crate) const PROJECT_COLUMNS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
 ];
 
 /// `states` columns in Django `_meta` order (captured from
@@ -582,7 +583,7 @@ mod tests {
             ]
         );
         assert!(ISSUE_COLUMNS.contains(&"sequence_id"));
-        assert_eq!(PROJECT_COLUMNS.len(), 46);
+        assert_eq!(PROJECT_COLUMNS.len(), 47);
         assert_eq!(
             &PROJECT_COLUMNS[..6],
             [
@@ -596,7 +597,11 @@ mod tests {
         );
         assert_eq!(
             &PROJECT_COLUMNS[44..],
-            ["agent_ticking_enabled", "default_agent_executor"]
+            [
+                "agent_ticking_enabled",
+                "default_agent_executor",
+                "default_work_type"
+            ]
         );
         assert!(PROJECT_COLUMNS.contains(&"agent_default_max_ticks"));
         assert_eq!(STATE_COLUMNS.len(), 18);

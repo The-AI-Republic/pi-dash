@@ -384,14 +384,14 @@ impl PgDummyData {
                  is_default, guest_view_all_features, timezone, members_can_edit_states,
                  repo_url, base_branch, agent_default_interval_seconds, agent_default_max_ticks,
                  agent_review_default_interval_seconds, agent_test_default_interval_seconds,
-                 agent_ticking_enabled, default_agent_executor)
+                 agent_ticking_enabled, default_agent_executor, default_work_type)
                 VALUES ($1::uuid, $2::uuid, $3, $4, NULL, TRUE, $5, $5,
                  '', 2, FALSE, FALSE, FALSE, TRUE,
                  0, 0, '{}', FALSE, FALSE,
                  $6, FALSE, $7, TRUE,
                  '', 'main', 10800, 10,
                  10800, 10800,
-                 TRUE, $8)"#,
+                 TRUE, $8, $9)"#,
         )
         .bind(&project_id)
         .bind(workspace_id)
@@ -401,6 +401,9 @@ impl PgDummyData {
         .bind(!has_default)
         .bind(&timezone)
         .bind(default_agent_executor())
+        // `Project.save()` resolves the blank default from the (empty)
+        // repo binding (PDASHOSS01-234).
+        .bind(pidash_services::prompting::work_types::default_for_new_project(Some("")))
         .execute(&self.pool)
         .await
         .map_err(db_error)?;

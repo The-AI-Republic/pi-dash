@@ -129,7 +129,7 @@ def _seed_integrations(conn) -> None:
                         repo_url, base_branch, agent_default_interval_seconds,
                         agent_default_max_ticks, agent_ticking_enabled, is_default,
                         agent_review_default_interval_seconds, default_agent_executor,
-                        agent_test_default_interval_seconds, created_at, updated_at)
+                        agent_test_default_interval_seconds, created_at, updated_at, default_work_type)
                     VALUES (%s, 'Replay Second Project', '', 2, 'RPJ2',
                         %s, %s, true, true,
                         true, true, false, 0, 0,
@@ -137,7 +137,7 @@ def _seed_integrations(conn) -> None:
                         false, 'UTC', false,
                         '', '', 0,
                         0, false, false,
-                        0, '', 0, now(), now())
+                        0, '', 0, now(), now(), 'software')
                     """,
                     (PROJ2_ID, ws_id, admin_id),
                 )

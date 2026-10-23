@@ -70,11 +70,11 @@ def _seed_followup(conn) -> None:
                 repo_url, base_branch, agent_default_interval_seconds,
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
-                agent_test_default_interval_seconds)
+                agent_test_default_interval_seconds, default_work_type)
             VALUES (now(), now(), %s, 'Replay Project 2', '', 0, 'RPJ2', %s,
                 true, true, true, true, true, 0, 0, '{}', true, true,
                 true, 'UTC', true, '', '', 3600, 100, true, false, 10800,
-                'muse', 10800)
+                'muse', 10800, 'software')
             """,
             (PROJ2_ID, ws_id),
         )

@@ -1864,10 +1864,10 @@ mod tests {
              logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
              agent_default_max_ticks, agent_review_default_interval_seconds, \
              agent_test_default_interval_seconds, agent_ticking_enabled, \
-             default_agent_executor, workspace_id) \
+             default_agent_executor, default_work_type, workspace_id) \
              VALUES ($1, $2, $2, 'FX6', 'FX6', '', 2, false, false, false, true, false, false, \
              false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/fx6.git', \
-             'main', 10800, 10, 10800, 10800, true, 'local_runner', $3)",
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', 'software', $3)",
         )
         .bind(project)
         .bind(at)

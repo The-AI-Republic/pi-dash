@@ -1450,7 +1450,7 @@ mod tests {
             vec![
                 ("\"agent_run\"".to_owned(), 42),
                 ("\"issues\"".to_owned(), 34),
-                ("\"projects\"".to_owned(), 46),
+                ("\"projects\"".to_owned(), 47),
                 ("\"states\"".to_owned(), 18),
                 ("\"scheduler_bindings\"".to_owned(), 22),
             ]

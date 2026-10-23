@@ -130,6 +130,8 @@ def test_workspace_seed_before_after(db_conn, broker_url):
     # bot audit, first-project default, workspace timezone.
     assert _count(db_conn, "projects") == before_projects + 1
     assert project["name"] == workspace["name"]
+    # No repo bound: `save()` resolves the blank work type (PDASHOSS01-234).
+    assert project["default_work_type"] == "general"
     expected_identifier = "".join(
         ch for ch in workspace["name"] if ch.isalnum()
     )[:5].upper()

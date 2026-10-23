@@ -887,6 +887,7 @@ const SPAN_MODELS: &[SpanModel] = &[
             "created_at",
             "cycle_view",
             "default_agent_executor",
+            "default_work_type",
             "deleted_at",
             "description",
             "description_html",

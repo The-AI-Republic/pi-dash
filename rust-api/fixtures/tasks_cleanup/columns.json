@@ -360,7 +360,8 @@
         "agent_review_default_interval_seconds": "IntegerField",
         "agent_test_default_interval_seconds": "IntegerField",
         "agent_ticking_enabled": "BooleanField",
-        "default_agent_executor": "CharField"
+        "default_agent_executor": "CharField",
+        "default_work_type": "CharField"
       }
     },
     "project_members": {
