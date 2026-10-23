@@ -367,6 +367,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                 richFilters={preferences.rich_filters}
                 peekKey={peekKey}
                 onPeekChange={setPeekKey}
+                weekStart={weekStart}
                 compact={search.layout === "compact"}
               />
             );
@@ -386,6 +387,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
         />
       );
     };
+
     const createDialog = createOpen ? (
       <React.Suspense fallback={null}>
         <LazyWorkItemCreateDialog

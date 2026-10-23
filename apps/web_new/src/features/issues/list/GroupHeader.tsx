@@ -11,6 +11,8 @@ import { ChevronDown, ChevronRight, ListTodo, Plus } from "lucide-react";
 import * as React from "react";
 
 import type { IssueGroupSection } from "./grouping.js";
+import { GroupSelectionCheckbox } from "../bulk/SelectionCheckbox.js";
+import type { GroupSelectionState } from "../bulk/model.js";
 
 export interface GroupHeaderProps {
   section: IssueGroupSection;
@@ -24,6 +26,9 @@ export interface GroupHeaderProps {
   menu: boolean;
   onCreate: () => void;
   onAddExisting: () => void;
+  /** Selection is offered when the list enables bulk selection. */
+  selection?: GroupSelectionState | undefined;
+  onSelectionToggle?: (() => void) | undefined;
 }
 
 function GroupGlyph({ dimension }: { dimension: string | null }): React.ReactElement {
@@ -42,6 +47,8 @@ export function GroupHeader({
   menu,
   onCreate,
   onAddExisting,
+  selection,
+  onSelectionToggle,
 }: GroupHeaderProps): React.ReactElement {
   const Chevron = collapsed ? ChevronRight : ChevronDown;
   const addControl = menu ? (
@@ -110,6 +117,15 @@ export function GroupHeader({
         }
       }}
     >
+      {selection === undefined ? null : (
+        <GroupSelectionCheckbox
+          state={selection}
+          label={`Select all work items in ${section.title}`}
+          onToggle={() => {
+            onSelectionToggle?.();
+          }}
+        />
+      )}
       <Chevron size={14} strokeWidth={2} className="shrink-0 text-(--text-muted)" aria-hidden="true" />
       <GroupGlyph dimension={dimension} />
       <span className="text-emphasis min-w-0 truncate text-(--text)">{section.title}</span>

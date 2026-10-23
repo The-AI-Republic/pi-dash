@@ -77,3 +77,25 @@ describe("GroupHeader", () => {
     expect(screen.queryByRole("button", { name: "Add to Todo" })).not.toBeInTheDocument();
   });
 });
+
+describe("GroupHeader selection", () => {
+  it("renders no selection control when selection is off", () => {
+    setup();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
+  it("renders a tri-state group control and toggles the group", () => {
+    const props = setup({ selection: "partial", onSelectionToggle: vi.fn() });
+    const box = screen.getByRole("checkbox", { name: "Select all work items in Todo" }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    expect(box.indeterminate).toBe(true);
+    fireEvent.click(box);
+    expect(props.onSelectionToggle).toHaveBeenCalledTimes(1);
+    expect(props.onToggle).not.toHaveBeenCalled();
+  });
+
+  it("checks the group control when every row is selected", () => {
+    setup({ selection: "complete", onSelectionToggle: vi.fn() });
+    expect(screen.getByRole("checkbox", { name: "Select all work items in Todo" })).toBeChecked();
+  });
+});

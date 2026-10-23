@@ -49,6 +49,17 @@ import {
   useSheetModuleUpdate,
 } from "./data.js";
 import { SheetPropertyCell, isEditableColumn, type SheetCellContext } from "./cells.js";
+import {
+  BulkToolbar,
+  BulkUpgradeBanner,
+  ForeignRowSelectionHint,
+  GroupSelectionCheckbox,
+  RowSelectionCheckbox,
+  SELECTION_ROW_ATTR,
+  isBulkOperationsEnabled,
+  useBulkMutations,
+  useBulkSelection,
+} from "../bulk/index.js";
 import { SpreadsheetSkeleton } from "../loaders/skeletons.js";
 
 const ROW_HEIGHT = 44;
@@ -70,6 +81,8 @@ export interface SpreadsheetLayoutProps {
   richExpression?: RichExpression;
   /** The profile's first day of week; the route owns the session read. */
   weekStart: number;
+  /** Whether this sheet offers multi-select (ISS-108); defaults on. */
+  enableSelection?: boolean | undefined;
 }
 
 export interface DisplayRow {
@@ -91,6 +104,7 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     highlightedId = null,
     richExpression = {},
     weekStart,
+    enableSelection = true,
   } = props;
   const client = getAppClient();
   const query = useInfiniteQuery(
@@ -140,6 +154,20 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     [roots, expanded, childrenByParent]
   );
   const viewport = useViewportWindow(scrollNode, ROW_HEIGHT, rows.length);
+  const rowIndexById = React.useMemo(() => new Map(rows.map((row, index) => [row.issue.id, index])), [rows]);
+  const revealSelectionRow = React.useCallback(
+    (id: string) => viewport.revealRow(rowIndexById.get(id)!),
+    [rowIndexById, viewport]
+  );
+  const selectionItems = React.useMemo(
+    () =>
+      rows.filter((row) => row.issue.project_id === projectId).map((row) => ({ id: row.issue.id, groupKey: "all" })),
+    [rows, projectId]
+  );
+  const selection = useBulkSelection(selectionItems, enableSelection, revealSelectionRow);
+  const bulk = useBulkMutations({ workspaceSlug, projectId });
+  const bulkEnabled = isBulkOperationsEnabled();
+  const selectedCount = selection.selectedIds.size;
   const visibleRows = rows.slice(viewport.start, viewport.end);
   const pendingFocus = React.useRef<{ row: number; column: number } | null>(null);
 
@@ -186,6 +214,9 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
     const direction = arrowDirection(event.key);
     if (direction === null) return;
     event.preventDefault();
+    // Grid navigation owns arrows while a cell has focus; the selection
+    // hook's window listener must not also move the bulk-active row.
+    event.stopPropagation();
     const rowIndex = Number(event.currentTarget.dataset["rowIndex"]);
     const columnIndex = Number(event.currentTarget.dataset["columnIndex"]);
     const next = moveSheetFocus({ row: rowIndex, column: columnIndex }, direction, rows.length, columns.length + 1);
@@ -235,7 +266,16 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                 style={{ boxShadow: scrolled ? "8px 22px 22px 10px rgba(0, 0, 0, 0.05)" : "none" }}
                 className="text-caption sticky left-0 z-30 h-11 min-w-60 border-r border-b border-(--border) bg-(--surface) px-(--space-3) font-medium text-(--text)"
               >
-                <span>Work items</span>
+                <span className="flex items-center gap-(--space-2)">
+                  {enableSelection ? (
+                    <GroupSelectionCheckbox
+                      state={selection.groupState("all")}
+                      label="Select all work items"
+                      onToggle={() => selection.onGroupToggle("all")}
+                    />
+                  ) : null}
+                  <span>Work items</span>
+                </span>
               </th>
               {columns.map((column) => (
                 <SheetHeaderCell
@@ -275,6 +315,10 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
                   projectIdentifier={projectIdentifier}
                   scrolled={scrolled}
                   context={context}
+                  selectionEnabled={enableSelection}
+                  selected={selection.isSelected(row.issue.id)}
+                  active={selection.isActive(row.issue.id)}
+                  onSelectionToggle={selection.onRowToggle}
                   highlighted={row.issue.id === highlightedId}
                   hasChildren={(row.issue.sub_issues_count ?? 0) > 0}
                   expanded={expanded.has(row.issue.id)}
@@ -309,6 +353,45 @@ export function SpreadsheetLayout(props: SpreadsheetLayoutProps): React.ReactEle
         pending={create.isPending}
         onCreate={(name) => create.mutateAsync({ name })}
       />
+      {selectedCount === 0 ? null : bulkEnabled && canEdit ? (
+        <BulkToolbar
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          count={selectedCount}
+          hideCycle={hideCycle}
+          hideModule={hideModule}
+          hideEstimate={hideEstimate}
+          weekStart={weekStart}
+          busy={bulk.update.isPending || bulk.remove.isPending || bulk.archive.isPending || bulk.subscribe.isPending}
+          onClear={selection.clear}
+          onUpdate={(properties) => {
+            void bulk.update
+              .mutateAsync({ issueIds: [...selection.selectedIds], properties })
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onDelete={() => {
+            void bulk.remove
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onArchive={() => {
+            void bulk.archive
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onSubscribe={() => {
+            void bulk.subscribe
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+        />
+      ) : bulkEnabled ? null : (
+        <BulkUpgradeBanner count={selectedCount} />
+      )}
       {peekIssue === null ? null : (
         <PeekPanel
           eyebrow={`${projectIdentifier}-${peekIssue.sequence_id}`}
@@ -505,6 +588,10 @@ function SheetRow({
   onToggle,
   onOpen,
   onKeyDown,
+  selectionEnabled,
+  selected,
+  active,
+  onSelectionToggle,
 }: {
   row: DisplayRow;
   columns: readonly SheetColumn[];
@@ -513,6 +600,10 @@ function SheetRow({
   scrolled: boolean;
   context: SheetCellContext;
   highlighted: boolean;
+  selectionEnabled: boolean;
+  selected: boolean;
+  active: boolean;
+  onSelectionToggle: (id: string, shiftKey: boolean) => void;
   hasChildren: boolean;
   expanded: boolean;
   onToggle: () => void;
@@ -526,9 +617,11 @@ function SheetRow({
   const cellStyle = { boxShadow: scrolled ? "8px 22px 22px 10px rgba(0, 0, 0, 0.05)" : "none" };
   return (
     <tr
+      {...{ [SELECTION_ROW_ATTR]: issue.id }}
       data-highlight={highlighted ? "true" : undefined}
       data-temprow={temp ? "true" : undefined}
-      className={highlighted ? "bg-(--accent-subtle)" : undefined}
+      data-active={active ? "true" : undefined}
+      className={highlighted ? "bg-(--accent-subtle)" : active ? "ring-1 ring-(--accent) ring-inset" : undefined}
     >
       <td
         id={`issue-${issue.id}`}
@@ -540,6 +633,15 @@ function SheetRow({
         className="text-caption sticky left-0 z-10 h-11 max-w-lg min-w-60 border-r border-b border-(--border) bg-(--bg) px-(--space-3) text-(--text)"
       >
         <div className="flex h-full w-full items-center gap-(--space-2)">
+          {selectionEnabled && issue.project_id === context.projectId ? (
+            <RowSelectionCheckbox
+              checked={selected}
+              label={`Select ${key}`}
+              onChange={(event) => onSelectionToggle(issue.id, event.shiftKey)}
+            />
+          ) : selectionEnabled ? (
+            <ForeignRowSelectionHint label={`Cannot select ${key}`} />
+          ) : null}
           <div style={{ width: `${depth * 12}px` }} aria-hidden="true" />
           <span className="grid size-4 shrink-0 place-items-center">
             {hasChildren && !temp ? (

@@ -10,7 +10,7 @@
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
-import { Skeleton, VirtualList } from "@pidash/kit";
+import { Skeleton, VirtualList, type VirtualListHandle } from "@pidash/kit";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -18,10 +18,22 @@ import { usePermissions } from "../../../core/session/index.js";
 import { projectDetailsQueryOptions, projectsQueryOptions } from "../../projects/index.js";
 import { isCollapsed, readCollapsedGroups, useToggleCollapsedGroup } from "./collapse.js";
 
-import { creationDisabledForGroup, quickAddDisabledReason, sectionPrefill } from "./grouping.js";
+import {
+  creationDisabledForGroup,
+  quickAddDisabledReason,
+  sectionPrefill,
+  type IssueGroupSection,
+} from "./grouping.js";
 import { GroupHeader } from "./GroupHeader.js";
 
 import { ListRow } from "./ListRow.js";
+import {
+  BulkToolbar,
+  BulkUpgradeBanner,
+  isBulkOperationsEnabled,
+  useBulkMutations,
+  useBulkSelection,
+} from "../bulk/index.js";
 import { useListPages } from "./pages.js";
 
 import { useListReferences } from "./reference.js";
@@ -108,6 +120,10 @@ export interface ListLayoutProps {
    * the cloud workflow layer injects its reason here.
    */
   creationBlockedReason?: string | undefined;
+  /** Whether this list offers multi-select (ISS-108); defaults on. */
+  enableSelection?: boolean | undefined;
+  /** Profile week start for the bulk date pickers. */
+  weekStart?: number | undefined;
 }
 
 /** Entries the empty card can reach through this layout. */
@@ -127,11 +143,13 @@ function FlatRows({
   renderRow,
   rowHeight,
   footer,
+  listRef,
 }: {
   rows: IssueListItem[];
   renderRow: (issue: IssueListItem) => React.ReactNode;
   rowHeight: number;
   footer?: React.ReactNode;
+  listRef: React.Ref<VirtualListHandle>;
 }): React.ReactElement {
   return (
     <VirtualList
@@ -141,6 +159,7 @@ function FlatRows({
       getKey={(issue) => issue.id}
       overscan={4}
       className="h-full"
+      listRef={listRef}
       renderRow={(issue) => renderRow(issue)}
       footer={footer}
     />
@@ -183,6 +202,8 @@ export function ListLayout({
   enableQuickAdd = true,
   canEdit,
   creationBlockedReason,
+  enableSelection = true,
+  weekStart = 0,
 }: ListLayoutProps): React.ReactElement {
   const client = getAppClient();
   const permissions = usePermissions(workspaceSlug);
@@ -223,6 +244,72 @@ export function ListLayout({
   };
 
   const allRows = pages.sections.flatMap((section) => section.rows);
+  const [expandedSelectionIds, setExpandedSelectionIds] = React.useState<ReadonlySet<string>>(() => new Set());
+  const [childrenByParent, setChildrenByParent] = React.useState<ReadonlyMap<string, readonly IssueListItem[]>>(
+    () => new Map()
+  );
+  const onExpandedChange = React.useCallback((id: string, expanded: boolean) => {
+    setExpandedSelectionIds((current) => {
+      if (current.has(id) === expanded) return current;
+      const next = new Set(current);
+      if (expanded) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+    if (!expanded) {
+      setChildrenByParent((current) => {
+        if (!current.has(id)) return current;
+        const next = new Map(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  }, []);
+  const onChildrenChange = React.useCallback((id: string, children: readonly IssueListItem[]) => {
+    setChildrenByParent((current) => {
+      if (current.get(id) === children) return current;
+      const next = new Map(current);
+      if (children.length === 0) next.delete(id);
+      else next.set(id, children);
+      return next;
+    });
+  }, []);
+  const selectionTree = React.useMemo(
+    () => ({ expanded: expandedSelectionIds, children: childrenByParent }),
+    [expandedSelectionIds, childrenByParent]
+  );
+  const selectionItems = React.useMemo(
+    () => flattenSectionSelection(pages.sections, projectId, expandedSelectionIds, childrenByParent),
+    [pages.sections, projectId, expandedSelectionIds, childrenByParent]
+  );
+  const listRef = React.useRef<VirtualListHandle | null>(null);
+  const selectionRowIndex = React.useMemo(() => {
+    const indexes = new Map<string, number>();
+    let rowIndex = 0;
+    const visit = (issue: IssueListItem): void => {
+      indexes.set(issue.id, rowIndex);
+      if (expandedSelectionIds.has(issue.id)) {
+        for (const child of childrenByParent.get(issue.id) ?? []) visit(child);
+      }
+    };
+    for (const section of pages.sections) {
+      for (const issue of section.rows) {
+        visit(issue);
+        rowIndex += 1;
+      }
+    }
+    return indexes;
+  }, [pages.sections, expandedSelectionIds, childrenByParent]);
+  const revealSelectionRow = React.useCallback(
+    (id: string) => {
+      if (listRef.current !== null) listRef.current.scrollToIndex(selectionRowIndex.get(id)!);
+    },
+    [selectionRowIndex]
+  );
+  const selection = useBulkSelection(selectionItems, enableSelection, pages.grouped ? undefined : revealSelectionRow);
+  const bulk = useBulkMutations({ workspaceSlug, projectId });
+  const bulkEnabled = isBulkOperationsEnabled();
+  const selectedCount = selection.selectedIds.size;
   const peekIssue =
     peekKey === null ? null : (allRows.find((row) => `${projectIdentifier}-${row.sequence_id}` === peekKey) ?? null);
   const peekTitle = peekIssue?.name ?? peekTitleHint;
@@ -323,6 +410,11 @@ export function ListLayout({
         workspaceSlug={workspaceSlug}
         projectId={projectId}
         projectIdentifier={projectIdentifier}
+        projectIdentifierFor={(row) =>
+          row.project_id === projectId
+            ? projectIdentifier
+            : (projects?.find((item) => item.id === row.project_id)?.identifier ?? projectIdentifier)
+        }
         issue={issue}
         depth={1}
         properties={prefs.properties}
@@ -339,6 +431,15 @@ export function ListLayout({
         highlightedId={null}
         onOpenPeek={openPeek}
         hrefFor={hrefFor}
+        selected={selection.isSelected(issue.id)}
+        active={selection.isActive(issue.id)}
+        selectionSelectedFor={selection.isSelected}
+        selectionActiveFor={selection.isActive}
+        onSelectionToggle={enableSelection ? selection.onRowToggle : undefined}
+        selectionAvailable={issue.project_id === projectId}
+        onExpandedChange={onExpandedChange}
+        onChildrenChange={onChildrenChange}
+        selectionTree={selectionTree}
         compact={compact}
         deferPickers={!pages.grouped}
         showSubIssues={prefs.showSubIssues}
@@ -374,6 +475,8 @@ export function ListLayout({
               menu={menu}
               onCreate={() => openCreate({ ...sectionPrefill(prefs.groupBy, section) })}
               onAddExisting={() => setAddExistingOpen(true)}
+              selection={enableSelection ? selection.groupState(section.key) : undefined}
+              onSelectionToggle={() => selection.onGroupToggle(section.key)}
             />
             {sectionCollapsed ? null : (
               <>
@@ -384,6 +487,7 @@ export function ListLayout({
                     rows={section.rows}
                     renderRow={renderListRow}
                     rowHeight={compact ? 32 : 44}
+                    listRef={listRef}
                     footer={
                       pages.hasMore ? (
                         <div
@@ -433,6 +537,45 @@ export function ListLayout({
           </section>
         );
       })}
+      {selectedCount === 0 ? null : bulkEnabled && editAllowed ? (
+        <BulkToolbar
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          count={selectedCount}
+          hideCycle={flags.hideCycle}
+          hideModule={flags.hideModule}
+          hideEstimate={!estimateEnabled}
+          weekStart={weekStart}
+          busy={bulk.update.isPending || bulk.remove.isPending || bulk.archive.isPending || bulk.subscribe.isPending}
+          onClear={selection.clear}
+          onUpdate={(properties) => {
+            void bulk.update
+              .mutateAsync({ issueIds: [...selection.selectedIds], properties })
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onDelete={() => {
+            void bulk.remove
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onArchive={() => {
+            void bulk.archive
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onSubscribe={() => {
+            void bulk.subscribe
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+        />
+      ) : bulkEnabled ? null : (
+        <BulkUpgradeBanner count={selectedCount} />
+      )}
       {addExistingOpen ? (
         <React.Suspense fallback={null}>
           <LazyAddExistingModal
@@ -478,4 +621,26 @@ export function ListLayout({
       )}
     </div>
   );
+}
+
+/**
+ * Ordered selectable rows for a grouped list: each section in render order,
+ * with expanded children inserted directly after their parent. Foreign-project
+ * rows stay visible but are omitted so ranges and group toggles skip them.
+ */
+export function flattenSectionSelection(
+  sections: readonly IssueGroupSection[],
+  projectId: string,
+  expanded: ReadonlySet<string>,
+  childrenByParent: ReadonlyMap<string, readonly IssueListItem[]>
+): Array<{ id: string; groupKey: string }> {
+  const out: Array<{ id: string; groupKey: string }> = [];
+  const visit = (rows: readonly IssueListItem[], groupKey: string): void => {
+    for (const row of rows) {
+      if (row.project_id === projectId) out.push({ id: row.id, groupKey });
+      if (expanded.has(row.id)) visit(childrenByParent.get(row.id) ?? [], groupKey);
+    }
+  };
+  for (const section of sections) visit(section.rows, section.key);
+  return out;
 }
