@@ -1403,17 +1403,30 @@ async fn forgot_password(
     if data_get_raises(&data) {
         return server_error();
     }
-    // Instance gate (`Instance.objects.first()`, `is_setup_done`): a
-    // missing row or an unset flag answers INSTANCE_NOT_CONFIGURED.
+    // Django gate order (`app/password_management.py:54-81`, space
+    // `:54-93`): instance, SMTP, `validate_email` — each short-circuits
+    // before the user lookup. The lookup runs last: a NUL byte in the
+    // email makes Postgres reject the bind param, which answered 500
+    // instead of Django's 400 INVALID_EMAIL (PIDASHCONV-1353).
     let instance_row = match pidash_db::license::queries::fetch_instance_first(&pool).await {
         Ok(row) => row,
         Err(_) => return server_error(),
     };
     let instance_setup_done = instance_row.map(|row| row.is_setup_done).unwrap_or(false);
+    if !instance_setup_done {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::InstanceNotConfigured,
+        ));
+    }
     // SMTP gate (`EMAIL_HOST` truthiness).
     let Ok(smtp) = smtp_configured(&pool, &state.settings().secret_key).await else {
         return server_error();
     };
+    if !smtp {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::SmtpNotConfigured,
+        ));
+    }
     // `validate_email`: only `ValidationError` is caught
     // (`app/password_management.py:75-81`). Falsy values and truthy
     // lists/dicts take the `INVALID_EMAIL` branch (`"@" not in [...]`
@@ -1424,17 +1437,20 @@ async fn forgot_password(
         Field::Absent | Field::Opaque => String::new(),
         Field::Scalar => return server_error(),
     };
-    let email_valid = crate::license::handlers_auth_forms::email_is_valid(&email);
+    if !crate::license::handlers_auth_forms::email_is_valid(&email) {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::InvalidEmail,
+        ));
+    }
     let user = match forgot_user_by_email(&pool, &email).await {
         Ok(user) => user,
         Err(_) => return server_error(),
     };
-    let decision =
-        t::forgot_password_decision(instance_setup_done, smtp, email_valid, user.is_some());
-    if decision != t::ForgotPasswordDecision::Emit {
-        return json_400(&pw::forgot_password_error_pairs(decision));
-    }
-    let user = user.expect("decided Emit");
+    let Some(user) = user else {
+        return json_400(&pw::forgot_password_error_pairs(
+            t::ForgotPasswordDecision::UserDoesNotExist,
+        ));
+    };
     let current_site = base_host_for(&state, !is_space, is_space);
     let now = now_unix();
     let (uidb64, token) = pw::make_password_token(
