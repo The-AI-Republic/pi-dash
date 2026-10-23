@@ -65,8 +65,10 @@
 //!   requested role (yes, 200, ported as-is), then bulk-creates the
 //!   invites and enqueues `project_invitation.delay(email, project_id,
 //!   token, current_site, inviter)` once per row.
-//! * Favorites list 500s: the viewset has no `serializer_class`, so the
-//!   DRF-default list raises `AssertionError` (FX-APROJ-06/08).
+//! * Favorites list (re-synced to the PDASHOSS01-293 Django fix — PB-0500
+//!   retired): the pre-fix port always 500ed (no `serializer_class`,
+//!   FX-APROJ-06/08 are the pre-fix probe records); the fixed viewset
+//!   lists through `UserFavoriteSerializer`, 200.
 //! * Board retrieve / partial_update / destroy look the row up globally:
 //!   `DeployBoardViewSet` defines no `get_queryset`, so any live board UUID
 //!   resolves regardless of workspace or project.
@@ -2916,14 +2918,22 @@ async fn join_post(
 // ---------------------------------------------------------------------------
 
 /// `GET .../user-favorite-projects/` (`base.py:503-514`): the DRF-default
-/// list raises `AssertionError` — the viewset inherits
-/// `serializer_class = None` — so the endpoint always answers the generic
-/// 500 (FX-APROJ-06/08), after the auth-only gate.
+/// list over `UserFavoriteSerializer` (PDASHOSS01-293 — the viewset used
+/// to inherit `serializer_class = None` and 500, PB-0500 retired). After
+/// the auth-only gate, the caller's live favorites in the slug's
+/// workspace — every entity type, folders and children included (the
+/// queryset filters neither) — `-created_at` first (`Meta.ordering`), as
+/// an unpaginated JSON array (no default pagination class). Each row
+/// renders the shared 10-key `UserFavoriteSerializer` shape, the same
+/// renderer as the workspace `user-favorites/` list.
 async fn fav_list(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     extension: Option<axum::Extension<SessionHandle>>,
 ) -> Result<Response, Denial> {
+    use crate::app_workspace::handlers_favorites_drafts::{
+        favorite_row_from_pg, fetch_favorite_entity, render_favorite,
+    };
     let resolved = actor(&state, extension).await?;
     let pool = pool_of(&state)?.clone();
     check_gate(
@@ -2935,7 +2945,36 @@ async fn fav_list(
         "workspaces/<slug>/user-favorite-projects/",
     )
     .await?;
-    Err(Denial::ServerError)
+    // `.filter(workspace__slug=)` joins the workspace row without its
+    // manager's `deleted_at` scope; `select_related` adds no filter (the
+    // inner joins follow non-null FKs).
+    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(
+        r#"SELECT user_favorites.* FROM user_favorites
+           JOIN workspaces ON workspaces.id = user_favorites.workspace_id
+           WHERE user_favorites.deleted_at IS NULL AND workspaces.slug = $1
+             AND user_favorites.user_id = $2
+           ORDER BY user_favorites.created_at DESC"#,
+    )
+    .bind(&slug)
+    .bind(resolved.id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| Denial::ServerError)?;
+    let mut rendered = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let favorite = favorite_row_from_pg(row)?;
+        let entity = fetch_favorite_entity(
+            &pool,
+            &favorite.entity_type,
+            favorite.entity_identifier.as_deref(),
+        )
+        .await?;
+        rendered.push(render_favorite(&favorite, entity.as_ref()));
+    }
+    Ok(json_response(
+        StatusCode::OK,
+        format!("[{}]", rendered.join(",")),
+    ))
 }
 
 /// `POST .../user-favorite-projects/` (`base.py:519-526`): create the
@@ -4119,13 +4158,12 @@ mod tests {
             parse(SECRET_JOIN_BODY),
             fx["user_invites"]["user_invite_join_secret_403"]["body"]
         );
-        // The remaining ported 500 (favorites list) renders the generic
-        // FX-APROJ-08 body. (Invite create no longer 500s since the
-        // `d656243d` re-sync, PIDASHCONV-1085; the `invite_create_500`
-        // fixture entry is the pre-fix probe record.)
+        // The generic FX-APROJ-08 500 body. (Neither invite create nor the
+        // favorites list 500s any more — the `d656243d` re-sync,
+        // PIDASHCONV-1085, and PDASHOSS01-293; the `invite_create_500` and
+        // `favorites_list_500` fixture entries are pre-fix probe records.)
         let fx08 = fixture("FX-APROJ-08.tasks.json");
         assert_eq!(parse(SERVER_ERROR_BODY), fx08["generic_500_body"]);
-        assert_eq!(parse(SERVER_ERROR_BODY), fx08["favorites_list_500"]["body"]);
         // The fixed invite-create bodies (no fixture entry — pinned here).
         assert_eq!(
             parse(ROLE_MISMATCH_BODY),
