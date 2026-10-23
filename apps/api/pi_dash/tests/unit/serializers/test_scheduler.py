@@ -5,6 +5,7 @@
 """Tests for the project-scheduler serializers.
 
 Covers RRULE/dtstart validation, color validation, extra_context bounds,
+slug derivation and duplicate names,
 the scheduler-rebind lock on PATCH, and the active_binding_count fallback.
 """
 
@@ -12,16 +13,23 @@ from __future__ import annotations
 
 from datetime import datetime, timezone as dt_timezone
 
+import json
+from pathlib import Path
+
 import pytest
 from crum import impersonate
 
 from pi_dash.app.serializers.scheduler import (
+    DUPLICATE_NAME_MESSAGE,
     EXTRA_CONTEXT_MAX_LENGTH,
+    NAME_NEEDS_ALNUM_MESSAGE,
     SchedulerBindingSerializer,
     SchedulerSerializer,
 )
 from pi_dash.db.models import Project, Scheduler, SchedulerBinding, Workspace
 from pi_dash.runner.models import Pod
+from pi_dash.scheduler import slug as slug_module
+from pi_dash.scheduler.slug import derive_scheduler_slug
 
 
 # Fixture-shared anchor — Mon 2026-01-05 09:00 UTC.
@@ -170,7 +178,7 @@ def test_rdates_must_be_iso_strings(scheduler, project, workspace):
 @pytest.mark.parametrize("color", ["#3b82f6", "#000000", "#FFFFFF"])
 def test_valid_color_accepted(workspace, color):
     s = SchedulerSerializer(
-        data={"slug": "x", "name": "x", "prompt": "x", "color": color}
+        data={"name": "x", "prompt": "x", "color": color}
     )
     assert s.is_valid(), s.errors
 
@@ -179,7 +187,7 @@ def test_valid_color_accepted(workspace, color):
 @pytest.mark.parametrize("color", ["", "blue", "#fff", "#ggghhh", "rgb(0,0,0)"])
 def test_invalid_color_rejected(workspace, color):
     s = SchedulerSerializer(
-        data={"slug": "x", "name": "x", "prompt": "x", "color": color}
+        data={"name": "x", "prompt": "x", "color": color}
     )
     assert not s.is_valid()
     assert "color" in s.errors
@@ -416,86 +424,170 @@ def test_create_pod_validated_against_context_project_not_request_body(
 
 
 # ---------------------------------------------------------------------------
-# Slug uniqueness (Scheduler) — mirrors the conditional DB constraint
-# ``scheduler_unique_workspace_slug_when_active`` so a duplicate comes back
-# as {"slug": [...]} instead of an IntegrityError-shaped generic 400
-# (PDASHOSS01-221 test-pass defect).
+# Slug derivation + duplicate names (Scheduler, PDASHOSS01-319). The slug is
+# derived from the name on the server; a name whose derived slug matches
+# another active scheduler in the workspace is a ``name`` field error,
+# mirroring the conditional DB constraint
+# ``scheduler_unique_workspace_slug_when_active`` so it never surfaces as an
+# IntegrityError-shaped generic 400 (PDASHOSS01-221 test-pass defect).
 # ---------------------------------------------------------------------------
+
+_VECTORS = json.loads(
+    (Path(slug_module.__file__).parent / "slug_vectors.json").read_text(encoding="utf-8")
+)
 
 
 @pytest.mark.unit
-def test_create_duplicate_slug_rejected(scheduler, workspace):
+@pytest.mark.parametrize("vector", _VECTORS, ids=lambda v: repr(v["name"][:24]))
+def test_derive_scheduler_slug_matches_shared_vectors(vector):
+    # The same vectors drive apps/web/tests/schedulers/definition-helpers.test.ts.
+    assert derive_scheduler_slug(vector["name"]) == vector["slug"]
+
+
+@pytest.mark.unit
+def test_create_derives_slug_from_name(workspace, create_user):
     s = SchedulerSerializer(
-        data={"slug": "test-scheduler", "name": "Dupe", "prompt": "x"},
+        data={"name": "Nightly Bug Scan", "prompt": "x"},
+        context={"workspace": workspace},
+    )
+    assert s.is_valid(), s.errors
+    with impersonate(create_user):
+        row = s.save(workspace=workspace)
+    assert row.slug == "nightly-bug-scan"
+
+
+@pytest.mark.unit
+def test_create_ignores_client_slug(workspace, create_user):
+    s = SchedulerSerializer(
+        data={"slug": "something-else", "name": "  PR  review!!", "prompt": "x"},
+        context={"workspace": workspace},
+    )
+    assert s.is_valid(), s.errors
+    with impersonate(create_user):
+        row = s.save(workspace=workspace)
+    assert row.slug == "pr-review"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["Test Scheduler", "test-scheduler", "TEST_scheduler!!"])
+def test_create_duplicate_name_rejected(scheduler, workspace, name):
+    s = SchedulerSerializer(
+        data={"name": name, "prompt": "x"},
         context={"workspace": workspace},
     )
     assert not s.is_valid()
-    assert "slug" in s.errors
+    assert s.errors["name"] == [DUPLICATE_NAME_MESSAGE]
+    assert "slug" not in s.errors
 
 
 @pytest.mark.unit
-def test_create_slug_of_soft_deleted_scheduler_accepted(scheduler, workspace):
+@pytest.mark.parametrize("name", ["!!!", "日本語", "  --  "])
+def test_create_name_without_letter_or_digit_rejected(workspace, name):
+    s = SchedulerSerializer(
+        data={"name": name, "prompt": "x"},
+        context={"workspace": workspace},
+    )
+    assert not s.is_valid()
+    assert s.errors["name"] == [NAME_NEEDS_ALNUM_MESSAGE]
+
+
+@pytest.mark.unit
+def test_create_name_of_soft_deleted_scheduler_accepted(scheduler, workspace):
     scheduler.delete()  # soft-delete — constraint only guards active rows
     s = SchedulerSerializer(
-        data={"slug": "test-scheduler", "name": "Reborn", "prompt": "x"},
+        data={"name": "Test Scheduler", "prompt": "x"},
         context={"workspace": workspace},
     )
     assert s.is_valid(), s.errors
 
 
 @pytest.mark.unit
-def test_create_same_slug_in_other_workspace_accepted(scheduler, create_user):
+def test_create_same_name_in_other_workspace_accepted(scheduler, create_user):
     with impersonate(create_user):
         other_ws = Workspace.objects.create(
             name="Second WS", owner=create_user, slug="second-ws"
         )
     s = SchedulerSerializer(
-        data={"slug": "test-scheduler", "name": "Elsewhere", "prompt": "x"},
+        data={"name": "Test Scheduler", "prompt": "x"},
         context={"workspace": other_ws},
     )
     assert s.is_valid(), s.errors
 
 
 @pytest.mark.unit
-def test_create_duplicate_slug_without_workspace_context_skips_check(scheduler):
+def test_create_duplicate_name_without_workspace_context_skips_check(scheduler):
     # Without a workspace in context (or an instance) there is nothing to
     # check against; the DB constraint remains the backstop.
-    s = SchedulerSerializer(
-        data={"slug": "test-scheduler", "name": "Dupe", "prompt": "x"},
-    )
+    s = SchedulerSerializer(data={"name": "Test Scheduler", "prompt": "x"})
     assert s.is_valid(), s.errors
 
 
 @pytest.mark.unit
-def test_patch_keeping_own_slug_accepted(scheduler):
-    s = SchedulerSerializer(
-        scheduler,
-        data={"slug": "test-scheduler", "name": "Renamed"},
-        partial=True,
-    )
+def test_rename_rederives_slug(scheduler):
+    s = SchedulerSerializer(scheduler, data={"name": "Weekly Review"}, partial=True)
     assert s.is_valid(), s.errors
+    s.save()
+    scheduler.refresh_from_db()
+    assert (scheduler.name, scheduler.slug) == ("Weekly Review", "weekly-review")
 
 
 @pytest.mark.unit
-def test_patch_to_another_active_slug_rejected(scheduler, other_scheduler):
+def test_rename_to_own_name_variant_accepted(scheduler):
+    s = SchedulerSerializer(scheduler, data={"name": "TEST scheduler"}, partial=True)
+    assert s.is_valid(), s.errors
+    s.save()
+    scheduler.refresh_from_db()
+    assert scheduler.slug == "test-scheduler"
+
+
+@pytest.mark.unit
+def test_patch_without_name_keeps_slug(scheduler):
     s = SchedulerSerializer(
-        scheduler,
-        data={"slug": "test-other-scheduler"},
-        partial=True,
+        scheduler, data={"slug": "ignored", "prompt": "new"}, partial=True
+    )
+    assert s.is_valid(), s.errors
+    s.save()
+    scheduler.refresh_from_db()
+    assert scheduler.slug == "test-scheduler"
+
+
+@pytest.mark.unit
+def test_rename_to_another_active_name_rejected(scheduler, other_scheduler):
+    s = SchedulerSerializer(
+        scheduler, data={"name": "Test Other Scheduler"}, partial=True
     )
     assert not s.is_valid()
-    assert "slug" in s.errors
+    assert s.errors["name"] == [DUPLICATE_NAME_MESSAGE]
 
 
 @pytest.mark.unit
-def test_post_duplicate_slug_returns_slug_field_error(session_client, scheduler, workspace):
-    """The wire shape the web modal maps inline: 400 {"slug": [...]},
+def test_rename_builtin_keeps_slug(workspace):
+    # Seeded by the post_save(Workspace) signal.
+    builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    s = SchedulerSerializer(builtin, data={"name": "Weekly Sec Sweep"}, partial=True)
+    assert s.is_valid(), s.errors
+    s.save()
+    builtin.refresh_from_db()
+    assert (builtin.name, builtin.slug) == ("Weekly Sec Sweep", "security-audit")
+
+
+@pytest.mark.unit
+def test_rename_builtin_to_another_active_name_rejected(scheduler, workspace):
+    builtin = Scheduler.objects.get(workspace=workspace, slug="security-audit")
+    s = SchedulerSerializer(builtin, data={"name": "Test Scheduler"}, partial=True)
+    assert not s.is_valid()
+    assert s.errors["name"] == [DUPLICATE_NAME_MESSAGE]
+
+
+@pytest.mark.unit
+def test_post_duplicate_name_returns_name_field_error(session_client, scheduler, workspace):
+    """The wire shape the web forms map inline under Name: 400 {"name": [...]},
     not the IntegrityError-shaped {"error": "The payload is not valid"}."""
     resp = session_client.post(
         f"/api/workspaces/{workspace.slug}/schedulers/",
-        {"slug": "test-scheduler", "name": "Dupe", "prompt": "x"},
+        {"name": "test scheduler", "prompt": "x"},
         format="json",
     )
     assert resp.status_code == 400
-    assert "slug" in resp.data
+    assert resp.data == {"name": [DUPLICATE_NAME_MESSAGE]}
     assert Scheduler.objects.filter(workspace=workspace, slug="test-scheduler").count() == 1
