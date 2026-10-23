@@ -19896,48 +19896,131 @@ export class WebNewDriver implements ParityDriver {
     return todo("exportsSettingsToast");
   }
 
+  // Previous-exports history reads (NEWFRONT-767, EXP-006..013). Fresh
+  // selectors over roles and text; the old-app driver is reference for
+  // what a user sees only, never for markup or classes.
+
+  private exportsHistorySeen = 0;
+  private exportsHistoryWatching = false;
+  private exportsHistoryStalled = false;
+  private exportsHistoryHookInstalled = false;
+  private exportsHistoryGates: Array<() => void> = [];
+
   async exportsSettingsHistoryRows(): Promise<ExportsSettingsHistoryRow[]> {
-    return todo("exportsSettingsHistoryRows");
+    const table = this.page.getByRole("table", { name: "Previous exports" });
+    if ((await table.count()) === 0) return [];
+    const rows = table.locator("tbody tr");
+    const total = await rows.count();
+    const facts: ExportsSettingsHistoryRow[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const cells = rows.nth(index).getByRole("cell");
+      const by = cells.nth(0);
+      const img = by.locator("img");
+      const hasAvatar = (await img.count()) > 0;
+      const avatarUrl = hasAvatar ? await img.first().getAttribute("src") : null;
+      const glyph = hasAvatar ? "" : (await by.getByRole("img").first().innerText()).trim();
+      const shown = (await by.innerText()).trim();
+      const exportedBy = hasAvatar ? shown : shown.slice(glyph.length).trim();
+      const exportedOn = (await cells.nth(1).innerText()).trim();
+      const projectCount = Number.parseInt((await cells.nth(2).innerText()).trim(), 10);
+      const format = (await cells.nth(3).innerText()).trim();
+      const status = (await cells.nth(4).innerText()).trim();
+      const downloadCell = cells.last();
+      const link = downloadCell.getByRole("link");
+      let download: ExportsSettingsHistoryRow["download"];
+      if ((await link.count()) > 0) {
+        const anchor = link.first();
+        download = {
+          kind: "link",
+          href: (await anchor.getAttribute("href")) ?? "",
+          target: (await anchor.getAttribute("target")) ?? "",
+        };
+      } else if (/expired/i.test((await downloadCell.innerText()).trim())) {
+        download = { kind: "expired" };
+      } else {
+        download = { kind: "dash" };
+      }
+      facts.push({
+        exportedBy,
+        avatarUrl,
+        initial: hasAvatar ? null : glyph,
+        exportedOn,
+        projectCount,
+        format,
+        status,
+        download,
+      });
+    }
+    return facts;
   }
 
   async exportsSettingsHistoryCount(): Promise<number> {
     return this.page.locator("tbody tr").count();
   }
 
+  /** The manual refresh in either of its labels. */
+  private exportsHistoryRefreshButton(): Locator {
+    return this.page.getByRole("button", { name: /^(Refresh status|Refreshing)$/ });
+  }
+
   async exportsSettingsRefresh(): Promise<void> {
-    return todo("exportsSettingsRefresh");
+    await this.exportsHistoryRefreshButton().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async exportsSettingsRefreshLabel(): Promise<string | null> {
-    return todo("exportsSettingsRefreshLabel");
+    const button = this.exportsHistoryRefreshButton();
+    if ((await button.count()) === 0) return null;
+    return (await button.first().innerText()).trim() || null;
   }
 
   async exportsSettingsPagination(): Promise<{ visible: boolean; prevDisabled: boolean; nextDisabled: boolean }> {
-    return todo("exportsSettingsPagination");
+    const prev = this.page.getByRole("button", { name: "Prev", exact: true });
+    const next = this.page.getByRole("button", { name: "Next", exact: true });
+    if ((await prev.count()) === 0 || (await next.count()) === 0) {
+      return { visible: false, prevDisabled: true, nextDisabled: true };
+    }
+    return {
+      visible: true,
+      prevDisabled: await prev.first().isDisabled(),
+      nextDisabled: await next.first().isDisabled(),
+    };
   }
 
   async exportsSettingsGoPrev(): Promise<void> {
-    return todo("exportsSettingsGoPrev");
+    await this.page.getByRole("button", { name: "Prev", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async exportsSettingsGoNext(): Promise<void> {
-    return todo("exportsSettingsGoNext");
+    await this.page.getByRole("button", { name: "Next", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async exportsSettingsSkeletonVisible(): Promise<boolean> {
-    return todo("exportsSettingsSkeletonVisible");
+    const loader = this.page.getByRole("status", { name: "Loading export history" });
+    return (await loader.count()) > 0;
   }
 
   async exportsSettingsEmptyFacts(): Promise<ExportsSettingsEmptyFacts | null> {
-    return todo("exportsSettingsEmptyFacts");
+    const heading = this.page.getByRole("heading", { name: "No exports yet" });
+    if ((await heading.count()) === 0) return null;
+    const parts = await heading.first().locator("span").allTextContents();
+    const title = parts[0];
+    if (title === undefined) return null;
+    return { title: title.trim(), description: (parts[1] ?? "").trim() };
   }
 
   async exportsSettingsWatchHistoryRequests(): Promise<void> {
-    return todo("exportsSettingsWatchHistoryRequests");
+    this.exportsHistorySeen = 0;
+    if (this.exportsHistoryWatching) return;
+    this.exportsHistoryWatching = true;
+    this.page.on("request", (request) => {
+      if (request.method() === "GET" && request.url().includes("/export-issues")) {
+        this.exportsHistorySeen += 1;
+      }
+    });
   }
 
   async exportsSettingsHistoryRequestCount(): Promise<number> {
-    return todo("exportsSettingsHistoryRequestCount");
+    return this.exportsHistorySeen;
   }
 
   async exportsSettingsCaptureSubmit(): Promise<void> {
@@ -19964,16 +20047,47 @@ export class WebNewDriver implements ParityDriver {
     return todo("exportsSettingsUnfailSubmit");
   }
 
+  /** Single route hook stalling the history read while armed. */
+  private async exportsHistoryHook(): Promise<void> {
+    if (this.exportsHistoryHookInstalled) return;
+    this.exportsHistoryHookInstalled = true;
+    await this.page.route("**/api/workspaces/*/export-issues**", async (route) => {
+      if (route.request().method() === "GET" && this.exportsHistoryStalled) {
+        await new Promise<void>((resolve) => {
+          this.exportsHistoryGates.push(resolve);
+        });
+      }
+      await route.fallback();
+    });
+  }
+
   async exportsSettingsStallHistory(): Promise<void> {
-    return todo("exportsSettingsStallHistory");
+    this.exportsHistoryStalled = true;
+    await this.exportsHistoryHook();
   }
 
   async exportsSettingsReleaseHistory(): Promise<void> {
-    return todo("exportsSettingsReleaseHistory");
+    const gates = this.exportsHistoryGates;
+    this.exportsHistoryGates = [];
+    this.exportsHistoryStalled = false;
+    gates.forEach((release) => release());
   }
 
-  async exportsSettingsDownloadPopupUrl(_rowIndex: number): Promise<string> {
-    return todo("exportsSettingsDownloadPopupUrl");
+  async exportsSettingsDownloadPopupUrl(rowIndex: number): Promise<string> {
+    const anchor = this.page
+      .getByRole("table", { name: "Previous exports" })
+      .locator("tbody tr")
+      .nth(rowIndex)
+      .getByRole("cell")
+      .last()
+      .getByRole("link");
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }),
+      anchor.click({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+    const url = popup.url();
+    await popup.close().catch(() => undefined);
+    return url;
   }
 
   // ---------------------------------------------------------------------------
