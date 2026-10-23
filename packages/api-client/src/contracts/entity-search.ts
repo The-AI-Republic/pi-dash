@@ -1,13 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Editor mention lookup (parity/specs/issues.md §11, ISS-127; comments
-// CMT-019): the person search behind the @ trigger. One GET returns a
-// section per requested entity kind; the picker reads the people section
-// and renders the rest under their own headings, so the contract keeps
-// every section the server sends instead of stripping unknown ones.
+// Editor lookup: the person search behind the @ trigger
+// (parity/specs/issues.md §11, ISS-127; comments CMT-019) and the
+// entity-preview search the page body uses for links and embeds
+// (parity/specs/pages.md §11.5, PAGE-041/043). One GET returns a section per
+// requested entity kind; the picker reads the people section and renders the
+// rest under their own headings, so the envelope keeps every section the
+// server sends instead of stripping unknown ones.
 import * as z from "zod/mini";
 import { ApiClient } from "../client.js";
+import { uuid } from "./fields.js";
 
 /** One person suggestion: the member id and the name to show. */
 export const MentionPerson = z.object({
@@ -33,6 +36,89 @@ export const MentionSearchResponse = z.looseObject({
   user_mention: z.optional(z.array(MentionPerson)),
 });
 export type MentionSearchResponse = z.infer<typeof MentionSearchResponse>;
+/** One project suggestion from the entity preview. */
+export const EntitySearchProject = z.object({
+  name: z.string(),
+  id: uuid(),
+  identifier: z.string(),
+  logo_props: z.record(z.string(), z.unknown()),
+  workspace__slug: z.string(),
+});
+export type EntitySearchProject = z.infer<typeof EntitySearchProject>;
+
+/** One work-item suggestion; an item with no type answers a null `type_id`. */
+export const EntitySearchIssue = z.object({
+  name: z.string(),
+  id: uuid(),
+  sequence_id: z.number(),
+  project__identifier: z.string(),
+  project_id: uuid(),
+  priority: z.string(),
+  state_id: uuid(),
+  type_id: z.nullable(uuid()),
+});
+export type EntitySearchIssue = z.infer<typeof EntitySearchIssue>;
+
+/** One cycle suggestion; `status` is derived from the cycle's dates. */
+export const EntitySearchCycle = z.object({
+  name: z.string(),
+  id: uuid(),
+  project_id: uuid(),
+  project__identifier: z.string(),
+  status: z.string(),
+  workspace__slug: z.string(),
+});
+export type EntitySearchCycle = z.infer<typeof EntitySearchCycle>;
+
+/** One module suggestion. */
+export const EntitySearchModule = z.object({
+  name: z.string(),
+  id: uuid(),
+  project_id: uuid(),
+  project__identifier: z.string(),
+  status: z.string(),
+  workspace__slug: z.string(),
+});
+export type EntitySearchModule = z.infer<typeof EntitySearchModule>;
+
+/**
+ * One page suggestion: only open pages of the scoped project come back;
+ * `projects__id` is the flat project id a page link token stores.
+ */
+export const EntitySearchPage = z.object({
+  name: z.string(),
+  id: uuid(),
+  logo_props: z.record(z.string(), z.unknown()),
+  projects__id: z.nullable(uuid()),
+  workspace__slug: z.string(),
+});
+export type EntitySearchPage = z.infer<typeof EntitySearchPage>;
+
+/**
+ * The typed preview kinds a page body resolves: the trigger kinds the
+ * editor understands today. People are the mention picker's section.
+ */
+export const ENTITY_PREVIEW_KINDS = ["project", "issue", "cycle", "module", "page"] as const;
+export type EntityPreviewKind = (typeof ENTITY_PREVIEW_KINDS)[number];
+
+/** One typed section per preview kind. */
+export const EntityPreviewSections = z.object({
+  project: z.optional(z.array(EntitySearchProject)),
+  issue: z.optional(z.array(EntitySearchIssue)),
+  cycle: z.optional(z.array(EntitySearchCycle)),
+  module: z.optional(z.array(EntitySearchModule)),
+  page: z.optional(z.array(EntitySearchPage)),
+});
+export type EntityPreviewSections = z.infer<typeof EntityPreviewSections>;
+
+/** One parser per preview kind; the loop below picks by the kind it asked for. */
+const ENTITY_PREVIEW_SECTION_SCHEMAS: Record<EntityPreviewKind, { parse(data: unknown): unknown }> = {
+  project: z.array(EntitySearchProject),
+  issue: z.array(EntitySearchIssue),
+  cycle: z.array(EntitySearchCycle),
+  module: z.array(EntitySearchModule),
+  page: z.array(EntitySearchPage),
+};
 
 export interface MentionSearchQuery {
   /** Term typed after the @ trigger. */
@@ -106,4 +192,39 @@ export async function searchEntitySections(
     },
   });
   return client.parse(MentionSearchResponse, body, `GET ${path}`);
+}
+
+/**
+ * Read the preview sections a page body can draw cards for. Each section is
+ * parsed on its own, so a kind the server echoes but the caller did not ask
+ * for can never fail the read.
+ */
+export async function searchEntityPreviews(
+  client: ApiClient,
+  slug: string,
+  query: Omit<EntitySearchQuery, "queryTypes"> & { kinds?: readonly EntityPreviewKind[] | undefined }
+): Promise<EntityPreviewSections> {
+  const path = `/api/workspaces/${slug}/entity-search/`;
+  const kinds = query.kinds ?? ENTITY_PREVIEW_KINDS;
+  const body = await client.getJson<unknown>(path, {
+    query: {
+      query: query.query,
+      query_type: kinds.join(","),
+      project_id: query.projectId,
+      count: query.count,
+    },
+  });
+  const envelope = client.parse(z.record(z.string(), z.unknown()), body, `GET ${path}`);
+  const sections: EntityPreviewSections = {};
+  for (const kind of kinds) {
+    const section = envelope[kind];
+    if (section !== undefined) {
+      (sections as Record<string, unknown>)[kind] = client.parse(
+        ENTITY_PREVIEW_SECTION_SCHEMAS[kind],
+        section,
+        `GET ${path}`
+      );
+    }
+  }
+  return sections;
 }
