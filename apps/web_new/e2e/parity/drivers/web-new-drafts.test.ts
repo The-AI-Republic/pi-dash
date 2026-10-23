@@ -182,7 +182,9 @@ function expectTrace(actual: string[], expected: string[]): void {
 const BLOCK = "[data-draft-block]";
 const NAME_BLOCK = `${BLOCK}").filter(`;
 const HEADING = 'getByRole("heading").first()';
-const SUBMIT = 'form button[type=\\"submit\\"]';
+// The shared create dialog renders Save in the footer, outside the <form>
+// it submits via the form attribute (NEWFRONT-662): no form ancestor.
+const SUBMIT = 'button[type=\\"submit\\"]';
 const TITLE = 'getByPlaceholder("Title").first()';
 const CHIP = 'locator("form").getByRole("button").first()';
 const DIALOG = 'getByRole("dialog")';

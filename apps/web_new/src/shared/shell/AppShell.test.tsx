@@ -22,6 +22,7 @@ import { useCommandPalette } from "../commands/index.js";
 import { useSessionStore } from "../../core/session/store.js";
 import { AppShell } from "./AppShell.js";
 import { useShortcutsDialog } from "./shortcutsDialogStore.js";
+import { notifyError } from "./toaster.js";
 
 function shell(slots: Partial<React.ComponentProps<typeof AppShell>> = {}): React.ReactElement {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -154,6 +155,32 @@ describe("AppShell", () => {
       useShortcutsDialog.getState().openShortcuts();
     });
     expect(await screen.findByRole("dialog", { name: "Keyboard shortcuts" })).not.toBeNull();
+  });
+
+  it("delivers a mount-time notice from page content: the host subscribes first (CLOUD-026)", async () => {
+    // The kit manager emits to current subscribers only, so a notice
+    // fired from a page mount effect is lost when the host sits after
+    // the content. The Apps bounce (CLOUD-026) notifies exactly there.
+    function NotifyingPage(): React.ReactElement {
+      React.useEffect(() => {
+        notifyError("Mount boom", "fired while the shell mounted");
+      }, []);
+      return <p>page content</p>;
+    }
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AppShell
+          topBar={<header>top bar</header>}
+          sidebar={<aside aria-label="Workspace navigation">sidebar</aside>}
+          searchScope={null}
+          onSelectSearchResult={() => undefined}
+        >
+          <NotifyingPage />
+        </AppShell>
+      </QueryClientProvider>
+    );
+    expect(await screen.findByText("Mount boom")).not.toBeNull();
   });
 
   it("redirects to sign-in once when the session expires", () => {

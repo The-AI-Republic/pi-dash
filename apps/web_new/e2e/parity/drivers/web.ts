@@ -57335,6 +57335,15 @@ export class WebDriver implements ParityDriver {
     return out;
   }
 
+  async cloudAppsDialogInputValues(): Promise<string[]> {
+    // (NEWFRONT-662) extracted from the CLOUD-027 cleared-fields read.
+    return this.page
+      .locator("div.fixed.inset-0")
+      .last()
+      .locator("input")
+      .evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value));
+  }
+
   private cloudAppsToggleSwitch(): Locator {
     return this.cloudAppsMain().locator('[role="switch"]').first();
   }
@@ -57711,6 +57720,11 @@ export class WebDriver implements ParityDriver {
     // re-implements this against its own badge.
     const texts = await this.page.locator("#main-sidebar button").allInnerTexts();
     return texts.map((text) => this.cloudNorm(text)).some((text) => text === "Upgrade" || text === "Migrate plan");
+  }
+
+  async cloudPlanBadgeFacts(): Promise<{ label: string; hint: string } | null> {
+    // Absent on the oracle (NEWFRONT-474); the new leg reads its own badge.
+    return null;
   }
 
   async cloudFocusedControl(): Promise<{ role: string; label: string } | null> {

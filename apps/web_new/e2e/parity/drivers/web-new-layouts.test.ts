@@ -333,3 +333,24 @@ describe("web_new add-existing modal driver", () => {
     await expect(new WebNewDriver(page).layoutsAddExistingModalIssueNames()).resolves.toEqual([]);
   });
 });
+
+describe("web_new visible issue names", () => {
+  it("reads every non-blank content paragraph in order (NEWFRONT-662)", async () => {
+    const { page, roles } = pageOf({
+      role: (role) =>
+        role === "main"
+          ? locator({
+              locator: (selector: string) =>
+                selector === "p"
+                  ? locator({ allTextContents: async () => ["  Cloud first issue  ", "", "Cloud second issue"] })
+                  : locator(),
+            })
+          : locator(),
+    });
+    await expect(new WebNewDriver(page).visibleIssueNames()).resolves.toEqual([
+      "Cloud first issue",
+      "Cloud second issue",
+    ]);
+    expect(roles).toContainEqual({ role: "main", name: undefined });
+  });
+});

@@ -256,6 +256,25 @@ describe("hover preview card", () => {
   });
 });
 
+describe("modal submit", () => {
+  it("clicks the dialog's submit button without requiring a form ancestor (NEWFRONT-662)", async () => {
+    const selectors: string[] = [];
+    const clicked = vi.fn(async () => undefined);
+    const dialog = locator({
+      locator: (selector: string) => {
+        selectors.push(selector);
+        return locator({ click: clicked });
+      },
+    });
+    const page = pageOf({
+      getByRole: () => locator({ filter: () => dialog }),
+    });
+    await new WebNewDriver(page).submitCreateModal();
+    expect(selectors).toEqual(['button[type="submit"]']);
+    expect(clicked).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("toast view action", () => {
   it("returns the address of the tab the action opened", async () => {
     const popup = {

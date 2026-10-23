@@ -9155,6 +9155,8 @@ export interface SpaceBoardStability {
   cloudAppsDialogCancel(): Promise<void>;
   /** Inline credential dialog errors currently shown. */
   cloudAppsDialogErrors(): Promise<string[]>;
+  /** Current values of the credential dialog inputs, in order. */
+  cloudAppsDialogInputValues(): Promise<string[]>;
   /** Agent-tools toggle state, or null when the toggle is absent. */
   cloudAppsToggleState(): Promise<boolean | null>;
   /** Agent-tools toggle label plus description text. */
@@ -9219,6 +9221,8 @@ export interface SpaceBoardStability {
   cloudAssistantAppsPointerVisible(): Promise<boolean>;
   /** Whether the workspace sidebar shows the plan badge (absent on the oracle: NEWFRONT-474). */
   cloudPlanBadgeVisible(): Promise<boolean>;
+  /** Plan badge label + hover hint, or null when no badge renders. */
+  cloudPlanBadgeFacts(): Promise<{ label: string; hint: string } | null>;
   /** Focused control role + label, or null when the body holds focus. */
   cloudFocusedControl(): Promise<{ role: string; label: string } | null>;
 }

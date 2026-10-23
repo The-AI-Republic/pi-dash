@@ -11,6 +11,10 @@
     "/create-workspace",
     "/signin",
     "/login",
-    "/register"
+    "/register",
+    "/home",
+    "/docs",
+    "/downloads",
+    "/pricing"
   ]
 }

@@ -686,15 +686,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async visibleIssueNames(): Promise<string[]> {
-    // Scaffold-tier selector: each row is an article whose second span
-    // carries the issue name (key first, priority badge last).
-    const rows = this.page.locator('section[aria-label="Issue list"] article');
-    const count = await rows.count();
-    const names: string[] = [];
-    for (let i = 0; i < count; i++) {
-      names.push(((await rows.nth(i).locator("span").nth(1).innerText()) ?? "").trim());
-    }
-    return names;
+    // Mirror the oracle reader (drivers/web): every non-blank paragraph
+    // in the content area, in order. On the issues page those are the
+    // row titles (link paragraphs); headings, counts and controls are
+    // headings, buttons and generics, never paragraphs (NEWFRONT-662).
+    const texts = await this.page.getByRole("main").locator("p").allTextContents();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
 
   // --- Mention flows (NEWFRONT-115). Throwing stubs per the shared driver
@@ -1790,7 +1787,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async submitCreateModal(): Promise<void> {
-    await this.createDialog().locator('form button[type="submit"]').first().click();
+    // The Save button carries type="submit" but renders in the dialog
+    // footer, outside the <form> it submits via the form attribute
+    // (NEWFRONT-662); match the attribute, not the ancestry.
+    await this.createDialog().locator('button[type="submit"]').first().click();
   }
 
   async clickModalDiscard(): Promise<void> {
@@ -1802,7 +1802,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modalPrimaryButtonLabel(): Promise<string> {
-    const submit = this.createDialog().locator('form button[type="submit"]').first();
+    // Same footer placement as submitCreateModal (NEWFRONT-662): the
+    // type="submit" Save button renders outside the <form> it submits
+    // via the form attribute, so no form ancestor is required.
+    const submit = this.createDialog().locator('button[type="submit"]').first();
     return ((await submit.textContent()) ?? "").trim();
   }
 
@@ -27489,227 +27492,724 @@ export class WebNewDriver implements ParityDriver {
 
   // --- Cloud Apps catalog (NEWFRONT-439, CLOUD-021–031). Appended;
   // --- existing stubs above are untouched per the shared driver contract.
+  // --- Reads implemented by the cloud area gate (NEWFRONT-662) against
+  // --- the openhub components: same contracts as drivers/web.
+  private cloudAppsMain(): Locator {
+    return this.cloudMain();
+  }
+
+  private cloudAppsGrid(): Locator {
+    return this.cloudAppsMain().getByTestId("apps-catalog-grid");
+  }
+
+  private cloudAppsSearchBox(): Locator {
+    return this.cloudAppsMain().getByPlaceholder("Search apps", { exact: true }).first();
+  }
+
+  private cloudAppsDialog(): Locator {
+    // Toasts share the dialog role, so an unscoped .first() lands on a
+    // toast instead of the modal: scope to the panel holding the Connect
+    // submit (toasts in these flows carry no buttons).
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("button", { name: "Connect", exact: true }) })
+      .first();
+  }
+
+  private cloudAppsToggleSwitch(): Locator {
+    return this.page.getByRole("region", { name: "Agent tools" }).getByRole("switch").first();
+  }
+
+  private async cloudAppsCard(name: string): Promise<Locator | null> {
+    const cards = this.cloudAppsMain().getByTestId("app-card");
+    const count = await cards.count();
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const title = (
+        (await card
+          .getByTestId("app-card-name")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (title === name) return card;
+    }
+    return null;
+  }
+
   async cloudAppsSidebarHref(): Promise<string | null> {
-    return todo("cloudAppsSidebarHref");
+    const link = this.page.locator('#main-sidebar a[href$="/apps/"]').first();
+    if ((await link.count()) === 0) return null;
+    return await link.getAttribute("href");
   }
 
   async cloudAppsSidebarIconPresent(): Promise<boolean> {
-    return todo("cloudAppsSidebarIconPresent");
+    const link = this.page.locator('#main-sidebar a[href$="/apps/"]').first();
+    if ((await link.count()) === 0) return false;
+    return (await link.locator("svg").count()) > 0;
   }
 
   async cloudAppsOpenFromSidebar(): Promise<void> {
-    return todo("cloudAppsOpenFromSidebar");
+    await this.page.locator('#main-sidebar a[href$="/apps/"]').first().click({ timeout: 60_000 });
+    // SPA navigation never fires load: settle on the Apps heading instead.
+    await this.cloudAppsMain().getByRole("heading", { name: "Apps" }).first().waitFor({ timeout: 60_000 });
   }
 
   async cloudAppsIntroText(): Promise<string> {
-    return todo("cloudAppsIntroText");
+    const paragraphs = this.cloudAppsMain().locator(":scope p");
+    const count = await paragraphs.count();
+    for (let index = 0; index < count; index++) {
+      const text = (
+        (await paragraphs
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") return text;
+    }
+    return "";
   }
 
-  async cloudAppsSearchFill(_value: string): Promise<void> {
-    return todo("cloudAppsSearchFill");
+  async cloudAppsSearchFill(value: string): Promise<void> {
+    await this.cloudAppsSearchBox().fill(value, { timeout: 60_000 });
   }
 
-  async cloudAppsSearchTypeText(_text: string): Promise<void> {
-    return todo("cloudAppsSearchTypeText");
+  async cloudAppsSearchTypeText(text: string): Promise<void> {
+    const box = this.cloudAppsSearchBox();
+    await box.click({ timeout: 60_000 });
+    await box.pressSequentially(text, { delay: 50, timeout: 60_000 });
   }
 
   async cloudAppsSearchValue(): Promise<string> {
-    return todo("cloudAppsSearchValue");
+    return this.cloudAppsSearchBox()
+      .inputValue()
+      .catch(() => "");
   }
 
   async cloudAppsSearchVisible(): Promise<boolean> {
-    return todo("cloudAppsSearchVisible");
+    return this.cloudAppsSearchBox()
+      .isVisible()
+      .catch(() => false);
   }
 
   async cloudAppsCardNames(): Promise<string[]> {
-    return todo("cloudAppsCardNames");
+    const names = this.cloudAppsMain().getByTestId("app-card-name");
+    const count = await names.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index++) {
+      out.push(
+        (
+          (await names
+            .nth(index)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).trim()
+      );
+    }
+    return out;
   }
 
   async cloudAppsCards(): Promise<CloudAppsCardFacts[]> {
-    return todo("cloudAppsCards");
+    const cards = this.cloudAppsMain().getByTestId("app-card");
+    const count = await cards.count();
+    const out: CloudAppsCardFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const nameNode = card.getByTestId("app-card-name").first();
+      const name = (await nameNode.count()) > 0 ? ((await nameNode.innerText().catch(() => "")) ?? "").trim() : "";
+      const text = ((await card.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ");
+      const badge: CloudAppsCardFacts["badge"] = /\bInstalled\b/.test(text)
+        ? "installed"
+        : /\bNeeds connection\b/.test(text)
+          ? "needs-connection"
+          : null;
+      const buttons = card.getByRole("button");
+      const buttonCount = await buttons.count();
+      const actions: string[] = [];
+      for (let buttonIndex = 0; buttonIndex < buttonCount; buttonIndex++) {
+        const label = (
+          (await buttons
+            .nth(buttonIndex)
+            .innerText()
+            .catch(() => "")) ?? ""
+        )
+          .trim()
+          .replace(/\s+/g, " ");
+        if (label !== "") actions.push(label);
+      }
+      const iconImg = card.getByTestId("app-card-icon").first();
+      const iconShown = (await iconImg.count()) > 0 && (await iconImg.isVisible().catch(() => false));
+      let icon: CloudAppsCardFacts["icon"] = "letter";
+      if (iconShown) {
+        const src = (await iconImg.getAttribute("src").catch(() => "")) ?? "";
+        icon = src.startsWith("data:") ? "inline" : "proxied";
+      }
+      // Count first: innerText() on a missing tile would auto-wait out
+      // the poll instead of resolving empty.
+      const tile = card.getByTestId("app-card-tile").first();
+      const tileText = (await tile.count()) > 0 ? ((await tile.innerText().catch(() => "")) ?? "").trim() : "";
+      // The tile renders only when no icon does (row CLOUD-028); under an
+      // icon the letter is the name initial the tile would show.
+      const letter = tileText !== "" ? tileText : name.trim().slice(0, 1).toUpperCase();
+      out.push({ name, badge, actions, icon, letter });
+    }
+    return out;
   }
 
-  async cloudAppsClickCardAction(_name: string, _action: "Install" | "Connect" | "Uninstall"): Promise<void> {
-    return todo("cloudAppsClickCardAction");
+  async cloudAppsClickCardAction(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<void> {
+    const card = await this.cloudAppsCard(name);
+    if (card === null) throw new Error(`[parity] no Apps card named ${JSON.stringify(name)}.`);
+    await card.getByRole("button", { name: action, exact: true }).click({ timeout: 60_000 });
   }
 
-  async cloudAppsCardActionDisabled(_name: string, _action: "Install" | "Connect" | "Uninstall"): Promise<boolean> {
-    return todo("cloudAppsCardActionDisabled");
+  async cloudAppsCardActionDisabled(name: string, action: "Install" | "Connect" | "Uninstall"): Promise<boolean> {
+    const card = await this.cloudAppsCard(name);
+    if (card === null) throw new Error(`[parity] no Apps card named ${JSON.stringify(name)}.`);
+    const button = card.getByRole("button", { name: action, exact: true }).first();
+    if ((await button.count()) === 0) throw new Error(`[parity] no ${action} action on ${JSON.stringify(name)}.`);
+    return await button.isDisabled();
   }
 
   async cloudAppsNextPage(): Promise<void> {
-    return todo("cloudAppsNextPage");
+    await this.cloudAppsMain().getByRole("button", { name: "Next", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsPrevPage(): Promise<void> {
-    return todo("cloudAppsPrevPage");
+    await this.cloudAppsMain().getByRole("button", { name: "Previous", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsPageIndicator(): Promise<string | null> {
-    return todo("cloudAppsPageIndicator");
+    const indicator = this.cloudAppsMain().getByTestId("apps-page-indicator").first();
+    if ((await indicator.count()) === 0) return null;
+    return ((await indicator.innerText().catch(() => "")) ?? "").trim() || null;
   }
 
   async cloudAppsPagerVisible(): Promise<boolean> {
-    return todo("cloudAppsPagerVisible");
+    return this.cloudAppsMain()
+      .getByTestId("apps-page-indicator")
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
 
   async cloudAppsDialogVisible(): Promise<boolean> {
-    return todo("cloudAppsDialogVisible");
+    return this.cloudAppsDialog()
+      .isVisible()
+      .catch(() => false);
   }
 
   async cloudAppsDialogTitle(): Promise<string | null> {
-    return todo("cloudAppsDialogTitle");
+    const dialog = this.cloudAppsDialog();
+    if ((await dialog.count()) === 0) return null;
+    const title = (
+      (await dialog
+        .getByRole("heading")
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
+    return title === "" ? null : title;
   }
 
   async cloudAppsDialogFields(): Promise<CloudAppsDialogFieldFacts[]> {
-    return todo("cloudAppsDialogFields");
+    const dialog = this.cloudAppsDialog();
+    const labels = dialog.locator("label");
+    const count = await labels.count();
+    const out: CloudAppsDialogFieldFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const label = labels.nth(index);
+      const text = ((await label.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ");
+      const fieldId = (await label.getAttribute("for").catch(() => null)) ?? "";
+      const input = fieldId === "" ? null : dialog.locator(`#${fieldId}`).first();
+      const inputType = input === null ? "" : ((await input.getAttribute("type").catch(() => "")) ?? "");
+      const placeholder = input === null ? "" : ((await input.getAttribute("placeholder").catch(() => "")) ?? "");
+      out.push({ label: text, inputType, placeholder });
+    }
+    return out;
   }
 
   async cloudAppsDialogInstructions(): Promise<string | null> {
-    return todo("cloudAppsDialogInstructions");
+    const dialog = this.cloudAppsDialog();
+    if ((await dialog.count()) === 0) return null;
+    const description = dialog.locator("p:not([role='alert'])").first();
+    if ((await description.count()) === 0) return null;
+    const text = ((await description.innerText().catch(() => "")) ?? "").trim();
+    return text === "" ? null : text;
   }
 
   async cloudAppsDialogSetupHref(): Promise<string | null> {
-    return todo("cloudAppsDialogSetupHref");
+    const dialog = this.cloudAppsDialog();
+    const link = dialog.getByRole("link", { name: "Get credentials" }).first();
+    if ((await link.count()) === 0) return null;
+    return await link.getAttribute("href");
   }
 
-  async cloudAppsDialogFill(_label: string, _value: string): Promise<void> {
-    return todo("cloudAppsDialogFill");
+  async cloudAppsDialogFill(label: string, value: string): Promise<void> {
+    await this.cloudAppsDialog().getByLabel(label, { exact: true }).fill(value, { timeout: 60_000 });
   }
 
   async cloudAppsDialogSubmit(): Promise<void> {
-    return todo("cloudAppsDialogSubmit");
+    await this.cloudAppsDialog().getByRole("button", { name: "Connect", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsDialogCancel(): Promise<void> {
-    return todo("cloudAppsDialogCancel");
+    await this.cloudAppsDialog().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsDialogErrors(): Promise<string[]> {
-    return todo("cloudAppsDialogErrors");
+    const dialog = this.cloudAppsDialog();
+    const alerts = dialog.locator('p[role="alert"]');
+    const count = await alerts.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const text = (
+        (await alerts
+          .nth(index)
+          .innerText()
+          .catch(() => "")) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== "") out.push(text);
+    }
+    return out;
+  }
+
+  async cloudAppsDialogInputValues(): Promise<string[]> {
+    return this.cloudAppsDialog()
+      .locator("input")
+      .evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value));
   }
 
   async cloudAppsToggleState(): Promise<boolean | null> {
-    return todo("cloudAppsToggleState");
+    const toggle = this.cloudAppsToggleSwitch();
+    if ((await toggle.count()) === 0) return null;
+    return (await toggle.getAttribute("aria-checked").catch(() => null)) === "true";
   }
 
   async cloudAppsToggleText(): Promise<string> {
-    return todo("cloudAppsToggleText");
+    const panel = this.page.getByRole("region", { name: "Agent tools" }).first();
+    if ((await panel.count()) === 0) return "";
+    return ((await panel.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ") || "";
   }
 
   async cloudAppsToggle(): Promise<void> {
-    return todo("cloudAppsToggle");
+    await this.cloudAppsToggleSwitch().click({ timeout: 60_000 });
   }
 
   async cloudAppsBodyText(): Promise<string> {
-    return todo("cloudAppsBodyText");
+    const main = this.cloudAppsMain();
+    return ((await main.innerText().catch(() => "")) ?? "").trim().replace(/\s+/g, " ") || "";
   }
 
   async cloudAppsCatalogVisible(): Promise<boolean> {
-    return todo("cloudAppsCatalogVisible");
+    const grid = this.cloudAppsGrid();
+    if ((await grid.count()) === 0) return false;
+    return (await grid.getByTestId("app-card").count()) > 0;
   }
 
   async cloudAppsClickRetry(): Promise<void> {
-    return todo("cloudAppsClickRetry");
+    await this.cloudAppsMain().getByRole("button", { name: "Retry", exact: true }).click({ timeout: 60_000 });
   }
 
   async cloudAppsSidebarCreateOpensDialog(): Promise<boolean> {
-    return todo("cloudAppsSidebarCreateOpensDialog");
+    // The command-palette proof on web_new: the sidebar quick-create
+    // control mounts on every gated page and opens the shared dialog.
+    const create = this.page.getByTestId("sidebar-quick-create").first();
+    if ((await create.count()) === 0) return false;
+    await create.click({ timeout: 60_000 });
+    const title = this.page.getByPlaceholder("Title").first();
+    try {
+      await title.waitFor({ timeout: WebNewDriver.WAIT_MS });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // --- Cloud profile tabs + misc (NEWFRONT-440, CLOUD-032..040).
-  // --- Stubs: the cloud profile area has not landed in apps/web_new yet.
+  // --- Reads implemented by the cloud area gate (NEWFRONT-662) against
+  // --- the cloud-assistant components: same contracts as drivers/web.
+  private cloudNorm(value: string | null): string {
+    return (value ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  private cloudAssistantCards(): Locator {
+    return this.page.locator('[data-testid^="assistant-connection-"]');
+  }
+
+  private async cloudAssistantCardByTitle(title: string): Promise<Locator> {
+    const cards = this.cloudAssistantCards();
+    const count = await cards.count();
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const label = card.locator("label").first();
+      const spans = await label.locator("span").allInnerTexts();
+      if (this.cloudNorm(spans[0] ?? "") === title) return card;
+    }
+    throw new Error(`[parity] no assistant connection card titled ${JSON.stringify(title)}.`);
+  }
 
   async cloudAssistantConnections(): Promise<CloudAssistantConnectionFacts[]> {
-    return todo("cloudAssistantConnections");
+    const cards = this.cloudAssistantCards();
+    const count = await cards.count();
+    const out: CloudAssistantConnectionFacts[] = [];
+    for (let index = 0; index < count; index++) {
+      const card = cards.nth(index);
+      const label = card.locator("label").first();
+      const spans = await label.locator("span").allInnerTexts();
+      const title = this.cloudNorm(spans[0] ?? "");
+      if (title === "") continue;
+      const markers = spans
+        .slice(1)
+        .map((text) => this.cloudNorm(text))
+        .filter((text) => text !== "");
+      const radio = card.locator('input[name="assistant-active-connection"]').first();
+      const select = card.locator("select").first();
+      const input = card.locator('input[list="assistant-known-byok-models"]').first();
+      const selectVisible = (await select.count()) > 0 && (await select.isVisible().catch(() => false));
+      const inputVisible = (await input.count()) > 0 && (await input.isVisible().catch(() => false));
+      const modelControl = selectVisible ? "select" : inputVisible ? "input" : "hidden";
+      let modelValue = "";
+      let modelOptions: string[] = [];
+      if (modelControl === "select") {
+        modelValue = await select.inputValue();
+        const options = select.locator("option");
+        const optionCount = await options.count();
+        for (let optionIndex = 0; optionIndex < optionCount; optionIndex++) {
+          modelOptions.push((await options.nth(optionIndex).getAttribute("value")) ?? "");
+        }
+      } else if (modelControl === "input") {
+        modelValue = await input.inputValue();
+      }
+      const verified = card.getByText("Verified", { exact: false }).first();
+      const verifiedVisible = (await verified.count()) > 0 && (await verified.isVisible().catch(() => false));
+      const header = label.locator("xpath=parent::div");
+      const actions = (await header.getByRole("button").allInnerTexts())
+        .map((text) => this.cloudNorm(text))
+        .filter((text) => text !== "");
+      out.push({
+        title,
+        selected: await radio.isChecked(),
+        selectDisabled: await radio.isDisabled(),
+        markers,
+        modelControl,
+        modelValue,
+        modelOptions,
+        verifiedVisible,
+        actions,
+      });
+    }
+    return out;
   }
 
   async cloudAssistantEmptyState(): Promise<{ visible: boolean; addLabel: string | null }> {
-    return todo("cloudAssistantEmptyState");
+    const hint = this.page.getByText("No AI provider connected yet", { exact: false }).first();
+    if ((await hint.count()) === 0 || !(await hint.isVisible().catch(() => false))) {
+      return { visible: false, addLabel: null };
+    }
+    const panel = hint.locator("xpath=ancestor::div[1]");
+    const action = panel.getByRole("button").first();
+    const addLabel = (await action.count()) > 0 ? this.cloudNorm(await action.innerText()) : null;
+    return { visible: true, addLabel: addLabel === "" ? null : addLabel };
   }
 
   async cloudAssistantView(): Promise<"list" | "add"> {
-    return todo("cloudAssistantView");
+    const back = this.page.getByRole("button", { name: "Back to connections" }).first();
+    const head = this.page.getByRole("heading", { name: "AI Assistant" }).first();
+    // Settle first: a blank pre-boot page has no Back button and would
+    // misread as the list view.
+    await back
+      .or(head)
+      .first()
+      .waitFor({ timeout: 10_000 })
+      .catch(() => undefined);
+    if ((await back.count()) > 0 && (await back.isVisible().catch(() => false))) return "add";
+    return "list";
   }
 
   async cloudAssistantClickAdd(): Promise<void> {
-    return todo("cloudAssistantClickAdd");
+    await this.page.getByRole("button", { name: "Add connection" }).first().click({ timeout: 60_000 });
   }
 
   async cloudAssistantClickBackToList(): Promise<void> {
-    return todo("cloudAssistantClickBackToList");
+    await this.page.getByRole("button", { name: "Back to connections" }).click({ timeout: 60_000 });
   }
 
-  async cloudAssistantSelectConnection(_title: string): Promise<void> {
-    return todo("cloudAssistantSelectConnection");
+  async cloudAssistantSelectConnection(title: string): Promise<void> {
+    // Click plus poll: the radio is server-driven, so its checked state
+    // flips only after the select roundtrip plus refetch lands.
+    const card = await this.cloudAssistantCardByTitle(title);
+    const radio = card.locator('input[name="assistant-active-connection"]');
+    await radio.click({ timeout: 60_000 });
+    const started = Date.now();
+    for (;;) {
+      if (await radio.isChecked().catch(() => false)) return;
+      if (Date.now() - started > 60_000) {
+        throw new Error(`[parity] selecting ${JSON.stringify(title)} never checked its radio.`);
+      }
+      await this.page.waitForTimeout(250);
+    }
   }
 
-  async cloudAssistantSetModel(_title: string, _model: string): Promise<void> {
-    return todo("cloudAssistantSetModel");
+  async cloudAssistantSetModel(title: string, model: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const select = card.locator("select").first();
+    if ((await select.count()) > 0 && (await select.isVisible().catch(() => false))) {
+      await select.selectOption(model, { timeout: 60_000 });
+      return;
+    }
+    const input = card.locator('input[list="assistant-known-byok-models"]').first();
+    await input.fill(model, { timeout: 60_000 });
+    await input.press("Enter", { timeout: 60_000 });
   }
 
-  async cloudAssistantClickRowAction(_title: string, _action: "Test" | "Remove" | "Disconnect"): Promise<void> {
-    return todo("cloudAssistantClickRowAction");
+  async cloudAssistantClickRowAction(title: string, action: "Test" | "Remove" | "Disconnect"): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    await card.getByRole("button", { name: action, exact: true }).click({ timeout: 60_000 });
+    if (action === "Remove") {
+      // web_new asks inline before removing; the oracle row removes at once.
+      await card.getByRole("button", { name: "Confirm remove", exact: true }).click({ timeout: 60_000 });
+    }
+  }
+
+  private cloudAssistantProviderSelect(): Locator {
+    return this.page.getByLabel("Provider");
   }
 
   async cloudAssistantAddFormFacts(): Promise<CloudAssistantAddFormFacts> {
-    return todo("cloudAssistantAddFormFacts");
+    const provider = this.cloudAssistantProviderSelect();
+    const options = provider.locator("option");
+    const optionCount = await options.count();
+    const providers: string[] = [];
+    for (let index = 0; index < optionCount; index++) {
+      providers.push((await options.nth(index).getAttribute("value")) ?? "");
+    }
+    const base = this.page.getByLabel("Base URL");
+    const save = this.page.getByRole("button", { name: "Add connection" });
+    return {
+      providers,
+      provider: await provider.inputValue(),
+      baseVisible:
+        (await base.count()) > 0 &&
+        (await base
+          .first()
+          .isVisible()
+          .catch(() => false)),
+      saveEnabled: await save.first().isEnabled(),
+    };
   }
 
-  async cloudAssistantAddFill(_fill: CloudAssistantAddFill): Promise<void> {
-    return todo("cloudAssistantAddFill");
+  async cloudAssistantAddFill(fill: CloudAssistantAddFill): Promise<void> {
+    if (fill.provider !== undefined) await this.cloudAssistantProviderSelect().selectOption(fill.provider);
+    if (fill.baseUrl !== undefined) await this.page.getByLabel("Base URL").fill(fill.baseUrl);
+    if (fill.model !== undefined) await this.page.getByLabel("Model").fill(fill.model);
+    if (fill.key !== undefined) await this.page.getByLabel("API key").fill(fill.key);
   }
 
   async cloudAssistantAddSave(): Promise<void> {
-    return todo("cloudAssistantAddSave");
+    // The success toast fires before the list refetch lands, so a toast
+    // alone cannot settle the save: wait for the list view, and treat a
+    // toast as the answer only when the view still shows the form after
+    // it (the failure shape keeps the form up). The create POST is the
+    // first gate, so a click that never submits cannot hide behind the
+    // toast watch.
+    const posted = this.page
+      .waitForResponse(
+        (response) =>
+          response.url().includes("/api/users/me/ai-assistant/connections/") && response.request().method() === "POST",
+        { timeout: 60_000 }
+      )
+      .catch(() => null);
+    await this.page.getByRole("button", { name: "Add connection" }).click();
+    await posted;
+    const started = Date.now();
+    let toastFirstSeen = 0;
+    for (;;) {
+      if ((await this.cloudAssistantView()) === "list") return;
+      if ((await this.toastText()) !== null) {
+        if (toastFirstSeen === 0) toastFirstSeen = Date.now();
+        if (Date.now() - toastFirstSeen > 5_000) return;
+      }
+      if (Date.now() - started > 60_000)
+        throw new Error("[parity] add-connection save settled on neither list nor toast.");
+      await this.page.waitForTimeout(250);
+    }
   }
 
-  async cloudAssistantClickProviderSignIn(_title: string): Promise<void> {
-    return todo("cloudAssistantClickProviderSignIn");
+  async cloudAssistantClickProviderSignIn(title: string): Promise<void> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    await card.getByRole("button", { name: "Continue with ChatGPT" }).click({ timeout: 60_000 });
   }
 
   async cloudAssistantProviderPopupUrl(): Promise<string> {
-    return todo("cloudAssistantProviderPopupUrl");
+    const pages = this.page.context().pages();
+    let popup = pages.find((page) => page !== this.page) ?? null;
+    if (popup === null) popup = await this.page.waitForEvent("popup", { timeout: 60_000 });
+    await popup.waitForFunction(() => !["", "about:blank"].includes(window.location.href), null, {
+      timeout: 60_000,
+    });
+    const url = popup.url();
+    await popup.close();
+    return url;
   }
 
+  private cloudAssistantStatusSeen = 0;
+
+  private cloudAssistantStatusHandler = (request: import("@playwright/test").Request): void => {
+    if (request.url().includes("/api/users/me/ai-assistant/openai-login/status/")) this.cloudAssistantStatusSeen += 1;
+  };
+
   async cloudAssistantArmStatusCounter(): Promise<void> {
-    return todo("cloudAssistantArmStatusCounter");
+    this.cloudAssistantStatusSeen = 0;
+    this.page.off("request", this.cloudAssistantStatusHandler);
+    this.page.on("request", this.cloudAssistantStatusHandler);
   }
 
   async cloudAssistantStatusHits(): Promise<number> {
-    return todo("cloudAssistantStatusHits");
+    return this.cloudAssistantStatusSeen;
   }
 
   async cloudAssistantBlockPopups(): Promise<void> {
-    return todo("cloudAssistantBlockPopups");
+    await this.page.addInitScript(() => {
+      window.open = () => null;
+    });
   }
 
-  async cloudAssistantStaleNotice(_title: string): Promise<string | null> {
-    return todo("cloudAssistantStaleNotice");
+  async cloudAssistantStaleNotice(title: string): Promise<string | null> {
+    const card = await this.cloudAssistantCardByTitle(title);
+    const notice = card.getByText("predates OpenHub access", { exact: false }).first();
+    if ((await notice.count()) === 0 || !(await notice.isVisible().catch(() => false))) return null;
+    const text = this.cloudNorm(await notice.locator("xpath=ancestor::div[1]").innerText());
+    return text === "" ? null : text;
+  }
+
+  private cloudProfileTabLabels(): string[] {
+    return [
+      "Profile",
+      "Security",
+      "Activity",
+      "Preferences",
+      "AI Assistant",
+      "Auto Project Management",
+      "Notifications",
+      "Integrations",
+      "Personal Access Tokens",
+    ];
   }
 
   async cloudProfileSidebarTabs(): Promise<string[]> {
-    return todo("cloudProfileSidebarTabs");
+    // web_new renders tab links, the old app tab buttons (the OSS-oracle
+    // scenario reads the old DOM through this same driver): collect both.
+    const labels = this.cloudProfileTabLabels();
+    const buttons = await this.page.getByRole("button").allInnerTexts();
+    const links = await this.page.locator('[data-testid^="profile-settings-tab-"]').allInnerTexts();
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const text of [...buttons, ...links]) {
+      const label = this.cloudNorm(text);
+      if (labels.includes(label) && !seen.has(label)) {
+        seen.add(label);
+        out.push(label);
+      }
+    }
+    return out;
   }
 
   async cloudProfileActiveTab(): Promise<string | null> {
-    return todo("cloudProfileActiveTab");
+    const keys: Record<string, string> = {
+      Profile: "general",
+      Security: "security",
+      Activity: "activity",
+      Preferences: "preferences",
+      "AI Assistant": "ai-assistant",
+      "Auto Project Management": "auto-project-management",
+      Notifications: "notifications",
+      Integrations: "integrations",
+      "Personal Access Tokens": "api-tokens",
+    };
+    const current = this.page.locator('[data-testid^="profile-settings-tab-"][aria-current="page"]').first();
+    if ((await current.count()) > 0) {
+      const label = this.cloudNorm(await current.innerText());
+      if (keys[label] !== undefined) return keys[label] ?? null;
+    }
+    const active = this.page.locator("button.bg-layer-transparent-selected");
+    const count = await active.count();
+    for (let index = 0; index < count; index++) {
+      const label = this.cloudNorm(await active.nth(index).innerText());
+      if (keys[label] !== undefined) return keys[label] ?? null;
+    }
+    return null;
   }
 
   async cloudAssistantMcpSectionVisible(): Promise<boolean> {
-    return todo("cloudAssistantMcpSectionVisible");
+    const heading = this.page.getByRole("heading", { name: "Tool servers (MCP)" }).first();
+    return (await heading.count()) > 0 && (await heading.isVisible().catch(() => false));
   }
 
   async cloudAssistantAppsPointerVisible(): Promise<boolean> {
-    return todo("cloudAssistantAppsPointerVisible");
+    const pointer = this.page.getByText("Looking for apps?", { exact: false }).first();
+    return (await pointer.count()) > 0 && (await pointer.isVisible().catch(() => false));
   }
 
   async cloudPlanBadgeVisible(): Promise<boolean> {
-    return todo("cloudPlanBadgeVisible");
+    const badge = this.page.getByTestId("cloud-plan-badge").first();
+    return (await badge.count()) > 0 && (await badge.isVisible().catch(() => false));
+  }
+
+  async cloudPlanBadgeFacts(): Promise<{ label: string; hint: string } | null> {
+    const badge = this.page.getByTestId("cloud-plan-badge").first();
+    if ((await badge.count()) === 0) return null;
+    const label = this.cloudNorm(await badge.innerText().catch(() => ""));
+    const hint = ((await badge.getAttribute("title").catch(() => "")) ?? "").trim();
+    return label === "" ? null : { label, hint };
   }
 
   async cloudFocusedControl(): Promise<{ role: string; label: string } | null> {
-    return todo("cloudFocusedControl");
+    return this.page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      if (el === null || el === document.body) return null;
+      const tag = el.tagName.toLowerCase();
+      const implicit: Record<string, string> = {
+        button: "button",
+        select: "combobox",
+        textarea: "textbox",
+      };
+      let role = el.getAttribute("role") ?? implicit[tag] ?? tag;
+      if (tag === "input") {
+        role = (el as HTMLInputElement).type === "radio" ? "radio" : "textbox";
+      }
+      const labelledBy = el.getAttribute("aria-labelledby");
+      if (labelledBy !== null && labelledBy !== "") {
+        const parts = labelledBy
+          .split(" ")
+          .map((id) => document.getElementById(id)?.innerText ?? "")
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (parts !== "") return { role, label: parts };
+      }
+      // Parity-shaped labels, not computed accessible names: the oracle
+      // app names these fields through their wrapping labels, so the
+      // wrapped text wins over aria-label here (row model fields carry
+      // "Model for X" for assistive users; the walk wants "Model").
+      const wrap = el.closest("label");
+      if (wrap !== null) {
+        const clone = wrap.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll("input,select,textarea,button,datalist").forEach((node) => node.remove());
+        const text = (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (text !== "") return { role, label: text };
+      }
+      if (el.id !== "") {
+        const external = document.querySelector(`label[for="${el.id}"]`);
+        const text = (external?.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (text !== "") return { role, label: text };
+      }
+      const aria = el.getAttribute("aria-label");
+      if (aria !== null && aria.trim() !== "") return { role, label: aria.trim() };
+      const text = (el.innerText ?? "").replace(/\s+/g, " ").trim();
+      return { role, label: text };
+    });
   }
 
   // --- Desktop sign-in halves (NEWFRONT-486, AUTH-022/AUTH-023). Stubs:

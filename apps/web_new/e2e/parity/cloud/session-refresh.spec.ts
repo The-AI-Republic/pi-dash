@@ -82,6 +82,11 @@ test(
     const issuesPath = `/${seed.workspaceSlug}/projects/${seed.projectId}/issues`;
     await driver.openAuthenticated(issuesPath, cloudBrowserCookies(session.cookie));
     await driver.dismissWelcomeDialog();
+    // Order the sabotage after the first render (NEWFRONT-662): expiring
+    // the access cookie mid-boot turns the boot itself into the refused
+    // call, which is the rotation scenario's shape, not this one's. The
+    // oracle boots before the sabotage either way, so it is unaffected.
+    await expect.poll(() => driver.visibleIssueNames(), { timeout: 60_000 }).toContain("Cloud first issue");
     await driver.cloudExpireAccessCookie();
     await driver.cloudFailRefresh();
     await driver.cloudArmSignInCapture();

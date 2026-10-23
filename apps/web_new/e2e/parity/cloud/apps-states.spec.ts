@@ -35,7 +35,11 @@ test(
     // Live page, no stubs: the real disconnected shape.
     await driver.openAuthenticated(`/${seed.workspaceSlug}/apps`, cloudBrowserCookies(session.cookie));
     await driver.dismissWelcomeDialog();
-    await expect.poll(() => driver.cloudAppsBodyText(), { timeout: 60_000 }).toContain("Apps");
+    // Settle on content, not chrome: the "Apps" heading renders while the
+    // status read still flies on web_new, so polling for it passes early.
+    await expect
+      .poll(async () => (await driver.cloudAppsBodyText()).toLowerCase(), { timeout: 60_000 })
+      .toContain("sign out");
     const body = (await driver.cloudAppsBodyText()).toLowerCase();
     expect(body).toContain("sign out");
     expect(body).toContain("back in");
@@ -122,6 +126,21 @@ test(
     try {
       await driver.openAuthenticated(`/${seed.workspaceSlug}/apps`, cloudBrowserCookies(session.cookie));
       await driver.dismissWelcomeDialog();
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-473): the aborted read renders the
+        // status-error panel with its Retry control instead of falling
+        // through to an empty catalog.
+        await expect.poll(() => driver.cloudAppsBodyText(), { timeout: 60_000 }).toContain("Apps are unavailable");
+        expect(await driver.cloudAppsCatalogVisible()).toBe(false);
+        await driver.cloudAppsClickRetry();
+        await expect
+          .poll(() => stub.log.filter((entry) => entry.path.startsWith("/api/openhub/status/")).length, {
+            timeout: 60_000,
+          })
+          .toBeGreaterThan(1);
+        expect(stub.log.some((entry) => entry.path.startsWith("/api/openhub/apps/marketplace/"))).toBe(false);
+        return;
+      }
       // Current (buggy) behavior: full catalog chrome over the empty
       // state, no error, no retry. Intended: the status-error panel
       // with its Retry control (see NEWFRONT-473).
@@ -163,8 +182,11 @@ test(
       await driver.dismissWelcomeDialog();
       await expect.poll(() => driver.cloudAppsBodyText(), { timeout: 60_000 }).toContain("Catalog is unreachable");
       expect(await driver.cloudAppsCatalogVisible()).toBe(false);
-      // An error, not an empty catalog: it carries a retry.
-      const retry = driver.page.locator("main main").last().getByRole("button", { name: "Retry" });
+      // An error, not an empty catalog: it carries a retry. The old app
+      // nests a second main around the panel; web_new keeps one.
+      const scope =
+        driver.target === "web_new" ? driver.page.locator("main").last() : driver.page.locator("main main").last();
+      const retry = scope.getByRole("button", { name: "Retry" });
       expect(await retry.count()).toBe(1);
       await driver.cloudAppsClickRetry();
       await expect.poll(() => driver.cloudAppsCardNames(), { timeout: 60_000 }).toEqual(["Back Online"]);

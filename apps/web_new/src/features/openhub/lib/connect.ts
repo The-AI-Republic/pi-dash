@@ -28,13 +28,25 @@ export const CONNECT_TAB_TITLE = "Connecting…";
 
 /**
  * Reserve the handoff tab synchronously during the click (CLOUD-025):
- * placeholder content, opener detached so the provider page cannot
- * navigate the product. Null when the popup blocker eats the tab or
- * the window is already gone — the flow reports instead of failing
+ * placeholder content the flow later steers (OAuth begin address or
+ * hub detail) or closes. No `noopener` feature: that makes window.open
+ * return null, so the flow could never steer or close the tab it just
+ * opened. The opener is severed explicitly instead, while the
+ * same-origin placeholder is still scriptable — the retained handle
+ * steers and closes, but the provider page cannot reach back
+ * (NEWFRONT-662). Null when the popup blocker eats the tab or the
+ * window is already gone — the flow reports instead of failing
  * silently.
  */
 export function reserveConnectTab(opener: Window): Window | null {
-  const tab = opener.open("about:blank", "_blank", "noopener");
+  const tab = opener.open("about:blank", "_blank");
+  if (tab !== null && !tab.closed) {
+    try {
+      tab.opener = null;
+    } catch {
+      // A severed-by-policy opener reads null already.
+    }
+  }
   if (tab === null || tab.closed) return null;
   try {
     tab.document.title = CONNECT_TAB_TITLE;

@@ -82,6 +82,10 @@ export function AppShell({
 
   return (
     <div className="flex h-screen flex-col bg-(--bg) text-(--text)">
+      {/* First: the toast manager emits to current subscribers only, so
+          the host subscribes before any page mount effect can notify
+          (CLOUD-026's bounce). The viewport is fixed: order is not layout. */}
+      <ToastHost manager={getToastManager()} />
       {topBar}
       {/* Positioned: the floating sidebar and its peek overlay anchor here, below the top bar. */}
       <div className="relative flex min-h-0 flex-1">
@@ -111,7 +115,6 @@ export function AppShell({
           <LazyShortcutsDialog />
         </React.Suspense>
       ) : null}
-      <ToastHost manager={getToastManager()} />
       {dialogs}
     </div>
   );

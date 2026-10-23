@@ -49,11 +49,14 @@ describe("reserveConnectTab", () => {
     } as unknown as Window;
   }
 
-  it("opens a detached placeholder tab synchronously (CLOUD-025)", () => {
-    const tab = fakeTab();
+  it("opens an attached placeholder tab synchronously (CLOUD-025)", () => {
+    const tab = fakeTab({ opener: {} });
     const open = vi.fn(() => tab);
     const reserved = reserveConnectTab({ open } as unknown as Window);
-    expect(open).toHaveBeenCalledWith("about:blank", "_blank", "noopener");
+    // No noopener: the flow steers and closes the tab it opened, which
+    // needs the handle (NEWFRONT-662).
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    expect(tab.opener).toBeNull();
     expect(reserved).toBe(tab);
     expect(tab.document.title).toBe(CONNECT_TAB_TITLE);
     expect(CONNECT_TAB_TITLE).toContain("Connecting");
@@ -67,6 +70,22 @@ describe("reserveConnectTab", () => {
   it("treats an already-closed window as blocked", () => {
     const open = vi.fn(() => fakeTab({ closed: true }));
     expect(reserveConnectTab({ open } as unknown as Window)).toBeNull();
+  });
+
+  it("still reserves the tab when policy has already severed its opener (CLOUD-025)", () => {
+    const tab = fakeTab();
+    Object.defineProperty(tab, "opener", {
+      configurable: true,
+      get() {
+        return null;
+      },
+      set() {
+        throw new Error("opener is not settable");
+      },
+    });
+    const open = vi.fn(() => tab);
+    expect(reserveConnectTab({ open } as unknown as Window)).toBe(tab);
+    expect(tab.document.title).toBe(CONNECT_TAB_TITLE);
   });
 
   it("still reserves a tab that will not take a title", () => {

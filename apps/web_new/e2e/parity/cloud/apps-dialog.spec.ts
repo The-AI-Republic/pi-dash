@@ -152,12 +152,7 @@ test(
       // Reopening shows cleared fields: no secret lingers in the form.
       await driver.cloudAppsClickCardAction("Manual CRM", "Connect");
       await expect.poll(() => driver.cloudAppsDialogVisible(), { timeout: 60_000 }).toBe(true);
-      const values = await driver.page
-        .locator("div.fixed.inset-0")
-        .last()
-        .locator("input")
-        .evaluateAll((nodes) => nodes.map((node) => (node as HTMLInputElement).value));
-      expect(values).toEqual(["", ""]);
+      expect(await driver.cloudAppsDialogInputValues()).toEqual(["", ""]);
     } finally {
       await stub.uninstall();
     }
