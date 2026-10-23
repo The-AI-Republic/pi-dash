@@ -2,26 +2,35 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Estimates model (PSET-049, EST-005/006/009/010/012): active and
-// superseded selection, value labels, the OSS starter sets and the
-// per-value rules.
+// superseded selection, value labels, family capability filtering, the
+// starter sets and the per-value rules.
 import type { Estimate } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
   CUSTOM_STARTER_ID,
   ESTIMATE_FAMILIES,
+  ESTIMATE_FAMILY_CATALOGUE,
+  ESTIMATE_FAMILY_TIME,
   ESTIMATE_VALUE_MAX_LENGTH,
+  estimateFamilies,
+  estimateFamilyEnabled,
+  estimatePreview,
   estimateStarters,
+  estimateValueLabel,
   familySystemName,
+  moveValueBefore,
   renumberValues,
   selectActiveSystem,
   selectSupersededSystems,
   starterValues,
   systemValueLabels,
+  truncateEstimateValue,
   valueSetProblems,
   VALUE_DUPLICATE,
   VALUE_NOT_CATEGORY,
   VALUE_NOT_NUMBER,
+  VALUE_NOT_POSITIVE,
   VALUE_REQUIRED,
   VALUE_TOO_LONG,
 } from "./model.js";
@@ -44,14 +53,29 @@ function estimate(overrides: Partial<Estimate> & { id: string }): Estimate {
 }
 
 describe("estimate families", () => {
-  it("offers points and categories only in this build", () => {
+  it("offers points and categories in the community edition", () => {
     expect(ESTIMATE_FAMILIES.map((family) => family.value)).toEqual(["points", "categories"]);
     expect(ESTIMATE_FAMILIES.map((family) => family.label)).toEqual(["Points", "Categories"]);
+    expect(estimateFamilies({}).map((family) => family.value)).toEqual(["points", "categories"]);
+  });
+
+  it("adds time only when the edition capability is on", () => {
+    expect(ESTIMATE_FAMILY_CATALOGUE.map((family) => family.value)).toEqual(["points", "categories", "time"]);
+    expect(estimateFamilies({ "estimate-time-family": true }).map((family) => family.value)).toEqual([
+      "points",
+      "categories",
+      "time",
+    ]);
+    expect(estimateFamilyEnabled(ESTIMATE_FAMILY_TIME, {})).toBe(false);
+    expect(estimateFamilyEnabled(ESTIMATE_FAMILY_TIME, { "estimate-time-family": true })).toBe(true);
+    expect(estimateFamilyEnabled("points", {})).toBe(true);
+    expect(estimateFamilyEnabled("unknown" as never, { "estimate-time-family": true })).toBe(false);
   });
 
   it("names the created system after its family", () => {
     expect(familySystemName("points")).toBe("Points");
     expect(familySystemName("categories")).toBe("Categories");
+    expect(familySystemName("time")).toBe("Time");
   });
 });
 
@@ -61,6 +85,22 @@ describe("starters", () => {
     expect(points[0]).toEqual({ id: CUSTOM_STARTER_ID, title: "Custom", values: ["1", "2"] });
     expect(points.map((starter) => starter.title)).toEqual(["Custom", "Fibonacci", "Linear", "Squares"]);
     expect(estimateStarters("categories")[0]?.values).toEqual(["Easy", "Hard"]);
+    expect(estimateStarters("time")[0]?.values).toEqual(["1", "2"]);
+  });
+
+  it("offers the category and time templates named by the spec", () => {
+    expect(estimateStarters("categories").map((starter) => starter.title)).toEqual([
+      "Custom",
+      "T-Shirt Sizes",
+      "Easy to hard",
+    ]);
+    expect(estimateStarters("time").map((starter) => starter.title)).toEqual(["Custom", "Hours"]);
+    expect(estimateStarters("categories").find((starter) => starter.id === "easy-to-hard")?.values).toEqual([
+      "Easy",
+      "Medium",
+      "Hard",
+      "Very Hard",
+    ]);
   });
 
   it("previews each template's values", () => {
@@ -76,6 +116,14 @@ describe("starters", () => {
       "XL",
       "XXL",
     ]);
+  });
+
+  it("humanizes time previews while keeping stored values raw", () => {
+    const hours = estimateStarters("time").find((starter) => starter.title === "Hours");
+    expect(hours?.values).toEqual(["1", "2", "3", "4", "5", "6"]);
+    expect(estimatePreview("time", hours?.values ?? [])).toBe("1m, 2m, 3m, 4m, 5m, 6m");
+    expect(estimatePreview("time", ["90", "150", "60", "45"])).toBe("1h 30m, 2h 30m, 1h, 45m");
+    expect(estimateValueLabel("points", "90")).toBe("90");
   });
 
   it("resolves values by id and refuses an unknown one", () => {
@@ -130,21 +178,27 @@ describe("active and superseded systems", () => {
 describe("value rules", () => {
   it("accepts positive numbers for the points family", () => {
     expect(valueSetProblems("points", ["1", "2", "13"])).toEqual([]);
+    expect(valueSetProblems("time", ["1", "90", "150"])).toEqual([]);
   });
 
-  it("refuses empty, non-positive, non-numeric, duplicate and over-long values", () => {
-    const problems = valueSetProblems("points", ["", "0", "abc", "1", "1", "x".repeat(ESTIMATE_VALUE_MAX_LENGTH + 1)]);
+  it("refuses empty, non-numeric, non-positive and over-long values", () => {
+    const problems = valueSetProblems("points", ["", "0", "abc", "x".repeat(ESTIMATE_VALUE_MAX_LENGTH + 1)]);
     expect(problems).toEqual([
       { index: 0, message: VALUE_REQUIRED },
-      { index: 1, message: VALUE_NOT_NUMBER },
+      { index: 1, message: VALUE_NOT_POSITIVE },
       { index: 2, message: VALUE_NOT_NUMBER },
-      { index: 4, message: VALUE_DUPLICATE },
-      { index: 5, message: VALUE_TOO_LONG },
+      { index: 3, message: VALUE_TOO_LONG },
     ]);
   });
 
-  it("ignores case when spotting duplicates", () => {
-    expect(valueSetProblems("categories", ["Easy", "easy"])).toEqual([{ index: 1, message: VALUE_DUPLICATE }]);
+  it("compares numeric duplicates by value", () => {
+    expect(valueSetProblems("points", ["1", "1.0", "01"])).toEqual([{ index: 1, message: VALUE_DUPLICATE }]);
+    expect(valueSetProblems("time", ["90", " 90 "])).toEqual([{ index: 1, message: VALUE_DUPLICATE }]);
+  });
+
+  it("compares category duplicates exactly and case-sensitively", () => {
+    expect(valueSetProblems("categories", ["Easy", "easy"])).toEqual([]);
+    expect(valueSetProblems("categories", ["Easy", "Easy"])).toEqual([{ index: 1, message: VALUE_DUPLICATE }]);
   });
 
   it("refuses numbers in the categories family", () => {
@@ -157,10 +211,25 @@ describe("value rules", () => {
     expect(valueSetProblems("points", ["   "])).toEqual([{ index: 0, message: VALUE_REQUIRED }]);
   });
 
+  it("truncates over-long edits to the server cap", () => {
+    expect(ESTIMATE_VALUE_MAX_LENGTH).toBe(20);
+    expect(truncateEstimateValue("1234567890123456789012345")).toBe("12345678901234567890");
+  });
+
   it("renumbers positions 1..n in display order", () => {
     expect(renumberValues(["b", "a"])).toEqual([
       { key: 1, value: "b" },
       { key: 2, value: "a" },
     ]);
+  });
+
+  it("moves a value before a target and refuses no-op requests", () => {
+    expect(moveValueBefore(["1", "2", "3"], 0, 2)).toEqual(["2", "1", "3"]);
+    expect(moveValueBefore(["1", "2", "3"], 2, 0)).toEqual(["3", "1", "2"]);
+    expect(moveValueBefore(["1", "2", "3"], 1, 1)).toEqual(["1", "2", "3"]);
+    expect(moveValueBefore(["1", "2", "3"], -1, 1)).toEqual(["1", "2", "3"]);
+    expect(moveValueBefore(["1", "2", "3"], 1, 4)).toEqual(["1", "2", "3"]);
+    expect(moveValueBefore(["1", "2", "3"], 0, 2).length).toBe(3);
+    expect(moveValueBefore(["1"], 0, 0)).toEqual(["1"]);
   });
 });
