@@ -2,19 +2,39 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Analytics home (SHELL-054). Thin mount: proves the route renders the
-// Analytics area mount; the analytics area epic owns the screen itself.
-import { render, screen } from "@testing-library/react";
-import * as React from "react";
+// Bare analytics address (parity/specs/analytics.md §1, ANL-001):
+// forwards to the overview tab with the query string kept.
+import { isRedirect } from "@tanstack/react-router";
 import { describe, expect, it } from "vitest";
 
 import { Route } from "./index.js";
 
-describe("analytics route", () => {
-  it("renders the Analytics area mount", () => {
-    const Component = Route.options.component;
-    if (!Component) throw new Error("missing component");
-    render(<Component />);
-    expect(screen.getByRole("heading", { name: "Analytics" })).toBeInTheDocument();
+function thrownFrom(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return error;
+  }
+  return null;
+}
+
+describe("bare analytics address", () => {
+  it("redirects to the overview tab", () => {
+    const thrown = thrownFrom(() =>
+      Route.options.beforeLoad?.({ location: { searchStr: "" }, params: { ws: "acme" } } as never)
+    );
+    expect(isRedirect(thrown)).toBe(true);
+    expect((thrown as { options: { href: string } }).options.href).toBe("/acme/analytics/overview");
+  });
+
+  it("keeps the query string across the redirect", () => {
+    const thrown = thrownFrom(() =>
+      Route.options.beforeLoad?.({
+        location: { searchStr: "?project_ids=a%2Cb" },
+        params: { ws: "acme" },
+      } as never)
+    );
+    expect(isRedirect(thrown)).toBe(true);
+    expect((thrown as { options: { href: string } }).options.href).toBe("/acme/analytics/overview?project_ids=a%2Cb");
   });
 });
