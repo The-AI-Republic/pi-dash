@@ -197,11 +197,8 @@ export {
 export type { ReactionScope } from "./reactions/api.js";
 
 export type { LiteResolution } from "./api/browse.js";
-export {
-  descriptionVersionQueryOptions,
-  descriptionVersionsQueryOptions,
-  issueDetailQueryOptions,
-} from "./api/queries.js";
+export { issueDetailQueryOptions } from "./api/queries.js";
+export { descriptionVersionQueryOptions, descriptionVersionsQueryOptions } from "./api/descriptionVersions.js";
 export {
   DESCRIPTION_SAVE_FAILED_TITLE,
   TITLE_SAVE_FAILED_TITLE,

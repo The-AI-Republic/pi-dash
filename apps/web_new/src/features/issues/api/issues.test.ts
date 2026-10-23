@@ -2,15 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
 import { createClient, type Transport } from "@pidash/api-client";
+import { describe, expect, it } from "vitest";
+
 import { issueKeys } from "./keys.js";
-import {
-  descriptionVersionQueryOptions,
-  descriptionVersionsQueryOptions,
-  issueDetailQueryOptions,
-  issuesQueryOptions,
-} from "./queries.js";
+import { issueDetailQueryOptions, issuesQueryOptions } from "./queries.js";
 
 function stubTransport(body: unknown): Transport {
   return async () => ({
@@ -175,40 +171,7 @@ const DETAIL_ROW = {
   has_open_blockers: false,
 };
 
-const VERSION_ROW = {
-  id: "323e4567-e89b-12d3-a456-426614174002",
-  workspace: "423e4567-e89b-12d3-a456-426614174003",
-  project: "223e4567-e89b-12d3-a456-426614174001",
-  issue: "123e4567-e89b-12d3-a456-426614174000",
-  last_saved_at: "2024-02-03T04:05:06Z",
-  owned_by: "523e4567-e89b-12d3-a456-426614174004",
-  created_at: "2024-02-03T04:05:06Z",
-  updated_at: "2024-02-03T04:05:06Z",
-  created_by: null,
-  updated_by: null,
-};
-
-const VERSIONS_ENVELOPE = {
-  prev_cursor: "",
-  cursor: "",
-  next_cursor: null,
-  prev_page_results: false,
-  next_page_results: false,
-  page_count: 1,
-  total_results: 1,
-  total_pages: 1,
-  results: [VERSION_ROW],
-};
-
-const VERSION_DETAIL = {
-  ...VERSION_ROW,
-  description_binary: null,
-  description_html: "<p>restored</p>",
-  description_stripped: "restored",
-  description_json: {},
-};
-
-describe("detail and version queries", () => {
+describe("detail query", () => {
   it("hydrates the detail without focus revalidation", async () => {
     const seen: string[] = [];
     const inner = stubTransport(DETAIL_ROW);
@@ -233,46 +196,6 @@ describe("detail and version queries", () => {
     expect(seen[0]).toBe(
       "https://api.test/api/workspaces/acme/projects/223e4567-e89b-12d3-a456-426614174001/issues/123e4567-e89b-12d3-a456-426614174000/"
     );
-  });
-
-  it("reads the version history and one version through the work-item URLs", async () => {
-    const seen: string[] = [];
-    const client = createClient({
-      baseUrl: "https://api.test",
-      transport: async (url) => {
-        seen.push(url);
-        const body = url.includes("description-versions/323e4567") ? VERSION_DETAIL : VERSIONS_ENVELOPE;
-        return {
-          status: 200,
-          url,
-          headers: { get: () => null },
-          text: async () => JSON.stringify(body),
-        };
-      },
-      validate: true,
-    });
-    const queryClient = new QueryClient();
-    const list = await queryClient.fetchQuery(
-      descriptionVersionsQueryOptions(
-        client,
-        "acme",
-        "223e4567-e89b-12d3-a456-426614174001",
-        "123e4567-e89b-12d3-a456-426614174000"
-      )
-    );
-    expect(list.results).toHaveLength(1);
-    const one = await queryClient.fetchQuery(
-      descriptionVersionQueryOptions(
-        client,
-        "acme",
-        "223e4567-e89b-12d3-a456-426614174001",
-        "123e4567-e89b-12d3-a456-426614174000",
-        "323e4567-e89b-12d3-a456-426614174002"
-      )
-    );
-    expect(one.description_html).toBe("<p>restored</p>");
-    expect(seen[0]).toContain("/description-versions/");
-    expect(seen[1]).toContain("/description-versions/323e4567-e89b-12d3-a456-426614174002/");
   });
 });
 

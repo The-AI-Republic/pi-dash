@@ -15,7 +15,7 @@ import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
-import { subIssuesQueryOptions } from "../api/queries.js";
+import { subIssuesQueryOptions } from "../api/subIssuePage.js";
 import { isRowHighlighted, isTempRowId, rowDomId } from "../freshness/fresh.js";
 import type { DisplayFeatureFlags } from "../display/matrix.js";
 import { ForeignRowSelectionHint, RowSelectionCheckbox } from "../bulk/SelectionCheckbox.js";
