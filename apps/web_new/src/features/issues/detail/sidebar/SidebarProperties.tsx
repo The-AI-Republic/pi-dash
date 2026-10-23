@@ -173,6 +173,7 @@ export function SidebarProperties({
           workspaceSlug={workspaceSlug}
           projectId={projectId}
           issueId={issue.id}
+          memberRole={project.member_role}
           archived={issue.archived_at !== null}
         />
       ) : null}

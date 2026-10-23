@@ -203,6 +203,16 @@ describe("stored choices", () => {
     expect(parseStoredFilters(stored)).toEqual(["ACTIVITY", "STATE"]);
   });
 
+  it("keeps the worklog toggle through a cloud round trip", () => {
+    const stored = serializeFilters(["COMMENT", "STATE", "ASSIGNEE", "WORKLOG"], CLOUD_FEED_FILTERS);
+    expect(stored).toBe('["COMMENT","STATE","ASSIGNEE","WORKLOG"]');
+    expect(parseStoredFilters(stored, CLOUD_FEED_FILTERS)).toEqual(["COMMENT", "STATE", "ASSIGNEE", "WORKLOG"]);
+  });
+
+  it("still drops the worklog toggle for the default OSS set", () => {
+    expect(serializeFilters(["STATE", WORKLOG_FILTER])).toBe('["STATE"]');
+  });
+
   it("round-trips the order", () => {
     expect(serializeSort("desc")).toBe('"desc"');
     expect(parseStoredSort('"desc"')).toBe("desc");

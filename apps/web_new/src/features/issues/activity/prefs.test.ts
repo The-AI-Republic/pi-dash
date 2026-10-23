@@ -112,4 +112,24 @@ describe("useFeedPrefs", () => {
     const { result } = renderHook(() => useFeedPrefs(true));
     expect(result.current.filters).toEqual([...CLOUD_FEED_FILTERS]);
   });
+
+  it("persists a worklog toggle turned off in cloud across a reload", () => {
+    const { result } = renderHook(() => useFeedPrefs(true));
+    act(() => {
+      result.current.setFilters(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"]);
+    });
+    expect(window.localStorage.getItem(FILTERS_STORAGE_KEY)).toBe(
+      JSON.stringify(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"])
+    );
+    const reloaded = renderHook(() => useFeedPrefs(true));
+    expect(reloaded.result.current.filters).toEqual(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"]);
+  });
+
+  it("stores the worklog toggle when it stays on in cloud", () => {
+    const { result } = renderHook(() => useFeedPrefs(true));
+    act(() => {
+      result.current.setFilters([...CLOUD_FEED_FILTERS]);
+    });
+    expect(window.localStorage.getItem(FILTERS_STORAGE_KEY)).toBe(JSON.stringify([...CLOUD_FEED_FILTERS]));
+  });
 });

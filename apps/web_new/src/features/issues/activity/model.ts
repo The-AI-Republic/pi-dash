@@ -300,9 +300,16 @@ export function activityActorName(activity: Pick<IssueActivity, "field" | "new_v
   return activity.actor_detail?.display_name ?? "Unknown author";
 }
 
-/** Stable storage value for the toggle set. */
-export function serializeFilters(filters: readonly FeedFilter[]): string {
-  return JSON.stringify(FEED_FILTERS.filter((filter) => filters.includes(filter)));
+/**
+ * Stable storage value for the toggle set. The available set defaults to
+ * the four OSS toggles; cloud builds pass all five so a stored worklog
+ * toggle survives the round trip instead of being dropped on write.
+ */
+export function serializeFilters(
+  filters: readonly FeedFilter[],
+  available: readonly FeedFilter[] = FEED_FILTERS
+): string {
+  return JSON.stringify(available.filter((filter) => filters.includes(filter)));
 }
 
 export function serializeSort(order: FeedSortOrder): string {

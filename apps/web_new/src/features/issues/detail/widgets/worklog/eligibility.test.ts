@@ -49,15 +49,44 @@ describe("canLogWorklog", () => {
 
 describe("canManageWorklogEntry", () => {
   it("admits the author on a live item", () => {
-    expect(canManageWorklogEntry({ viewerId: VIEWER, entry: { actor: VIEWER }, archived: false })).toBe(true);
+    expect(canManageWorklogEntry({ viewerId: VIEWER, memberRole: 15, entry: { actor: VIEWER }, archived: false })).toBe(
+      true
+    );
   });
 
-  it("refuses other viewers, including admins", () => {
-    expect(canManageWorklogEntry({ viewerId: VIEWER, entry: { actor: OTHER }, archived: false })).toBe(false);
-    expect(canManageWorklogEntry({ viewerId: null, entry: { actor: OTHER }, archived: false })).toBe(false);
+  it("admits an admin on another member's entry", () => {
+    expect(canManageWorklogEntry({ viewerId: VIEWER, memberRole: 20, entry: { actor: OTHER }, archived: false })).toBe(
+      true
+    );
   });
 
-  it("refuses everyone on archived items", () => {
-    expect(canManageWorklogEntry({ viewerId: VIEWER, entry: { actor: VIEWER }, archived: true })).toBe(false);
+  it("refuses a non-admin on another member's entry", () => {
+    expect(canManageWorklogEntry({ viewerId: VIEWER, memberRole: 15, entry: { actor: OTHER }, archived: false })).toBe(
+      false
+    );
+    expect(canManageWorklogEntry({ viewerId: VIEWER, memberRole: 5, entry: { actor: OTHER }, archived: false })).toBe(
+      false
+    );
+    expect(
+      canManageWorklogEntry({ viewerId: VIEWER, memberRole: null, entry: { actor: OTHER }, archived: false })
+    ).toBe(false);
+  });
+
+  it("refuses an unknown viewer without an admin role", () => {
+    expect(canManageWorklogEntry({ viewerId: null, memberRole: 15, entry: { actor: OTHER }, archived: false })).toBe(
+      false
+    );
+    expect(canManageWorklogEntry({ viewerId: null, memberRole: null, entry: { actor: OTHER }, archived: false })).toBe(
+      false
+    );
+  });
+
+  it("refuses everyone, including admins, on archived items", () => {
+    expect(canManageWorklogEntry({ viewerId: VIEWER, memberRole: 20, entry: { actor: OTHER }, archived: true })).toBe(
+      false
+    );
+    expect(canManageWorklogEntry({ viewerId: VIEWER, memberRole: 15, entry: { actor: VIEWER }, archived: true })).toBe(
+      false
+    );
   });
 });

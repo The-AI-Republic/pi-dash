@@ -4,8 +4,9 @@
 // Worklog sidebar section (parity/specs/issues.md §16, ISS-206, cloud
 // leg). The logged total plus one row per entry — duration, day, note,
 // and the author for entries the viewer did not log. Authors manage
-// their own entries (edit, remove) on live items; everyone else reads.
-// A failed read offers a retry instead of an empty section.
+// their own entries (edit, remove) on live items, and admins manage
+// anyone's; everyone else reads. A failed read offers a retry instead
+// of an empty section.
 
 import { Button, Dialog, IconButton, Skeleton } from "@pidash/kit";
 import type { WorklogEntry } from "@pidash/api-client";
@@ -33,6 +34,8 @@ export interface WorklogSidebarSectionProps {
   issueId: string;
   /** Signed-in user, for authorship only; defaults to the session. */
   viewerId?: string | null;
+  /** Project role (20 admin, 15 member, 5 guest); null when unknown. */
+  memberRole?: number | null;
   /** Archived items keep the totals and rows but drop every manage control. */
   archived: boolean;
 }
@@ -40,6 +43,7 @@ export interface WorklogSidebarSectionProps {
 function WorklogEntryRow({
   entry,
   viewerId,
+  memberRole,
   archived,
   removing,
   onEdit,
@@ -47,12 +51,13 @@ function WorklogEntryRow({
 }: {
   entry: WorklogEntry;
   viewerId: string | null;
+  memberRole: number | null;
   archived: boolean;
   removing: boolean;
   onEdit: () => void;
   onDelete: () => void;
 }): React.ReactElement {
-  const manageable = canManageWorklogEntry({ viewerId, entry, archived });
+  const manageable = canManageWorklogEntry({ viewerId, memberRole, entry, archived });
   const when = `${formatMinutes(entry.minutes)} on ${formatLoggedOn(entry.logged_on)}`;
   return (
     <div data-worklog-row="true" className="group/row flex items-start gap-(--space-2) py-(--space-1)">
@@ -83,6 +88,7 @@ export function WorklogSidebarSection({
   projectId,
   issueId,
   viewerId: viewerOverride,
+  memberRole = null,
   archived,
 }: WorklogSidebarSectionProps): React.ReactElement {
   const me = useMe();
@@ -127,6 +133,7 @@ export function WorklogSidebarSection({
           key={entry.id}
           entry={entry}
           viewerId={viewerId}
+          memberRole={memberRole}
           archived={archived}
           removing={remove.isPending}
           onEdit={() => {

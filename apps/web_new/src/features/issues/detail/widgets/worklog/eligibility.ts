@@ -4,8 +4,9 @@
 // Worklog eligibility (parity/specs/issues.md §16/§23, ISS-206, cloud
 // leg). Logging is for admins and assignees on live, non-intake items —
 // guests never see the control, whatever their assignment. Managing an
-// entry (edit, delete) is author-only, mirroring comment authorship in
-// the same feed; the server enforces both rules, these only gate the UI.
+// entry (edit, delete) is for its author and for admins, matching the
+// server's admin-or-creator rule; the server enforces both rules, these
+// only gate the UI.
 
 import type { WorklogEntry } from "@pidash/api-client";
 
@@ -30,13 +31,16 @@ export function canLogWorklog(standing: WorklogStanding): boolean {
 
 export interface WorklogEntryStanding {
   viewerId: string | null;
+  /** Project role (20 admin, 15 member, 5 guest); null when unknown. */
+  memberRole: number | null;
   entry: Pick<WorklogEntry, "actor">;
   archived: boolean;
 }
 
-/** Whether the viewer may edit or remove one entry: its author, on a live item. */
+/** Whether the viewer may edit or remove one entry: its author, or an admin, on a live item. */
 export function canManageWorklogEntry(standing: WorklogEntryStanding): boolean {
   if (standing.archived) return false;
+  if (standing.memberRole === ROLE_ADMIN) return true;
   if (standing.viewerId === null) return false;
   return standing.entry.actor === standing.viewerId;
 }

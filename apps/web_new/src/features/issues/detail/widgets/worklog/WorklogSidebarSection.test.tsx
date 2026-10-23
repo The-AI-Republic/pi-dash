@@ -306,6 +306,20 @@ describe("WorklogSidebarSection", () => {
     expect(screen.queryByRole("button", { name: /Remove / })).toBeNull();
   });
 
+  it("shows manage controls to an admin on others' entries", async () => {
+    setup({ rows: [entryRow({ actor: OTHER, actor_detail: null })] }, { memberRole: 20 });
+    expect(await screen.findByText(/Someone/)).toBeDefined();
+    expect(screen.getByRole("button", { name: "Edit 1h 30m on Oct 20, 2026" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Remove 1h 30m on Oct 20, 2026" })).toBeDefined();
+  });
+
+  it("hides manage controls from a member on others' entries", async () => {
+    setup({ rows: [entryRow({ actor: OTHER, actor_detail: null })] }, { memberRole: 15 });
+    expect(await screen.findByText(/Someone/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: /Edit / })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Remove / })).toBeNull();
+  });
+
   it("hides manage controls on archived items", async () => {
     setup({}, { archived: true });
     expect(await screen.findByText("1h 30m", { selector: "[data-worklog-total]" })).toBeDefined();

@@ -50,15 +50,18 @@ export function useFeedPrefs(worklogEnabled: boolean = false): FeedPrefs {
   const [filters, setFilterState] = React.useState<FeedFilter[]>(() => readFilters(available));
   const [order, setOrderState] = React.useState<FeedSortOrder>(readSort);
 
-  const setFilters = React.useCallback((next: FeedFilter[]) => {
-    setFilterState(next);
-    try {
-      window.localStorage.setItem(FILTERS_STORAGE_KEY, serializeFilters(next));
-    } catch {
-      // Storage can be denied (private mode); the feed still narrows in
-      // this tab, it just does not remember the choice.
-    }
-  }, []);
+  const setFilters = React.useCallback(
+    (next: FeedFilter[]) => {
+      setFilterState(next);
+      try {
+        window.localStorage.setItem(FILTERS_STORAGE_KEY, serializeFilters(next, available));
+      } catch {
+        // Storage can be denied (private mode); the feed still narrows in
+        // this tab, it just does not remember the choice.
+      }
+    },
+    [available]
+  );
 
   const setOrder = React.useCallback((next: FeedSortOrder) => {
     setOrderState(next);
