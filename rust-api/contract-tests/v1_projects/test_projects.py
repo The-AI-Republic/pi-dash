@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from psycopg.types.json import Json
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -656,3 +657,28 @@ def test_cover_image_url_attachment_null_project_renders_none_text(seed, conn):
     )
     detail = http.get(key, f"{base(seed)}/{pid}/").json()
     assert detail["cover_image_url"] == expected
+
+
+def test_detail_renders_stored_network_and_description_json(seed, conn):
+    """Detail echoes stored network + JSON descriptions (PIDASHCONV-1388 twin).
+
+    HTTP-side twin of the tasks_webhooks project-chain tests: the worker
+    fan-out must decode these same columns (INT2 network, jsonb
+    descriptions). Seeded via SQL because create ignores the description
+    fields (ProjectCreateSerializer.Meta.fields) — the read path is what
+    this pins.
+    """
+    pid = db.create_project(conn, seed["ws_a"]["id"], db.new_tag(),
+                            created_by_id=seed["owner"]["id"])["id"]
+    db.add_project_member(conn, seed["ws_a"]["id"], pid, seed["owner"]["id"], db.ADMIN)
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE projects SET network = 2, description_text = %s,"
+            " description_html = %s WHERE id = %s",
+            (Json({"ops": "text"}), Json({"a": 1}), pid),
+        )
+    conn.commit()
+    body = http.get(seed["keys"][KEY], f"{base(seed)}/{pid}/").json()
+    assert body["network"] == 2
+    assert body["description_text"] == {"ops": "text"}
+    assert body["description_html"] == {"a": 1}
