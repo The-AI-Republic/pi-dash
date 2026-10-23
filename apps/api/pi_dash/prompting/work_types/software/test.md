@@ -23,3 +23,5 @@ Acting on findings, within the limits of the chosen kind (step 7 of the test cyc
 - **UI / EXPLORATORY**: same rule as AUTOMATED for a trivial fix; a visual/interaction defect you cannot fix trivially goes back as a defect finding.
 - **OPS / INFRA**: apply a trivial config fix; otherwise report.
 - **DESIGN**: edit the doc for a trivial gap; otherwise report.
+
+For software, "accepting the deliverable" on an agent-close pass means merging the {{ repo.code_review_term }}; "waiting on an external process" means waiting on CI checks or a merge.

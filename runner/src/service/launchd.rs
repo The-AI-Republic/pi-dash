@@ -56,13 +56,7 @@ pub async fn write_unit(paths: &Paths) -> Result<()> {
 /// `EnvironmentVariables` so the daemon (and every subprocess it forks)
 /// inherits the operator's interactive PATH instead of launchd's stripped
 /// default. See `service::capture_install_time_path` for the full rationale.
-fn render_plist(
-    exe: &str,
-    config: &str,
-    data: &str,
-    logs: &str,
-    path_env: Option<&str>,
-) -> String {
+fn render_plist(exe: &str, config: &str, data: &str, logs: &str, path_env: Option<&str>) -> String {
     let path_entry = match path_env {
         Some(p) => format!("\n    <key>PATH</key><string>{p}</string>"),
         None => String::new(),
@@ -718,7 +712,9 @@ mod tests {
         assert!(is_not_loaded_error("Service not loaded"));
         // Real failures we MUST surface, not silently absorb:
         assert!(!is_not_loaded_error("Operation not permitted"));
-        assert!(!is_not_loaded_error("Bootstrap failed: 5: Input/output error"));
+        assert!(!is_not_loaded_error(
+            "Bootstrap failed: 5: Input/output error"
+        ));
         assert!(!is_not_loaded_error(""));
     }
 
@@ -748,7 +744,9 @@ mod tests {
         assert!(!is_already_loaded_error(
             "Load failed: 2: No such file or directory"
         ));
-        assert!(!is_already_loaded_error("Path had bad ownership/permissions"));
+        assert!(!is_already_loaded_error(
+            "Path had bad ownership/permissions"
+        ));
         assert!(!is_already_loaded_error(""));
     }
 

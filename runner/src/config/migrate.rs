@@ -103,7 +103,10 @@ pub fn migrate_legacy_pool(
     // runner) from case 2 (several) — order-stable for deterministic messages.
     let mut by_workdir: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for (runner, workdir) in &refs {
-        by_workdir.entry(workdir.as_str()).or_default().push(runner.as_str());
+        by_workdir
+            .entry(workdir.as_str())
+            .or_default()
+            .push(runner.as_str());
     }
 
     // A `workdir = "x"` that names no `[[workdir]] name = "x"` is a broken
@@ -141,9 +144,9 @@ pub fn migrate_legacy_pool(
     let mut report: Vec<String> = Vec::new();
     let mut claimed: BTreeSet<&str> = BTreeSet::new();
     for (runner_name, workdir_name) in &refs {
-        let info = workdirs.get(workdir_name.as_str()).expect(
-            "dangling references were rejected above, so every ref resolves here",
-        );
+        let info = workdirs
+            .get(workdir_name.as_str())
+            .expect("dangling references were rejected above, so every ref resolves here");
         // Snapshot what we need from the pool table before the mutable borrow
         // of `cfg.runners` below.
         let canonical = info.path.clone();
@@ -330,9 +333,7 @@ fn quote_join(items: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::schema::{
-        Config, DaemonConfig, RunnerConfig, WorkspaceSection,
-    };
+    use crate::config::schema::{Config, DaemonConfig, RunnerConfig, WorkspaceSection};
     use std::path::PathBuf;
     use uuid::Uuid;
 
@@ -366,6 +367,7 @@ mod tests {
                 log_level: "info".into(),
                 log_retention_days: 14,
                 agent_observability_v1: false,
+                agent_watchdog: Default::default(),
                 auto_update: true,
             },
             runners,
@@ -391,7 +393,10 @@ mod tests {
         "#);
         let out = migrate_legacy_pool(&mut cfg, &value, Path::new("/data")).unwrap();
         assert!(out.is_none(), "expected no migration, got {out:?}");
-        assert_eq!(cfg.runners[0].workspace.working_dir, PathBuf::from("/work/main"));
+        assert_eq!(
+            cfg.runners[0].workspace.working_dir,
+            PathBuf::from("/work/main")
+        );
     }
 
     #[test]
@@ -419,8 +424,10 @@ mod tests {
             PathBuf::from("/home/me/repo")
         );
         assert!(
-            migration.report.iter().any(|l| l.contains("now runs directly in")
-                && l.contains("/home/me/repo")),
+            migration
+                .report
+                .iter()
+                .any(|l| l.contains("now runs directly in") && l.contains("/home/me/repo")),
             "report should announce the move: {:?}",
             migration.report
         );
@@ -451,7 +458,10 @@ mod tests {
             PathBuf::from("/home/me/repo")
         );
         assert!(
-            migration.report.iter().any(|l| l.contains("keeps working_dir")),
+            migration
+                .report
+                .iter()
+                .any(|l| l.contains("keeps working_dir")),
             "report: {:?}",
             migration.report
         );
@@ -509,8 +519,10 @@ mod tests {
         );
         // The move is announced for both runners, not silent.
         assert!(
-            migration.report.iter().any(|l| l.contains("\"claude\"")
-                && l.contains("has its own working_dir")),
+            migration
+                .report
+                .iter()
+                .any(|l| l.contains("\"claude\"") && l.contains("has its own working_dir")),
             "report should announce the displaced runner: {:?}",
             migration.report
         );
@@ -552,7 +564,10 @@ mod tests {
         let migration = migrate_legacy_pool(&mut cfg, &value, Path::new("/data"))
             .unwrap()
             .expect("orphan workdir still yields a report");
-        assert_eq!(cfg.runners[0].workspace.working_dir, PathBuf::from("/work/codex"));
+        assert_eq!(
+            cfg.runners[0].workspace.working_dir,
+            PathBuf::from("/work/codex")
+        );
         assert!(
             migration.report.iter().any(|l| l.contains("no runner")),
             "report: {:?}",
@@ -593,13 +608,18 @@ mod tests {
             .expect("case 1");
 
         assert!(
-            migration.report.iter().any(|l| l.contains("leftover pool worktrees")
-                && l.contains("worktrees")),
+            migration
+                .report
+                .iter()
+                .any(|l| l.contains("leftover pool worktrees") && l.contains("worktrees")),
             "report: {:?}",
             migration.report
         );
         assert!(
-            migration.report.iter().any(|l| l.contains("leftover chat worktree")),
+            migration
+                .report
+                .iter()
+                .any(|l| l.contains("leftover chat worktree")),
             "report: {:?}",
             migration.report
         );

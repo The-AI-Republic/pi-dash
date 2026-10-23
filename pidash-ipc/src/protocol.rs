@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::dto::{
-    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRecord, ObservabilitySnapshot, RunSummary,
-    RunnerStatus,
+    ApprovalDecision, ApprovalKind, ApprovalMode, ApprovalRecord, ObservabilitySnapshot,
+    RunSummary, RunnerStatus,
 };
 
 /// IPC wire version. Bumped on incompatible shape changes between
@@ -856,7 +856,14 @@ mod tests {
         let s = serde_json::to_string(&req).unwrap();
         // `skip_serializing_if = Option::is_none` keeps absent selectors
         // off the wire (and keeps older daemons from tripping on them).
-        for field in ["runner", "cwd", "model", "mode", "local_thread_id", "local_session_id"] {
+        for field in [
+            "runner",
+            "cwd",
+            "model",
+            "mode",
+            "local_thread_id",
+            "local_session_id",
+        ] {
             assert!(!s.contains(field), "unexpected {field} in {s}");
         }
         // Required fields are still present.

@@ -215,7 +215,10 @@ async fn result_before_init_is_surfaced_as_failed() {
             );
         }
     }
-    assert!(saw_failed, "expected a Failed event from a result-before-init");
+    assert!(
+        saw_failed,
+        "expected a Failed event from a result-before-init"
+    );
 }
 
 #[tokio::test]
@@ -276,7 +279,10 @@ async fn dropping_bridge_kills_a_running_cursor() {
         .process_handle()
         .pid
         .expect("a spawned process should report a pid");
-    assert!(proc_alive(pid), "child should be alive right after run setup");
+    assert!(
+        proc_alive(pid),
+        "child should be alive right after run setup"
+    );
 
     // Drop the bridge — its kill channel closes; the wait task should kill +
     // reap the still-running child.
