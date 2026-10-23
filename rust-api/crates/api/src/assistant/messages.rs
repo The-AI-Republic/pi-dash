@@ -167,8 +167,12 @@ const THREAD_FULL_BODY: &str = r#"{"error":"thread_full","detail":"Start a new t
 
 /// `AssistantMessageListCreateEndpoint.post` (`messages.py:63-111`).
 ///
-/// Gate order, preserved: member gate → owned-thread scope → POST-only
-/// throttle → content validation → LLM-config gate → the atomic creation.
+/// Gate order, preserved: POST-only throttle → member gate → owned-thread
+/// scope → content validation → LLM-config gate → the atomic creation.
+/// DRF `initial()` runs `check_throttles` before the handler body, so a
+/// throttled caller answers 429 even when a gate would also deny it; the
+/// throttle follows the UUID parse because Django's `<uuid:thread_id>`
+/// route converter 404s garbage ids before any view code runs.
 /// The creation runs in one transaction under a `SELECT ... FOR UPDATE`
 /// thread lock: reject an in-flight turn (409), reject a full thread (409),
 /// insert the queued turn, insert the user message (`seq = MAX+1`,
@@ -186,19 +190,19 @@ async fn post_message(
     let Some(actor) = request_actor(&state, pool, extension).await? else {
         return Err(unauthenticated());
     };
-    let role = role_for(pool, &actor.id, &slug).await?;
-    require_member(role)?;
     let thread_id: Uuid = thread_id.parse().map_err(|_| thread_not_found())?;
-    let Some(_thread) = owned_thread(pool, &thread_id, &actor.id, &slug).await? else {
-        return Err(thread_not_found());
-    };
     // POST-only throttle (`get_throttles`, `messages.py:39-42`): DRF runs
-    // `check_throttles` before the handler body, so a throttled caller
-    // answers 429 even when a later gate would also deny it (see
-    // `redis::check_message_throttle`).
+    // `check_throttles` before the handler body, so denied POSTs count and
+    // a throttled caller answers 429 even when a gate would also deny it
+    // (see `redis::check_message_throttle`).
     if check_message_throttle(&state, &actor.id).await == ThrottleVerdict::Deny {
         return Err(crate::assistant::throttles::Throttled.into_response());
     }
+    let role = role_for(pool, &actor.id, &slug).await?;
+    require_member(role)?;
+    let Some(_thread) = owned_thread(pool, &thread_id, &actor.id, &slug).await? else {
+        return Err(thread_not_found());
+    };
     let data = parse_json_body(&body)?;
     let content = or_empty_str(data.get("content"))?.trim().to_owned();
     if content.is_empty() {
