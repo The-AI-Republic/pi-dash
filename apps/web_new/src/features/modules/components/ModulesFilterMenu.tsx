@@ -18,7 +18,13 @@ import type { ModuleStatus, WorkspaceMember } from "@pidash/api-client";
 import { ListFilter, Search, X } from "lucide-react";
 import * as React from "react";
 
-import { DateRangeCalendar, FilterSection, useWeekStart, type FilterSectionOption } from "../../issues/index.js";
+import {
+  DateRangeCalendar,
+  FilterSection,
+  useWeekStart,
+  type FilterSectionOption,
+  type RangeValue,
+} from "../../issues/index.js";
 import {
   clearModuleDateRange,
   defaultModuleCustomRange,
@@ -30,6 +36,7 @@ import {
   MODULE_FILTER_LABELS,
   MODULE_STATUS_OPTIONS,
   moduleDateRange,
+  moduleCustomWindow,
   moduleDateTokenKey,
   selectModuleMemberOptions,
   toggleModuleDateToken,
@@ -172,9 +179,11 @@ function DateSection({
   onFiltersChange: (filters: ModuleListFilters) => void;
 }): React.ReactElement {
   const [customOpen, setCustomOpen] = React.useState(false);
-  // The two days picked in the open calendar; Apply writes them, so a
-  // half-finished pick never reaches the list.
-  const [draftRange, setDraftRange] = React.useState<{ start: string | null; end: string | null } | null>(null);
+  // The window picked in the open dialog. Until the first pick the calendar
+  // shows the documented default (today through the same day next month,
+  // §2.6.1); Apply writes the draft when there is one and the default
+  // otherwise, so nothing reaches the list before Apply.
+  const [draftRange, setDraftRange] = React.useState<RangeValue | null>(null);
   const range = moduleDateRange(filters, dimension);
   const options: FilterSectionOption[] = MODULE_DATE_PRESETS.map((preset) => ({
     id: preset.value,
@@ -201,18 +210,12 @@ function DateSection({
   };
 
   const applyRange = (): void => {
-    // Untouched dialog: the documented default window. A draft keeps the
-    // picked days; a single picked day is not a window yet.
-    const next = draftRange ?? defaultModuleCustomRange();
-    if (next.start === null || next.end === null) {
-      // A single picked day is not a window: keep the dialog open.
-      setDraftRange(next);
-      return;
-    }
+    // Applying always writes a window: the picks, or the default the
+    // calendar showed when it was not touched (§2.6.1).
     setCustomOpen(false);
     setDraftRange(null);
     onFiltersChange(
-      toggleModuleDateToken(filters, dimension, { kind: "range", value: { start: next.start, end: next.end } })
+      toggleModuleDateToken(filters, dimension, { kind: "range", value: moduleCustomWindow(draftRange) })
     );
   };
 
@@ -253,9 +256,10 @@ function DateSection({
               {customOpen ? (
                 <div data-testid="modules-custom-date" className="flex flex-col gap-(--space-2)">
                   <DateRangeCalendar
-                    // Opening the calendar clears an applied range, so only
-                    // the draft picked in this dialog can be in flight.
-                    value={draftRange ?? { start: null, end: null }}
+                    // An applied range is toggled off before the calendar
+                    // opens, so this is either the draft being picked or the
+                    // documented default window.
+                    value={draftRange ?? defaultModuleCustomRange()}
                     onChange={setDraftRange}
                     weekStart={weekStart}
                     testId="modules-custom-calendar"

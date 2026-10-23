@@ -15,6 +15,7 @@ import {
   compareModuleNaturalNames,
   DEFAULT_MODULE_SORT,
   defaultModuleCustomRange,
+  moduleCustomWindow,
   emptyModuleFilters,
   hasModuleFilters,
   isModuleFilterDimensionActive,
@@ -424,6 +425,15 @@ describe("filter dimensions (MOD-006)", () => {
   it("computes the custom default window and preset days", () => {
     expect(defaultModuleCustomRange(NOW)).toEqual({ start: "2026-10-20", end: "2026-11-20" });
     expect(defaultModuleCustomRange(new Date(2026, 0, 31, 12))).toEqual({ start: "2026-01-31", end: "2026-03-03" });
+    expect(moduleCustomWindow(null, NOW)).toEqual({ start: "2026-10-20", end: "2026-11-20" });
+    expect(moduleCustomWindow({ start: "2026-10-10", end: null }, NOW)).toEqual({
+      start: "2026-10-10",
+      end: "2026-11-20",
+    });
+    expect(moduleCustomWindow({ start: "2026-10-21", end: "2026-10-25" }, NOW)).toEqual({
+      start: "2026-10-21",
+      end: "2026-10-25",
+    });
     expect(moduleDatePresetDay("week-1", NOW)).toBe("2026-10-27");
     expect(moduleDatePresetDay("month-2", NOW)).toBe("2026-12-19");
     expect(MODULE_DATE_PRESETS.map((preset) => preset.label)).toEqual([
@@ -554,20 +564,20 @@ describe("chip groups (MOD-007)", () => {
     };
     const groups = selectModuleChipGroups(filters, base);
     expect(groups.map((group) => group.key)).toEqual([
-      "Modules",
       "status",
       "lead",
       "members",
       "start date",
       "target date",
+      "Modules",
     ]);
-    expect(groups[0]?.values).toEqual([{ value: "Favorite", label: "Favorite" }]);
-    expect(groups[1]?.values.map((value) => value.label)).toEqual(["Completed", "Planned"]);
-    expect(groups[1]?.values[0]?.color).toBe("#16a34a");
-    expect(groups[2]?.values[0]?.label).toBe("You");
-    expect(groups[3]?.values[0]?.label).toBe("Zed Member");
-    expect(groups[4]?.values.map((value) => value.label)).toEqual(["1 week from now"]);
-    expect(groups[5]?.values.map((value) => value.label)).toEqual(["2026-10-20..2026-11-20"]);
+    expect(groups[0]?.values.map((value) => value.label)).toEqual(["Completed", "Planned"]);
+    expect(groups[0]?.values[0]?.color).toBe("#16a34a");
+    expect(groups[1]?.values[0]?.label).toBe("You");
+    expect(groups[2]?.values[0]?.label).toBe("Zed Member");
+    expect(groups[3]?.values.map((value) => value.label)).toEqual(["1 week from now"]);
+    expect(groups[4]?.values.map((value) => value.label)).toEqual(["2026-10-20..2026-11-20"]);
+    expect(groups[5]?.values).toEqual([{ value: "Favorite", label: "Favorite" }]);
     expect(MODULE_FILTER_CHIP_KEYS.favorites).toBe("Modules");
   });
 

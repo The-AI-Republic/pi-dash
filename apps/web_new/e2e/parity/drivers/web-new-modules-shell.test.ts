@@ -67,8 +67,8 @@ class FakePage {
       first: () => self.locator(id),
       last: () => self.locator(id),
       nth: () => self.locator(id),
-      filter: (options: { has?: Locator }) =>
-        self.locator(`${id} has(${String((options.has as never)?.["__id"] ?? "")})`),
+      filter: (options: { has?: Locator; hasText?: string | RegExp }) =>
+        self.locator(`${id} has(${String((options.has as never)?.["__id"] ?? "")},${String(options.hasText ?? "")})`),
       getByTestId: (testId: string) => self.locator(`${id} testid(${testId})`),
       getByRole: (role: string, options?: { name?: string }) =>
         self.locator(`${id} role(${role},${options?.name ?? ""})`),
@@ -780,7 +780,7 @@ describe("modules chip hooks (MOD-007)", () => {
     await driver.modulesRemoveChipDimension("lead");
     await driver.modulesClearFilters();
     expect(fake.clicks).toEqual([
-      'page testid(modules-filter-chips) css([data-chip-key="status"]) css([data-chip-value="completed"]) role(button,)',
+      'page testid(modules-filter-chips) css([data-chip-key="status"]) css([data-chip-value]) has(,completed) role(button,)',
       'page testid(modules-filter-chips) css([data-chip-key="lead"]) testid(modules-filter-chip-clear)',
       "page testid(modules-filter-clear-all)",
     ]);

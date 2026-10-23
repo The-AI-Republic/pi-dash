@@ -95,10 +95,10 @@ describe("ModulesFilterChips", () => {
     filters = toggleModuleDateToken(filters, "due-date", { kind: "preset", value: "week-1" });
     renderChips(filters);
     expect(screen.getAllByTestId("modules-filter-chip").map((node) => node.getAttribute("data-chip-key"))).toEqual([
-      "Modules",
       "status",
       "lead",
       "target date",
+      "Modules",
     ]);
     expect(within(chipFor("Modules")).getByTestId("modules-filter-chip-value")).toHaveTextContent("Favorite");
     expect(within(chipFor("status")).getByText("Completed")).toBeInTheDocument();

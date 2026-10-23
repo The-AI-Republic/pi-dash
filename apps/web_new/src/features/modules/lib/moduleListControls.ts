@@ -9,6 +9,8 @@
 
 import type { ModuleRow, ModuleStatus, WorkspaceMember } from "@pidash/api-client";
 
+import type { RangeValue } from "../../issues/index.js";
+
 // ---------------------------------------------------------------- search
 
 /** Case-insensitive name substring match; blank query keeps every row. */
@@ -425,6 +427,16 @@ export function defaultModuleCustomRange(now: Date = new Date()): { start: strin
   return { start: localIsoDay(now), end: localIsoDay(end) };
 }
 
+/**
+ * The window the custom dialog writes (§2.6.1): its two picks when it has
+ * them, otherwise the documented default. An applied range is always
+ * complete, so a missing end can only mean the dialog was not finished.
+ */
+export function moduleCustomWindow(range: RangeValue | null, now: Date = new Date()): { start: string; end: string } {
+  const fallback = defaultModuleCustomRange(now);
+  return { start: range?.start ?? fallback.start, end: range?.end ?? fallback.end };
+}
+
 /** A stored target/start date (an ISO day) compared against a day. */
 function dayAtOrAfter(value: string | null, day: string): boolean {
   return value !== null && value >= day;
@@ -628,9 +640,6 @@ export function selectModuleChipGroups(filters: ModuleListFilters, input: Module
     });
   };
 
-  if (showFavorites && filters.favorites) {
-    push("favorites", [{ value: "Favorite", label: "Favorite" }]);
-  }
   if (showStatus) {
     push(
       "status",
@@ -662,6 +671,9 @@ export function selectModuleChipGroups(filters: ModuleListFilters, input: Module
       label: dateTokenLabel(token, input.formatDateRange),
     }))
   );
+  if (showFavorites && filters.favorites) {
+    push("favorites", [{ value: "Favorite", label: "Favorite" }]);
+  }
   return groups;
 }
 
@@ -676,18 +688,4 @@ export type ModuleListContentState = "rows" | "no-match";
  */
 export function moduleListContentState(total: number, visible: number): ModuleListContentState {
   return total > 0 && visible === 0 ? "no-match" : "rows";
-}
-
-// ---------------------------------------------------------------- list context
-
-/** A value the header shows and the body reads. */
-export interface ModuleListContextValue {
-  query: string;
-  setQuery: (query: string) => void;
-  sort: ModuleSort;
-  filters: ModuleListFilters;
-  /** True while any filter dimension carries a value. */
-  filtersActive: boolean;
-  /** Every module the header's search/filters narrow. */
-  modules: ModuleRow[];
 }

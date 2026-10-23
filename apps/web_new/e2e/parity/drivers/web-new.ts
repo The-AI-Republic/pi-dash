@@ -20039,8 +20039,12 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesRemoveChipValue(key: string, value: string): Promise<void> {
+    // The scenario names the rendered label ("Planned"), while the wire
+    // id on the element is lowercase ("planned"): match the text.
     await this.modulesChip(key)
-      .locator(`[data-chip-value="${value}"]`)
+      .locator("[data-chip-value]")
+      .filter({ hasText: value })
+      .first()
       .getByRole("button")
       .click({ timeout: WebNewDriver.WAIT_MS });
   }

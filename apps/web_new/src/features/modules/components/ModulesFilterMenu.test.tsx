@@ -183,6 +183,15 @@ describe("ModulesFilterMenu", () => {
     const start = () => screen.getAllByTestId("modules-filter-date-group")[0]!;
     fireEvent.click(within(start()).getByRole("checkbox", { name: "Custom" }));
     expect(screen.getByTestId("modules-custom-date")).toBeInTheDocument();
+    const calendar = screen.getByTestId("modules-custom-calendar");
+    // The dialog opens on today through the same day next month (§2.6.1),
+    // and both ends are drawn as selected.
+    expect(within(calendar).getByRole("button", { name: "October 20, 2026" })).toHaveAttribute("aria-pressed", "true");
+    // The far end is next month, so only the month on screen is drawn.
+    fireEvent.click(within(calendar).getByRole("button", { name: "Next month" }));
+    expect(
+      within(screen.getByTestId("modules-custom-calendar")).getByRole("button", { name: "November 20, 2026" })
+    ).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByTestId("modules-custom-apply"));
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -216,43 +225,65 @@ describe("ModulesFilterMenu", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("picks a range end and keeps the dialog open until Apply", () => {
+  it("picks a range and keeps the dialog open until Apply", () => {
     const onChange = vi.fn();
     renderMenu({ onChange });
     fireEvent.click(screen.getByTestId("modules-filter-trigger"));
     const start = screen.getAllByTestId("modules-filter-date-group")[0]!;
     fireEvent.click(within(start).getByRole("checkbox", { name: "Custom" }));
     const calendar = screen.getByTestId("modules-custom-calendar");
-    fireEvent.click(within(calendar).getByRole("button", { name: "October 21, 2026" }));
-    fireEvent.click(within(calendar).getByRole("button", { name: "October 22, 2026" }));
+    // The first pick keeps the default start and moves the end.
+    fireEvent.click(within(calendar).getByRole("button", { name: "October 25, 2026" }));
     expect(onChange).not.toHaveBeenCalled();
     expect(screen.getByTestId("modules-custom-date")).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("modules-custom-apply"));
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({
-        "start-date": [{ kind: "range", value: { start: "2026-10-21", end: "2026-10-22" } }],
+        "start-date": [{ kind: "range", value: { start: "2026-10-20", end: "2026-10-25" } }],
       })
     );
     expect(screen.queryByTestId("modules-custom-date")).not.toBeInTheDocument();
   });
 
-  it("keeps the dialog open after Apply when only one day is picked", () => {
+  it("moves only the end when a later day is picked and keeps relative tokens", () => {
+    const onChange = vi.fn();
+    renderMenu({ onChange, filters: { ...emptyModuleFilters(), "start-date": [{ kind: "preset", value: "week-1" }] } });
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    const start = screen.getAllByTestId("modules-filter-date-group")[0]!;
+    fireEvent.click(within(start).getByRole("checkbox", { name: "Custom" }));
+    fireEvent.click(
+      within(screen.getByTestId("modules-custom-calendar")).getByRole("button", { name: "October 23, 2026" })
+    );
+    fireEvent.click(screen.getByTestId("modules-custom-apply"));
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        "start-date": [
+          { kind: "preset", value: "week-1" },
+          { kind: "range", value: { start: "2026-10-20", end: "2026-10-23" } },
+        ],
+      })
+    );
+  });
+
+  it("reseeds the default window each time the dialog opens and keeps Cancel inert", () => {
     const onChange = vi.fn();
     renderMenu({ onChange });
     fireEvent.click(screen.getByTestId("modules-filter-trigger"));
     const start = screen.getAllByTestId("modules-filter-date-group")[0]!;
     fireEvent.click(within(start).getByRole("checkbox", { name: "Custom" }));
     const calendar = screen.getByTestId("modules-custom-calendar");
-    fireEvent.click(within(calendar).getByRole("button", { name: "October 21, 2026" }));
-    fireEvent.click(screen.getByTestId("modules-custom-apply"));
+    fireEvent.click(within(calendar).getByRole("button", { name: "October 10, 2026" }));
+    expect(within(calendar).getByRole("button", { name: "October 20, 2026" })).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onChange).not.toHaveBeenCalled();
-    expect(screen.getByTestId("modules-custom-date")).toBeInTheDocument();
-    // The picked day stays selected, so the second click completes it.
-    fireEvent.click(within(calendar).getByRole("button", { name: "October 24, 2026" }));
+    // Reopening drops the cancelled pick and shows the default again.
+    fireEvent.click(within(start).getByRole("checkbox", { name: "Custom" }));
+    const reopened = screen.getByTestId("modules-custom-calendar");
+    expect(within(reopened).getByRole("button", { name: "October 20, 2026" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(screen.getByTestId("modules-custom-apply"));
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({
-        "start-date": [{ kind: "range", value: { start: "2026-10-21", end: "2026-10-24" } }],
+        "start-date": [{ kind: "range", value: { start: "2026-10-20", end: "2026-11-20" } }],
       })
     );
   });
