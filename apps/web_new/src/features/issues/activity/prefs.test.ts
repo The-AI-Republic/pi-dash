@@ -8,7 +8,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_FILTERS, FILTERS_STORAGE_KEY, SORT_STORAGE_KEY } from "./model.js";
+import { CLOUD_FEED_FILTERS, DEFAULT_FILTERS, FILTERS_STORAGE_KEY, SORT_STORAGE_KEY } from "./model.js";
 import { useFeedPrefs } from "./prefs.js";
 
 beforeEach(() => {
@@ -88,5 +88,48 @@ describe("useFeedPrefs", () => {
     const { result } = renderHook(() => useFeedPrefs());
     expect(result.current.filters).toEqual([...DEFAULT_FILTERS]);
     expect(result.current.order).toBe("asc");
+  });
+
+  it("starts cloud from all five toggles and reads them back", () => {
+    const { result } = renderHook(() => useFeedPrefs(true));
+    expect(result.current.filters).toEqual([...CLOUD_FEED_FILTERS]);
+  });
+
+  it("keeps a stored worklog toggle in cloud and drops it in OSS", () => {
+    window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(["WORKLOG", "STATE"]));
+    const cloud = renderHook(() => useFeedPrefs(true));
+    expect(cloud.result.current.filters).toEqual(["STATE", "WORKLOG"]);
+    const oss = renderHook(() => useFeedPrefs(false));
+    expect(oss.result.current.filters).toEqual(["STATE"]);
+  });
+
+  it("falls back to five in cloud when storage refuses the read", () => {
+    stubStorage({
+      getItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+    const { result } = renderHook(() => useFeedPrefs(true));
+    expect(result.current.filters).toEqual([...CLOUD_FEED_FILTERS]);
+  });
+
+  it("persists a worklog toggle turned off in cloud across a reload", () => {
+    const { result } = renderHook(() => useFeedPrefs(true));
+    act(() => {
+      result.current.setFilters(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"]);
+    });
+    expect(window.localStorage.getItem(FILTERS_STORAGE_KEY)).toBe(
+      JSON.stringify(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"])
+    );
+    const reloaded = renderHook(() => useFeedPrefs(true));
+    expect(reloaded.result.current.filters).toEqual(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE"]);
+  });
+
+  it("stores the worklog toggle when it stays on in cloud", () => {
+    const { result } = renderHook(() => useFeedPrefs(true));
+    act(() => {
+      result.current.setFilters([...CLOUD_FEED_FILTERS]);
+    });
+    expect(window.localStorage.getItem(FILTERS_STORAGE_KEY)).toBe(JSON.stringify([...CLOUD_FEED_FILTERS]));
   });
 });

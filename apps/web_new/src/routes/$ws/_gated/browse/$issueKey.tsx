@@ -304,6 +304,8 @@ function BrowseIssueDetail({
               issueId={issue.id}
               archived={issue.archived_at !== null}
               published={project?.anchor != null}
+              assigneeIds={issue.assignee_ids}
+              memberRole={project?.member_role ?? null}
             />
           </div>
         }

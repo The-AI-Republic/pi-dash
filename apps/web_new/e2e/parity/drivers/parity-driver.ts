@@ -9229,6 +9229,18 @@ export interface SpaceBoardStability {
   cloudPlanBadgeFacts(): Promise<{ label: string; hint: string } | null>;
   /** Focused control role + label, or null when the body holds focus. */
   cloudFocusedControl(): Promise<{ role: string; label: string } | null>;
+  // --- Cloud worklog (NEWFRONT-672, ISS-206 cloud leg). Appended;
+  // --- existing methods above are untouched per the shared driver
+  // --- contract. The cloud spec runs on web_new only: the OSS oracle
+  // --- provably lacks the surface and the private cloud oracle's UI is
+  // --- intentionally not pinned here, so the old-app driver throws on
+  // --- these while worklogCreateVisible stays the OSS absence reader.
+  /** Log `minutes` on `loggedOn` with `note` through the header control; resolves once the dialog closes. */
+  worklogLogEntry(minutes: number, loggedOn: string, note: string): Promise<void>;
+  /** Sidebar worklog total text, or null when no total renders. */
+  worklogSidebarTotal(): Promise<string | null>;
+  /** Sidebar worklog entry texts in display order. */
+  worklogSidebarEntryTexts(): Promise<string[]>;
 }
 
 /** One Apps catalog card (NEWFRONT-439, CLOUD-028). */

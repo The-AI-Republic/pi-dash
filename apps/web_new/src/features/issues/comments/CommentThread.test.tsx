@@ -48,7 +48,9 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => {
 });
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { WORKLOG_FLAG } from "../detail/widgets/worklog/worklog.js";
 import { COMMENT_LINK_COPIED_TITLE, COMMENT_LINK_COPY_FAILED_TITLE, COMMENT_REMOVED_TITLE } from "./api.js";
 import { CommentThread, commentIdFromHash, commentLinkFor } from "./CommentThread.js";
 
@@ -496,5 +498,36 @@ describe("CommentThread", () => {
     expect(JSON.parse(calls.find((call) => call.method === "PATCH")?.body ?? "{}")).toEqual({
       comment_html: "<p>Edited words</p>",
     });
+  });
+
+  it("mounts the log-time control for an eligible viewer in cloud", async () => {
+    edition.flags[WORKLOG_FLAG] = true;
+    try {
+      stubTransport(() => ({ status: 200, body: [comment()] }));
+      renderThread({ assigneeIds: [ADA], memberRole: 15 });
+      await screen.findByText("Thread words", undefined, { timeout: 5000 });
+      expect(screen.getByRole("button", { name: "Log time" })).toBeInTheDocument();
+    } finally {
+      delete edition.flags[WORKLOG_FLAG];
+    }
+  });
+
+  it("mounts no log-time control for a guest in cloud", async () => {
+    edition.flags[WORKLOG_FLAG] = true;
+    try {
+      stubTransport(() => ({ status: 200, body: [comment()] }));
+      renderThread({ assigneeIds: [ADA], memberRole: 5 });
+      await screen.findByText("Thread words", undefined, { timeout: 5000 });
+      expect(screen.queryByRole("button", { name: "Log time" })).not.toBeInTheDocument();
+    } finally {
+      delete edition.flags[WORKLOG_FLAG];
+    }
+  });
+
+  it("mounts no log-time control in OSS even for an eligible viewer", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread({ assigneeIds: [ADA], memberRole: 15 });
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    expect(screen.queryByRole("button", { name: "Log time" })).not.toBeInTheDocument();
   });
 }, 20_000);

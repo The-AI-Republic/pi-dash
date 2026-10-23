@@ -9,8 +9,9 @@
 import * as React from "react";
 
 import {
-  DEFAULT_FILTERS,
+  CLOUD_FEED_FILTERS,
   DEFAULT_SORT,
+  FEED_FILTERS,
   FILTERS_STORAGE_KEY,
   SORT_STORAGE_KEY,
   parseStoredFilters,
@@ -21,11 +22,11 @@ import {
   type FeedSortOrder,
 } from "./model.js";
 
-function readFilters(): FeedFilter[] {
+function readFilters(available: readonly FeedFilter[]): FeedFilter[] {
   try {
-    return parseStoredFilters(window.localStorage.getItem(FILTERS_STORAGE_KEY));
+    return parseStoredFilters(window.localStorage.getItem(FILTERS_STORAGE_KEY), available);
   } catch {
-    return [...DEFAULT_FILTERS];
+    return [...available];
   }
 }
 
@@ -44,19 +45,23 @@ export interface FeedPrefs {
   setOrder: (next: FeedSortOrder) => void;
 }
 
-export function useFeedPrefs(): FeedPrefs {
-  const [filters, setFilterState] = React.useState<FeedFilter[]>(readFilters);
+export function useFeedPrefs(worklogEnabled: boolean = false): FeedPrefs {
+  const available = worklogEnabled ? CLOUD_FEED_FILTERS : FEED_FILTERS;
+  const [filters, setFilterState] = React.useState<FeedFilter[]>(() => readFilters(available));
   const [order, setOrderState] = React.useState<FeedSortOrder>(readSort);
 
-  const setFilters = React.useCallback((next: FeedFilter[]) => {
-    setFilterState(next);
-    try {
-      window.localStorage.setItem(FILTERS_STORAGE_KEY, serializeFilters(next));
-    } catch {
-      // Storage can be denied (private mode); the feed still narrows in
-      // this tab, it just does not remember the choice.
-    }
-  }, []);
+  const setFilters = React.useCallback(
+    (next: FeedFilter[]) => {
+      setFilterState(next);
+      try {
+        window.localStorage.setItem(FILTERS_STORAGE_KEY, serializeFilters(next, available));
+      } catch {
+        // Storage can be denied (private mode); the feed still narrows in
+        // this tab, it just does not remember the choice.
+      }
+    },
+    [available]
+  );
 
   const setOrder = React.useCallback((next: FeedSortOrder) => {
     setOrderState(next);

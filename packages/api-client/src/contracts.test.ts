@@ -367,6 +367,13 @@ import {
 } from "./contracts/issue-reactions.js";
 import { getIssueByIdentifier, getIssueMeta } from "./contracts/issue-identity.js";
 import {
+  deleteWorklogEntry,
+  getWorklogEntry,
+  listWorklogEntries,
+  logWorklogEntry,
+  updateWorklogEntry,
+} from "./contracts/issue-worklog.js";
+import {
   createLabel,
   deleteLabel,
   getIntakeState,
@@ -8050,5 +8057,110 @@ describe("profile area contracts", () => {
       display_name: "ada-l",
       user_timezone: "Europe/Paris",
     });
+  });
+});
+
+describe("issue worklog contracts", () => {
+  const actor = {
+    id: UUID,
+    first_name: "Contract",
+    last_name: "Tester",
+    avatar: "",
+    avatar_url: null,
+    display_name: "contract.tester",
+    is_bot: false,
+  };
+  const entry = {
+    id: UUID,
+    issue: UUID2,
+    project: UUID2,
+    workspace: UUID2,
+    actor: UUID,
+    actor_detail: actor,
+    minutes: 90,
+    logged_on: "2026-10-20",
+    note: "Debugging the flake",
+    created_at: "2026-10-20T22:00:00Z",
+    updated_at: "2026-10-20T22:00:00Z",
+    created_by: UUID,
+    updated_by: UUID,
+    deleted_at: null,
+  };
+
+  it("lists entries newest first from the issue collection", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([entry]) });
+    const listed = await listWorklogEntries(client, "acme", UUID2, UUID);
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.minutes).toBe(90);
+    expect(listed[0]?.actor_detail?.display_name).toBe("contract.tester");
+  });
+
+  it("reads a single entry", async () => {
+    const transport = recordingTransport(() => fakeResponse({ body: JSON.stringify(entry) }));
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await getWorklogEntry(client, "acme", UUID2, UUID, UUID);
+    expect(parsed.id).toBe(UUID);
+    expect(transport.calls[0]?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/worklogs/${UUID}/`
+    );
+  });
+
+  it("logs an entry and parses the created row", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 201, body: JSON.stringify(entry) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await logWorklogEntry(client, "acme", UUID2, UUID, {
+      minutes: 90,
+      logged_on: "2026-10-20",
+      note: "Debugging the flake",
+    });
+    expect(parsed.id).toBe(UUID);
+    const postCall = transport.calls.find((call) => call.init.method === "POST");
+    expect(postCall?.url).toBe(`https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/worklogs/`);
+    expect(postCall?.init.body).toBe(
+      JSON.stringify({ minutes: 90, logged_on: "2026-10-20", note: "Debugging the flake" })
+    );
+  });
+
+  it("patches minutes, date and note", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ body: JSON.stringify({ ...entry, minutes: 120, note: "Still debugging" }) })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    const parsed = await updateWorklogEntry(client, "acme", UUID2, UUID, UUID, {
+      minutes: 120,
+      note: "Still debugging",
+    });
+    expect(parsed.minutes).toBe(120);
+    const patchCall = transport.calls.find((call) => call.init.method === "PATCH");
+    expect(patchCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/worklogs/${UUID}/`
+    );
+    expect(patchCall?.init.body).toBe(JSON.stringify({ minutes: 120, note: "Still debugging" }));
+  });
+
+  it("deletes an entry (204)", async () => {
+    const transport = recordingTransport((call) =>
+      call.url.endsWith("/auth/get-csrf-token/")
+        ? fakeResponse({ body: JSON.stringify({ csrf_token: "csrf" }) })
+        : fakeResponse({ status: 204, body: "" })
+    );
+    const client = createClient({ baseUrl: "https://api.test", transport });
+    await expect(deleteWorklogEntry(client, "acme", UUID2, UUID, UUID)).resolves.toBeUndefined();
+    const deleteCall = transport.calls.find((call) => call.init.method === "DELETE");
+    expect(deleteCall?.url).toBe(
+      `https://api.test/api/workspaces/acme/projects/${UUID2}/issues/${UUID}/worklogs/${UUID}/`
+    );
+  });
+
+  it("rejects an entry with a bad date", async () => {
+    const client = createClient({ baseUrl: "https://api.test", transport: json([{ ...entry, logged_on: "soon" }]) });
+    const error = await listWorklogEntries(client, "acme", UUID2, UUID).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("contract");
   });
 });

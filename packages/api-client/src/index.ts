@@ -505,6 +505,16 @@ export {
 } from "./contracts/issue-code-reviews.js";
 export type { CodeReviewState } from "./contracts/issue-code-reviews.js";
 export {
+  WorklogEntry,
+  WorklogEntryList,
+  deleteWorklogEntry,
+  getWorklogEntry,
+  listWorklogEntries,
+  logWorklogEntry,
+  updateWorklogEntry,
+} from "./contracts/issue-worklog.js";
+export type { WorklogEntryCreate, WorklogEntryPatch } from "./contracts/issue-worklog.js";
+export {
   DescriptionVersion,
   DescriptionVersionDetail,
   DescriptionVersionListResponse,

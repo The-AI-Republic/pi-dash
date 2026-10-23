@@ -8,8 +8,11 @@ import type { IssueActivity, IssueComment } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import {
+  CLOUD_FEED_FILTERS,
   DEFAULT_FILTERS,
   FEED_FILTERS,
+  FEED_FILTER_LABELS,
+  WORKLOG_FILTER,
   activityActorName,
   activityFilterOf,
   activitySentence,
@@ -198,6 +201,16 @@ describe("stored choices", () => {
     const stored = serializeFilters(["STATE", "ACTIVITY"]);
     expect(stored).toBe('["ACTIVITY","STATE"]');
     expect(parseStoredFilters(stored)).toEqual(["ACTIVITY", "STATE"]);
+  });
+
+  it("keeps the worklog toggle through a cloud round trip", () => {
+    const stored = serializeFilters(["COMMENT", "STATE", "ASSIGNEE", "WORKLOG"], CLOUD_FEED_FILTERS);
+    expect(stored).toBe('["COMMENT","STATE","ASSIGNEE","WORKLOG"]');
+    expect(parseStoredFilters(stored, CLOUD_FEED_FILTERS)).toEqual(["COMMENT", "STATE", "ASSIGNEE", "WORKLOG"]);
+  });
+
+  it("still drops the worklog toggle for the default OSS set", () => {
+    expect(serializeFilters(["STATE", WORKLOG_FILTER])).toBe('["STATE"]');
   });
 
   it("round-trips the order", () => {
@@ -390,6 +403,99 @@ describe("activity sentences", () => {
   it("renders nothing for fields the timeline does not describe", () => {
     expect(activitySentence({ field: "type", verb: "updated", old_value: null, new_value: null })).toBeNull();
     expect(activitySentence({ field: "something_new", verb: "updated", old_value: null, new_value: null })).toBeNull();
+  });
+});
+
+describe("worklog category", () => {
+  it("maps the worklog field to its own toggle", () => {
+    expect(activityFilterOf({ field: "worklog" })).toBe(WORKLOG_FILTER);
+    expect(WORKLOG_FILTER).toBe("WORKLOG");
+    expect(FEED_FILTER_LABELS[WORKLOG_FILTER]).toBe("Worklog");
+    expect(CLOUD_FEED_FILTERS).toEqual(["ACTIVITY", "COMMENT", "STATE", "ASSIGNEE", "WORKLOG"]);
+  });
+
+  it("shows worklog rows only while their toggle is on", () => {
+    const row = activity({ id: "w1", field: "worklog", verb: "created", new_value: "90" });
+    const [entry] = buildFeed([row], []);
+    expect(entry).toBeDefined();
+    if (entry === undefined) return;
+    expect(feedEntryVisible(entry, CLOUD_FEED_FILTERS)).toBe(true);
+    expect(feedEntryVisible(entry, ["WORKLOG"])).toBe(true);
+    expect(feedEntryVisible(entry, FEED_FILTERS)).toBe(false);
+  });
+
+  it("toggles the fifth category in menu order and guards the last one", () => {
+    expect(toggleFeedFilter(CLOUD_FEED_FILTERS, "WORKLOG", CLOUD_FEED_FILTERS)).toEqual([...FEED_FILTERS]);
+    expect(toggleFeedFilter(FEED_FILTERS, "WORKLOG", CLOUD_FEED_FILTERS)).toEqual([...CLOUD_FEED_FILTERS]);
+    expect(toggleFeedFilter(["WORKLOG"], "WORKLOG", CLOUD_FEED_FILTERS)).toEqual(["WORKLOG"]);
+  });
+
+  it("marks four-of-five as narrowed in cloud but full in OSS", () => {
+    expect(isFilterNarrowed(CLOUD_FEED_FILTERS, CLOUD_FEED_FILTERS)).toBe(false);
+    expect(isFilterNarrowed([...FEED_FILTERS], CLOUD_FEED_FILTERS)).toBe(true);
+    expect(isFilterNarrowed([...FEED_FILTERS])).toBe(false);
+  });
+
+  it("defaults cloud to five toggles and drops stored worklog in OSS", () => {
+    expect(parseStoredFilters(null, CLOUD_FEED_FILTERS)).toEqual([...CLOUD_FEED_FILTERS]);
+    expect(parseStoredFilters("not json", CLOUD_FEED_FILTERS)).toEqual([...CLOUD_FEED_FILTERS]);
+    expect(parseStoredFilters('["WORKLOG","STATE"]', CLOUD_FEED_FILTERS)).toEqual(["STATE", "WORKLOG"]);
+    expect(parseStoredFilters('["WORKLOG","STATE"]')).toEqual(["STATE"]);
+    expect(parseStoredFilters('["WORKLOG"]')).toEqual([...FEED_FILTERS]);
+  });
+
+  it("sentences a fresh log from its minutes", () => {
+    expect(activitySentence({ field: "worklog", verb: "created", old_value: null, new_value: "90" })).toBe(
+      "logged 1h 30m."
+    );
+    expect(activitySentence({ field: "worklog", verb: "created", old_value: null, new_value: "45" })).toBe(
+      "logged 45m."
+    );
+  });
+
+  it("falls back to a plain sentence for empty or unparseable minutes", () => {
+    expect(activitySentence({ field: "worklog", verb: "created", old_value: null, new_value: null })).toBe(
+      "logged time."
+    );
+    expect(activitySentence({ field: "worklog", verb: "created", old_value: null, new_value: "soon" })).toBe(
+      "logged time."
+    );
+    expect(activitySentence({ field: "worklog", verb: "created", old_value: null, new_value: "0" })).toBe(
+      "logged time."
+    );
+  });
+
+  it("sentences an edit from its before and after minutes", () => {
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "30", new_value: "90" })).toBe(
+      "changed logged time from 30m to 1h 30m."
+    );
+  });
+
+  it("reads an edit with unchanged minutes as a plain edit", () => {
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "90", new_value: "90" })).toBe(
+      "edited a time entry."
+    );
+  });
+
+  it("falls back to a plain sentence for unparseable edits", () => {
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "soon", new_value: "90" })).toBe(
+      "edited a time entry."
+    );
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "", new_value: "90" })).toBe(
+      "edited a time entry."
+    );
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "30", new_value: "soon" })).toBe(
+      "edited a time entry."
+    );
+    expect(activitySentence({ field: "worklog", verb: "updated", old_value: "30", new_value: "0" })).toBe(
+      "edited a time entry."
+    );
+  });
+
+  it("sentences a removal", () => {
+    expect(activitySentence({ field: "worklog", verb: "deleted", old_value: "90", new_value: null })).toBe(
+      "removed logged time."
+    );
   });
 });
 

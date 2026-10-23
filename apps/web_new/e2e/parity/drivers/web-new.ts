@@ -3923,6 +3923,35 @@ export class WebNewDriver implements ParityDriver {
     return texts.some((text) => /work\s?log/i.test(text));
   }
 
+  // --- Cloud worklog (NEWFRONT-672, ISS-206 cloud leg). The cloud spec
+  // --- drives these on a cloud-flagged web_new build only.
+
+  async worklogLogEntry(minutes: number, loggedOn: string, note: string): Promise<void> {
+    await this.page
+      .locator('section[aria-label="Activity"]')
+      .getByRole("button", { name: "Log time" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    const dialog = this.page.getByRole("dialog", { name: "Log time" });
+    await dialog.getByLabel("Minutes").fill(String(minutes), { timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByLabel("Date").fill(loggedOn, { timeout: WebNewDriver.WAIT_MS });
+    if (note !== "") {
+      await dialog.getByLabel("Note").fill(note, { timeout: WebNewDriver.WAIT_MS });
+    }
+    await dialog.getByRole("button", { name: "Log time" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async worklogSidebarTotal(): Promise<string | null> {
+    const total = this.page.locator("[data-worklog-total]");
+    if ((await total.count()) === 0) return null;
+    const text = (await total.first().innerText()).trim();
+    return text === "" ? null : text;
+  }
+
+  async worklogSidebarEntryTexts(): Promise<string[]> {
+    return this.page.locator("[data-worklog-row]").allInnerTexts();
+  }
+
   // --- Shared property dropdowns (NEWFRONT-122, ISS-207–220). Stubs until
   // --- the matching area lands in apps/web_new; the oracle driver above
   // --- stays untouched.

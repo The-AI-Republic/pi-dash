@@ -398,3 +398,68 @@ describe("worklog absence and toast readers", () => {
     await expect(new WebNewDriver(page).sawToast("Attachment failed")).resolves.toBe(false);
   });
 });
+
+describe("cloud worklog drivers (NEWFRONT-672, ISS-206 cloud leg)", () => {
+  it("logs an entry through the header control and waits for the dialog to close", async () => {
+    const events: string[] = [];
+    const field = (name: string) =>
+      locator({
+        fill: async (value: string) => void events.push(`fill:${name}=${value}`),
+      });
+    const dialog = locator({
+      getByLabel: ((label: string) => field(label)) as never,
+      getByRole: (() => locator({ click: async () => void events.push("save") })) as never,
+      waitFor: (async () => void events.push("closed")) as never,
+    });
+    const page = pageOf({
+      locator: () =>
+        locator({
+          getByRole: (() => locator({ click: async () => void events.push("open") })) as never,
+        }),
+      getByRole: (() => dialog) as never,
+    });
+    await new WebNewDriver(page).worklogLogEntry(90, "2026-10-20", "Deep work");
+    expect(events).toEqual([
+      "open",
+      "fill:Minutes=90",
+      "fill:Date=2026-10-20",
+      "fill:Note=Deep work",
+      "save",
+      "closed",
+    ]);
+  });
+
+  it("skips the note field when no note is given", async () => {
+    const events: string[] = [];
+    const dialog = locator({
+      getByLabel: ((label: string) => locator({ fill: async () => void events.push(`fill:${label}`) })) as never,
+      getByRole: (() => locator()) as never,
+    });
+    const page = pageOf({ getByRole: (() => dialog) as never });
+    await new WebNewDriver(page).worklogLogEntry(30, "2026-10-20", "");
+    expect(events).toEqual(["fill:Minutes", "fill:Date"]);
+  });
+
+  it("reads the sidebar total and nulls a missing or blank one", async () => {
+    const page = pageOf({
+      locator: () => locator({ count: async () => 1, first: () => locator({ innerText: async () => "  2h  " }) }),
+    });
+    await expect(new WebNewDriver(page).worklogSidebarTotal()).resolves.toBe("2h");
+    const missing = pageOf({ locator: () => locator({ count: async () => 0 }) });
+    await expect(new WebNewDriver(missing).worklogSidebarTotal()).resolves.toBeNull();
+    const blank = pageOf({
+      locator: () => locator({ count: async () => 1, first: () => locator({ innerText: async () => "  " }) }),
+    });
+    await expect(new WebNewDriver(blank).worklogSidebarTotal()).resolves.toBeNull();
+  });
+
+  it("reads the sidebar entry rows in order", async () => {
+    const page = pageOf({
+      locator: () => locator({ allInnerTexts: async () => ["1h 30m · Oct 20, 2026", "30m · Oct 19, 2026"] }),
+    });
+    await expect(new WebNewDriver(page).worklogSidebarEntryTexts()).resolves.toEqual([
+      "1h 30m · Oct 20, 2026",
+      "30m · Oct 19, 2026",
+    ]);
+  });
+});
