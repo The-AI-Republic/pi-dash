@@ -20,6 +20,7 @@
     "NEWFRONT-586": { "reason": "profile area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-662": { "reason": "cloud area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-521": { "reason": "admin area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
+    "NEWFRONT-550": { "reason": "workspace-settings area gate proxy regen", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$"] },
     "NEWFRONT-528": { "reason": "workspace-scoped coexistence routing", "paths": ["^apps/proxy/Caddyfile[^/]*$", "^apps/proxy/Dockerfile\\.ce$", "^\\.ai_design/new_frontend_implementation/wiki/09-phases-and-migration\\.md$"] },
     "NEWFRONT-334": { "reason": "module guest reads backend", "paths": ["^apps/api/pi_dash/app/views/module/", "^apps/api/pi_dash/tests/"] },
     "NEWFRONT-672": { "reason": "ISS-206 cloud worklog backend", "paths": ["^apps/api/pi_dash/db/models/worklog\\.py$", "^apps/api/pi_dash/db/models/__init__\\.py$", "^apps/api/pi_dash/db/migrations/01(69|7[0-9])_[A-Za-z0-9_]+\\.py$", "^apps/api/pi_dash/app/serializers/worklog\\.py$", "^apps/api/pi_dash/app/serializers/__init__\\.py$", "^apps/api/pi_dash/app/views/issue/worklog\\.py$", "^apps/api/pi_dash/app/urls/issue\\.py$", "^apps/api/pi_dash/bgtasks/issue_activities_task\\.py$", "^apps/api/pi_dash/tests/contract/app/test_issue_worklogs\\.py$"] }
