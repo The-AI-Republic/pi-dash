@@ -174,6 +174,10 @@ pub fn register_oss_handlers(registry: &mut Registry, ctx: &OssWorkerCtx) -> Res
         registry,
         ctx.pools.primary().clone(),
         ctx.seed_dir.clone(),
+        ctx.settings.cloud_agent.clone(),
+        ctx.settings.managed_runner.clone(),
+        std::sync::Arc::new(NoExtraToolsets),
+        ctx.assistant_seam.clone(),
     );
     crate::tasks_cleanup::dummy_data::register(registry, ctx.pools.primary().clone());
     // D-05 integrations groups (PIDASHCONV-238; kept in sync with

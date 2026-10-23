@@ -1566,6 +1566,25 @@ async fn probe_status(
 mod tests {
     use super::*;
 
+    /// Assistant-model seam double for registration-only tests: the
+    /// trait defaults with a canned title (no test here drives
+    /// dispatch).
+    #[derive(Debug)]
+    struct DefaultSeam;
+
+    impl pidash_services::extensions::AssistantModelSeam for DefaultSeam {
+        fn generate_title(
+            &self,
+            request: pidash_services::extensions::TitleRequest,
+        ) -> pidash_services::extensions::SeamFuture<
+            '_,
+            Result<String, pidash_services::extensions::TitleError>,
+        > {
+            let _ = request;
+            Box::pin(async move { Ok("canned".to_owned()) })
+        }
+    }
+
     /// Structural sanity: sorted, unique, well-formed rows over known
     /// groups and tracked methods, owned/proxied disjoint.
     #[test]
@@ -1751,7 +1770,16 @@ mod tests {
             )),
             std::sync::Arc::new(tasks_cleanup::assets::NoopLiveConvert),
         );
-        tasks_cleanup::register_workspace_seed(&mut registry, pool.clone(), std::env::temp_dir());
+        let seed_settings = pidash_db::config::Settings::test_defaults();
+        tasks_cleanup::register_workspace_seed(
+            &mut registry,
+            pool.clone(),
+            std::env::temp_dir(),
+            seed_settings.cloud_agent.clone(),
+            seed_settings.managed_runner.clone(),
+            std::sync::Arc::new(pidash_services::extensions::NoExtraToolsets),
+            std::sync::Arc::new(DefaultSeam),
+        );
         tasks_cleanup::dummy_data::register(&mut registry, pool.clone());
         // The same call `worker()` makes (PIDASHCONV-858): construction
         // does no I/O (lazy client, resolved settings), so the lazy
