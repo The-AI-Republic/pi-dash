@@ -10,6 +10,8 @@
 // gated to the creator or a workspace admin (drafts spec §4.6,
 // DRAFT-011); row abilities follow the DRAFT-025 matrix. No drafts
 // invites the first one; no joined project invites a project instead.
+// State precedence (loading, error, empty, rows-with-guidance) follows
+// parity/specs/drafts.md §2.3/§5 (DRAFT-022/023, NEWFRONT-305).
 
 import { Button, Skeleton } from "@pidash/kit";
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -196,63 +198,86 @@ export function DraftsPage({ workspaceSlug, CreateDialog, onCreateProject }: Dra
     </div>
   );
 
+  const list = (
+    <div data-testid="drafts-list" className="relative">
+      {rows.map((draft) => (
+        <DraftBlock
+          key={draft.id}
+          workspaceSlug={workspaceSlug}
+          draft={draft}
+          project={projects.find((project) => project.id === draft.project_id)}
+          projectIdentifier={identifierOf(projects, draft.project_id)}
+          abilities={draftAbilities(draft, viewer)}
+          onEdit={() => setDialog({ kind: "edit", draft })}
+          onCopy={() => setDialog({ kind: "copy", draft })}
+          onMove={() => setDialog({ kind: "move", draft })}
+          onDelete={() => requestDelete(draft)}
+          onWrite={(patch) => writeField(draft, patch)}
+        />
+      ))}
+      {drafts.hasNextPage ? (
+        drafts.isFetchingNextPage ? (
+          <div data-testid="drafts-load-more-loading" className="p-(--space-3)">
+            <Skeleton className="h-8 w-full" />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => drafts.fetchNextPage()}
+            className="text-body w-full border-b border-(--border) bg-(--surface) p-(--space-3) pl-(--space-6) text-left font-medium text-(--accent) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
+          >
+            {LOAD_MORE_LABEL} &darr;
+          </button>
+        )
+      ) : null}
+    </div>
+  );
+
+  const retryLoad = (): void => {
+    void drafts.refetch();
+    void projectDetails.refetch();
+  };
+
   const body = ((): React.ReactElement => {
     // Drafts paint before their projects do. Until that list lands a row
     // has no code and no pickers, and "you have no project" is not yet
-    // known, so a returning viewer waits rather than sees either.
-    if (drafts.isPending || (rows.length > 0 && projectDetails.isPending)) return loading();
-    if (drafts.isError) {
+    // known, so the viewer waits on the skeleton rather than sees either
+    // first-run screen flash in (DRAFT-023).
+    if (drafts.isPending || projectDetails.isPending) return loading();
+    // A failed read is never an empty collection: the failure surface
+    // names the retry, whether drafts or the project list refused to load.
+    // A failed later page keeps its rows instead: the load-more control
+    // stays available for the retry (DRAFT-023).
+    if ((drafts.isError || projectDetails.isError) && rows.length === 0) {
       return (
         <div className="flex flex-col items-center gap-(--space-2) p-(--space-12)">
           <h2 className="text-h3 text-(--text)">Couldn't load drafts</h2>
           <p className="text-body text-(--text-muted)">Check your connection and try again.</p>
-          <Button variant="secondary" onClick={() => void drafts.refetch()}>
+          <Button variant="secondary" onClick={retryLoad}>
             <RefreshCw size={14} strokeWidth={1.5} aria-hidden="true" />
             Try again
           </Button>
         </div>
       );
     }
-    if (!hasProject) {
-      return <DraftsNoProjectState canCreate={permissions.canEdit} onCreateProject={onCreateProject} />;
-    }
     if (rows.length === 0) {
+      if (!hasProject) {
+        return <DraftsNoProjectState canCreate={permissions.canEdit} onCreateProject={onCreateProject} />;
+      }
       return <DraftsEmptyState canCreate={permissions.canEdit} onCreate={() => setDialog({ kind: "create" })} />;
     }
-    return (
-      <div data-testid="drafts-list" className="relative">
-        {rows.map((draft) => (
-          <DraftBlock
-            key={draft.id}
-            workspaceSlug={workspaceSlug}
-            draft={draft}
-            project={projects.find((project) => project.id === draft.project_id)}
-            projectIdentifier={identifierOf(projects, draft.project_id)}
-            abilities={draftAbilities(draft, viewer)}
-            onEdit={() => setDialog({ kind: "edit", draft })}
-            onCopy={() => setDialog({ kind: "copy", draft })}
-            onMove={() => setDialog({ kind: "move", draft })}
-            onDelete={() => requestDelete(draft)}
-            onWrite={(patch) => writeField(draft, patch)}
-          />
-        ))}
-        {drafts.hasNextPage ? (
-          drafts.isFetchingNextPage ? (
-            <div data-testid="drafts-load-more-loading" className="p-(--space-3)">
-              <Skeleton className="h-8 w-full" />
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => drafts.fetchNextPage()}
-              className="text-body w-full border-b border-(--border) bg-(--surface) p-(--space-3) pl-(--space-6) text-left font-medium text-(--accent) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:outline-none"
-            >
-              {LOAD_MORE_LABEL} &darr;
-            </button>
-          )
-        ) : null}
-      </div>
-    );
+    // A counted draft always renders (NEWFRONT-305): when the viewer owns
+    // rows but has no usable project left, the guidance sits above the
+    // list instead of replacing it.
+    if (!hasProject) {
+      return (
+        <>
+          <DraftsNoProjectState canCreate={permissions.canEdit} onCreateProject={onCreateProject} />
+          {list}
+        </>
+      );
+    }
+    return list;
   })();
 
   return (

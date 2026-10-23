@@ -765,3 +765,184 @@ describe("cache", () => {
     );
   });
 });
+
+describe("header and count (DRAFT-001/002/003)", () => {
+  it("renders rows in server order under the Drafts heading", async () => {
+    renderPage({ pages: [page([draft(DRAFT_1, "Second"), draft(DRAFT_2, "First")])] });
+    expect(await screen.findByText("Second")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Drafts" })).toBeInTheDocument();
+    const blocks = screen.getAllByRole("article");
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toHaveTextContent("Second");
+    expect(blocks[1]).toHaveTextContent("First");
+  });
+
+  it("shows the server total in the chip, not the loaded rows", async () => {
+    renderPage({ pages: [page([draft(DRAFT_1, "One")], { total_count: 51 })] });
+    await screen.findByText("One");
+    expect(screen.getByTestId("drafts-count")).toHaveTextContent("51");
+  });
+
+  it("opens the create dialog from the header entry", async () => {
+    const h = renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
+    await screen.findByText("One");
+    fireEvent.click(screen.getByRole("button", { name: "Draft a work item" }));
+    expect(screen.getByTestId("create-dialog")).toBeInTheDocument();
+    expect(h.dialog.seen.at(-1)).toMatchObject({ open: true });
+  });
+});
+
+describe("paging polish (DRAFT-023)", () => {
+  it("drops a repeated row and hides Load more at the end", async () => {
+    let served = 0;
+    createAppClient("https://api.test", (async (url: string) => {
+      const json = (status: number, payload: unknown) => ({
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(payload),
+      });
+      if (url.includes("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+      if (url.includes("/draft-issues/")) {
+        served += 1;
+        return served === 1
+          ? json(200, page([draft(DRAFT_1, "One")], { total_count: 2, next_page_results: true, next_cursor: "c2" }))
+          : json(200, page([draft(DRAFT_1, "One"), draft(DRAFT_2, "Two")], { total_count: 2 }));
+      }
+      if (url.endsWith("/projects/details/")) return json(200, [project()]);
+      return json(200, {});
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DraftsPage workspaceSlug={SLUG} CreateDialog={dialogStub().CreateDialog} onCreateProject={vi.fn()} />
+      </QueryClientProvider>
+    );
+    await screen.findByText("One");
+    fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
+    await screen.findByText("Two");
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /Load more/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId("drafts-count")).toHaveTextContent("2");
+  });
+
+  it("keeps its rows and retries when the next page fails", async () => {
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let served = 0;
+    createAppClient("https://api.test", (async (url: string) => {
+      const json = (status: number, payload: unknown) => ({
+        status,
+        url,
+        headers: { get: () => null },
+        text: async () => JSON.stringify(payload),
+      });
+      if (url.includes("/auth/get-csrf-token/")) return json(200, { csrf_token: "csrf" });
+      if (url.includes("/draft-issues/")) {
+        served += 1;
+        if (served === 1) {
+          return json(
+            200,
+            page([draft(DRAFT_1, "One")], { total_count: 2, next_page_results: true, next_cursor: "c2" })
+          );
+        }
+        if (served === 2) {
+          // Held until the loader is observed, then refused once.
+          await held;
+          return json(500, { error: "boom" });
+        }
+        return json(200, page([draft(DRAFT_2, "Two")], { total_count: 2 }));
+      }
+      if (url.endsWith("/projects/details/")) return json(200, [project()]);
+      return json(200, {});
+    }) as never);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DraftsPage workspaceSlug={SLUG} CreateDialog={dialogStub().CreateDialog} onCreateProject={vi.fn()} />
+      </QueryClientProvider>
+    );
+    await screen.findByText("One");
+    fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
+    expect(await screen.findByTestId("drafts-load-more-loading")).toBeInTheDocument();
+    act(() => release?.());
+    // The failure keeps the loaded rows and hands the control back for a retry.
+    await waitFor(() => expect(screen.getByRole("button", { name: /Load more/ })).toBeInTheDocument());
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.queryByText("Two")).not.toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load drafts")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Load more/ }));
+    expect(await screen.findByText("Two")).toBeInTheDocument();
+  });
+});
+
+describe("project read states (DRAFT-022/023)", () => {
+  it("waits for the project list before inviting the first draft", async () => {
+    // Empty drafts with projects still in flight: neither first-run
+    // screen may flash in while the viewer may well have a project.
+    const h = renderPage({ pages: [page([])], projectsStatus: "pending" }, { seedProjects: false });
+    await waitFor(() => expect(h.calls.some((call) => call.url.includes("/draft-issues/"))).toBe(true));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    expect(screen.getByTestId("drafts-loading")).toBeInTheDocument();
+    expect(screen.queryByText("No project")).not.toBeInTheDocument();
+    expect(screen.queryByText("Half-written work items")).not.toBeInTheDocument();
+  });
+
+  it("explains a failed project read and retries both reads", async () => {
+    const h = renderPage({ pages: [page([])], projectsStatus: 500 }, { seedProjects: false });
+    expect(await screen.findByText("Couldn't load drafts")).toBeInTheDocument();
+    const projectReads = () => h.calls.filter((call) => call.url.includes("/projects/details/")).length;
+    expect(projectReads()).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(projectReads()).toBe(2));
+  });
+
+  it("keeps counted rows under the no-project guidance", async () => {
+    // NEWFRONT-305: a counted draft always renders. With rows but no
+    // usable project, the guidance sits above the list, not over it.
+    renderPage({ pages: [page([draft(DRAFT_1, "One")], { total_count: 1 })], projects: [] });
+    expect(await screen.findByText("No project")).toBeInTheDocument();
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.getByTestId("drafts-list")).toBeInTheDocument();
+    expect(screen.getByTestId("drafts-count")).toHaveTextContent("1");
+    expect(screen.queryByRole("button", { name: "Draft a work item" })).not.toBeInTheDocument();
+    const guidance = screen.getByTestId("drafts-no-project-state");
+    const position = guidance.compareDocumentPosition(screen.getByTestId("drafts-list"));
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("disables the create-project action for a guest", async () => {
+    session.canEdit = false;
+    renderPage({ pages: [page([])], projects: [] });
+    expect(await screen.findByRole("button", { name: "Start your first project" })).toBeDisabled();
+  });
+});
+
+describe("non-behaviors (DRAFT-026)", () => {
+  it("offers no checkbox, draggable row, filter, search or export", async () => {
+    renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
+    await screen.findByText("One");
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    for (const block of screen.getAllByRole("article")) {
+      expect(block).not.toHaveAttribute("draggable");
+    }
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/filter/i);
+    expect(text).not.toMatch(/export/i);
+    expect(text).not.toMatch(/search/i);
+  });
+
+  it("ignores shortcut-like keys", async () => {
+    renderPage({ pages: [page([draft(DRAFT_1, "One")])] });
+    await screen.findByText("One");
+    for (const key of ["e", "/", "?", "c"]) {
+      fireEvent.keyDown(document.body, { key });
+    }
+    expect(screen.queryByTestId("create-dialog")).not.toBeInTheDocument();
+    expect(screen.getByText("One")).toBeInTheDocument();
+  });
+});

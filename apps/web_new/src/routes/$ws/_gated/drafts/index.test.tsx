@@ -97,10 +97,10 @@ function renderRoute(): void {
 }
 
 describe("drafts route", () => {
-  it("claims a private Drafts document head", () => {
+  it("claims the pinned Workspace Draft document head", () => {
     renderRoute();
     expect(harness.heads).toContainEqual({ title: DRAFTS_HEAD_TITLE, robots: "noindex, nofollow" });
-    expect(DRAFTS_HEAD_TITLE).toBe("Drafts");
+    expect(DRAFTS_HEAD_TITLE).toBe("Workspace Draft");
   });
 
   it("mounts the page for the route's workspace", () => {

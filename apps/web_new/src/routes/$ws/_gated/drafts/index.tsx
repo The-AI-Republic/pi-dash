@@ -17,7 +17,10 @@ import { DraftsPage } from "../../../../features/issues/drafts/DraftsPage.js";
 import { CreateProjectDialog, workspaceMembersQueryOptions } from "../../../../features/projects/index.js";
 import { useDocumentHead } from "../../../../shared/shell/index.js";
 
-export const DRAFTS_HEAD_TITLE = "Drafts";
+// Pinned by the drafts parity contract (parity/specs/drafts.md §1.1): the
+// tab title reads "Workspace Draft" while the visible heading reads
+// "Drafts".
+export const DRAFTS_HEAD_TITLE = "Workspace Draft";
 
 const LazyCreateDialog = React.lazy(() =>
   import("../../../../features/issues/components/WorkItemCreateDialog.js").then((module) => ({

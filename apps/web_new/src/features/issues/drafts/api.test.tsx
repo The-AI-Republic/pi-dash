@@ -189,6 +189,21 @@ describe("draftListQueryOptions", () => {
     expect(draftKeys.list(WS).at(-1)).toBe("list");
     expect(draftKeys.list(WS)).toEqual([...draftKeys.all(WS), "list"]);
   });
+
+  it("reads with the shared list freshness and inherits the app's no-refocus reads", async () => {
+    // DRAFT-026: outside changes appear only on a fresh fetch. The app
+    // client pins refetchOnWindowFocus/refetchOnReconnect false (ISS-221);
+    // the drafts query must not opt back in.
+    const { LIST_STALE_TIME_MS } = await import("../../../core/query/client.js");
+    const { createQueryClient } = await import("../../../core/query/client.js");
+    const options = draftListQueryOptions({} as never, WS);
+    expect(options.staleTime).toBe(LIST_STALE_TIME_MS);
+    expect(options.refetchOnWindowFocus).toBeUndefined();
+    expect(options.refetchOnReconnect).toBeUndefined();
+    const defaults = createQueryClient().getDefaultOptions().queries;
+    expect(defaults?.refetchOnWindowFocus).toBe(false);
+    expect(defaults?.refetchOnReconnect).toBe(false);
+  });
 });
 
 describe("page shape", () => {
