@@ -155,6 +155,25 @@ describe("CyclePicker", () => {
     expect(screen.queryByRole("option")).not.toBeInTheDocument();
   });
 
+  it("lists completed cycles when the switcher opts in", async () => {
+    const { queryClient } = harness(CYCLES);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <CyclePicker
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          value={null}
+          onChange={() => undefined}
+          allowClear={false}
+          includeCompleted
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "No cycle" }));
+    expect(await screen.findByRole("option", { name: "Done" })).toBeInTheDocument();
+    expect(optionNames()).toEqual(["Current", "Done"]);
+  });
+
   it("reports failed loads and blocks reads while disabled", async () => {
     const failed = harness({ detail: "boom" }, 500);
     const first = render(

@@ -117,6 +117,40 @@ describe("AnalyticsEntry", () => {
     expect(within(dialog).getByText("No grouped counts to show yet.")).toBeInTheDocument();
     expect(within(dialog).getByTestId("analytics-total")).toHaveTextContent("0");
   });
+
+  it("names the cycle scope in the dialog for members", async () => {
+    const user = userEvent.setup();
+    render(harness(ROLE_MEMBER, { cycle: { id: "cycle-1", name: "Sprint 3" }, totalCount: 2 }));
+    expect(screen.queryByTestId("issues-analytics-entry")).not.toBeInTheDocument();
+    await user.click(await screen.findByTestId("cycle-analytics-entry"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Analytics for Website in Sprint 3");
+  });
+
+  it("keeps the desktop trigger member+ under a cycle scope", async () => {
+    const { container } = render(harness(ROLE_GUEST, { cycle: { id: "cycle-1", name: "Sprint 3" } }, ROLE_GUEST));
+    await waitFor(() => expect(screen.queryByTestId("cycle-analytics-entry")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("cycle-analytics-entry-narrow")).not.toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("offers the narrow trigger to guests while the desktop one stays gated", async () => {
+    const user = userEvent.setup();
+    render(harness(ROLE_MEMBER, { cycle: { id: "cycle-1", name: "Sprint 3" }, narrowGuestAccess: true }, ROLE_GUEST));
+    expect(await screen.findByTestId("cycle-analytics-entry-narrow")).toBeInTheDocument();
+    expect(screen.queryByTestId("cycle-analytics-entry")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("cycle-analytics-entry-narrow"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Analytics for Website in Sprint 3");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("renders both triggers for members when the narrow entry is on", async () => {
+    render(harness(ROLE_MEMBER, { cycle: { id: "cycle-1", name: "Sprint 3" }, narrowGuestAccess: true }));
+    expect(await screen.findByTestId("cycle-analytics-entry")).toBeInTheDocument();
+    expect(screen.getByTestId("cycle-analytics-entry-narrow")).toBeInTheDocument();
+  });
 });
 
 describe("groupCounts", () => {

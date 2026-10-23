@@ -21,6 +21,8 @@ export interface CyclePickerProps {
   onChange: (id: string | null) => void;
   /** False hides the No-cycle clear row. */
   allowClear?: boolean;
+  /** True lists completed cycles too (the cycle detail switcher, CYC-033). */
+  includeCompleted?: boolean;
   /** Cycles hidden from the list (no caller passes this yet). */
   excludeCycleIds?: readonly string[];
   disabled?: boolean;
@@ -60,6 +62,7 @@ export function CyclePicker({
   value,
   onChange,
   allowClear = true,
+  includeCompleted = false,
   excludeCycleIds,
   disabled = false,
   variant = "secondary",
@@ -82,8 +85,8 @@ export function CyclePicker({
 
   const cycles = usePickerCycles(workspaceSlug, projectId, open || preload);
   const options = React.useMemo(
-    () => selectCycleOptions({ cycles: cycles.data ?? [], excludeIds: excludeCycleIds, allowClear }),
-    [cycles.data, excludeCycleIds, allowClear]
+    () => selectCycleOptions({ cycles: cycles.data ?? [], excludeIds: excludeCycleIds, allowClear, includeCompleted }),
+    [cycles.data, excludeCycleIds, allowClear, includeCompleted]
   );
   const loading = open && !disabled && cycles.isPending;
   const errorText = cycles.isError ? "Couldn't load cycles." : undefined;

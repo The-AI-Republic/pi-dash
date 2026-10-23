@@ -47,6 +47,7 @@ import {
   CycleArchiveDialog,
   CycleDateSpan,
   CycleDeleteDialog,
+  CycleDetailCrumbs,
   CycleDetailGate,
   CycleFilterChips,
   CycleFilterMenu,
@@ -106,12 +107,14 @@ import {
   openCycleInNewTab,
   parseCycleDateEntry,
   parseCyclesListSearch,
+  projectIssuesHref,
   projectOffsetChip,
   projectToday,
   resetCycleFilterStore,
   resetCycleSearchStore,
   resolveCyclesBody,
   selectCycleMemberDirectory,
+  switchCycleTarget,
   UNKNOWN_CYCLE_MEMBER,
   useArchiveCycle,
   useCycleDetail,
@@ -156,6 +159,9 @@ describe("cycles barrel", () => {
     expect(CyclesLoadError).toBeDefined();
     expect(CycleGoneAway).toBeDefined();
     expect(CycleDetailGate).toBeDefined();
+    expect(CycleDetailCrumbs).toBeDefined();
+    expect(projectIssuesHref).toBeDefined();
+    expect(switchCycleTarget).toBeDefined();
   });
 
   it("re-exports the shared date helper", () => {

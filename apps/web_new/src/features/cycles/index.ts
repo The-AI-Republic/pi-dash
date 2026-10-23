@@ -6,7 +6,8 @@
 // slice B adds the list body, rows, search, peek, and share helpers;
 // slice C adds the list filters, menu, chips, and predicate; slice E
 // adds the row menu, delete/archive dialogs and mutations, the menu
-// model, and the finished read-only notice).
+// model, and the finished read-only notice; slice F adds the detail
+// trail and its addresses).
 export { cycleDetailKeys, cycleDetailQueryOptions, useCycleDetail } from "./api/cycleDetail.js";
 export {
   CYCLE_ARCHIVE_FAILED_LINE,
@@ -52,6 +53,7 @@ export {
 export { CycleArchiveDialog, type CycleArchiveDialogProps } from "./components/CycleArchiveDialog.js";
 export { CycleDateSpan, type CycleDateSpanProps } from "./components/CycleDateSpan.js";
 export { CycleDeleteDialog, type CycleDeleteDialogProps } from "./components/CycleDeleteDialog.js";
+export { CycleDetailCrumbs, type CycleDetailCrumbsProps } from "./components/CycleDetailCrumbs.js";
 export { CycleDetailGate, type CycleDetailGateProps } from "./components/CycleDetailGate.js";
 export { CycleFilterChips, type CycleFilterChipsProps } from "./components/CycleFilterChips.js";
 export {
@@ -156,7 +158,9 @@ export {
   cyclesListHref,
   cyclesTitle,
   isCycleGoneAway,
+  projectIssuesHref,
   resolveCyclesBody,
+  switchCycleTarget,
   type CyclesBodyInput,
   type CyclesBodyState,
 } from "./lib/cycleScreen.js";

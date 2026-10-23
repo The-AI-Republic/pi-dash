@@ -46,4 +46,16 @@ describe("selectCycleOptions", () => {
     const options = selectCycleOptions({ cycles: [cycleRow(CURRENT, "Current", "ACTIVE")] });
     expect(options.map((option) => option.id)).toEqual(["", CURRENT]);
   });
+
+  it("lists completed cycles when the caller opts in", () => {
+    const options = selectCycleOptions({
+      cycles: [cycleRow(CURRENT, "Current", "ACTIVE"), cycleRow(DONE, "Done", "COMPLETED")],
+      allowClear: false,
+      includeCompleted: true,
+    });
+    expect(options).toEqual([
+      { id: CURRENT, name: "Current", clear: false },
+      { id: DONE, name: "Done", clear: false },
+    ]);
+  });
 });

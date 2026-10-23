@@ -5,8 +5,7 @@
 // deleted, foreign, or archived-via-live-address cycle renders this
 // dedicated view — never a generic 404, never the layout chrome, never
 // an auto-redirect — with a working route back to the cycles list.
-// Slice F mounts it inside the full detail host; until then the detail
-// gate below owns the mount.
+// Slice F mounts the detail gate inside the full detail host.
 
 import { EmptyState } from "@pidash/kit";
 import * as React from "react";
