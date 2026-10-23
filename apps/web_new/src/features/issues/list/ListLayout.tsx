@@ -460,7 +460,7 @@ export function ListLayout({
       {peekKey === null ? null : (
         <React.Suspense fallback={null}>
           <LazyListPeek
-            issueKey={peekKey ?? ""}
+            issueKey={peekKey}
             title={peekTitle ?? ""}
             onClose={closePeek}
             workspaceSlug={workspaceSlug}

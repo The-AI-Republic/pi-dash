@@ -768,6 +768,12 @@ describe("ListLayout", () => {
     expect(screen.getByLabelText("Work item title")).toHaveValue("Nested child");
   });
 
+  it("opens peek with a blank title when the key matches no loaded row", async () => {
+    renderLayout({ peekKey: "WEB-404" });
+    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
+    expect(screen.getByLabelText("Work item title")).toHaveValue("");
+  });
+
   it("passes compact density through and keeps the flat sentinel inside the scroll region", () => {
     mocks.pages.mockReturnValue(pageState({ hasMore: true }));
     renderLayout({ compact: true });

@@ -383,4 +383,17 @@ describe("GlobalIssuesScreen", () => {
       "Copy link",
     ]);
   });
+
+  it("keys a row from an unknown project by '?' with a read-only menu (ISS-065)", async () => {
+    const user = userEvent.setup();
+    renderScreen({ results: [row("zz", { sequence_id: 7, project_id: idFor("unknown") })] });
+    await screen.findByText("Issue zz");
+    expect(screen.getByText("?-7")).toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: "Actions for ?-7" })[0]!);
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.querySelector("[data-menu-title]")?.textContent ?? item.textContent)).toEqual([
+      "Open in new tab",
+      "Copy link",
+    ]);
+  });
 });

@@ -95,6 +95,53 @@ describe("ListPeek", () => {
     resetAppClient();
   });
 
+  it("offers only the read-only entries when writing is not allowed (ISS-066)", async () => {
+    createAppClient("https://api.test", (() => Promise.reject(new Error("unexpected network"))) as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ListPeek
+          issueKey="WEB-42"
+          title="Fix login"
+          onClose={vi.fn()}
+          workspaceSlug="acme"
+          projectId={PROJECT}
+          projectIdentifier="WEB"
+          issue={{
+            id: ISSUE,
+            name: "Fix login",
+            state_id: null,
+            sort_order: 1,
+            completed_at: null,
+            priority: "none",
+            sequence_id: 42,
+            project_id: PROJECT,
+            parent_id: null,
+            cycle_id: null,
+            module_ids: [],
+            label_ids: [],
+            assignee_ids: [],
+            sub_issues_count: null,
+            attachment_count: null,
+            link_count: null,
+            created_at: "2026-03-01T00:00:00Z",
+            updated_at: "2026-03-02T00:00:00Z",
+            created_by: null,
+            updated_by: null,
+            is_draft: false,
+            archived_at: null,
+          }}
+        />
+      </QueryClientProvider>
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Actions for WEB-42" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.querySelector("[data-menu-title]")?.textContent ?? item.textContent)).toEqual([
+      "Open in new tab",
+    ]);
+    resetAppClient();
+  });
+
   it("removes the key listener on unmount", () => {
     const onClose = vi.fn();
     const { unmount } = render(<ListPeek issueKey="WEB-42" title="Fix login" onClose={onClose} />);

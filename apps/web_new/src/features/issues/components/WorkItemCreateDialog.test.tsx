@@ -2408,6 +2408,15 @@ describe("WorkItemCreateDialog copy prefill (ISS-060)", () => {
     await waitFor(() => expect(titleField()).toHaveValue("Bare (copy)"));
     expect(screen.getByRole("textbox", { name: "Description" })).toBeInTheDocument();
   });
+
+  it("opens a copy outside any project context", async () => {
+    setup(
+      { projects: { [PROJECT_ATLAS]: projectDetail(PROJECT_ATLAS, "Atlas") } },
+      { copySeed: { title: "Bare (copy)", snapshot: null } }
+    );
+    await waitFor(() => expect(titleField()).toHaveValue("Bare (copy)"));
+    expect(screen.getByRole("textbox", { name: "Description" })).toBeInTheDocument();
+  });
 });
 
 describe("WorkItemCreateDialog context close and Create more (ISS-124/125)", () => {
