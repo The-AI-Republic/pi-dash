@@ -13,11 +13,12 @@ import * as React from "react";
 import { isProjectGateError } from "../../../../../../../features/auth/index.js";
 import { ListSkeleton, parseIssueSearch } from "../../../../../../../features/issues/index.js";
 import { projectsQueryOptions } from "../../../../../../../features/projects/index.js";
-import {
-  loadSavedViewDetail,
-  resolvedSavedViewDetail,
-  type SavedViewDetailParams,
-} from "../../../../../../../features/views/index.js";
+// Deep import, not the views barrel: this route file is eager (the router
+// imports every route), and the barrel re-exports modules with module-level
+// state that Rollup then keeps in the initial chunk (NEWFRONT-869, the same
+// shape NEWFRONT-867 fixed for the browse route's agent actions).
+import { loadSavedViewDetail, resolvedSavedViewDetail } from "../../../../../../../features/views/detail/lazy.js";
+import type { SavedViewDetailParams } from "../../../../../../../features/views/detail/preload.js";
 
 // Start the chunk with the route module so the visit does not serialize a
 // round trip behind the data reads; `beforeLoad` awaits the same request.

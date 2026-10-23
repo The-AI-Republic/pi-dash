@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createClient, type TransportResponse } from "@pidash/api-client";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 const navigate = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
@@ -20,8 +20,16 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 import { createAppClient } from "../../../../../../core/api/client.js";
+import { loadIntakeRouteChunk } from "../../../../../../features/intake/route/lazy.js";
 import { Route } from "./index.js";
 import { Route as InboxRoute } from "../inbox.js";
+
+// The route component renders the resolved chunk (NEWFRONT-869), which
+// production guarantees via beforeLoad. Await it once up front so the
+// component tests do not depend on the prefetch tests having run first.
+beforeAll(async () => {
+  await loadIntakeRouteChunk();
+});
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
 

@@ -107,6 +107,12 @@ const happyPath = (url: string) => {
 };
 
 describe("saved-view detail route preload", () => {
+  it("validates the search with the issues screen's schema", () => {
+    const validate = Route.options.validateSearch as unknown as (raw: Record<string, unknown>) => unknown;
+    expect(validate({})).toEqual({});
+    expect(validate({ layout: "compact" })).toEqual({ layout: "compact" });
+  });
+
   it("shows the list skeleton while the route loads", () => {
     const Pending = Route.options.pendingComponent;
     if (!Pending) throw new Error("missing pending component");
@@ -185,7 +191,7 @@ describe("saved-view detail route preload", () => {
 
   it("re-raises a non-gate chunk failure so the route reports it", async () => {
     vi.resetModules();
-    vi.doMock("../../../../../../../features/views/index.ts", () => ({
+    vi.doMock("../../../../../../../features/views/detail/lazy.ts", () => ({
       loadSavedViewDetail: () => Promise.reject(new Error("chunk failed")),
       resolvedSavedViewDetail: () => ({ SavedViewScreen: () => null, preloadSavedView: async () => undefined }),
     }));
@@ -193,7 +199,7 @@ describe("saved-view detail route preload", () => {
     await expect(FreshRoute.options.beforeLoad?.({ context: {}, params: PARAMS, search: {} } as never)).rejects.toThrow(
       "chunk failed"
     );
-    vi.doUnmock("../../../../../../../features/views/index.ts");
+    vi.doUnmock("../../../../../../../features/views/detail/lazy.ts");
     vi.resetModules();
   });
 
