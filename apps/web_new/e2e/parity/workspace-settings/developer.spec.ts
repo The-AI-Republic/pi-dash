@@ -40,7 +40,7 @@ import {
   signInSession,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import type { ParitySeedFacts } from "../drivers/parity-driver";
+import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
 
 function requireMember(seed: ParitySeedFacts): { email: string; password: string } {
   if (!seed.mentionMember) throw new Error("[parity] seed has no mention member; rerun parity-up.sh.");
@@ -50,6 +50,15 @@ function requireMember(seed: ParitySeedFacts): { email: string; password: string
 /** Unique, resolvable target URL per test (workspace+URL is unique). */
 function webhookUrl(label: string): string {
   return `https://example.com/post/412-${label}-${Date.now()}`;
+}
+
+/**
+ * A failed write's notice. The old app titles every failure "Error!";
+ * web_new names the outcome ("Webhook not updated"), so each leg pins
+ * what its own surface says.
+ */
+function failureNotice(driver: ParityDriver, webNewNotice: string): string {
+  return driver.target === "web_new" ? webNewNotice : "Error";
 }
 
 test(
@@ -580,7 +589,9 @@ test(
         try {
           await driver.wsSettingsWebhookUrlFill(other.url);
           await driver.wsSettingsWebhookDetailUpdate();
-          await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("Error");
+          await expect
+            .poll(() => driver.lastToast(), { timeout: 20_000 })
+            .toContain(failureNotice(driver, "Webhook not updated"));
           expect(await driver.wsSettingsWebhookUrlValue()).toBe(other.url);
           expect((await serverWebhookDetails(seed.workspaceSlug, created.id, session)).url).not.toBe(other.url);
         } finally {
@@ -651,7 +662,9 @@ test(
         await driver.wsSettingsOpenWebhookDetail(seed.workspaceSlug, doomed.id);
         await serverCleanupWebhook(seed.workspaceSlug, doomed.id, session);
         await driver.wsSettingsWebhookRegenerate();
-        await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("Error");
+        await expect
+          .poll(() => driver.lastToast(), { timeout: 20_000 })
+          .toContain(failureNotice(driver, "Secret key not regenerated"));
       });
     } finally {
       await serverCleanupWebhook(seed.workspaceSlug, created.id, session);
@@ -673,8 +686,24 @@ test(
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await driver.wsSettingsOpenWebhookDetail(seed.workspaceSlug, created.id);
 
-      // No download on a fresh load (the 10s absence probe outlives the
-      // success toast, so the toast is asserted after the repeat below).
+      if (driver.target === "web_new") {
+        // The new frontend builds the intended behavior: every successful
+        // regenerate downloads a fresh file carrying the key it issued.
+        const first = await driver.wsSettingsWebhookRegenerateAndCaptureDownload();
+        expect(first).not.toBeNull();
+        expect(first?.fileName).toMatch(/^webhook-secret-key-\d+\.csv$/);
+        await driver.wsSettingsWebhookSecretToggleView();
+        const issued = await driver.wsSettingsWebhookSecretValue();
+        expect(issued).not.toBeNull();
+        expect(issued).not.toBe(created.secret_key);
+        expect(first?.content).toContain(issued ?? "");
+        await expect.poll(() => driver.lastToast(), { timeout: 20_000 }).toContain("regenerated");
+        return;
+      }
+
+      // The old app's bug (NEWFRONT-419): no download on a fresh load (the
+      // 10s absence probe outlives the success toast, so the toast is
+      // asserted after the repeat below).
       expect(await driver.wsSettingsWebhookRegenerateAndCaptureDownload()).toBeNull();
       await driver.wsSettingsWebhookSecretToggleView();
       const second = await driver.wsSettingsWebhookSecretValue();

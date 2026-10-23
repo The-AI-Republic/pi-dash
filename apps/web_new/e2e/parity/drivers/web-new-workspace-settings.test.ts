@@ -70,6 +70,7 @@ function chain(overrides: LocatorStub = {}): LocatorStub {
 function stubPage(overrides: Record<string, unknown> = {}): Page {
   const page = {
     goto: vi.fn(async () => undefined),
+    route: vi.fn(async () => undefined),
     waitForLoadState: vi.fn(async () => undefined),
     waitForFunction: vi.fn(async () => undefined),
     waitForTimeout: vi.fn(async () => undefined),
@@ -939,9 +940,11 @@ describe("exports entry and instance startup driver (NEWFRONT-548, WSET-033–03
   });
 
   it("opens a section by address and reads the shared settings surface", async () => {
+    const frame = element({ count: async () => 1, innerText: async () => "  a  b " });
     const page = stubPage({
-      getByTestId: (id: string) =>
-        element({ count: async () => (id === "workspace-settings-sidebar" ? 1 : 0), innerText: async () => "  a  b " }),
+      getByTestId: (id: string) => element({ count: async () => (id === "workspace-settings-sidebar" ? 1 : 0) }),
+      locator: (selector: string) =>
+        selector === '[data-testid="workspace-settings-shell"]' ? frame : element({ count: async () => 0 }),
     });
     const driver = new WebNewDriver(page);
     await driver.wsSettingsOpenSection("acme", "members", []);
@@ -1060,5 +1063,207 @@ describe("exports entry and instance startup driver (NEWFRONT-548, WSET-033–03
     const driver = new WebNewDriver(stubPage({ emulateMedia }));
     await driver.wsSettingsSetColorScheme("dark");
     expect(emulateMedia).toHaveBeenCalledWith({ colorScheme: "dark" });
+  });
+});
+
+// Sign-out from a workspace-settings page (NEWFRONT-550): the settings frame
+// replaces the workspace shell and its command palette, so the driver first
+// lands on the workspace home, dismisses a first-run tour that can reappear
+// there, and only then opens the palette.
+interface SignOutStub {
+  count?: () => Promise<number>;
+  isVisible?: () => Promise<boolean>;
+  innerText?: () => Promise<string>;
+  fill?: (value: string) => Promise<void>;
+  click?: (options?: unknown) => Promise<void>;
+  waitFor?: (options?: unknown) => Promise<void>;
+  first?: () => SignOutStub;
+  filter?: (options?: unknown) => SignOutStub;
+  locator?: (selector: string) => SignOutStub;
+}
+
+function signOutLocator(overrides: SignOutStub = {}): SignOutStub {
+  const self: SignOutStub = {
+    count: async () => 1,
+    isVisible: async () => false,
+    innerText: async () => "",
+    fill: async () => undefined,
+    click: async () => undefined,
+    waitFor: async () => undefined,
+    first: () => self,
+    filter: () => self,
+    locator: () => self,
+    ...overrides,
+  };
+  return self;
+}
+
+interface SignOutHarnessOptions {
+  startPath: string;
+  sidebar: boolean;
+  afterHostSidebar?: boolean;
+  tourVisible?: boolean;
+}
+
+function signOutHarness(options: SignOutHarnessOptions) {
+  let path = options.startPath;
+  let onHost = options.sidebar;
+  let signedOut = false;
+  const goto = vi.fn(async (url: string) => {
+    path = url;
+    onHost = options.afterHostSidebar ?? true;
+  });
+  const paletteFill = vi.fn(async (_value: string) => undefined);
+  const paletteClick = vi.fn(async (_options?: unknown) => {
+    signedOut = true;
+  });
+  const page = {
+    url: () => `http://localhost:3010${path}`,
+    goto,
+    keyboard: { press: vi.fn(async () => undefined) },
+    getByRole: (role: string, query?: { name?: string }) =>
+      role === "button" && query?.name === "Explore on my own"
+        ? signOutLocator({ count: async () => (options.tourVisible ? 1 : 0) })
+        : signOutLocator(),
+    getByText: () => signOutLocator({ count: async () => 0 }),
+    getByTestId: () => signOutLocator(),
+    getByPlaceholder: () => signOutLocator({ isVisible: async () => signedOut }),
+    getByLabel: () => signOutLocator(),
+    locator: (selector: string) => {
+      if (selector === "#main-sidebar") return signOutLocator({ count: async () => (onHost ? 1 : 0) });
+      if (selector.includes("section[aria-label=")) {
+        return signOutLocator({ count: async () => (signedOut ? 1 : 0), isVisible: async () => signedOut });
+      }
+      if (selector.includes("dialog")) {
+        return signOutLocator({
+          count: async () => 0,
+          locator: (inner: string) =>
+            inner.includes("option") ? signOutLocator({ click: paletteClick }) : signOutLocator({ fill: paletteFill }),
+        });
+      }
+      return signOutLocator();
+    },
+    title: async () => "Pi Dash",
+  } as unknown as Page;
+  const driver = new WebNewDriver(page);
+  // The chord itself is covered by the shell's palette tests; here the
+  // concern is the host switch and tour handling that precede it.
+  const pressPaletteOpenChord = vi.spyOn(driver, "pressPaletteOpenChord").mockResolvedValue(undefined);
+  return {
+    driver,
+    spies: {
+      goto,
+      paletteFill,
+      paletteClick,
+      pressPaletteOpenChord,
+      get signedOut() {
+        return signedOut;
+      },
+    },
+  };
+}
+
+describe("signOutViaCommandPalette from a settings page", () => {
+  it("lands on the workspace home before driving the palette", async () => {
+    const { driver, spies } = signOutHarness({ startPath: "/acme/settings/members/", sidebar: false });
+    await driver.signOutViaCommandPalette();
+    expect(spies.goto).toHaveBeenCalledWith("/acme/", { waitUntil: "domcontentloaded" });
+    expect(spies.paletteFill).toHaveBeenCalledWith("Sign out");
+    expect(spies.paletteClick).toHaveBeenCalled();
+    expect(spies.signedOut).toBe(true);
+  });
+
+  it("leaves a dismissable first-run tour before opening the palette", async () => {
+    const { driver, spies } = signOutHarness({ startPath: "/acme/settings/", sidebar: false, tourVisible: true });
+    await driver.signOutViaCommandPalette();
+    expect(spies.goto).toHaveBeenCalledTimes(1);
+    expect(spies.paletteClick).toHaveBeenCalled();
+  });
+
+  it("signs out in place when the workspace shell is already mounted", async () => {
+    const { driver, spies } = signOutHarness({ startPath: "/acme/projects/", sidebar: true });
+    await driver.signOutViaCommandPalette();
+    expect(spies.goto).not.toHaveBeenCalled();
+    expect(spies.paletteClick).toHaveBeenCalled();
+  });
+
+  it("returns without navigating when the page is already signed out", async () => {
+    const { driver, spies } = signOutHarness({ startPath: "/", sidebar: false });
+    vi.spyOn(driver, "isSignedOut").mockResolvedValue(true);
+    await driver.signOutViaCommandPalette();
+    expect(spies.goto).not.toHaveBeenCalled();
+    expect(spies.paletteClick).not.toHaveBeenCalled();
+  });
+});
+
+describe("settings frame and traffic readers (NEWFRONT-550, WSET-037–039)", () => {
+  it("reads the outlet from the profile shell when no workspace shell renders", async () => {
+    const profile = element({ count: async () => 1, innerText: async () => " Add personal access token " });
+    const workspace = element({ count: async () => 0 });
+    const page = stubPage({
+      locator: (selector: string) =>
+        selector === '[data-testid="workspace-settings-shell"]'
+          ? workspace
+          : selector === '[data-testid="profile-settings-shell"]'
+            ? profile
+            : element({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsOutletText()).resolves.toBe("Add personal access token");
+  });
+
+  it("prefers the workspace shell and falls back to the page main region", async () => {
+    const shell = element({ count: async () => 1, innerText: async () => " Members " });
+    const page = stubPage({
+      locator: (selector: string) =>
+        selector.includes("workspace-settings") ? shell : element({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsOutletText()).resolves.toBe("Members");
+
+    const bare = element({ count: async () => 1, innerText: async () => " Loading " });
+    const barePage = stubPage({
+      locator: (selector: string) => (selector.startsWith("[data-testid=") ? element({ count: async () => 0 }) : bare),
+    });
+    const bareDriver = new WebNewDriver(barePage);
+    await expect(bareDriver.wsSettingsOutletText()).resolves.toBe("Loading");
+
+    const emptyPage = stubPage({ locator: () => element({ count: async () => 0 }) });
+    await expect(new WebNewDriver(emptyPage).wsSettingsOutletText()).resolves.toBe("");
+  });
+
+  it("lists only the dialog's text buttons", async () => {
+    const dialog = element({ allInnerTexts: async () => ["", "  Cancel ", "Delete"] });
+    const page = stubPage({ getByRole: () => dialog });
+    const driver = new WebNewDriver(page);
+    await expect(driver.wsSettingsDialogButtons()).resolves.toEqual(["Cancel", "Delete"]);
+
+    const absent = stubPage({ getByRole: () => element({ count: async () => 0 }) });
+    await expect(new WebNewDriver(absent).wsSettingsDialogButtons()).resolves.toEqual([]);
+  });
+
+  it("counts app sockets but never the dev server's hot-reload channel", async () => {
+    const handlers: ((socket: { url: () => string }) => void)[] = [];
+    const page = stubPage({
+      on: vi.fn((event: string, handler: (socket: { url: () => string }) => void) => {
+        if (event === "websocket") handlers.push(handler);
+      }),
+    });
+    const driver = new WebNewDriver(page);
+    handlers.length = 0;
+    await driver.wsSettingsWatchSockets();
+    expect(handlers).toHaveLength(1);
+    handlers[0]?.({ url: () => "ws://localhost:3010/?token=abc" });
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(0);
+    // Anything that is not the hot-reload channel is app traffic, even
+    // when its address cannot be parsed.
+    handlers[0]?.({ url: () => "not a url" });
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(1);
+    handlers[0]?.({ url: () => "ws://localhost:3010/api/notifications/" });
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(2);
+    // Re-arming resets the count without installing a second listener.
+    await driver.wsSettingsWatchSockets();
+    await expect(driver.wsSettingsSocketCount()).resolves.toBe(0);
+    expect(handlers).toHaveLength(1);
   });
 });

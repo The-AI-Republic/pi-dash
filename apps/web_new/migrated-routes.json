@@ -21,7 +21,14 @@
     "/profile",
     "/{ws}",
     "/{ws}/projects",
-    "/{ws}/browse/{workItem}"
+    "/{ws}/browse/{workItem}",
+    "/{ws}/settings",
+    "/{ws}/settings/members",
+    "/{ws}/settings/billing",
+    "/{ws}/settings/exports",
+    "/{ws}/settings/integrations",
+    "/{ws}/settings/webhooks",
+    "/{ws}/settings/webhooks/*"
   ],
   "reservedTopLevel": [
     "404",

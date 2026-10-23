@@ -177,7 +177,7 @@ describe("invite dialog driver", () => {
     const waitFor = vi.fn(async () => undefined);
     const page = pageOf({
       locator: (selector: string) =>
-        selector === 'div[role="dialog"]:has(h2)'
+        selector === 'div[role="dialog"]:not([data-testid="toast-notification"])'
           ? locator({ getByRole: () => locator({ click }) })
           : selector === 'input[name="emails.0.email"]'
             ? locator({ waitFor })
@@ -195,7 +195,7 @@ describe("invite dialog driver", () => {
         rows += 1;
       }),
       locator: (selector: string) => {
-        if (selector === 'div[role="dialog"]:has(h2)')
+        if (selector === 'div[role="dialog"]:not([data-testid="toast-notification"])')
           return locator({ getByRole: () => locator({ click: async () => undefined }) });
         if (selector.startsWith('input[name^="emails."]')) return locator({ count: async () => rows });
         return locator();
@@ -210,7 +210,7 @@ describe("invite dialog driver", () => {
     const hiddenWait = vi.fn(async () => undefined);
     const page = pageOf({
       locator: (selector: string) => {
-        if (selector === 'div[role="dialog"]:has(h2)')
+        if (selector === 'div[role="dialog"]:not([data-testid="toast-notification"])')
           return locator({
             getByRole: () =>
               locator({
@@ -238,7 +238,7 @@ describe("invite dialog driver", () => {
     let submitted = false;
     const page = pageOf({
       locator: (selector: string) => {
-        if (selector === 'div[role="dialog"]:has(h2)')
+        if (selector === 'div[role="dialog"]:not([data-testid="toast-notification"])')
           return locator({
             getByRole: () =>
               locator({
@@ -261,7 +261,7 @@ describe("invite dialog driver", () => {
     let attempted = false;
     const page = pageOf({
       locator: (selector: string) => {
-        if (selector === 'div[role="dialog"]:has(h2)')
+        if (selector === 'div[role="dialog"]:not([data-testid="toast-notification"])')
           return locator({
             getByRole: () =>
               locator({
@@ -295,7 +295,7 @@ describe("invite dialog driver", () => {
     const page = pageOf({
       waitForTimeout: vi.fn(async () => undefined),
       locator: (selector: string) => {
-        if (selector === 'div[role="dialog"]:has(h2)')
+        if (selector === 'div[role="dialog"]:not([data-testid="toast-notification"])')
           return locator({
             getByRole: () => locator({ click: async () => undefined }),
             locator: () => locator({ count: async () => 0 }),
@@ -497,7 +497,7 @@ describe("pending invitations driver", () => {
       locator: (selector: string) =>
         selector === '[data-testid="pending-invitation-row"][data-email="ada@example.com"]'
           ? locator({ getByRole: () => locator({ click: menuClick }) })
-          : selector === 'div[role="dialog"]:has(h2)'
+          : selector === 'div[role="dialog"]:not([data-testid="toast-notification"])'
             ? locator({ waitFor })
             : locator(),
       getByRole: (role: string, options?: { name?: string }) =>
@@ -610,9 +610,10 @@ describe("remove dialog driver", () => {
   it("reports the open dialog, its heading and its text", async () => {
     const page = pageOf({
       locator: (selector: string) =>
-        selector === 'div[role="dialog"]:has(h2)'
+        selector === 'div[role="dialog"]:not([data-testid="toast-notification"])'
           ? locator({
               count: async () => 1,
+              isVisible: async () => true,
               innerText: async () => "Remove ada@example.com?\nThis withdraws the invitation",
               getByRole: () => locator({ count: async () => 1, innerText: async () => "Remove ada@example.com?" }),
             })
@@ -641,8 +642,10 @@ describe("remove dialog driver", () => {
     });
     const page = pageOf({
       locator: (selector: string) =>
-        selector === 'div[role="dialog"]:has(h2)'
+        selector === 'div[role="dialog"]:not([data-testid="toast-notification"])'
           ? locator({
+              count: async () => 1,
+              isVisible: async () => false,
               waitFor,
               getByRole: (role: string, options?: { name?: RegExp | string }) => {
                 if (options?.name instanceof RegExp) {
@@ -667,6 +670,59 @@ describe("remove dialog driver", () => {
     detached = true;
     await expect(driver.wsSettingsRemoveDialogCancel()).resolves.toBeUndefined();
     expect(cancelClick).toHaveBeenCalled();
+  });
+});
+
+describe("remove confirmation close poll (NEWFRONT-550)", () => {
+  /** A dialog node whose visibility follows a scripted sequence. */
+  function dialogSequence(sequence: boolean[]): { page: Page; polls: () => number } {
+    let index = 0;
+    let polls = 0;
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === 'div[role="dialog"]:not([data-testid="toast-notification"])'
+          ? locator({
+              count: async () => 1,
+              isVisible: async () => {
+                const visible = sequence[Math.min(index, sequence.length - 1)] ?? false;
+                index += 1;
+                polls += 1;
+                return visible;
+              },
+            })
+          : locator(),
+    });
+    return { page, polls: () => polls };
+  }
+
+  it("waits out a dialog that blinks away between roster renders before calling it closed", async () => {
+    const { page, polls } = dialogSequence([true, true, false, true, false, false, false]);
+    const driver = new WebNewDriver(page);
+    await (
+      driver as unknown as { wsSettingsAwaitRemoveDialogClosed: () => Promise<void> }
+    ).wsSettingsAwaitRemoveDialogClosed();
+    // Three quiet reads in a row, only after the re-render stopped.
+    expect(polls()).toBe(7);
+  });
+
+  it("gives up when the confirmation never leaves the screen", async () => {
+    const { page } = dialogSequence([true]);
+    const driver = new WebNewDriver(page);
+    const now = vi.spyOn(Date, "now");
+    let clock = 1_000;
+    now.mockImplementation(() => {
+      clock += 20_000;
+      return clock;
+    });
+    try {
+      await expect(
+        (
+          driver as unknown as { wsSettingsAwaitRemoveDialogClosed: () => Promise<void> }
+        ).wsSettingsAwaitRemoveDialogClosed()
+      ).rejects.toThrow(/never closed/);
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 

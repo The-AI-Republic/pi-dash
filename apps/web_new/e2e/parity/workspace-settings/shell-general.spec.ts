@@ -489,10 +489,12 @@ test(
     const session = await signInSession(seed.email, seed.password);
     await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
     await ensureFallbackLogo(driver, seed, session);
-    // Intended: the avatar shows the initial-letter fallback as soon as
-    // the removal succeeds, with no reload. Observed: the success notice
-    // shows and the stored logo clears, but the old image stays rendered
-    // until the page is reloaded.
+    // Observed on the old app: the success notice shows and the stored
+    // logo clears, but the old image stays rendered until the page is
+    // reloaded. The new frontend ships the intended behavior (spec §4,
+    // §43): the avatar falls back to the initial as soon as removal
+    // succeeds, with no reload — the same branching the other bug: rows
+    // use where web_new carries the fix.
     await driver.wsSettingsOpenLogoDialog();
     await driver.wsSettingsUploadLogo(LOGO_A);
     expect(await driver.wsSettingsLogoState()).toBe("image");
@@ -501,6 +503,12 @@ test(
     const toast = await pollToast(driver);
     expect(toast?.title).toBe("Success!");
     await expect.poll(async () => (await serverWorkspace(seed.workspaceSlug, session)).logoUrl).toBeNull();
+    if (driver.target === "web_new") {
+      await expect.poll(() => driver.wsSettingsLogoState(), { timeout: 30_000 }).toBe("fallback");
+      expect(await driver.wsSettingsLogoSrc()).toBeNull();
+      expect(await driver.wsSettingsLogoAction()).toBe("upload");
+      return;
+    }
     expect(await driver.wsSettingsLogoState()).toBe("image");
     await driver.wsSettingsOpen(seed.workspaceSlug, "");
     expect(await driver.wsSettingsLogoState()).toBe("fallback");
@@ -608,6 +616,9 @@ test(
   specTitle(["WSET-007"], "tab titles carry the workspace and section names"),
   { tag: specTags(["WSET-007"]) },
   async ({ driver, seed }) => {
+    // Three identities each walk every section after a sign-out and
+    // sign-in, so the default budget leaves no room for a slow paint.
+    test.setTimeout(600_000);
     const session = await signInSession(seed.email, seed.password);
     const guest = requireGuest(seed);
     const member = await provisionMember(seed, session, "nf410-titles");

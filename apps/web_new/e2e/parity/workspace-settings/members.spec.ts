@@ -42,6 +42,7 @@ import {
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
 import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
+import { openWorkspacePage, provisionMember as provisionEditionMember, seededSession } from "./edition-session";
 
 /** Numeric workspace roles as the server stores them. */
 const ROLE = { ADMIN: 20, MEMBER: 15, GUEST: 5 } as const;
@@ -143,6 +144,16 @@ async function adminOpen(driver: ParityDriver, workspaceSlug: string): Promise<v
   await expect.poll(() => driver.wsSettingsMembersAddVisible(), { timeout: 30_000 }).toBe(true);
 }
 
+/**
+ * Suspended rows form the tail of the roster: once the first suspended
+ * row appears, no active row may follow it.
+ */
+function expectSuspendedRowsLast(order: string[], suspended: Set<string>): void {
+  const firstSuspended = order.findIndex((email) => suspended.has(email));
+  if (firstSuspended === -1) return;
+  expect(order.slice(firstSuspended).every((email) => suspended.has(email))).toBe(true);
+}
+
 test(
   specTitle(["WSET-008"], "roster counts, searches, filters by role, and sorts suspended rows last"),
   { tag: specTags(["WSET-008"]) },
@@ -195,29 +206,41 @@ test(
       });
 
       await test.step("removed members persist as suspended rows sorted last", async () => {
+        // Other specs in this shared scratch workspace leave their own
+        // suspended members behind, so the roster is not empty here.
+        // Assert relatively: the removed member joins the suspended set
+        // and every suspended row sits after every active row.
+        const suspendedBefore = new Set(await driver.wsSettingsMembersSuspendedEmails());
+        expect(suspendedBefore.has(memberExtra.email)).toBe(false);
         await driver.wsSettingsMemberOpenRemove(memberExtra.email);
         expect(await driver.wsSettingsRemoveDialogTitle()).toBe(`Remove ${memberExtra.displayName}?`);
         await driver.wsSettingsRemoveDialogCancel();
         expect(await driver.wsSettingsRemoveDialogVisible()).toBe(false);
-        expect(await driver.wsSettingsMembersSuspendedEmails()).toEqual([]);
+        expect(new Set(await driver.wsSettingsMembersSuspendedEmails())).toEqual(suspendedBefore);
         await driver.wsSettingsMemberOpenRemove(memberExtra.email);
         await driver.wsSettingsRemoveDialogConfirm();
         expect(await driver.wsSettingsRemoveDialogVisible()).toBe(false);
-        expect(await driver.wsSettingsMembersSuspendedEmails()).toEqual([memberExtra.email]);
+        expect(new Set(await driver.wsSettingsMembersSuspendedEmails())).toEqual(
+          new Set([...suspendedBefore, memberExtra.email])
+        );
         const order = await driver.wsSettingsMembersVisibleEmails();
-        expect(order[order.length - 1]).toBe(memberExtra.email);
+        expectSuspendedRowsLast(order, new Set([...suspendedBefore, memberExtra.email]));
         // Removal deactivates server-side; the row is not deleted.
         const server = await serverWorkspaceMembersFull(seed.workspaceSlug, session);
         expect(server.find((row) => row.email === memberExtra.email)?.isActive).toBe(false);
         await driver.wsSettingsMembersOpenFilters();
         await driver.wsSettingsMembersToggleFilter("Suspended");
-        expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([memberExtra.email]);
+        expect(new Set(await driver.wsSettingsMembersVisibleEmails())).toEqual(
+          new Set([...suspendedBefore, memberExtra.email])
+        );
         await driver.wsSettingsMembersToggleFilter("Suspended");
         await driver.wsSettingsMembersCloseFilters();
         await driver.wsSettingsMembersOpen(seed.workspaceSlug);
-        expect(await driver.wsSettingsMembersSuspendedEmails()).toEqual([memberExtra.email]);
+        expect(new Set(await driver.wsSettingsMembersSuspendedEmails())).toEqual(
+          new Set([...suspendedBefore, memberExtra.email])
+        );
         const reloaded = await driver.wsSettingsMembersVisibleEmails();
-        expect(reloaded[reloaded.length - 1]).toBe(memberExtra.email);
+        expectSuspendedRowsLast(reloaded, new Set([...suspendedBefore, memberExtra.email]));
       });
     } finally {
       await serverHardDeleteWorkspaceMember(guestExtra.membershipId);
@@ -275,6 +298,10 @@ test(
       await test.step("two rows with distinct roles send and appear as pending", async () => {
         const emailA = uniqueEmail("nf411-inv-a");
         const emailB = uniqueEmail("nf411-inv-b");
+        // The shared scratch workspace can carry other runs' pending
+        // invitations, so the group is asserted relative to what shows
+        // before this submit.
+        const invitesBefore = new Set(await driver.wsSettingsInvitesVisibleEmails());
         await driver.wsSettingsInviteFillRow(0, emailA);
         await driver.wsSettingsInviteSetRowRole(0, "Guest");
         await driver.wsSettingsInviteAddRow();
@@ -284,8 +311,13 @@ test(
         expect(await driver.wsSettingsInviteVisible()).toBe(false);
         await expect.poll(() => toastMessage(driver), { timeout: 30_000 }).toContain("Invitations sent");
         expect(await driver.wsSettingsInvitesGroupVisible()).toBe(true);
-        expect(await driver.wsSettingsInvitesCount()).toBe(2);
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        await expect
+          .poll(() => driver.wsSettingsInvitesVisibleEmails(), { timeout: 30_000 })
+          .toEqual(expect.arrayContaining([emailA, emailB]));
+        expect(await driver.wsSettingsInvitesCount()).toBe(invitesBefore.size + 2);
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
         expect(await driver.wsSettingsInviteRole(emailA)).toBe("Guest");
         expect(await driver.wsSettingsInviteRole(emailB)).toBe("Admin");
         const server = await serverWorkspaceInvitations(seed.workspaceSlug, session);
@@ -340,14 +372,30 @@ test(
     );
     const idA = seeded.find((row) => row.email === emailA)?.id ?? "";
     const idB = seeded.find((row) => row.email === emailB)?.id ?? "";
+    // Other runs can leave pending invitations in the shared workspace,
+    // so this scenario asserts its own rows against what the group shows
+    // before its setup invites land. The UI baseline is taken first: the
+    // list endpoint also returns withdrawn rows, so a server-side count
+    // would overstate the group.
+    let invitesBefore = new Set<string>();
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
       await adminOpen(driver, seed.workspaceSlug);
+      // The setup invites are already listed here, so the baseline is
+      // whatever preceded them.
+      invitesBefore = new Set(
+        (await driver.wsSettingsInvitesVisibleEmails()).filter((email) => email !== emailA && email !== emailB)
+      );
 
       await test.step("group lists pending invitations with roles", async () => {
         await expect.poll(() => driver.wsSettingsInvitesGroupVisible(), { timeout: 30_000 }).toBe(true);
-        expect(await driver.wsSettingsInvitesCount()).toBe(2);
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        await expect
+          .poll(() => driver.wsSettingsInvitesVisibleEmails(), { timeout: 30_000 })
+          .toEqual(expect.arrayContaining([emailA, emailB]));
+        expect(await driver.wsSettingsInvitesCount()).toBe(invitesBefore.size + 2);
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
         expect(await driver.wsSettingsInviteRole(emailA)).toBe("Member");
         expect(await driver.wsSettingsInviteRole(emailB)).toBe("Guest");
       });
@@ -359,7 +407,9 @@ test(
         expect(await driver.wsSettingsInvitesVisibleEmails()).toEqual([]);
         await driver.wsSettingsInvitesToggleGroup();
         expect(await driver.wsSettingsInvitesExpanded()).toBe(true);
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
       });
 
       await test.step("search matches pending invitations by email", async () => {
@@ -367,7 +417,9 @@ test(
         expect(await driver.wsSettingsInvitesVisibleEmails()).toEqual([emailA]);
         expect(await driver.wsSettingsMembersVisibleEmails()).toEqual([]);
         await driver.wsSettingsMembersSearch("");
-        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(new Set([emailA, emailB]));
+        expect(new Set(await driver.wsSettingsInvitesVisibleEmails())).toEqual(
+          new Set([...invitesBefore, emailA, emailB])
+        );
       });
 
       await test.step("invitation roles change and persist", async () => {
@@ -729,22 +781,32 @@ test(
   specTitle(["WSET-015"], "no billing upsell entry renders in this checkout for any role"),
   { tag: specTags(["WSET-015"]) },
   async ({ driver, seed }) => {
-    const session = await signInSession(seed.email, seed.password);
-    const member = requireMember(seed);
+    // Cloud-tagged row: the OSS build and the cloud build both render no
+    // upsell affordance in the members header (the cloud overlay's billing
+    // action component is empty), so the same absence is asserted on both.
+    const session = await seededSession(seed, seed.email);
+    const member = await provisionEditionMember(seed, session, "wset015-member", ROLE.MEMBER);
     const server = await serverWorkspaceMembersFull(seed.workspaceSlug, session);
     expect(server.some((row) => row.email === seed.email && row.role === ROLE.ADMIN)).toBe(true);
 
     await test.step("admins see no billing entry in the members header", async () => {
-      await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
+      await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/members`, {
+        email: seed.email,
+        session,
+        password: seed.password,
+      });
       await adminOpen(driver, seed.workspaceSlug);
       expect(await driver.wsSettingsMembersBillingVisible()).toBe(false);
     });
 
     await test.step("members see no billing entry either", async () => {
-      await switchUser(driver, member.email, member.password, seed.workspaceSlug);
+      await openWorkspacePage(driver, seed, `/${seed.workspaceSlug}/settings/members`, member);
       await driver.wsSettingsMembersOpen(seed.workspaceSlug);
       expect(await driver.wsSettingsMembersAddVisible()).toBe(false);
       expect(await driver.wsSettingsMembersBillingVisible()).toBe(false);
     });
+
+    // The member row belongs to the shared scratch stack; the roster
+    // assertions here never depend on the roster being empty.
   }
 );

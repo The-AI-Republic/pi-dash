@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 
 import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
+import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
 import { calendarDayLabel, isoDayOffset, localTodayISO, zonedTodayISO } from "../helpers/calendar-dates.js";
 import { descriptionAfterHeading } from "./modal-copy.js";
 import type {
@@ -264,11 +265,16 @@ import type {
   CommentActivityTraffic,
 } from "./parity-driver";
 
-/** Whether the billing address settled on its page or the denial view. */
-export function billingPageSettled(root: { querySelector: (selector: string) => unknown }): boolean {
+/**
+ * Whether the billing address settled on its page or the denial view.
+ * Playwright passes the function argument as null and serializes it into
+ * the page, so it must fall back to the page document itself.
+ */
+export function billingPageSettled(root?: { querySelector: (selector: string) => unknown } | null): boolean {
+  const scope = root ?? document;
   return (
-    root.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
-    root.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null
+    scope.querySelector('[data-testid="workspace-settings-billing"]') !== null ||
+    scope.querySelector('[data-testid="workspace-settings-not-authorized"]') !== null
   );
 }
 
@@ -544,22 +550,22 @@ export class WebNewDriver implements ParityDriver {
     await this.paintedCard().waitFor({ timeout: timeoutMs });
   }
 
-  /** True once the password or code step shows (the email check round-tripped). */
+  /**
+   * True once the password or code step shows (the email check
+   * round-tripped). One locator covering either field, so whichever step
+   * paints first settles the wait: the card shows exactly one of them, and
+   * two parallel waits would spend the absent field's whole timeout on
+   * every email step.
+   */
   private async nextAuthStepShown(timeoutMs: number): Promise<boolean> {
-    const password = this.authPasswordField()
+    const step = this.authPasswordField().or(this.authCodeField());
+    return step
+      .first()
       .waitFor({ state: "visible", timeout: timeoutMs })
       .then(
         () => true,
         () => false
       );
-    const code = this.authCodeField()
-      .waitFor({ state: "visible", timeout: timeoutMs })
-      .then(
-        () => true,
-        () => false
-      );
-    const [passwordShown, codeShown] = await Promise.all([password, code]);
-    return passwordShown || codeShown;
   }
 
   async openEntry(): Promise<void> {
@@ -4731,6 +4737,24 @@ export class WebNewDriver implements ParityDriver {
     await this.waitForSignedOut();
   }
 
+  /**
+   * The palette belongs to the workspace shell. Settings pages render
+   * their own frame and replace that chrome, so a sign-out driven from one
+   * of them first lands on the workspace home; anywhere else it signs out
+   * in place. Bounded so a page that never mounts the shell fails here
+   * instead of inside a palette wait.
+   */
+  private async ensurePaletteHost(): Promise<void> {
+    if ((await this.page.locator("#main-sidebar").count()) > 0) return;
+    const segment = new URL(this.page.url()).pathname.split("/").filter(Boolean)[0];
+    if (segment === undefined) return;
+    await this.page.goto(`/${segment}/`, { waitUntil: "domcontentloaded" });
+    await this.page
+      .locator("#main-sidebar")
+      .waitFor({ state: "attached", timeout: 30_000 })
+      .catch(() => undefined);
+  }
+
   async signOutViaCommandPalette(): Promise<void> {
     // A slow paint can outlast the whole attempt even though the sign-out
     // already happened, so every attempt ends by checking for the entry;
@@ -4738,12 +4762,14 @@ export class WebNewDriver implements ParityDriver {
     // is no longer there.
     for (let attempt = 0; attempt < 3; attempt++) {
       if (await this.isSignedOut().catch(() => false)) return;
-      await this.dismissTourIfShown();
       try {
-        await this.page.getByRole("button", { name: "Open command palette" }).click({ timeout: 15_000 });
-        const filter = this.page.getByPlaceholder("Type a command…");
-        await filter.fill("Sign out");
-        await this.page.getByRole("option", { name: "Sign out" }).first().click({ timeout: 15_000 });
+        // The host switch can land on a first-run home, so the tour is
+        // dismissed after it, right before the palette opens over it.
+        await this.ensurePaletteHost();
+        await this.dismissTourIfShown();
+        await this.pressPaletteOpenChord();
+        await this.paletteInput().fill("Sign out");
+        await this.paletteItems().filter({ hasText: "Sign out" }).first().click({ timeout: 15_000 });
         await this.waitForSignedOut();
         return;
       } catch {
@@ -23902,15 +23928,18 @@ export class WebNewDriver implements ParityDriver {
   }
 
   /**
-   * Wait until the roster settles: member rows, the no-match note, or the
-   * failed-load notice. The skeleton must be gone first so a scenario can
-   * never read rows off the loading state (WSET-014).
+   * Wait until the roster settles: member rows, pending invitations, the
+   * no-match note, or the failed-load notice. The skeleton must be gone
+   * first so a scenario can never read rows off the loading state
+   * (WSET-014). A search can legitimately leave only invitations (§10),
+   * so their rows count as settled too.
    */
   private async wsSettingsAwaitRosterSettled(): Promise<void> {
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
     for (;;) {
       const rows = await this.page.locator('[data-testid="member-row"]').count();
       if (rows > 0) return;
+      if ((await this.page.locator('[data-testid="pending-invitation-row"]').count()) > 0) return;
       if (await this.isShown(this.page.locator('[data-testid="members-no-match"]'))) return;
       if (await this.isShown(this.page.locator('[data-testid="members-load-failed"]'))) return;
       if (Date.now() > deadline) throw new Error("[parity] members roster never settled.");
@@ -24106,9 +24135,13 @@ export class WebNewDriver implements ParityDriver {
     return this.page.locator(`[data-testid="pending-invitation-row"][data-email="${email}"]`).first();
   }
 
-  /** The open dialog carrying a heading (toasts never carry one). */
+  /**
+   * The open dialog. The toast stack reports `role=dialog` too (each
+   * notice has a heading), so it is excluded by its test id; a copy-link
+   * confirmation could otherwise be read as the confirmation dialog.
+   */
   private wsSettingsOpenDialog(): Locator {
-    return this.page.locator('div[role="dialog"]:has(h2)').first();
+    return this.page.locator('div[role="dialog"]:not([data-testid="toast-notification"])').first();
   }
 
   /** Visible option rows of the currently open combobox/picker. */
@@ -24352,20 +24385,49 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async wsSettingsInviteOpenRemove(email: string): Promise<void> {
+    // A Cancel on the previous confirmation left its row menu open over
+    // the roster; Escape closes it so the next click reaches the trigger
+    // instead of a stale item.
+    if ((await this.page.getByRole("menu").count()) > 0) {
+      await this.page.keyboard.press("Escape");
+      await this.page.getByRole("menu").first().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    }
     await this.wsSettingsInviteOpenMenu(email);
     await this.page.getByRole("menuitem", { name: "Remove", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await this.wsSettingsOpenDialog().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
+  /**
+   * Poll until no confirmation is on screen and stays gone; a navigation
+   * counts as gone. A confirm drops the target and refreshes the roster,
+   * which re-renders the page: for a frame or two no dialog is mounted
+   * and then the outgoing one paints out. Reading one sample would call
+   * that closed before it has, so the close must hold across a few checks.
+   */
+  private async wsSettingsAwaitRemoveDialogClosed(): Promise<void> {
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    let closedChecks = 0;
+    for (;;) {
+      const stillOpen = await this.wsSettingsRemoveDialogVisible().catch(() => false);
+      closedChecks = stillOpen ? 0 : closedChecks + 1;
+      if (closedChecks >= 3) return;
+      if (Date.now() > deadline) throw new Error("[parity] the remove confirmation never closed.");
+      await this.page.waitForTimeout(100);
+    }
+  }
+
   async wsSettingsRemoveDialogVisible(): Promise<boolean> {
-    return (await this.wsSettingsOpenDialog().count()) > 0;
+    // A dialog leaving after a confirm stays mounted while it animates
+    // out, so the question is whether one is actually on screen.
+    return this.isShown(this.wsSettingsOpenDialog());
   }
 
   async wsSettingsRemoveDialogTitle(): Promise<string | null> {
     const dialog = this.wsSettingsOpenDialog();
     if ((await dialog.count()) === 0) return null;
     const heading = dialog.getByRole("heading").first();
-    if ((await heading.count()) === 0) return null;
+    // The popup mounts before its content paints; read only once it shows.
+    await heading.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
     return (((await heading.innerText().catch(() => "")) ?? "").trim() || null) as string | null;
   }
 
@@ -24396,12 +24458,11 @@ export class WebNewDriver implements ParityDriver {
       .first()
       .click({ timeout: WebNewDriver.WAIT_MS });
     await settled;
-    await this.wsSettingsOpenDialog()
-      .waitFor({ state: "detached", timeout: 5_000 })
-      .then(
-        () => undefined,
-        () => undefined
-      );
+    // §13: the confirmation closes after a confirm whether or not the
+    // write landed. It animates out (and the self-leave leg navigates
+    // away), so wait for it to leave the screen instead of reading the
+    // still-mounted popup.
+    await this.wsSettingsAwaitRemoveDialogClosed();
   }
 
   async wsSettingsRemoveDialogCancel(): Promise<void> {
@@ -24472,6 +24533,9 @@ export class WebNewDriver implements ParityDriver {
     const trigger = this.wsSettingsMemberRow(email).getByRole("button", { name: `Actions for ${email}` });
     if (!(await this.isShown(trigger))) return null;
     await trigger.click({ timeout: WebNewDriver.WAIT_MS });
+    // The menu mounts in a portal a tick after the click; reading its
+    // entries straight away would answer "no entry" for every row.
+    await this.page.getByRole("menuitem").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     const items = await this.page.getByRole("menuitem").allInnerTexts();
     await this.page.keyboard.press("Escape");
     const entries = items.map((item) => item.trim()).filter((item) => item.length > 0);
@@ -25123,14 +25187,20 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async wsSettingsOutletText(): Promise<string> {
-    return (
-      (await this.page
-        .getByTestId("workspace-settings-shell")
-        .innerText()
-        .catch(() => "")) ?? ""
-    )
-      .replace(/\s+/g, " ")
-      .trim();
+    // Workspace sections live inside the settings shell; the token page
+    // sits in the profile shell instead. Read whichever frame renders the
+    // section, falling back to the page's own main region.
+    for (const selector of [
+      '[data-testid="workspace-settings-shell"]',
+      '[data-testid="profile-settings-shell"]',
+      "main",
+    ]) {
+      const frame = this.page.locator(selector).first();
+      if ((await frame.count()) === 0) continue;
+      const text = (await frame.innerText().catch(() => "")) ?? "";
+      return text.replace(/\s+/g, " ").trim();
+    }
+    return "";
   }
 
   async wsSettingsCurrentPath(): Promise<string> {
@@ -25184,7 +25254,284 @@ export class WebNewDriver implements ParityDriver {
     return "loading";
   }
   async wsSettingsDesktopOnlyCount(): Promise<number> {
-    return todo("wsSettingsDesktopOnlyCount");
+    return this.page.evaluate(() => document.querySelectorAll('[data-desktop-only], [data-testid^="desktop-"]').length);
+  }
+
+  /** The open workspace-settings dialog (kit renders it as a modal popup). */
+  private wsSettingsDialog(): Locator {
+    return this.page.getByRole("dialog").first();
+  }
+
+  /** Wait until a dialog paints a control, not merely its wrapper. */
+  private async wsSettingsAwaitDialog(): Promise<void> {
+    const dialog = this.wsSettingsDialog();
+    await dialog.waitFor({ state: "attached", timeout: WebNewDriver.WAIT_MS });
+    await dialog.getByRole("button").first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async wsSettingsOpenInviteDialog(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.wsSettingsOpenSection(workspaceSlug, "members", cookies);
+    await this.wsSettingsAwaitRosterSettled();
+    await this.page
+      .getByTestId("workspace-settings-members")
+      .getByRole("button", { name: "Add member", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenWebhookCreateDialog(workspaceSlug: string, cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.wsSettingsOpenSection(workspaceSlug, "webhooks", cookies);
+    await this.page
+      .getByRole("button", { name: "Add webhook", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenTokenCreateDialog(cookies: ParityBrowserCookie[]): Promise<void> {
+    await this.wsSettingsApiTokenOpenTokens(cookies);
+    await this.wsSettingsApiTokenOpenCreate();
+  }
+
+  async wsSettingsOpenRemoveMemberDialog(
+    workspaceSlug: string,
+    memberEmail: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.wsSettingsOpenSection(workspaceSlug, "members", cookies);
+    await this.wsSettingsAwaitRosterSettled();
+    const row = this.wsSettingsMemberRow(memberEmail);
+    await row.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    // The row menu is a trailing icon control, hidden until the row is
+    // hovered or the control is focused (§8).
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row
+      .getByRole("button", { name: `Actions for ${memberEmail}`, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByRole("menuitem", { name: "Remove", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsOpenDeleteWebhookDialog(
+    workspaceSlug: string,
+    webhookId: string,
+    cookies: ParityBrowserCookie[]
+  ): Promise<void> {
+    await this.wsSettingsOpenWebhookDetail(workspaceSlug, webhookId, cookies);
+    const danger = this.page.getByRole("button", { name: "Danger zone", exact: true }).first();
+    await danger.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    if ((await danger.getAttribute("aria-expanded")) !== "true") {
+      await danger.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.page
+      .getByRole("button", { name: "Delete webhook", exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsAwaitDialog();
+  }
+
+  async wsSettingsDialogOpen(): Promise<boolean> {
+    return this.isShown(this.wsSettingsDialog());
+  }
+
+  async wsSettingsDialogButtons(): Promise<string[]> {
+    const dialog = this.wsSettingsDialog();
+    if ((await dialog.count()) === 0) return [];
+    // Icon-only controls (the header close) carry no text of their own, so
+    // leave them out: the oracle lists the text buttons it can read.
+    return (await dialog.getByRole("button").allInnerTexts())
+      .map((text) => text.replace(/\s+/g, " ").trim())
+      .filter((text) => text !== "");
+  }
+
+  async wsSettingsPressEscape(): Promise<void> {
+    await this.page.keyboard.press("Escape");
+    // A quiet window proves stability either way: dialogs that ignore
+    // Escape never change, and closing ones animate out.
+    await this.page.waitForTimeout(1000);
+  }
+
+  async wsSettingsCloseDialogExplicit(): Promise<void> {
+    await this.wsSettingsDialog()
+      .getByRole("button", { name: /^(cancel|close)$/i })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.wsSettingsDialog()
+      .waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async wsSettingsDialogTabOrder(presses: number): Promise<{ order: string[]; escaped: boolean }> {
+    const order: string[] = [];
+    let escaped = false;
+    for (let index = 0; index < presses; index += 1) {
+      await this.page.keyboard.press("Tab");
+      await this.page.waitForTimeout(200);
+      const focused = await this.page.evaluate(() => {
+        const element = document.activeElement as HTMLElement | null;
+        if (element === null) return { label: "<none>", inside: false };
+        const role = element.getAttribute("role") ?? element.tagName.toLowerCase();
+        const name = (
+          element.getAttribute("aria-label") ??
+          element.getAttribute("placeholder") ??
+          element.innerText ??
+          ""
+        )
+          .replace(/\s+/g, " ")
+          .slice(0, 40);
+        return { label: `${role}:${name}`, inside: element.closest('[role="dialog"]') !== null };
+      });
+      order.push(focused.label);
+      if (!focused.inside) escaped = true;
+    }
+    return { order, escaped };
+  }
+
+  async wsSettingsPressKeys(keys: string[]): Promise<void> {
+    for (const key of keys) {
+      await this.page.keyboard.press(key);
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  async wsSettingsMembersSearchEscapeProbe(query: string): Promise<{ value: string; visible: boolean }> {
+    // The roster search is a persistent text field (WSET-037): Escape
+    // must leave both its value and its presence alone. The top bar's
+    // command search ("Search commands...") belongs to the shell.
+    const field = this.page.getByPlaceholder("Search...", { exact: true }).first();
+    await field.fill(query, { timeout: WebNewDriver.WAIT_MS });
+    await field.focus();
+    await this.page.keyboard.press("Escape");
+    await this.page.waitForTimeout(250);
+    return {
+      value: await field.inputValue().catch(() => "<gone>"),
+      visible: await field.isVisible().catch(() => false),
+    };
+  }
+
+  /** Settings list reads seen since the last watch reset (§38). */
+  private wsSettingsListSeen = 0;
+  private wsSettingsListHandler: ((request: { url(): string; method(): string }) => void) | null = null;
+  private wsSettingsSocketsSeen = 0;
+  private wsSettingsSocketHandler: (() => void) | null = null;
+  private wsSettingsDownloadsSeen = 0;
+  private wsSettingsDownloadHandler: (() => void) | null = null;
+
+  async wsSettingsWatchListRequests(): Promise<void> {
+    this.wsSettingsListSeen = 0;
+    if (this.wsSettingsListHandler !== null) return;
+    this.wsSettingsListHandler = (request: { url(): string; method(): string }) => {
+      if (request.method() !== "GET") return;
+      const path = new URL(request.url()).pathname;
+      // The settings lists this row covers: the roster and invitations,
+      // the webhook list, and the caller's personal tokens.
+      if (/\/(members|invitations|webhooks|api-tokens)\/?$/.test(path)) this.wsSettingsListSeen += 1;
+    };
+    this.page.on("request", this.wsSettingsListHandler as (request: never) => void);
+  }
+
+  async wsSettingsListRequestCount(): Promise<number> {
+    return this.wsSettingsListSeen;
+  }
+
+  async wsSettingsWatchSockets(): Promise<void> {
+    this.wsSettingsSocketsSeen = 0;
+    if (this.wsSettingsSocketHandler !== null) return;
+    // The dev server's own hot-reload socket is not app traffic (§38
+    // counts sockets the settings pages open themselves).
+    this.wsSettingsSocketHandler = (socket: { url: () => string }) => {
+      if (WebNewDriver.isDevServerSocket(socket.url())) return;
+      this.wsSettingsSocketsSeen += 1;
+    };
+    this.page.on("websocket", this.wsSettingsSocketHandler as () => void);
+  }
+
+  /** Vite's hot-reload channel: the dev origin root carrying a token. */
+  private static isDevServerSocket(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return parsed.pathname === "/" && parsed.searchParams.has("token");
+    } catch {
+      return false;
+    }
+  }
+
+  async wsSettingsSocketCount(): Promise<number> {
+    return this.wsSettingsSocketsSeen;
+  }
+
+  async wsSettingsMembersListText(): Promise<string[]> {
+    return this.page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="member-row"]')].map((row) =>
+        ((row as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim()
+      )
+    );
+  }
+
+  async wsSettingsWebhooksListText(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const list = document.querySelector('ul[aria-label="Webhooks"]');
+      if (list === null) return [];
+      return [...list.querySelectorAll("li a")].map((link) =>
+        ((link.textContent ?? "") as string).replace(/\s+/g, " ").trim()
+      );
+    });
+  }
+
+  async wsSettingsDraggableCount(): Promise<number> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return main.querySelectorAll('[draggable="true"]').length;
+    });
+  }
+
+  async wsSettingsDragFirstMemberRowToSecond(): Promise<void> {
+    const rows = this.page.locator('[data-testid="member-row"]');
+    const from = await rows.nth(0).boundingBox();
+    const to = await rows.nth(1).boundingBox();
+    if (from === null || to === null) throw new Error("[parity] members roster has no two rows to drag between.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    const end = { x: to.x + to.width / 2, y: to.y + to.height / 2 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(end.x, end.y, { steps: 12 });
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(800);
+  }
+
+  async wsSettingsFileInputCount(): Promise<number> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      return main.querySelectorAll('input[type="file"]').length;
+    });
+  }
+
+  async wsSettingsImportMentions(): Promise<string[]> {
+    return this.page.evaluate(() => {
+      const main = document.querySelector("main") ?? document.body;
+      const hits = [...main.querySelectorAll("button, a")]
+        .map((element) => ((element.textContent ?? "") as string).replace(/\s+/g, " ").trim().slice(0, 40))
+        .filter((text) => /import/i.test(text));
+      return [...new Set(hits)].slice(0, 5);
+    });
+  }
+
+  async wsSettingsWatchDownloads(): Promise<void> {
+    this.wsSettingsDownloadsSeen = 0;
+    if (this.wsSettingsDownloadHandler !== null) return;
+    this.wsSettingsDownloadHandler = () => {
+      this.wsSettingsDownloadsSeen += 1;
+    };
+    this.page.on("download", this.wsSettingsDownloadHandler);
+  }
+
+  async wsSettingsDownloadCount(): Promise<number> {
+    return this.wsSettingsDownloadsSeen;
   }
 
   // Instance startup states (NEWFRONT-548, WSET-034/035). The root gate
@@ -25276,121 +25623,6 @@ export class WebNewDriver implements ParityDriver {
 
   async wsSettingsSetColorScheme(scheme: "light" | "dark"): Promise<void> {
     await this.page.emulateMedia({ colorScheme: scheme });
-  }
-
-  async wsSettingsOpenInviteDialog(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsOpenInviteDialog");
-  }
-
-  async wsSettingsOpenWebhookCreateDialog(_workspaceSlug: string, _cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsOpenWebhookCreateDialog");
-  }
-
-  async wsSettingsOpenTokenCreateDialog(_cookies: ParityBrowserCookie[]): Promise<void> {
-    return todo("wsSettingsOpenTokenCreateDialog");
-  }
-
-  async wsSettingsOpenRemoveMemberDialog(
-    _workspaceSlug: string,
-    _memberEmail: string,
-    _cookies: ParityBrowserCookie[]
-  ): Promise<void> {
-    return todo("wsSettingsOpenRemoveMemberDialog");
-  }
-
-  async wsSettingsOpenDeleteWebhookDialog(
-    _workspaceSlug: string,
-    _webhookId: string,
-    _cookies: ParityBrowserCookie[]
-  ): Promise<void> {
-    return todo("wsSettingsOpenDeleteWebhookDialog");
-  }
-
-  async wsSettingsDialogOpen(): Promise<boolean> {
-    return todo("wsSettingsDialogOpen");
-  }
-
-  async wsSettingsDialogButtons(): Promise<string[]> {
-    return todo("wsSettingsDialogButtons");
-  }
-
-  async wsSettingsPressEscape(): Promise<void> {
-    return todo("wsSettingsPressEscape");
-  }
-
-  async wsSettingsCloseDialogExplicit(): Promise<void> {
-    return todo("wsSettingsCloseDialogExplicit");
-  }
-
-  async wsSettingsDialogTabOrder(_presses: number): Promise<{ order: string[]; escaped: boolean }> {
-    return todo("wsSettingsDialogTabOrder");
-  }
-
-  async wsSettingsPressKeys(_keys: string[]): Promise<void> {
-    return todo("wsSettingsPressKeys");
-  }
-
-  async wsSettingsMembersSearchEscapeProbe(query: string): Promise<{ value: string; visible: boolean }> {
-    // The roster search is a persistent text field (WSET-037): Escape
-    // must leave both its value and its presence alone. The top bar's
-    // command search ("Search commands...") belongs to the shell.
-    const field = this.page.getByPlaceholder("Search...", { exact: true });
-    await field.fill(query, { timeout: WebNewDriver.WAIT_MS });
-    await field.focus();
-    await this.page.keyboard.press("Escape");
-    await this.page.waitForTimeout(250);
-    return {
-      value: await field.inputValue().catch(() => "<gone>"),
-      visible: await field.isVisible().catch(() => false),
-    };
-  }
-
-  async wsSettingsWatchListRequests(): Promise<void> {
-    return todo("wsSettingsWatchListRequests");
-  }
-
-  async wsSettingsListRequestCount(): Promise<number> {
-    return todo("wsSettingsListRequestCount");
-  }
-
-  async wsSettingsWatchSockets(): Promise<void> {
-    return todo("wsSettingsWatchSockets");
-  }
-
-  async wsSettingsSocketCount(): Promise<number> {
-    return todo("wsSettingsSocketCount");
-  }
-
-  async wsSettingsMembersListText(): Promise<string[]> {
-    return todo("wsSettingsMembersListText");
-  }
-
-  async wsSettingsWebhooksListText(): Promise<string[]> {
-    return todo("wsSettingsWebhooksListText");
-  }
-
-  async wsSettingsDraggableCount(): Promise<number> {
-    return todo("wsSettingsDraggableCount");
-  }
-
-  async wsSettingsDragFirstMemberRowToSecond(): Promise<void> {
-    return todo("wsSettingsDragFirstMemberRowToSecond");
-  }
-
-  async wsSettingsFileInputCount(): Promise<number> {
-    return todo("wsSettingsFileInputCount");
-  }
-
-  async wsSettingsImportMentions(): Promise<string[]> {
-    return todo("wsSettingsImportMentions");
-  }
-
-  async wsSettingsWatchDownloads(): Promise<void> {
-    return todo("wsSettingsWatchDownloads");
-  }
-
-  async wsSettingsDownloadCount(): Promise<number> {
-    return todo("wsSettingsDownloadCount");
   }
 
   // --- Workspace billing oracle (NEWFRONT-414, WSET-029..032). The billing
@@ -25644,62 +25876,151 @@ export class WebNewDriver implements ParityDriver {
   // with NEWFRONT-534's own driver pass. The general rows below need only
   // opening an address and reading the path, so those two live here.
 
+  /**
+   * Bucket requests on the dev origin have no server (see the bridge
+   * helper); install the forwarding route once per page, before the first
+   * settings paint can request the stored logo.
+   */
+  private async wsSettingsEnsureAssetBridge(): Promise<void> {
+    if (this.wsSettingsAssetBridgeInstalled) return;
+    this.wsSettingsAssetBridgeInstalled = true;
+    await bridgeParityAssetBucket(this.page);
+  }
+
   async wsSettingsOpen(workspaceSlug: string, section: string): Promise<void> {
+    await this.wsSettingsEnsureAssetBridge();
     const suffix = section === "" ? "" : `/${section}`;
     await this.page.goto(`/${workspaceSlug}/settings${suffix}/`, { timeout: 60_000 });
     await this.page.waitForLoadState("domcontentloaded");
-    // Settle on whichever surface the address resolves to: the page body,
-    // the shell frame with a registered body, or the denial view.
+    // Settle on whichever surface the address resolves to: the shell frame,
+    // the denial view, the instance screens or the workspace-not-found
+    // screen, and then on the frame's section heading. The served document
+    // is a static shell whose title is already set, so a title check
+    // returns before hydration paints the settings page.
+    await this.wsSettingsAwaitSettingsSurface();
+    // Only the shell carries a section heading. Denied and instance
+    // screens settle on their own surface, so waiting for a heading there
+    // would spend the whole bound on an element that never exists.
+    if ((await this.page.getByTestId("workspace-settings-shell").count()) === 0) return;
     await this.page
-      .waitForFunction(
-        () =>
-          document.title !== "" ||
-          document.querySelector("[data-testid='workspace-settings-section-placeholder']") !== null ||
-          [...document.querySelectorAll("*")].some(
-            (node) =>
-              node.children.length === 0 &&
-              (node.textContent ?? "").includes("not authorized") &&
-              (node as HTMLElement).getBoundingClientRect().width > 0
-          ),
-        { timeout: 60_000 }
-      )
+      .locator("[data-testid='workspace-settings-shell'] h1, h2")
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS })
       .catch(() => undefined);
   }
+  /** Set once wsSettingsEnsureAssetBridge has installed its route. */
+  private wsSettingsAssetBridgeInstalled = false;
+
+  /** The wide sidebar; hidden below the desktop breakpoint (§1). */
+  private wsSettingsSidebarNav(): Locator {
+    return this.page.getByTestId("workspace-settings-sidebar").getByTestId("workspace-settings-nav").first();
+  }
+
+  /**
+   * Group headings and their entries in DOM order, from one navigation.
+   * The denial and instance screens render no navigation at all, so an
+   * absent one reads as empty instead of waiting on a node that never
+   * mounts (their outcomes carry no entries by definition).
+   */
+  private async wsSettingsReadNav(nav: Locator): Promise<{ groups: string[]; items: string[] }> {
+    if ((await nav.count()) === 0) return { groups: [], items: [] };
+    return nav.evaluate((root) => {
+      const visible = (node: Element): boolean => {
+        const rect = (node as HTMLElement).getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const groups: string[] = [];
+      const items: string[] = [];
+      for (const section of [...root.querySelectorAll("section")]) {
+        if (!visible(section)) continue;
+        const heading = section.querySelector("h2");
+        const label = ((heading?.textContent ?? "") as string).replace(/\s+/g, " ").trim();
+        if (label !== "" && !groups.includes(label)) groups.push(label);
+        for (const link of [...section.querySelectorAll("li > a")]) {
+          if (!visible(link)) continue;
+          const text = ((link as HTMLElement).innerText ?? "").replace(/\s+/g, " ").trim();
+          if (text !== "") items.push(text);
+        }
+      }
+      return { groups, items };
+    });
+  }
+
   async wsSettingsGroups(): Promise<string[]> {
-    return todo("wsSettingsGroups");
+    return (await this.wsSettingsReadNav(this.wsSettingsSidebarNav())).groups;
   }
+
   async wsSettingsItems(): Promise<string[]> {
-    return todo("wsSettingsItems");
+    return (await this.wsSettingsReadNav(this.wsSettingsSidebarNav())).items;
   }
+
   async wsSettingsActiveItem(): Promise<string | null> {
-    return todo("wsSettingsActiveItem");
+    const active = this.wsSettingsSidebarNav().locator('a[aria-current="page"]').first();
+    if ((await active.count()) === 0) return null;
+    if (!(await active.isVisible().catch(() => false))) return null;
+    const text = ((await active.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
+    return text === "" ? null : text;
   }
-  async wsSettingsFollowItem(_label: string): Promise<void> {
-    return todo("wsSettingsFollowItem");
+
+  async wsSettingsFollowItem(label: string): Promise<void> {
+    const before = await this.wsSettingsPath();
+    await this.wsSettingsSidebarNav()
+      .getByRole("link", { name: label, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    // The entry is a client-side navigation: wait for the address and the
+    // highlight to agree with the picked entry (§1).
+    await this.page
+      .waitForFunction((prior) => window.location.pathname !== prior, before, { timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    while (Date.now() < deadline) {
+      if ((await this.wsSettingsActiveItem()) === label) return;
+      await this.page.waitForTimeout(250);
+    }
   }
+
   async wsSettingsPath(): Promise<string> {
     return new URL(this.page.url()).pathname;
   }
+
   async wsSettingsTitle(): Promise<string> {
-    return todo("wsSettingsTitle");
+    return this.page.title();
   }
+
   async wsSettingsDeniedVisible(): Promise<boolean> {
-    return todo("wsSettingsDeniedVisible");
+    return this.isShown(this.page.getByTestId("workspace-settings-not-authorized"));
   }
+
+  /** The narrow bar's trigger only paints below the breakpoint (§1). */
+  private wsSettingsNarrowTrigger(): Locator {
+    return this.page.getByRole("button", { name: "Open settings navigation", exact: true }).first();
+  }
+
   async wsSettingsNarrowTriggerVisible(): Promise<boolean> {
-    return todo("wsSettingsNarrowTriggerVisible");
+    return this.isShown(this.wsSettingsNarrowTrigger());
   }
+
   async wsSettingsOpenDrawer(): Promise<void> {
-    return todo("wsSettingsOpenDrawer");
+    await this.page.setViewportSize({ width: 390, height: 844 });
+    await this.wsSettingsNarrowTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("workspace-settings-drawer").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsDrawerItems(): Promise<string[]> {
-    return todo("wsSettingsDrawerItems");
+    const drawer = this.page.getByTestId("workspace-settings-drawer").first();
+    if ((await drawer.count()) === 0) return [];
+    return (await this.wsSettingsReadNav(drawer)).items;
   }
+
   async wsSettingsMobileCrumb(): Promise<string> {
-    return todo("wsSettingsMobileCrumb");
+    const crumb = this.page.getByTestId("workspace-settings-mobile-crumb").first();
+    if ((await crumb.count()) === 0) return "";
+    return ((await crumb.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
+
   async wsSettingsWideViewport(): Promise<void> {
-    return todo("wsSettingsWideViewport");
+    await this.page.setViewportSize({ width: 1280, height: 800 });
   }
   async wsSettingsGeneralVisible(): Promise<boolean> {
     const form = this.page.getByTestId("workspace-general-form").first();
@@ -26327,7 +26648,13 @@ export class WebNewDriver implements ParityDriver {
   }
 
   private webhookRowSwitch(url: string): Locator {
-    return this.webhookRowLink(url).first().getByRole("switch");
+    // The switch is a sibling of the row's link (inside the row), not a
+    // descendant of it, so read it from the row that holds the link.
+    return this.page
+      .locator("li")
+      .filter({ has: this.page.locator('a[href*="/settings/webhooks/"]').filter({ hasText: url }) })
+      .first()
+      .getByRole("switch");
   }
 
   async wsSettingsWebhooksRowActiveOn(url: string): Promise<boolean> {
@@ -33324,16 +33651,19 @@ export class WebNewDriver implements ParityDriver {
       .toMatch(/\/settings\/profile\/api-tokens\/?$/);
     await this.wsSettingsApiTokenWaitForContent();
   }
+
   async wsSettingsApiTokenHeading(): Promise<string | null> {
     const heading = this.page.getByRole("heading", { name: "Personal Access Tokens", exact: true }).first();
     if ((await heading.count()) === 0) return null;
     const text = (((await heading.textContent().catch(() => null)) ?? "").trim() || null) as string | null;
     return text;
   }
+
   async wsSettingsApiTokenAddVisible(): Promise<boolean> {
     const add = this.page.getByRole("button", { name: "Add personal access token", exact: true }).first();
     return (await add.count()) > 0 && (await add.isVisible().catch(() => false));
   }
+
   async wsSettingsApiTokenLoaderSeen(): Promise<boolean> {
     // Call after OpenTokens: the session cookies the earlier navigation
     // planted carry this reload, and the route hold keeps the loader up
@@ -33394,6 +33724,7 @@ export class WebNewDriver implements ParityDriver {
       await this.page.unroute(pattern);
     }
   }
+
   async wsSettingsApiTokenEmptyVisible(): Promise<boolean> {
     const title = this.page.getByText("No Personal token yet", { exact: true }).first();
     const action = this.page.getByRole("button", { name: "Add API token", exact: true }).first();
@@ -33404,18 +33735,21 @@ export class WebNewDriver implements ParityDriver {
       (await action.isVisible().catch(() => false))
     );
   }
+
   async wsSettingsApiTokenEmptyCreate(): Promise<void> {
     await this.page
       .getByRole("button", { name: "Add API token", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.wsSettingsApiTokenWaitForCreateForm();
   }
+
   async wsSettingsApiTokenOpenCreate(): Promise<void> {
     await this.page
       .getByRole("button", { name: "Add personal access token", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
     await this.wsSettingsApiTokenWaitForCreateForm();
   }
+
   async wsSettingsApiTokenRows(): Promise<WsSettingsApiTokenRow[]> {
     await this.wsSettingsApiTokenWaitForContent();
     const heads = this.page.getByRole("heading", { level: 5 });
@@ -33434,6 +33768,7 @@ export class WebNewDriver implements ParityDriver {
     }
     return rows;
   }
+
   async wsSettingsApiTokenPageText(): Promise<string> {
     return (
       (await this.page
@@ -33445,6 +33780,7 @@ export class WebNewDriver implements ParityDriver {
       .replace(/\s+/g, " ")
       .trim();
   }
+
   async wsSettingsApiTokenDialogOpen(): Promise<boolean> {
     const title = this.page.getByPlaceholder("Title", { exact: true }).first();
     return (await title.count()) > 0 && (await title.isVisible().catch(() => false));
@@ -33455,6 +33791,7 @@ export class WebNewDriver implements ParityDriver {
   async wsSettingsApiTokenFillDescription(text: string): Promise<void> {
     await this.page.getByPlaceholder("Description", { exact: true }).fill(text);
   }
+
   async wsSettingsApiTokenTitleError(): Promise<string | null> {
     const error = this.wsSettingsApiTokenDialog()
       .getByText(/Title (is required|should be less than 255 characters)/)
@@ -33463,6 +33800,7 @@ export class WebNewDriver implements ParityDriver {
     const text = ((await error.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
     return text === "" ? null : text;
   }
+
   async wsSettingsApiTokenPresetOptions(): Promise<string[]> {
     await this.wsSettingsApiTokenExpiryTrigger().click({ timeout: WebNewDriver.WAIT_MS });
     const options = this.page.getByRole("option");
@@ -33477,6 +33815,7 @@ export class WebNewDriver implements ParityDriver {
     await this.page.getByRole("option", { name: label, exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await expect.poll(() => this.page.getByRole("option").count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
   }
+
   async wsSettingsApiTokenExpiryTriggerText(): Promise<string> {
     return (
       (await this.wsSettingsApiTokenExpiryTrigger()
@@ -33486,9 +33825,11 @@ export class WebNewDriver implements ParityDriver {
       .trim()
       .replace(/\s+/g, " ");
   }
+
   async wsSettingsApiTokenExpiryTriggerDisabled(): Promise<boolean> {
     return this.wsSettingsApiTokenExpiryTrigger().isDisabled();
   }
+
   async wsSettingsApiTokenExpiryPreview(): Promise<string | null> {
     const preview = this.wsSettingsApiTokenDialog()
       .getByText(/^Expires /)
@@ -33497,6 +33838,7 @@ export class WebNewDriver implements ParityDriver {
     const text = ((await preview.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
     return text === "" ? null : text;
   }
+
   async wsSettingsApiTokenToggleNeverExpires(): Promise<void> {
     await this.wsSettingsApiTokenDialog()
       .getByText("Never expires", { exact: true })
@@ -33521,6 +33863,7 @@ export class WebNewDriver implements ParityDriver {
       .first()
       .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsApiTokenCustomFloor(): Promise<{ todayDisabled: boolean; tomorrowEnabled: boolean }> {
     await this.wsSettingsApiTokenPickPreset("Custom");
     await this.wsSettingsApiTokenDialog()
@@ -33540,11 +33883,13 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => this.page.locator('[role="gridcell"]').count(), { timeout: WebNewDriver.WAIT_MS }).toBe(0);
     return { todayDisabled, tomorrowEnabled };
   }
+
   async wsSettingsApiTokenSubmit(): Promise<void> {
     await this.page
       .getByRole("button", { name: "Generate token", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async wsSettingsApiTokenSubmitAndCaptureBackup(): Promise<WsSettingsApiTokenBackup> {
     const [download] = await Promise.all([
       this.page.waitForEvent("download", { timeout: 60_000 }),
@@ -33556,6 +33901,7 @@ export class WebNewDriver implements ParityDriver {
     for await (const chunk of stream) chunks.push(Buffer.from(chunk));
     return { fileName: download.suggestedFilename(), content: Buffer.concat(chunks).toString("utf8") };
   }
+
   async wsSettingsApiTokenCancelCreate(): Promise<void> {
     await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await expect
@@ -33564,18 +33910,21 @@ export class WebNewDriver implements ParityDriver {
       })
       .toBe(0);
   }
+
   async wsSettingsApiTokenRevealHeading(): Promise<string | null> {
     const heading = this.page.getByRole("heading", { name: "Key created", exact: true }).first();
     if ((await heading.count()) === 0) return null;
     const text = ((await heading.textContent().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") ?? "";
     return text === "" ? null : text;
   }
+
   async wsSettingsApiTokenRevealValue(): Promise<string | null> {
     const secret = this.page.getByTestId("token-secret").first();
     if ((await secret.count()) === 0) return null;
     const text = ((await secret.innerText().catch(() => null)) ?? "").trim() ?? "";
     return /pi_dash_api_[0-9a-f]+/.exec(text)?.[0] ?? null;
   }
+
   async wsSettingsApiTokenRevealExpiryLine(): Promise<string | null> {
     const text =
       (await this.wsSettingsApiTokenDialog()
@@ -33587,6 +33936,7 @@ export class WebNewDriver implements ParityDriver {
       .find((part) => /^(Expires |Never expires$)/.test(part));
     return line ?? null;
   }
+
   async wsSettingsApiTokenRevealCopy(): Promise<string> {
     // Copying writes to the clipboard, which headless Chromium denies
     // without an explicit grant; arrange it before the click.
@@ -33599,6 +33949,7 @@ export class WebNewDriver implements ParityDriver {
       .not.toBe("");
     return this.page.evaluate(() => navigator.clipboard.readText());
   }
+
   async wsSettingsApiTokenRevealClose(): Promise<void> {
     await this.page.getByRole("button", { name: "Close", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await expect
@@ -33624,6 +33975,7 @@ export class WebNewDriver implements ParityDriver {
       .trim()
       .replace(/\s+/g, " ");
   }
+
   async wsSettingsApiTokenDeleteCancel(): Promise<void> {
     await this.page.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
     await expect
