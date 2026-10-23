@@ -39,11 +39,17 @@ vi.mock("../../shared/shell/index.js", async (importOriginal) => ({
 }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
-  Link: (props: { children?: React.ReactNode; to?: string; className?: string; params?: unknown }) => (
-    <a href={String(props.to)} className={props.className} data-params={JSON.stringify(props.params)}>
-      {props.children as React.ReactNode}
-    </a>
-  ),
+  Link: (props: { children?: React.ReactNode; to?: string; className?: string; params?: Record<string, string> }) => {
+    const href = Object.entries(props.params ?? {}).reduce(
+      (path, [key, value]) => path.replace(`$${key}`, value),
+      String(props.to)
+    );
+    return (
+      <a href={href} className={props.className} data-params={JSON.stringify(props.params)}>
+        {props.children as React.ReactNode}
+      </a>
+    );
+  },
 }));
 
 import { useDocumentHead } from "../../shared/shell/index.js";
@@ -257,6 +263,15 @@ describe("BindingDetailBody", () => {
     expect(within(history).getByText("Filed one issue.")).toBeInTheDocument();
     await user.click(within(history).getByText("Main pool"));
     expect(navigate).toHaveBeenCalledWith({ href: `/${SLUG}/projects/${PROJECT}/runners/runs/r1` });
+  });
+
+  it("offers each run row as a link to the run detail", async () => {
+    setup({ runs: page([runRow()]) });
+    const history = await screen.findByRole("region", { name: "Run history" });
+    expect(within(history).getByRole("link", { name: "Oct 20, 2026, 9:00 AM" })).toHaveAttribute(
+      "href",
+      `/${SLUG}/projects/${PROJECT}/runners/runs/r1`
+    );
   });
 
   it("pages through the run history", async () => {

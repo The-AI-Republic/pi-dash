@@ -321,7 +321,16 @@ export function BindingDetailBody({
                       void navigate({ href: `/${workspaceSlug}/projects/${projectId}/runners/runs/${run.id}` });
                     }}
                   >
-                    <td className="px-(--space-3) py-(--space-2) whitespace-nowrap">{runStartedLabel(run)}</td>
+                    <td className="px-(--space-3) py-(--space-2) whitespace-nowrap">
+                      <Link
+                        to="/$ws/projects/$projectId/runners/runs/$id"
+                        params={{ ws: workspaceSlug, projectId, id: run.id }}
+                        className="text-(--accent) hover:underline"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        {runStartedLabel(run)}
+                      </Link>
+                    </td>
                     <td className="px-(--space-3) py-(--space-2) whitespace-nowrap">{formatMoment(run.ended_at)}</td>
                     <td className="px-(--space-3) py-(--space-2)">
                       <StatusMark status={run.status} />
