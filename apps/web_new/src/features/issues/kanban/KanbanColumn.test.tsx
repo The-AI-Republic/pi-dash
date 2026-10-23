@@ -2,16 +2,17 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Board columns (parity/specs/issues.md §5, ISS-028/030): the header's
-// glyph, name and live count, the collapse fold to the narrow strip, the
-// skeleton during the first page, the quick-add slot and the swimlane
-// cell's fold.
-import { render, screen } from "@testing-library/react";
+// Board columns (parity/specs/issues.md §5, ISS-028/030, ISS-041–042): the
+// header's glyph, name and live count, the collapse fold to the narrow
+// strip, the skeleton during the first page, the quick-add slot, the
+// swimlane cell's fold, the drop-disabled overlay, the scroll sentinel
+// and the explicit load-more entry.
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { KanbanColumn, KanbanLaneColumn } from "./KanbanColumn.js";
+import { KanbanColumn, KanbanColumnSentinel, KanbanLaneColumn, KanbanLoadMore } from "./KanbanColumn.js";
 
 describe("KanbanColumn", () => {
   it("renders the name, count, cards and footer", () => {
@@ -108,6 +109,124 @@ describe("KanbanColumn", () => {
     );
     expect(screen.queryByTestId("kanban-column-loading")).not.toBeInTheDocument();
     expect(screen.getByTestId("card-a")).toBeInTheDocument();
+  });
+});
+
+describe("column header add control", () => {
+  it("passes the add control through to the header", () => {
+    render(
+      <KanbanColumn
+        columnKey="todo"
+        title="Todo"
+        count={1}
+        rows={[]}
+        loading={false}
+        collapsed={false}
+        onToggleCollapse={vi.fn()}
+        create={<div data-testid="column-create" />}
+      />
+    );
+    expect(screen.getByTestId("column-create")).toBeInTheDocument();
+  });
+});
+
+describe("column drop overlay and pagination slot", () => {
+  it("paints the drop-disabled notice over the column body", () => {
+    render(
+      <KanbanColumn
+        columnKey="todo"
+        title="Todo"
+        count={1}
+        rows={[<div key="a" data-testid="card-a" />]}
+        loading={false}
+        collapsed={false}
+        onToggleCollapse={vi.fn()}
+        dropOverlayText="Ordered by Priority"
+        afterRows={<div data-testid="sentinel" />}
+      />
+    );
+    expect(screen.getByTestId("kanban-drop-overlay")).toHaveTextContent("Ordered by Priority");
+    expect(screen.getByTestId("sentinel")).toBeInTheDocument();
+  });
+
+  it("renders no overlay without a notice", () => {
+    render(
+      <KanbanColumn
+        columnKey="todo"
+        title="Todo"
+        count={1}
+        rows={[<div key="a" data-testid="card-a" />]}
+        loading={false}
+        collapsed={false}
+        onToggleCollapse={vi.fn()}
+        dropOverlayText={null}
+      />
+    );
+    expect(screen.queryByTestId("kanban-drop-overlay")).not.toBeInTheDocument();
+  });
+
+  it("paints the notice over a swimlane cell", () => {
+    render(
+      <KanbanLaneColumn
+        laneKey="bug"
+        columnKey="todo"
+        collapsed={false}
+        rows={[<div key="a" data-testid="card-a" />]}
+        dropOverlayText="Cannot move to a completed cycle"
+        afterRows={<div data-testid="cell-more" />}
+      />
+    );
+    expect(screen.getByTestId("kanban-drop-overlay")).toHaveTextContent("Cannot move to a completed cycle");
+    expect(screen.getByTestId("cell-more")).toBeInTheDocument();
+  });
+});
+
+describe("KanbanColumnSentinel", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("fires once its end nears the viewport", () => {
+    const callbacks: Array<(entries: Array<{ isIntersecting: boolean }>) => void> = [];
+    const disconnects: Array<() => void> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: (entries: Array<{ isIntersecting: boolean }>) => void) {
+          callbacks.push(callback);
+        }
+        observe(): void {}
+        disconnect(): void {
+          disconnects.push(() => undefined);
+        }
+      }
+    );
+    const onVisible = vi.fn();
+    const { unmount } = render(<KanbanColumnSentinel onVisible={onVisible} />);
+    expect(screen.getByTestId("kanban-column-sentinel")).toBeInTheDocument();
+    act(() => callbacks[0]?.([{ isIntersecting: false }]));
+    expect(onVisible).not.toHaveBeenCalled();
+    act(() => callbacks[0]?.([{ isIntersecting: true }]));
+    expect(onVisible).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(disconnects).toHaveLength(1);
+  });
+
+  it("renders inert without an observer", () => {
+    const onVisible = vi.fn();
+    render(<KanbanColumnSentinel onVisible={onVisible} />);
+    expect(screen.getByTestId("kanban-column-sentinel")).toBeInTheDocument();
+    expect(onVisible).not.toHaveBeenCalled();
+  });
+});
+
+describe("KanbanLoadMore", () => {
+  it("loads the next page on press", async () => {
+    const user = userEvent.setup();
+    const onLoad = vi.fn();
+    render(<KanbanLoadMore onLoad={onLoad} />);
+    await user.click(screen.getByTestId("kanban-load-more"));
+    expect(onLoad).toHaveBeenCalledTimes(1);
   });
 });
 

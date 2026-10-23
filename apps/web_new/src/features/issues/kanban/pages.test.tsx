@@ -2,18 +2,29 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Board reads (parity/specs/issues.md §5, ISS-028/029): the grouped and
-// sub-grouped endpoints, their page sizes and grouping parameters, the
-// project/cycle/module paths, the key axes and envelope shaping.
+// Board reads (parity/specs/issues.md §5, ISS-028/029, ISS-042): the grouped
+// and sub-grouped endpoints, their page sizes and grouping parameters,
+// the project/cycle/module paths, the key axes, envelope shaping, and
+// per-column/per-cell later pages.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createClient, type IssueListItem } from "@pidash/api-client";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { resetAppClient } from "../../../core/api/client.js";
 import type { IssuesEntity } from "../prefs/entities.js";
-import { boardQueryKey, isGrouped, isSubGrouped, readBoard, toBoard, useBoard, type BoardReadInput } from "./pages.js";
+import {
+  boardCellKey,
+  boardCellOf,
+  boardQueryKey,
+  isGrouped,
+  isSubGrouped,
+  readBoard,
+  toBoard,
+  useBoard,
+  type BoardReadInput,
+} from "./pages.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
 const CYCLE = "323e4567-e89b-12d3-a456-426614174002";
@@ -232,5 +243,295 @@ describe("useBoard", () => {
     expect(result.current.board).toBeNull();
     await waitFor(() => expect(result.current.board).not.toBeNull());
     expect(result.current.board?.columns[0]?.title).toBe("Todo");
+  });
+});
+
+function many(prefix: string, count: number): IssueListItem[] {
+  return Array.from({ length: count }, (_, index) =>
+    row({
+      id: `223e4567-e89b-12d3-a456-42661417${String(4000 + index).slice(-4)}`,
+      name: `${prefix} ${index}`,
+      sequence_id: 100 + index,
+    })
+  );
+}
+
+function extraRow(index: number): IssueListItem {
+  return row({
+    id: `223e4567-e89b-12d3-a456-42661417${String(5000 + index).slice(-4)}`,
+    name: `extra ${index}`,
+    sequence_id: 200 + index,
+  });
+}
+
+function groupedPage(rows: IssueListItem[], total: number): Record<string, unknown> {
+  return {
+    ...envelope,
+    grouped_by: "state_id",
+    total_count: total,
+    results: { [STATE]: { results: rows, total_results: total } },
+  };
+}
+
+function subPage(rows: IssueListItem[], total: number): Record<string, unknown> {
+  return {
+    ...envelope,
+    grouped_by: "state_id",
+    sub_grouped_by: "labels__id",
+    total_count: total,
+    results: {
+      [STATE]: { results: { None: { results: rows, total_results: total } }, total_results: total },
+    },
+  };
+}
+
+function flatPage(rows: IssueListItem[], total: number, nextCursor: string): Record<string, unknown> {
+  return {
+    ...envelope,
+    total_count: total,
+    count: rows.length,
+    total_results: total,
+    next_cursor: nextCursor,
+    next_page_results: nextCursor !== "",
+    results: rows,
+  };
+}
+
+function pagingClient(first: Record<string, unknown>, pages: Record<string, Record<string, unknown>>) {
+  const calls: string[] = [];
+  const client = createClient({
+    baseUrl: "https://api.test",
+    transport: async (url) => {
+      calls.push(url);
+      const cursor = new URL(url).searchParams.get("cursor") ?? "";
+      const body = cursor === "" ? first : (pages[cursor] ?? first);
+      return { status: 200, url, headers: { get: () => "application/json" }, text: async () => JSON.stringify(body) };
+    },
+  });
+  return { client, calls };
+}
+
+function deferredClient(first: Record<string, unknown>, second: Record<string, unknown>) {
+  const calls: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const client = createClient({
+    baseUrl: "https://api.test",
+    transport: async (url) => {
+      calls.push(url);
+      const cursor = new URL(url).searchParams.get("cursor") ?? "";
+      const body = cursor === "" ? first : second;
+      if (cursor !== "") await gate;
+      return { status: 200, url, headers: { get: () => "application/json" }, text: async () => JSON.stringify(body) };
+    },
+  });
+  return { client, calls, release };
+}
+
+function boardClient(): QueryClient {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } });
+}
+
+describe("boardCellKey and boardCellOf", () => {
+  it("keys a cell by its lane and column", () => {
+    expect(boardCellKey(STATE, "bug")).toBe(JSON.stringify(["bug", STATE]));
+  });
+
+  it("reads flat and swimlane cells and misses cleanly", () => {
+    expect(boardCellOf(null, STATE, null)).toBeNull();
+    const board = toBoard(groupedPage(many("g", 2), 2) as never, input());
+    expect(boardCellOf(board, STATE, null)?.rows).toHaveLength(2);
+    expect(boardCellOf(board, "missing", null)).toBeNull();
+    expect(boardCellOf(board, STATE, "missing")).toBeNull();
+    expect(boardCellOf({ ...board, lanes: [] }, STATE, null)).toBeNull();
+    const sub = toBoard(subPage(many("s", 1), 1) as never, input({ subGroupBy: "labels" }));
+    expect(boardCellOf(sub, STATE, "None")?.rows).toHaveLength(1);
+  });
+});
+
+describe("board pagination", () => {
+  it("sends the cursor on later grouped and flat reads", async () => {
+    const { client, calls } = recordingClient(groupedEnvelope);
+    await readBoard(client, "acme", input(), "30:1:0");
+    expect(new URL(calls[0]!.url).searchParams.get("cursor")).toBe("30:1:0");
+    const flat = recordingClient(envelope);
+    await readBoard(flat.client, "acme", input({ groupBy: null }), "30:1:0");
+    expect(new URL(flat.calls[0]!.url).searchParams.get("cursor")).toBe("30:1:0");
+  });
+
+  it("pages a grouped column at its own row count without refetching cursors", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(groupedPage(many("g", 30), 32), {
+      "30:1:0": groupedPage([extraRow(0), extraRow(1)], 32),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input()), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(result.current.columnHasMore(STATE)).toBe(true);
+    expect(result.current.columnHasMore("missing")).toBe(false);
+    act(() => result.current.loadMoreColumn(STATE));
+    await waitFor(() => expect(result.current.columnHasMore(STATE)).toBe(false));
+    expect(boardCellOf(result.current.board, STATE, null)?.rows).toHaveLength(32);
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[1]!).searchParams.get("cursor")).toBe("30:1:0");
+    act(() => result.current.loadMoreColumn(STATE));
+    act(() => result.current.loadMoreColumn("missing"));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("pages a sub-grouped cell behind its own cursor", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(subPage(many("s", 10), 12), {
+      "10:1:0": subPage([extraRow(0), extraRow(1)], 12),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input({ subGroupBy: "labels" })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(result.current.cellHasMore(STATE, "None")).toBe(true);
+    expect(result.current.cellHasMore(STATE, "missing")).toBe(false);
+    act(() => result.current.loadMoreCell(STATE, "None"));
+    await waitFor(() => expect(result.current.cellHasMore(STATE, "None")).toBe(false));
+    expect(boardCellOf(result.current.board, STATE, "None")?.rows).toHaveLength(12);
+    expect(calls).toHaveLength(2);
+    expect(new URL(calls[1]!).searchParams.get("cursor")).toBe("10:1:0");
+    act(() => result.current.loadMoreCell(STATE, "None"));
+    act(() => result.current.loadMoreCell(STATE, "missing"));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("follows the flat cursor chain on the single column", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(flatPage(many("f", 30), 32, "30:1:0"), {
+      "30:1:0": flatPage([extraRow(0), extraRow(1)], 32, ""),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input({ groupBy: null })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(result.current.columnHasMore("all")).toBe(true);
+    act(() => result.current.loadMoreColumn("all"));
+    await waitFor(() => expect(result.current.columnHasMore("all")).toBe(false));
+    expect(boardCellOf(result.current.board, "all", null)?.rows).toHaveLength(32);
+    expect(calls).toHaveLength(2);
+    act(() => result.current.loadMoreColumn("all"));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("holds the flat column while its chain ends or loses its cursor", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(flatPage(many("f", 2), 3, ""), {});
+    const { result } = renderHook(() => useBoard(client, "acme", input({ groupBy: null })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(result.current.columnHasMore("all")).toBe(true);
+    act(() => result.current.loadMoreColumn("all"));
+    expect(calls).toHaveLength(1);
+  });
+
+  it("ignores a grouped cursor the server already answered", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(groupedPage(many("g", 30), 32), {
+      "30:1:0": groupedPage([], 32),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input()), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    act(() => result.current.loadMoreColumn(STATE));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(result.current.columnHasMore(STATE)).toBe(true);
+    act(() => result.current.loadMoreColumn(STATE));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("ignores a cell cursor the server already answered", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(subPage(many("s", 10), 12), {
+      "10:1:0": subPage([], 12),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input({ subGroupBy: "labels" })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    act(() => result.current.loadMoreCell(STATE, "None"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(result.current.cellHasMore(STATE, "None")).toBe(true);
+    act(() => result.current.loadMoreCell(STATE, "None"));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("holds a flat cursor the server repeats", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(flatPage(many("f", 30), 60, "30:1:0"), {
+      "30:1:0": flatPage([], 60, "30:1:0"),
+    });
+    const { result } = renderHook(() => useBoard(client, "acme", input({ groupBy: null })), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(result.current.columnFetching("all")).toBe(false);
+    act(() => result.current.loadMoreColumn("all"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(result.current.columnHasMore("all")).toBe(true);
+    act(() => result.current.loadMoreColumn("all"));
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reports per-owner fetching while a later page flies", async () => {
+    const queryClient = boardClient();
+    const { client, release } = deferredClient(groupedPage(many("g", 30), 32), groupedPage([extraRow(0)], 32));
+    const { result } = renderHook(() => useBoard(client, "acme", input()), {
+      wrapper: wrapper(queryClient),
+    });
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    expect(result.current.columnFetching(STATE)).toBe(false);
+    act(() => result.current.loadMoreColumn(STATE));
+    await waitFor(() => expect(result.current.columnFetching(STATE)).toBe(true));
+    expect(result.current.isFetching).toBe(true);
+    expect(result.current.columnFetching("other")).toBe(false);
+    expect(result.current.cellFetching(STATE, "None")).toBe(false);
+    act(() => release());
+    await waitFor(() => expect(result.current.columnFetching(STATE)).toBe(false));
+  });
+
+  it("resets asked cursors when the read changes", async () => {
+    const queryClient = boardClient();
+    const { client, calls } = pagingClient(groupedPage(many("g", 30), 32), {
+      "30:1:0": groupedPage([extraRow(0)], 32),
+    });
+    const { result, rerender } = renderHook(
+      ({ groupBy }: { groupBy: string | null }) => useBoard(client, "acme", input({ groupBy })),
+      {
+        wrapper: wrapper(queryClient),
+        initialProps: { groupBy: "state" as string | null },
+      }
+    );
+    await waitFor(() => expect(result.current.board).not.toBeNull());
+    act(() => result.current.loadMoreColumn(STATE));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    rerender({ groupBy: "priority" });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(new URL(calls[2]!).searchParams.get("group_by")).toBe("priority");
+    expect(calls.filter((url) => new URL(url).searchParams.has("cursor"))).toHaveLength(1);
+  });
+
+  it("answers empty while the first page is pending", () => {
+    const queryClient = boardClient();
+    const { client } = pagingClient(groupedPage(many("g", 1), 1), {});
+    const { result } = renderHook(() => useBoard(client, "acme", input()), {
+      wrapper: wrapper(queryClient),
+    });
+    expect(result.current.board).toBeNull();
+    expect(result.current.columnHasMore(STATE)).toBe(false);
+    expect(result.current.cellHasMore(STATE, "None")).toBe(false);
+    expect(result.current.columnFetching(STATE)).toBe(false);
+    expect(result.current.cellFetching(STATE, "None")).toBe(false);
+    act(() => result.current.loadMoreColumn(STATE));
+    act(() => result.current.loadMoreCell(STATE, "None"));
   });
 });

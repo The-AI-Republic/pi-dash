@@ -20,6 +20,7 @@ import type {
 } from "@pidash/api-client";
 
 import { GROUP_NONE_LABEL } from "../display/matrix.js";
+import type { CreateFormInitialValues } from "../create/createForm.js";
 import { FLAT_GROUP_TITLE, groupTitle, normalizeGroupedRow, orderGroupKeys, sectionPrefill } from "../list/grouping.js";
 import type { IssueGroupSection } from "../list/grouping.js";
 
@@ -333,3 +334,63 @@ export function showsGroup(total: number, showEmpty: boolean): boolean {
 
 /** Empty-value bucket title, shared by columns and lanes. */
 export const EMPTY_GROUP_TITLE = GROUP_NONE_LABEL;
+
+/** Whether a column or cell still has unseen rows. */
+export function boardHasMore(loaded: number, total: number): boolean {
+  return loaded < total;
+}
+
+/** Cursor asking the server for the page that starts at `loaded` rows. */
+export function boardPageCursor(loaded: number, pageSize: number): string {
+  return `${pageSize}:${Math.floor(loaded / pageSize)}:0`;
+}
+
+/**
+ * Fold a later page into the board: rows append per cell without
+ * duplicates, and every total refreshes from the latest envelope. Cells,
+ * lanes and columns the first page never discovered join the tail.
+ */
+export function mergeBoardPage(current: BoardData, incoming: BoardData): BoardData {
+  const columns = current.columns.map((column) => {
+    const next = incoming.columns.find((entry) => entry.key === column.key);
+    return next === undefined ? column : { ...column, total: next.total };
+  });
+  for (const column of incoming.columns) {
+    if (!columns.some((entry) => entry.key === column.key)) columns.push(column);
+  }
+  const lanes = current.lanes.map((lane) => {
+    const next = incoming.lanes.find((entry) => entry.key === lane.key);
+    if (next === undefined) return lane;
+    const cells = { ...lane.cells };
+    for (const [key, cell] of Object.entries(next.cells)) {
+      const existing = cells[key];
+      if (existing === undefined) {
+        cells[key] = cell;
+        continue;
+      }
+      const seen = new Set(existing.rows.map((row) => row.id));
+      cells[key] = {
+        ...existing,
+        rows: [...existing.rows, ...cell.rows.filter((row) => !seen.has(row.id))],
+        total: cell.total,
+      };
+    }
+    return { ...lane, cells, total: next.total };
+  });
+  for (const lane of incoming.lanes) {
+    if (!lanes.some((entry) => entry.key === lane.key)) lanes.push(lane);
+  }
+  return { columns, lanes, subGrouped: current.subGrouped, total: incoming.total };
+}
+
+/** Cell prefill translated to the create dialog's initial values. */
+export function boardCreateInitialValues(prefill: Record<string, string | string[]>): CreateFormInitialValues {
+  const initial: CreateFormInitialValues = {};
+  if (typeof prefill["state_id"] === "string") initial.stateId = prefill["state_id"];
+  if (typeof prefill["priority"] === "string") initial.priority = prefill["priority"];
+  if (Array.isArray(prefill["assignee_ids"])) initial.assigneeIds = [...prefill["assignee_ids"]];
+  if (Array.isArray(prefill["label_ids"])) initial.labelIds = [...prefill["label_ids"]];
+  if (typeof prefill["cycle_id"] === "string") initial.cycleId = prefill["cycle_id"];
+  if (Array.isArray(prefill["module_ids"])) initial.moduleIds = [...prefill["module_ids"]];
+  return initial;
+}

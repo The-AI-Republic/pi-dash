@@ -2,14 +2,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Board card (parity/specs/issues.md §5, ISS-033/034): the real anchor,
-// the identifier, the clamped name with its tooltip, the hover quick
-// actions, the property strip and the inert unconfirmed row.
+// Board card (parity/specs/issues.md §5, ISS-033/034, ISS-037): the real
+// anchor, the identifier, the clamped name with its tooltip, the hover
+// quick actions, the property strip, the inert unconfirmed row, and the
+// drag press that hands a travelled card to the board.
 import type { IssueListItem } from "@pidash/api-client";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const narrow = vi.hoisted(() => ({ value: false }));
 
@@ -23,6 +24,7 @@ vi.mock("../list/InlinePropertyStrip.js", () => ({
   ),
 }));
 
+import { BOARD_DRAG_THRESHOLD_PX } from "./drag.js";
 import { cardDomId, cardKey, KanbanCard } from "./KanbanCard.js";
 
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";
@@ -187,5 +189,124 @@ describe("KanbanCard", () => {
     expect(screen.queryByTestId("kanban-card-actions")).not.toBeInTheDocument();
     expect(screen.queryByTestId("strip")).not.toBeInTheDocument();
     expect(link).toHaveTextContent("…");
+  });
+});
+
+function pointer(type: string, clientX: number, clientY: number): MouseEvent {
+  return new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY });
+}
+
+describe("KanbanCard drag press", () => {
+  afterEach(() => {
+    delete (window.HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  });
+
+  it("hands a travelled press to the board and swallows the after-click", () => {
+    const unblock = blockNavigation();
+    const onDragStart = vi.fn();
+    const { onOpen } = setup({ draggable: true, onDragStart });
+    const card = screen.getByTestId("kanban-card");
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointermove", 11, 11));
+    expect(onDragStart).not.toHaveBeenCalled();
+    fireEvent(document, pointer("pointermove", 10 + BOARD_DRAG_THRESHOLD_PX, 10));
+    expect(onDragStart).toHaveBeenCalledTimes(1);
+    expect(onDragStart).toHaveBeenCalledWith(expect.objectContaining({ id: ISSUE }), expect.anything());
+    fireEvent.click(screen.getByTestId("kanban-card-link"));
+    expect(onOpen).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("kanban-card-link"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    unblock();
+  });
+
+  it("never arms without a handler, while disabled, or unconfirmed", () => {
+    const unblock = blockNavigation();
+    const { onOpen, unmount } = setup({ draggable: true });
+    const card = screen.getByTestId("kanban-card");
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    fireEvent.click(screen.getByTestId("kanban-card-link"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    unmount();
+    const gated = setup({ draggable: false, onDragStart: vi.fn() });
+    fireEvent(screen.getByTestId("kanban-card"), pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    gated.unmount();
+    setup({ draggable: true, onDragStart: vi.fn(), issue: issue({ id: "temp-1" }) });
+    fireEvent(screen.getByTestId("kanban-card"), pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    unblock();
+  });
+
+  it("ignores presses starting on the card's own controls", () => {
+    const onDragStart = vi.fn();
+    narrow.value = true;
+    setup({ draggable: true, onDragStart });
+    fireEvent(screen.getByRole("button", { name: "Actions for Fix login" }), pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    expect(onDragStart).not.toHaveBeenCalled();
+    narrow.value = false;
+  });
+
+  it("ignores moves without a press", () => {
+    const onDragStart = vi.fn();
+    setup({ draggable: true, onDragStart });
+    fireEvent(document, pointer("pointermove", 80, 80));
+    expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("starts only once when a second press lands before the first ends", () => {
+    const onDragStart = vi.fn();
+    setup({ draggable: true, onDragStart });
+    const card = screen.getByTestId("kanban-card");
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointermove", 10 + BOARD_DRAG_THRESHOLD_PX, 10));
+    expect(onDragStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops tracking on release, cancel and unmount", () => {
+    const onDragStart = vi.fn();
+    const first = setup({ draggable: true, onDragStart });
+    const card = screen.getByTestId("kanban-card");
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(card, pointer("pointerup", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(card, pointer("pointercancel", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    fireEvent(document, pointer("pointerup", 10, 10));
+    fireEvent(document, pointer("pointermove", 80, 80));
+    expect(onDragStart).not.toHaveBeenCalled();
+    fireEvent(card, pointer("pointerdown", 10, 10));
+    first.unmount();
+    fireEvent(document, pointer("pointermove", 80, 80));
+    expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("kills the native link drag instead of arming the board's", () => {
+    const onDragStart = vi.fn();
+    setup({ draggable: true, onDragStart });
+    const link = screen.getByTestId("kanban-card-link");
+    expect(link).toHaveAttribute("draggable", "false");
+    fireEvent(link, pointer("pointerdown", 10, 10));
+    const event = fireEvent.dragStart(link);
+    expect(event).toBe(false);
+    fireEvent(document, pointer("pointermove", 80, 80));
+    expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it("marks the drag source and the dropped card", () => {
+    const scrolled = vi.fn();
+    window.HTMLElement.prototype.scrollIntoView = scrolled;
+    const first = setup({ draggable: true, dragging: true });
+    const card = screen.getByTestId("kanban-card");
+    expect(card).toHaveAttribute("data-dragging", "true");
+    expect(card.className).toContain("opacity-50");
+    first.unmount();
+    setup({ dropped: true });
+    expect(screen.getByTestId("kanban-card").className).toContain("ring-(--accent)");
+    expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });
   });
 });
