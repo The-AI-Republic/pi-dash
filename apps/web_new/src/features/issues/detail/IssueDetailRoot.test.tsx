@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Issue } from "@pidash/api-client";
 import * as React from "react";
@@ -207,5 +207,16 @@ describe("IssueDetailRoot", () => {
     renderRoot({ editable: false });
     expect(screen.getByRole("heading", { name: "Fix login" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Edited by/ })).not.toBeInTheDocument();
+  });
+
+  it("hands field saves to the override a host supplies", async () => {
+    stubViewport(false);
+    const saveTitle = vi.fn(async (_name: string) => undefined);
+    const saveDescription = vi.fn(async (_html: string) => undefined);
+    renderRoot({ fieldWrites: { saveTitle, saveDescription } });
+    const box = screen.getByRole("textbox", { name: TITLE_LABEL });
+    fireEvent.change(box, { target: { value: "Renamed" } });
+    fireEvent.blur(box);
+    await waitFor(() => expect(saveTitle).toHaveBeenCalledWith("Renamed"));
   });
 });

@@ -15,7 +15,7 @@ import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import * as React from "react";
 
 import { useNarrowViewport } from "../../../shared/shell/narrowViewport.js";
-import { DetailMainColumn } from "./DetailMainColumn.js";
+import { DetailMainColumn, type DetailFieldWrites } from "./DetailMainColumn.js";
 import { ParentBanner } from "./ParentBanner.js";
 import { useDetailUiStore } from "./store.js";
 
@@ -35,6 +35,8 @@ export interface IssueDetailRootProps {
   activity?: React.ReactNode;
   /** Render the parent banner above the title (default true). */
   showParentBanner?: boolean;
+  /** Title/description saves; the work-item PATCH when absent. */
+  fieldWrites?: DetailFieldWrites | undefined;
 }
 
 export function IssueDetailRoot({
@@ -47,6 +49,7 @@ export function IssueDetailRoot({
   agentActions,
   activity,
   showParentBanner = true,
+  fieldWrites,
 }: IssueDetailRootProps): React.ReactElement {
   const collapsed = useDetailUiStore((state) => state.sidebarCollapsed);
   const setCollapsed = useDetailUiStore((state) => state.setSidebarCollapsed);
@@ -78,6 +81,7 @@ export function IssueDetailRoot({
           topSlot={topSlot}
           agentActions={agentActions}
           activity={activity}
+          fieldWrites={fieldWrites}
         />
       </div>
       {sidebar === undefined ? null : (

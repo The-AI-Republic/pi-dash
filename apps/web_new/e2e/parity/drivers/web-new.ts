@@ -4213,7 +4213,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async intakeTriageStateDisabled(): Promise<boolean> {
-    return todo("intakeTriageStateDisabled");
+    return this.intakeDetailPropertyDisabled("State");
   }
 
   async viewsOpenList(_workspaceSlug: string, _projectId: string): Promise<void> {
@@ -15021,119 +15021,427 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesEditDetailReadOnlyNotice");
   }
 
-  // --- Intake detail (NEWFRONT-258, INT-019/024/026-029). Stubs: the area
-  // --- has not landed in apps/web_new, so every action throws.
+  // --- Intake detail (NEWFRONT-692, INT-019/024/026-029). ---
+
+  /** The detail pane settles once its header and title (field or static) are visible. */
+  private async intakeDetailTitleSettled(): Promise<void> {
+    const root = this.page.getByTestId("intake-detail");
+    await root.getByTestId("intake-detail-header").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    const field = root.getByRole("textbox", { name: "Title" });
+    const heading = root.getByRole("heading", { level: 1 });
+    await field.or(heading).first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** The shared save indicator reports Saved after a title/description write lands. */
+  private async intakeDetailSaved(): Promise<void> {
+    await this.page
+      .getByTestId("intake-detail")
+      .getByText("Saved", { exact: true })
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private intakePropertyGroup(label: IntakeDetailProperty): Locator {
+    return this.page.getByTestId("intake-properties").getByRole("group", { name: label });
+  }
+
+  /**
+   * A selection move settles once the address changes and the new
+   * request's title paints. A move that lands back on the same request
+   * (wraparound on one row, a suppressed key) changes neither, so both
+   * waits tolerate a miss.
+   */
+  private async intakeDetailSelectionSettled(beforeUrl: string, beforeTitle: string): Promise<void> {
+    const changed = await this.page
+      .waitForFunction((prev: string) => window.location.href !== prev, beforeUrl, { timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (changed) {
+      await this.page
+        .waitForFunction(
+          (prev: string) => {
+            const root = document.querySelector('[data-testid="intake-detail"]');
+            if (root === null) return false;
+            const field = root.querySelector('[aria-label="Title"]');
+            const current =
+              field instanceof HTMLTextAreaElement ? field.value : (root.querySelector("h1")?.textContent ?? "");
+            return current.trim() !== prev;
+          },
+          beforeTitle,
+          { timeout: 8_000 }
+        )
+        .catch(() => undefined);
+    }
+    await this.intakeDetailTitleSettled();
+  }
 
   async intakeDetailTitle(): Promise<string> {
-    return todo("intakeDetailTitle");
+    await this.intakeDetailTitleSettled();
+    const root = this.page.getByTestId("intake-detail");
+    const field = root.getByRole("textbox", { name: "Title" });
+    if ((await field.count()) > 0) return ((await field.first().inputValue()) ?? "").trim();
+    const heading = root.getByRole("heading", { level: 1 });
+    return (
+      (await heading
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
   async intakeDetailTitleEditable(): Promise<boolean> {
-    return todo("intakeDetailTitleEditable");
+    await this.intakeDetailTitleSettled();
+    const field = this.page.getByTestId("intake-detail").getByRole("textbox", { name: "Title" });
+    if ((await field.count()) === 0) return false;
+    return field.first().isEnabled();
   }
-  async intakeDetailSetTitle(_title: string): Promise<void> {
-    return todo("intakeDetailSetTitle");
+  async intakeDetailSetTitle(title: string): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    const field = this.page.getByTestId("intake-detail").getByRole("textbox", { name: "Title" });
+    await field.first().fill(title);
+    await field.first().blur();
+    await this.intakeDetailSaved();
   }
   async intakeDetailFocusTitle(): Promise<void> {
-    return todo("intakeDetailFocusTitle");
+    await this.intakeDetailTitleSettled();
+    await this.page.getByTestId("intake-detail").getByRole("textbox", { name: "Title" }).first().focus();
   }
   async intakeDetailDescriptionText(): Promise<string> {
-    return todo("intakeDetailDescriptionText");
+    await this.intakeDetailTitleSettled();
+    const root = this.page.getByTestId("intake-detail");
+    const editor = root.locator(".ProseMirror");
+    if (
+      (await editor.count()) > 0 &&
+      (await editor
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      return (
+        (await editor
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+    }
+    const view = root.getByRole("region", { name: "Description" });
+    if ((await view.count()) === 0) return "";
+    return (
+      (await view
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
   async intakeDetailDescriptionEditable(): Promise<boolean> {
-    return todo("intakeDetailDescriptionEditable");
+    await this.intakeDetailTitleSettled();
+    const root = this.page.getByTestId("intake-detail");
+    if ((await root.locator(".ProseMirror").count()) > 0) return true;
+    const add = root.getByRole("button", { name: "Add a description" });
+    if ((await add.count()) > 0 && (await this.isShown(add))) return true;
+    const edit = root.getByRole("button", { name: "Edit description" });
+    return (await edit.count()) > 0 && (await this.isShown(edit));
   }
-  async intakeDetailSetDescription(_text: string): Promise<void> {
-    return todo("intakeDetailSetDescription");
+  async intakeDetailSetDescription(text: string): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    const root = this.page.getByTestId("intake-detail");
+    const add = root.getByRole("button", { name: "Add a description" });
+    if ((await add.count()) > 0 && (await this.isShown(add))) await add.first().click();
+    else await root.getByRole("button", { name: "Edit description" }).first().click();
+    const editor = root.locator(".ProseMirror");
+    await editor.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await editor.first().fill(text);
+    await editor.first().blur();
+    await this.intakeDetailSaved();
   }
   async intakeDetailFocusDescription(): Promise<void> {
-    return todo("intakeDetailFocusDescription");
+    await this.intakeDetailTitleSettled();
+    const root = this.page.getByTestId("intake-detail");
+    const add = root.getByRole("button", { name: "Add a description" });
+    if ((await add.count()) > 0 && (await this.isShown(add))) await add.first().click();
+    else await root.getByRole("button", { name: "Edit description" }).first().click();
+    const editor = root.locator(".ProseMirror");
+    await editor.first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await editor.first().focus();
   }
   async intakeDetailReactions(): Promise<string[]> {
-    return todo("intakeDetailReactions");
+    await this.intakeDetailTitleSettled();
+    const chips = this.page
+      .getByTestId("intake-detail")
+      .getByRole("region", { name: "Reactions on this work item" })
+      .getByRole("button", { name: /reaction,/ });
+    const count = await chips.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const label = await chips
+        .nth(i)
+        .getAttribute("aria-label")
+        .catch(() => null);
+      const entry = (label ?? "").trim();
+      if (entry !== "") out.push(entry);
+    }
+    return out;
   }
-  async intakeDetailAddReaction(_emoji: string): Promise<void> {
-    return todo("intakeDetailAddReaction");
+  async intakeDetailAddReaction(emoji: string): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    const section = this.page.getByTestId("intake-detail").getByRole("region", { name: "Reactions on this work item" });
+    await section.getByRole("button", { name: "Add reaction" }).click();
+    const popup = this.page.getByRole("listbox", { name: "Emoji" });
+    await popup.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await popup.getByRole("option", { name: emoji }).click();
+    await popup.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
+    await section
+      .getByRole("button", { name: `${emoji} reaction,` })
+      .first()
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async intakeDetailAttachmentNames(): Promise<string[]> {
-    return todo("intakeDetailAttachmentNames");
+    await this.intakeDetailTitleSettled();
+    const rows = this.page.getByTestId("intake-detail").locator('[data-widget-row="Attachments"]');
+    const count = await rows.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const line = (
+        (
+          (await rows
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? ""
+        ).split("\n")[0] ?? ""
+      ).trim();
+      if (line !== "") out.push(line);
+    }
+    return out;
   }
-  async intakeDetailPropertyDisabled(_label: IntakeDetailProperty): Promise<boolean> {
-    return todo("intakeDetailPropertyDisabled");
+  async intakeDetailPropertyDisabled(label: IntakeDetailProperty): Promise<boolean> {
+    await this.intakeDetailTitleSettled();
+    const group = this.intakePropertyGroup(label);
+    await group.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if (label === "Labels") {
+      return (await group.getByTestId("label-picker-trigger").count()) === 0;
+    }
+    const trigger = group.getByRole("button").first();
+    if ((await trigger.count()) === 0) return true;
+    return !(await trigger.isEnabled().catch(() => false));
   }
   async intakeDetailPriorityText(): Promise<string> {
-    return todo("intakeDetailPriorityText");
+    await this.intakeDetailTitleSettled();
+    const trigger = this.intakePropertyGroup("Priority").getByRole("button").first();
+    return ((await trigger.innerText().catch(() => "")) ?? "").trim();
   }
-  async intakeDetailSetPriority(_priority: string): Promise<void> {
-    return todo("intakeDetailSetPriority");
+  async intakeDetailSetPriority(priority: string): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    await this.intakePropertyGroup("Priority").getByRole("button").first().click();
+    const popup = this.page.getByRole("listbox", { name: "Priorities" });
+    await popup.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await popup.getByRole("option", { name: priority }).click();
+    await popup.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async intakeDetailAssigneeTexts(): Promise<string[]> {
-    return todo("intakeDetailAssigneeTexts");
+    await this.intakeDetailTitleSettled();
+    const trigger = this.intakePropertyGroup("Assignees").getByRole("button").first();
+    const text = ((await trigger.innerText().catch(() => "")) ?? "").trim();
+    if (text === "") return [];
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
   }
-  async intakeDetailAddAssignee(_displayName: string): Promise<void> {
-    return todo("intakeDetailAddAssignee");
+  async intakeDetailAddAssignee(displayName: string): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    await this.intakePropertyGroup("Assignees").getByRole("button").first().click();
+    const popup = this.page.getByRole("listbox", { name: "Members" });
+    await popup.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("combobox", { name: "Search members" }).fill(displayName);
+    await popup.getByRole("option", { name: displayName }).click();
+    await this.page.keyboard.press("Escape");
+    await popup.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async intakeDetailDueDateText(): Promise<string> {
-    return todo("intakeDetailDueDateText");
+    await this.intakeDetailTitleSettled();
+    const trigger = this.intakePropertyGroup("Due date").getByRole("button", { name: "Due date", exact: true });
+    return (
+      (await trigger
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
-  async intakeDetailSetDueDate(_daysFromNow: number): Promise<void> {
-    return todo("intakeDetailSetDueDate");
+  async intakeDetailSetDueDate(daysFromNow: number): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    const target = new Date();
+    target.setDate(target.getDate() + daysFromNow);
+    const iso = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}-${String(target.getDate()).padStart(2, "0")}`;
+    const group = this.intakePropertyGroup("Due date");
+    await group.getByRole("button", { name: "Due date", exact: true }).first().click();
+    const calendar = group.getByTestId("intake-due-picker-calendar");
+    await calendar.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if ((await calendar.locator(`[data-day="${iso}"]`).count()) === 0) {
+      await calendar.getByRole("combobox", { name: "Month" }).selectOption(String(target.getMonth()));
+      await calendar.getByRole("combobox", { name: "Year" }).selectOption(String(target.getFullYear()));
+    }
+    await calendar.locator(`[data-day="${iso}"]`).click();
+    await calendar.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async intakeDetailLabelTexts(): Promise<string[]> {
-    return todo("intakeDetailLabelTexts");
+    await this.intakeDetailTitleSettled();
+    const chips = this.intakePropertyGroup("Labels")
+      .getByRole("list", { name: "Selected labels" })
+      .getByRole("listitem");
+    const count = await chips.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const entry = (
+        (await chips
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (entry !== "") out.push(entry);
+    }
+    return out;
   }
-  async intakeDetailAddLabel(_labelName: string): Promise<void> {
-    return todo("intakeDetailAddLabel");
+  async intakeDetailAddLabel(labelName: string): Promise<void> {
+    await this.intakeDetailTitleSettled();
+    const group = this.intakePropertyGroup("Labels");
+    await group.getByTestId("label-picker-trigger").click();
+    const search = this.page.getByTestId("label-picker-search");
+    await search.fill(labelName);
+    const options = this.page.getByTestId("label-picker-option");
+    const count = await options.count();
+    for (let i = 0; i < count; i += 1) {
+      const text = (
+        (await options
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === labelName) {
+        await options.nth(i).click();
+        break;
+      }
+    }
+    await this.page.keyboard.press("Escape");
+    await search.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   async intakeDetailCopyLink(): Promise<void> {
-    return todo("intakeDetailCopyLink");
+    await this.intakeDetailTitleSettled();
+    const header = this.page.getByTestId("intake-detail-header");
+    const menu = header.getByTestId("intake-detail-menu");
+    if ((await menu.count()) > 0 && (await this.isShown(menu))) {
+      await menu.getByRole("button", { name: "Request actions" }).click();
+      await this.page.getByRole("menuitem", { name: "Copy work item link" }).click();
+      return;
+    }
+    await header.getByRole("button", { name: "Copy work item link" }).click();
   }
   async intakeDetailOpenWorkItemVisible(): Promise<boolean> {
-    return todo("intakeDetailOpenWorkItemVisible");
+    await this.intakeDetailTitleSettled();
+    return this.isShown(this.page.getByTestId("intake-detail-open-work-item"));
   }
   async intakeDetailOpenWorkItem(): Promise<void> {
-    return todo("intakeDetailOpenWorkItem");
+    await this.intakeDetailTitleSettled();
+    await this.page.getByTestId("intake-detail-open-work-item").click();
   }
   async intakeDetailCurrentInboxIssueId(): Promise<string | null> {
-    return todo("intakeDetailCurrentInboxIssueId");
+    return new URL(this.page.url()).searchParams.get("inboxIssueId");
   }
   async intakeDetailCurrentUrl(): Promise<string> {
-    return todo("intakeDetailCurrentUrl");
+    return this.page.url();
   }
-  async intakeDetailPressArrow(_direction: "up" | "down"): Promise<void> {
-    return todo("intakeDetailPressArrow");
+  async intakeDetailPressArrow(direction: "up" | "down"): Promise<void> {
+    const beforeUrl = this.page.url();
+    const beforeTitle = await this.intakeDetailTitle();
+    await this.page.keyboard.press(direction === "up" ? "ArrowUp" : "ArrowDown");
+    await this.intakeDetailSelectionSettled(beforeUrl, beforeTitle);
   }
-  async intakeDetailClickChevron(_direction: "prev" | "next"): Promise<void> {
-    return todo("intakeDetailClickChevron");
+  async intakeDetailClickChevron(direction: "prev" | "next"): Promise<void> {
+    const beforeUrl = this.page.url();
+    const beforeTitle = await this.intakeDetailTitle();
+    const header = this.page.getByTestId("intake-detail-header");
+    await header
+      .getByTestId(direction === "prev" ? "intake-detail-prev" : "intake-detail-next")
+      .getByRole("button")
+      .click();
+    await this.intakeDetailSelectionSettled(beforeUrl, beforeTitle);
   }
-  async intakeDetailOpenRaw(_path: string): Promise<void> {
-    return todo("intakeDetailOpenRaw");
+  async intakeDetailOpenRaw(path: string): Promise<void> {
+    await this.page.goto(path);
+    await this.page.getByTestId("intake-shell").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async intakeDetailListVisible(): Promise<boolean> {
-    return todo("intakeDetailListVisible");
+    return this.isShown(this.page.getByTestId("intake-list"));
   }
-  async intakeDetailSelectListItem(_name: string): Promise<void> {
-    return todo("intakeDetailSelectListItem");
+  async intakeDetailSelectListItem(name: string): Promise<void> {
+    const beforeUrl = this.page.url();
+    const beforeTitle = await this.intakeDetailTitle();
+    const rows = this.page.getByTestId("intake-list").getByTestId("intake-row");
+    const count = await rows.count();
+    for (let i = 0; i < count; i += 1) {
+      const title = rows.nth(i).getByTestId("intake-row-title");
+      if (((await title.innerText().catch(() => "")) ?? "").trim() === name) {
+        await rows.nth(i).click();
+        break;
+      }
+    }
+    await this.intakeDetailSelectionSettled(beforeUrl, beforeTitle);
   }
   async intakeDetailVersionsVisible(): Promise<boolean> {
-    return todo("intakeDetailVersionsVisible");
+    await this.intakeDetailTitleSettled();
+    const trigger = this.page.getByTestId("intake-detail").getByRole("button", { name: /Edited by/ });
+    return (await trigger.count()) > 0 && (await this.isShown(trigger));
   }
   async intakeDetailOpenVersions(): Promise<void> {
-    return todo("intakeDetailOpenVersions");
+    await this.intakeDetailTitleSettled();
+    const open = this.page.getByRole("menu");
+    if ((await open.count()) > 0 && (await this.isShown(open))) return;
+    await this.page
+      .getByTestId("intake-detail")
+      .getByRole("button", { name: /Edited by/ })
+      .click();
+    await open.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async intakeDetailVersionTexts(): Promise<string[]> {
-    return todo("intakeDetailVersionTexts");
+    const items = this.page.getByRole("menu").getByRole("menuitem");
+    const count = await items.count();
+    const out: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      const entry = (
+        (await items
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (entry !== "") out.push(entry);
+    }
+    return out;
   }
-  async intakeDetailOpenVersion(_index: number): Promise<void> {
-    return todo("intakeDetailOpenVersion");
+  async intakeDetailOpenVersion(index: number): Promise<void> {
+    await this.page.getByRole("menu").getByRole("menuitem").nth(index).click();
+    await this.page
+      .getByRole("dialog", { name: "Description history" })
+      .waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async intakeDetailVersionModalText(): Promise<string | null> {
-    return todo("intakeDetailVersionModalText");
+    const dialog = this.page.getByRole("dialog", { name: "Description history" });
+    if ((await dialog.count()) === 0) return null;
+    return (
+      (await dialog
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
   async intakeDetailRestoreVersion(): Promise<void> {
-    return todo("intakeDetailRestoreVersion");
+    const dialog = this.page.getByRole("dialog", { name: "Description history" });
+    await dialog.getByRole("button", { name: "Restore" }).click();
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    await this.intakeDetailSaved();
   }
   async intakeDetailCloseVersionModal(): Promise<void> {
-    return todo("intakeDetailCloseVersionModal");
+    const dialog = this.page.getByRole("dialog", { name: "Description history" });
+    if ((await dialog.count()) === 0) return;
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
   // --- Archived work-item mutations (NEWFRONT-223, ARCH-008..013). ---
 
@@ -25922,7 +26230,11 @@ export class WebNewDriver implements ParityDriver {
           if (payload.instance !== undefined) {
             payload.instance["workspaces_exist"] = false;
           }
-          await route.fulfill({ status: live.status(), contentType: "application/json", body: JSON.stringify(payload) });
+          await route.fulfill({
+            status: live.status(),
+            contentType: "application/json",
+            body: JSON.stringify(payload),
+          });
           return;
         }
         await route.continue();
@@ -26062,7 +26374,8 @@ export class WebNewDriver implements ParityDriver {
       submitBusy: (await submit.getAttribute("aria-busy")) === "true",
       telemetryChecked: await form.locator("#is_telemetry_enabled").isChecked(),
       strengthVisible: await this.isShown(strength),
-      strengthMessage: (await strengthMessage.count()) === 0 ? null : (await strengthMessage.first().innerText()).trim(),
+      strengthMessage:
+        (await strengthMessage.count()) === 0 ? null : (await strengthMessage.first().innerText()).trim(),
       mismatchVisible: await this.isShown(this.page.getByTestId("admin-setup-mismatch")),
       bannerText: (await banner.count()) === 0 ? null : (await banner.first().innerText()).trim(),
       inlineErrors: { email: await errorText("email"), password: await errorText("password") },
@@ -26236,7 +26549,10 @@ export class WebNewDriver implements ParityDriver {
         .first()
         .getByRole("menuitem", { name: `Switch to ${mode} mode` })
         .click({ timeout: 5_000 })
-        .then(() => true, () => false);
+        .then(
+          () => true,
+          () => false
+        );
       if (pressed || Date.now() >= deadline) break;
       await this.page.waitForTimeout(250);
     }
@@ -26255,7 +26571,10 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async adminNotFoundFollowAction(): Promise<void> {
-    await this.page.getByTestId("admin-not-found").getByRole("link", { name: "Go to general settings" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .getByTestId("admin-not-found")
+      .getByRole("link", { name: "Go to general settings" })
+      .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.waitForURL((url) => url.pathname === "/god-mode/general/", { timeout: WebNewDriver.WAIT_MS });
   }
 
@@ -26278,7 +26597,9 @@ export class WebNewDriver implements ParityDriver {
       .getByTestId("admin-first-workspace-popup")
       .getByRole("link", { name: "Create workspace", exact: true })
       .click({ timeout: WebNewDriver.WAIT_MS });
-    await this.page.waitForURL((url) => url.pathname === "/god-mode/workspace/create/", { timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForURL((url) => url.pathname === "/god-mode/workspace/create/", {
+      timeout: WebNewDriver.WAIT_MS,
+    });
   }
 
   async adminSetupToggleTabIndex(field: "password" | "confirm"): Promise<string | null> {
@@ -26591,7 +26912,11 @@ export class WebNewDriver implements ParityDriver {
 
   async adminEmailSetSecurity(which: AdminEmailSecurity): Promise<void> {
     const testId =
-      which === "TLS" ? "admin-email-security-tls" : which === "SSL" ? "admin-email-security-ssl" : "admin-email-security-none";
+      which === "TLS"
+        ? "admin-email-security-tls"
+        : which === "SSL"
+          ? "admin-email-security-ssl"
+          : "admin-email-security-none";
     const option = this.page.getByTestId(testId);
     await option.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
     if (!(await option.isChecked())) {
@@ -26700,7 +27025,15 @@ export class WebNewDriver implements ParityDriver {
   async adminTestEmailFacts(): Promise<AdminTestEmailFacts> {
     const dialog = this.adminTestEmailDialog();
     if (!(await this.isShown(dialog))) {
-      return { open: false, step: "compose", receiver: "", heading: "", bodyText: "", sendLabel: null, dismissLabel: "" };
+      return {
+        open: false,
+        step: "compose",
+        receiver: "",
+        heading: "",
+        bodyText: "",
+        sendLabel: null,
+        dismissLabel: "",
+      };
     }
     const heading = (await dialog.getByRole("heading").first().innerText()).trim();
     const stepNode = dialog.getByTestId("admin-test-email-step");
@@ -26788,11 +27121,7 @@ export class WebNewDriver implements ParityDriver {
         const link = card.locator('a[data-testid^="admin-auth-link-"]');
         const hasToggle = (await toggle.count()) > 0;
         const hasLink = (await link.count()) > 0;
-        const control: AdminAuthMethodControl = hasToggle
-          ? hasLink
-            ? "edit-toggle"
-            : "toggle"
-          : "configure";
+        const control: AdminAuthMethodControl = hasToggle ? (hasLink ? "edit-toggle" : "toggle") : "configure";
         cards.push({
           name: (await card.locator('[id^="admin-auth-name-"]').innerText()).trim(),
           description: (
@@ -26957,7 +27286,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async adminAuthDiscardLeave(): Promise<void> {
-    await this.adminAuthDiscardDialog().getByTestId("admin-auth-discard-leave").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.adminAuthDiscardDialog()
+      .getByTestId("admin-auth-discard-leave")
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async adminAuthCopyFacts(): Promise<AdminAuthCopyFact[]> {
@@ -27089,7 +27420,7 @@ export class WebNewDriver implements ParityDriver {
       helperVisible: await this.isShown(this.page.getByTestId("admin-workspace-helper")),
       createHref: await this.page.getByTestId("admin-workspace-create").getAttribute("href"),
       loadMoreVisible: await this.isShown(loadMore),
-      loadMoreDisabled: await this.isShown(loadMore) ? await loadMore.isDisabled() : true,
+      loadMoreDisabled: (await this.isShown(loadMore)) ? await loadMore.isDisabled() : true,
       loadMoreLabel: (await this.isShown(loadMore)) ? (await loadMore.innerText()).trim() : null,
     };
   }
@@ -27455,9 +27786,9 @@ export class WebNewDriver implements ParityDriver {
     }
     let skeletonHeights: string[] = [];
     if (skeletonVisible) {
-      skeletonHeights = await skeleton.locator(":scope > *").evaluateAll((nodes) =>
-        nodes.map((node) => `${Math.round(node.getBoundingClientRect().height)}px`)
-      );
+      skeletonHeights = await skeleton
+        .locator(":scope > *")
+        .evaluateAll((nodes) => nodes.map((node) => `${Math.round(node.getBoundingClientRect().height)}px`));
     }
     return {
       titleVisible: await this.isShown(this.page.getByRole("heading", { name: "Loop jobs", exact: true })),
@@ -27659,9 +27990,9 @@ export class WebNewDriver implements ParityDriver {
     }
     let skeletonHeights: string[] = [];
     if (skeletonVisible) {
-      skeletonHeights = await skeleton.locator(":scope > *").evaluateAll((nodes) =>
-        nodes.map((node) => `${Math.round(node.getBoundingClientRect().height)}px`)
-      );
+      skeletonHeights = await skeleton
+        .locator(":scope > *")
+        .evaluateAll((nodes) => nodes.map((node) => `${Math.round(node.getBoundingClientRect().height)}px`));
     }
     let stats: AdminLoopStats | null = null;
     if (await this.isShown(this.page.getByTestId("loop-job-detail-stats"))) {
@@ -27680,9 +28011,9 @@ export class WebNewDriver implements ParityDriver {
     let skipOptions: string[] = [];
     let skipSelected = "";
     if (await this.isShown(filter)) {
-      skipOptions = await filter.locator("option").evaluateAll((nodes) =>
-        nodes.map((node) => (node as HTMLOptionElement).value)
-      );
+      skipOptions = await filter
+        .locator("option")
+        .evaluateAll((nodes) => nodes.map((node) => (node as HTMLOptionElement).value));
       skipSelected = await filter.inputValue();
     }
     return {
@@ -28048,9 +28379,7 @@ export class WebNewDriver implements ParityDriver {
     // Collapsed, every entry renders its icon alone, so a blank first
     // entry reads the rail state without touching storage.
     const collapsed = entries.length > 0 && entries[0]?.name === "";
-    const persistedRaw = await this.page.evaluate(() =>
-      window.localStorage.getItem("god_mode_sidebar_collapsed")
-    );
+    const persistedRaw = await this.page.evaluate(() => window.localStorage.getItem("god_mode_sidebar_collapsed"));
     return {
       entries,
       collapsed,
@@ -28078,7 +28407,13 @@ export class WebNewDriver implements ParityDriver {
     const deadline = Date.now() + 3_000;
     for (;;) {
       const tip = this.page.getByRole("tooltip").filter({ hasText: text });
-      if ((await tip.count()) > 0 && (await tip.first().isVisible().catch(() => false))) {
+      if (
+        (await tip.count()) > 0 &&
+        (await tip
+          .first()
+          .isVisible()
+          .catch(() => false))
+      ) {
         return (await tip.first().innerText()).trim() || null;
       }
       if (Date.now() >= deadline) return null;
@@ -28104,9 +28439,7 @@ export class WebNewDriver implements ParityDriver {
 
   async adminSidebarToggleCollapse(): Promise<void> {
     const before = (await this.adminSidebarFacts()).collapsed;
-    await this.page
-      .getByTestId("admin-sidebar-toggle")
-      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("admin-sidebar-toggle").click({ timeout: WebNewDriver.WAIT_MS });
     const deadline = Date.now() + WebNewDriver.WAIT_MS;
     for (;;) {
       if ((await this.adminSidebarFacts()).collapsed !== before) return;
@@ -28186,7 +28519,12 @@ export class WebNewDriver implements ParityDriver {
     const footer = this.adminFooter();
     const redirect = footer.getByTestId("admin-help-redirect");
     const links = this.adminHelpPanel().locator('a[target="_blank"]');
-    const open = (await links.count()) > 0 && (await links.first().isVisible().catch(() => false));
+    const open =
+      (await links.count()) > 0 &&
+      (await links
+        .first()
+        .isVisible()
+        .catch(() => false));
     const out: AdminHelpLink[] = [];
     if (open) {
       for (let index = 0; index < (await links.count()); index += 1) {
@@ -28417,9 +28755,8 @@ export class WebNewDriver implements ParityDriver {
     };
     return {
       branch: deniedShown ? "denied" : errorShown ? "error" : "spinner",
-      heading: await this.isShown(rootHeading) ? denorm(await rootHeading.innerText()) : null,
-      deniedHref:
-        !deniedShown || (await backLink.count()) === 0 ? null : await backLink.first().getAttribute("href"),
+      heading: (await this.isShown(rootHeading)) ? denorm(await rootHeading.innerText()) : null,
+      deniedHref: !deniedShown || (await backLink.count()) === 0 ? null : await backLink.first().getAttribute("href"),
       retryVisible: (await retry.count()) > 0 && (await retry.first().isVisible()),
       passwordFields: await this.page.locator('input[type="password"]').count(),
       setupFields: await this.page.getByLabel("First name").count(),

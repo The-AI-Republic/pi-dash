@@ -187,6 +187,14 @@ describe("IntakeStatePicker", () => {
     expect(calls).toEqual([]);
   });
 
+  it("names a set state up front when preloading, even while disabled", async () => {
+    const { queryClient, calls } = harness(TRIAGE);
+    renderPicker({ value: TRIAGE_ID, disabled: true, preload: true }, queryClient);
+    expect(await screen.findByRole("button", { name: "Triage" })).toBeDisabled();
+    expect(calls.some((url) => url.endsWith("/intake-state/"))).toBe(true);
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
   it("shows the loading row while fetching", async () => {
     const { queryClient } = harness(TRIAGE, 200, true);
     renderPicker({}, queryClient);

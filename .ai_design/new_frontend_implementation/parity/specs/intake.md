@@ -673,6 +673,10 @@ The content pane shows the selected request:
   save on blur/debounce; a failed save surfaces an error and keeps the
   text.
 
+Once a request is accepted its work item has moved from triage to a
+workflow state, so the State row names that workflow state (still
+read-only) instead of the triage state.
+
 Title, description and property writes all go through the intake update
 `PATCH …/intake-issues/{issueId}/`, which carries work-item fields inside
 an `issue` object (`name`, `description_html`, `priority`, `assignee_ids`,

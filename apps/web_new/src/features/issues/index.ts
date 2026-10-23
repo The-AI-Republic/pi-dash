@@ -194,10 +194,15 @@ export {
   descriptionVersionsQueryOptions,
   issueDetailQueryOptions,
 } from "./api/queries.js";
-export { DESCRIPTION_SAVE_FAILED_TITLE, TITLE_SAVE_FAILED_TITLE, useUpdateIssue } from "./api/mutations.js";
+export {
+  DESCRIPTION_SAVE_FAILED_TITLE,
+  TITLE_SAVE_FAILED_TITLE,
+  saveFailureDetail,
+  useUpdateIssue,
+} from "./api/mutations.js";
 export type { UpdateIssueScope } from "./api/mutations.js";
 export { DetailMainColumn } from "./detail/DetailMainColumn.js";
-export type { DetailMainColumnProps } from "./detail/DetailMainColumn.js";
+export type { DetailFieldWrites, DetailMainColumnProps } from "./detail/DetailMainColumn.js";
 export { DetailMissingState } from "./detail/DetailMissingState.js";
 export type { DetailMissingStateProps } from "./detail/DetailMissingState.js";
 export { DetailSkeleton } from "./detail/DetailSkeleton.js";
@@ -226,6 +231,10 @@ export {
 export type { ParentWriteScope } from "./api/parent.js";
 export { IssuePropertiesSidebar } from "./detail/sidebar/index.js";
 export type { IssuePropertiesSidebarProps } from "./detail/sidebar/index.js";
+export { SidebarRow, dateBounds, isDueDateOverdue } from "./detail/sidebar/index.js";
+export type { SidebarRowProps } from "./detail/sidebar/index.js";
+export { AttachmentsWidget } from "./detail/widgets/attachments/AttachmentsWidget.js";
+export type { AttachmentsWidgetProps } from "./detail/widgets/attachments/AttachmentsWidget.js";
 export type { IssueDetailRootProps } from "./detail/IssueDetailRoot.js";
 export { TriageDetailRoot } from "./detail/TriageDetailRoot.js";
 export type { TriageDetailRootProps } from "./detail/TriageDetailRoot.js";

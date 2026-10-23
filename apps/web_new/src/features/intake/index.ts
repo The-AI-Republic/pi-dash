@@ -8,6 +8,14 @@
 export { INTAKE_DEFAULT_ORDER, intakeKeys } from "./api/keys.js";
 export type { IntakeListFilters, IntakeListKeyInput } from "./api/keys.js";
 export {
+  intakeDetailQueryOptions,
+  intakeDetailWorkItem,
+  isMissingIntakeDetail,
+  useIntakeDetail,
+} from "./api/detail.js";
+export { paintIntakeDetailPatch, useUpdateIntakeIssue } from "./api/mutations.js";
+export type { UpdateIntakeIssueScope } from "./api/mutations.js";
+export {
   INTAKE_PAGE_SIZE,
   INTAKE_QUERY_POLICY,
   intakeListQueryOptions,
@@ -18,8 +26,14 @@ export {
   useIntakeList,
 } from "./api/queries.js";
 export type { IntakeListRead } from "./api/queries.js";
+export { IntakeDetail } from "./components/IntakeDetail.js";
+export type { IntakeDetailProps } from "./components/IntakeDetail.js";
+export { IntakeDetailHeader } from "./components/IntakeDetailHeader.js";
+export type { IntakeDetailHeaderProps } from "./components/IntakeDetailHeader.js";
 export { IntakeEmptyState } from "./components/IntakeEmptyState.js";
 export type { IntakeEmptyStateProps } from "./components/IntakeEmptyState.js";
+export { IntakeProperties } from "./components/IntakeProperties.js";
+export type { IntakePropertiesProps } from "./components/IntakeProperties.js";
 export { IntakeGate } from "./components/IntakeGate.js";
 export type { IntakeGateProps } from "./components/IntakeGate.js";
 export { IntakeScreen } from "./components/IntakeScreen.js";
@@ -29,14 +43,19 @@ export type { IntakeTabsProps } from "./components/IntakeTabs.js";
 export { selectIntakeEmptyState } from "./lib/emptyStates.js";
 export type { IntakeEmptyInput, IntakeEmptyState as IntakeEmptyKind } from "./lib/emptyStates.js";
 export { intakeFeatureSettingsHref, intakeHref, retiredInboxHref } from "./lib/paths.js";
+export { INTAKE_NAV_OVERLAY_SELECTOR, neighborIntakeId, suppressIntakeArrowKey } from "./lib/navigation.js";
+export type { IntakeStepDirection } from "./lib/navigation.js";
+export { isResolvedIntakeStatus, selectIntakeEditability } from "./lib/permissions.js";
+export type { IntakeEditability, IntakeStanding } from "./lib/permissions.js";
 export {
   DEFAULT_INTAKE_SEARCH,
+  intakeSearchAfterRemove,
   intakeSearchFor,
   parseIntakeSearch,
   settleIntakeSearch,
   withoutSelection,
 } from "./lib/search.js";
-export type { IntakeSearch } from "./lib/search.js";
+export type { IntakeSearch, IntakeSearchWriteOptions } from "./lib/search.js";
 export {
   DEFAULT_INTAKE_TAB,
   INTAKE_TAB_LABELS,

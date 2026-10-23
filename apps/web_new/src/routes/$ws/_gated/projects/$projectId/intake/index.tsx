@@ -12,7 +12,11 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { loadIntakeRouteChunk, resolvedIntakeRouteChunk } from "../../../../../../features/intake/route/lazy.js";
-import { parseIntakeSearch, type IntakeSearch } from "../../../../../../features/intake/lib/search.js";
+import {
+  parseIntakeSearch,
+  type IntakeSearch,
+  type IntakeSearchWriteOptions,
+} from "../../../../../../features/intake/lib/search.js";
 
 // Start the chunk with the route module so the visit does not serialize a
 // round trip behind the data reads; `beforeLoad` awaits the same request.
@@ -24,8 +28,8 @@ function IntakeRoute(): React.ReactElement {
   const navigate = useNavigate();
   const { IntakeScreen } = resolvedIntakeRouteChunk();
   const write = React.useCallback(
-    (next: IntakeSearch) => {
-      void navigate({ to: ".", search: next, replace: true } as never);
+    (next: IntakeSearch, options?: IntakeSearchWriteOptions) => {
+      void navigate({ to: ".", search: next, replace: options?.replace ?? false } as never);
     },
     [navigate]
   );

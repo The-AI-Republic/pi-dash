@@ -8,7 +8,7 @@
 // and the empty state for each situation.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { TransportResponse } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,7 +25,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import type { IntakeSearch } from "../lib/search.js";
+import type { IntakeSearch, IntakeSearchWriteOptions } from "../lib/search.js";
 import { IntakeScreen } from "./IntakeScreen.js";
 
 const PROJECT_ID = "223e4567-e89b-12d3-a456-426614174001";
@@ -116,7 +116,69 @@ interface Server {
   closed: FakeRow[];
   listRequests: string[];
   listFails?: boolean;
+  detailStatus?: number;
+  rolesFail?: boolean;
 }
+
+function detailPayload(issueId: string) {
+  const row = [...server.pending, ...server.closed].find((candidate) => candidate.issueId === issueId);
+  return {
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+    status: row?.status ?? -2,
+    duplicate_to: null,
+    snoozed_till: null,
+    duplicate_issue_detail: null,
+    source: null,
+    issue: {
+      id: issueId,
+      name: row?.name ?? "Unknown",
+      state_id: null,
+      sort_order: 1,
+      completed_at: null,
+      priority: "none",
+      sequence_id: 7,
+      project_id: PROJECT_ID,
+      parent_id: null,
+      label_ids: [],
+      assignee_ids: [],
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-02T00:00:00Z",
+      created_by: null,
+      updated_by: null,
+      is_draft: false,
+      archived_at: null,
+      complexity_score: 0,
+      agent_executor: null,
+      is_synced: false,
+      description_html: "<p>Body</p>",
+      agent_ticker: null,
+      agent_status: null,
+      relations_summary: { blocked_by: [], blocking: [] },
+      has_open_blockers: false,
+    },
+  };
+}
+
+const ME_PAYLOAD = {
+  id: "023e4567-e89b-12d3-a456-426614174009",
+  email: "me@example.com",
+  username: "me",
+  first_name: "Me",
+  last_name: "M",
+  display_name: "Me M",
+  avatar: "",
+  avatar_url: null,
+  cover_image: null,
+  cover_image_url: null,
+  date_joined: "2026-01-01T00:00:00.000Z",
+  user_timezone: "UTC",
+  is_active: true,
+  is_bot: false,
+  is_email_verified: true,
+  is_password_autoset: false,
+  last_login_medium: "password",
+  last_login_time: null,
+};
 
 function installServer(server: Server): void {
   createAppClient("https://api.test", (async (url: string) => {
@@ -126,12 +188,16 @@ function installServer(server: Server): void {
     if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) {
       return jsonResponse(url, 200, projectRow(server.inboxView, server.projectName));
     }
-    if (path.endsWith("/project-roles/")) return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+    if (path.endsWith("/project-roles/")) {
+      if (server.rolesFail) return jsonResponse(url, 500, { error: "boom" });
+      return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+    }
     if (path.endsWith("/api/users/me/workspaces/")) {
       return jsonResponse(url, 200, [
         { id: WS_ID, name: "Acme", slug: "acme", logo_url: null, total_members: 1, role: 20 },
       ]);
     }
+    if (path.endsWith("/api/users/me/")) return jsonResponse(url, 200, ME_PAYLOAD);
     if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/`) {
       server.listRequests.push(parsed.search);
       if (server.listFails) return jsonResponse(url, 500, { error: "boom" });
@@ -139,11 +205,17 @@ function installServer(server: Server): void {
       const rows = status === "1,-1,2" ? server.closed : status === "-2" ? server.pending : [];
       return jsonResponse(url, 200, listResponse(rows));
     }
+    const detailPrefix = `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/`;
+    if (path.startsWith(detailPrefix) && path !== detailPrefix) {
+      const status = server.detailStatus ?? 200;
+      if (status >= 400) return jsonResponse(url, status, {});
+      return jsonResponse(url, 200, detailPayload(path.slice(detailPrefix.length, -1)));
+    }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
 }
 
-type SearchWriter = (next: IntakeSearch) => void;
+type SearchWriter = (next: IntakeSearch, options?: IntakeSearchWriteOptions) => void;
 
 function renderScreen(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn()) {
   return renderScreenWithRerender(search, onSearchChange).onSearchChange;
@@ -187,11 +259,12 @@ describe("IntakeScreen shell (INT-001/INT-003)", () => {
     expect(screen.getByTestId("intake-breadcrumb")).toHaveTextContent("Intake");
   });
 
-  it("replaces the pick placeholder once a request is selected", async () => {
+  it("replaces the pick placeholder with the request detail once a request is selected", async () => {
     server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
     installServer(server);
     renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
     await screen.findByText("Alpha");
+    expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
     expect(screen.queryByTestId("intake-placeholder")).toBeNull();
   });
 
@@ -370,7 +443,55 @@ describe("IntakeScreen selection (INT-005)", () => {
     installServer(server);
     const onSearchChange = renderScreen({ currentTab: "open" });
     await screen.findByText("Alpha");
-    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_1 }));
+    await waitFor(() =>
+      expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_1 }, { replace: true })
+    );
+  });
+
+  it("steps between requests from the detail chevrons, pushing the address", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-detail-header");
+    fireEvent.click(screen.getByRole("button", { name: "Next request" }));
+    expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_2 });
+    fireEvent.click(screen.getByRole("button", { name: "Previous request" }));
+    expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_2 });
+  });
+
+  it("drops a stale selection from the address and re-reads the tab", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    server.detailStatus = 404;
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open" }, { replace: true }));
+    await waitFor(() => expect(server.listRequests.length).toBeGreaterThan(1));
+  });
+
+  it("steps nowhere when the tab holds no rows", async () => {
+    server.pending = [];
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-detail-header");
+    vi.mocked(onSearchChange).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Next request" }));
+    fireEvent.click(screen.getByRole("button", { name: "Previous request" }));
+    expect(onSearchChange).not.toHaveBeenCalled();
+  });
+
+  it("reads the detail without a role while the roles read fails", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    server.rolesFail = true;
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByTestId("intake-detail-header");
+    const pane = screen.getByTestId("intake-content-pane");
+    expect(within(pane).getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-detail-menu")).not.toBeInTheDocument();
   });
 
   it("writes the picked row into the address under the active tab", async () => {

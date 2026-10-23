@@ -14,6 +14,15 @@ export interface IntakeSearch {
   inboxIssueId?: string;
 }
 
+/**
+ * How a search write lands in history. User moves (selection, tab
+ * switch, previous/next, triage advance) push so back/forward walks
+ * them; corrections (settle, missing-id fallback) replace.
+ */
+export interface IntakeSearchWriteOptions {
+  replace?: boolean;
+}
+
 /** The search value the screen writes for a tab and optional selection. */
 export function intakeSearchFor(tab: IntakeTab, issueId: string | null | undefined): IntakeSearch {
   return issueId === null || issueId === undefined || issueId === ""
@@ -60,3 +69,25 @@ export function settleIntakeSearch(args: {
 
 /** Default search: the default tab, nothing selected. */
 export const DEFAULT_INTAKE_SEARCH: IntakeSearch = { currentTab: DEFAULT_INTAKE_TAB };
+
+/**
+ * What the address should say after a request leaves the active tab's
+ * list (INT-027/INT-028; the triage actions in slice E call this). The
+ * neighbour takes the selection — the next row, or the previous row
+ * when the removed row was last — and an emptied list keeps the tab
+ * with no selection.
+ */
+export function intakeSearchAfterRemove(args: {
+  search: IntakeSearch;
+  /** Row work-item ids of the active tab, in display order, still holding the removed id. */
+  rowIds: readonly string[];
+  removedId: string;
+}): IntakeSearch {
+  const { search, rowIds, removedId } = args;
+  const remaining = rowIds.filter((id) => id !== removedId);
+  if (remaining.length === 0) return { currentTab: search.currentTab };
+  const removedIndex = rowIds.indexOf(removedId);
+  if (removedIndex === -1) return { currentTab: search.currentTab, inboxIssueId: remaining[0]! };
+  const next = remaining[removedIndex] ?? remaining[remaining.length - 1]!;
+  return { currentTab: search.currentTab, inboxIssueId: next };
+}

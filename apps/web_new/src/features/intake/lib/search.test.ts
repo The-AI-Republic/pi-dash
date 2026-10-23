@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_INTAKE_SEARCH,
+  intakeSearchAfterRemove,
   intakeSearchFor,
   parseIntakeSearch,
   settleIntakeSearch,
@@ -79,5 +80,34 @@ describe("settleIntakeSearch (INT-005/INT-028)", () => {
 
   it("selects nothing for an empty tab (INT-005)", () => {
     expect(settleIntakeSearch({ search: { currentTab: "open" }, rowIds: [] })).toBe(null);
+  });
+});
+
+describe("intakeSearchAfterRemove (INT-027/INT-028)", () => {
+  const search = { currentTab: "open" as const, inboxIssueId: "i-2" };
+
+  it("advances to the next row", () => {
+    expect(intakeSearchAfterRemove({ search, rowIds: ["i-1", "i-2", "i-3"], removedId: "i-2" })).toEqual({
+      currentTab: "open",
+      inboxIssueId: "i-3",
+    });
+  });
+
+  it("falls back to the previous row when the removed row was last", () => {
+    expect(intakeSearchAfterRemove({ search, rowIds: ["i-1", "i-2"], removedId: "i-2" })).toEqual({
+      currentTab: "open",
+      inboxIssueId: "i-1",
+    });
+  });
+
+  it("keeps the tab with no selection when the list empties", () => {
+    expect(intakeSearchAfterRemove({ search, rowIds: ["i-2"], removedId: "i-2" })).toEqual({ currentTab: "open" });
+  });
+
+  it("selects the first row when the removed id was never listed", () => {
+    expect(intakeSearchAfterRemove({ search, rowIds: ["i-1", "i-3"], removedId: "gone" })).toEqual({
+      currentTab: "open",
+      inboxIssueId: "i-1",
+    });
   });
 });
