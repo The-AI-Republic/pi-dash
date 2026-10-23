@@ -20,7 +20,7 @@
   },
   "scripts": {
     "build": "tsdown src/index.ts --dts --format esm && tailwindcss -i src/kit.css -o dist/kit.css && cp src/tokens.css dist/tokens.css",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc/tsconfig.tsbuildinfo",
     "lint": "oxlint --deny-warnings",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

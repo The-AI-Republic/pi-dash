@@ -15,11 +15,6 @@
     "isolatedModules": true,
     "skipLibCheck": true,
     "noEmit": true,
-    // Cache type information between runs so a re-run of `tsc --noEmit`
-    // only re-checks changed files and their dependents. The cache lives
-    // in node_modules, so each checkout gets its own and git ignores it.
-    "incremental": true,
-    "tsBuildInfoFile": "./node_modules/.cache/tsc/tsconfig.tsbuildinfo",
     "esModuleInterop": true
   },
   "include": ["src", "vitest.config.ts"]

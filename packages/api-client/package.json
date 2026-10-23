@@ -12,7 +12,7 @@
   "types": "./dist/index.d.mts",
   "scripts": {
     "build": "tsdown src/index.ts --dts --format esm",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc/tsconfig.tsbuildinfo",
     "lint": "oxlint --deny-warnings",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage"
