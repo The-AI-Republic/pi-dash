@@ -13,7 +13,7 @@ all four columns go.
 The ``FileAsset`` rows that the FKs pointed at are left in place: they are
 ordinary soft-deletable assets and the shared upload machinery still owns
 them. Reverse restores the columns (nullable, empty) so a downgrade validates
-against the 0167 model.
+against the 0168 model.
 """
 
 from django.db import migrations
@@ -21,7 +21,7 @@ from django.db import migrations
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("db", "0167_wait_budget"),
+        ("db", "0168_ticker_stop_signal_disarm_reason"),
     ]
 
     operations = [
