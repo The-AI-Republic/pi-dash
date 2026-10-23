@@ -722,6 +722,54 @@ describe("IntakeDetail mobile header (INT-030)", () => {
     expect(await screen.findByRole("menu")).toBeInTheDocument();
     expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
   });
+
+  it("fires the snooze, duplicate and decline entries through the shared dialogs", async () => {
+    const user = userEvent.setup();
+    renderNarrow();
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    for (const [entry, dialog] of [
+      ["Snooze", "Snooze request"],
+      ["Mark as duplicate", "Mark as duplicate"],
+      ["Decline", "Decline work item"],
+    ]) {
+      await user.click(screen.getByRole("button", { name: "Request actions" }));
+      await user.click(await screen.findByRole("menuitem", { name: entry }));
+      expect(screen.getByRole("dialog", { name: dialog })).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    }
+  });
+
+  it("un-snoozes from the mobile menu and advances", async () => {
+    const user = userEvent.setup();
+    const future = new Date();
+    future.setDate(future.getDate() + 3);
+    const snoozed = detailPayload(0);
+    snoozed.snoozed_till = future.toISOString();
+    const server: DetailServer = { detailStatus: 200, detail: snoozed, writes: [] };
+    const { queryClient } = harness(server);
+    const onAdvance = vi.fn(() => false);
+    renderDetail(queryClient, { narrow: true, listOpen: true, onToggleList: () => undefined, onAdvance });
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Un snooze" }));
+    await waitFor(() => expect(server.writes).toHaveLength(1));
+    expect(server.writes[0]?.body).toEqual({ status: -2, snoozed_till: null });
+    expect(onAdvance).toHaveBeenCalledWith(ISSUE);
+  });
+
+  it("copies the work-item link from the mobile menu", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(globalThis.navigator, "clipboard", { configurable: true, value: { writeText } });
+    renderNarrow();
+    render(<ToastHost manager={getToastManager()} />);
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Copy work item link" }));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/acme/browse/APO-7/"));
+    expect(await screen.findByText("Copied the work item link.")).toBeInTheDocument();
+  });
 });
 
 describe("IntakeDetail duplicate detection (INT-018)", () => {
