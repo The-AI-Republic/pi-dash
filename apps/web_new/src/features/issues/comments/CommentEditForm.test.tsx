@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueComment, TransportInit } from "@pidash/api-client";
 import * as React from "react";
@@ -15,8 +15,17 @@ vi.mock("../../../shared/shell/index.js", () => ({
 }));
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { mentionQueryAt } from "../../../shared/editor/mention.js";
 import { notifyError } from "../../../shared/shell/index.js";
 import { CommentEditForm } from "./CommentEditForm.js";
+
+/** Pictures the stored body opens with, as the real editor parses them. */
+function seedImages(html: string): string[] {
+  const document = new DOMParser().parseFromString(html, "text/html");
+  return Array.from(document.querySelectorAll("img, image-component"))
+    .map((element) => element.getAttribute("src") ?? "")
+    .filter((src) => src !== "");
+}
 
 // The lazy Tiptap chunk loads once per worker and is slow under the full
 // suite; the form's own behaviors are what this file pins.
@@ -28,21 +37,58 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
     label,
     autoFocus,
     onReady,
+    onMentionQuery,
+    handleKeyDown,
   }: {
     initialHtml: string;
     onChange: (html: string) => void;
     label: string;
     autoFocus?: boolean;
-    onReady?: (handle: { insertImage: (src: string) => void }) => void;
+    onReady?: (handle: {
+      insertImage: (src: string) => void;
+      insertMention: (target: { id: string; name: string }) => void;
+    }) => void;
+    onMentionQuery?: (query: string | null) => void;
+    handleKeyDown?: (event: KeyboardEvent) => boolean;
   }) {
-    const images = React.useRef<string[]>([]);
+    const images = React.useRef<string[]>(seedImages(initialHtml));
+    const mentions = React.useRef<{ id: string; name: string }[]>([]);
+    const boxRef = React.useRef<HTMLTextAreaElement>(null);
     const [, rerender] = React.useReducer((value: number) => value + 1, 0);
+    const text = React.useRef(
+      initialHtml
+        .replace(/<[^>]*>/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    );
+    const emit = (): void => {
+      const markup =
+        images.current.map((src) => `<image-component src="${src}" status="uploaded"></image-component>`).join("") +
+        mentions.current
+          .map(
+            (mention) =>
+              `<mention-component id="${mention.id}" entity_identifier="${mention.id}" entity_name="user_mention" data-name="${mention.name}"></mention-component>`
+          )
+          .join("");
+      onChange(`<p>${text.current}</p>${markup}`);
+      onMentionQuery?.(mentionQueryAt(text.current)?.text ?? null);
+    };
     React.useEffect(
       () =>
         onReady?.({
           insertImage: (src) => {
             images.current.push(src);
             rerender();
+            emit();
+          },
+          insertMention: (target) => {
+            // The real handle replaces the typed @query with the node.
+            const query = mentionQueryAt(text.current);
+            if (query !== null) text.current = text.current.slice(0, text.current.length - query.text.length - 1);
+            if (boxRef.current !== null) boxRef.current.value = text.current;
+            mentions.current.push(target);
+            rerender();
+            emit();
           },
         }),
       [onReady]
@@ -53,13 +99,23 @@ vi.mock("../../../shared/editor/RichTextEditor.js", async (importOriginal) => {
           <img key={src} src={src} alt="" />
         ))}
         <textarea
+          ref={boxRef}
           aria-label={label}
           autoFocus={autoFocus}
-          defaultValue={initialHtml
-            .replace(/<[^>]*>/g, "")
-            .replace(/\s+/g, " ")
-            .trim()}
-          onInput={(event) => onChange(`<p>${event.currentTarget.value}</p>`)}
+          defaultValue={text.current}
+          onInput={(event) => {
+            text.current = event.currentTarget.value;
+            emit();
+          }}
+          onKeyDown={(event) => {
+            // Mirror the editing surface: the editor-level guard runs
+            // first, and a swallowed key reaches the form prevented,
+            // exactly as ProseMirror delivers it (CMT-011). The real
+            // surface inserts nothing on Ctrl/Cmd+Enter; a raw textarea
+            // would newline instead, so the fake swallows that default.
+            if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) event.preventDefault();
+            else if (handleKeyDown?.(event.nativeEvent) === true) event.preventDefault();
+          }}
         />
       </div>
     );
@@ -132,8 +188,10 @@ function renderForm(props: Partial<React.ComponentProps<typeof CommentEditForm>>
   };
 }
 
+type StubAnswer = { status: number; body: unknown };
+
 function stubTransport(
-  handler: (method: string, url: string) => { status: number; body: unknown } = () => ({ status: 200, body: {} })
+  handler: (method: string, url: string) => StubAnswer | Promise<StubAnswer> = () => ({ status: 200, body: {} })
 ) {
   const calls: { method: string; url: string }[] = [];
   createAppClient("https://api.test", async (url: string, init: TransportInit) => {
@@ -141,7 +199,7 @@ function stubTransport(
     if (url.endsWith("/auth/get-csrf-token/")) {
       return { status: 200, url, headers: { get: () => null }, text: async () => JSON.stringify({ csrf_token: "x" }) };
     }
-    const answer = handler(init.method, url);
+    const answer = await handler(init.method, url);
     return {
       status: answer.status,
       url,
@@ -194,7 +252,7 @@ describe("CommentEditForm", () => {
     expect(onSave).toHaveBeenCalledWith(expect.stringContaining("now"));
   });
 
-  it("saves on Enter and leaves modifier-plus-Enter for a line break", async () => {
+  it("saves on Enter and newlines on Shift+Enter (CMT-011)", async () => {
     stubTransport();
     const user = userEvent.setup();
     const { onSave } = renderForm();
@@ -206,6 +264,31 @@ describe("CommentEditForm", () => {
     expect(onSave).not.toHaveBeenCalled();
     await user.keyboard("{Enter}");
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+  });
+
+  it("leaves Ctrl+Enter and Cmd+Enter inert (CMT-011)", async () => {
+    stubTransport();
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    await user.keyboard(" one");
+    await waitFor(() => expect(editable.value).toMatch(/one/));
+    const draft = editable.value;
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(editable.value).toBe(draft);
+    // The real surface delivers these Enters un-prevented (its guard
+    // returns false for them); firing from the fake's wrapper div
+    // reproduces that delivery, since the newline swallow sits on the
+    // textarea itself. The guard must ignore them on its own.
+    const wrapper = editable.parentElement!;
+    fireEvent.keyDown(wrapper, { key: "Enter", ctrlKey: true });
+    fireEvent.keyDown(wrapper, { key: "Enter", metaKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onSave).not.toHaveBeenCalled();
+    expect(editable.value).toBe(draft);
   });
 
   it("blocks an empty save", async () => {
@@ -236,6 +319,140 @@ describe("CommentEditForm", () => {
     fireEvent.input(editable, { target: { value: "Stored words" } });
     await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).toBeDisabled());
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("leaves the Enter that commits an IME composition to the input (CMT-011)", async () => {
+    stubTransport();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    editable.focus();
+    const composing = new KeyboardEvent("keydown", { key: "Enter", bubbles: true });
+    Object.defineProperty(composing, "isComposing", { value: true });
+    fireEvent(editable, composing);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it("disables save and holds Enter while an upload is in flight (CMT-011)", async () => {
+    const user = userEvent.setup();
+    let release!: (answer: StubAnswer) => void;
+    let held = true;
+    stubTransport(() => {
+      if (!held) return { status: 204, body: "" };
+      return new Promise((resolve) => {
+        release = (answer) => {
+          held = false;
+          resolve(answer);
+        };
+      });
+    });
+    vi.stubGlobal("fetch", async () => ({ ok: true, status: 204 }));
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    fireEvent.change(screen.getByLabelText("Add an image to the comment"), {
+      target: { files: [new File(["img"], "shot.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).toBeDisabled());
+    await user.keyboard("{Enter}");
+    fireEvent.submit(screen.getByRole("button", { name: "Save comment" }).closest("form")!);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onSave).not.toHaveBeenCalled();
+    release({
+      status: 200,
+      body: {
+        asset_id: "asset-7",
+        asset_url: "/api/assets/v2/workspaces/acme/projects/p-1/asset-7/",
+        upload_data: { url: "https://s3.test/upload", fields: {} },
+      },
+    });
+    // Once the upload lands, the save control arms again.
+    await waitFor(() => expect(document.querySelector("img")).not.toBeNull());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).not.toBeDisabled());
+  });
+
+  it("duplicates kept images into the new revision on save (CMT-009)", async () => {
+    stubTransport((_method, url) => {
+      if (url.includes("/duplicate-assets/")) return { status: 200, body: { asset_id: "asset-1b" } };
+      return { status: 204, body: "" };
+    });
+    const user = userEvent.setup();
+    const { onSave } = renderForm({
+      comment: comment({
+        comment_html: '<p>Pic <image-component src="asset-1" status="uploaded"></image-component></p>',
+      }),
+    });
+    const editable = await surface("Pic");
+    caretToEnd(editable);
+    await user.keyboard(" kept");
+    await waitFor(() => expect(editable.value).toMatch(/kept/));
+    await user.click(screen.getByRole("button", { name: "Save comment" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.stringContaining('src="asset-1b"'));
+    expect(onSave).toHaveBeenCalledWith(expect.not.stringContaining('src="asset-1"'));
+  });
+
+  it("notices a refused duplicate and keeps the draft without saving (CMT-009)", async () => {
+    stubTransport((_method, url) => {
+      if (url.includes("/duplicate-assets/")) return { status: 404, body: { error: "Asset missing" } };
+      return { status: 204, body: "" };
+    });
+    const user = userEvent.setup();
+    const { onSave } = renderForm({
+      comment: comment({
+        comment_html: '<p>Pic <image-component src="asset-1" status="uploaded"></image-component></p>',
+      }),
+    });
+    const editable = await surface("Pic");
+    // A pristine draft cannot save (CMT-003), so dirty it to reach the duplicate path.
+    caretToEnd(editable);
+    await user.keyboard(" x");
+    await waitFor(() => expect(editable.value).toMatch(/x/));
+    await user.click(screen.getByRole("button", { name: "Save comment" }));
+    await waitFor(() => expect(notifyError).toHaveBeenCalledWith("Couldn't update the comment", "Asset missing"));
+    expect(onSave).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).not.toBeDisabled());
+  });
+
+  it("saves a text-only edit without duplicating anything (CMT-009)", async () => {
+    const calls = stubTransport();
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    await user.keyboard(" more");
+    await waitFor(() => expect(editable.value).toMatch(/more/));
+    await user.click(screen.getByRole("button", { name: "Save comment" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.stringContaining("more"));
+    expect(calls.some((call) => call.url.includes("/duplicate-assets/"))).toBe(false);
+  });
+
+  it("picks a mention from the popup and saves it with the body (CMT-019)", async () => {
+    stubTransport((_method, url) => {
+      if (url.includes("/entity-search/")) {
+        return {
+          status: 200,
+          body: {
+            user_mention: [{ member__id: "u-1", member__display_name: "Ada L", member__avatar_url: null }],
+          },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    await user.keyboard(" @ad");
+    const popup = await screen.findByRole("list", { name: "Mention suggestions" });
+    expect(within(popup).getByText("Users")).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    // The pick lands in the draft instead of saving.
+    expect(onSave).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Mention suggestions" })).not.toBeInTheDocument());
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.stringContaining("mention-component"));
   });
 
   it("keeps the draft and re-enables the check when the save is refused", async () => {
@@ -327,6 +544,33 @@ describe("CommentEditForm", () => {
     expect(onSave).toHaveBeenCalledTimes(1);
     (release as (() => void) | null)?.();
     await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).not.toBeDisabled());
+  });
+
+  it("dismisses the mention popup on Escape without saving (CMT-019)", async () => {
+    stubTransport((_method, url) => {
+      if (url.includes("/entity-search/")) {
+        return {
+          status: 200,
+          body: {
+            user_mention: [{ member__id: "u-1", member__display_name: "Ada L", member__avatar_url: null }],
+          },
+        };
+      }
+      return { status: 200, body: {} };
+    });
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    caretToEnd(editable);
+    // Escape with no popup is a no-op.
+    await user.keyboard("{Escape}");
+    expect(onSave).not.toHaveBeenCalled();
+    await user.keyboard(" @ad");
+    await screen.findByRole("list", { name: "Mention suggestions" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Mention suggestions" })).not.toBeInTheDocument());
+    expect(onSave).not.toHaveBeenCalled();
+    expect(editable.value).toContain("@ad");
   });
 
   it("notices an image that uploads but cannot attach while editing", async () => {

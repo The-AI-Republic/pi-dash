@@ -400,9 +400,11 @@ export type {
 } from "./contracts/issue-comments.js";
 export {
   COMMENT_IMAGE_ENTITY_TYPE,
+  CommentImageDuplicate,
   CommentImageGrant,
   attachCommentImages,
   completeCommentImageUpload,
+  duplicateCommentImage,
   requestCommentImageUpload,
   uploadCommentImage,
 } from "./contracts/comment-assets.js";

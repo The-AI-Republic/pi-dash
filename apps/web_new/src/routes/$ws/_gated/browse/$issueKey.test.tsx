@@ -596,6 +596,16 @@ describe("browse route", () => {
     expect(document.title).not.toContain("WEB-1");
   });
 
+  it("hides a refused item behind the missing state with no composer (CMT-002)", async () => {
+    // A guest refused another member's item resolves the same null lite
+    // as an unknown key (issues §21 owns the read); the comments area
+    // only verifies the state carries no posting surface.
+    renderBrowse(true, undefined, { liteStatus: 403 });
+    await screen.findByRole("heading", { name: "No work item matches this address" });
+    expect(screen.queryByRole("group", { name: "Add comment" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Comment" })).not.toBeInTheDocument();
+  });
+
   it("leaves intake rows for the project intake tab", async () => {
     const { router } = renderBrowse(true, undefined, { intake: true });
     expect(await screen.findByText("navigated away")).toBeInTheDocument();

@@ -92,7 +92,10 @@ test(
 // editor's upload flag stuck, so an edit that keeps the image can never
 // be saved (only removing the image re-arms save). Intended per CMT-009:
 // editing keeps attachments bound, duplicating them into the new
-// revision. Locked here so the fix has a regression test.
+// revision. Locked here so the fix has a regression test. The new app
+// ships the fix, so the web_new leg asserts the intended outcome
+// instead of the stuck save (gate-aligned target behavior, NEWFRONT-812;
+// the AUTH-013 scenario shows the branching pattern).
 test(
   specTitle(ROWS, "bug: edit that keeps the image never arms save (NEWFRONT-147)"),
   { tag: specTags(ROWS) },
@@ -111,6 +114,37 @@ test(
         .toEqual(expect.arrayContaining([expect.stringContaining(marker)]));
       await expect.poll(() => driver.composerCommentImageCount(marker), { timeout: 60_000 }).toBeGreaterThan(0);
     });
+
+    if (driver.target === "web_new") {
+      await test.step("the edit arms save, saves, and keeps the image", async () => {
+        await driver.composerOpenCommentMenu(marker);
+        await driver.composerMenuClick("Edit");
+        // Type before asserting the control arms: a pristine draft
+        // legitimately leaves save disabled (CMT-003), so the arm
+        // assertion only holds past the first keystroke.
+        await driver.composerEditType(`${marker} kept`);
+        await expect.poll(() => driver.composerEditSaveDisabled(), { timeout: 30_000 }).toBe(false);
+        await driver.composerEditSave();
+        await expect
+          .poll(() => driver.composerVisibleCommentTexts(), { timeout: 60_000 })
+          .toEqual(expect.arrayContaining([expect.stringContaining(`${marker} kept`)]));
+        await expect
+          .poll(() => driver.composerCommentImageCount(`${marker} kept`), { timeout: 60_000 })
+          .toBeGreaterThan(0);
+      });
+
+      await test.step("the server stored the edit with its duplicated image", async () => {
+        const session = await signInSession(seed.email, seed.password);
+        const issueId = await serverIssueIdByName(seed.workspaceSlug, seed.projectId, seed.issueNames[2]!, session);
+        const comments = await composerServerComments(seed.workspaceSlug, seed.projectId, issueId, session);
+        const stored = comments.find((comment) => comment.comment_stripped.includes(marker));
+        expect(stored).toBeDefined();
+        expect(stored!.comment_html).toContain("image-component");
+        expect(stored!.comment_html).toContain('status="uploaded"');
+        expect(stored!.edited_at).not.toBeNull();
+      });
+      return;
+    }
 
     await test.step("save stays disabled while the image is in the edit draft", async () => {
       await driver.composerOpenCommentMenu(marker);

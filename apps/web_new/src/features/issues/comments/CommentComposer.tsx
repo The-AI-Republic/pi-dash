@@ -1,12 +1,16 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Comment composer (parity/specs/issues.md §16, ISS-197). Enter posts a
-// non-empty body; modifier-plus-Enter (and Shift+Enter) insert a line
-// break. One post at a time: the second Enter while a write is out is a
-// no-op. On success the editor clears and the images uploaded while
-// typing attach to the new comment. On published projects the toolbar
-// carries the internal/external switch, internal by default.
+// Comment composer (parity/specs/issues.md §16, ISS-197;
+// parity/specs/comments.md §2/§6, CMT-001/002/009/011/019). Enter posts
+// a non-empty body; Shift+Enter inserts a line break and
+// Ctrl/Cmd+Enter are inert. One post at a time: a second Enter while
+// a write is out is a no-op, as is Enter mid-upload. Every attempted
+// post clears the draft, success or failure (§11.3). On success the
+// images uploaded while typing attach to the new comment. On published
+// projects the toolbar carries the internal/external switch, internal
+// by default. Typing @ opens the mention picker; Enter picks its first
+// row and Escape dismisses it.
 
 import { Button, IconButton, Tooltip } from "@pidash/kit";
 import { Globe, ImagePlus, Lock } from "lucide-react";
@@ -14,8 +18,9 @@ import * as React from "react";
 import type { CommentAccess } from "@pidash/api-client";
 
 import { CommentRichTextEditor, type RichTextEditorHandle } from "../../../shared/editor/index.js";
-import { isCommentBodyEmpty } from "./model.js";
+import { commentEnterAction, COMMENT_IMAGE_UPLOADED_STATUS, isCommentBodyEmpty } from "./model.js";
 import { useUploadCommentImage } from "./api.js";
+import { CommentMentionSuggestions, useCommentMentionPicker } from "./MentionSuggestions.js";
 
 export const COMPOSER_LABEL = "Add comment";
 export const COMPOSER_PLACEHOLDER = "Add comment";
@@ -42,27 +47,56 @@ export function CommentComposer({
   const [html, setHtml] = React.useState("<p></p>");
   const [access, setAccess] = React.useState<CommentAccess>("INTERNAL");
   const [sending, setSending] = React.useState(false);
+  const [uploads, setUploads] = React.useState(0);
   const [resetToken, setResetToken] = React.useState(0);
   const assetsRef = React.useRef<string[]>([]);
   const handleRef = React.useRef<RichTextEditorHandle | null>(null);
   const upload = useUploadCommentImage({ workspaceSlug, projectId });
   const empty = isCommentBodyEmpty(html);
+  const busy = sending || uploads > 0;
+  const mentions = useCommentMentionPicker({
+    workspaceSlug,
+    projectId,
+    getHandle: () => handleRef.current,
+    busy,
+    empty,
+  });
 
-  const post = async (): Promise<void> => {
-    if (sending || empty) return;
-    setSending(true);
-    const assets = assetsRef.current;
-    try {
-      await onCreate({ html, access, assetIds: assets });
-    } catch {
-      // The create raised its own notice; the draft stays for a retry.
-      setSending(false);
-      return;
-    }
+  const clearDraft = (): void => {
     assetsRef.current = [];
+    mentions.reset();
     setHtml("<p></p>");
     setResetToken((value) => value + 1);
+  };
+
+  const post = async (): Promise<void> => {
+    if (busy || empty) return;
+    setSending(true);
+    try {
+      await onCreate({ html, access, assetIds: assetsRef.current });
+    } catch {
+      // A refused post still clears the draft: parity pins the cleared
+      // composer after a failed create (comments.md §11.3), the failure
+      // notice already carries the outcome, and parked images must not
+      // leak into the next, unrelated comment.
+    }
+    clearDraft();
     setSending(false);
+  };
+
+  const uploadImage = (file: File): void => {
+    setUploads((count) => count + 1);
+    void upload
+      .mutateAsync({ file })
+      .then((image) => {
+        assetsRef.current = [...assetsRef.current, image.assetId];
+        // The editor may have unmounted while the upload was out.
+        handleRef.current?.insertImage(image.src, { storedSrc: image.assetId, status: COMMENT_IMAGE_UPLOADED_STATUS });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        setUploads((count) => count - 1);
+      });
   };
 
   return (
@@ -75,7 +109,22 @@ export function CommentComposer({
         void post();
       }}
       onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          if (mentions.mentionOpen) {
+            event.preventDefault();
+            mentions.dismiss();
+          }
+          return;
+        }
         if (event.key !== "Enter" || event.shiftKey || event.ctrlKey || event.metaKey) return;
+        if (event.defaultPrevented) {
+          // The editing surface already swallowed this Enter (a pick or
+          // a no-op); only a pick still needs its insertion (CMT-011).
+          if (commentEnterAction({ mentionOpen: mentions.mentionOpen, busy, empty }) === "pick-mention") {
+            mentions.pickFirst();
+          }
+          return;
+        }
         // IME composition commits with Enter: leave that Enter to the input.
         if (event.nativeEvent.isComposing) return;
         event.preventDefault();
@@ -92,8 +141,11 @@ export function CommentComposer({
           onReady={(handle) => {
             handleRef.current = handle;
           }}
+          onMentionQuery={mentions.onMentionQuery}
+          handleKeyDown={mentions.handleEditorKeyDown}
         />
       </React.Suspense>
+      {mentions.mentionOpen ? <CommentMentionSuggestions people={mentions.people} onPick={mentions.pick} /> : null}
       <div className="flex items-center justify-end gap-(--space-2)">
         {showAccess ? (
           <div
@@ -137,19 +189,12 @@ export function CommentComposer({
               const file = event.target.files?.[0];
               event.target.value = "";
               if (file === undefined) return;
-              void upload
-                .mutateAsync({ file })
-                .then((image) => {
-                  assetsRef.current = [...assetsRef.current, image.assetId];
-                  // The editor may have unmounted while the upload was out.
-                  handleRef.current?.insertImage(image.src);
-                })
-                .catch(() => undefined);
+              uploadImage(file);
             }}
           />
           <ImagePlus size={16} strokeWidth={1.5} aria-hidden="true" />
         </label>
-        <Button type="submit" size="small" variant="primary" loading={sending} disabled={empty}>
+        <Button type="submit" size="small" variant="primary" loading={sending} disabled={empty || busy}>
           {COMPOSER_SUBMIT_LABEL}
         </Button>
       </div>

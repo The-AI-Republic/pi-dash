@@ -151,6 +151,98 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(document.querySelector("img")?.getAttribute("src")).toBe("https://cdn.test/shot.png");
   });
 
+  it("stores an uploaded comment picture as image-component with its status (CMT-009)", async () => {
+    const onChange = vi.fn();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p>with image</p>"
+          label="CommentStored"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    await editorSurface("CommentStored");
+    await vi.waitFor(() => expect(handles.length).toBeGreaterThan(0));
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    handle.insertImage("/api/assets/v2/workspaces/acme/projects/p-1/asset-9/", {
+      storedSrc: "asset-9",
+      status: "uploaded",
+    });
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("<image-component");
+    expect(last).toContain('src="asset-9"');
+    expect(last).toContain('status="uploaded"');
+    expect(last).not.toContain("data-stored-src");
+  });
+
+  it("stores a picked person in the comment editor (CMT-019)", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const handles: import("./RichTextEditor.js").RichTextEditorHandle[] = [];
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p></p>"
+          label="CommentMention"
+          onChange={onChange}
+          onReady={(ready) => {
+            handles.push(ready);
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentMention");
+    editable.focus();
+    await user.keyboard("Hello @ad");
+    const handle = handles[handles.length - 1];
+    if (handle === undefined) throw new Error("the editor announced no handle");
+    handle.insertMention({ id: "u-1", name: "Ada" });
+    await vi.waitFor(() => expect(editable.querySelector("mention-component")).not.toBeNull());
+    expect(editable.innerHTML).not.toContain("@ad");
+    expect(editable.querySelector(".mention-chip")?.textContent).toBe("@Ada");
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("mention-component");
+    expect(last).toContain('entity_identifier="u-1"');
+    expect(last).toContain('data-name="Ada"');
+  });
+
+  it("keeps pasted formatting in the comment editor (CMT-001)", async () => {
+    const onChange = vi.fn();
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor initialHtml="<p>typed marker</p>" label="CommentPaste" onChange={onChange} />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentPaste");
+    editable.focus();
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      // A real clipboard answers "" for types it does not carry; the
+      // code-block plugin JSON-parses its own type, so anything else
+      // there would throw before the paste lands.
+      value: {
+        getData: (type: string) => {
+          if (type === "text/html") return "<p>pasted <strong>bold</strong> fragment</p>";
+          if (type === "text/plain") return "pasted bold fragment";
+          return "";
+        },
+      },
+    });
+    editable.dispatchEvent(paste);
+    await vi.waitFor(() => expect(onChange).toHaveBeenCalled());
+    const last = onChange.mock.calls[onChange.mock.calls.length - 1]?.[0] as string;
+    expect(last).toContain("typed marker");
+    expect(last).toContain("<strong>bold</strong>");
+  });
+
   it("reports the @-query under the caret and its absence", async () => {
     const user = userEvent.setup();
     const queries: Array<string | null> = [];
@@ -368,6 +460,50 @@ describe("RichTextEditor", { timeout: EDITOR_TEST_TIMEOUT }, () => {
     expect(last).toContain('<img src="https://cdn.test/shot.png"');
     expect(last).not.toContain("data-stored-src");
     expect(last).not.toContain("<image-component");
+  });
+
+  it("routes keys through the caller's guard first (CMT-011)", async () => {
+    const seen: KeyboardEvent[] = [];
+    let swallow = true;
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <CommentRichTextEditor
+          initialHtml="<p>guarded</p>"
+          label="CommentGuard"
+          onChange={() => {}}
+          handleKeyDown={(event) => {
+            seen.push(event);
+            return swallow;
+          }}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("CommentGuard");
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    editable.dispatchEvent(enter);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    // A released key bubbles on unconsumed.
+    swallow = false;
+    const plain = new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true });
+    editable.dispatchEvent(plain);
+    expect(seen).toHaveLength(2);
+    expect(plain.defaultPrevented).toBe(false);
+  });
+
+  it("paints a stored image without a source with an empty address", async () => {
+    render(
+      <React.Suspense fallback={<p>loading</p>}>
+        <IssueDescriptionEditor
+          initialHtml='<image-component status="uploaded"></image-component>'
+          label="DescriptionSrcless"
+          onChange={() => {}}
+        />
+      </React.Suspense>
+    );
+    const editable = await editorSurface("DescriptionSrcless");
+    expect(editable.querySelector("image-component img")?.getAttribute("src")).toBe("");
   });
 
   it("mounts without a ready handler", async () => {

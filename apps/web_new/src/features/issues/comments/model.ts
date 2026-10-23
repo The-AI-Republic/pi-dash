@@ -5,7 +5,8 @@
 // helpers the composer, the card menu and the deep-link highlight share:
 // for whom a comment is authored, which menu entries that viewer gets,
 // how the fold marker rides in the comment's labels, the display name the
-// header shows, and the deep link a copied comment points at.
+// header shows, the deep link a copied comment points at, the asset ids
+// an edit duplicates (CMT-009), and the Enter key decision (CMT-011).
 
 import { COMMENT_FOLD_LABEL, type IssueComment } from "@pidash/api-client";
 
@@ -115,6 +116,91 @@ export function commentDeepLink(issueUrl: string, commentId: string): string {
 /** True when a comment body has neither words nor image/mention markup. */
 export function isCommentBodyEmpty(html: string): boolean {
   return isStoredHtmlEmptyIgnoring(html, COMMENT_CONTENT_TAGS);
+}
+
+/** Status a freshly uploaded comment picture carries in the stored body. */
+export const COMMENT_IMAGE_UPLOADED_STATUS = "uploaded";
+
+/**
+ * Asset id a comment image node points at (CMT-009). Stored bodies keep
+ * either the bare asset id or the served asset path, app-relative or
+ * absolute; anything else (external pictures, data URLs) has no asset
+ * to duplicate and answers null.
+ */
+export function commentImageAssetId(src: string): string | null {
+  const value = src.trim();
+  if (value === "") return null;
+  const marker = "/api/assets/v2/";
+  const at = value.indexOf(marker);
+  if (at !== -1) {
+    const tail = value
+      .slice(at + marker.length)
+      .split("/")
+      .filter((part) => part !== "");
+    const id = tail[tail.length - 1];
+    return id === undefined ? null : id;
+  }
+  if (value.includes("/") || value.includes(":") || /\s/.test(value)) return null;
+  return value;
+}
+
+/** Asset ids a comment body embeds, in document order without repeats. */
+export function commentBodyImageAssetIds(html: string): string[] {
+  if (typeof globalThis.DOMParser === "undefined") return [];
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const ids: string[] = [];
+  for (const element of Array.from(document.querySelectorAll("img, image-component"))) {
+    const id = commentImageAssetId(element.getAttribute("src") ?? "");
+    if (id !== null && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Next comment body with duplicated assets rebound (CMT-009). Every
+ * image node whose asset id sits in `mapping` points at its duplicate
+ * instead; anything else passes through untouched. An empty mapping
+ * returns the body untouched, never renormalized.
+ */
+export function rewriteCommentImageSrcs(html: string, mapping: ReadonlyMap<string, string>): string {
+  if (mapping.size === 0 || typeof globalThis.DOMParser === "undefined") return html;
+  const document = new DOMParser().parseFromString(html, "text/html");
+  for (const element of Array.from(document.querySelectorAll("img, image-component"))) {
+    const id = commentImageAssetId(element.getAttribute("src") ?? "");
+    if (id === null) continue;
+    const duplicate = mapping.get(id);
+    if (duplicate !== undefined) element.setAttribute("src", duplicate);
+  }
+  return document.body.innerHTML;
+}
+
+/** Form state a plain Enter keypress decides on (CMT-011). */
+export interface CommentEnterState {
+  /** A mention suggestion shows and Enter would pick it. */
+  mentionOpen: boolean;
+  /** A post/save or an upload is in flight. */
+  busy: boolean;
+  /** The draft holds neither words nor a stored content node. */
+  empty: boolean;
+}
+
+/** What a plain Enter does: pick the mention, submit, or nothing. */
+export type CommentEnterAction = "pick-mention" | "submit" | "none";
+
+/** One Enter rule both comment forms share (CMT-011). */
+export function commentEnterAction(state: CommentEnterState): CommentEnterAction {
+  if (state.mentionOpen) return "pick-mention";
+  if (state.busy || state.empty) return "none";
+  return "submit";
+}
+
+/**
+ * Whether the editing surface swallows a plain Enter before it reaches
+ * the form (CMT-011). A swallowed Enter inserts no newline: picks and
+ * no-ops leave the draft byte-identical, and only a submit bubbles on.
+ */
+export function swallowCommentEnter(state: CommentEnterState): boolean {
+  return commentEnterAction(state) !== "submit";
 }
 
 /** A change the card made to the comment, as the cache paints it. */
