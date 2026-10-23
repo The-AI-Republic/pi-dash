@@ -99,8 +99,29 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     if scheme != "http" && scheme != "https" {
         return Err(format!("No connection adapters were found for {url:?}"));
     }
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, tail)) => (authority, format!("/{tail}")),
+    // `urllib3.util.parse_url` (behind `PreparedRequest.prepare_url`)
+    // ends the authority at the first of `/`, `?` or `#`: a query or
+    // fragment on a bare host is not part of it (PIDASHCONV-1275).
+    let (authority, path) = match rest.find(['/', '?', '#']) {
+        Some(i) => {
+            let (authority, tail) = rest.split_at(i);
+            // `prepare_url`: an empty path becomes `/`; a bare query
+            // keeps its mark (`/?x=1`); the fragment is dropped here
+            // (and below for the `/` case) — it never reaches the wire.
+            let path = if let Some(query) = tail.strip_prefix('?') {
+                let query = query.split_once('#').map_or(query, |(head, _)| head);
+                if query.is_empty() {
+                    "/".to_owned()
+                } else {
+                    format!("/?{query}")
+                }
+            } else if tail.starts_with('#') {
+                "/".to_owned()
+            } else {
+                tail.to_owned()
+            };
+            (authority, path)
+        }
         None => (rest, "/".to_owned()),
     };
     if authority.is_empty() {
@@ -698,7 +719,10 @@ pub fn resolve_url(base: &str, location: &str) -> String {
     if let Some(network) = location.strip_prefix("//") {
         return inherit_fragment(&format!("{scheme}://{network}"), base);
     }
-    let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
+    // The base head carries no fragment (stripped above), but a
+    // query on a bare host is not part of the authority either
+    // (`urljoin` parity, PIDASHCONV-1275).
+    let authority = rest.find(['/', '?']).map_or(rest, |i| &rest[..i]);
     if location.starts_with('/') {
         // Absolute path (possibly with a new query).
         return inherit_fragment(&format!("{scheme}://{authority}{location}"), base);
@@ -1150,6 +1174,30 @@ mod tests {
     }
 
     #[test]
+    fn url_parsing_ends_authority_at_query_or_fragment() {
+        // PIDASHCONV-1275: `urllib3.util.parse_url` (behind
+        // `PreparedRequest.prepare_url`) ends the authority at the first
+        // of `/`, `?` or `#`. A query or fragment on a bare host must
+        // not fold into the host; the request target becomes `/?query`
+        // and the fragment is dropped (empty path becomes `/`).
+        let parsed = parse_url("http://h?x=1").unwrap();
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.port, 80);
+        assert_eq!(parsed.path, "/?x=1");
+
+        let parsed = parse_url("http://h#f").unwrap();
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.path, "/");
+
+        // A `?` before the first `/` splits there, not at the `/`.
+        let parsed = parse_url("http://h:8080?x=/y").unwrap();
+        assert_eq!(parsed.host, "h");
+        assert_eq!(parsed.port, 8080);
+        assert_eq!(parsed.path, "/?x=/y");
+        assert_eq!(parsed.host_header(), "h:8080");
+    }
+
+    #[test]
     fn request_bytes_match_requests_wire_order() {
         // Order pinned by the raw-socket probe: Host, caller headers,
         // Content-Length, then the body.
@@ -1296,6 +1344,11 @@ mod tests {
         assert_eq!(resolve_url("http://h/a/b", "../c"), "http://h/c");
         assert_eq!(resolve_url("http://h/a/b", "?y=2"), "http://h/a/b?y=2");
         assert_eq!(resolve_url("http://h/a", "//o/d"), "http://o/d");
+        // PIDASHCONV-1275: a query on the redirect base's bare host
+        // is not part of its authority (`urljoin` parity).
+        assert_eq!(resolve_url("http://h?x=1", "/c"), "http://h/c");
+        assert_eq!(resolve_url("http://h?x=1", "?y=2"), "http://h?y=2");
+        assert_eq!(resolve_url("http://h?x=1", "c"), "http://h/c");
         assert_eq!(requote_uri("/a b/%7e"), "/a%20b/~");
         assert_eq!(requote_uri("/a%2G"), "/a%252G");
     }

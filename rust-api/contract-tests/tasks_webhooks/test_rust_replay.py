@@ -363,6 +363,45 @@ def test_rust_webhook_send_hostile_content_length_retries_locally(
     assert str(alive[0]["response_status"]) == "200"
 
 
+def test_rust_webhook_send_query_on_bare_host_posts_to_root(
+    db_conn, broker_url, webhook_sink
+):
+    """Query-string URL with no path, Rust side: POST /?token=... (PIDASHCONV-1275).
+
+    Mirrors ``test_webhook_send_query_on_bare_host_posts_to_root_with_query``:
+    the Rust worker must end the URL authority at the first of '/',
+    '?' or '#' (urllib3 ``parse_url`` parity) so the delivery goes
+    to the bare host with '/?token=abc' as the request target and
+    the log row carries the sink's status. Pre-fix the query folded
+    into the host and every delivery failed with a transport error.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-query-host-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayqueryhost", owner["id"])
+    token = uuid.uuid4().hex
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"{config.WEBHOOK_SINK_BASE}?token={token}",
+        issue=True,
+    )
+    hook = dict(hook)
+    hook["workspace_slug"] = workspace["slug"]
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-query-host")
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_SEND} executed")
+    (delivery,) = webhook_sink.wait_for_count(1, what="query-host webhook POST")
+    assert delivery["path"] == f"/?token={token}"
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="query-host webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+
+
 def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_sink):
     """Redelivery: two publishes → two POSTs, two rows (PIDASHCONV-1105).
 
