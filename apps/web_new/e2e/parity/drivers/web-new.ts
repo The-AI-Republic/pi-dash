@@ -398,6 +398,31 @@ export class WebNewDriver implements ParityDriver {
     messageList: 0,
   };
 
+  // --- Desktop traffic watches (NEWFRONT-595 gate). One request-URL log
+  // --- per family (runtime, updater, shell); specs begin/end their own.
+  private deskTrafficWatches = new Map<string, { urls: string[]; handler: (request: { url(): string }) => void }>();
+
+  private deskTrafficWatchBegin(family: string): void {
+    this.deskTrafficWatchEnd(family);
+    const urls: string[] = [];
+    const handler = (request: { url(): string }): void => {
+      urls.push(request.url());
+    };
+    this.page.on("request", handler);
+    this.deskTrafficWatches.set(family, { urls, handler });
+  }
+
+  private deskTrafficWatchUrls(family: string): string[] {
+    return [...(this.deskTrafficWatches.get(family)?.urls ?? [])];
+  }
+
+  private deskTrafficWatchEnd(family: string): void {
+    const watch = this.deskTrafficWatches.get(family);
+    if (!watch) return;
+    this.page.off("request", watch.handler);
+    this.deskTrafficWatches.delete(family);
+  }
+
   // --- Auth area (NEWFRONT-491 gate). The card is email-first with
   // --- placeholder-pinned steps; submits are XHR plus a full navigation on
   // --- success, an inline banner plus step recovery on failure.
@@ -2827,7 +2852,11 @@ export class WebNewDriver implements ParityDriver {
     return todo("openReadOnlyIssueDetail");
   }
   async issueDetailTitle(): Promise<string | null> {
-    return todo("issueDetailTitle");
+    // Editable detail carries the title field; anything else is not a
+    // settled detail view.
+    const field = this.page.getByLabel("Title").first();
+    if ((await field.count()) === 0) return null;
+    return field.inputValue().catch(() => null);
   }
   async issueDetailIdentifier(): Promise<string | null> {
     return todo("issueDetailIdentifier");
@@ -2860,7 +2889,10 @@ export class WebNewDriver implements ParityDriver {
     return todo("pickPriority");
   }
   async copyIssueLink(): Promise<void> {
-    return todo("copyIssueLink");
+    // Detail header's shared copy control (DESK-019): copies the hosted
+    // work-item address on desktop, the page origin on web.
+    const control = this.page.getByRole("button", { name: "Copy work item link", exact: true });
+    await control.first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async lastToast(): Promise<string | null> {
     const toasts = this.webhookToasts();
@@ -3244,21 +3276,38 @@ export class WebNewDriver implements ParityDriver {
       .click({ timeout: WebNewDriver.WAIT_MS });
   }
   async downloadWidgetRowFile(widget: string, rowName: string): Promise<{ fileName: string; bytes: Buffer }> {
-    // The row is a new-tab link to the served asset; the tab downloads the
-    // bytes instead of rendering them, so capture both halves.
+    // The row is a new-tab link to the served asset. When the tab
+    // downloads the bytes, capture the download; when it renders them
+    // (the served view answers inline), pull the bytes over the
+    // authenticated session instead. Either way the tab closes again.
+    const link = this.widgetRow(widget, rowName).locator('a[target="_blank"]').first();
+    const href = await link.getAttribute("href");
     const popupWait = this.page.waitForEvent("popup", { timeout: WebNewDriver.WAIT_MS }).catch(() => null);
-    const [download] = await Promise.all([
-      this.page.waitForEvent("download", { timeout: 60_000 }),
-      this.widgetRow(widget, rowName).locator('a[target="_blank"]').first().click({ timeout: WebNewDriver.WAIT_MS }),
-    ]);
+    const downloadWait = this.page.waitForEvent("download", { timeout: 30_000 }).catch(() => null);
+    await link.click({ timeout: WebNewDriver.WAIT_MS });
     const popup = await popupWait;
-    if (popup === null) throw new Error(`[parity] row ${JSON.stringify(rowName)} downloaded without opening a tab.`);
-    await popup.close().catch(() => undefined);
-    const stream = await download.createReadStream();
-    if (stream === null) throw new Error(`[parity] download of ${JSON.stringify(rowName)} produced no bytes.`);
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
-    return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
+    const download = await downloadWait;
+    if (download !== null) {
+      if (popup === null) throw new Error(`[parity] row ${JSON.stringify(rowName)} downloaded without opening a tab.`);
+      await popup.close().catch(() => undefined);
+      const stream = await download.createReadStream();
+      if (stream === null) throw new Error(`[parity] download of ${JSON.stringify(rowName)} produced no bytes.`);
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+      return { fileName: download.suggestedFilename(), bytes: Buffer.concat(chunks) };
+    }
+    if (popup !== null) await popup.close().catch(() => undefined);
+    if (href === null || href === "") {
+      throw new Error(`[parity] row ${JSON.stringify(rowName)} has no served address to read back.`);
+    }
+    const response = await this.page.request.get(href);
+    if (!response.ok()) {
+      throw new Error(`[parity] row ${JSON.stringify(rowName)} served HTTP ${response.status()}.`);
+    }
+    const disposition = response.headers()["content-disposition"] ?? "";
+    const match = /filename\*?=(?:UTF-8''|")?([^";]+)"?/i.exec(disposition);
+    const fileName = match?.[1] !== undefined && match[1] !== "" ? decodeURIComponent(match[1].trim()) : rowName;
+    return { fileName, bytes: Buffer.from(await response.body()) };
   }
 
   private async openAppDialog(): Promise<Locator | null> {
@@ -9319,47 +9368,120 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => revoke.isDisabled(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
-  // --- Desktop-only chat + agent runtime (NEWFRONT-182). Throwing stubs
-  // --- per the shared driver contract; the runners area fills these in.
+  // --- Desktop-only chat + agent runtime (NEWFRONT-182). Implemented for
+  // --- the desktop area gate (NEWFRONT-595): the gate runs these specs in
+  // --- desktop mode.
 
-  async desktopRuntimeOpenRunners(_workspaceSlug: string): Promise<void> {
-    return todo("desktopRuntimeOpenRunners");
+  async desktopRuntimeOpenRunners(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/runners`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByTestId("runners-rail").first().waitFor({ timeout: 60_000 });
   }
   async desktopRuntimeRailSectionHeaders(): Promise<string[]> {
-    return todo("desktopRuntimeRailSectionHeaders");
+    const headers = this.page.getByTestId("runners-rail").locator("div.uppercase");
+    const total = await headers.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      texts.push(
+        (
+          ((await headers
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? "") as string
+        ).trim()
+      );
+    }
+    return texts;
   }
   async desktopRuntimeRailChatLinks(): Promise<{ name: string; href: string }[]> {
-    return todo("desktopRuntimeRailChatLinks");
+    const links = this.page.getByTestId("runners-rail").locator('a[href*="/chat/"]');
+    const total = await links.count();
+    const contacts: { name: string; href: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      contacts.push({
+        name: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: (await link.getAttribute("href")) ?? "",
+      });
+    }
+    return contacts;
   }
-  async desktopRuntimeOpenChat(_workspaceSlug: string, _runnerId: string, _sessionId?: string): Promise<void> {
-    return todo("desktopRuntimeOpenChat");
+  async desktopRuntimeOpenChat(workspaceSlug: string, runnerId: string, sessionId?: string): Promise<void> {
+    const suffix = sessionId === undefined ? "" : `?sessionId=${encodeURIComponent(sessionId)}`;
+    await this.page.goto(`/${workspaceSlug}/runners/chat/${runnerId}${suffix}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the chat shell: history plus composer render for known
+    // and unknown runners alike.
+    await this.page.getByTestId("runner-chat").first().waitFor({ timeout: 60_000 });
+    await this.page.getByTestId("runner-chat-composer").first().waitFor({ timeout: 60_000 });
   }
   async desktopRuntimeApprovalPromptVisible(): Promise<boolean> {
-    return todo("desktopRuntimeApprovalPromptVisible");
+    return (await this.page.getByRole("alertdialog", { name: "Approval requested" }).count()) > 0;
   }
   async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
-    return todo("desktopRuntimeApprovalModeVisible");
+    return (await this.page.getByRole("group", { name: "Approval mode" }).count()) > 0;
   }
   async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
-    return todo("desktopRuntimeRuntimeBannerVisible");
+    // The supervisor's viewport-pinned status pill (runtime-notice); corner
+    // toast stacks are a different surface.
+    return this.isShown(this.page.getByTestId("runtime-notice"));
   }
   async desktopRuntimeIsTauriPresent(): Promise<boolean> {
-    return todo("desktopRuntimeIsTauriPresent");
+    // The desktop native bridge: the shell (or the gate's desktop mock)
+    // exposes the Tauri core. Absent in every plain browser session.
+    return this.page.evaluate(() => {
+      const core = (globalThis as { __TAURI__?: { core?: unknown } }).__TAURI__?.core;
+      return core !== undefined && core !== null;
+    });
   }
   async desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]> {
-    return todo("desktopRuntimeChatBubbles");
+    const column = this.page.getByTestId("runner-chat-transcript").locator('ol[aria-label="Messages"]');
+    if ((await column.count()) === 0) return [];
+    return column.evaluate((element) => {
+      const rows: { role: string; text: string }[] = [];
+      for (const child of Array.from(element.children)) {
+        const bubble = (child as HTMLElement).querySelector("[data-role]");
+        const role = bubble?.getAttribute("data-role") ?? "status";
+        const text = ((bubble as HTMLElement | null)?.innerText ?? "").trim();
+        if (text === "") continue;
+        rows.push({ role, text });
+      }
+      return rows;
+    });
   }
   async desktopRuntimeStorageKeys(): Promise<{ local: string[]; session: string[] }> {
-    return todo("desktopRuntimeStorageKeys");
+    return this.page.evaluate(() => {
+      const read = (storage: Storage | null): string[] => {
+        if (storage === null) return [];
+        try {
+          return Object.keys(storage);
+        } catch {
+          return [];
+        }
+      };
+      let local: Storage | null = null;
+      let session: Storage | null = null;
+      try {
+        local = window.localStorage;
+      } catch {
+        local = null;
+      }
+      try {
+        session = window.sessionStorage;
+      } catch {
+        session = null;
+      }
+      return { local: read(local), session: read(session) };
+    });
   }
   async desktopRuntimeStartRequestSpy(): Promise<void> {
-    return todo("desktopRuntimeStartRequestSpy");
+    this.deskTrafficWatchBegin("runtime");
   }
   async desktopRuntimeSpyUrls(): Promise<string[]> {
-    return todo("desktopRuntimeSpyUrls");
+    return this.deskTrafficWatchUrls("runtime");
   }
   async desktopRuntimeStopRequestSpy(): Promise<void> {
-    return todo("desktopRuntimeStopRequestSpy");
+    this.deskTrafficWatchEnd("runtime");
   }
 
   // --- Scheduler catalog + definitions (NEWFRONT-184). Throwing stubs
@@ -17568,18 +17690,56 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
-  // --- DESK-011–015, DESK-027). Throwing stubs per the shared driver contract.
+  // --- DESK-011–015, DESK-027). Implemented for the desktop area gate
+  // --- (NEWFRONT-595): the gate runs these specs in desktop mode.
   async deskSigninMarketingFrameVisible(): Promise<boolean> {
-    return todo("deskSigninMarketingFrameVisible");
+    // The framed entry card carries the welcome header; the desktop bare
+    // screen (DesktopSignInScreen) never renders it on any entry route.
+    return (await this.page.getByText("Welcome back to Pi Dash.").count()) > 0;
   }
   async deskSigninOnboardingProgress(): Promise<string | null> {
-    return todo("deskSigninOnboardingProgress");
+    // OnboardingShell's progress strip: "current/total" from its values.
+    const bar = this.page.getByRole("progressbar", { name: "Onboarding progress" });
+    if ((await bar.count()) === 0) return null;
+    const current = await bar.first().getAttribute("aria-valuenow");
+    const total = await bar.first().getAttribute("aria-valuemax");
+    if (current === null || total === null) return null;
+    return `${current}/${total}`;
   }
   async deskSigninUpdateDialogLinks(): Promise<DeskSigninUpdateLink[]> {
-    return todo("deskSigninUpdateDialogLinks");
+    // The open "What's new?" dialog's external footer. web_new renders
+    // buttons routed through the external opener (no static href: the
+    // destination is observed at click time, natively on desktop), so the
+    // address reads empty and the target null.
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "What's new?" }).first();
+    const footer = ["Docs", "Full changelog", "Support"];
+    const links: DeskSigninUpdateLink[] = [];
+    for (const label of footer) {
+      const control = dialog.getByRole("button", { name: label, exact: true });
+      if ((await control.count()) === 0) continue;
+      const tag = (
+        (await control
+          .first()
+          .evaluate((node) => node.tagName)
+          .catch(() => "")) as string
+      ).toLowerCase();
+      links.push({ label, tag, href: "", target: null });
+    }
+    return links;
   }
-  async deskSigninOpenUpdateDialogLink(_label: string): Promise<string | null> {
-    return todo("deskSigninOpenUpdateDialogLink");
+  async deskSigninOpenUpdateDialogLink(label: string): Promise<string | null> {
+    // Click a footer external; resolves with the popup URL, or null when
+    // the click opens nothing in the page (desktop routes through the
+    // native opener instead, which the spec reads from the mock log).
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "What's new?" }).first();
+    const control = dialog.getByRole("button", { name: label, exact: true });
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 10_000 }).catch(() => null),
+      control.click({ timeout: 30_000 }),
+    ]);
+    if (popup === null) return null;
+    await popup.waitForFunction(() => window.location.href !== "about:blank", { timeout: 10_000 }).catch(() => {});
+    return popup.url();
   }
 
   // --- NEWFRONT-317 (pages navigation pane + versions, PAGE-045-054).
@@ -28212,21 +28372,26 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Desktop updater web-observable sides (NEWFRONT-209, DESK-016–018).
-  // --- Throwing stubs per the shared driver contract.
+  // --- Implemented for the desktop area gate (NEWFRONT-595).
   async deskUpdateNativePromptVisible(): Promise<boolean> {
-    return todo("deskUpdateNativePromptVisible");
+    // The launch prompt and the install-failure dialog are OS-level; the
+    // page can only ever show their text if a web surface quotes it.
+    const text = await this.pageText();
+    return text.includes("Install now? The app will restart automatically.") || text.includes("Pi Dash update failed");
   }
   async deskUpdateBeginTrafficWatch(): Promise<void> {
-    return todo("deskUpdateBeginTrafficWatch");
+    this.deskTrafficWatchBegin("updater");
   }
   async deskUpdateTrafficUrls(): Promise<string[]> {
-    return todo("deskUpdateTrafficUrls");
+    return this.deskTrafficWatchUrls("updater");
   }
   async deskUpdateEndTrafficWatch(): Promise<void> {
-    return todo("deskUpdateEndTrafficWatch");
+    this.deskTrafficWatchEnd("updater");
   }
   async deskUpdateSidebarButtonVisible(): Promise<boolean> {
-    return todo("deskUpdateSidebarButtonVisible");
+    // The DESK-018 detail mounts in the sidebar slot only while an update
+    // waits; the mock shell holds the waiting release in desktop mode.
+    return this.isShown(this.page.getByTestId("desktop-update-control"));
   }
 
   // === NEWFRONT-97 space navigation (shared; keep earliest-merged on dup). ===
@@ -31380,34 +31545,113 @@ export class WebNewDriver implements ParityDriver {
     return todo("spacePeekSkeletonsVisible");
   }
   async deskShellNativeHttpPresent(): Promise<boolean> {
-    return todo("deskShellNativeHttpPresent");
+    // The shell advertises its API origin; without it the desktop
+    // transport keeps the page fetch. Set by the gate's desktop mock.
+    return this.page.evaluate(() => {
+      const advertised = (globalThis as { __PIDASH_NATIVE_HTTP__?: unknown }).__PIDASH_NATIVE_HTTP__;
+      return typeof advertised === "string" && advertised.length > 0;
+    });
   }
   async deskShellBeginTrafficWatch(): Promise<void> {
-    return todo("deskShellBeginTrafficWatch");
+    this.deskTrafficWatchBegin("shell");
   }
   async deskShellTrafficUrls(): Promise<string[]> {
-    return todo("deskShellTrafficUrls");
+    return this.deskTrafficWatchUrls("shell");
   }
   async deskShellEndTrafficWatch(): Promise<void> {
-    return todo("deskShellEndTrafficWatch");
+    this.deskTrafficWatchEnd("shell");
   }
   async deskShellAbortSemantics(): Promise<{ aborted: string; timedOut: string; unroutable: string }> {
-    return todo("deskShellAbortSemantics");
+    // Browser-equivalence probe: the desktop transport must surface the
+    // same names a browser fetch would (the native mapping behind it is
+    // unit-covered; the mock shell stands in for Rust IPC here).
+    return this.page.evaluate(async () => {
+      const nameOf = async (run: () => Promise<Response>): Promise<string> => {
+        try {
+          await run();
+          return "fulfilled";
+        } catch (error) {
+          return error instanceof Error ? error.name : `non-error:${typeof error}`;
+        }
+      };
+      const target = `${window.location.origin}/api/auth/get-csrf-token/`;
+      const aborted = await nameOf(() => {
+        const controller = new AbortController();
+        controller.abort();
+        return fetch(target, { signal: controller.signal });
+      });
+      const timedOut = await nameOf(() => fetch(target, { signal: AbortSignal.timeout(1) }));
+      const unroutable = await nameOf(() => fetch("https://parity-unroutable.invalid/api/"));
+      return { aborted, timedOut, unroutable };
+    });
   }
   async deskShellZoomMenuVisible(): Promise<boolean> {
-    return todo("deskShellZoomMenuVisible");
+    // The desktop View menu is OS-level (main.rs); its entries must never
+    // appear under a page menu role.
+    const entries = this.page.getByRole("menuitem", { name: /^(Zoom In|Zoom Out|Actual Size)$/ });
+    if ((await entries.count()) === 0) return false;
+    return entries
+      .first()
+      .isVisible()
+      .catch(() => false);
   }
   async deskShellDeviceAuthHeading(): Promise<string | null> {
-    return todo("deskShellDeviceAuthHeading");
+    const heading = this.page.getByRole("heading", { name: /CLI login approved|Approve a CLI login/ }).first();
+    if ((await heading.count()) === 0) return null;
+    const text = ((await heading.innerText().catch(() => null)) ?? "").trim();
+    return text === "" ? null : text;
   }
   async deskShellDeviceApproveEnabled(): Promise<boolean> {
-    return todo("deskShellDeviceApproveEnabled");
+    const submit = this.page.getByRole("button", { name: "Approve", exact: true }).first();
+    await submit.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return submit.isEnabled().catch(() => false);
   }
-  async deskShellDeviceSubmitCode(_code: string): Promise<void> {
-    return todo("deskShellDeviceSubmitCode");
+  async deskShellDeviceSubmitCode(code: string): Promise<void> {
+    const input = this.page.getByPlaceholder("XXXX-YYYY").first();
+    await input.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await input.fill(code);
+    const submit = this.page.getByRole("button", { name: "Approve", exact: true }).first();
+    await submit.click({ timeout: WebNewDriver.WAIT_MS });
+    // Either the approval lands or the card reports the server's error;
+    // wait for one of the two so the scenario never reads a mid-flight
+    // form.
+    await expect
+      .poll(
+        async () => {
+          const text = await this.page
+            .locator("body")
+            .innerText()
+            .catch(() => "");
+          return /CLI login approved|not recognized|already been used|has expired|has been denied|must be 8 characters|Couldn't|Could not/i.test(
+            text
+          );
+        },
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .toBe(true);
   }
   async deskShellCloseReopenPath(): Promise<string> {
-    return todo("deskShellCloseReopenPath");
+    // The harness page closes like a browser tab (tray parking is
+    // native-only): reopening is a fresh load carrying the same cookie
+    // session. The driver's page is closed by this call; only API checks
+    // may follow it in the scenario.
+    const context = this.page.context();
+    await this.page.close();
+    const fresh = await context.newPage();
+    await fresh.goto("/");
+    await fresh.waitForLoadState("domcontentloaded");
+    const deadline = Date.now() + WebNewDriver.WAIT_MS;
+    for (;;) {
+      let path = "/";
+      try {
+        path = new URL(fresh.url()).pathname;
+      } catch {
+        path = "/";
+      }
+      if (path !== "/") return path;
+      if (Date.now() >= deadline) return path;
+      await fresh.waitForTimeout(500);
+    }
   }
 
   // --- Space engagement: votes, reactions, comments (NEWFRONT-451, SPC-047–057).
