@@ -959,6 +959,7 @@ mod tests {
                 "prompt",
                 "color",
                 "source",
+                "is_builtin",
                 "is_enabled",
                 "bindings",
                 "created_at",
