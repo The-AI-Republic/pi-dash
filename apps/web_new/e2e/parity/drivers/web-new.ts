@@ -398,6 +398,31 @@ export class WebNewDriver implements ParityDriver {
     messageList: 0,
   };
 
+  // --- Desktop traffic watches (NEWFRONT-595 gate). One request-URL log
+  // --- per family (runtime, updater, shell); specs begin/end their own.
+  private deskTrafficWatches = new Map<string, { urls: string[]; handler: (request: { url(): string }) => void }>();
+
+  private deskTrafficWatchBegin(family: string): void {
+    this.deskTrafficWatchEnd(family);
+    const urls: string[] = [];
+    const handler = (request: { url(): string }): void => {
+      urls.push(request.url());
+    };
+    this.page.on("request", handler);
+    this.deskTrafficWatches.set(family, { urls, handler });
+  }
+
+  private deskTrafficWatchUrls(family: string): string[] {
+    return [...(this.deskTrafficWatches.get(family)?.urls ?? [])];
+  }
+
+  private deskTrafficWatchEnd(family: string): void {
+    const watch = this.deskTrafficWatches.get(family);
+    if (!watch) return;
+    this.page.off("request", watch.handler);
+    this.deskTrafficWatches.delete(family);
+  }
+
   // --- Auth area (NEWFRONT-491 gate). The card is email-first with
   // --- placeholder-pinned steps; submits are XHR plus a full navigation on
   // --- success, an inline banner plus step recovery on failure.
@@ -28255,21 +28280,26 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Desktop updater web-observable sides (NEWFRONT-209, DESK-016–018).
-  // --- Throwing stubs per the shared driver contract.
+  // --- Implemented for the desktop area gate (NEWFRONT-595).
   async deskUpdateNativePromptVisible(): Promise<boolean> {
-    return todo("deskUpdateNativePromptVisible");
+    // The launch prompt and the install-failure dialog are OS-level; the
+    // page can only ever show their text if a web surface quotes it.
+    const text = await this.pageText();
+    return text.includes("Install now? The app will restart automatically.") || text.includes("Pi Dash update failed");
   }
   async deskUpdateBeginTrafficWatch(): Promise<void> {
-    return todo("deskUpdateBeginTrafficWatch");
+    this.deskTrafficWatchBegin("updater");
   }
   async deskUpdateTrafficUrls(): Promise<string[]> {
-    return todo("deskUpdateTrafficUrls");
+    return this.deskTrafficWatchUrls("updater");
   }
   async deskUpdateEndTrafficWatch(): Promise<void> {
-    return todo("deskUpdateEndTrafficWatch");
+    this.deskTrafficWatchEnd("updater");
   }
   async deskUpdateSidebarButtonVisible(): Promise<boolean> {
-    return todo("deskUpdateSidebarButtonVisible");
+    // The DESK-018 detail mounts in the sidebar slot only while an update
+    // waits; the mock shell holds the waiting release in desktop mode.
+    return this.isShown(this.page.getByTestId("desktop-update-control"));
   }
 
   // === NEWFRONT-97 space navigation (shared; keep earliest-merged on dup). ===
