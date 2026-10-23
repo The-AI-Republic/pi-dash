@@ -635,7 +635,9 @@ describe("drafts list-surface reads (NEWFRONT-782)", () => {
     expect(seen).toEqual(["GET /api/workspaces/acme/draft-issues/"]);
     expect(recorder.gotos()).toEqual(["/acme/drafts"]);
     expectTrace(recorder.trace(), ["off page.off"]);
-=======
+  });
+});
+
 describe("row identity (NEWFRONT-783, DRAFT-007)", () => {
   it("reads the marker from the row's first button", async () => {
     const recorder = new Recorder();
