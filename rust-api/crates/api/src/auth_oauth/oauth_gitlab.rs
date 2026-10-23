@@ -79,6 +79,7 @@ use axum::Router;
 use chrono::Utc;
 use sqlx::PgPool;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -221,12 +222,18 @@ fn pool_of(state: &AppState) -> Result<&PgPool, Denial> {
 
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header and an
 /// empty body. Django percent-encodes the URL first (`iri_to_uri`,
-/// `django/http/response.py:620`).
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return Denial::ServerError.into_response();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -2300,6 +2307,16 @@ async fn create_update_account(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")

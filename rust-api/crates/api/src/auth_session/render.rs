@@ -14,6 +14,8 @@
 //! template drift is owned by the domain gate). Only `{{ root_url }}`
 //! is substituted; `reason` never renders (ported quirk).
 
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use pidash_services::auth_session::{error_dict_json, get_safe_redirect_url, ParamValue};
 use serde_json::{Map, Value};
 
@@ -51,6 +53,27 @@ pub fn redirect_location(
     allowed_hosts: &[&str],
 ) -> String {
     get_safe_redirect_url(base_url, next_path, params, allowed_hosts)
+}
+
+/// `DisallowedRedirect` answer: the final `Location` is longer than
+/// `MAX_URL_REDIRECT_LENGTH` characters, so `HttpResponseRedirectBase`
+/// raises (`django/http/response.py:621-625`) and Django serves its
+/// stock 400 page (`django/views/defaults.py`, `ERROR_PAGE_TEMPLATE`;
+/// the project ships no `400.html` and no `handler400` override).
+/// Under `settings.test` (`DEBUG=True`) Django renders the technical
+/// traceback page instead, which no port reproduces: the contract
+/// suite pins the status only.
+pub const DISALLOWED_REDIRECT_400_BODY: &str = "\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n";
+
+/// 400 for an over-long redirect `Location` (see
+/// [`DISALLOWED_REDIRECT_400_BODY`]).
+pub fn disallowed_redirect() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DISALLOWED_REDIRECT_400_BODY,
+    )
+        .into_response()
 }
 
 /// Django autoescape for the single substituted value (`&<>"'`;
@@ -188,6 +211,28 @@ mod tests {
         assert_eq!(
             location,
             "http://localhost:8000/spaces/?next_path=/x&error_code=5090&error_message=INVALID_MAGIC_CODE_SIGN_IN&email=u%40x.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_redirect_matches_django_production_400() {
+        let response = disallowed_redirect();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .expect("content-type"),
+            "text/html; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("reads");
+        // `ERROR_PAGE_TEMPLATE % {"title": "Bad Request (400)", "details": ""}`
+        // (`django/views/defaults.py`), 143 bytes.
+        assert_eq!(
+            body.as_ref(),
+            b"\n<!doctype html>\n<html lang=\"en\">\n<head>\n  <title>Bad Request (400)</title>\n</head>\n<body>\n  <h1>Bad Request (400)</h1><p></p>\n</body>\n</html>\n"
         );
     }
 

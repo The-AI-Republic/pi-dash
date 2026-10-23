@@ -66,6 +66,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use axum::Router;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -410,11 +411,18 @@ impl IntoResponse for Denial {
     fn into_response(self) -> Response {
         match self {
             // `HttpResponseRedirect(url)`: Django percent-encodes the URL
-            // first (`iri_to_uri`, `django/http/response.py:620`).
+            // first (`iri_to_uri`, `django/http/response.py:620`). Past
+            // `MAX_URL_REDIRECT_LENGTH` characters the final `Location`
+            // answers 400 (`DisallowedRedirect`).
             Denial::Redirect(location) => {
+                let too_long = location.chars().count()
+                    > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
                 let encoded = crate::response_headers::iri_to_uri(&location);
                 match crate::response_headers::header_value(&encoded) {
-                    Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
+                    Some(value) if !too_long => {
+                        (StatusCode::FOUND, [(header::LOCATION, value)]).into_response()
+                    }
+                    Some(_) => disallowed_redirect(),
                     None => Denial::ServerError.into_response(),
                 }
             }
@@ -427,11 +435,18 @@ impl IntoResponse for Denial {
 }
 
 /// 302 `Location` response (`HttpResponseRedirect(url)`: Django
-/// percent-encodes the URL first via `iri_to_uri`).
+/// percent-encodes the URL first via `iri_to_uri`). Past
+/// `MAX_URL_REDIRECT_LENGTH` characters the final `Location` answers
+/// 400 (`DisallowedRedirect`).
 pub fn redirect(location: String) -> Response {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(&location);
     match crate::response_headers::header_value(&encoded) {
-        Some(value) => (StatusCode::FOUND, [(header::LOCATION, value)]).into_response(),
+        Some(value) if !too_long => {
+            (StatusCode::FOUND, [(header::LOCATION, value)]).into_response()
+        }
+        Some(_) => disallowed_redirect(),
         None => Denial::ServerError.into_response(),
     }
 }
@@ -2770,6 +2785,20 @@ fn owned(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect(long.clone()).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            Denial::Redirect(long).into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            redirect("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn fixture(name: &str) -> serde_json::Value {
         let path = format!(

@@ -82,6 +82,7 @@ use pidash_db::redis::RedisHandle;
 use pidash_services::auth_oauth::{error as oauth_error, exchange, providers};
 use pidash_services::auth_session::shapes::{self, HostSettings, ParamValue};
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 
@@ -153,12 +154,17 @@ pub fn routes() -> Router<AppState> {
 
 /// `HttpResponseRedirect(url)`: 302 with a `Location` header. Django
 /// percent-encodes the URL first (`iri_to_uri`,
-/// `django/http/response.py:620`).
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_response(location: String) -> Response {
+    let too_long = location.chars().count() > shapes::MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -1644,6 +1650,16 @@ async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn test_settings() -> pidash_db::config::Settings {
         // No `WEB_URL`: `get_allowed_hosts` allows only

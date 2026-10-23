@@ -102,6 +102,7 @@ use axum::routing::get;
 use axum::{Extension, Router};
 use serde_json::Value;
 
+use crate::auth_session::render::disallowed_redirect;
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
 use pidash_db::redis::RedisHandle;
@@ -114,7 +115,7 @@ use pidash_services::auth_oauth::providers::{
 };
 use pidash_services::auth_session::{
     allowed_hosts_for, base_host, get_safe_redirect_url, redirection_path_str,
-    select_redirection_path, HostSettings, ParamValue,
+    select_redirection_path, HostSettings, ParamValue, MAX_URL_REDIRECT_LENGTH,
 };
 
 // ---------------------------------------------------------------------------
@@ -210,12 +211,17 @@ pub const PASSWORD_HASH_ITERATIONS: u32 = 600_000;
 
 /// 302 with a `Location`, mirroring `HttpResponseRedirect(url)`.
 /// Django percent-encodes the URL first (`iri_to_uri`,
-/// `django/http/response.py:620`).
+/// `django/http/response.py:620`). Past `MAX_URL_REDIRECT_LENGTH`
+/// characters the final `Location` answers 400 (`DisallowedRedirect`).
 pub fn redirect_response(location: &str) -> Response {
+    let too_long = location.chars().count() > MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(location);
     let Some(value) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     let mut response = StatusCode::FOUND.into_response();
     response.headers_mut().insert(header::LOCATION, value);
     response
@@ -2513,6 +2519,16 @@ pub async fn space_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_response(&long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_response("http://app.test/?next_path=/x").status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn fixtures_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/auth_oauth")

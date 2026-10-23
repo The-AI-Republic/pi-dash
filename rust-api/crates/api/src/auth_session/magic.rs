@@ -97,7 +97,7 @@ use pidash_services::auth_session::tasks::{
     MAGIC_REDIS_EXPIRY_SECS,
 };
 
-use crate::auth_session::render::render_csrf_failure;
+use crate::auth_session::render::{disallowed_redirect, render_csrf_failure};
 use crate::license::handlers_auth_forms::{email_is_valid, LOGIN_BACKEND};
 use crate::middleware::SessionHandle;
 use crate::state::AppState;
@@ -176,12 +176,18 @@ fn json_400(code: i32, message: &str, payload: &[(&str, ParamValue)]) -> Respons
 /// `HttpResponseRedirect(url)`: 302 with `Location`, empty body.
 /// Django percent-encodes the URL first (`iri_to_uri`,
 /// `django/http/response.py:620`), so the raw `next_path` never reaches
-/// the wire.
+/// the wire. Past `MAX_URL_REDIRECT_LENGTH` characters the final
+/// `Location` answers 400 (`DisallowedRedirect`).
 fn redirect_302(location: String) -> Response {
+    let too_long =
+        location.chars().count() > pidash_services::auth_session::MAX_URL_REDIRECT_LENGTH;
     let encoded = crate::response_headers::iri_to_uri(&location);
     let Some(location) = crate::response_headers::header_value(&encoded) else {
         return server_error();
     };
+    if too_long {
+        return disallowed_redirect();
+    }
     Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, location)
@@ -2173,6 +2179,16 @@ async fn sign_up_space(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlong_redirect_location_answers_400() {
+        let long = format!("http://app.test/?{}", "a".repeat(17_000));
+        assert_eq!(redirect_302(long).status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            redirect_302("http://app.test/?next_path=/x".to_owned()).status(),
+            StatusCode::FOUND
+        );
+    }
 
     fn test_hosts() -> (String, String, Vec<String>) {
         // Contract layout: app base http://localhost:3000, spaces base
