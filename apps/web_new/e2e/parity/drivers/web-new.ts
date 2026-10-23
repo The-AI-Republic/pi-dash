@@ -9344,7 +9344,12 @@ export class WebNewDriver implements ParityDriver {
     return todo("desktopRuntimeRuntimeBannerVisible");
   }
   async desktopRuntimeIsTauriPresent(): Promise<boolean> {
-    return todo("desktopRuntimeIsTauriPresent");
+    // The desktop native bridge: the shell (or the gate's desktop mock)
+    // exposes the Tauri core. Absent in every plain browser session.
+    return this.page.evaluate(() => {
+      const core = (globalThis as { __TAURI__?: { core?: unknown } }).__TAURI__?.core;
+      return core !== undefined && core !== null;
+    });
   }
   async desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]> {
     return todo("desktopRuntimeChatBubbles");
@@ -17568,18 +17573,56 @@ export class WebNewDriver implements ParityDriver {
   }
 
   // --- Desktop bare sign-in, deep links, onboarding seam (NEWFRONT-208,
-  // --- DESK-011–015, DESK-027). Throwing stubs per the shared driver contract.
+  // --- DESK-011–015, DESK-027). Implemented for the desktop area gate
+  // --- (NEWFRONT-595): the gate runs these specs in desktop mode.
   async deskSigninMarketingFrameVisible(): Promise<boolean> {
-    return todo("deskSigninMarketingFrameVisible");
+    // The framed entry card carries the welcome header; the desktop bare
+    // screen (DesktopSignInScreen) never renders it on any entry route.
+    return (await this.page.getByText("Welcome back to Pi Dash.").count()) > 0;
   }
   async deskSigninOnboardingProgress(): Promise<string | null> {
-    return todo("deskSigninOnboardingProgress");
+    // OnboardingShell's progress strip: "current/total" from its values.
+    const bar = this.page.getByRole("progressbar", { name: "Onboarding progress" });
+    if ((await bar.count()) === 0) return null;
+    const current = await bar.first().getAttribute("aria-valuenow");
+    const total = await bar.first().getAttribute("aria-valuemax");
+    if (current === null || total === null) return null;
+    return `${current}/${total}`;
   }
   async deskSigninUpdateDialogLinks(): Promise<DeskSigninUpdateLink[]> {
-    return todo("deskSigninUpdateDialogLinks");
+    // The open "What's new?" dialog's external footer. web_new renders
+    // buttons routed through the external opener (no static href: the
+    // destination is observed at click time, natively on desktop), so the
+    // address reads empty and the target null.
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "What's new?" }).first();
+    const footer = ["Docs", "Full changelog", "Support"];
+    const links: DeskSigninUpdateLink[] = [];
+    for (const label of footer) {
+      const control = dialog.getByRole("button", { name: label, exact: true });
+      if ((await control.count()) === 0) continue;
+      const tag = (
+        (await control
+          .first()
+          .evaluate((node) => node.tagName)
+          .catch(() => "")) as string
+      ).toLowerCase();
+      links.push({ label, tag, href: "", target: null });
+    }
+    return links;
   }
-  async deskSigninOpenUpdateDialogLink(_label: string): Promise<string | null> {
-    return todo("deskSigninOpenUpdateDialogLink");
+  async deskSigninOpenUpdateDialogLink(label: string): Promise<string | null> {
+    // Click a footer external; resolves with the popup URL, or null when
+    // the click opens nothing in the page (desktop routes through the
+    // native opener instead, which the spec reads from the mock log).
+    const dialog = this.page.getByRole("dialog").filter({ hasText: "What's new?" }).first();
+    const control = dialog.getByRole("button", { name: label, exact: true });
+    const [popup] = await Promise.all([
+      this.page.waitForEvent("popup", { timeout: 10_000 }).catch(() => null),
+      control.click({ timeout: 30_000 }),
+    ]);
+    if (popup === null) return null;
+    await popup.waitForFunction(() => window.location.href !== "about:blank", { timeout: 10_000 }).catch(() => {});
+    return popup.url();
   }
 
   // --- NEWFRONT-317 (pages navigation pane + versions, PAGE-045-054).
@@ -31380,7 +31423,12 @@ export class WebNewDriver implements ParityDriver {
     return todo("spacePeekSkeletonsVisible");
   }
   async deskShellNativeHttpPresent(): Promise<boolean> {
-    return todo("deskShellNativeHttpPresent");
+    // The shell advertises its API origin; without it the desktop
+    // transport keeps the page fetch. Set by the gate's desktop mock.
+    return this.page.evaluate(() => {
+      const advertised = (globalThis as { __PIDASH_NATIVE_HTTP__?: unknown }).__PIDASH_NATIVE_HTTP__;
+      return typeof advertised === "string" && advertised.length > 0;
+    });
   }
   async deskShellBeginTrafficWatch(): Promise<void> {
     return todo("deskShellBeginTrafficWatch");
