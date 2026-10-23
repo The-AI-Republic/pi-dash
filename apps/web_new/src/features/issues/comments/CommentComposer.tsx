@@ -13,7 +13,7 @@
 // row and Escape dismisses it.
 
 import { Button, IconButton, Tooltip } from "@pidash/kit";
-import { Globe, ImagePlus, Lock } from "lucide-react";
+import { Globe, ImagePlus, Lock, MessageSquarePlus } from "lucide-react";
 import * as React from "react";
 import type { CommentAccess } from "@pidash/api-client";
 
@@ -25,9 +25,17 @@ import { CommentMentionSuggestions, useCommentMentionPicker } from "./MentionSug
 export const COMPOSER_LABEL = "Add comment";
 export const COMPOSER_PLACEHOLDER = "Add comment";
 export const COMPOSER_SUBMIT_LABEL = "Comment";
+export const COMPOSER_COMMENT_AND_RUN_LABEL = "Comment & Run";
 export const COMPOSER_IMAGE_LABEL = "Add an image to the comment";
 export const COMPOSER_INTERNAL_LABEL = "Private comment";
 export const COMPOSER_EXTERNAL_LABEL = "Public comment";
+
+/** One composer post: the body with its access choice and parked image assets. */
+export interface ComposerPost {
+  html: string;
+  access: CommentAccess;
+  assetIds: string[];
+}
 
 export interface CommentComposerProps {
   workspaceSlug: string;
@@ -35,7 +43,12 @@ export interface CommentComposerProps {
   /** Published projects show the access switch (ISS-200). */
   showAccess: boolean;
   /** Post the body with its access choice and parked image assets. */
-  onCreate: (input: { html: string; access: CommentAccess; assetIds: string[] }) => Promise<unknown>;
+  onCreate: (input: ComposerPost) => Promise<unknown>;
+  /**
+   * Comment & Run (ISS-193): post the draft, then dispatch a continuation
+   * run. Absent on surfaces without runs; disabled until dispatch can act.
+   */
+  commentAndRun?: { submit: (input: ComposerPost) => Promise<unknown>; disabled: boolean } | undefined;
 }
 
 export function CommentComposer({
@@ -43,6 +56,7 @@ export function CommentComposer({
   projectId,
   showAccess,
   onCreate,
+  commentAndRun,
 }: CommentComposerProps): React.ReactElement {
   const [html, setHtml] = React.useState("<p></p>");
   const [access, setAccess] = React.useState<CommentAccess>("INTERNAL");
@@ -69,11 +83,11 @@ export function CommentComposer({
     setResetToken((value) => value + 1);
   };
 
-  const post = async (): Promise<void> => {
+  const post = async (via: (input: ComposerPost) => Promise<unknown>): Promise<void> => {
     if (busy || empty) return;
     setSending(true);
     try {
-      await onCreate({ html, access, assetIds: assetsRef.current });
+      await via({ html, access, assetIds: assetsRef.current });
     } catch {
       // A refused post still clears the draft: parity pins the cleared
       // composer after a failed create (comments.md §11.3), the failure
@@ -106,7 +120,7 @@ export function CommentComposer({
       className="flex flex-col gap-(--space-2) rounded-(--radius-control) border border-(--border) p-(--space-2)"
       onSubmit={(event) => {
         event.preventDefault();
-        void post();
+        void post(onCreate);
       }}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
@@ -128,7 +142,7 @@ export function CommentComposer({
         // IME composition commits with Enter: leave that Enter to the input.
         if (event.nativeEvent.isComposing) return;
         event.preventDefault();
-        void post();
+        void post(onCreate);
       }}
     >
       <React.Suspense fallback={<div className="min-h-16" />}>
@@ -194,6 +208,21 @@ export function CommentComposer({
           />
           <ImagePlus size={16} strokeWidth={1.5} aria-hidden="true" />
         </label>
+        {commentAndRun === undefined ? null : (
+          <Button
+            type="button"
+            size="small"
+            variant="primary"
+            loading={sending}
+            disabled={commentAndRun.disabled || empty || busy}
+            onClick={() => void post(commentAndRun.submit)}
+          >
+            <span className="flex items-center gap-(--space-1)">
+              <MessageSquarePlus size={14} strokeWidth={1.5} aria-hidden="true" />
+              <span>{COMPOSER_COMMENT_AND_RUN_LABEL}</span>
+            </span>
+          </Button>
+        )}
         <Button type="submit" size="small" variant="primary" loading={sending} disabled={empty || busy}>
           {COMPOSER_SUBMIT_LABEL}
         </Button>

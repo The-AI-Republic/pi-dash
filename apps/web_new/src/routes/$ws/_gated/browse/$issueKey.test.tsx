@@ -208,6 +208,49 @@ const STATE_ROW = {
   sequence: 2,
 };
 
+const AGENT_STATUS_ROW = {
+  ticker: {
+    enabled: false,
+    user_disabled: false,
+    used: 2,
+    tick_count: 2,
+    granted: 13,
+    waited: 0,
+    max_ticks: 13,
+    remaining: 11,
+    interval_seconds: 3600,
+    next_run_at: "2026-05-01T14:30:00Z",
+    last_tick_at: "2026-05-01T11:00:00Z",
+    disarm_reason: "cap_hit",
+    pending_entry: false,
+    can_re_tick: true,
+  },
+  active_run: null,
+  latest_run: {
+    id: "723e4567-e89b-12d3-a456-426614174007",
+    status: "completed",
+    executor_kind: "local_runner",
+    queue_position: null,
+    runner: null,
+    runner_name: "runner-1",
+    created_at: "2026-05-01T11:50:00Z",
+    assigned_at: "2026-05-01T11:51:00Z",
+    started_at: "2026-05-01T11:52:00Z",
+    ended_at: "2026-05-01T11:58:00Z",
+    done_payload: null,
+    error: "",
+    error_code: "",
+    error_diagnostic: null,
+    llm_model: "test-model",
+    input_tokens: null,
+    output_tokens: null,
+    total_tokens: null,
+    live_state: null,
+  },
+  run_count: 2,
+  total_tokens: 3200,
+};
+
 function userPropertiesPayload() {
   return {
     id: UUID,
@@ -240,6 +283,8 @@ interface BrowseExtras {
   foreignChild?: boolean;
   creator?: boolean;
   memberRole?: number;
+  doneState?: boolean;
+  agent?: boolean;
 }
 
 function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {}) {
@@ -251,6 +296,9 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
     if (url.endsWith("/auth/get-csrf-token/")) {
       status = 200;
       body = JSON.stringify({ csrf_token: "csrf" });
+    } else if (init.method === "POST" && url.includes(`/issues/${ISSUE_ID}/archive/`)) {
+      status = 200;
+      body = JSON.stringify({ archived_at: "2026-03-01" });
     } else if (init.method !== "GET" && url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 204;
       body = "";
@@ -396,11 +444,16 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
           instance_changelog_url: "",
         },
       });
+    } else if (url.endsWith("/subscribe/")) {
+      status = 200;
+      body = JSON.stringify({ subscribed: false });
     } else if (url.includes(`/issues/${ISSUE_ID}/`)) {
       status = 200;
       const row = {
         ...(isEpic === undefined ? issueRow() : { ...issueRow(), is_epic: isEpic }),
         ...(extras.creator === true ? { created_by: UUID } : {}),
+        ...(extras.doneState === true ? { state_id: STATE_ROW.id } : {}),
+        ...(extras.agent === true ? { agent_status: AGENT_STATUS_ROW } : {}),
       };
       const stamped = extras.archivedIssue === true ? { ...row, archived_at: "2024-03-04" } : row;
       body = JSON.stringify(extras.syncedIssue === true ? { ...stamped, is_synced: true } : stamped);
@@ -767,6 +820,96 @@ describe("browse route", () => {
     expect(router.state.location.pathname).toBe(`/acme/projects/${PROJECT_ID}/issues`);
     clearCommands();
     clearPalettePages();
+  });
+
+  it("carries the identifier, copy link, and subscribe toggle in the header (ISS-160/161/163)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    await findStrip();
+    expect(await screen.findByRole("button", { name: "WEB-1" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy work item link" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Subscribe" })).toBeInTheDocument();
+  });
+
+  it("hides the subscribe toggle on an archived issue (ISS-161)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    await findStrip();
+    await screen.findByTestId("issue-detail-widgets");
+    expect(screen.queryByRole("button", { name: /^(Subscribe|Unsubscribe)$/ })).toBeNull();
+  });
+
+  it("leaves for the issue list after a confirmed menu delete (ISS-162)", async () => {
+    const user = userEvent.setup();
+    const { router } = renderBrowse(true, undefined, { details: "member", me: true });
+    await findStrip();
+    await user.click(await screen.findByRole("button", { name: "Work item actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("navigated away")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(`/acme/projects/${PROJECT_ID}/issues`);
+    clearCommands();
+    clearPalettePages();
+  });
+
+  it("leaves for the archives list after deleting an archived issue (ISS-162)", async () => {
+    const user = userEvent.setup();
+    const { router } = renderBrowse(true, undefined, { details: "member", me: true, archivedIssue: true });
+    await screen.findByTestId("issue-detail-widgets");
+    await user.click(await screen.findByRole("button", { name: "Work item actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Delete" }));
+    expect(await screen.findByText("navigated away")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(`/acme/projects/${PROJECT_ID}/archives/issues`);
+    clearCommands();
+    clearPalettePages();
+  });
+
+  it("leaves for the issue list after a confirmed menu archive (ISS-162)", async () => {
+    const user = userEvent.setup();
+    const { router } = renderBrowse(true, undefined, { details: "member", me: true, doneState: true });
+    await findStrip();
+    await user.click(await screen.findByRole("button", { name: "Work item actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Archive" }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Archive" }));
+    expect(await screen.findByText("navigated away")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe(`/acme/projects/${PROJECT_ID}/issues`);
+    clearCommands();
+    clearPalettePages();
+  });
+
+  it("keeps the agent panel off an issue without runs (ISS-164)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    await findStrip();
+    await screen.findByTestId("issue-detail-widgets");
+    expect(screen.queryByTestId("agent-status-panel")).toBeNull();
+    expect(screen.queryByRole("button", { name: /re-tick/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /abort run/i })).toBeNull();
+  });
+
+  it("mounts the agent panel with its tiles and re-tick where runs exist (ISS-164)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, agent: true });
+    await findStrip();
+    const panel = await screen.findByTestId("agent-status-panel");
+    expect(within(panel).getByText("Agent run finished")).toBeInTheDocument();
+    expect(within(panel).getByText("Local runner")).toBeInTheDocument();
+    expect(within(panel).getByText("3.2k")).toBeInTheDocument();
+    expect(within(panel).getByRole("button", { name: "Re-tick" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Abort run" })).toBeNull();
+  });
+
+  it("mounts Comment & Run in the composer once the workspace resolves (ISS-193)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    await findStrip();
+    expect(await screen.findByRole("button", { name: "Comment & Run" })).toBeDisabled();
+  });
+
+  it("keeps Comment & Run off until the workspace read resolves (ISS-193)", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, unresolvedWorkspace: true });
+    await screen.findByTestId("issue-detail-widgets");
+    expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Comment & Run" })).toBeNull();
   });
 });
 

@@ -552,3 +552,68 @@ describe("CommentComposer", () => {
     expect(onCreate).not.toHaveBeenCalled();
   });
 }, 20_000);
+
+describe("CommentComposer comment and run (ISS-193)", () => {
+  it("hides the action without the run wiring", async () => {
+    renderComposer();
+    await editor();
+    expect(screen.queryByRole("button", { name: "Comment & Run" })).toBeNull();
+  });
+
+  it("disables on an empty draft", async () => {
+    renderComposer({ commentAndRun: { submit: vi.fn(), disabled: false } });
+    await editor();
+    expect(screen.getByRole("button", { name: "Comment & Run" })).toBeDisabled();
+  });
+
+  it("disables until dispatch can act", async () => {
+    renderComposer({ commentAndRun: { submit: vi.fn(), disabled: true } });
+    const box = await editor();
+    fireEvent.input(box, { target: { value: "run prompt" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Comment & Run" })).toBeDisabled();
+  });
+
+  it("posts through the run submitter, then clears the draft", async () => {
+    const submit = vi.fn(async () => undefined);
+    renderComposer({ commentAndRun: { submit, disabled: false } });
+    const box = await editor();
+    fireEvent.input(box, { target: { value: "run prompt" } });
+    const action = await waitFor(() => {
+      const button = screen.getByRole("button", { name: "Comment & Run" });
+      expect(button).toBeEnabled();
+      return button;
+    });
+    fireEvent.click(action);
+    await waitFor(() =>
+      expect(submit).toHaveBeenCalledWith({ html: "<p>run prompt</p>", access: "INTERNAL", assetIds: [] })
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment & Run" })).toBeDisabled());
+    expect((await editor()) as HTMLTextAreaElement).toHaveValue("");
+  });
+
+  it("holds a second click while the run round-trip is out", async () => {
+    let release!: () => void;
+    const submit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        })
+    );
+    renderComposer({ commentAndRun: { submit, disabled: false } });
+    const box = await editor();
+    fireEvent.input(box, { target: { value: "run prompt" } });
+    const action = await waitFor(() => {
+      const button = screen.getByRole("button", { name: "Comment & Run" });
+      expect(button).toBeEnabled();
+      return button;
+    });
+    fireEvent.click(action);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment & Run" })).toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: "Comment & Run" }));
+    expect(submit).toHaveBeenCalledTimes(1);
+    release();
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe(""));
+  });
+});

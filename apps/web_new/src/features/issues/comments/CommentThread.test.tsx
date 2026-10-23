@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../shared/shell/index.js", () => ({
   notifyError: vi.fn(),
+  notifyInfo: vi.fn(),
   notifySuccess: vi.fn(),
 }));
 
@@ -49,7 +50,8 @@ vi.mock("../../../core/session/index.js", async (importOriginal) => {
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { edition } from "../../../core/edition/index.js";
-import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
+import { RUN_QUEUED_TITLE } from "../../runners/index.js";
+import { notifyError, notifyInfo, notifySuccess } from "../../../shared/shell/index.js";
 import { WORKLOG_FLAG } from "../detail/widgets/worklog/worklog.js";
 import { COMMENT_LINK_COPIED_TITLE, COMMENT_LINK_COPY_FAILED_TITLE, COMMENT_REMOVED_TITLE } from "./api.js";
 import { CommentThread, commentIdFromHash, commentLinkFor } from "./CommentThread.js";
@@ -531,3 +533,98 @@ describe("CommentThread", () => {
     expect(screen.queryByRole("button", { name: "Log time" })).not.toBeInTheDocument();
   });
 }, 20_000);
+
+describe("CommentThread comment and run (ISS-193)", () => {
+  const WORKSPACE = "123e4567-e89b-12d3-a456-426614174000";
+
+  function runTransport(failComment = false) {
+    return stubTransport((call) => {
+      if (call.url.endsWith("/api/runners/runs/") && call.method === "POST") {
+        return { status: 202, body: { queued: true, reason: "active", detail: "one already runs" } };
+      }
+      if (call.method === "POST") {
+        if (failComment) return { status: 400, body: { detail: "no" } };
+        return { status: 201, body: comment() };
+      }
+      return { status: 200, body: [comment()] };
+    });
+  }
+
+  beforeEach(() => {
+    vi.mocked(notifyInfo).mockClear();
+  });
+
+  it("hides the action without the run wiring or a workspace id", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread();
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    expect(screen.queryByRole("button", { name: "Comment & Run" })).not.toBeInTheDocument();
+  });
+
+  it("hides the action while the workspace read is landing", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread({ commentAndRun: { workspaceId: null, disabled: false } });
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    expect(screen.getByRole("group", { name: "Add comment" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Comment & Run" })).not.toBeInTheDocument();
+  });
+
+  it("disables the action on an empty draft", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread({ commentAndRun: { workspaceId: WORKSPACE, disabled: false } });
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    expect(screen.getByRole("button", { name: "Comment & Run" })).toBeDisabled();
+  });
+
+  it("disables the action where runs are off", async () => {
+    stubTransport(() => ({ status: 200, body: [comment()] }));
+    renderThread({ commentAndRun: { workspaceId: WORKSPACE, disabled: true } });
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    const box = within(screen.getByRole("group", { name: "Add comment" })).getByLabelText("Add comment");
+    fireEvent.input(box, { target: { value: "run prompt" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Comment" })).toBeEnabled());
+    expect(screen.getByRole("button", { name: "Comment & Run" })).toBeDisabled();
+  });
+
+  it("posts the typed comment first, then dispatches the run", async () => {
+    const calls = runTransport();
+    renderThread({ commentAndRun: { workspaceId: WORKSPACE, disabled: false } });
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    const box = within(screen.getByRole("group", { name: "Add comment" })).getByLabelText("Add comment");
+    fireEvent.input(box, { target: { value: "run prompt" } });
+    const action = await waitFor(() => {
+      const button = screen.getByRole("button", { name: "Comment & Run" });
+      expect(button).toBeEnabled();
+      return button;
+    });
+    fireEvent.click(action);
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith("/api/runners/runs/"))).toBe(true));
+    const posts = calls.filter((call) => call.method === "POST" && !call.url.endsWith("/auth/get-csrf-token/"));
+    expect(posts).toHaveLength(2);
+    expect(posts[0]?.url).toContain("/comments/");
+    expect(JSON.parse(posts[0]?.body ?? "{}")).toEqual({ comment_html: "<p>run prompt</p>", access: "INTERNAL" });
+    expect(posts[1]?.url.endsWith("/api/runners/runs/")).toBe(true);
+    expect(JSON.parse(posts[1]?.body ?? "{}")).toEqual({
+      workspace: WORKSPACE,
+      work_item: ISSUE,
+      triggered_by: "comment_and_run",
+    });
+    expect(vi.mocked(notifyInfo)).toHaveBeenCalledWith(RUN_QUEUED_TITLE, expect.any(String));
+  });
+
+  it("dispatches nothing when the post is refused", async () => {
+    const calls = runTransport(true);
+    renderThread({ commentAndRun: { workspaceId: WORKSPACE, disabled: false } });
+    await screen.findByText("Thread words", undefined, { timeout: 5000 });
+    const box = within(screen.getByRole("group", { name: "Add comment" })).getByLabelText("Add comment");
+    fireEvent.input(box, { target: { value: "run prompt" } });
+    const action = await waitFor(() => {
+      const button = screen.getByRole("button", { name: "Comment & Run" });
+      expect(button).toBeEnabled();
+      return button;
+    });
+    fireEvent.click(action);
+    await waitFor(() => expect(vi.mocked(notifyError)).toHaveBeenCalled());
+    expect(calls.some((call) => call.url.endsWith("/api/runners/runs/"))).toBe(false);
+  });
+});

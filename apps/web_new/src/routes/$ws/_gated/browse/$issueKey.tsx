@@ -28,14 +28,15 @@ import {
   issueKeys,
   liteIssueQueryOptions,
 } from "../../../../features/issues/index.js";
-import { IssueReTickAction, IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
+import { IssueRunAIAction } from "../../../../features/issues/detail/IssueAgentActions.js";
+import { AgentStatusPanel } from "../../../../features/issues/detail/agent/AgentStatusPanel.js";
+import { DetailHeaderActions } from "../../../../features/issues/detail/DetailHeaderActions.js";
 import {
   AttachmentsWidget,
   type AttachmentsWidgetHandle,
 } from "../../../../features/issues/detail/widgets/attachments/AttachmentsWidget.js";
 import { CodeReviewsWidget } from "../../../../features/issues/detail/widgets/codeReviews/CodeReviewsWidget.js";
 import { mayDeleteWorkItem } from "../../../../features/issues/lifecycle/rules.js";
-import { DetailQuickActions } from "../../../../features/issues/menus/DetailQuickActions.js";
 import { useQuickActions } from "../../../../features/issues/menus/useQuickActions.js";
 import {
   LinkActionButton,
@@ -46,7 +47,6 @@ import {
 } from "../../../../features/issues/widgets/index.js";
 import { projectDetailsQueryOptions, ProjectTabStrip } from "../../../../features/projects/index.js";
 import { canEditInProject, useWorkItemPaletteContext } from "../../../../shared/shell/contextual/index.js";
-import { CopyWorkItemLinkButton } from "../../../../shared/shell/CopyWorkItemLinkButton.js";
 import { useDocumentHead } from "../../../../shared/shell/index.js";
 
 /** The project's code; the browse key's own prefix until the row joins. */
@@ -155,6 +155,11 @@ function BrowseIssueDetail({
     memberRole: project?.member_role ?? null,
     archived: project?.archived_at != null,
   });
+  // One detail re-read for the palette, the header, and the agent panel.
+  const refreshDetail = React.useCallback(
+    () => context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
+    [context.queryClient, issueId, workspaceSlug]
+  );
   const palette = useWorkItemPaletteContext({
     workspaceSlug,
     projectId,
@@ -183,7 +188,7 @@ function BrowseIssueDetail({
         creatorId: issue.created_by,
         projectRole: project?.member_role ?? null,
       }),
-    refresh: async () => context.queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) }),
+    refresh: refreshDetail,
     onDeleted: () => void navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: workspaceSlug, projectId } }),
   });
   const writable = editable && issue.archived_at === null && !issue.is_synced;
@@ -208,6 +213,24 @@ function BrowseIssueDetail({
           context: "detail",
           canWrite: editable,
           onRestored: () => void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey } }),
+          onArchived: () =>
+            void navigate({
+              to: "/$ws/projects/$projectId/issues",
+              params: { ws: workspaceSlug, projectId },
+            }),
+          onDeleted: () => {
+            if (issue.archived_at !== null) {
+              void navigate({
+                to: "/$ws/projects/$projectId/archives/issues",
+                params: { ws: workspaceSlug, projectId },
+              });
+            } else {
+              void navigate({
+                to: "/$ws/projects/$projectId/issues",
+                params: { ws: workspaceSlug, projectId },
+              });
+            }
+          },
         }
   );
   const attachmentsRef = React.useRef<AttachmentsWidgetHandle>(null);
@@ -299,21 +322,17 @@ function BrowseIssueDetail({
         projectId={projectId}
         issue={issue}
         editable={editable}
-        agentActions={
-          <IssueReTickAction
+        topSlot={
+          <DetailHeaderActions
             workspaceSlug={workspaceSlug}
-            workspaceId={workspace?.id ?? null}
             projectId={projectId}
             issue={issue}
-            disabled={!writable}
+            issueKey={issueKey}
+            projectIdentifier={identifier}
+            editable={editable}
+            menu={menu}
+            onSubscriptionChanged={refreshDetail}
           />
-        }
-        topSlot={
-          <div className="flex items-center gap-(--space-2)">
-            <span className="text-meta font-medium text-(--text-muted)">{issueKey}</span>
-            <CopyWorkItemLinkButton workspaceSlug={workspaceSlug} issueKey={issueKey} />
-            {menu === null ? null : <DetailQuickActions state={menu} />}
-          </div>
         }
         activity={
           <div className="flex flex-col gap-(--space-6)">
@@ -332,16 +351,20 @@ function BrowseIssueDetail({
               published={project?.anchor != null}
               assigneeIds={issue.assignee_ids}
               memberRole={project?.member_role ?? null}
+              commentAndRun={{ workspaceId: workspace?.id ?? null, disabled: !writable }}
             />
           </div>
         }
         sidebar={
-          <IssuePropertiesSidebar
-            workspaceSlug={workspaceSlug}
-            projectId={projectId}
-            issue={issue}
-            editable={editable}
-          />
+          <>
+            <AgentStatusPanel workspaceSlug={workspaceSlug} issue={issue} refresh={refreshDetail} />
+            <IssuePropertiesSidebar
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              issue={issue}
+              editable={editable}
+            />
+          </>
         }
       />
       {palette.deleteDialog}

@@ -72,6 +72,10 @@ export interface QuickActionsInput {
   onChanged?: (() => void) | undefined;
   /** After a landed restore (the archived list usually refetches). */
   onRestored?: (() => void) | undefined;
+  /** After a landed archive (a detail page navigates back to its list). */
+  onArchived?: (() => void) | undefined;
+  /** After a landed delete (a detail page navigates back to its list). */
+  onDeleted?: (() => void) | undefined;
 }
 
 export interface QuickActionHandlers {
@@ -268,6 +272,19 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
     refresh();
   }, [close, refresh]);
 
+  // Detail follow-ups after the shared close-and-refresh: the mounting
+  // page navigates away from a record it just archived or deleted.
+  const onArchived = input?.onArchived;
+  const onDeleted = input?.onDeleted;
+  const afterArchive = React.useCallback((): void => {
+    afterWrite();
+    onArchived?.();
+  }, [afterWrite, onArchived]);
+  const afterDelete = React.useCallback((): void => {
+    afterWrite();
+    onDeleted?.();
+  }, [afterWrite, onDeleted]);
+
   if (input === null) return null;
 
   const createContext = quickActionCreateContext(input.cycleId, input.moduleId, open);
@@ -309,7 +326,7 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
           projectIdentifier={target.projectIdentifier}
           sequenceId={target.sequenceId}
           kind={target.isEpic === true ? "epic" : "issue"}
-          onArchived={afterWrite}
+          onArchived={afterArchive}
         />
       ) : null}
       {open === "delete" ? (
@@ -323,7 +340,7 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
           viewerId={me.data?.id ?? null}
           creatorId={target.createdBy ?? null}
           projectRole={project?.member_role ?? null}
-          onDeleted={afterWrite}
+          onDeleted={afterDelete}
         />
       ) : null}
       {open === "move" ? (
