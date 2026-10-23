@@ -39,6 +39,7 @@ import {
   primeIssueListLeaves,
 } from "../../../../../../features/issues/components/lazyLeaves.js";
 import { loadListLayout, resolvedListLayout } from "../../../../../../features/issues/list/lazy.js";
+import { loadKanbanLayout, resolvedKanbanLayout } from "../../../../../../features/issues/kanban/lazy.js";
 // Keep the calendar off the issues route chunk: its entry carries the
 // calendar skeleton, and first paint should stay inside the size gate.
 const LazyCalendarEntry = React.lazy(() =>
@@ -119,7 +120,9 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
       // their own chunks (Quality gates); await them with the data so the
       // first commit is the screen itself. The list layout reads its own
       // first page, including the stored sub-issue and empty-group flags.
-      await Promise.all([loadIssueListLeaves(), loadListLayout(), loadProjectEmptyState()]);
+      // The board chunk rides beside the list chunk so a stored board
+      // layout renders without an extra round trip (ISS-028).
+      await Promise.all([loadIssueListLeaves(), loadListLayout(), loadProjectEmptyState(), loadKanbanLayout()]);
     } catch (error) {
       // Denial statuses belong to the project gate (AUTH-024): let them
       // through so the gate renders the denial screen instead of the load
@@ -230,7 +233,7 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
 
     // Layout slices extend the offered list with their renderer; the
     // Display control resolves the same active layout from it.
-    const offered: readonly LayoutKind[] = ["list", "gantt_chart", "spreadsheet", "calendar"];
+    const offered: readonly LayoutKind[] = ["list", "kanban", "gantt_chart", "spreadsheet", "calendar"];
     const weekStart = useWeekStart();
     const canEdit = canEditInProject({ memberRole: project.member_role, archived: project.archived_at != null });
     const addWorkItem = canCreate ? (
@@ -334,6 +337,22 @@ export const Route = createFileRoute("/$ws/_gated/projects/$projectId/issues/")(
                     canEdit={canEdit}
                   />
                 </React.Suspense>
+              );
+            }
+            if (active === "kanban") {
+              const ResolvedKanbanLayout = resolvedKanbanLayout();
+              return (
+                <ResolvedKanbanLayout
+                  workspaceSlug={params.ws}
+                  entity={{ scope: "project", projectId: params.projectId }}
+                  projectId={params.projectId}
+                  projectIdentifier={project.identifier}
+                  prefs={prefs}
+                  canEdit={canEdit}
+                  richFilters={preferences.rich_filters}
+                  peekKey={peekKey}
+                  onPeekChange={setPeekKey}
+                />
               );
             }
             const ResolvedListLayout = resolvedListLayout();
