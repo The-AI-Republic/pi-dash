@@ -124,4 +124,10 @@ describe("PeekPanel", () => {
     expect(panel).toHaveAttribute("aria-label", "Cycle preview");
     expect(screen.queryByTestId("issue-preview")).not.toBeInTheDocument();
   });
+
+  it("renders a read-only heading when the title is not editable", () => {
+    setup({ title: "Cycle 7", titleAsHeading: true, label: "Cycle preview", testId: "cycle-preview" });
+    expect(screen.getByRole("heading", { level: 4, name: "Cycle 7" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Work item title" })).not.toBeInTheDocument();
+  });
 });

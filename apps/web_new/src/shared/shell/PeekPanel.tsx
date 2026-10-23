@@ -24,6 +24,8 @@ export interface PeekPanelProps {
   title: string;
   /** Accessible name for the title field. */
   titleLabel: string;
+  /** Render the title as a heading instead of an editable field. */
+  titleAsHeading?: boolean | undefined;
   onClose: () => void;
   /** Commits a renamed title; without it edits stay local to the field. */
   onCommitTitle?: ((next: string) => void) | undefined;
@@ -38,6 +40,7 @@ export function PeekPanel({
   eyebrow,
   title,
   titleLabel,
+  titleAsHeading = false,
   onClose,
   onCommitTitle,
   actions,
@@ -82,18 +85,22 @@ export function PeekPanel({
             </IconButton>
           </div>
         </div>
-        <input
-          aria-label={titleLabel}
-          value={draft}
-          onChange={(event) => {
-            setDraft(event.target.value);
-          }}
-          onBlur={commit}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") commit();
-          }}
-          className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
-        />
+        {titleAsHeading ? (
+          <h4 className="text-h3 w-full px-(--space-2) py-(--space-1) text-(--text)">{title}</h4>
+        ) : (
+          <input
+            aria-label={titleLabel}
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+            }}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commit();
+            }}
+            className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
+          />
+        )}
         {children}
       </aside>
     </OverlayPortal>

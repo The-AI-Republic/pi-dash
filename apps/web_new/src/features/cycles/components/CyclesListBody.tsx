@@ -75,6 +75,7 @@ export function CyclesListBody({
     return {
       upcoming: visible.filter((cycle) => groupOfCycle(cycle.status) === "upcoming"),
       completed: visible.filter((cycle) => groupOfCycle(cycle.status) === "completed"),
+      visible,
     };
   }, [cycles.data, query, cycleFilter]);
 
@@ -83,7 +84,7 @@ export function CyclesListBody({
   const projectTimeZone = project.data?.timezone ?? "UTC";
   const showFavoriteMarker = isProjectAuthorized(roles.data?.[projectId] ?? null);
   const loaded = cycles.data ?? [];
-  const noMatch = loaded.length > 0 && groups.upcoming.length === 0 && groups.completed.length === 0;
+  const noMatch = loaded.length > 0 && groups.visible.length === 0;
   const peeking = peekCycleId === null ? null : (loaded.find((cycle) => cycle.id === peekCycleId) ?? null);
 
   const toggleGroup = (group: CycleListGroup): void => {

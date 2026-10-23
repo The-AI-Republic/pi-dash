@@ -103,6 +103,7 @@ export function CyclePeekPanel({
       eyebrow="Cycle"
       title={cycle?.name ?? fallbackName}
       titleLabel="Cycle name"
+      titleAsHeading
       onClose={onClose}
       actions={
         <>

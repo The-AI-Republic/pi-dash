@@ -94,7 +94,7 @@ describe("CyclePeekPanel", () => {
     renderPeek({ fallbackName: "Cycle 7" });
     expect(await screen.findByTestId("cycle-preview")).toBeInTheDocument();
     expect(screen.getByTestId("cycle-peek-skeleton")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Cycle name" })).toHaveValue("Cycle 7");
+    expect(screen.getByRole("heading", { level: 4, name: "Cycle 7" })).toBeInTheDocument();
     expect(await screen.findByTestId("cycle-peek-body")).toBeInTheDocument();
     expect(screen.queryByTestId("cycle-peek-skeleton")).not.toBeInTheDocument();
   });
@@ -109,7 +109,7 @@ describe("CyclePeekPanel", () => {
     });
     renderPeek();
     expect(await screen.findByTestId("cycle-peek-body")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Cycle name" })).toHaveValue("Cycle 7");
+    expect(screen.getByRole("heading", { level: 4, name: "Cycle 7" })).toBeInTheDocument();
     expect(screen.getByText("Yet to start")).toBeInTheDocument();
     expect(screen.getByTestId("cycle-date-span")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "33% complete" })).toBeInTheDocument();

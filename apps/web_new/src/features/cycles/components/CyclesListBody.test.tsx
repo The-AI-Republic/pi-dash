@@ -276,4 +276,12 @@ describe("CyclesListBody", () => {
     expect(screen.getByRole("button", { name: "Completed cycle 0" })).toBeInTheDocument();
     expect(screen.queryByTestId("cycles-no-match")).not.toBeInTheDocument();
   });
+
+  it("keeps both empty group headers when only the current cycle is loaded", async () => {
+    harness.cycles = [seedCycles()[0]!];
+    renderBody();
+    expect(await screen.findByRole("button", { name: "Upcoming cycle 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Completed cycle 0" })).toBeInTheDocument();
+    expect(screen.queryByTestId("cycles-no-match")).not.toBeInTheDocument();
+  });
 });
