@@ -12,8 +12,9 @@ import { Spinner } from "@pidash/kit";
 import type { SpaceBoardIssue, SpaceBoardSettings } from "@pidash/api-client";
 import * as React from "react";
 
-import { projectMarkGlyph } from "../lib/projectMark.js";
 import { spaceSignInHref, type SpaceBoardSearch } from "../lib/address.js";
+import { spaceMessage } from "../lib/spaceMessages.js";
+import { SpaceProjectMark } from "./SpaceProjectMark.js";
 
 export interface BoardNavbarProps {
   settings: SpaceBoardSettings | undefined;
@@ -24,20 +25,19 @@ export interface BoardNavbarProps {
   children?: React.ReactNode;
 }
 
-/** Placeholder while settings load: generic mark and name, no content flash. */
+/**
+ * Board navbar (SPC-001 placeholder chrome, SPC-010 identity). The mark
+ * resolves through the slice-D mark branches; without settings the bar
+ * holds the generic mark and the placeholder name with no content flash.
+ * Long names truncate with the full name on hover.
+ */
 export function BoardNavbar({ settings, anchor, search, accountSlot, children }: BoardNavbarProps): React.ReactElement {
   const details = settings?.project_details ?? null;
-  const glyph = details === null ? null : projectMarkGlyph(details.logo_props);
   const name = details?.name ?? "...";
   return (
     <header className="flex min-h-14 items-center gap-(--space-3) border-b border-(--border) px-(--space-4)">
-      <span
-        data-testid="space-navbar-mark"
-        className="text-body flex size-7 items-center justify-center rounded-(--radius-control) bg-(--subtle)"
-      >
-        {glyph ?? (details === null ? null : name.slice(0, 1).toUpperCase())}
-      </span>
-      <span data-testid="space-navbar-name" className="text-emphasis truncate">
+      <SpaceProjectMark details={details} />
+      <span data-testid="space-navbar-name" title={name} className="text-emphasis truncate">
         {name}
       </span>
       <div className="ml-auto flex items-center gap-(--space-2)">
@@ -47,7 +47,7 @@ export function BoardNavbar({ settings, anchor, search, accountSlot, children }:
             href={spaceSignInHref(anchor, search)}
             className="text-body rounded-(--radius-control) border border-(--border) px-(--space-3) py-(--space-1)"
           >
-            Sign in
+            {spaceMessage("account.signIn")}
           </a>
         )}
       </div>

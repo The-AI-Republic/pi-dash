@@ -10,3 +10,46 @@ export * from "./lib/returnPath.js";
 export { LandingGate, LandingGuidance, spaceLandingCapabilities } from "./components/LandingGate.js";
 export type { LandingGateProps, LandingGuidanceProps } from "./components/LandingGate.js";
 export { SpaceBoardHead } from "./components/SpaceBoardHead.js";
+export { SpaceProjectMark, resolveSpaceMarkKind } from "./components/SpaceProjectMark.js";
+export type { SpaceMarkKind } from "./components/SpaceProjectMark.js";
+export { SpaceThemeSwitch } from "./components/SpaceThemeSwitch.js";
+export { DEFAULT_SPACE_BADGE_URL, resolveSpaceBadgeUrl, SpaceProductBadge } from "./components/SpaceProductBadge.js";
+export type { SpaceProductBadgeProps } from "./components/SpaceProductBadge.js";
+export { SPACE_SIGN_OUT_ACTION, SpaceAccountMenu } from "./components/SpaceAccountMenu.js";
+export type { SpaceAccountMenuProps } from "./components/SpaceAccountMenu.js";
+export { SpaceAccountSlot } from "./components/SpaceAccountSlot.js";
+export type { SpaceAccountSlotProps } from "./components/SpaceAccountSlot.js";
+export {
+  SPACE_PROGRESS_DELAY_MS,
+  SpaceProgressProvider,
+  SpaceRouteProgress,
+  useSpaceProgress,
+} from "./components/SpaceRouteProgress.js";
+export { SpaceLocaleGate } from "./components/SpaceLocaleGate.js";
+export { spaceAccountLabel } from "./lib/spaceAccount.js";
+export type { SpaceAccountIdentity } from "./lib/spaceAccount.js";
+export { isEmbeddedWindow, readSpaceEmbedded, useSpaceEmbedded } from "./lib/spaceEmbed.js";
+export type { FramedWindow } from "./lib/spaceEmbed.js";
+export { healSpaceLocale, storedSpaceLocaleNeedsHeal, useSpaceLocaleTag } from "./lib/spaceLocale.js";
+export { SPACE_MESSAGE_KEYS, spaceMessage } from "./lib/spaceMessages.js";
+export type { SpaceMessageKey } from "./lib/spaceMessages.js";
+export {
+  notifySpaceAttachmentFailure,
+  notifySpaceCommentDeleteFailure,
+  notifySpaceCommentDeleteSuccess,
+  notifySpaceCommentEditFailure,
+  notifySpaceCommentFailure,
+  notifySpaceCopyFailure,
+  notifySpaceCopySuccess,
+  notifySpaceReactionFailure,
+  notifySpaceVoteFailure,
+} from "./lib/spaceNotices.js";
+export {
+  canWatchSystemTheme,
+  readStoredSpaceTheme,
+  resolveSpaceTheme,
+  SPACE_THEME_STORAGE_KEY,
+  useSpaceTheme,
+  writeStoredSpaceTheme,
+} from "./lib/spaceTheme.js";
+export type { SpaceTheme } from "./lib/spaceTheme.js";
