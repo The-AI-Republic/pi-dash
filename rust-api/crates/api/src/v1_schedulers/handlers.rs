@@ -30,7 +30,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, Method, Uri};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::Value;
@@ -52,13 +52,21 @@ use super::{
 /// [`owned`].
 pub fn routes() -> axum::Router<AppState> {
     axum::Router::new()
+        // POST on the two list routes is the create / install write
+        // (PDASHOSS01-318, [`super::writes`]).
         .route(
             "/api/v1/workspaces/{slug}/schedulers/",
-            owned(get(ws_scheduler_list)),
+            super::owned_get_post(
+                get(ws_scheduler_list),
+                post(super::writes::definition_create),
+            ),
         )
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/",
-            owned(get(project_scheduler_list)),
+            super::owned_get_post(
+                get(project_scheduler_list),
+                post(super::writes::binding_install),
+            ),
         )
         .route(
             "/api/v1/workspaces/{slug}/projects/{project_id}/schedulers/{scheduler_id}/",
@@ -327,7 +335,7 @@ pub fn render_scheduler(
     bindings: &[BindingRow],
     tz: &Tz,
 ) -> serde_json::Map<String, Value> {
-    let mut map = serde_json::Map::with_capacity(12);
+    let mut map = serde_json::Map::with_capacity(13);
     map.insert("id".to_owned(), uuid_string(&row.id));
     map.insert("workspace".to_owned(), uuid_string(&row.workspace_id));
     map.insert("slug".to_owned(), Value::String(row.slug.clone()));
@@ -339,6 +347,10 @@ pub fn render_scheduler(
     map.insert("prompt".to_owned(), Value::String(row.prompt.clone()));
     map.insert("color".to_owned(), Value::String(row.color.clone()));
     map.insert("source".to_owned(), Value::String(row.source.clone()));
+    map.insert(
+        "is_builtin".to_owned(),
+        Value::Bool(super::writes::is_builtin_slug(&row.slug)),
+    );
     map.insert("is_enabled".to_owned(), Value::Bool(row.is_enabled));
     map.insert(
         "bindings".to_owned(),
@@ -865,7 +877,7 @@ async fn project_scheduler_runs_inner(
 /// `UUIDConverter` routes it: lowercase hex, hyphenated, 36 characters
 /// (`django/urls/converters.py:25`; the `v1_cli_auth` PIDASHCONV-1095 and
 /// `license` PIDASHCONV-1132 precedents).
-fn is_canonical_uuid(raw: &str) -> bool {
+pub(crate) fn is_canonical_uuid(raw: &str) -> bool {
     if raw.len() != 36 {
         return false;
     }
@@ -947,6 +959,7 @@ mod tests {
                 "prompt",
                 "color",
                 "source",
+                "is_builtin",
                 "is_enabled",
                 "bindings",
                 "created_at",
