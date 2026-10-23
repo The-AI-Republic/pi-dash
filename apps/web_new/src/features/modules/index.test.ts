@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_MODULES_LAYOUT,
   formatModuleDay,
+  formatModuleOffsetChip,
   formatModuleRange,
   invalidateAfterModuleWrite,
   invalidateArchivedModuleReads,
@@ -14,8 +15,16 @@ import {
   invalidateWorkspaceModules,
   MODULES_CRUMB,
   MODULES_LAYOUTS,
+  MODULE_USER_ZONE_HEADING,
   moduleDateText,
+  moduleDayAnchor,
   moduleDetailHref,
+  moduleInstantReading,
+  moduleOffsetChip,
+  moduleProjectFactsQueryOptions,
+  moduleRangeReading,
+  moduleViewEnabled,
+  moduleZoneOffsetMinutes,
   moduleKeys,
   modulesFeatureHref,
   modulesListHref,
@@ -76,5 +85,20 @@ describe("modules barrel", () => {
     expect(formatModuleRange).toBeDefined();
     expect(moduleDateText).toBeDefined();
     expect(userZoneDiffers).toBeDefined();
+  });
+
+  it("re-exports the project-zone date helpers later slices render with", () => {
+    expect(MODULE_USER_ZONE_HEADING).toBe("In your timezone");
+    expect(moduleZoneOffsetMinutes).toBeDefined();
+    expect(formatModuleOffsetChip).toBeDefined();
+    expect(moduleOffsetChip).toBeDefined();
+    expect(moduleDayAnchor).toBeDefined();
+    expect(moduleRangeReading).toBeDefined();
+    expect(moduleInstantReading).toBeDefined();
+  });
+
+  it("re-exports the tolerant project facts read the gate uses", () => {
+    expect(moduleProjectFactsQueryOptions).toBeDefined();
+    expect(moduleViewEnabled).toBeDefined();
   });
 });

@@ -10,9 +10,17 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   formatModuleDay,
+  formatModuleOffsetChip,
   formatModuleRange,
+  MODULE_USER_ZONE_HEADING,
   moduleDateText,
+  moduleDayAnchor,
+  moduleInstantDay,
+  moduleInstantReading,
+  moduleOffsetChip,
   moduleRangeDurationDays,
+  moduleRangeReading,
+  moduleZoneOffsetMinutes,
   parseModuleDay,
   userZoneDiffers,
 } from "./moduleDates.js";
@@ -126,5 +134,215 @@ describe("userZoneDiffers", () => {
       throw new Error("no zone");
     } as typeof Intl.DateTimeFormat.prototype.resolvedOptions;
     expect(userZoneDiffers("Asia/Tokyo")).toBe(false);
+  });
+});
+
+describe("moduleZoneOffsetMinutes", () => {
+  it("reads a DST-aware offset at the anchored instant", () => {
+    expect(moduleZoneOffsetMinutes("America/New_York", new Date("2026-01-15T12:00:00Z"))).toBe(-300);
+    expect(moduleZoneOffsetMinutes("America/New_York", new Date("2026-07-15T12:00:00Z"))).toBe(-240);
+    expect(moduleZoneOffsetMinutes("Asia/Kolkata", new Date("2026-07-15T12:00:00Z"))).toBe(330);
+    expect(moduleZoneOffsetMinutes("UTC", new Date("2026-07-15T12:00:00Z"))).toBe(0);
+  });
+
+  it("returns null for an unknown zone, a blank zone or a broken instant", () => {
+    expect(moduleZoneOffsetMinutes("Nowhere/City", new Date("2026-07-15T12:00:00Z"))).toBeNull();
+    expect(moduleZoneOffsetMinutes(null, new Date("2026-07-15T12:00:00Z"))).toBeNull();
+    expect(moduleZoneOffsetMinutes("  ", new Date("2026-07-15T12:00:00Z"))).toBeNull();
+    expect(moduleZoneOffsetMinutes("UTC", new Date("not a date"))).toBeNull();
+  });
+});
+
+describe("formatModuleOffsetChip", () => {
+  it("reads the signed hour and minute, suppressing a zero offset", () => {
+    expect(formatModuleOffsetChip(-240)).toBe("UTC -04:00");
+    expect(formatModuleOffsetChip(330)).toBe("UTC +05:30");
+    expect(formatModuleOffsetChip(345)).toBe("UTC +05:45");
+    expect(formatModuleOffsetChip(0)).toBeNull();
+    expect(formatModuleOffsetChip(Number.NaN)).toBeNull();
+  });
+});
+
+describe("moduleOffsetChip", () => {
+  it("combines the zone reading with the formatter", () => {
+    expect(moduleOffsetChip("America/New_York", new Date("2026-01-15T12:00:00Z"))).toBe("UTC -05:00");
+    expect(moduleOffsetChip("UTC", new Date("2026-01-15T12:00:00Z"))).toBeNull();
+    expect(moduleOffsetChip("Nowhere/City", new Date("2026-01-15T12:00:00Z"))).toBeNull();
+  });
+});
+
+describe("moduleDayAnchor", () => {
+  it("anchors a calendar day at midday in the project zone", () => {
+    expect(moduleDayAnchor({ year: 2026, month: 1, day: 15 }, "America/New_York")?.toISOString()).toBe(
+      "2026-01-15T17:00:00.000Z"
+    );
+    expect(moduleDayAnchor({ year: 2026, month: 7, day: 15 }, "America/New_York")?.toISOString()).toBe(
+      "2026-07-15T16:00:00.000Z"
+    );
+  });
+
+  it("settles the day's own offset on a DST transition day", () => {
+    const springForward = moduleDayAnchor({ year: 2026, month: 3, day: 8 }, "America/New_York");
+    expect(springForward?.toISOString()).toBe("2026-03-08T16:00:00.000Z");
+    expect(moduleInstantDay(springForward!, "America/New_York")).toEqual({ year: 2026, month: 3, day: 8 });
+    expect(moduleOffsetChip("America/New_York", springForward!)).toBe("UTC -04:00");
+  });
+
+  it("returns null without a usable zone", () => {
+    expect(moduleDayAnchor({ year: 2026, month: 1, day: 15 }, null)).toBeNull();
+    expect(moduleDayAnchor({ year: 2026, month: 1, day: 15 }, "Nowhere/City")).toBeNull();
+  });
+
+  it("keeps the first reading when the engine fails the second", () => {
+    const original = Intl.DateTimeFormat.prototype.formatToParts;
+    let calls = 0;
+    Intl.DateTimeFormat.prototype.formatToParts = function formatToParts(
+      this: Intl.DateTimeFormat,
+      at?: number | Date
+    ) {
+      calls += 1;
+      if (calls > 1) throw new Error("engine refused");
+      return original.call(this, at);
+    } as typeof Intl.DateTimeFormat.prototype.formatToParts;
+    try {
+      expect(moduleDayAnchor({ year: 2026, month: 10, day: 15 }, "America/New_York")?.toISOString()).toBe(
+        "2026-10-15T16:00:00.000Z"
+      );
+    } finally {
+      Intl.DateTimeFormat.prototype.formatToParts = original;
+    }
+  });
+});
+
+describe("moduleInstantDay", () => {
+  it("reads an instant's day in a zone, degrading an unknown zone to the engine zone", () => {
+    expect(moduleInstantDay("2026-01-15T02:00:00Z", "America/New_York")).toEqual({ year: 2026, month: 1, day: 14 });
+    expect(moduleInstantDay(new Date("2026-01-15T02:00:00Z"), "UTC")).toEqual({ year: 2026, month: 1, day: 15 });
+    expect(moduleInstantDay("nope", "UTC")).toBeNull();
+    const engineZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const unknown = moduleInstantDay("2026-01-15T02:00:00Z", "Nowhere/City");
+    expect(unknown).not.toBeNull();
+    expect(unknown).toEqual(moduleInstantDay("2026-01-15T02:00:00Z", engineZone));
+    expect(moduleInstantDay("2026-01-15T02:00:00Z", null)).toEqual(unknown);
+  });
+});
+
+describe("moduleInstantReading", () => {
+  it("states the project day and a differing reader's day", () => {
+    const reading = moduleInstantReading("2026-01-15T02:00:00Z", "America/New_York", "Asia/Tokyo");
+    expect(reading.text).toBe("Jan 14, 2026");
+    expect(reading.chip).toBe("UTC -05:00");
+    expect(reading.userText).toBe("Jan 15, 2026");
+    expect(reading.note).toContain(MODULE_USER_ZONE_HEADING);
+    expect(reading.note).toContain("America/New_York");
+  });
+
+  it("suppresses the reader equivalent and note when the zones agree", () => {
+    const reading = moduleInstantReading("2026-01-15T02:00:00Z", "America/New_York", "America/New_York");
+    expect(reading.text).toBe("Jan 14, 2026");
+    expect(reading.userText).toBeNull();
+    expect(reading.note).toBeNull();
+  });
+
+  it("keeps the day and chip but drops the equivalent for a zero offset", () => {
+    const reading = moduleInstantReading("2026-01-15T02:00:00Z", "UTC", "UTC");
+    expect(reading).toEqual({ text: "Jan 15, 2026", chip: null, userText: null, note: null });
+  });
+
+  it("keeps the day but drops the note for a zero or unknown offset", () => {
+    expect(moduleInstantReading("2026-01-15T02:00:00Z", "UTC", "Asia/Tokyo")).toEqual({
+      text: "Jan 15, 2026",
+      chip: null,
+      userText: null,
+      note: null,
+    });
+    const degraded = moduleInstantReading("2026-01-15T02:00:00Z", "Nowhere/City", "Asia/Tokyo");
+    expect(degraded.text).not.toBeNull();
+    expect(degraded).toMatchObject({ chip: null, userText: null, note: null });
+  });
+
+  it("falls back to the viewer's browser zone when none is passed", () => {
+    Intl.DateTimeFormat.prototype.resolvedOptions = function resolved(this: Intl.DateTimeFormat) {
+      return { ...originalResolved.call(this), timeZone: "Asia/Tokyo" };
+    } as typeof Intl.DateTimeFormat.prototype.resolvedOptions;
+    const reading = moduleInstantReading("2026-01-15T02:00:00Z", "America/New_York");
+    expect(reading.userText).toBe("Jan 15, 2026");
+    expect(reading.note).toContain("In your timezone (Asia/Tokyo)");
+  });
+
+  it("returns empty readings for absent or broken instants", () => {
+    expect(moduleInstantReading(null, "UTC", "Asia/Tokyo")).toEqual({
+      text: null,
+      chip: null,
+      userText: null,
+      note: null,
+    });
+    expect(moduleInstantReading("nope", "UTC", "Asia/Tokyo")).toEqual({
+      text: null,
+      chip: null,
+      userText: null,
+      note: null,
+    });
+  });
+});
+
+describe("moduleRangeReading", () => {
+  it("reads the calendar range with the project chip and viewer equivalent", () => {
+    const reading = moduleRangeReading({ start: "2026-10-15", target: "2026-10-22" }, "America/New_York", "Asia/Tokyo");
+    expect(reading.text).toBe("Oct 15 - 22, 2026");
+    expect(reading.chip).toBe("UTC -04:00");
+    expect(reading.userText).toBe("Oct 15 - 22, 2026");
+    expect(reading.note).toBe(
+      "Dates shown in America/New_York (UTC -04:00). In your timezone (Asia/Tokyo): Oct 15 - 22, 2026."
+    );
+  });
+
+  it("anchors a single-sided range and reads a westward viewer's day", () => {
+    const reading = moduleRangeReading({ start: "2026-01-15", target: null }, "Europe/Berlin", "America/Los_Angeles");
+    expect(reading.text).toBe("Jan 15, 2026");
+    expect(reading.chip).toBe("UTC +01:00");
+    expect(reading.userText).toBe("Jan 15, 2026");
+  });
+
+  it("suppresses the equivalent when the zones agree", () => {
+    const reading = moduleRangeReading(
+      { start: "2026-10-15", target: "2026-10-22" },
+      "America/New_York",
+      "America/New_York"
+    );
+    expect(reading.chip).toBe("UTC -04:00");
+    expect(reading.userText).toBeNull();
+    expect(reading.note).toBeNull();
+  });
+
+  it("suppresses the note for a zero offset, an unknown zone or an empty range", () => {
+    expect(moduleRangeReading({ start: "2026-10-15", target: null }, "UTC", "Asia/Tokyo").note).toBeNull();
+    expect(moduleRangeReading({ start: "2026-10-15", target: null }, "Nowhere/City", "Asia/Tokyo")).toEqual({
+      text: "Oct 15, 2026",
+      chip: null,
+      userText: null,
+      note: null,
+    });
+    expect(moduleRangeReading({ start: null, target: null }, "UTC", "Asia/Tokyo")).toEqual({
+      text: null,
+      chip: null,
+      userText: null,
+      note: null,
+    });
+    expect(moduleRangeReading({ start: "bad", target: null }, "UTC", "Asia/Tokyo")).toEqual({
+      text: null,
+      chip: null,
+      userText: null,
+      note: null,
+    });
+  });
+
+  it("falls back to the viewer's browser zone when none is passed", () => {
+    Intl.DateTimeFormat.prototype.resolvedOptions = function resolved(this: Intl.DateTimeFormat) {
+      return { ...originalResolved.call(this), timeZone: "Asia/Tokyo" };
+    } as typeof Intl.DateTimeFormat.prototype.resolvedOptions;
+    const reading = moduleRangeReading({ start: "2026-10-15", target: null }, "America/New_York");
+    expect(reading.userText).toBe("Oct 15, 2026");
+    expect(reading.note).toContain(MODULE_USER_ZONE_HEADING);
   });
 });

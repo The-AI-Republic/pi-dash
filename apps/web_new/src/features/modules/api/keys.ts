@@ -31,6 +31,9 @@ export const moduleKeys = {
     [...moduleKeys.detail(workspaceSlug, projectId, moduleId), "work-items"] as const,
   /** The workspace-wide module set pickers and switchers read. */
   workspaceList: (workspaceSlug: string) => [...moduleKeys.all(workspaceSlug), "workspace"] as const,
+  /** The project name, switch and zone the list shell gates on (MOD-001/002). */
+  projectFacts: (workspaceSlug: string, projectId: string) =>
+    [...moduleKeys.all(workspaceSlug), "project-facts", projectId] as const,
   /** The project's estimate system, read by the sidebar's points row. */
   projectEstimates: (workspaceSlug: string, projectId: string) =>
     [...moduleKeys.all(workspaceSlug), "estimates", projectId] as const,

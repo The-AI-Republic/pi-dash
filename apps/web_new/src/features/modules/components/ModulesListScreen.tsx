@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Project modules list (parity/specs/modules.md §2.1, §2.2 and §3.1,
-// MOD-001/002/008/011). Reads the project row for the feature gate, the
-// modules collection for the body and the role map for the gate's shortcut;
-// sets the tab title; and composes exactly one body state — gate, skeleton
-// or content. No list read runs while the gate shows, and the gate never
-// flashes a skeleton first. The layout is the viewer's per-project choice,
-// restored from the modules feature's own browser record.
+// MOD-001/002/008/011). Reads the project facts for the name, the feature
+// switch and the zone, the modules collection for the body and the role
+// map for the gate's shortcut; sets the tab title; and composes exactly one
+// body state — gate, skeleton or content. The facts read is the modules
+// feature's own tolerant projection: a project record without
+// `module_view` parses and reads as off, so it gates instead of leaving
+// the skeleton up (MOD-002). No list read runs while the gate shows, and
+// the gate never flashes a skeleton first. The layout is the viewer's
+// per-project choice, restored from the modules feature's own browser
+// record.
 
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -15,8 +19,9 @@ import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
 import { useDocumentHead, useNarrowViewport } from "../../../shared/shell/index.js";
-import { useProjectRoles, useProjectRow } from "../../auth/index.js";
+import { useProjectRoles } from "../../auth/index.js";
 import { isProjectAdmin } from "../../projects/index.js";
+import { moduleProjectFactsQueryOptions, moduleViewEnabled } from "../api/projectFacts.js";
 import { modulesListQueryOptions } from "../api/queries.js";
 import { MODULES_CRUMB, modulesFeatureHref, modulesTitle, resolveModulesListBody } from "../lib/moduleList.js";
 import { resolveCompactLayout } from "../lib/moduleLayouts.js";
@@ -40,8 +45,9 @@ export interface ModulesListScreenProps {
 export function ModulesListScreen({ workspaceSlug, projectId, children }: ModulesListScreenProps): React.ReactElement {
   const navigate = useNavigate();
   const narrow = useNarrowViewport();
-  const project = useProjectRow(workspaceSlug, projectId);
-  const gateOff = project.data?.module_view === false;
+  const project = useQuery(moduleProjectFactsQueryOptions(getAppClient(), workspaceSlug, projectId));
+  // Only a literal `true` opens the list; an absent flag is off (§2.2).
+  const gateOff = project.data !== undefined && !moduleViewEnabled(project.data.module_view);
   const modules = useQuery({
     ...modulesListQueryOptions(getAppClient(), workspaceSlug, projectId),
     enabled: project.isSuccess && !gateOff,

@@ -93,8 +93,8 @@ afterEach(() => {
   document.title = "";
 });
 
-function renderScreen(children?: React.ReactNode): void {
-  render(
+function renderScreen(children?: React.ReactNode): ReturnType<typeof render> {
+  return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <ModulesListScreen workspaceSlug="acme" projectId={MODULES_PROJECT_ID}>
         {children}
@@ -191,6 +191,28 @@ describe("ModulesListScreen", () => {
     const menu = within(screen.getByRole("menu", { name: "Change module layout, current List" }));
     expect(menu.getAllByRole("menuitem")).toHaveLength(2);
     expect(readProjectLayout(MODULES_PROJECT_ID)).toBe("timeline");
+  });
+
+  it("gates a project row that carries no module_view flag", async () => {
+    const { module_view: _omitted, ...row } = makeProjectRow();
+    harness.project = row;
+    renderScreen();
+    expect(await screen.findByTestId("modules-feature-gate")).toBeInTheDocument();
+    expect(screen.queryByTestId("modules-list-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("modules-list")).not.toBeInTheDocument();
+    expect(harness.modulesCalls).toBe(0);
+  });
+
+  it("gates a parseable row whose module_view is null or not boolean", async () => {
+    harness.project = makeProjectRow({ module_view: null });
+    const first = renderScreen();
+    expect(await screen.findByTestId("modules-feature-gate")).toBeInTheDocument();
+    expect(harness.modulesCalls).toBe(0);
+    first.unmount();
+    harness.project = makeProjectRow({ module_view: "on" });
+    renderScreen();
+    expect(await screen.findByTestId("modules-feature-gate")).toBeInTheDocument();
+    expect(harness.modulesCalls).toBe(0);
   });
 
   it("disables the gate shortcut when the role map names no role", async () => {

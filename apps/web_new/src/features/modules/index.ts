@@ -12,6 +12,14 @@ export {
   invalidateWorkspaceModules,
 } from "./api/invalidate.js";
 export { moduleKeys } from "./api/keys.js";
+export {
+  getModuleProjectFacts,
+  ModuleProjectFacts,
+  moduleProjectFactsQueryOptions,
+  moduleProjectPath,
+  moduleProjectTimeZone,
+  moduleViewEnabled,
+} from "./api/projectFacts.js";
 export { modulesListQueryOptions } from "./api/queries.js";
 export { ModuleBoardCard, type ModuleBoardCardProps } from "./components/ModuleBoardCard.js";
 export { ModuleLayoutIcon } from "./components/ModuleLayoutIcon.js";
@@ -62,11 +70,21 @@ export {
 } from "./lib/moduleLayouts.js";
 export {
   formatModuleDay,
+  formatModuleOffsetChip,
   formatModuleRange,
+  MODULE_USER_ZONE_HEADING,
   moduleDateText,
+  moduleDayAnchor,
+  moduleInstantDay,
+  moduleInstantReading,
+  moduleOffsetChip,
   moduleRangeDurationDays,
+  moduleRangeReading,
+  moduleZoneOffsetMinutes,
   parseModuleDay,
   userZoneDiffers,
   type ModuleDateRange,
+  type ModuleInstantReading,
   type ModuleZoneDay,
+  type ModuleZoneReading,
 } from "./lib/moduleDates.js";
