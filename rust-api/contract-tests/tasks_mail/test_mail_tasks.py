@@ -8,6 +8,7 @@ project_invitation_task}.py (project_invitation revived by Django d656243d;
 see NOTE on MAIL_TASKS.)
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -16,7 +17,7 @@ from psycopg.rows import dict_row
 
 from _harness import broker_probe, celery_wire, redis_cache, taskspec
 from _harness import seed as seed_helpers
-from _harness.db import diff, snapshot, wait_for_condition as wait_for
+from _harness.db import diff, insert_row, snapshot, wait_for_condition as wait_for
 
 M = "pi_dash.bgtasks"
 
@@ -376,3 +377,124 @@ def _sent(conn, log_ids) -> bool:
             ([str(i) for i in log_ids],),
         )
         return cur.fetchone()["n"] == len(log_ids)
+
+
+# PIDASHCONV-1288: the subscriber email log keeps
+# ``data.issue_activity.issue_comment`` on non-comment activities — Django
+# (notification_task.py:426-447) always writes it, as "" when the activity
+# names no comment. The replay mirror lives in test_rust_replay.py.
+def _seed_1288_world(conn, slug):
+    """Issue chain + email-enabled subscriber S (not the actor).
+
+    S is an active project member subscribed to the issue, with
+    ``property_change`` email allowed (every other email gate off, so the
+    log row below can only come from the property-change gate).
+    """
+    chain = seed_helpers.issue_chain(conn, slug)
+    project, ws, issue = chain["project"], chain["workspace"], chain["issue"]
+    subscriber = seed_helpers.user(conn, f"contract-notif1288-{slug}")
+    seed_helpers.project_member(conn, project["id"], ws["id"], subscriber["id"])
+    insert_row(
+        conn,
+        "issue_subscribers",
+        {
+            "workspace_id": str(ws["id"]),
+            "project_id": str(project["id"]),
+            "issue_id": str(issue["id"]),
+            "subscriber_id": str(subscriber["id"]),
+        },
+    )
+    insert_row(
+        conn,
+        "user_notification_preferences",
+        {
+            "user_id": str(subscriber["id"]),
+            "property_change": True,
+            "state_change": False,
+            "comment": False,
+            "mention": False,
+            "issue_completed": False,
+        },
+    )
+    return chain, subscriber
+
+
+def _priority_1288_activity(issue_id, actor_id):
+    """A non-comment property-change activity (no ``issue_comment`` key)."""
+    return {
+        "id": str(uuid.uuid4()),
+        "verb": "updated",
+        "field": "priority",
+        "actor_id": str(actor_id),
+        "new_value": "high",
+        "old_value": "low",
+        "comment": "changed the priority",
+        "created_at": seed_helpers.now_iso(),
+        "old_identifier": None,
+        "new_identifier": None,
+        "issue_detail": {"id": str(issue_id)},
+    }
+
+
+def _notifications_1288_args(chain, activity):
+    issue, project, owner = chain["issue"], chain["project"], chain["owner"]
+    plain = json.dumps({"description_html": "<p>plain</p>"})
+    return [
+        "issue.activity.created",
+        str(issue["id"]),
+        str(project["id"]),
+        str(owner["id"]),
+        [],
+        json.dumps([activity]),
+        plain,
+        plain,
+    ]
+
+
+def _fetch_1288_row(conn, table, receiver_id, issue_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"SELECT data FROM {table} "
+            "WHERE receiver_id = %s AND entity_identifier = %s "
+            "ORDER BY created_at DESC LIMIT 1",
+            (str(receiver_id), str(issue_id)),
+        )
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+
+def _assert_1288_issue_comment_empty(data, where):
+    assert data is not None, f"{where}: no row written"
+    block = data["issue_activity"]
+    assert "issue_comment" in block, f"{where}: keys {sorted(block)}"
+    assert block["issue_comment"] == "", f"{where}: {block['issue_comment']!r}"
+
+
+def test_notifications_email_log_keeps_issue_comment(db_conn, broker_url):
+    """Django: email log carries ``issue_comment == ""`` on priority change.
+
+    The in-app Notification row is asserted too — the control, already
+    correct on both planes.
+    """
+    chain, subscriber = _seed_1288_world(db_conn, "notif1288o")
+    issue = chain["issue"]
+    celery_wire.publish(
+        f"{M}.notification_task.notifications",
+        args=_notifications_1288_args(
+            chain, _priority_1288_activity(issue["id"], chain["owner"]["id"])
+        ),
+    )
+    email_data = wait_for(
+        lambda: _fetch_1288_row(
+            db_conn, "email_notification_logs", subscriber["id"], issue["id"]
+        ),
+        what="oracle email log for notif1288o",
+    )
+    app_data = wait_for(
+        lambda: _fetch_1288_row(
+            db_conn, "notifications", subscriber["id"], issue["id"]
+        ),
+        what="oracle in-app notification for notif1288o",
+    )
+    _assert_1288_issue_comment_empty(email_data, "oracle email log")
+    _assert_1288_issue_comment_empty(app_data, "oracle in-app notification")
