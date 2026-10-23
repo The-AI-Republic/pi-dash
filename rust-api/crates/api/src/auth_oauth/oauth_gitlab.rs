@@ -752,7 +752,11 @@ async fn app_callback(
     )
     .await
     {
-        Ok(path) => Ok(redirect_response(success_location(&base, &path, &allowed))),
+        Ok((path, csrf_cookie)) => {
+            let mut response = redirect_response(success_location(&base, &path, &allowed));
+            super::login::push_cookie(&mut response, csrf_cookie);
+            Ok(response)
+        }
         Err(CallbackOutcome::Provider(error)) => {
             let payload: Vec<(&str, serde_json::Value)> = error
                 .payload
@@ -1842,57 +1846,13 @@ async fn bulk_insert_project_members(
 // Login + redirection
 // ---------------------------------------------------------------------------
 
-/// `user.get_session_auth_hash()`: the make side of
-/// `verify_session_hash` (`license/mod.rs`): HMAC-SHA256 over the
-/// password field, keyed by SHA256(salt + secret), hex-encoded.
-fn make_session_auth_hash(password_field: &str, secret_key: &[u8]) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::{Digest, Sha256};
-    let key = Sha256::digest(
-        [
-            crate::license::SESSION_AUTH_HASH_SALT.as_bytes(),
-            secret_key,
-        ]
-        .concat(),
-    );
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(password_field.as_bytes());
-    let bytes = mac.finalize().into_bytes();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
-/// `user_login` (`authentication/utils/login.py:13-28`) with
-/// `is_app=True`: Django `login()` keys plus the `device_info` dict.
-/// (Django also cycles the session key; the session layer exposes no
-/// cycle operation, so the keys land on the current session — the
-/// cookie behaviour is unchanged: a mutated session is persisted.)
-fn user_login(
-    handle: &SessionHandle,
-    user: &DbUser,
-    user_agent: Option<&str>,
-    ip: Option<&str>,
-    domain: &str,
-    secret_key: &[u8],
-) {
+/// `device_info` half of `user_login`
+/// (`authentication/utils/login.py:21-25`): the `login()` half (rotation,
+/// the auth trio, `last_login`, the CSRF cookie) runs first via
+/// [`super::login::login_session_keys`]; this writes only the
+/// `device_info` dict.
+fn user_login(handle: &SessionHandle, user_agent: Option<&str>, ip: Option<&str>, domain: &str) {
     let mut session = handle.lock();
-    session.set(
-        "_auth_user_id".to_owned(),
-        serde_json::Value::String(user.id.to_string()),
-    );
-    session.set(
-        "_auth_user_hash".to_owned(),
-        serde_json::Value::String(make_session_auth_hash(&user.password, secret_key)),
-    );
-    session.set(
-        "_auth_user_backend".to_owned(),
-        serde_json::Value::String(crate::license::MODEL_BACKEND.to_owned()),
-    );
     session.set(
         "device_info".to_owned(),
         crate::license::handlers_auth_forms::device_info(user_agent.unwrap_or(""), ip, domain),
@@ -1995,7 +1955,8 @@ fn name_or_empty(value: &serde_json::Value) -> String {
 /// → `user_login` → redirect path, `views/app/gitlab.py:92-104`):
 /// token exchange, user fetch, login-or-signup, account upsert,
 /// session login. Returns the redirect `path` (`next_path or
-/// get_redirection_path(user)`).
+/// get_redirection_path(user)`) plus the rotated `csrftoken` `Set-Cookie`
+/// value for the success redirect.
 #[allow(clippy::too_many_arguments)]
 async fn callback_success(
     state: &AppState,
@@ -2005,7 +1966,7 @@ async fn callback_success(
     handle: Option<SessionHandle>,
     peer: Option<std::net::SocketAddr>,
     is_space: bool,
-) -> Result<String, CallbackOutcome> {
+) -> Result<(String, String), CallbackOutcome> {
     let pool = pool_of(state)?;
     let settings = state.settings();
     let secret = settings.secret_key.clone();
@@ -2193,32 +2154,39 @@ async fn callback_success(
     // `create_update_account(user)` (B6: DB errors are swallowed).
     create_update_account(pool, &user.id, &user_data, &token_data, now).await;
 
-    // `user_login(request, user, is_app=True)` on the app path,
-    // `user_login(request, user, is_space=True)` on the space path
-    // (`utils/login.py:21-25` records the matching base as the
-    // `device_info` domain).
+    // `user_login(request, user, ...)` (`utils/login.py:13-28`): the
+    // shared `login()` half first (rotation, trio, `last_login`, CSRF
+    // cookie), then the `device_info` dict (`login.py:21-25` records the
+    // matching base as the domain).
     let handle = handle.ok_or(CallbackOutcome::Server)?;
     let domain = if is_space {
         space_base(settings)
     } else {
         app_base(settings)
     };
-    user_login(
+    let csrf_cookie = super::login::login_session_keys(
         &handle,
-        &user,
-        user_agent.as_deref(),
-        ip.as_deref(),
-        &domain,
+        pool,
+        user.id,
+        &user.password,
         secret.as_bytes(),
-    );
+        settings,
+        now,
+    )
+    .await
+    .map_err(|_| CallbackOutcome::Server)?;
+    user_login(&handle, user_agent.as_deref(), ip.as_deref(), &domain);
 
     // `path = next_path or get_redirection_path(user)`.
     if let Some(next) = session_next_path {
         if !next.is_empty() {
-            return Ok(next);
+            return Ok((next, csrf_cookie));
         }
     }
-    Ok(redirection_path(pool, user.id, &email, now).await?)
+    Ok((
+        redirection_path(pool, user.id, &email, now).await?,
+        csrf_cookie,
+    ))
 }
 
 /// `create_update_account` (`adapter/oauth.py:107-140`, gitlab
@@ -2572,20 +2540,6 @@ mod tests {
                 .expect_err("invalid");
             assert_eq!(error.code, INVALID_EMAIL_CODE, "invalid: {address}");
         }
-    }
-
-    // -- session hash ------------------------------------------------------
-
-    #[test]
-    fn session_auth_hash_matches_django_salted_hmac() {
-        // Oracle: Django 6.0 `salted_hmac(...get_session_auth_hash,
-        // "pbkdf2_sha256$1200000$abc$def", secret="topsecret",
-        // algorithm="sha256")` (the default `algorithm="sha1"` is a
-        // trap — `get_session_auth_hash` passes sha256 explicitly).
-        assert_eq!(
-            make_session_auth_hash("pbkdf2_sha256$1200000$abc$def", b"topsecret"),
-            "9c9a3cd895ca244f0c1fc8a4d24cd83d65287bb3353f39d69ab926a0d240b079"
-        );
     }
 
     // -- misc pure helpers ---------------------------------------------------
