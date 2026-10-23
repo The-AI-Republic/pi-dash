@@ -57,6 +57,14 @@
 	reverse_proxy /login/* web_new:3000
 	redir /register /register/ permanent
 	reverse_proxy /register/* web_new:3000
+	redir /home /home/ permanent
+	reverse_proxy /home/* web_new:3000
+	redir /docs /docs/ permanent
+	reverse_proxy /docs/* web_new:3000
+	redir /downloads /downloads/ permanent
+	reverse_proxy /downloads/* web_new:3000
+	redir /pricing /pricing/ permanent
+	reverse_proxy /pricing/* web_new:3000
 	# END MIGRATED ROUTES
 	reverse_proxy /* web:3000
 }
