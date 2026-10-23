@@ -151,6 +151,15 @@ describe("messages", () => {
     expect(row.payload.links).toHaveLength(1);
     expect(row.payload).not.toHaveProperty("future");
   });
+
+  it("parses a minimal link with only its address and label", () => {
+    const row = AssistantMessage.parse({
+      ...MESSAGE_ROW,
+      role: "tool_result",
+      payload: { links: [{ url_path: "/acme/assistant/t1", label: "Open thread" }] },
+    });
+    expect(row.payload.links).toEqual([{ url_path: "/acme/assistant/t1", label: "Open thread" }]);
+  });
 });
 
 describe("cancel and title", () => {

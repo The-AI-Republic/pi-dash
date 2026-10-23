@@ -1,15 +1,19 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Thread transcript rules (parity/specs/agents.md §10, AGT-042/AGT-047).
-// Two feeds describe one conversation: the stored transcript page and the
-// live event stream. Both speak the same message rows and both carry a
-// sequence number, so the view keeps a row table keyed by id, merges the
-// transcript without discarding streamed text that is ahead of it, and
-// dedupes replayed event frames by sequence. Pure functions only; the
-// hook owns timing.
+// Thread transcript rules (parity/specs/agents.md §10/§11,
+// AGT-042/AGT-046/AGT-047/AGT-056). Two feeds describe one conversation:
+// the stored transcript page and the live event stream. Both speak the
+// same message rows and both carry a sequence number, so the view keeps a
+// row table keyed by id, merges the transcript without discarding streamed
+// text that is ahead of it, and dedupes replayed event frames by sequence.
+// Skipped-server notices sit beside the rows in their own anchored table,
+// so replay is idempotent and the settle rules never read them as replies.
+// Pure functions only; the hook owns timing.
 
-import type { AssistantEvent, AssistantMessage } from "@pidash/api-client";
+import type { AssistantEvent, AssistantMessage, AssistantSkippedServer } from "@pidash/api-client";
+
+import { noticeAnchorSeq, noticeId, type ThreadNotice } from "./notices.js";
 
 /** Chat roles the transcript draws; tool rows are carried for AGT-046. */
 const REAL_ROLES = new Set(["user", "assistant", "error", "tool_call", "tool_result"]);
@@ -25,9 +29,11 @@ export interface TranscriptState {
    * made the replay skip the first delta and commit nothing.
    */
   readonly appliedDelta: number;
+  /** Client-synthesized skipped-server notices by replay key (AGT-046). */
+  readonly notices: Readonly<Record<string, ThreadNotice>>;
 }
 
-export const EMPTY_TRANSCRIPT: TranscriptState = { rows: {}, appliedDelta: 0 };
+export const EMPTY_TRANSCRIPT: TranscriptState = { rows: {}, appliedDelta: 0, notices: {} };
 
 /**
  * Whether `incoming` may replace `current`. A terminal row always wins;
@@ -77,6 +83,31 @@ export function mergeMessage(state: TranscriptState, message: AssistantMessage):
 }
 
 /**
+ * Anchor the notice for one skipped-servers event just after the highest
+ * message sequence on screen, and never move it again: a reconnect replays
+ * the event from zero, and the replay key makes that a no-op. Notices live
+ * beside the rows (never in them) so the terminal rules below, which read
+ * only real rows, can never mistake one for a finished reply (AGT-056).
+ */
+export function addNotice(
+  state: TranscriptState,
+  eventSeq: number,
+  servers: readonly AssistantSkippedServer[],
+  createdAt: string
+): TranscriptState {
+  const id = noticeId(eventSeq);
+  if (state.notices[id] !== undefined) return state;
+  const anchor = noticeAnchorSeq(state.rows);
+  return {
+    ...state,
+    notices: {
+      ...state.notices,
+      [id]: { id, seq: anchor + 0.5, eventSeq, servers, createdAt },
+    },
+  };
+}
+
+/**
  * Apply one parsed stream event. Two rules keep a reconnect (which replays
  * the thread from the beginning) from doubling text: a delta at or below
  * the last applied sequence was already served, and a delta never appends
@@ -101,6 +132,7 @@ export function applyAssistantEvent(state: TranscriptState, event: AssistantEven
       const current = state.rows[target];
       if (current === undefined || current.status !== "streaming") return state;
       return {
+        ...state,
         appliedDelta: event.seq,
         rows: { ...state.rows, [target]: { ...current, content: current.content + delta } },
       };
@@ -124,6 +156,29 @@ export function transcriptRows(state: TranscriptState): AssistantMessage[] {
   return Object.values(state.rows)
     .filter((row) => REAL_ROLES.has(row.role))
     .sort((left, right) => left.seq - right.seq);
+}
+
+/** One rendered transcript entry: a stored row or a synthesized notice. */
+export type TranscriptEntry =
+  | { kind: "message"; seq: number; eventSeq: number; message: AssistantMessage }
+  | { kind: "notice"; seq: number; eventSeq: number; notice: ThreadNotice };
+
+/**
+ * Rows and notices in display order. A notice anchors at a fractional
+ * sequence, so it interleaves in the turn it belongs to; two notices on
+ * the same anchor keep event order. Real rows sort by sequence alone.
+ */
+export function transcriptEntries(state: TranscriptState): TranscriptEntry[] {
+  const entries: TranscriptEntry[] = transcriptRows(state).map((message) => ({
+    kind: "message" as const,
+    seq: message.seq,
+    eventSeq: 0,
+    message,
+  }));
+  for (const notice of Object.values(state.notices)) {
+    entries.push({ kind: "notice", seq: notice.seq, eventSeq: notice.eventSeq, notice });
+  }
+  return entries.sort((left, right) => left.seq - right.seq || left.eventSeq - right.eventSeq);
 }
 
 /**

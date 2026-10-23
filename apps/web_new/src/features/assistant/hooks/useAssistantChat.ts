@@ -1,16 +1,18 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Live conversation state for one thread (parity/specs/agents.md §10).
+// Live conversation state for one thread (parity/specs/agents.md §10/§11).
 // Three feeds describe one turn: the stored transcript page is the durable
 // record, the event channel adds token deltas and lifecycle signals as they
 // arrive, and a one-second poll runs while a turn is visibly in flight so an
 // answer still lands when the channel stays silent (AGT-042). Stopping only
 // asks the server to cancel; the composer stays locked until a terminal row
-// or event arrives, so a resend can never race the worker.
+// or event arrives, so a resend can never race the worker. Dropped tool
+// servers surface as inline per-turn notices anchored in the transcript,
+// queued when they replay ahead of the stored page (AGT-046).
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { AssistantEvent, AssistantMessage } from "@pidash/api-client";
+import type { AssistantEvent, AssistantMessage, AssistantSkippedServer } from "@pidash/api-client";
 import * as React from "react";
 
 import { getAppClient } from "../../../core/api/client.js";
@@ -21,17 +23,23 @@ import { assistantTranscriptQueryOptions } from "../api/transcript.js";
 import { sendFailureLine, useSendMessage, useStopTurn } from "../api/threadMutations.js";
 import {
   EMPTY_TRANSCRIPT,
+  addNotice,
   applyAssistantEvent,
   mergeMessage,
   mergeTranscript,
   replySettled,
   terminalRow,
+  transcriptEntries,
   transcriptRows,
+  type TranscriptEntry,
   type TranscriptState,
 } from "../lib/turn.js";
 
-/** Transcript page size: the server bounds a thread below this. */
-export const TRANSCRIPT_PAGE_SIZE = 200;
+/**
+ * Transcript page size: the read walks the cursor one page at a time, and
+ * threads are capped server-side, so the walk stays bounded (AGT-055).
+ */
+export const TRANSCRIPT_PAGE_SIZE = 100;
 
 /** Poll cadence for a turn that is visibly in flight. */
 export const TURN_POLL_MS = 1000;
@@ -59,11 +67,14 @@ type Action =
   | { type: "reset" }
   | { type: "page"; rows: readonly AssistantMessage[] }
   | { type: "message"; message: AssistantMessage }
-  | { type: "event"; event: AssistantEvent };
+  | { type: "event"; event: AssistantEvent }
+  | { type: "notice"; eventSeq: number; servers: readonly AssistantSkippedServer[]; createdAt: string };
 
 export interface AssistantChat {
   /** Rows oldest first, ready to render. */
   messages: AssistantMessage[];
+  /** Rows and notices in display order, ready to render. */
+  entries: TranscriptEntry[];
   /** A turn is running: stop replaces send and the poll is on. */
   running: boolean;
   /** A send is posting: the box locks until it resolves. */
@@ -90,6 +101,8 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
         return mergeMessage(current, action.message);
       case "event":
         return applyAssistantEvent(current, action.event);
+      case "notice":
+        return addNotice(current, action.eventSeq, action.servers, action.createdAt);
     }
   }, []);
   const [state, dispatch] = React.useReducer(reduce, EMPTY_TRANSCRIPT);
@@ -126,6 +139,14 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
   // active. Until the page applies, the list's `has_active_turn` is the only
   // clock (AGT-042).
   const pageAppliedRef = React.useRef(false);
+  // Notices that replayed ahead of the transcript. A notice anchors after
+  // the highest message sequence on screen, so anchoring one against an
+  // empty table would pin it to the top of the thread; the page effect
+  // drains these oldest-first once there is something to anchor to
+  // (AGT-046).
+  const pendingNotices = React.useRef<
+    { eventSeq: number; servers: readonly AssistantSkippedServer[]; createdAt: string }[]
+  >([]);
 
   // When the latest turn started, on this clock. A thread-list read taken at
   // or after this point is the server's answer about that turn; an older one
@@ -133,6 +154,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
   const [startedAt, setStartedAt] = React.useState(0);
 
   const messages = React.useMemo(() => transcriptRows(state), [state]);
+  const entries = React.useMemo(() => transcriptEntries(state), [state]);
 
   // The thread list carries `has_active_turn`, the only server read that
   // says a turn is over even when stopping added no transcript row (a cancel
@@ -215,6 +237,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     awaitingStartRef.current = null;
     startSeqRef.current = 0;
     pageAppliedRef.current = false;
+    pendingNotices.current = [];
     setBusy(false);
     setError(null);
     setStartedAt(0);
@@ -224,6 +247,16 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
     if (page.data === undefined) return;
     pageAppliedRef.current = true;
     dispatch({ type: "page", rows: page.data });
+    // The transcript is in: anchor the notices that replayed ahead of it,
+    // oldest event first so they keep their relative order. Drained out
+    // here rather than inside the page dispatch because the queue is a ref,
+    // and a reducer must stay pure.
+    const queued = pendingNotices.current;
+    if (queued.length === 0) return;
+    pendingNotices.current = [];
+    for (const notice of [...queued].sort((left, right) => left.eventSeq - right.eventSeq)) {
+      dispatch({ type: "notice", ...notice });
+    }
   }, [page.data]);
 
   // The rows as the event handler sees them. A replayed `turn_started` is
@@ -314,6 +347,23 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
           case "tool_result":
             dispatch({ type: "event", event });
             break;
+          case "tool_servers_skipped": {
+            // A run dropped one or more tool servers. The notice anchors to
+            // the turn it belongs to and interleaves in the thread; a replay
+            // from zero re-anchors nothing, and a reload re-derives it from
+            // the same event (AGT-046).
+            const servers = (event.payload as { servers?: AssistantSkippedServer[] }).servers;
+            if (servers === undefined || servers.length === 0) break;
+            const notice = { eventSeq: event.seq, servers, createdAt: event.created_at };
+            if (!pageAppliedRef.current) {
+              // Replayed ahead of the transcript: hold it until there is
+              // something to anchor against (flushed by the page effect).
+              pendingNotices.current.push(notice);
+              break;
+            }
+            dispatch({ type: "notice", ...notice });
+            break;
+          }
           case "turn_failed": {
             const turnId = followsTurn(event);
             if (turnId === null) break;
@@ -379,6 +429,7 @@ export function useAssistantChat(workspaceSlug: string, threadId: string): Assis
 
   return {
     messages,
+    entries,
     running,
     sending: sendMutation.isPending,
     error,

@@ -1,7 +1,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Conversation rail (parity/specs/agents.md §11, AGT-044). Each cached
+// Conversation rail (parity/specs/agents.md §11, AGT-044/AGT-061). This is
+// the assistant's own inline link rail — a brand header, a link New-chat
+// entry and link thread rows — never the shared history panel. Each cached
 // conversation links to its own address newest-first with an untitled
 // fallback, the open one carries `aria-current`, archived rows never
 // render, and a resolved-but-empty list shows the placeholder. A refused
@@ -12,7 +14,12 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import * as React from "react";
 
 import { useAssistantThreads } from "../api/queries.js";
-import { CONVERSATION_RAIL_TITLE, NEW_CONVERSATION_LABEL, NO_CONVERSATIONS } from "../lib/copy.js";
+import {
+  CONVERSATION_RAIL_BRAND,
+  CONVERSATION_RAIL_TITLE,
+  NEW_CONVERSATION_LABEL,
+  NO_CONVERSATIONS,
+} from "../lib/copy.js";
 import { conversationLabel, visibleConversations } from "../lib/labels.js";
 import { assistantThreadHref } from "../lib/navigation.js";
 
@@ -31,6 +38,12 @@ export function ConversationRail({ workspaceSlug }: ConversationRailProps): Reac
       data-testid="assistant-rail"
       className="flex w-[280px] shrink-0 flex-col gap-(--space-3) border-r border-(--border) bg-(--surface) p-(--space-3)"
     >
+      <div
+        data-testid="assistant-rail-header"
+        className="text-body flex h-9 shrink-0 items-center px-(--space-3) font-semibold text-(--text)"
+      >
+        {CONVERSATION_RAIL_BRAND}
+      </div>
       <Link
         to="/$ws/assistant"
         params={{ ws: workspaceSlug }}

@@ -71,6 +71,10 @@ export const NO_CONVERSATIONS = "No conversations yet.";
 export const CONVERSATION_RAIL_TITLE = "Conversations";
 /** New-conversation rail action. */
 export const NEW_CONVERSATION_LABEL = "New chat";
+/** Brand line at the top of the conversation rail, matched exactly by the AGT-061 scenario. */
+export const CONVERSATION_RAIL_BRAND = "Pi Dash AI";
+/** Fallback label for a tool-activity link the server sent without one. */
+export const TOOL_LINK_FALLBACK = "View";
 
 /**
  * Dashboard card suggestion chips (AGT-048), in display order. Picking one

@@ -16,7 +16,7 @@ export interface AssistantLayoutProps {
 
 export function AssistantLayout({ workspaceSlug }: AssistantLayoutProps): React.ReactElement {
   return (
-    <div className="flex h-full w-full overflow-hidden">
+    <div data-testid="assistant-layout" className="flex h-full w-full overflow-hidden">
       <ConversationRail key={workspaceSlug} workspaceSlug={workspaceSlug} />
       <main className="min-w-0 flex-1 overflow-hidden">
         <Outlet />

@@ -12902,10 +12902,35 @@ export class WebNewDriver implements ParityDriver {
     });
   }
   async assistantToolActivities(): Promise<AssistantToolActivity[]> {
-    return todo("assistantToolActivities");
+    const rows = this.assistantTranscript().locator('[data-testid="assistant-tool-activity"]');
+    const total = await rows.count();
+    const out: AssistantToolActivity[] = [];
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      const text = (await row.locator('[data-testid="assistant-tool-text"]').first().innerText()).trim();
+      const links = row.locator(":scope a");
+      const linkTotal = await links.count();
+      const items: { label: string; href: string }[] = [];
+      for (let j = 0; j < linkTotal; j++) {
+        const link = links.nth(j);
+        items.push({
+          label: (await link.innerText()).trim(),
+          href: (await link.getAttribute("href")) ?? "",
+        });
+      }
+      out.push({ text, links: items });
+    }
+    return out;
   }
   async assistantNoticeLines(): Promise<string[]> {
-    return todo("assistantNoticeLines");
+    const lines = this.assistantTranscript().locator('[data-testid="assistant-notice-line"]');
+    const total = await lines.count();
+    const out: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (await lines.nth(i).innerText()).trim();
+      if (text !== "") out.push(text);
+    }
+    return out;
   }
   async assistantEmptyState(): Promise<string | null> {
     if ((await this.assistantTranscript().count()) > 0) return null;
@@ -12924,8 +12949,13 @@ export class WebNewDriver implements ParityDriver {
       return Math.abs(node.scrollHeight - node.scrollTop - node.clientHeight) < 24;
     });
   }
-  async assistantClickToolLink(_activityIndex: number, _linkIndex: number): Promise<void> {
-    return todo("assistantClickToolLink");
+  async assistantClickToolLink(activityIndex: number, linkIndex: number): Promise<void> {
+    await this.assistantTranscript()
+      .locator('[data-testid="assistant-tool-activity"]')
+      .nth(activityIndex)
+      .locator(":scope a")
+      .nth(linkIndex)
+      .click();
   }
   async assistantSidebarThreads(): Promise<AssistantSidebarThread[]> {
     const links = this.assistantSidebar().locator("nav a");
@@ -13255,16 +13285,46 @@ export class WebNewDriver implements ParityDriver {
     return [...this.assistantTranscribeSeen];
   }
   async assistantSidebarButtons(): Promise<string[]> {
-    return todo("assistantSidebarButtons");
+    const sidebar = this.assistantSidebar();
+    if ((await sidebar.count()) === 0) return [];
+    return sidebar.locator("button").allInnerTexts();
   }
   async assistantThreadManagementControls(): Promise<string[]> {
-    return todo("assistantThreadManagementControls");
+    // The assistant layout (sidebar + outlet) must offer no thread
+    // rename/archive/delete affordance; the report names any violator.
+    const layout = this.page.locator('[data-testid="assistant-layout"]').first();
+    if ((await layout.count()) === 0) return [];
+    const candidates = layout.locator("button, a");
+    const total = await candidates.count();
+    const hits: string[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const text = ((await candidates.nth(i).textContent()) ?? "").trim().toLowerCase();
+      if (text.includes("rename") || text.includes("archive") || text.includes("delete")) hits.push(text);
+    }
+    return hits;
   }
   async assistantSidebarHeader(): Promise<string | null> {
-    return todo("assistantSidebarHeader");
+    const header = this.assistantSidebar().locator('[data-testid="assistant-rail-header"]').first();
+    if ((await header.count()) === 0) return null;
+    // textContent: innerText would apply CSS text transforms.
+    const text = ((await header.textContent()) ?? "").trim();
+    return text === "" ? null : text;
   }
   async assistantSidebarRowKinds(): Promise<{ newChat: string | null; rows: string[] }> {
-    return todo("assistantSidebarRowKinds");
+    const sidebar = this.assistantSidebar();
+    if ((await sidebar.count()) === 0) return { newChat: null, rows: [] };
+    const links = sidebar.locator(":scope a, :scope button");
+    const total = await links.count();
+    let newChat: string | null = null;
+    const rows: string[] = [];
+    for (let i = 0; i < total; i += 1) {
+      const node = links.nth(i);
+      const tag = await node.evaluate((element) => element.tagName.toLowerCase());
+      const text = ((await node.textContent()) ?? "").trim();
+      if (text === "New chat") newChat = tag;
+      else rows.push(tag);
+    }
+    return { newChat, rows };
   }
   async assistantSkippedNoticeActions(): Promise<{ kind: string; text: string; href: string | null }[]> {
     return todo("assistantSkippedNoticeActions");

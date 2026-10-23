@@ -1075,6 +1075,58 @@ describe("useAssistantChat", () => {
     expect(result.current.messages).toEqual([]);
   });
 
+  describe("skipped-server notices", () => {
+    function skipped(seq: number, servers: unknown): unknown {
+      return {
+        id: seq,
+        thread: THREAD_ID,
+        message: null,
+        seq,
+        kind: "tool_servers_skipped",
+        payload: { servers },
+        created_at: "2026-01-01T00:00:00Z",
+      };
+    }
+
+    it("anchors a notice in the turn it belongs to", async () => {
+      const { result } = setup([row({ id: "u", seq: 1 })]);
+      await waitFor(() => expect(result.current.loaded).toBe(true));
+      act(() => stream.subscriptions.at(-1)?.onEvent(skipped(701, [{ name: "dead", reason: "RuntimeError" }])));
+      await waitFor(() => expect(result.current.entries).toHaveLength(2));
+      expect(result.current.entries[1]).toMatchObject({ kind: "notice", seq: 1.5, eventSeq: 701 });
+      // The notice is not a row: the terminal rules still see the user row.
+      expect(result.current.messages).toHaveLength(1);
+    });
+
+    it("queues notices that replay ahead of the transcript and drains them oldest-first", async () => {
+      // The held read parses through the contract (no seeded cache), so the
+      // row carries a real id.
+      const { result, releaseTranscriptReads } = setup([row({ id: "22222222-2222-4222-8222-222222222222", seq: 1 })], {
+        holdTranscriptReads: true,
+      });
+      await waitFor(() => expect(stream.subscriptions.length).toBeGreaterThan(0));
+      act(() => stream.subscriptions.at(-1)?.onEvent(skipped(702, [{ name: "b", reason: "RuntimeError" }])));
+      act(() => stream.subscriptions.at(-1)?.onEvent(skipped(701, [{ name: "a", reason: "RuntimeError" }])));
+      // Nothing anchors until the page lands: the queue holds both.
+      expect(result.current.entries).toEqual([]);
+      act(() => releaseTranscriptReads());
+      await waitFor(() => expect(result.current.loaded).toBe(true));
+      await waitFor(() => expect(result.current.entries).toHaveLength(3));
+      const notices = result.current.entries.filter((entry) => entry.kind === "notice");
+      expect(notices.map((entry) => entry.eventSeq)).toEqual([701, 702]);
+      expect(notices.every((entry) => entry.seq === 1.5)).toBe(true);
+    });
+
+    it("ignores a skipped event with no servers", async () => {
+      const { result } = setup([row({ id: "u", seq: 1 })]);
+      await waitFor(() => expect(result.current.loaded).toBe(true));
+      act(() => stream.subscriptions.at(-1)?.onEvent(skipped(701, [])));
+      act(() => stream.subscriptions.at(-1)?.onEvent(skipped(702, undefined)));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(result.current.entries).toHaveLength(1);
+    });
+  });
+
   it("polls the transcript every second while a turn is in flight", async () => {
     // A streaming row is the turn's own proof; a trailing user row waits for
     // the list's answer, so each case names what it is testing.

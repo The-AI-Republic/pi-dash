@@ -17,13 +17,18 @@ export type AssistantMessageRole = z.infer<typeof AssistantMessageRole>;
 export const AssistantMessageStatus = z.enum(["streaming", "completed", "failed", "cancelled"]);
 export type AssistantMessageStatus = z.infer<typeof AssistantMessageStatus>;
 
-/** Deep link a tool-activity row carries (write actions stay visible). */
+/**
+ * Deep link a tool-activity row carries (write actions stay visible). Only
+ * the address is guaranteed: issue links add their identifiers, and the
+ * label is the row's own display text when the server sent one (AGT-046).
+ */
 export const AssistantMessageLink = z.object({
-  type: z.string(),
-  workspace_slug: z.string(),
-  project_id: z.string(),
-  issue_id: z.string(),
+  type: z.optional(z.string()),
+  workspace_slug: z.optional(z.string()),
+  project_id: z.optional(z.string()),
+  issue_id: z.optional(z.string()),
   url_path: z.string(),
+  label: z.optional(z.string()),
 });
 export type AssistantMessageLink = z.infer<typeof AssistantMessageLink>;
 
