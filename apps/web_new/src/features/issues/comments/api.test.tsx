@@ -23,6 +23,7 @@ import {
   COMMENT_LINK_COPY_FAILED_TITLE,
   COMMENT_REMOVE_FAILED_TITLE,
   COMMENT_REMOVED_TITLE,
+  COMMENT_SYNCED_REMOVE_FAILED_TITLE,
   COMMENT_UPDATE_FAILED_TITLE,
   COMMENT_UPDATED_TITLE,
   accessPatch,
@@ -253,6 +254,23 @@ describe("useUpdateComment", () => {
     );
   });
 
+  it("rolls a refused fold back to the unfolded row", async () => {
+    const { queryClient, wrapper } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
+    stubClient(() => ({ status: 403, body: { error: "You don't have the required permissions." } }));
+    const { result } = renderHook(() => useUpdateComment(SCOPE, COMMENT_UPDATE_FAILED_TITLE, COMMENT_UPDATED_TITLE), {
+      wrapper,
+    });
+    await result.current.mutateAsync({ commentId: COMMENT, patch: foldPatch(comment(), true) }).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(COMMENT_UPDATE_FAILED_TITLE, "You don't have the required permissions.");
+    await waitFor(() =>
+      expect(queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE))?.[0]?.labels).toEqual(
+        []
+      )
+    );
+  });
+
   it("paints one comment optimistically and snapshots it for rollback", async () => {
     const { queryClient } = harness();
     queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment()]);
@@ -339,6 +357,28 @@ describe("useDeleteComment", () => {
     const { result } = renderHook(() => useDeleteComment(SCOPE), { wrapper });
     await result.current.mutateAsync(COMMENT).catch(() => undefined);
     expect(notifyError).toHaveBeenCalledWith(COMMENT_REMOVE_FAILED_TITLE, "Only the author can delete.");
+    await waitFor(() =>
+      expect(queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE))).toHaveLength(1)
+    );
+  });
+
+  it("keeps a git-synced comment and carries the unbind instruction", async () => {
+    const { queryClient, wrapper } = harness();
+    queryClient.setQueryData(issueKeys.comments(SLUG, PROJECT, ISSUE), [comment({ is_synced: true })]);
+    stubClient(() => ({
+      status: 409,
+      body: { error: "Unbind the project's repository to delete this comment." },
+    }));
+    const { result } = renderHook(() => useDeleteComment(SCOPE), { wrapper });
+    await result.current.mutateAsync(COMMENT).catch(() => undefined);
+    expect(notifyError).toHaveBeenCalledTimes(1);
+    expect(notifyError).toHaveBeenCalledWith(
+      COMMENT_SYNCED_REMOVE_FAILED_TITLE,
+      "Unbind the project's repository to delete this comment."
+    );
+    const [title, message] = vi.mocked(notifyError).mock.calls[0] as [string, string];
+    expect(`${title} ${message}`.toLowerCase()).toContain("fail");
+    expect(message.toLowerCase()).toContain("unbind");
     await waitFor(() =>
       expect(queryClient.getQueryData<IssueComment[]>(issueKeys.comments(SLUG, PROJECT, ISSUE))).toHaveLength(1)
     );

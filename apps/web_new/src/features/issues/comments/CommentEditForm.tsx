@@ -1,10 +1,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Inline comment editor (parity/specs/issues.md §16, ISS-198). Opens
-// prefilled and focused on the stored body; the check (or Enter) saves,
-// Enter on an empty body does nothing, and cancel drops the draft without
-// a write. Uploads stay on while editing and attach to the comment.
+// Inline comment editor (parity/specs/issues.md §16, ISS-198; CMT-003).
+// Opens prefilled and focused on the stored body; the check (or Enter)
+// saves once the draft differs from it, Enter on an empty or unchanged
+// body does nothing, and cancel drops the draft without a write.
+// Uploads stay on while editing and attach to the comment.
 
 import { Button, IconButton } from "@pidash/kit";
 import type { IssueComment } from "@pidash/api-client";
@@ -39,10 +40,13 @@ export function CommentEditForm({
   const [saving, setSaving] = React.useState(false);
   const handleRef = React.useRef<RichTextEditorHandle | null>(null);
   const empty = isCommentBodyEmpty(html);
+  // A pristine draft (no change from the stored body) cannot be saved:
+  // only a content change arms the check (CMT-003).
+  const pristine = html === comment.comment_html;
   const upload = useUploadCommentImage({ workspaceSlug, projectId });
 
   const save = async (): Promise<void> => {
-    if (saving || empty) return;
+    if (saving || empty || pristine) return;
     setSaving(true);
     try {
       await onSave(html);
@@ -63,7 +67,7 @@ export function CommentEditForm({
     >
       <div
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !empty) {
+          if (event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !empty && !pristine) {
             event.preventDefault();
             void save();
           }
@@ -107,7 +111,7 @@ export function CommentEditForm({
           label={SAVE_COMMENT_LABEL}
           size="small"
           className="border border-(--success) text-(--success)"
-          disabled={saving || empty}
+          disabled={saving || empty || pristine}
           onClick={() => void save()}
         >
           <Check size={16} strokeWidth={2} />

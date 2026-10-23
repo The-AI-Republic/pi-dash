@@ -21,6 +21,8 @@ export const COMMENT_CONTENT_TAGS = ["img", "image-component", "mention-componen
 /** Card header name. Agent messages carry their own speaker label. */
 export const AGENT_SPEAKER_FALLBACK = "AI Agent";
 export const UNKNOWN_AUTHOR = "Unknown author";
+/** Suffix marking a bot account's display name (CMT-012). */
+export const BOT_AUTHOR_SUFFIX = "Bot";
 
 /** Whether `viewerId` may edit or delete this comment (ISS-198/199). */
 export function isCommentAuthor(comment: Pick<IssueComment, "actor">, viewerId: string | null): boolean {
@@ -86,12 +88,18 @@ export function commentMenuEntries(
   ];
 }
 
-/** Header name: speaker label for agents, profile name otherwise. */
+/**
+ * Header name: speaker label for agents, a bot-marked profile name for bot
+ * accounts, the profile name for humans. A bot whose display name already
+ * reads as a bot keeps it as stored, as does a human with "bot" in theirs.
+ */
 export function commentAuthorName(
   comment: Pick<IssueComment, "speaker_type" | "speaker_label" | "actor_detail">
 ): string {
   if (comment.speaker_type === "agent") return comment.speaker_label.trim() || AGENT_SPEAKER_FALLBACK;
-  return comment.actor_detail?.display_name ?? UNKNOWN_AUTHOR;
+  const name = comment.actor_detail?.display_name ?? UNKNOWN_AUTHOR;
+  if (comment.actor_detail?.is_bot === true && !/bot/i.test(name)) return `${name} ${BOT_AUTHOR_SUFFIX}`;
+  return name;
 }
 
 /** Avatar image for a comment author, when the server carries one. */

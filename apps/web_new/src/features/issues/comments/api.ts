@@ -13,6 +13,7 @@ import {
   attachCommentImages,
   createIssueComment,
   deleteIssueComment,
+  gitSyncedCommentErrorFrom,
   isApiError,
   listIssueComments,
   updateIssueComment,
@@ -39,6 +40,7 @@ export const COMMENT_LINK_COPY_FAILED_TITLE = "Couldn't copy the comment link";
 export const COMMENT_CREATE_FAILED_TITLE = "Couldn't add the comment";
 export const COMMENT_UPDATE_FAILED_TITLE = "Couldn't update the comment";
 export const COMMENT_REMOVE_FAILED_TITLE = "Couldn't delete the comment";
+export const COMMENT_SYNCED_REMOVE_FAILED_TITLE = "Failed to delete the synced comment";
 export const COMMENT_ATTACH_FAILED_TITLE = "Couldn't finish the comment upload";
 export const COMMENT_IMAGE_UPLOAD_FAILED_TITLE = "Couldn't upload the image";
 export const COMMENT_FAILURE_FALLBACK = "Check your connection and try again.";
@@ -177,7 +179,11 @@ export function useUpdateComment(scope: CommentScope, failureTitle: string, succ
   });
 }
 
-/** Delete a comment (ISS-199): no confirmation, one notice. */
+/**
+ * Delete a comment (ISS-199): no confirmation, one notice. A comment
+ * mirrored from a git provider is refused with 409 instead: the row rolls
+ * back and one notice carries the server's unbind instruction (CMT-005).
+ */
 export function useDeleteComment(scope: CommentScope) {
   const client = getAppClient();
   const queryClient = useQueryClient();
@@ -188,7 +194,12 @@ export function useDeleteComment(scope: CommentScope) {
     onSuccess: () => notifySuccess(COMMENT_REMOVED_TITLE),
     onError: (error: Error, _commentId, snapshots: QuerySnapshot[] | undefined) => {
       if (snapshots !== undefined) rollbackSnapshots(queryClient, snapshots);
-      notifyError(COMMENT_REMOVE_FAILED_TITLE, commentFailureDetail(error));
+      const synced = gitSyncedCommentErrorFrom(error);
+      if (synced === null) {
+        notifyError(COMMENT_REMOVE_FAILED_TITLE, commentFailureDetail(error));
+      } else {
+        notifyError(COMMENT_SYNCED_REMOVE_FAILED_TITLE, synced.message);
+      }
     },
     onSettled: () => invalidateCommentViews(queryClient, scope),
   });

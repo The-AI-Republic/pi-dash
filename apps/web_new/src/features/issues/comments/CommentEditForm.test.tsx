@@ -219,6 +219,25 @@ describe("CommentEditForm", () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it("leaves save disabled until the draft differs from the stored body", async () => {
+    stubTransport();
+    const user = userEvent.setup();
+    const { onSave } = renderForm();
+    const editable = await surface("Stored words");
+    expect(screen.getByRole("button", { name: "Save comment" })).toBeDisabled();
+    // A bare Enter or submit with no content change saves nothing.
+    fireEvent.keyDown(editable, { key: "Enter" });
+    fireEvent.submit(screen.getByRole("button", { name: "Save comment" }).closest("form")!);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Save comment" })).toBeDisabled();
+    caretToEnd(editable);
+    await user.keyboard(" edited");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).not.toBeDisabled());
+    fireEvent.input(editable, { target: { value: "Stored words" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save comment" })).toBeDisabled());
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it("keeps the draft and re-enables the check when the save is refused", async () => {
     stubTransport();
     const user = userEvent.setup();
