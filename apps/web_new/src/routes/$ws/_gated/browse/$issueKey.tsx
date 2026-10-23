@@ -188,12 +188,6 @@ function BrowseIssueDetail({
   });
   const writable = editable && issue.archived_at === null && !issue.is_synced;
   const identifier = projectIdentifier(project, issueKey);
-  const queryClient = context.queryClient;
-  function refreshDetail(): void {
-    void queryClient.invalidateQueries({ queryKey: issueKeys.detail(workspaceSlug, issueId) });
-    void queryClient.invalidateQueries({ queryKey: issueKeys.browse(workspaceSlug, issueKey) });
-    void queryClient.invalidateQueries({ queryKey: issueKeys.all(workspaceSlug) });
-  }
   const menu = useQuickActions(
     issue.is_synced
       ? null
@@ -213,7 +207,6 @@ function BrowseIssueDetail({
           },
           context: "detail",
           canWrite: editable,
-          onChanged: () => refreshDetail(),
           onRestored: () => void navigate({ to: "/$ws/browse/$issueKey", params: { ws: workspaceSlug, issueKey } }),
         }
   );

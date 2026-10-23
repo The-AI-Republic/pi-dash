@@ -97,6 +97,8 @@ interface Stub {
   fail?: string;
   projects?: unknown[];
   states?: unknown[];
+  /** Answer the signed-in user, so `useMe` resolves. */
+  me?: boolean;
 }
 
 function transport(stub: Stub = {}) {
@@ -162,6 +164,28 @@ function transport(stub: Stub = {}) {
       );
     }
     if (url.includes("/members/") && url.includes("/workspaces/")) return json(200, { results: [] });
+    if (stub.me === true && url.endsWith("/api/users/me/")) {
+      return json(200, {
+        id: ME,
+        email: "ada@example.test",
+        username: "ada",
+        first_name: "Ada",
+        last_name: "L",
+        display_name: "Ada L",
+        avatar: "",
+        avatar_url: null,
+        cover_image: null,
+        cover_image_url: null,
+        date_joined: "2026-01-01T00:00:00Z",
+        user_timezone: "UTC",
+        is_active: true,
+        is_bot: false,
+        is_email_verified: true,
+        is_password_autoset: false,
+        last_login_medium: "email",
+        last_login_time: null,
+      });
+    }
     if (stub.fail !== undefined && url.includes(stub.fail)) return json(500, { error: "boom" });
     if (method === "DELETE") return json(204, {});
     if (method === "POST") return json(201, { message: "ok" });
@@ -175,6 +199,26 @@ function wrapper() {
   return function Wrapper({ children }: { children: React.ReactNode }): React.ReactElement {
     return <QueryClientProvider client={queryClient}>{children as never}</QueryClientProvider>;
   };
+}
+
+function asOverlay(node: React.ReactElement | null | undefined): React.ReactElement | null {
+  return node ?? null;
+}
+
+function dialogOf(state: ReturnType<typeof useQuickActions>): React.ReactElement<Record<string, unknown>> | null {
+  const overlay = asOverlay(state?.overlays);
+  if (overlay === null) return null;
+  const children = React.Children.toArray(
+    (overlay.props as { children: React.ReactNode }).children
+  ) as React.ReactElement<Record<string, unknown>>[];
+  return children.find((child) => typeof child.type !== "string") ?? null;
+}
+
+/** The dialog a state mounts right now; the tests assert on its props. */
+function mountedDialog(state: ReturnType<typeof useQuickActions>): React.ReactElement<Record<string, unknown>> {
+  const dialog = dialogOf(state);
+  if (dialog === null) throw new Error("expected a mounted dialog");
+  return dialog;
 }
 
 function renderMenu(input: Parameters<typeof useQuickActions>[0]) {
@@ -490,6 +534,118 @@ describe("quick-action dialog wiring", () => {
       view.unmount();
     }
     expect(onChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("quick-action overlays", () => {
+  const CASES = [
+    ["copy", WorkItemCreateDialog],
+    ["archive", ArchiveWorkItemDialog],
+    ["delete", DeleteWorkItemDialog],
+    ["move", MoveWorkItemDialog],
+  ] as const;
+
+  for (const [key, type] of CASES) {
+    it(`mounts only the ${key} dialog, and dismisses it once the dialog asks to close (ISS-060/066)`, async () => {
+      transport();
+      const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "project" });
+      await act(async () => result.current?.handlers.run(key));
+      const dialog = mountedDialog(result.current as ReturnType<typeof useQuickActions>);
+      expect(dialog.type).toBe(type);
+      const onOpenChange = dialog.props["onOpenChange"] as (next: boolean) => void;
+      act(() => onOpenChange(true));
+      expect(mountedDialog(result.current as ReturnType<typeof useQuickActions>).type).toBe(type);
+      act(() => onOpenChange(false));
+      expect(dialogOf(result.current as ReturnType<typeof useQuickActions>)).toBeNull();
+    });
+  }
+
+  it("closes the create form and refreshes once a copy is saved (ISS-060)", async () => {
+    transport();
+    const onChanged = vi.fn();
+    const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "project", onChanged });
+    await act(async () => result.current?.handlers.run("copy"));
+    const onCreated = mountedDialog(result.current as ReturnType<typeof useQuickActions>).props[
+      "onCreated"
+    ] as () => void;
+    await act(async () => onCreated());
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(dialogOf(result.current as ReturnType<typeof useQuickActions>)).toBeNull();
+  });
+
+  it("closes the archive confirmation after the write lands and refreshes (ISS-061)", async () => {
+    transport();
+    const onChanged = vi.fn();
+    const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "project", onChanged });
+    await act(async () => result.current?.handlers.run("archive"));
+    await act(async () =>
+      (mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["onArchived"] as () => void)()
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(dialogOf(result.current as ReturnType<typeof useQuickActions>)).toBeNull();
+  });
+
+  it("names an epic's dialogs after the epic and falls back when the viewer is unknown (ISS-060/066)", async () => {
+    transport();
+    const { result } = renderMenu({
+      workspaceSlug: SLUG,
+      target: target({ isEpic: true, createdBy: null }),
+      context: "detail",
+    });
+    await act(async () => result.current?.handlers.run("archive"));
+    expect(mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["kind"]).toBe("epic");
+    act(() =>
+      (
+        mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["onOpenChange"] as (
+          n: boolean
+        ) => void
+      )(false)
+    );
+    await act(async () => result.current?.handlers.run("delete"));
+    const dialog = mountedDialog(result.current as ReturnType<typeof useQuickActions>);
+    expect(dialog.props["kind"]).toBe("epic");
+    expect(dialog.props["creatorId"]).toBeNull();
+  });
+
+  it("hands the delete confirmation the signed-in viewer (ISS-066)", async () => {
+    transport({ me: true });
+    const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "detail" });
+    await act(async () => result.current?.handlers.run("delete"));
+    await waitFor(() =>
+      expect(mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["viewerId"]).toBe(ME)
+    );
+  });
+
+  it("opens the edit form from the caller's row, or from its key when it holds none (ISS-060)", async () => {
+    transport();
+    const held = renderMenu({ workspaceSlug: SLUG, target: target(), context: "project" });
+    await act(async () => held.result.current?.handlers.run("edit"));
+    const fromRow = mountedDialog(held.result.current as ReturnType<typeof useQuickActions>);
+    expect((fromRow.props["edit"] as { snapshot: { name: string } }).snapshot.name).toBe("Fix login");
+
+    resetAppClient();
+    transport();
+    const bare = renderMenu({
+      workspaceSlug: SLUG,
+      target: { ...target(), snapshot: undefined },
+      context: "project",
+    });
+    await act(async () => bare.result.current?.handlers.run("edit"));
+    const fromKey = mountedDialog(bare.result.current as ReturnType<typeof useQuickActions>);
+    expect((fromKey.props["edit"] as { snapshot: { name: string } }).snapshot.name).toBe("Fix login");
+    expect((fromKey.props["edit"] as { snapshot: { id: string } }).snapshot.id).toBe(ISSUE);
+  });
+
+  it("closes the delete confirmation after the delete lands and refreshes (ISS-066)", async () => {
+    transport();
+    const onChanged = vi.fn();
+    const { result } = renderMenu({ workspaceSlug: SLUG, target: target(), context: "detail", onChanged });
+    await act(async () => result.current?.handlers.run("delete"));
+    await act(async () =>
+      (mountedDialog(result.current as ReturnType<typeof useQuickActions>).props["onDeleted"] as () => void)()
+    );
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(dialogOf(result.current as ReturnType<typeof useQuickActions>)).toBeNull();
   });
 });
 

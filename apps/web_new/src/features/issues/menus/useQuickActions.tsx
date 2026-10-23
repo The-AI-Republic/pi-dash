@@ -252,7 +252,21 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
     [copyLink, openInNewTab, removeMembership, restore]
   );
 
-  const close = (): void => setOpen(null);
+  const close = React.useCallback((): void => setOpen(null), []);
+
+  /** Every dialog closes on a false `onOpenChange`; a true one keeps it up. */
+  const dismiss = React.useCallback(
+    (next: boolean): void => {
+      if (!next) close();
+    },
+    [close]
+  );
+
+  /** A landed write closes whichever dialog ran it and re-reads the lists. */
+  const afterWrite = React.useCallback((): void => {
+    close();
+    refresh();
+  }, [close, refresh]);
 
   if (input === null) return null;
 
@@ -265,17 +279,13 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
       {open === "edit" || open === "copy" ? (
         <WorkItemCreateDialog
           open
-          onOpenChange={(next) => {
-            if (!next) close();
-          }}
+          onOpenChange={dismiss}
           workspaceSlug={input.workspaceSlug}
           projects={createProjects(projects.data)}
           initialProjectId={target.projectId}
           projectIdentifier={target.projectIdentifier}
           canCreate={canWrite}
-          {...(open === "copy"
-            ? { copySeed: { title: String(copyPrefill["name"] ?? target.name), snapshot: copyPrefill } }
-            : {})}
+          {...(open === "copy" ? { copySeed: { title: String(copyPrefill["name"]), snapshot: copyPrefill } } : {})}
           {...(open === "edit"
             ? {
                 edit: {
@@ -288,34 +298,24 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
               }
             : {})}
           {...(createContext === undefined ? {} : { context: createContext })}
-          onCreated={() => {
-            close();
-            refresh();
-          }}
+          onCreated={afterWrite}
         />
       ) : null}
       {open === "archive" ? (
         <ArchiveWorkItemDialog
           open
-          onOpenChange={(next) => {
-            if (!next) close();
-          }}
+          onOpenChange={dismiss}
           scope={{ workspaceSlug: input.workspaceSlug, projectId: target.projectId, issueId: target.id }}
           projectIdentifier={target.projectIdentifier}
           sequenceId={target.sequenceId}
           kind={target.isEpic === true ? "epic" : "issue"}
-          onArchived={() => {
-            close();
-            refresh();
-          }}
+          onArchived={afterWrite}
         />
       ) : null}
       {open === "delete" ? (
         <DeleteWorkItemDialog
           open
-          onOpenChange={(next) => {
-            if (!next) close();
-          }}
+          onOpenChange={dismiss}
           scope={{ workspaceSlug: input.workspaceSlug, projectId: target.projectId, issueId: target.id }}
           projectIdentifier={target.projectIdentifier}
           sequenceId={target.sequenceId}
@@ -323,18 +323,13 @@ export function useQuickActions(input: QuickActionsInput | null): QuickActionsSt
           viewerId={me.data?.id ?? null}
           creatorId={target.createdBy ?? null}
           projectRole={project?.member_role ?? null}
-          onDeleted={() => {
-            close();
-            refresh();
-          }}
+          onDeleted={afterWrite}
         />
       ) : null}
       {open === "move" ? (
         <MoveWorkItemDialog
           open
-          onOpenChange={(next) => {
-            if (!next) close();
-          }}
+          onOpenChange={dismiss}
           scope={{ workspaceSlug: input.workspaceSlug, projectId: target.projectId, issueId: target.id }}
           projects={moveTargetsFrom(projects.data ?? [])}
           identifierOf={(projectId) => projects.data?.find((row) => row.id === projectId)?.identifier}
