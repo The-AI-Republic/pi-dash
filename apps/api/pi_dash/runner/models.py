@@ -397,6 +397,24 @@ class DevMachine(models.Model):
         return self.label or self.host_label or str(self.id)
 
 
+class RunnerQuerySet(models.QuerySet):
+    def assignable(self):
+        """Runners that may take new work right now.
+
+        Online, heartbeat-fresh, and not operator-paused. Every path that
+        picks a runner for new work (matcher drains, follow-up pinning,
+        availability checks) must go through this so a new eligibility
+        rule only has to be added once.
+        """
+        from pi_dash.runner.services.matcher import HEARTBEAT_GRACE
+
+        return self.filter(
+            status=RunnerStatus.ONLINE,
+            last_heartbeat_at__gte=timezone.now() - HEARTBEAT_GRACE,
+            paused_at__isnull=True,
+        )
+
+
 class Runner(models.Model):
     """Cloud-visible worker entity under a dev machine.
 
@@ -408,6 +426,8 @@ class Runner(models.Model):
     """
 
     MAX_PER_USER = 5
+
+    objects = RunnerQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False, db_index=True)
     owner = models.ForeignKey(
@@ -492,6 +512,18 @@ class Runner(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
     revoked_reason = models.CharField(max_length=32, blank=True, default="")
+    # Operator pause. Orthogonal to ``status``: ``status`` is connectivity
+    # (rewritten by every poll), while a paused runner keeps heartbeating,
+    # finishes its in-flight run, and is skipped by every matcher path until
+    # resumed. NULL means not paused.
+    paused_at = models.DateTimeField(null=True, blank=True)
+    paused_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
 
     class Meta:
         db_table = "runner"
@@ -552,6 +584,12 @@ class Runner(models.Model):
         if self.pod_id is None:
             return None
         return self.pod.project_id
+
+    @property
+    def is_revoked(self) -> bool:
+        # Either marker counts: legacy and partial revokes may have set only
+        # one of the two.
+        return self.revoked_at is not None or self.status == RunnerStatus.REVOKED
 
     def mark_heartbeat(self) -> None:
         self.last_heartbeat_at = timezone.now()
@@ -1469,6 +1507,18 @@ class ChatMessageDedupe(models.Model):
         ]
 
 
+class AgentHealth(models.TextChoices):
+    """Activity-watchdog health a runner reports for its in-flight run.
+
+    ``UNHEALTHY`` means the agent has emitted no event for the runner's
+    unhealthy threshold (24h by default). The run is still running: the
+    runner only fails it at its kill threshold (48h by default).
+    """
+
+    HEALTHY = "healthy", "Healthy"
+    UNHEALTHY = "unhealthy", "Unhealthy"
+
+
 class RunnerLiveState(models.Model):
     """Volatile per-runner observability snapshot for the active agent run.
 
@@ -1515,6 +1565,14 @@ class RunnerLiveState(models.Model):
     usage = models.JSONField(default=dict, blank=True)
     llm_model = models.CharField(max_length=128, null=True, blank=True)
     turn_count = models.PositiveIntegerField(null=True, blank=True)
+    # Activity-watchdog health, reported on every poll while a run is in
+    # flight regardless of the runner's ``agent_observability_v1`` flag.
+    # NULL means the runner predates the passive-kill watchdog: it still runs
+    # the legacy short stall timer, and ``reconcile_stalled_runs`` keeps
+    # backstopping it. Non-NULL runners own their watchdog, so the cloud
+    # never fails their runs for silence.
+    agent_health = models.CharField(max_length=16, choices=AgentHealth.choices, null=True, blank=True)
+    agent_last_activity_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

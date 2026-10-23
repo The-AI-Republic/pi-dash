@@ -24,6 +24,10 @@
 //! identifier the same way it already supplies the workspace slug — this module
 //! is a consumer of the session the webview holds, never a second copy of it.
 //!
+//! The engine's copy follows the same rule: each account gets its own
+//! `CODEX_HOME` (`ManagedPaths::engine_home`), keyed like this store, and
+//! clearing an account's history removes both copies.
+//!
 //! **Why the chat working copy is a separate tree.** A local chat and a managed
 //! issue run must never modify the same working copy at the same time. Rather
 //! than coordinate locks with the daemon (which owns managed-run lifecycle), a
@@ -360,17 +364,18 @@ pub async fn chat_delete_session<R: Runtime>(
     Ok(())
 }
 
-/// Clear all of an account's chat history — every session and event.
+/// Clear all of an account's chat history — every session and event, and the
+/// engine's own copy of them.
 ///
-/// Used both by the "clear all history" affordance and, when the user opts in,
-/// by sign-out (see [`clear_account_history`], which `managed_sign_out` calls).
+/// The "clear all history" affordance. Sign-out reaches the same wipe through
+/// [`clear_account_history`] when the user opts in.
 #[tauri::command]
 pub async fn chat_clear_history<R: Runtime>(
     app: AppHandle<R>,
     account: String,
 ) -> Result<(), String> {
     let paths = ManagedPaths::resolve(&app)?;
-    clear_account_history(&paths, &account)
+    clear_history_while_signed_in(&paths, &account)
 }
 
 /// Resolve (and create) the working copy a local chat runs in.
@@ -394,19 +399,48 @@ pub async fn chat_working_dir<R: Runtime>(
 // Internals
 // ---------------------------------------------------------------------------
 
-/// Remove an account's entire chat tree (DB, WAL, working copies).
+/// Remove an account's entire chat tree (DB, WAL, working copies) and the
+/// engine's copy of its conversations.
 ///
 /// Not a Tauri command itself — `managed_sign_out` calls this when the user
-/// asked to clear history on sign-out, and [`chat_clear_history`] wraps it for
+/// asked to delete history on sign-out, and [`chat_clear_history`] wraps it for
 /// the in-app "clear all" action. Removing the whole directory rather than just
 /// deleting rows also reclaims the working copies and leaves no WAL/journal
 /// behind for a later reader.
+///
+/// The engine's home goes as a whole for the same reason: its transcripts are
+/// not only session rollouts but `history.jsonl`, thread, log and memory
+/// databases and attachments, so deleting selected files would leave copies
+/// behind. Both removals are attempted even if the first fails.
 pub fn clear_account_history(paths: &ManagedPaths, account: &str) -> Result<(), String> {
-    let dir = account_dir(paths, account)?;
-    match std::fs::remove_dir_all(&dir) {
+    let chat = remove_tree(&account_dir(paths, account)?, "chat history");
+    let engine = remove_tree(&paths.engine_home(account)?, "engine history");
+    chat.and(engine)
+}
+
+/// [`clear_account_history`] for an account that stays signed in.
+///
+/// The engine refuses to start against a missing `CODEX_HOME`, and the daemon
+/// may be asked to start one at any moment, so the home is put straight back —
+/// empty apart from the `config.toml` this app wrote, which holds the model
+/// endpoint and no conversation content.
+fn clear_history_while_signed_in(paths: &ManagedPaths, account: &str) -> Result<(), String> {
+    let config = std::fs::read(paths.engine_home(account)?.join("config.toml")).ok();
+    clear_account_history(paths, account)?;
+    let Some(config) = config else {
+        return Ok(());
+    };
+    let path = paths.ensure_engine_home(account)?.join("config.toml");
+    std::fs::write(&path, config).map_err(|e| format!("restoring {}: {e}", path.display()))?;
+    restrict_file(&path);
+    Ok(())
+}
+
+fn remove_tree(dir: &Path, what: &str) -> Result<(), String> {
+    match std::fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("removing chat history {}: {e}", dir.display())),
+        Err(e) => Err(format!("removing {what} {}: {e}", dir.display())),
     }
 }
 
@@ -511,17 +545,18 @@ fn resolve_chat_working_dir(
 }
 
 /// Turn an account identifier (a user id, or an email) into a single
-/// filesystem-safe, traversal-proof directory name.
+/// filesystem-safe, traversal-proof directory name. Shared with
+/// `ManagedPaths::engine_home`, so every per-account tree uses one key.
 ///
 /// The visible prefix is the identifier with anything outside `[A-Za-z0-9_-]`
 /// dropped, so a directory is still recognisable to a human browsing the tree;
 /// an FNV-1a suffix over the *raw* bytes disambiguates values that filter to the
 /// same prefix (e.g. `a@b` vs `a.b`) and guarantees uniqueness. The output
-/// charset is limited to `[A-Za-z0-9_-]`, so no account value can escape the
-/// chat tree with `..` or an absolute path.
-fn account_key(account: &str) -> Result<String, String> {
+/// charset is limited to `[A-Za-z0-9_-]`, so no account value can escape its
+/// tree with `..` or an absolute path.
+pub(crate) fn account_key(account: &str) -> Result<String, String> {
     if account.trim().is_empty() {
-        return Err("chat history requires a signed-in account".into());
+        return Err("a signed-in account is required".into());
     }
     let prefix: String = account
         .chars()
@@ -596,13 +631,13 @@ fn sql_err(e: rusqlite::Error) -> String {
 }
 
 #[cfg(unix)]
-fn restrict_dir(path: &Path) {
+pub(crate) fn restrict_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
 }
 
 #[cfg(not(unix))]
-fn restrict_dir(_path: &Path) {}
+pub(crate) fn restrict_dir(_path: &Path) {}
 
 #[cfg(unix)]
 fn restrict_file(path: &Path) {
@@ -810,6 +845,51 @@ mod tests {
         assert_eq!(list_sessions(&paths, "user-2").len(), 1);
         // Clearing an account with no history is a no-op, not an error.
         clear_account_history(&paths, "never-signed-in").unwrap();
+    }
+
+    #[test]
+    fn clear_history_removes_the_engines_copy_for_that_account_only() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let rollout = |account: &str| {
+            let home = paths.ensure_engine_home(account).unwrap();
+            let file = home.join("sessions/2026/10/05/rollout.jsonl");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "transcript").unwrap();
+            file
+        };
+        create(&paths, "user-1", new_session());
+        let (first, second) = (rollout("user-1"), rollout("user-2"));
+
+        clear_account_history(&paths, "user-1").unwrap();
+        assert_eq!(list_sessions(&paths, "user-1").len(), 0);
+        assert!(
+            !paths.engine_home("user-1").unwrap().exists(),
+            "clear all history left the engine's copy at {}",
+            first.display()
+        );
+        assert!(second.exists(), "another account's engine history must survive");
+    }
+
+    #[test]
+    fn clearing_while_signed_in_leaves_an_empty_runnable_engine_home() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = paths(root.path());
+        let home = paths.ensure_engine_home("user-1").unwrap();
+        std::fs::write(home.join("config.toml"), "model = \"m\"\n").unwrap();
+        std::fs::write(home.join("history.jsonl"), "transcript").unwrap();
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+
+        clear_history_while_signed_in(&paths, "user-1").unwrap();
+        let left: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["config.toml"], "only the app-written config may remain");
+        assert_eq!(std::fs::read_to_string(home.join("config.toml")).unwrap(), "model = \"m\"\n");
+        // An account that never ran the engine gets no home conjured for it.
+        clear_history_while_signed_in(&paths, "user-2").unwrap();
+        assert!(!paths.engine_home("user-2").unwrap().exists());
     }
 
     #[test]

@@ -605,6 +605,27 @@ def test_drain_pod_honours_overbudget_pin_to_idle_runner(db, create_user, worksp
 
 
 @pytest.mark.unit
+def test_drain_pod_releases_overbudget_pin_to_paused_runner(db, create_user, workspace, pod):
+    """A paused pinned runner takes no new work, so its over-budget pin is
+    releasable even though the runner is online, heartbeating and idle."""
+    from django.utils import timezone
+
+    rA = _make_runner(create_user, workspace, pod, "agentA", heartbeat_ago_s=1)
+    rB = _make_runner(create_user, workspace, pod, "agentB", heartbeat_ago_s=10)
+    rA.paused_at = timezone.now()
+    rA.save(update_fields=["paused_at"])
+    pinned = _backdate(
+        _make_run(create_user, workspace, pod, prompt="for A", pinned_runner=rA),
+        3600,
+    )
+
+    assert matcher.drain_pod(pod) == 1
+    pinned.refresh_from_db()
+    assert pinned.runner_id == rB.id
+    assert pinned.pinned_runner_id is None
+
+
+@pytest.mark.unit
 def test_pod_budget_override_of_zero_disables_auto_release(db, create_user, workspace, pod):
     rA = _make_runner(create_user, workspace, pod, "agentA")
     _make_runner(create_user, workspace, pod, "agentB")

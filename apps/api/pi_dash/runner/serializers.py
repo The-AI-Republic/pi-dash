@@ -99,6 +99,8 @@ class RunnerLiveStateSerializer(serializers.ModelSerializer):
             "usage",
             "llm_model",
             "turn_count",
+            "agent_health",
+            "agent_last_activity_at",
             "updated_at",
         ]
         read_only_fields = fields
@@ -193,6 +195,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
+            "paused_at",
+            "paused_by",
             "created_at",
             "updated_at",
         ]
@@ -218,6 +222,8 @@ class RunnerSerializer(serializers.ModelSerializer):
             "enrolled_at",
             "revoked_at",
             "revoked_reason",
+            "paused_at",
+            "paused_by",
             "created_at",
             "updated_at",
         ]
