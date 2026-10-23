@@ -767,6 +767,7 @@ impl App {
                     summary: format!("remove {name:?} failed"),
                     detail: Some(format!("{e:#}")),
                     service_state: "unknown".into(),
+                    warnings: None,
                 },
             };
             tx.send(AppEvent::ReloadOutcomeUpdated(outcome));
