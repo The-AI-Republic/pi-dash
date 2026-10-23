@@ -222,7 +222,13 @@ describe("cloud apps search", () => {
     });
     const seen: unknown[] = [];
     const page = pageOf({
-      locator: () => locator({ getByPlaceholder: (...args: unknown[]) => (void seen.push(args), box) }),
+      locator: () =>
+        locator({
+          getByPlaceholder: (...args: unknown[]) => {
+            seen.push(args);
+            return box;
+          },
+        }),
     });
     const driver = new WebNewDriver(page);
     await driver.cloudAppsSearchFill("not");
