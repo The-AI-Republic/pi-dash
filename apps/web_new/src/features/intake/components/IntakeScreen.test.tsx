@@ -118,6 +118,7 @@ interface Server {
   listFails?: boolean;
   detailStatus?: number;
   rolesFail?: boolean;
+  roles?: Record<string, number>;
 }
 
 function detailPayload(issueId: string) {
@@ -190,7 +191,7 @@ function installServer(server: Server): void {
     }
     if (path.endsWith("/project-roles/")) {
       if (server.rolesFail) return jsonResponse(url, 500, { error: "boom" });
-      return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+      return jsonResponse(url, 200, server.roles ?? { [PROJECT_ID]: 20 });
     }
     if (path.endsWith("/api/users/me/workspaces/")) {
       return jsonResponse(url, 200, [
@@ -217,15 +218,21 @@ function installServer(server: Server): void {
 
 type SearchWriter = (next: IntakeSearch, options?: IntakeSearchWriteOptions) => void;
 
-function renderScreen(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn()) {
-  return renderScreenWithRerender(search, onSearchChange).onSearchChange;
+function renderScreen(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn(), onCreate?: () => void) {
+  return renderScreenWithRerender(search, onSearchChange, onCreate).onSearchChange;
 }
 
-function renderScreenWithRerender(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn()) {
+function renderScreenWithRerender(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn(), onCreate?: () => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const tree = (next: IntakeSearch) => (
     <QueryClientProvider client={client}>
-      <IntakeScreen workspaceSlug="acme" projectId={PROJECT_ID} search={next} onSearchChange={onSearchChange} />
+      <IntakeScreen
+        workspaceSlug="acme"
+        projectId={PROJECT_ID}
+        search={next}
+        onSearchChange={onSearchChange}
+        onCreate={onCreate}
+      />
     </QueryClientProvider>
   );
   const view = render(tree(search));
@@ -559,5 +566,35 @@ describe("IntakeScreen empty states (INT-008) and errors", () => {
     await screen.findByText("Alpha");
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(server.listRequests).toHaveLength(1);
+  });
+});
+
+describe("IntakeScreen header create control (INT-013)", () => {
+  it("offers creation to a non-admin member while intake is on", async () => {
+    server.roles = { [PROJECT_ID]: 15 };
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    const onCreate = vi.fn();
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 }, vi.fn(), onCreate);
+    const control = await screen.findByTestId("intake-header-create");
+    fireEvent.click(control);
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the control when the viewer holds no project standing", async () => {
+    server.roles = {};
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 }, vi.fn(), vi.fn());
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(screen.queryByTestId("intake-header-create")).toBeNull());
+  });
+
+  it("hides the control without a create handler", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    expect(screen.queryByTestId("intake-header-create")).toBeNull();
   });
 });

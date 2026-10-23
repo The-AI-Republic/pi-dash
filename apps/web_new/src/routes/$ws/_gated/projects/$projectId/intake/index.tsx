@@ -2,17 +2,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Intake screen route (NEWFRONT-689, parity/specs/intake.md INT-001–005,
-// 008, 012, 031). The project layout and tab strip stay around the page;
-// this file only adds the two search keys that carry the screen state. The
-// router imports every route file, so the screen, its reads and their
-// prefetch ride the route's own chunk (NEWFRONT-869), started here and
-// awaited in `beforeLoad` beside the data.
+// 008, 012, 031; the create dialog is NEWFRONT-691, INT-013–017, 033). The
+// project layout and tab strip stay around the page; this file adds the two
+// search keys that carry the screen state and owns the create dialog: it
+// opens from the screen's entry points and, on save, the address moves to
+// the new request on the Open tab. The router imports every route file, so
+// the screen, the dialog, their reads and the prefetch ride the route's own
+// chunk (NEWFRONT-869), started here and awaited in `beforeLoad` beside the
+// data.
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
 import { loadIntakeRouteChunk, resolvedIntakeRouteChunk } from "../../../../../../features/intake/route/lazy.js";
 import {
+  intakeSearchFor,
   parseIntakeSearch,
   type IntakeSearch,
   type IntakeSearchWriteOptions,
@@ -26,14 +30,41 @@ function IntakeRoute(): React.ReactElement {
   const params = Route.useParams();
   const search = Route.useSearch();
   const navigate = useNavigate();
-  const { IntakeScreen } = resolvedIntakeRouteChunk();
+  const { IntakeScreen, IntakeCreateDialog } = resolvedIntakeRouteChunk();
+  const [createOpen, setCreateOpen] = React.useState(false);
   const write = React.useCallback(
     (next: IntakeSearch, options?: IntakeSearchWriteOptions) => {
       void navigate({ to: ".", search: next, replace: options?.replace ?? false } as never);
     },
     [navigate]
   );
-  return <IntakeScreen workspaceSlug={params.ws} projectId={params.projectId} search={search} onSearchChange={write} />;
+  const openCreate = React.useCallback(() => {
+    setCreateOpen(true);
+  }, []);
+  const showCreated = React.useCallback(
+    (issueId: string) => {
+      write(intakeSearchFor("open", issueId));
+    },
+    [write]
+  );
+  return (
+    <>
+      <IntakeScreen
+        workspaceSlug={params.ws}
+        projectId={params.projectId}
+        search={search}
+        onSearchChange={write}
+        onCreate={openCreate}
+      />
+      <IntakeCreateDialog
+        workspaceSlug={params.ws}
+        projectId={params.projectId}
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onCreated={showCreated}
+      />
+    </>
+  );
 }
 
 export const Route = createFileRoute("/$ws/_gated/projects/$projectId/intake/")({

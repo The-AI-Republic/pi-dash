@@ -86,6 +86,9 @@ export { CREATE_WORK_ITEM_COMMAND_ID, WorkItemCreateEntry } from "./components/W
 export type { WorkItemCreateEntryProps } from "./components/WorkItemCreateEntry.js";
 export { selectCreatableProjects, TITLE_MAX_LENGTH as CREATE_TITLE_MAX_LENGTH } from "./create/createForm.js";
 export type { CreateFormState, CreateProjectOption } from "./create/createForm.js";
+export { useAttachDescriptionAssets } from "./create/createApi.js";
+export { ModalDescription } from "./create/ModalDescription.js";
+export type { ModalDescriptionProps } from "./create/ModalDescription.js";
 export type { WorkItemCreateDialogProps, WorkItemCreateProject } from "./components/WorkItemCreateDialog.js";
 export { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./api/browse.js";
 export { CommentCard, commentDomId, commentMenuItems } from "./comments/CommentCard.js";

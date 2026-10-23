@@ -157,6 +157,10 @@ export function IntakeScreen({
     userFilterCount: 0,
     statusNarrowed: false,
   });
+  // Creation is offered to any project standing while intake is on
+  // (INT-013); the gate above already returned for a switched-off
+  // project, so only membership is left to check.
+  const canCreate = (roles.data?.[projectId] ?? null) !== null;
 
   const selectedId = search.inboxIssueId;
   return (
@@ -190,6 +194,7 @@ export function IntakeScreen({
           />
         )
       }
+      canCreate={canCreate}
     />
   );
 }

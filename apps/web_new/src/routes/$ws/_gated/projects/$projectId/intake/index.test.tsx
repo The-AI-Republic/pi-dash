@@ -19,6 +19,41 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useNavigate: () => navigate,
 }));
 
+const { notifyMocks } = vi.hoisted(() => ({
+  notifyMocks: { notifyError: vi.fn(), notifySuccess: vi.fn() },
+}));
+
+vi.mock("../../../../../../shared/shell/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../../../../shared/shell/index.js")>()),
+  ...notifyMocks,
+}));
+
+vi.mock("../../../../../../shared/editor/index.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../../../../../shared/editor/index.js")>();
+  function StandInEditor({
+    onChange,
+    label,
+    initialHtml,
+  }: {
+    onChange: (html: string) => void;
+    label: string;
+    initialHtml: string;
+  }) {
+    const [value, setValue] = React.useState(() => initialHtml.replace(/^<p>/, "").replace(/<\/p>$/, ""));
+    return (
+      <textarea
+        aria-label={label}
+        value={value}
+        onChange={(event) => {
+          setValue(event.target.value);
+          onChange(`<p>${event.target.value}</p>`);
+        }}
+      />
+    );
+  }
+  return { ...original, IssueDescriptionEditor: StandInEditor };
+});
+
 import { createAppClient } from "../../../../../../core/api/client.js";
 import { loadIntakeRouteChunk } from "../../../../../../features/intake/route/lazy.js";
 import { Route } from "./index.js";
@@ -290,6 +325,125 @@ describe("intake route component", () => {
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({ to: ".", search: { currentTab: "open" }, replace: true })
     );
+  });
+});
+
+describe("intake route create dialog (INT-013/INT-015)", () => {
+  const ISSUE_ID = "123e4567-e89b-12d3-a456-426614174000";
+
+  function createdResponse(name: string) {
+    return {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-000000000001",
+      status: -2,
+      duplicate_to: null,
+      snoozed_till: null,
+      duplicate_issue_detail: null,
+      source: "IN_APP",
+      issue: {
+        id: ISSUE_ID,
+        name,
+        description_html: "",
+        priority: "none",
+        state_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        sequence_id: 7,
+        project_id: PROJECT_ID,
+        parent_id: null,
+        label_ids: [],
+        assignee_ids: [],
+        target_date: null,
+        start_date: null,
+        estimate_point: null,
+        sort_order: 1,
+        completed_at: null,
+        created_at: "2026-10-23T00:00:00Z",
+        updated_at: "2026-10-23T00:00:00Z",
+        created_by: null,
+        updated_by: null,
+        is_draft: false,
+        archived_at: null,
+        complexity_score: 0,
+        agent_executor: null,
+        is_synced: false,
+        is_subscribed: false,
+        agent_ticker: null,
+        agent_status: null,
+        relations_summary: { blocked_by: [], blocking: [] },
+        has_open_blockers: false,
+      },
+    };
+  }
+
+  function renderRoute() {
+    navigate.mockReset();
+    vi.spyOn(Route, "useParams").mockReturnValue({ ws: "acme", projectId: PROJECT_ID });
+    vi.spyOn(Route, "useSearch").mockReturnValue({ currentTab: "open" } as never);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    createAppClient("https://api.test", (async (url: string, init: { method?: string; body?: string }) => {
+      const method = init.method ?? "GET";
+      const path = new URL(url).pathname;
+      if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/`) return jsonResponse(url, 200, project(true));
+      if (path.endsWith("/project-roles/")) return jsonResponse(url, 200, { [PROJECT_ID]: 20 });
+      if (path.endsWith("/api/users/me/workspaces/")) {
+        return jsonResponse(url, 200, [
+          {
+            id: "123e4567-e89b-12d3-a456-426614174000",
+            name: "Acme",
+            slug: "acme",
+            logo_url: null,
+            total_members: 1,
+            role: 20,
+          },
+        ]);
+      }
+      if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/` && method === "POST") {
+        const name = (JSON.parse(init.body ?? "{}") as { issue?: { name?: string } }).issue?.name ?? "";
+        return jsonResponse(url, 200, createdResponse(name));
+      }
+      if (path.endsWith("/api/instances/")) return jsonResponse(url, 404, { error: "missing" });
+      if (path.endsWith("/api/users/me/profile/")) return jsonResponse(url, 404, { error: "missing" });
+      return jsonResponse(url, 200, {
+        grouped_by: null,
+        sub_grouped_by: null,
+        total_count: 0,
+        next_cursor: "",
+        prev_cursor: "",
+        next_page_results: false,
+        prev_page_results: false,
+        count: 0,
+        total_results: 0,
+        results: [],
+      });
+    }) as never);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Component />
+      </QueryClientProvider>
+    );
+  }
+
+  it("opens the dialog from the header control", async () => {
+    renderRoute();
+    await screen.findByTestId("intake-shell");
+    fireEvent.click(await screen.findByTestId("intake-header-create"));
+    expect(await screen.findByRole("heading", { name: "New intake request" })).toBeInTheDocument();
+  });
+
+  it("moves to the new request on the Open tab after a save", async () => {
+    renderRoute();
+    await screen.findByTestId("intake-shell");
+    fireEvent.click(await screen.findByTestId("intake-header-create"));
+    await screen.findByRole("heading", { name: "New intake request" });
+    fireEvent.change(screen.getByTestId("intake-create-title"), { target: { value: "Triage me" } });
+    fireEvent.click(screen.getByTestId("intake-create-submit"));
+    await waitFor(() => expect(notifyMocks.notifySuccess).toHaveBeenCalled());
+    expect(navigate).toHaveBeenCalledWith({
+      to: ".",
+      search: { currentTab: "open", inboxIssueId: ISSUE_ID },
+      replace: false,
+    });
   });
 });
 

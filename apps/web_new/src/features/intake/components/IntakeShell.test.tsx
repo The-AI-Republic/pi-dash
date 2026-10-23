@@ -2,9 +2,9 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { IntakeShell } from "./IntakeShell.js";
 
@@ -57,5 +57,26 @@ describe("IntakeShell (INT-001)", () => {
     expect(screen.getByTestId("intake-content-pane")).toBeInTheDocument();
     expect(screen.getByText("request detail")).toBeInTheDocument();
     expect(screen.queryByTestId("intake-placeholder")).toBeNull();
+  });
+});
+
+describe("IntakeShell header create control (INT-013)", () => {
+  it("offers creation in the header while the screen allows it", () => {
+    const onCreate = vi.fn();
+    render(<IntakeShell {...BASE} canCreate onCreate={onCreate} />);
+    const control = screen.getByTestId("intake-header-create");
+    expect(control).toHaveTextContent("Create request");
+    fireEvent.click(control);
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the control when creation is not offered", () => {
+    render(<IntakeShell {...BASE} canCreate={false} onCreate={() => {}} />);
+    expect(screen.queryByTestId("intake-header-create")).toBeNull();
+  });
+
+  it("hides the control without a create handler", () => {
+    render(<IntakeShell {...BASE} canCreate />);
+    expect(screen.queryByTestId("intake-header-create")).toBeNull();
   });
 });

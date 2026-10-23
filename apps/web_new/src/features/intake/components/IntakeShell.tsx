@@ -7,6 +7,7 @@
 // selection it shows the pick placeholder. The frame owns layout only;
 // the screen owns reads and the address.
 
+import { Button } from "@pidash/kit";
 import * as React from "react";
 
 import { intakeHref } from "../lib/paths.js";
@@ -34,6 +35,11 @@ export interface IntakeShellProps {
   onCreate?: (() => void) | undefined;
   /** Request detail for the content pane; the placeholder when absent. */
   detail?: React.ReactNode | undefined;
+  /**
+   * Whether the screen offers creation (INT-013): any project role while
+   * intake is on. The header control renders only when this is true.
+   */
+  canCreate?: boolean | undefined;
 }
 
 export function IntakeShell({
@@ -53,6 +59,7 @@ export function IntakeShell({
   onRetry,
   onCreate,
   detail,
+  canCreate = false,
 }: IntakeShellProps): React.ReactElement {
   return (
     <section
@@ -61,11 +68,20 @@ export function IntakeShell({
       className="flex min-h-0 flex-1 flex-col bg-(--bg) text-(--text)"
     >
       <header className="flex shrink-0 flex-col gap-(--space-2) px-(--space-4) py-(--space-3)">
-        <IntakeBreadcrumb
-          workspaceName={workspaceName}
-          projectName={projectName}
-          href={intakeHref(workspaceSlug, projectId)}
-        />
+        <div className="flex items-center gap-(--space-2)">
+          <div className="min-w-0 flex-1">
+            <IntakeBreadcrumb
+              workspaceName={workspaceName}
+              projectName={projectName}
+              href={intakeHref(workspaceSlug, projectId)}
+            />
+          </div>
+          {canCreate && onCreate !== undefined ? (
+            <Button variant="primary" size="small" data-testid="intake-header-create" onClick={onCreate}>
+              Create request
+            </Button>
+          ) : null}
+        </div>
       </header>
       <div className="flex min-h-0 flex-1">
         <IntakeListPane
