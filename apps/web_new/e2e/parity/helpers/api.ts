@@ -8537,6 +8537,30 @@ export async function serverDesktopRuntimeDesktopEnrollRefusal(
   return desktopRuntimeRefusalOf(res);
 }
 
+/**
+ * Mark a session as desktop (`pidash_client=desktop`) in the session store.
+ *
+ * NEWFRONT-595: the desktop-mode gate plants web-session cookies for legs that
+ * must run behind a desktop-marked session (the exchange hand-off that would
+ * set the marker lives on the cloud server and is absent here — DESK-014).
+ * Simulates a completed desktop hand-off; mirrors the marker reader
+ * `serverDeskSigninSessionHasDesktopMarker`.
+ */
+export async function serverDesktopRuntimeMarkSessionDesktop(sessionCookie: string): Promise<void> {
+  const key = /(?:^|;\s*)session-id=([^;]+)/.exec(sessionCookie)?.[1] ?? "";
+  if (key === "") throw new Error("[parity] session cookie carries no session-id.");
+  await desktopRuntimeShell(
+    `from pi_dash.db.models.session import Session\n` +
+      `row = Session.objects.filter(session_key=${JSON.stringify(key)}).first()\n` +
+      `assert row is not None, "session row missing"\n` +
+      `data = row.get_decoded()\n` +
+      `data["pidash_client"] = "desktop"\n` +
+      `row.session_data = Session.objects.encode(data)\n` +
+      `row.save(update_fields=["session_data"])\n` +
+      `print("PARITY_DESK_MARK_DESKTOP:ok")\n`
+  );
+}
+
 // --- Scheduler catalog + definitions (NEWFRONT-184, AGT-001..006, AGT-022).
 // --- Appended; existing helpers above are untouched per the shared harness
 // --- contract. Session-cookie style: every helper takes the workspace slug,

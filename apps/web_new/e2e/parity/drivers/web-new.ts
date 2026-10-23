@@ -9368,29 +9368,63 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => revoke.isDisabled(), { timeout: WebNewDriver.WAIT_MS }).toBe(true);
   }
 
-  // --- Desktop-only chat + agent runtime (NEWFRONT-182). Throwing stubs
-  // --- per the shared driver contract; the runners area fills these in.
+  // --- Desktop-only chat + agent runtime (NEWFRONT-182). Implemented for
+  // --- the desktop area gate (NEWFRONT-595): the gate runs these specs in
+  // --- desktop mode.
 
-  async desktopRuntimeOpenRunners(_workspaceSlug: string): Promise<void> {
-    return todo("desktopRuntimeOpenRunners");
+  async desktopRuntimeOpenRunners(workspaceSlug: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/runners`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.page.getByTestId("runners-rail").first().waitFor({ timeout: 60_000 });
   }
   async desktopRuntimeRailSectionHeaders(): Promise<string[]> {
-    return todo("desktopRuntimeRailSectionHeaders");
+    const headers = this.page.getByTestId("runners-rail").locator("div.uppercase");
+    const total = await headers.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      texts.push(
+        (
+          ((await headers
+            .nth(i)
+            .innerText()
+            .catch(() => "")) ?? "") as string
+        ).trim()
+      );
+    }
+    return texts;
   }
   async desktopRuntimeRailChatLinks(): Promise<{ name: string; href: string }[]> {
-    return todo("desktopRuntimeRailChatLinks");
+    const links = this.page.getByTestId("runners-rail").locator('a[href*="/chat/"]');
+    const total = await links.count();
+    const contacts: { name: string; href: string }[] = [];
+    for (let i = 0; i < total; i++) {
+      const link = links.nth(i);
+      contacts.push({
+        name: ((await link.innerText().catch(() => "")) ?? "").trim(),
+        href: (await link.getAttribute("href")) ?? "",
+      });
+    }
+    return contacts;
   }
-  async desktopRuntimeOpenChat(_workspaceSlug: string, _runnerId: string, _sessionId?: string): Promise<void> {
-    return todo("desktopRuntimeOpenChat");
+  async desktopRuntimeOpenChat(workspaceSlug: string, runnerId: string, sessionId?: string): Promise<void> {
+    const suffix = sessionId === undefined ? "" : `?sessionId=${encodeURIComponent(sessionId)}`;
+    await this.page.goto(`/${workspaceSlug}/runners/chat/${runnerId}${suffix}`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the chat shell: history plus composer render for known
+    // and unknown runners alike.
+    await this.page.getByTestId("runner-chat").first().waitFor({ timeout: 60_000 });
+    await this.page.getByTestId("runner-chat-composer").first().waitFor({ timeout: 60_000 });
   }
   async desktopRuntimeApprovalPromptVisible(): Promise<boolean> {
-    return todo("desktopRuntimeApprovalPromptVisible");
+    return (await this.page.getByRole("alertdialog", { name: "Approval requested" }).count()) > 0;
   }
   async desktopRuntimeApprovalModeVisible(): Promise<boolean> {
-    return todo("desktopRuntimeApprovalModeVisible");
+    return (await this.page.getByRole("group", { name: "Approval mode" }).count()) > 0;
   }
   async desktopRuntimeRuntimeBannerVisible(): Promise<boolean> {
-    return todo("desktopRuntimeRuntimeBannerVisible");
+    // The supervisor's viewport-pinned status pill (runtime-notice); corner
+    // toast stacks are a different surface.
+    return this.isShown(this.page.getByTestId("runtime-notice"));
   }
   async desktopRuntimeIsTauriPresent(): Promise<boolean> {
     // The desktop native bridge: the shell (or the gate's desktop mock)
@@ -9401,19 +9435,53 @@ export class WebNewDriver implements ParityDriver {
     });
   }
   async desktopRuntimeChatBubbles(): Promise<{ role: string; text: string }[]> {
-    return todo("desktopRuntimeChatBubbles");
+    const column = this.page.getByTestId("runner-chat-transcript").locator('ol[aria-label="Messages"]');
+    if ((await column.count()) === 0) return [];
+    return column.evaluate((element) => {
+      const rows: { role: string; text: string }[] = [];
+      for (const child of Array.from(element.children)) {
+        const bubble = (child as HTMLElement).querySelector("[data-role]");
+        const role = bubble?.getAttribute("data-role") ?? "status";
+        const text = ((bubble as HTMLElement | null)?.innerText ?? "").trim();
+        if (text === "") continue;
+        rows.push({ role, text });
+      }
+      return rows;
+    });
   }
   async desktopRuntimeStorageKeys(): Promise<{ local: string[]; session: string[] }> {
-    return todo("desktopRuntimeStorageKeys");
+    return this.page.evaluate(() => {
+      const read = (storage: Storage | null): string[] => {
+        if (storage === null) return [];
+        try {
+          return Object.keys(storage);
+        } catch {
+          return [];
+        }
+      };
+      let local: Storage | null = null;
+      let session: Storage | null = null;
+      try {
+        local = window.localStorage;
+      } catch {
+        local = null;
+      }
+      try {
+        session = window.sessionStorage;
+      } catch {
+        session = null;
+      }
+      return { local: read(local), session: read(session) };
+    });
   }
   async desktopRuntimeStartRequestSpy(): Promise<void> {
-    return todo("desktopRuntimeStartRequestSpy");
+    this.deskTrafficWatchBegin("runtime");
   }
   async desktopRuntimeSpyUrls(): Promise<string[]> {
-    return todo("desktopRuntimeSpyUrls");
+    return this.deskTrafficWatchUrls("runtime");
   }
   async desktopRuntimeStopRequestSpy(): Promise<void> {
-    return todo("desktopRuntimeStopRequestSpy");
+    this.deskTrafficWatchEnd("runtime");
   }
 
   // --- Scheduler catalog + definitions (NEWFRONT-184). Throwing stubs

@@ -29,6 +29,12 @@ export interface DesktopMockConfig {
   chatEcho?: string;
   /** chat_approval_modes_load answer. Default: {}. */
   approvalModes?: Record<string, string>;
+  /**
+   * When true, chat_send emits nothing and the turn stays active until the
+   * test emits frames itself: deterministic mid-turn assertions (composer
+   * blocked, warm absorbed, cancel).
+   */
+  chatHold?: boolean;
 }
 
 /** One recorded native invoke. */
@@ -41,6 +47,7 @@ type MockHandle = {
   invocations: DesktopInvocation[];
   emit: (event: string, payload: unknown) => void;
   configure: (patch: DesktopMockConfig) => void;
+  chatSessionSummaries: () => Array<{ id: string; title: string }>;
 };
 
 declare global {
@@ -57,13 +64,42 @@ declare global {
  */
 export async function installDesktopMock(page: Page, config: DesktopMockConfig = {}): Promise<void> {
   await page.addInitScript((seed: DesktopMockConfig) => {
+    // The on-machine stores (chat history, approval modes) survive page
+    // loads the way the shell's disk store does; each test's context is
+    // fresh, so nothing leaks between scenarios.
+    const PERSIST_KEY = "pidash-mock-desktop-chat";
+    type PersistedChat = {
+      sessions: Array<[string, Record<string, unknown>]>;
+      events: Array<[string, Record<string, unknown>[]]>;
+      seq: number;
+      modes: Record<string, Record<string, string>>;
+    };
+    function loadPersisted(): PersistedChat {
+      try {
+        const raw = sessionStorage.getItem(PERSIST_KEY);
+        if (raw !== null) {
+          const parsed = JSON.parse(raw) as Partial<PersistedChat>;
+          return {
+            sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+            events: Array.isArray(parsed.events) ? parsed.events : [],
+            seq: typeof parsed.seq === "number" ? parsed.seq : 0,
+            modes: parsed.modes !== null && typeof parsed.modes === "object" ? parsed.modes : {},
+          };
+        }
+      } catch {
+        // A store that cannot load reads as empty.
+      }
+      return { sessions: [], events: [], seq: 0, modes: {} };
+    }
+    const persisted = loadPersisted();
     const store = {
       config: seed as Required<DesktopMockConfig>,
       invocations: [] as DesktopInvocation[],
       listeners: new Map<string, Set<(message: { payload: unknown }) => void>>(),
-      chatSessions: new Map<string, Record<string, unknown>>(),
-      chatEvents: new Map<string, Record<string, unknown>[]>(),
-      chatSeq: 0,
+      chatSessions: new Map<string, Record<string, unknown>>(persisted.sessions),
+      chatEvents: new Map<string, Record<string, unknown>[]>(persisted.events),
+      chatSeq: persisted.seq,
+      chatModes: persisted.modes as Record<string, Record<string, string>>,
       installInFlight: false,
       apiControllers: new Map<string, AbortController>(),
     };
@@ -75,6 +111,23 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
     store.config.chatScript ??= [];
     store.config.chatEcho ??= "mocked assistant reply";
     store.config.approvalModes ??= {};
+    store.config.chatHold ??= false;
+
+    function savePersisted(): void {
+      try {
+        sessionStorage.setItem(
+          PERSIST_KEY,
+          JSON.stringify({
+            sessions: [...store.chatSessions],
+            events: [...store.chatEvents],
+            seq: store.chatSeq,
+            modes: store.chatModes,
+          } satisfies PersistedChat)
+        );
+      } catch {
+        // A store that cannot save still serves this page.
+      }
+    }
 
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
@@ -257,12 +310,34 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
         case "managed_enroll":
         case "managed_start_daemon":
         case "managed_stop_daemon":
-        case "managed_sign_out":
           return null;
-        case "chat_approval_modes_save":
+        case "managed_sign_out": {
+          // The native side owns history deletion: the page only names the
+          // account, so the mock clears that account's on-machine store.
+          const clear = (params["clearChatHistory"] as Record<string, unknown> | undefined) ?? {};
+          const account = String(clear["account"] ?? "");
+          if (account !== "") {
+            for (const key of [...store.chatSessions.keys()]) {
+              if (key.startsWith(`${account}:`)) {
+                store.chatSessions.delete(key);
+                store.chatEvents.delete(key);
+              }
+            }
+            savePersisted();
+          }
           return null;
-        case "chat_approval_modes_load":
-          return { ...store.config.approvalModes };
+        }
+        case "chat_approval_modes_save": {
+          const modesAccount = String(params["account"] ?? "");
+          const modes = (params["modes"] as Record<string, string> | undefined) ?? {};
+          store.chatModes[modesAccount] = { ...(store.chatModes[modesAccount] ?? {}), ...modes };
+          savePersisted();
+          return null;
+        }
+        case "chat_approval_modes_load": {
+          const modesAccount = String(params["account"] ?? "");
+          return { ...store.config.approvalModes, ...(store.chatModes[modesAccount] ?? {}) };
+        }
         case "desktop_pending_update":
           return store.config.pendingUpdate;
         case "desktop_install_update":
@@ -303,6 +378,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           };
           store.chatSessions.set(sessionKey(account, id), record);
           store.chatEvents.set(sessionKey(account, id), []);
+          savePersisted();
           return record;
         }
         case "chat_list_sessions": {
@@ -339,12 +415,14 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
             created_at: Date.now(),
           };
           rows.push(row);
+          savePersisted();
           return row;
         }
         case "chat_set_thread_id": {
           const { account, sessionId } = chatRecord(params);
           const record = store.chatSessions.get(sessionKey(account, sessionId));
           if (record) record["engine_thread_id"] = String(params["engineThreadId"] ?? "");
+          savePersisted();
           return null;
         }
         case "chat_rename_session": {
@@ -354,6 +432,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
             record["title"] = String(params["title"] ?? record["title"]);
             record["updated_at"] = Date.now();
           }
+          savePersisted();
           return null;
         }
         case "chat_delete_session": {
@@ -361,6 +440,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           const key = sessionKey(account, sessionId);
           store.chatSessions.delete(key);
           store.chatEvents.delete(key);
+          savePersisted();
           return null;
         }
         case "chat_clear_history": {
@@ -371,6 +451,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
               store.chatEvents.delete(key);
             }
           }
+          savePersisted();
           return null;
         }
         case "chat_working_dir":
@@ -379,6 +460,7 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
           return null;
         case "chat_send": {
           const chatSessionId = String(params["chatSessionId"] ?? "");
+          if (store.config.chatHold === true) return null;
           const script =
             store.config.chatScript.length > 0
               ? store.config.chatScript
@@ -437,6 +519,9 @@ export async function installDesktopMock(page: Page, config: DesktopMockConfig =
       configure: (patch: DesktopMockConfig) => {
         store.config = { ...store.config, ...patch };
       },
+      chatSessionSummaries: () => {
+        return [...store.chatSessions.values()].map((record) => ({ id: record.id, title: record.title }));
+      },
     };
   }, config);
 }
@@ -458,6 +543,11 @@ export async function desktopInvocations(page: Page, command?: string): Promise<
     if (name === undefined) return recorded;
     return recorded.filter((entry) => entry.command === name);
   }, command);
+}
+
+/** Id and title of every on-machine chat session the mock holds. */
+export async function desktopChatSessions(page: Page): Promise<Array<{ id: string; title: string }>> {
+  return page.evaluate(() => window.__PIDASH_DESKTOP_MOCK__?.chatSessionSummaries() ?? []);
 }
 
 /** Patch the mock's scenario knobs after install (pending update, CLI, chat script, ...). */
