@@ -513,8 +513,8 @@ def test_pin_preserved_even_without_parent_thread_id(
 def test_comment_rearms_terminally_disarmed_ticker(
     seeded, project, issue, states, runner_for_workspace, create_user
 ):
-    """A follow-up human comment after a `completed` terminal disarm
-    must flip ``enabled=True`` and clear ``disarm_reason``."""
+    """A follow-up human comment after a stop-signal disarm must flip
+    ``enabled=True`` and clear ``disarm_reason``."""
     from pi_dash.db.models.issue_agent_ticker import (
         IssueAgentTicker,
         TickerDisarmReason,
@@ -527,7 +527,7 @@ def test_comment_rearms_terminally_disarmed_ticker(
     scheduling.arm_ticker(issue)
     sched = IssueAgentTicker.objects.get(issue=issue)
     sched.enabled = False
-    sched.disarm_reason = TickerDisarmReason.TERMINAL_SIGNAL
+    sched.disarm_reason = TickerDisarmReason.STOP_SIGNAL
     sched.used = 5
     sched.save(update_fields=["enabled", "disarm_reason", "used"])
 

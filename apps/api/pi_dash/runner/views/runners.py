@@ -24,7 +24,11 @@ from pi_dash.runner.models import (
     Visibility,
 )
 from pi_dash.runner.serializers import DevMachineSerializer, RunnerSerializer
-from pi_dash.runner.services.matcher import NON_TERMINAL_STATUSES
+from pi_dash.runner.services.matcher import (
+    BUSY_STATUSES,
+    NON_TERMINAL_STATUSES,
+    drain_for_runner_by_id,
+)
 from pi_dash.runner.services.permissions import (
     can_manage_runner,
     can_view_dev_machine,
@@ -490,3 +494,91 @@ class RunnerRevokeEndpoint(APIView):
             close_runner_session(runner_pk)
             runner.refresh_from_db()
         return Response(RunnerSerializer(runner).data)
+
+
+def _lock_manageable_runner(request, runner_id):
+    """Row-lock a runner for a pause/resume toggle.
+
+    Returns ``(runner, None)`` or ``(None, error_response)``. Must be called
+    inside ``transaction.atomic()``. The lock also waits out a drain that
+    already picked this runner, so anything it assigned is visible to the
+    caller's in-flight check.
+    """
+    runner = Runner.objects.select_for_update().filter(pk=runner_id).first()
+    if runner is None or not can_view_runner(request.user, runner):
+        return None, Response({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+    if not can_manage_runner(request.user, runner):
+        return None, Response({"error": "forbidden"}, status=status.HTTP_403_FORBIDDEN)
+    if runner.is_revoked:
+        return None, Response(
+            {"error": "runner is revoked", "code": "runner_revoked"},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return runner, None
+
+
+def _serialize_toggled_runner(runner_pk, **extra):
+    runner = Runner.objects.select_related("pod__project", "dev_machine").get(pk=runner_pk)
+    return Response({**RunnerSerializer(runner).data, **extra})
+
+
+class RunnerPauseEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/pause/`` — stop dispatching new work.
+
+    Pausing is cloud-side only: the daemon keeps heartbeating, but every
+    matcher path skips the runner and chat to it is refused. QUEUED local
+    runs pinned to it go back to the pod queue so another runner can take
+    them. Work the runner already holds is left alone and returned as
+    ``in_flight_runs`` — including an ASSIGNED run it has not started yet,
+    which it will still start — so the operator knows what will still run.
+    Idempotent: pausing an already-paused runner keeps the original
+    ``paused_at`` / ``paused_by``.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        from pi_dash.runner.tasks import release_pins_for_paused_runner
+
+        with transaction.atomic():
+            runner, error = _lock_manageable_runner(request, runner_id)
+            if error is not None:
+                return error
+            if runner.paused_at is None:
+                runner.paused_at = timezone.now()
+                runner.paused_by = request.user
+                runner.save(update_fields=["paused_at", "paused_by", "updated_at"])
+                transaction.on_commit(lambda rid=runner.pk: release_pins_for_paused_runner(rid))
+            in_flight = [
+                {"id": str(run_id), "status": run_status}
+                for run_id, run_status in AgentRun.objects.filter(
+                    runner=runner, status__in=BUSY_STATUSES
+                ).values_list("id", "status")
+            ]
+        return _serialize_toggled_runner(runner.pk, in_flight_runs=in_flight)
+
+
+class RunnerResumeEndpoint(APIView):
+    """``POST /api/runners/<runner_id>/resume/`` — make a paused runner
+    eligible again and immediately try to hand it queued work.
+
+    The poll loop only drains on availability transitions, so without the
+    explicit drain here a resumed idle runner would sit unused until some
+    other trigger fired. Idempotent on a runner that is not paused.
+    """
+
+    authentication_classes = [BaseSessionAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, runner_id):
+        with transaction.atomic():
+            runner, error = _lock_manageable_runner(request, runner_id)
+            if error is not None:
+                return error
+            if runner.paused_at is not None:
+                runner.paused_at = None
+                runner.paused_by = None
+                runner.save(update_fields=["paused_at", "paused_by", "updated_at"])
+                transaction.on_commit(lambda rid=runner.pk: drain_for_runner_by_id(rid))
+        return _serialize_toggled_runner(runner.pk)
