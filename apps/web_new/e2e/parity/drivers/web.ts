@@ -36152,7 +36152,7 @@ export class WebDriver implements ParityDriver {
     for (;;) {
       await this.page.waitForTimeout(500);
       const current: string[] = await this.pagesGatingRowTitles();
-      if (current.join("") === previous.join("")) return current;
+      if (current.join("\u0000") === previous.join("\u0000")) return current;
       if (Date.now() > deadline) return current;
       previous = current;
     }

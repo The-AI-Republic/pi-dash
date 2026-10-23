@@ -13178,7 +13178,6 @@ export interface AdminLoopTargetRow {
   lastSkip: string;
 }
 
-/** Runners presence snapshot (NEWFRONT-445, ADM-080; bug-pinned until the page lands). */
 /** Runners page body facts (ADM-080, target behavior per NEWFRONT-518). */
 export interface AdminRunnersPageFacts {
   /** Whether the page root is showing. */
@@ -13193,6 +13192,7 @@ export interface AdminRunnersPageFacts {
   retryVisible: boolean;
 }
 
+/** Runners presence snapshot (NEWFRONT-445, ADM-080; bug-pinned until the page lands). */
 export interface AdminRunnersFacts {
   /** Whether the sidebar Runners entry is showing. */
   sidebarEntryVisible: boolean;
