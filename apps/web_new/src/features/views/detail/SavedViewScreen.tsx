@@ -1,0 +1,277 @@
+// Copyright (c) Pi Dash contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+// See the LICENSE file for details.
+// Project view detail screen (parity/specs/views.md §7, VIEW-021–024, 028).
+// Reads one stored view and its project, then mounts the issues layout root
+// with the view's own display settings as the source of the rendered layout,
+// its stored expression as the scope of every page, and its stored order.
+// The header carries the project → Views → view trail (last crumb a
+// searchable switcher), the owner-only lock and the tab title. Any record
+// that cannot be read — missing, refused, blank, failed — renders the
+// missing-view state without layout chrome.
+//
+// Layout persistence, Display, filters, Add and Save as belong to the
+// following slice (VIEW-025–027, 048); the issues layout root's own switcher
+// re-renders the current view locally and stores nothing here.
+
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
+import type { Project, SavedView } from "@pidash/api-client";
+import * as React from "react";
+
+import { getAppClient } from "../../../core/api/client.js";
+import { canEditInProject } from "../../../shared/shell/contextual/index.js";
+import { useDocumentHead } from "../../../shared/shell/index.js";
+import {
+  IssuesLayoutRoot,
+  ListSkeleton,
+  SavedViewEmptyCard,
+  ViewLayoutBody,
+  issuesQueryOptions,
+  mergeDisplayPrefs,
+  parseDisplayPrefs,
+  selectCreatableProjects,
+  useWeekStart,
+  type IssueSearch,
+  type LayoutKind,
+  type WorkItemCreateProject,
+} from "../../issues/index.js";
+import { projectsQueryOptions } from "../../projects/index.js";
+import { projectViewDetailQueryOptions } from "../api/detail.js";
+import { projectViewsQueryOptions } from "../api/queries.js";
+import { projectViewHref, projectViewsListHref, sortProjectViewsDefault } from "../lib/projectViews.js";
+import { SavedViewHeader } from "./SavedViewHeader.js";
+import { SavedViewMissingState } from "./SavedViewMissingState.js";
+import { savedViewDocumentTitle } from "./model.js";
+import type { SavedViewDetailParams } from "./preload.js";
+
+const LazyWorkItemCreateDialog = React.lazy(() =>
+  import("../../issues/components/WorkItemCreateDialog.js").then((module) => ({
+    default: module.WorkItemCreateDialog,
+  }))
+);
+
+/** Every layout a view may store, in switcher order (VIEW-028). */
+const VIEW_LAYOUTS: readonly LayoutKind[] = ["list", "kanban", "calendar", "spreadsheet", "gantt_chart"];
+
+export interface SavedViewScreenProps {
+  params: SavedViewDetailParams;
+  /** Validated route search, exactly as the issues screen reads it. */
+  search: IssueSearch;
+}
+
+export function SavedViewScreen({ params, search }: SavedViewScreenProps): React.ReactElement {
+  const client = getAppClient();
+  const navigate = useNavigate();
+  const weekStart = useWeekStart();
+
+  const projects = useQuery(projectsQueryOptions(client, params.ws));
+  const project = projects.data?.find((entry) => entry.id === params.projectId) ?? null;
+  const view = useQuery(projectViewDetailQueryOptions(client, params.ws, params.projectId, params.viewId));
+  const views = useQuery(projectViewsQueryOptions(client, params.ws, params.projectId));
+
+  // The tab title follows the record; while it loads or fails, the
+  // project's name (or the area name) is still an honest title.
+  useDocumentHead({
+    title: savedViewDocumentTitle(project?.name, view.data ?? null),
+    robots: "noindex, nofollow",
+  });
+
+  const openList = (): void => {
+    void navigate({ to: projectViewsListHref(params.ws, params.projectId) });
+  };
+
+  if (view.isPending) {
+    return (
+      <section aria-label="Saved view" className="flex min-h-0 flex-1 flex-col p-(--space-4)">
+        <ListSkeleton />
+      </section>
+    );
+  }
+  if (view.isError || view.data === null || view.data.id === "") {
+    // VIEW-022: absent, refused and blank records all read the same to a
+    // viewer who cannot see the record. No header chrome is rendered.
+    return <SavedViewMissingState onBack={openList} />;
+  }
+
+  return (
+    <SavedViewBody
+      workspaceSlug={params.ws}
+      projectId={params.projectId}
+      projectName={project?.name ?? null}
+      projectIdentifier={project?.identifier ?? null}
+      memberRole={project?.member_role ?? null}
+      projectArchived={project?.archived_at != null}
+      cycleView={project?.cycle_view === true}
+      moduleView={project?.module_view === true}
+      estimateEnabled={project !== null && project.estimate !== null}
+      search={search}
+      weekStart={weekStart}
+      view={view.data}
+      projects={projects.data ?? []}
+      views={sortProjectViewsDefault(views.data ?? [])}
+      viewsLoading={views.isPending}
+      viewsFailed={views.isError}
+      onOpenView={(viewId) => {
+        void navigate({ to: projectViewHref(params.ws, params.projectId, viewId) });
+      }}
+      onOpenProject={() => {
+        void navigate({ to: `/${params.ws}/projects/${params.projectId}` });
+      }}
+    />
+  );
+}
+
+interface SavedViewBodyProps {
+  workspaceSlug: string;
+  projectId: string;
+  projectName: string | null;
+  projectIdentifier: string | null;
+  memberRole: number | null;
+  projectArchived: boolean;
+  cycleView: boolean;
+  moduleView: boolean;
+  estimateEnabled: boolean;
+  search: IssueSearch;
+  weekStart: number;
+  view: SavedView;
+  projects: readonly Project[];
+  views: readonly SavedView[];
+  viewsLoading: boolean;
+  viewsFailed: boolean;
+  onOpenView: (viewId: string) => void;
+  onOpenProject: () => void;
+}
+
+function SavedViewBody({
+  workspaceSlug,
+  projectId,
+  projectName,
+  projectIdentifier,
+  memberRole,
+  projectArchived,
+  cycleView,
+  moduleView,
+  estimateEnabled,
+  search,
+  weekStart,
+  view,
+  projects,
+  views,
+  viewsLoading,
+  viewsFailed,
+  onOpenView,
+  onOpenProject,
+}: SavedViewBodyProps): React.ReactElement {
+  const client = getAppClient();
+  const projectEntity = React.useMemo(() => ({ scope: "project" as const, projectId }), [projectId]);
+  // The stored record decides the layout; the root's switcher moves a local
+  // copy so a view can be previewed in another layout without a write.
+  const storedDisplay = React.useMemo(
+    () => parseDisplayPrefs(view.display_filters, view.display_properties),
+    [view.display_filters, view.display_properties]
+  );
+  const [display, setDisplay] = React.useState(storedDisplay);
+  React.useEffect(() => {
+    setDisplay(storedDisplay);
+  }, [storedDisplay]);
+
+  const issues = useQuery(
+    issuesQueryOptions(client, workspaceSlug, projectId, search, view.rich_filters, display.orderBy)
+  );
+  const [createOpen, setCreateOpen] = React.useState(false);
+  // The empty card's create entry uses the same creatable-project rule as
+  // the issues list: a guest on this project sees it dead.
+  const creatable = React.useMemo<WorkItemCreateProject[]>(
+    () =>
+      selectCreatableProjects(
+        projects.map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          identifier: entry.identifier,
+          memberRole: entry.member_role,
+          archived: entry.archived_at !== null,
+        }))
+      ),
+    [projects]
+  );
+
+  const canEdit = memberRole === null ? false : canEditInProject({ memberRole, archived: projectArchived });
+  const rows = issues.data?.results ?? [];
+  const totalCount = issues.data?.total_count ?? 0;
+
+  const emptyCard = (
+    <SavedViewEmptyCard
+      canAct={canEdit}
+      onCreate={() => {
+        setCreateOpen(true);
+      }}
+    />
+  );
+
+  return (
+    <section aria-label="Saved view" className="flex min-h-0 flex-1 flex-col">
+      <SavedViewHeader
+        workspaceSlug={workspaceSlug}
+        projectId={projectId}
+        projectName={projectName ?? ""}
+        view={view}
+        views={views}
+        viewsLoading={viewsLoading}
+        viewsFailed={viewsFailed}
+        onOpenProject={onOpenProject}
+        onOpenView={onOpenView}
+      />
+      {issues.isPending ? (
+        <div className="min-h-0 flex-1 p-(--space-4)">
+          <ListSkeleton />
+        </div>
+      ) : (
+        <IssuesLayoutRoot
+          workspaceSlug={workspaceSlug}
+          entity={projectEntity}
+          title={view.name}
+          totalCount={totalCount}
+          resultCount={rows.length}
+          offered={VIEW_LAYOUTS}
+          display={display}
+          onDisplayChange={(next) => {
+            setDisplay((current) => mergeDisplayPrefs(current, { layout: next }));
+          }}
+          renderLayout={(active, prefs) => (
+            <ViewLayoutBody
+              layout={active}
+              workspaceSlug={workspaceSlug}
+              projectId={projectId}
+              projectIdentifier={projectIdentifier ?? ""}
+              entity={projectEntity}
+              prefs={prefs}
+              canEdit={canEdit}
+              richExpression={view.rich_filters}
+              hideCycle={!cycleView}
+              hideModule={!moduleView}
+              hideEstimate={!estimateEnabled}
+              weekStart={weekStart}
+              issues={rows}
+              totalCount={totalCount}
+              compact={search.layout === "compact"}
+            />
+          )}
+          emptyState={emptyCard}
+          noMatchState={emptyCard}
+        />
+      )}
+      {createOpen ? (
+        <React.Suspense fallback={null}>
+          <LazyWorkItemCreateDialog
+            open={createOpen}
+            onOpenChange={setCreateOpen}
+            workspaceSlug={workspaceSlug}
+            projects={creatable}
+            initialProjectId={projectId}
+          />
+        </React.Suspense>
+      ) : null}
+    </section>
+  );
+}

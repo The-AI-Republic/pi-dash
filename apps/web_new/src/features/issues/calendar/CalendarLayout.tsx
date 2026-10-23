@@ -16,6 +16,7 @@ import { PeekPanel } from "../../../shared/shell/index.js";
 import { issueDetailQueryOptions } from "../api/queries.js";
 import { useUpdateIssue } from "../api/mutations.js";
 import { issueKeys } from "../api/keys.js";
+import type { RichExpression } from "../filters/rich/expression.js";
 import { entityListsKeyPart } from "../prefs/entities.js";
 import { CalendarReloadBar } from "../loaders/skeletons.js";
 import { AddExistingModal } from "../list/AddExistingModal.js";
@@ -73,6 +74,12 @@ export interface CalendarLayoutProps {
   canAddExisting?: boolean;
   /** Cycle or module whose detail screen hosts this calendar. */
   membership?: CalendarMembershipContext;
+  /**
+   * Stored saved-view expression. A view opens its calendar with the same
+   * conditions its list applies (VIEW-028); a bare entity calendar sends
+   * none and reads every dated row.
+   */
+  richExpression?: RichExpression | undefined;
 }
 
 interface CalendarPeekState {
@@ -105,6 +112,7 @@ export function CalendarLayout({
   canEdit,
   canAddExisting = true,
   membership,
+  richExpression = {},
 }: CalendarLayoutProps): React.ReactElement {
   const narrow = useNarrowViewport();
   const touch = useTouchInput();
@@ -142,7 +150,7 @@ export function CalendarLayout({
   const range = rangeForCells(weeks);
   const perPage = mode === "month" ? MONTH_PER_PAGE : WEEK_PER_PAGE;
   const calendarQuery = useQuery(
-    calendarQueryOptions(getAppClient(), workspaceSlug, projectId, entity, { ...range, perPage })
+    calendarQueryOptions(getAppClient(), workspaceSlug, projectId, entity, { ...range, perPage }, richExpression)
   );
   const statesQuery = useQuery(calendarStatesQueryOptions(getAppClient(), workspaceSlug, projectId));
   const queryClient = useQueryClient();
@@ -282,7 +290,16 @@ export function CalendarLayout({
     const cursor = dayCursors[day] ?? `${perPage}:1:0`;
     setLoadingDay(day);
     void queryClient
-      .fetchQuery(calendarDayQueryOptions(getAppClient(), workspaceSlug, projectId, entity, { day, perPage, cursor }))
+      .fetchQuery(
+        calendarDayQueryOptions(
+          getAppClient(),
+          workspaceSlug,
+          projectId,
+          entity,
+          { day, perPage, cursor },
+          richExpression
+        )
+      )
       .then((response) => {
         const incoming = rowsFromResponse(response);
         setExtraByDay((current) => {

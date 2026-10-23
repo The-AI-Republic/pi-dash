@@ -18,9 +18,18 @@ export {
 export type { LayoutKind } from "./layouts/kinds.js";
 export { IssuesLayoutRoot } from "./layouts/IssuesLayoutRoot.js";
 export type { IssuesLayoutRootProps, LayoutRenderer } from "./layouts/IssuesLayoutRoot.js";
+export { ViewLayoutBody, preloadViewLayout } from "./layouts/ViewLayoutBody.js";
+export type { ViewLayoutBodyProps } from "./layouts/ViewLayoutBody.js";
+export { SavedViewEmptyCard, loadSavedViewEmptyCard } from "./emptyStates/viewEmpty.js";
+export type { SavedViewEmptyCardProps } from "./emptyStates/viewEmpty.js";
 export { entityListsKeyPart, writeEntityPrefs } from "./prefs/entities.js";
 export type { IssuesEntity, PrefsRecord } from "./prefs/entities.js";
-export { entityPrefsKeyPart, prefsQueryOptions, readEntityPrefs } from "./prefs/prefsQuery.js";
+export {
+  entityPrefsKeyPart,
+  orderByFromDisplayFilters,
+  prefsQueryOptions,
+  readEntityPrefs,
+} from "./prefs/prefsQuery.js";
 export {
   buildPrefsPatch,
   mergeDisplayPrefs,
@@ -381,6 +390,12 @@ export type { GanttMutations } from "./gantt/useGanttMutations.js";
 export { AnalyticsEntry, groupCounts } from "./analytics/AnalyticsEntry.js";
 export type { AnalyticsEntryProps } from "./analytics/AnalyticsEntry.js";
 export type { SpreadsheetLayoutProps } from "./spreadsheet/SpreadsheetLayout.js";
+export {
+  loadIssueListLeaves,
+  primeIssueListLeaves,
+  ResolvedAnalyticsEntry,
+  ResolvedIssueList,
+} from "./components/lazyLeaves.js";
 export {
   SHEET_COLUMNS,
   SHEET_DEFAULT_ORDER,

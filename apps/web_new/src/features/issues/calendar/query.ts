@@ -16,10 +16,13 @@ import {
   type GroupedIssueRow,
   type GroupedIssueListResponse,
   type IssueListItem,
+  type IssueListQuery,
 } from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { issueKeys } from "../api/keys.js";
+import type { RichExpression } from "../filters/rich/expression.js";
+import { richFiltersParam, withRichFilters } from "../filters/rich/query.js";
 import { entityListsKeyPart, type IssuesEntity } from "../prefs/entities.js";
 import type { CalendarRange } from "./model.js";
 
@@ -54,13 +57,19 @@ export interface CalendarQuery {
 }
 
 /** Key beneath the entity's list prefix; the range is part of the key. */
-export function calendarListKey(workspaceSlug: string, entity: IssuesEntity, query: CalendarQuery): readonly unknown[] {
+export function calendarListKey(
+  workspaceSlug: string,
+  entity: IssuesEntity,
+  query: CalendarQuery,
+  richExpression: RichExpression = {}
+): readonly unknown[] {
   return [
     ...issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity)),
     "calendar",
     query.after,
     query.before,
     query.perPage,
+    richFiltersParam(richExpression) ?? "all",
   ];
 }
 
@@ -71,13 +80,20 @@ function readWindow(
   projectId: string,
   entity: IssuesEntity,
   query: CalendarQuery,
+  richExpression: RichExpression,
   cursor?: string
 ) {
-  const input = {
-    groupBy: "target_date" as const,
-    perPage: query.perPage,
-    ...(cursor === undefined ? {} : { cursor }),
-    filters: { target_date: targetDateFilter(query) },
+  const input: IssueListQuery & { groupBy: string } = {
+    ...withRichFilters(
+      {
+        groupBy: "target_date",
+        perPage: query.perPage,
+        ...(cursor === undefined ? {} : { cursor }),
+        filters: { target_date: targetDateFilter(query) },
+      } satisfies IssueListQuery,
+      richExpression
+    ),
+    groupBy: "target_date",
   };
   if (entity.scope === "cycle") {
     return listGroupedCycleIssues(client, workspaceSlug, projectId, entity.cycleId, input);
@@ -94,11 +110,12 @@ export function calendarQueryOptions(
   workspaceSlug: string,
   projectId: string,
   entity: IssuesEntity,
-  query: CalendarQuery
+  query: CalendarQuery,
+  richExpression: RichExpression = {}
 ) {
   return queryOptions({
-    queryKey: calendarListKey(workspaceSlug, entity, query),
-    queryFn: () => readWindow(client, workspaceSlug, projectId, entity, query),
+    queryKey: calendarListKey(workspaceSlug, entity, query, richExpression),
+    queryFn: () => readWindow(client, workspaceSlug, projectId, entity, query, richExpression),
     staleTime: LIST_STALE_TIME_MS,
   });
 }
@@ -127,7 +144,8 @@ export interface CalendarDayQuery {
 export function calendarDayKey(
   workspaceSlug: string,
   entity: IssuesEntity,
-  query: CalendarDayQuery
+  query: CalendarDayQuery,
+  richExpression: RichExpression = {}
 ): readonly unknown[] {
   return [
     ...issueKeys.lists(workspaceSlug, ...entityListsKeyPart(entity)),
@@ -135,6 +153,7 @@ export function calendarDayKey(
     query.day,
     query.perPage,
     query.cursor ?? "",
+    richFiltersParam(richExpression) ?? "all",
   ];
 }
 
@@ -143,10 +162,11 @@ export function calendarDayQueryOptions(
   workspaceSlug: string,
   projectId: string,
   entity: IssuesEntity,
-  query: CalendarDayQuery
+  query: CalendarDayQuery,
+  richExpression: RichExpression = {}
 ) {
   return queryOptions({
-    queryKey: calendarDayKey(workspaceSlug, entity, query),
+    queryKey: calendarDayKey(workspaceSlug, entity, query, richExpression),
     queryFn: () =>
       readWindow(
         client,
@@ -154,6 +174,7 @@ export function calendarDayQueryOptions(
         projectId,
         entity,
         { after: query.day, before: query.day, perPage: query.perPage },
+        richExpression,
         query.cursor
       ),
     staleTime: LIST_STALE_TIME_MS,

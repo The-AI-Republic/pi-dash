@@ -36,6 +36,11 @@ export function projectViewHref(workspaceSlug: string, projectId: string, viewId
   return `/${workspaceSlug}/projects/${projectId}/views/${viewId}`;
 }
 
+/** The project's Views tab, where every detail state can return to. */
+export function projectViewsListHref(workspaceSlug: string, projectId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/views`;
+}
+
 /**
  * Manage-features shortcut target (VIEW-002): the project's views
  * feature leaf in settings, which renders the views switch (PSET-043).
