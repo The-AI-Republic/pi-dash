@@ -43,8 +43,9 @@ const SchedulersListPage = observer(function SchedulersListPage() {
 
   const rows = schedulers ?? [];
 
+  // A `name` field error (e.g. a duplicate name) is rethrown so the form
+  // modal shows it under the Name field; anything else is a toast.
   const handleCreate = async (values: {
-    slug: string;
     name: string;
     description: string;
     prompt: string;
@@ -61,9 +62,9 @@ const SchedulersListPage = observer(function SchedulersListPage() {
         message: t("Project admins can now install it on their projects."),
       });
     } catch (e: unknown) {
-      const err = e as { error?: string; slug?: string[]; name?: string[]; prompt?: string[] } | null;
-      const detail =
-        err?.error ?? err?.slug?.[0] ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not create the scheduler.");
+      const err = e as { error?: string; name?: string[]; prompt?: string[] } | null;
+      if (err?.name?.[0]) throw err;
+      const detail = err?.error ?? err?.prompt?.[0] ?? t("Could not create the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("Something went wrong"),
@@ -73,7 +74,6 @@ const SchedulersListPage = observer(function SchedulersListPage() {
   };
 
   const handleEditSubmit = async (values: {
-    slug: string;
     name: string;
     description: string;
     prompt: string;
@@ -82,7 +82,7 @@ const SchedulersListPage = observer(function SchedulersListPage() {
   }) => {
     if (!editTarget) return;
     try {
-      // Slug is read-only on the backend; only send the editable fields.
+      // The server derives the slug from the name; it is never sent.
       await schedulerStore.updateScheduler(slug, editTarget.id, {
         name: values.name,
         description: values.description,
@@ -99,7 +99,8 @@ const SchedulersListPage = observer(function SchedulersListPage() {
       });
     } catch (e: unknown) {
       const err = e as { error?: string; name?: string[]; prompt?: string[] } | null;
-      const detail = err?.error ?? err?.name?.[0] ?? err?.prompt?.[0] ?? t("Could not update the scheduler.");
+      if (err?.name?.[0]) throw err;
+      const detail = err?.error ?? err?.prompt?.[0] ?? t("Could not update the scheduler.");
       setToast({
         type: TOAST_TYPE.ERROR,
         title: t("Something went wrong"),
