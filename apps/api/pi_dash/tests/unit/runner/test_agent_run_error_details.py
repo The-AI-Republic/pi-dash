@@ -30,7 +30,7 @@ from pi_dash.runner.serializers import AgentRunSerializer
 from pi_dash.runner.services import tokens
 from pi_dash.runner.services.error_details import merge_error_details
 
-_MIGRATION = importlib.import_module("pi_dash.runner.migrations.0030_agent_run_error_details")
+_MIGRATION = importlib.import_module("pi_dash.runner.migrations.0032_agent_run_error_details")
 
 
 @pytest.fixture

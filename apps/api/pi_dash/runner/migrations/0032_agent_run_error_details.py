@@ -43,17 +43,19 @@ SET error_details = jsonb_strip_nulls(
 WHERE error_code <> '' OR error <> '' OR refusal_category <> '';
 """
 
+# ``LEFT`` keeps the reverse safe if a code or category longer than the
+# restored ``varchar`` columns was written while the JSON was the store.
 _RESTORE = """
 UPDATE agent_run
-SET error_code = COALESCE(error_details ->> 'code', ''),
+SET error_code = LEFT(COALESCE(error_details ->> 'code', ''), 64),
     error = COALESCE(error_details ->> 'message', ''),
-    refusal_category = COALESCE(error_details ->> 'refusal_category', '');
+    refusal_category = LEFT(COALESCE(error_details ->> 'refusal_category', ''), 32);
 """
 
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("runner", "0029_drop_agentrun_trigger_blocker_completed"),
+        ("runner", "0031_runner_paused"),
     ]
 
     operations = [
