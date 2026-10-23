@@ -7887,11 +7887,7 @@ export class WebNewDriver implements ParityDriver {
 
   async kanbanColumnCards(columnName: string): Promise<string[]> {
     const column = await this.kanbanColumnByName(columnName);
-    const cards = column.getByTestId("kanban-card-name");
-    const total = await cards.count();
-    const out: string[] = [];
-    for (let index = 0; index < total; index += 1) out.push(((await cards.nth(index).innerText()) ?? "").trim());
-    return out;
+    return this.kanbanScopeCards(column);
   }
 
   async kanbanToggleColumn(columnName: string): Promise<void> {
@@ -8042,100 +8038,354 @@ export class WebNewDriver implements ParityDriver {
     await expect.poll(() => this.kanbanColumnCards(columnName), { timeout: 120_000 }).toContain(title);
   }
 
-  async kanbanHeaderCreateVisible(_columnName: string): Promise<boolean> {
-    return todo("kanbanHeaderCreateVisible");
+  /** Header scope carrying the add control: the flat column or the swimlane group header. */
+  private async kanbanHeaderScope(columnName: string): Promise<Locator> {
+    const headers = this.page.getByTestId("kanban-group-header");
+    const total = await headers.count();
+    for (let index = 0; index < total; index += 1) {
+      const header = headers.nth(index);
+      const label = header.getByTestId("kanban-group-name").first();
+      const text = (
+        (await label.getAttribute("title").catch(() => null)) ??
+        (await label.innerText().catch(() => null)) ??
+        ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text === columnName) return header;
+    }
+    return this.kanbanColumnByName(columnName);
   }
 
-  async kanbanHeaderCreate(_columnName: string): Promise<void> {
-    return todo("kanbanHeaderCreate");
+  async kanbanHeaderCreateVisible(columnName: string): Promise<boolean> {
+    const header = await this.kanbanHeaderScope(columnName);
+    return this.isShown(header.getByTestId("kanban-header-create").first());
+  }
+
+  async kanbanHeaderCreate(columnName: string): Promise<void> {
+    const header = await this.kanbanHeaderScope(columnName);
+    await header.getByTestId("kanban-header-create").first().click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  private kanbanCreateModal(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Create new work item" }).first();
   }
 
   async kanbanCreateModalVisible(): Promise<boolean> {
-    return todo("kanbanCreateModalVisible");
+    return this.isShown(this.kanbanCreateModal());
+  }
+
+  /** Open header menu entries; the menu opens from the header add control. */
+  private kanbanHeaderMenuEntries(): Locator {
+    return this.page.locator('[role="menuitem"]:visible');
   }
 
   async kanbanHeaderMenuItems(_columnName: string): Promise<string[]> {
-    return todo("kanbanHeaderMenuItems");
+    const items = this.kanbanHeaderMenuEntries();
+    const count = await items.count();
+    const out: string[] = [];
+    for (let index = 0; index < count; index += 1) {
+      out.push(
+        (
+          (await items
+            .nth(index)
+            .innerText()
+            .catch(() => null)) ?? ""
+        )
+          .trim()
+          .replace(/\s+/g, " ")
+      );
+    }
+    return out.filter((entry) => entry.length > 0);
   }
 
-  async kanbanHeaderMenuChoose(_columnName: string, _item: string): Promise<void> {
-    return todo("kanbanHeaderMenuChoose");
+  async kanbanHeaderMenuChoose(_columnName: string, item: string): Promise<void> {
+    const items = this.kanbanHeaderMenuEntries();
+    const count = await items.count();
+    for (let index = 0; index < count; index += 1) {
+      const label = (
+        (await items
+          .nth(index)
+          .innerText()
+          .catch(() => null)) ?? ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (label === item) {
+        await items.nth(index).click({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error(`[parity] no header menu entry ${JSON.stringify(item)}.`);
   }
 
-  async kanbanDragCardBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("kanbanDragCardBefore");
+  private static boardBoxCenter(box: { x: number; y: number; width: number; height: number }): {
+    x: number;
+    y: number;
+  } {
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   }
 
-  async kanbanAttemptCardBefore(_sourceName: string, _targetName: string): Promise<void> {
-    return todo("kanbanAttemptCardBefore");
+  private async boardMouseDrag(from: { x: number; y: number }, onto: { x: number; y: number }): Promise<void> {
+    // The board drag engine is pointer-based: press, a stepped move with
+    // a pause so the drop target registers, then release.
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 8 });
+    await this.page.waitForTimeout(150);
+    await this.page.mouse.up();
   }
 
-  async kanbanDragCardToColumnEnd(_sourceName: string, _columnName: string): Promise<void> {
-    return todo("kanbanDragCardToColumnEnd");
+  async kanbanDragCardBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.kanbanCardByName(sourceName);
+    const target = await this.kanbanCardByName(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
+    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
+    await this.boardMouseDrag(from, onto);
+    await expect
+      .poll(
+        async () => {
+          const cards = await this.kanbanCards();
+          const names = cards.map((card) => card.name);
+          const sourceIndex = names.indexOf(sourceName);
+          const targetIndex = names.indexOf(targetName);
+          return sourceIndex >= 0 && targetIndex >= 0 && sourceIndex === targetIndex - 1;
+        },
+        { timeout: 120_000 }
+      )
+      .toBe(true);
   }
 
-  async kanbanDragCardToDelete(_sourceName: string): Promise<void> {
-    return todo("kanbanDragCardToDelete");
+  async kanbanAttemptCardBefore(sourceName: string, targetName: string): Promise<void> {
+    const source = await this.kanbanCardByName(sourceName);
+    const target = await this.kanbanCardByName(targetName);
+    const sourceBox = await source.boundingBox();
+    const targetBox = await target.boundingBox();
+    if (!sourceBox || !targetBox) throw new Error("[parity] drag card has no box.");
+    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const onto = { x: targetBox.x + targetBox.width / 2, y: targetBox.y + 8 };
+    await this.boardMouseDrag(from, onto);
+    await this.page.waitForTimeout(3_000);
+  }
+
+  async kanbanDragCardToColumnEnd(sourceName: string, columnName: string): Promise<void> {
+    const source = await this.kanbanCardByName(sourceName);
+    const column = await this.kanbanColumnByName(columnName);
+    const sourceBox = await source.boundingBox();
+    await column.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const columnBox = await column.boundingBox();
+    if (!sourceBox || !columnBox) throw new Error("[parity] drag card or column has no box.");
+    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const onto = { x: columnBox.x + columnBox.width / 2, y: columnBox.y + columnBox.height - 12 };
+    await this.boardMouseDrag(from, onto);
+    await expect.poll(() => this.kanbanColumnCards(columnName), { timeout: 120_000 }).toContain(sourceName);
+  }
+
+  async kanbanDragCardToDelete(sourceName: string): Promise<void> {
+    const source = await this.kanbanCardByName(sourceName);
+    const sourceBox = await source.boundingBox();
+    // The zone mounts with the board (transparent until a drag starts),
+    // so its box can be read before pressing the card.
+    const zoneBox = await this.page.getByTestId("kanban-delete-zone").first().boundingBox();
+    if (!sourceBox || !zoneBox) throw new Error("[parity] delete drag has no box.");
+    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const onto = WebNewDriver.boardBoxCenter(zoneBox);
+    await this.boardMouseDrag(from, onto);
+    await expect.poll(() => this.kanbanDeleteModalVisible(), { timeout: 120_000 }).toBe(true);
+  }
+
+  private kanbanDeleteModal(): Locator {
+    return this.page.getByRole("dialog").filter({ hasText: "Delete work item" }).first();
   }
 
   async kanbanDeleteModalVisible(): Promise<boolean> {
-    return todo("kanbanDeleteModalVisible");
+    return this.isShown(this.kanbanDeleteModal());
   }
 
   async kanbanConfirmDelete(): Promise<void> {
-    return todo("kanbanConfirmDelete");
+    const modal = this.kanbanDeleteModal();
+    const scope = (await modal.count()) > 0 ? modal : this.page;
+    await scope
+      .getByRole("button", { name: /^Delete$/ })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await expect.poll(() => this.kanbanDeleteModalVisible(), { timeout: 120_000 }).toBe(false);
   }
 
-  async kanbanDragHoldOverColumn(_sourceName: string, _columnName: string): Promise<{ overlay: string | null }> {
-    return todo("kanbanDragHoldOverColumn");
+  async kanbanDragHoldOverColumn(sourceName: string, columnName: string): Promise<{ overlay: string | null }> {
+    const source = await this.kanbanCardByName(sourceName);
+    const column = await this.kanbanColumnByName(columnName);
+    const sourceBox = await source.boundingBox();
+    await column.scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
+    const columnBox = await column.boundingBox();
+    if (!sourceBox || !columnBox) throw new Error("[parity] overlay drag has no box.");
+    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const onto = WebNewDriver.boardBoxCenter(columnBox);
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 8 });
+    await this.page.waitForTimeout(1_200);
+    // The overlay only renders over a column that refuses the card.
+    const overlay = column.getByTestId("kanban-drop-overlay").first();
+    let text: string | null = null;
+    if ((await overlay.count()) > 0) {
+      text = ((await overlay.innerText().catch(() => null)) ?? "").trim().replace(/\s+/g, " ") || null;
+    }
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1_000);
+    return { overlay: text };
   }
 
   async boardLastToast(): Promise<{ title: string; message: string } | null> {
-    return todo("boardLastToast");
+    const cards = this.page.locator('[data-testid="toast-notification"]');
+    if ((await cards.count()) === 0) return null;
+    const newest = cards.first();
+    const title = (
+      (await newest
+        .getByTestId("toast-title")
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    const message = (
+      (await newest
+        .getByTestId("toast-description")
+        .first()
+        .innerText()
+        .catch(() => null)) ?? ""
+    )
+      .trim()
+      .replace(/\s+/g, " ");
+    if (title === "" && message === "") return null;
+    return { title, message };
   }
 
-  async kanbanColumnScrollEnd(_columnName: string): Promise<void> {
-    return todo("kanbanColumnScrollEnd");
+  async kanbanColumnScrollEnd(columnName: string): Promise<void> {
+    const column = await this.kanbanColumnByName(columnName);
+    const body = column.getByTestId("kanban-column-body").first();
+    await body.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
   }
 
+  /** Flat columns page behind a scroll sentinel, never an explicit entry. */
   async kanbanColumnHasLoadMore(_columnName: string): Promise<boolean> {
-    return todo("kanbanColumnHasLoadMore");
+    return false;
   }
 
-  async kanbanColumnLoadMore(_columnName: string): Promise<void> {
-    return todo("kanbanColumnLoadMore");
+  async kanbanColumnLoadMore(columnName: string): Promise<void> {
+    await this.kanbanColumnScrollEnd(columnName);
   }
 
-  async kanbanColumnLoading(_columnName: string): Promise<boolean> {
-    return todo("kanbanColumnLoading");
+  async kanbanColumnLoading(columnName: string): Promise<boolean> {
+    const column = await this.kanbanColumnByName(columnName);
+    return this.isShown(column.getByTestId("kanban-column-loading").first());
   }
 
-  async kanbanCellCards(_columnName: string, _laneName: string): Promise<string[]> {
-    return todo("kanbanCellCards");
+  /** One scope's cards in order; virtualized placeholders read as "". */
+  private async kanbanScopeCards(scope: Locator): Promise<string[]> {
+    const cards = scope.getByTestId("kanban-card");
+    const total = await cards.count();
+    const out: string[] = [];
+    for (let index = 0; index < total; index += 1) {
+      const name = cards.nth(index).getByTestId("kanban-card-name").first();
+      if ((await name.count()) === 0) {
+        out.push("");
+        continue;
+      }
+      out.push(((await name.innerText().catch(() => null)) ?? "").trim());
+    }
+    return out;
   }
 
-  async kanbanCellHasLoadMore(_columnName: string, _laneName: string): Promise<boolean> {
-    return todo("kanbanCellHasLoadMore");
+  async kanbanCellCards(columnName: string, laneName: string): Promise<string[]> {
+    const cell = await this.kanbanCellByNames(columnName, laneName);
+    return this.kanbanScopeCards(cell);
   }
 
-  async kanbanCellLoadMore(_columnName: string, _laneName: string): Promise<void> {
-    return todo("kanbanCellLoadMore");
+  /** Cell scope from its column and lane names via the group header's key. */
+  private async kanbanCellByNames(columnName: string, laneName: string): Promise<Locator> {
+    const lane = await this.kanbanLaneByName(laneName);
+    const headers = this.page.getByTestId("kanban-group-header");
+    const total = await headers.count();
+    for (let index = 0; index < total; index += 1) {
+      const header = headers.nth(index);
+      const label = header.getByTestId("kanban-group-name").first();
+      const text = (
+        (await label.getAttribute("title").catch(() => null)) ??
+        (await label.innerText().catch(() => null)) ??
+        ""
+      )
+        .trim()
+        .replace(/\s+/g, " ");
+      if (text !== columnName) continue;
+      const key = await header.getAttribute("data-column-key").catch(() => null);
+      if (key === null) continue;
+      const cell = lane.locator(`[data-testid="kanban-cell"][data-column-key="${key}"]`).first();
+      if ((await cell.count()) > 0) return cell;
+    }
+    throw new Error(`[parity] no kanban cell for ${JSON.stringify(columnName)} × ${JSON.stringify(laneName)}.`);
+  }
+
+  async kanbanCellHasLoadMore(columnName: string, laneName: string): Promise<boolean> {
+    const cell = await this.kanbanCellByNames(columnName, laneName);
+    return this.isShown(cell.getByTestId("kanban-load-more").first());
+  }
+
+  async kanbanCellLoadMore(columnName: string, laneName: string): Promise<void> {
+    const cell = await this.kanbanCellByNames(columnName, laneName);
+    await cell.getByTestId("kanban-load-more").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async kanbanBoardScroll(): Promise<{ x: number; y: number }> {
-    return todo("kanbanBoardScroll");
+    return await this.page
+      .getByTestId("kanban-board")
+      .first()
+      .evaluate((node) => ({ x: node.scrollLeft, y: node.scrollTop }));
   }
 
-  async kanbanColumnScroll(_columnName: string): Promise<{ x: number; y: number }> {
-    return todo("kanbanColumnScroll");
+  async kanbanColumnScroll(columnName: string): Promise<{ x: number; y: number }> {
+    const column = await this.kanbanColumnByName(columnName);
+    return await column
+      .getByTestId("kanban-column-body")
+      .first()
+      .evaluate((node) => ({ x: node.scrollLeft, y: node.scrollTop }));
   }
 
   async kanbanDragHoldNearEdge(
-    _sourceName: string,
-    _edge: "left" | "right" | "top" | "bottom",
-    _holdMs: number
+    sourceName: string,
+    edge: "left" | "right" | "top" | "bottom",
+    holdMs: number
   ): Promise<void> {
-    return todo("kanbanDragHoldNearEdge");
+    const source = await this.kanbanCardByName(sourceName);
+    const sourceBox = await source.boundingBox();
+    const viewport = this.page.viewportSize() ?? { width: 1280, height: 720 };
+    if (!sourceBox) throw new Error("[parity] edge-hold card has no box.");
+    const from = WebNewDriver.boardBoxCenter(sourceBox);
+    const margin = 12;
+    // Holds track the grabbed card's own axis so the cursor stays over its
+    // column (vertical holds) or its row band (horizontal holds); a centered
+    // hold can land over a short neighbor column with no room to scroll.
+    const clamp = (value: number, max: number): number => Math.min(Math.max(value, margin), max - margin);
+    const onto =
+      edge === "left"
+        ? { x: margin, y: clamp(from.y, viewport.height) }
+        : edge === "right"
+          ? { x: viewport.width - margin, y: clamp(from.y, viewport.height) }
+          : edge === "top"
+            ? { x: clamp(from.x, viewport.width), y: margin }
+            : { x: clamp(from.x, viewport.width), y: viewport.height - margin };
+    await this.page.mouse.move(from.x, from.y);
+    await this.page.mouse.down();
+    await this.page.mouse.move(onto.x, onto.y, { steps: 10 });
+    await this.page.waitForTimeout(holdMs);
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1_000);
   }
 
   async ganttHeader(): Promise<{ count: number | null; views: string[]; hasToday: boolean; hasFullscreen: boolean }> {

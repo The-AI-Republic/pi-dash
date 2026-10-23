@@ -72,6 +72,19 @@ vi.mock("../calendar/CalendarEntry.js", () => ({
   ),
 }));
 
+vi.mock("../kanban/lazy.js", () => ({
+  resolvedKanbanLayout: () => (props: Record<string, unknown>) => (
+    <div
+      data-testid="kanban-layout"
+      data-project={String(props.projectId)}
+      data-can-edit={String(props.canEdit ?? "unset")}
+      data-cycle={String(props.cycleId ?? "")}
+      data-module={String(props.moduleId ?? "")}
+      data-completed={String(props.completedCycle ?? false)}
+    />
+  ),
+}));
+
 vi.mock("../display/DisplayControl.js", () => ({
   DisplayControl: (props: { hideCycle: boolean; hideModule: boolean; offered: readonly string[] }) => (
     <div data-testid="display-control" data-cycle={String(props.hideCycle)} data-module={String(props.hideModule)}>
@@ -107,6 +120,7 @@ vi.mock("../layouts/IssuesLayoutRoot.js", () => ({
       <div data-testid="no-match-state">{props.noMatchState}</div>
       <div data-testid="layout">{props.renderLayout("list", { layout: "list", groupBy: null })}</div>
       <div data-testid="calendar-layout">{props.renderLayout("calendar", { layout: "calendar", groupBy: null })}</div>
+      <div data-testid="kanban-layout-slot">{props.renderLayout("kanban", { layout: "kanban", groupBy: null })}</div>
     </div>
   ),
 }));
@@ -249,7 +263,7 @@ describe("EntityListScreen", () => {
     expect(root).toHaveAttribute("data-title", "Sprint 1");
     expect(root).toHaveAttribute("data-total", "7");
     expect(root).toHaveAttribute("data-results", "2");
-    expect(root).toHaveAttribute("data-offered", "list,calendar");
+    expect(root).toHaveAttribute("data-offered", "list,kanban,calendar");
     expect(await screen.findByTestId("list-layout")).toHaveTextContent("WEB");
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-cycle", CYCLE);
     expect(screen.getByTestId("list-layout")).toHaveAttribute("data-compact", "true");
@@ -601,6 +615,27 @@ describe("EntityListScreen", () => {
     const calendar = screen.getByTestId("calendar-entry");
     expect(calendar).toHaveAttribute("data-membership", JSON.stringify({ moduleId: MODULE }));
     expect(calendar).toHaveAttribute("data-can-edit", "false");
+  });
+
+  it("mounts the board with the entity's cycle context", () => {
+    setup();
+    const board = within(screen.getByTestId("kanban-layout-slot")).getByTestId("kanban-layout");
+    expect(board).toHaveAttribute("data-project", PROJECT);
+    expect(board).toHaveAttribute("data-cycle", CYCLE);
+    expect(board).toHaveAttribute("data-module", "");
+    expect(board).toHaveAttribute("data-completed", "false");
+    expect(board).toHaveAttribute("data-can-edit", "true");
+  });
+
+  it("mounts the module board read-only for a completed context", () => {
+    setup({
+      entity: { scope: "module", projectId: PROJECT, moduleId: MODULE },
+      moduleId: MODULE,
+      completedModule: true,
+    });
+    const board = within(screen.getByTestId("kanban-layout-slot")).getByTestId("kanban-layout");
+    expect(board).toHaveAttribute("data-module", MODULE);
+    expect(board).toHaveAttribute("data-can-edit", "false");
   });
 
   it("derives a completed module from its picker row", () => {

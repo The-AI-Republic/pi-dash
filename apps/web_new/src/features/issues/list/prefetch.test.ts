@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // The cycle/module prefetch reads the stored sub-issue flag before the
-// first page and starts the layout chunk alongside it (ISS-010/013).
+// first page and starts the layout chunks alongside it (ISS-010/013,
+// ISS-036).
 
 import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   ensure: vi.fn(),
   load: vi.fn(async () => ({ default: () => null })),
+  loadBoard: vi.fn(async () => ({ default: () => null })),
   page: vi.fn((..._args: unknown[]) => ({ queryKey: ["page"] })),
   prefs: vi.fn((..._args: unknown[]) => ({ queryKey: ["prefs"] })),
 }));
 
 vi.mock("../prefs/prefsQuery.js", () => ({ prefsQueryOptions: mocks.prefs }));
 vi.mock("./lazy.js", () => ({ loadListLayout: mocks.load }));
+vi.mock("../kanban/lazy.js", () => ({ loadKanbanLayout: mocks.loadBoard }));
 vi.mock("./pages.js", () => ({ listPageQueryOptions: mocks.page }));
 
 import { prefetchEntityList } from "./prefetch.js";
@@ -41,6 +44,7 @@ describe("prefetchEntityList", () => {
       showSubIssues: false,
     });
     expect(mocks.load).toHaveBeenCalledTimes(1);
+    expect(mocks.loadBoard).toHaveBeenCalledTimes(1);
     expect(queryClient.ensureQueryData).toHaveBeenCalledTimes(2);
   });
 

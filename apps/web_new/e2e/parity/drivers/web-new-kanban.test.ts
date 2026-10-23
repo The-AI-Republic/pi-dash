@@ -86,7 +86,12 @@ function element(
 
 /** A collection that returns the same node for whichever index is asked. */
 function list(nodes: Locator[]): Locator {
-  return locator({ count: async () => nodes.length, nth: (index: number) => nodes[index]! });
+  const empty = locator({ count: async () => 0, isVisible: async () => false });
+  return locator({
+    count: async () => nodes.length,
+    first: () => (nodes.length > 0 ? nodes[0]! : empty),
+    nth: (index: number) => nodes[index]!,
+  });
 }
 
 describe("kanbanOpenBoard", () => {
@@ -407,21 +412,52 @@ describe("kanbanCards", () => {
   });
 });
 
+function namedCard(name: string): Locator {
+  return element(
+    { "data-issue-id": `issue-${name}` },
+    { "kanban-card-name": locator({ innerText: async () => name }) }
+  );
+}
+
+function placeholderCard(): Locator {
+  return element({ "data-issue-id": "issue-far", "data-virtualized": "true" });
+}
+
 describe("kanbanColumnCards", () => {
   it("reads a named column's card titles in order", async () => {
     const column = element(
       { "data-column-name": "Todo" },
-      {
-        "kanban-card-name": list([
-          locator({ innerText: async () => "Fix login" }),
-          locator({ innerText: async () => "Ship it" }),
-        ]),
-      }
+      { "kanban-card": list([namedCard("Fix login"), namedCard("Ship it")]) }
     );
     const decoy = element({ "data-column-name": "Done" });
     const noName = element({});
     const page = boardPage({ columns: list([decoy, noName, column]) });
     await expect(new WebNewDriver(page).kanbanColumnCards("Todo")).resolves.toEqual(["Fix login", "Ship it"]);
+  });
+
+  it("reads virtualized placeholders as empty names", async () => {
+    const column = element(
+      { "data-column-name": "Todo" },
+      { "kanban-card": list([namedCard("Fix login"), placeholderCard()]) }
+    );
+    const page = boardPage({ columns: list([column]) });
+    await expect(new WebNewDriver(page).kanbanColumnCards("Todo")).resolves.toEqual(["Fix login", ""]);
+  });
+
+  it("reads an unreadable name as empty", async () => {
+    const card = element(
+      { "data-issue-id": "issue-1" },
+      {
+        "kanban-card-name": locator({
+          innerText: async () => {
+            throw new Error("gone");
+          },
+        }),
+      }
+    );
+    const column = element({ "data-column-name": "Todo" }, { "kanban-card": list([card]) });
+    const page = boardPage({ columns: list([column]) });
+    await expect(new WebNewDriver(page).kanbanColumnCards("Todo")).resolves.toEqual([""]);
   });
 
   it("throws for an unknown column", async () => {
@@ -646,8 +682,8 @@ describe("kanban quick-add", () => {
       getByTestId: (id: string) =>
         id === "kanban-quick-add"
           ? locator({ count: async () => (options.present ? 1 : 0), isVisible: async () => options.present })
-          : id === "kanban-card-name"
-            ? list(created === null ? [] : [locator({ innerText: async () => created ?? "" })])
+          : id === "kanban-card"
+            ? list(created === null ? [] : [namedCard(created ?? "")])
             : locator({ count: async () => 0 }),
       getByRole: () => locator({ first: () => locator({ click: async () => undefined }) }),
       getByLabel: () => locator({ first: () => field }),
@@ -668,5 +704,734 @@ describe("kanban quick-add", () => {
     const { page, typed } = quickAddPage({ present: true });
     await new WebNewDriver(page).kanbanQuickAdd("Todo", "Fresh item");
     expect(typed).toEqual(["Fresh item"]);
+  });
+});
+
+function mouseStub(): {
+  mouse: { move: (...args: unknown[]) => Promise<void>; down: () => Promise<void>; up: () => Promise<void> };
+  moves: Array<{ x: number; y: number; steps?: number }>;
+  events: string[];
+} {
+  const moves: Array<{ x: number; y: number; steps?: number }> = [];
+  const events: string[] = [];
+  return {
+    mouse: {
+      move: async (x: unknown, y: unknown, options?: { steps?: number }) => {
+        moves.push({ x: x as number, y: y as number, steps: options?.steps });
+        events.push("move");
+      },
+      down: async () => void events.push("down"),
+      up: async () => void events.push("up"),
+    },
+    moves,
+    events,
+  };
+}
+
+interface Box {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function dragCard(name: string, rect: Box | null): Locator {
+  return locator({
+    boundingBox: async () => rect,
+    getByTestId: (id: string) =>
+      id === "kanban-card-name" ? locator({ innerText: async () => name }) : locator({ count: async () => 0 }),
+  });
+}
+
+function groupHeaderStub(name: string, key: string | null, title: string | null = null): Locator {
+  return locator({
+    getAttribute: async (attribute: string) => (attribute === "data-column-key" ? key : null),
+    getByTestId: (id: string) => {
+      if (id !== "kanban-group-name") return locator({ count: async () => 0 });
+      return locator({
+        getAttribute: async () => title,
+        innerText: async () => (title === null ? name : ""),
+      });
+    },
+  });
+}
+
+describe("kanban header create", () => {
+  it("reads the add control on flat columns", async () => {
+    const clicks: string[] = [];
+    const column = locator({
+      getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Todo" : null),
+      getByTestId: (id: string) =>
+        id === "kanban-header-create"
+          ? locator({
+              isVisible: async () => true,
+              click: async () => void clicks.push("create"),
+            })
+          : locator({ count: async () => 0 }),
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "kanban-column" ? list([column]) : list([])) });
+    const driver = new WebNewDriver(page);
+    await expect(driver.kanbanHeaderCreateVisible("Todo")).resolves.toBe(true);
+    await driver.kanbanHeaderCreate("Todo");
+    expect(clicks).toEqual(["create"]);
+  });
+
+  it("reads the add control on swimlane group headers", async () => {
+    const header = locator({
+      getAttribute: async () => null,
+      getByTestId: (id: string) => {
+        if (id === "kanban-group-name") return locator({ getAttribute: async () => "Todo" });
+        if (id === "kanban-header-create") return locator({ isVisible: async () => true });
+        return locator({ count: async () => 0 });
+      },
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "kanban-group-header" ? list([header]) : list([])) });
+    await expect(new WebNewDriver(page).kanbanHeaderCreateVisible("Todo")).resolves.toBe(true);
+  });
+
+  it("falls back to the name text without a title marker", async () => {
+    const header = locator({
+      getByTestId: (id: string) => {
+        if (id === "kanban-group-name") {
+          return locator({
+            getAttribute: async () => null,
+            innerText: async () => "  Todo\n",
+          });
+        }
+        if (id === "kanban-header-create") return locator({ isVisible: async () => true });
+        return locator({ count: async () => 0 });
+      },
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "kanban-group-header" ? list([header]) : list([])) });
+    await expect(new WebNewDriver(page).kanbanHeaderCreateVisible("Todo")).resolves.toBe(true);
+  });
+
+  it("falls through unreadable headers to the flat column", async () => {
+    const unreadable = locator({
+      getByTestId: (id: string) =>
+        id === "kanban-group-name"
+          ? locator({
+              getAttribute: async () => null,
+              innerText: async () => {
+                throw new Error("gone");
+              },
+            })
+          : locator({ count: async () => 0 }),
+    });
+    const column = locator({
+      getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Todo" : null),
+      getByTestId: (id: string) =>
+        id === "kanban-header-create" ? locator({ isVisible: async () => true }) : locator({ count: async () => 0 }),
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "kanban-group-header") return list([unreadable]);
+        if (id === "kanban-column") return list([column]);
+        return list([]);
+      },
+    });
+    await expect(new WebNewDriver(page).kanbanHeaderCreateVisible("Todo")).resolves.toBe(true);
+  });
+
+  it("reads the create modal by its heading", async () => {
+    const dialog = (visible: boolean) =>
+      pageOf({
+        getByRole: () =>
+          locator({
+            filter: () =>
+              locator({
+                first: () => locator({ count: async () => (visible ? 1 : 0), isVisible: async () => visible }),
+              }),
+          }),
+      });
+    await expect(new WebNewDriver(dialog(true)).kanbanCreateModalVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(dialog(false)).kanbanCreateModalVisible()).resolves.toBe(false);
+  });
+});
+
+describe("kanban header menu", () => {
+  function menuPage(entries: string[]): Page {
+    return pageOf({
+      locator: (selector: string) =>
+        selector === '[role="menuitem"]:visible'
+          ? list(entries.map((entry) => locator({ innerText: async () => entry })))
+          : locator({ count: async () => 0 }),
+    });
+  }
+
+  it("reads the open menu entries without blanks", async () => {
+    const page = menuPage([" Create work item ", "", "Add an existing work item"]);
+    await expect(new WebNewDriver(page).kanbanHeaderMenuItems("Todo")).resolves.toEqual([
+      "Create work item",
+      "Add an existing work item",
+    ]);
+  });
+
+  it("drops menu entries that will not read", async () => {
+    const throwing = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "kanban-group-header")
+          return list([headerWithCreate(locator({ click: async () => undefined }), "Todo")]);
+        return list([]);
+      },
+      locator: (selector: string) =>
+        selector === '[role="menuitem"]:visible'
+          ? list([
+              locator({
+                innerText: async () => {
+                  throw new Error("gone");
+                },
+              }),
+              locator({ innerText: async () => "Create work item" }),
+            ])
+          : locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(throwing).kanbanHeaderMenuItems("Todo")).resolves.toEqual(["Create work item"]);
+  });
+
+  it("chooses the matching entry and throws when missing", async () => {
+    const clicks: string[] = [];
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[role="menuitem"]:visible'
+          ? list([
+              locator({ innerText: async () => "Create work item", click: async () => void clicks.push("create") }),
+              locator({
+                innerText: async () => "Add an existing work item",
+                click: async () => void clicks.push("add"),
+              }),
+            ])
+          : locator({ count: async () => 0 }),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.kanbanHeaderMenuChoose("Todo", "Add an existing work item");
+    expect(clicks).toEqual(["add"]);
+    await expect(driver.kanbanHeaderMenuChoose("Todo", "Missing")).rejects.toThrow(/no header menu entry/);
+  });
+});
+
+describe("kanban drags", () => {
+  function dragPage(cards: Locator[], columns: Locator[] = []) {
+    const { mouse, moves, events } = mouseStub();
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async () => undefined,
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list(cards);
+        if (id === "kanban-column") return list(columns);
+        return list([]);
+      },
+    });
+    return { page, moves, events };
+  }
+
+  function dragColumn(name: string, rect: Box | null, cards: Locator[] = []): Locator {
+    return locator({
+      boundingBox: async () => rect,
+      scrollIntoViewIfNeeded: async () => undefined,
+      getAttribute: async (attribute: string) => (attribute === "data-column-name" ? name : null),
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list(cards);
+        return locator({ count: async () => 0 });
+      },
+    });
+  }
+
+  it("drags a card before its target and settles on the new order", async () => {
+    const source = dragCard("Third", { x: 0, y: 200, width: 300, height: 80 });
+    const target = dragCard("First", { x: 0, y: 0, width: 300, height: 80 });
+    // The board already shows the settled order, so the poll passes first try.
+    const { page, moves, events } = dragPage([source, target]);
+    await new WebNewDriver(page).kanbanDragCardBefore("Third", "First");
+    expect(events).toEqual(["move", "down", "move", "up"]);
+    expect(moves[0]).toEqual({ x: 150, y: 240, steps: undefined });
+    expect(moves[1]).toEqual({ x: 150, y: 8, steps: 8 });
+  });
+
+  it("throws when either drag card has no box", async () => {
+    const boxed = dragCard("Third", { x: 0, y: 0, width: 300, height: 80 });
+    const flat = dragCard("First", null);
+    await expect(new WebNewDriver(dragPage([flat, boxed]).page).kanbanDragCardBefore("Third", "First")).rejects.toThrow(
+      /no box/
+    );
+    await expect(new WebNewDriver(dragPage([boxed, flat]).page).kanbanDragCardBefore("Third", "First")).rejects.toThrow(
+      /no box/
+    );
+  });
+
+  it("attempts a drop without settling", async () => {
+    const waits: Array<number | undefined> = [];
+    const source = dragCard("Beta", { x: 0, y: 0, width: 300, height: 80 });
+    const target = dragCard("Gamma", { x: 0, y: 100, width: 300, height: 80 });
+    const { mouse, events } = mouseStub();
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+      getByTestId: (id: string) => (id === "kanban-card" ? list([source, target]) : list([])),
+    });
+    await new WebNewDriver(page).kanbanAttemptCardBefore("Beta", "Gamma");
+    expect(events).toEqual(["move", "down", "move", "up"]);
+    expect(waits).toContain(3_000);
+  });
+
+  it("throws an attempt without boxes", async () => {
+    const boxed = dragCard("Beta", { x: 0, y: 0, width: 300, height: 80 });
+    const flat = dragCard("Gamma", null);
+    const attempt = (cards: Locator[]) =>
+      new WebNewDriver(dragPage(cards).page).kanbanAttemptCardBefore("Beta", "Gamma");
+    await expect(attempt([flat, boxed])).rejects.toThrow(/no box/);
+    await expect(attempt([boxed, flat])).rejects.toThrow(/no box/);
+  });
+
+  it("drags a card to the column end and settles on its arrival", async () => {
+    const scrolled: string[] = [];
+    const source = dragCard("Fix login", { x: 0, y: 0, width: 300, height: 80 });
+    const column = locator({
+      boundingBox: async () => ({ x: 350, y: 0, width: 350, height: 600 }),
+      scrollIntoViewIfNeeded: async () => void scrolled.push("done"),
+      getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Done" : null),
+      getByTestId: (id: string) => (id === "kanban-card" ? list([dragCard("Fix login", null)]) : list([])),
+    });
+    const { page, moves } = dragPage([source], [column]);
+    await new WebNewDriver(page).kanbanDragCardToColumnEnd("Fix login", "Done");
+    expect(scrolled).toEqual(["done"]);
+    expect(moves[0]).toEqual({ x: 150, y: 40, steps: undefined });
+    expect(moves[1]).toEqual({ x: 525, y: 588, steps: 8 });
+  });
+
+  it("throws a column-end drag without boxes", async () => {
+    const boxed = dragCard("Fix login", { x: 0, y: 0, width: 300, height: 80 });
+    const flat = dragCard("Fix login", null);
+    const column = (rect: Box | null) => dragColumn("Done", rect);
+    const attempt = (card: Locator, target: Locator) =>
+      new WebNewDriver(dragPage([card], [target]).page).kanbanDragCardToColumnEnd("Fix login", "Done");
+    await expect(attempt(flat, column({ x: 0, y: 0, width: 10, height: 10 }))).rejects.toThrow(/no box/);
+    await expect(attempt(boxed, column(null))).rejects.toThrow(/no box/);
+  });
+
+  it("holds near each viewport edge along the card's own axis", async () => {
+    const waits: Array<number | undefined> = [];
+    const source = dragCard("Last", { x: 500, y: 300, width: 300, height: 80 });
+    const { mouse, moves } = mouseStub();
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async (ms?: number) => void waits.push(ms),
+      viewportSize: () => ({ width: 1280, height: 720 }),
+      getByTestId: (id: string) => (id === "kanban-card" ? list([source]) : list([])),
+    });
+    const driver = new WebNewDriver(page);
+    await driver.kanbanDragHoldNearEdge("Last", "right", 500);
+    await driver.kanbanDragHoldNearEdge("Last", "left", 500);
+    await driver.kanbanDragHoldNearEdge("Last", "top", 500);
+    await driver.kanbanDragHoldNearEdge("Last", "bottom", 500);
+    expect(waits).toContain(500);
+    expect(moves.map((move) => [move.x, move.y])).toEqual([
+      [650, 340],
+      [1268, 340],
+      [650, 340],
+      [12, 340],
+      [650, 340],
+      [650, 12],
+      [650, 340],
+      [650, 708],
+    ]);
+  });
+
+  it("holds with the fallback viewport and throws without a box", async () => {
+    const source = dragCard("Last", { x: 0, y: 0, width: 300, height: 80 });
+    const { mouse, moves } = mouseStub();
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async () => undefined,
+      viewportSize: () => null,
+      getByTestId: (id: string) => (id === "kanban-card" ? list([source]) : list([])),
+    });
+    await new WebNewDriver(page).kanbanDragHoldNearEdge("Last", "right", 10);
+    expect(moves[1]).toEqual({ x: 1268, y: 40, steps: 10 });
+    const flat = dragCard("Last", null);
+    const missing = pageOf({
+      mouse: mouseStub().mouse,
+      getByTestId: (id: string) => (id === "kanban-card" ? list([flat]) : list([])),
+    });
+    await expect(new WebNewDriver(missing).kanbanDragHoldNearEdge("Last", "right", 10)).rejects.toThrow(/no box/);
+  });
+});
+
+describe("kanban delete flow", () => {
+  function deletePage(modalVisible: boolean) {
+    const { mouse } = mouseStub();
+    const source = dragCard("Fix login", { x: 0, y: 0, width: 300, height: 80 });
+    return pageOf({
+      mouse,
+      waitForTimeout: async () => undefined,
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list([source]);
+        if (id === "kanban-delete-zone") {
+          return locator({ boundingBox: async () => ({ x: 300, y: 0, width: 200, height: 40 }) });
+        }
+        return list([]);
+      },
+      getByRole: () =>
+        locator({
+          filter: () =>
+            locator({
+              count: async () => (modalVisible ? 1 : 0),
+              first: () => locator({ count: async () => (modalVisible ? 1 : 0), isVisible: async () => modalVisible }),
+              getByRole: () => locator({ first: () => locator({ click: async () => undefined }) }),
+            }),
+        }),
+    });
+  }
+
+  it("drags a card onto the zone and settles on the modal", async () => {
+    await new WebNewDriver(deletePage(true)).kanbanDragCardToDelete("Fix login");
+    await expect(new WebNewDriver(deletePage(true)).kanbanDeleteModalVisible()).resolves.toBe(true);
+    await expect(new WebNewDriver(deletePage(false)).kanbanDeleteModalVisible()).resolves.toBe(false);
+  });
+
+  it("throws a delete drag without boxes", async () => {
+    const flat = dragCard("Fix login", null);
+    const page = pageOf({
+      mouse: mouseStub().mouse,
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list([flat]);
+        if (id === "kanban-delete-zone") return locator({ boundingBox: async () => null });
+        return list([]);
+      },
+    });
+    await expect(new WebNewDriver(page).kanbanDragCardToDelete("Fix login")).rejects.toThrow(/no box/);
+    const boxed = dragCard("Fix login", { x: 0, y: 0, width: 300, height: 80 });
+    const zoneLess = pageOf({
+      mouse: mouseStub().mouse,
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list([boxed]);
+        if (id === "kanban-delete-zone") return locator({ boundingBox: async () => null });
+        return list([]);
+      },
+    });
+    await expect(new WebNewDriver(zoneLess).kanbanDragCardToDelete("Fix login")).rejects.toThrow(/no box/);
+  });
+
+  it("confirms the delete and settles on the closed modal", async () => {
+    let open = true;
+    const clicks: string[] = [];
+    const modal = locator({
+      count: async () => (open ? 1 : 0),
+      isVisible: async () => open,
+      getByRole: () =>
+        locator({
+          first: () =>
+            locator({
+              click: async () => {
+                open = false;
+                clicks.push("delete");
+              },
+            }),
+        }),
+    });
+    const page = pageOf({
+      getByRole: () => locator({ filter: () => locator({ first: () => modal }) }),
+    });
+    await new WebNewDriver(page).kanbanConfirmDelete();
+    expect(clicks).toEqual(["delete"]);
+  });
+
+  it("confirms from the page scope without a modal anchor", async () => {
+    const clicks: string[] = [];
+    const page = pageOf({
+      getByRole: (role: string) => {
+        if (role !== "button") {
+          return locator({
+            filter: () => locator({ count: async () => 0, first: () => locator({ count: async () => 0 }) }),
+          });
+        }
+        return locator({ first: () => locator({ click: async () => void clicks.push("delete") }) });
+      },
+    });
+    await new WebNewDriver(page).kanbanConfirmDelete();
+    expect(clicks).toEqual(["delete"]);
+  });
+});
+
+describe("kanban hold overlay and toasts", () => {
+  function holdPage(overlay: string | null) {
+    const { mouse, events } = mouseStub();
+    const source = dragCard("Fix login", { x: 0, y: 0, width: 300, height: 80 });
+    const column = locator({
+      boundingBox: async () => ({ x: 350, y: 0, width: 350, height: 600 }),
+      scrollIntoViewIfNeeded: async () => undefined,
+      getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Done" : null),
+      getByTestId: (id: string) =>
+        id === "kanban-drop-overlay" && overlay !== null
+          ? locator({ innerText: async () => overlay })
+          : locator({ count: async () => 0 }),
+    });
+    const page = pageOf({
+      mouse,
+      waitForTimeout: async () => undefined,
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") return list([source]);
+        if (id === "kanban-column") return list([column]);
+        return list([]);
+      },
+    });
+    return { page, events };
+  }
+
+  it("holds over a column and reads its overlay", async () => {
+    const { page, events } = holdPage("  Cannot move to a completed cycle\n");
+    await expect(new WebNewDriver(page).kanbanDragHoldOverColumn("Fix login", "Done")).resolves.toEqual({
+      overlay: "Cannot move to a completed cycle",
+    });
+    expect(events).toEqual(["move", "down", "move", "up"]);
+  });
+
+  it("reads no overlay over an accepting column", async () => {
+    const { page } = holdPage(null);
+    await expect(new WebNewDriver(page).kanbanDragHoldOverColumn("Fix login", "Done")).resolves.toEqual({
+      overlay: null,
+    });
+  });
+
+  it("throws an overlay hold without boxes", async () => {
+    const boxed = dragCard("Fix login", { x: 0, y: 0, width: 300, height: 80 });
+    const flat = dragCard("Fix login", null);
+    const column = (rect: Box | null) =>
+      locator({
+        boundingBox: async () => rect,
+        scrollIntoViewIfNeeded: async () => undefined,
+        getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Done" : null),
+      });
+    const attempt = (card: Locator, target: Locator) => {
+      const { mouse } = mouseStub();
+      const page = pageOf({
+        mouse,
+        getByTestId: (id: string) => {
+          if (id === "kanban-card") return list([card]);
+          if (id === "kanban-column") return list([target]);
+          return list([]);
+        },
+      });
+      return new WebNewDriver(page).kanbanDragHoldOverColumn("Fix login", "Done");
+    };
+    await expect(attempt(flat, column({ x: 0, y: 0, width: 10, height: 10 }))).rejects.toThrow(/no box/);
+    await expect(attempt(boxed, column(null))).rejects.toThrow(/no box/);
+  });
+
+  function toastPage(entries: Array<{ title: string; message: string }>): Page {
+    return pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="toast-notification"]'
+          ? list(
+              entries.map((entry) =>
+                locator({
+                  getByTestId: (id: string) => {
+                    const text = locator({
+                      innerText: async () => (id === "toast-title" ? entry.title : entry.message),
+                    });
+                    return locator({ first: () => text });
+                  },
+                })
+              )
+            )
+          : locator({ count: async () => 0 }),
+    });
+  }
+
+  it("reads the newest toast and ignores an empty stack", async () => {
+    const page = toastPage([{ title: "Cannot move the work item", message: "Cards stay put." }]);
+    await expect(new WebNewDriver(page).boardLastToast()).resolves.toEqual({
+      title: "Cannot move the work item",
+      message: "Cards stay put.",
+    });
+    await expect(new WebNewDriver(toastPage([])).boardLastToast()).resolves.toBeNull();
+    await expect(new WebNewDriver(toastPage([{ title: " ", message: " " }])).boardLastToast()).resolves.toBeNull();
+  });
+
+  it("treats an unreadable toast as empty", async () => {
+    const unreadable = locator({
+      getByTestId: () => {
+        const text = locator({
+          innerText: async () => {
+            throw new Error("gone");
+          },
+        });
+        return locator({ first: () => text });
+      },
+    });
+    const page = pageOf({
+      locator: (selector: string) =>
+        selector === '[data-testid="toast-notification"]' ? list([unreadable]) : locator({ count: async () => 0 }),
+    });
+    await expect(new WebNewDriver(page).boardLastToast()).resolves.toBeNull();
+  });
+});
+
+describe("kanban column paging and scroll", () => {
+  it("scrolls a column to its end and reports its scroll", async () => {
+    const node = { scrollLeft: 0, scrollTop: 40, scrollHeight: 600 };
+    const column = locator({
+      getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Todo" : null),
+      getByTestId: (id: string) =>
+        id === "kanban-column-body"
+          ? locator({
+              evaluate: async (fn: (target: typeof node) => void) => void fn(node),
+            })
+          : locator({ count: async () => 0 }),
+    });
+    const page = pageOf({ getByTestId: (id: string) => (id === "kanban-column" ? list([column]) : list([])) });
+    const driver = new WebNewDriver(page);
+    await driver.kanbanColumnScrollEnd("Todo");
+    expect(node.scrollTop).toBe(600);
+    await driver.kanbanColumnLoadMore("Todo");
+    expect(node.scrollTop).toBe(600);
+  });
+
+  it("reports flat columns without an explicit entry", async () => {
+    await expect(new WebNewDriver(pageOf()).kanbanColumnHasLoadMore("Todo")).resolves.toBe(false);
+  });
+
+  it("reports a column's loading marker", async () => {
+    const column = (loading: boolean) =>
+      locator({
+        getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Todo" : null),
+        getByTestId: (id: string) =>
+          id === "kanban-column-loading"
+            ? locator({ count: async () => (loading ? 1 : 0), isVisible: async () => loading })
+            : locator({ count: async () => 0 }),
+      });
+    const page = (loading: boolean) =>
+      pageOf({ getByTestId: (id: string) => (id === "kanban-column" ? list([column(loading)]) : list([])) });
+    await expect(new WebNewDriver(page(true)).kanbanColumnLoading("Todo")).resolves.toBe(true);
+    await expect(new WebNewDriver(page(false)).kanbanColumnLoading("Todo")).resolves.toBe(false);
+  });
+
+  it("reads board and column scroll offsets", async () => {
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "kanban-board") return locator({ evaluate: async () => ({ x: 120, y: 0 }) });
+        if (id === "kanban-column") {
+          return list([
+            locator({
+              getAttribute: async (attribute: string) => (attribute === "data-column-name" ? "Todo" : null),
+              getByTestId: (child: string) =>
+                child === "kanban-column-body" ? locator({ evaluate: async () => ({ x: 0, y: 45 }) }) : locator(),
+            }),
+          ]);
+        }
+        return list([]);
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.kanbanBoardScroll()).resolves.toEqual({ x: 120, y: 0 });
+    await expect(driver.kanbanColumnScroll("Todo")).resolves.toEqual({ x: 0, y: 45 });
+  });
+});
+
+describe("kanban cells", () => {
+  function cellPage(
+    options: { loadMore?: boolean; names?: Array<string | null>; key?: string | null; missingCell?: boolean } = {}
+  ) {
+    const names = options.names ?? ["Fix login"];
+    const key = options.key === undefined ? "todo" : options.key;
+    const cell = locator({
+      getByTestId: (id: string) => {
+        if (id === "kanban-card") {
+          return list(names.map((name) => (name === null ? placeholderCard() : namedCard(name))));
+        }
+        if (id === "kanban-load-more") {
+          const shown = options.loadMore === true;
+          return locator({ count: async () => (shown ? 1 : 0), isVisible: async () => shown });
+        }
+        return locator({ count: async () => 0 });
+      },
+    });
+    const lane = locator({
+      getByTestId: (id: string) => {
+        if (id === "kanban-lane-name") return locator({ getAttribute: async () => "Bug" });
+        return locator({ count: async () => 0 });
+      },
+      locator: (selector: string) =>
+        !options.missingCell && selector === `[data-testid="kanban-cell"][data-column-key="${key}"]`
+          ? cell
+          : locator({ count: async () => 0 }),
+    });
+    return pageOf({
+      getByTestId: (id: string) => {
+        if (id === "kanban-lane") return list([lane]);
+        if (id === "kanban-group-header") return list([groupHeaderStub("Todo", key)]);
+        return list([]);
+      },
+    });
+  }
+
+  it("reads a cell's cards with placeholders as blanks", async () => {
+    const page = cellPage({ names: ["Fix login", null] });
+    await expect(new WebNewDriver(page).kanbanCellCards("Todo", "Bug")).resolves.toEqual(["Fix login", ""]);
+  });
+
+  it("reports and activates a cell's load-more entry", async () => {
+    const clicks: string[] = [];
+    const cell = locator({
+      getByTestId: (id: string) =>
+        id === "kanban-load-more"
+          ? locator({ isVisible: async () => true, click: async () => void clicks.push("more") })
+          : locator({ count: async () => 0 }),
+    });
+    const lane = locator({
+      getByTestId: (id: string) =>
+        id === "kanban-lane-name" ? locator({ getAttribute: async () => "Bug" }) : locator({ count: async () => 0 }),
+      locator: () => cell,
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "kanban-lane") return list([lane]);
+        if (id === "kanban-group-header") return list([groupHeaderStub("Todo", "todo")]);
+        return list([]);
+      },
+    });
+    const driver = new WebNewDriver(page);
+    await expect(driver.kanbanCellHasLoadMore("Todo", "Bug")).resolves.toBe(true);
+    await driver.kanbanCellLoadMore("Todo", "Bug");
+    expect(clicks).toEqual(["more"]);
+    await expect(new WebNewDriver(cellPage({})).kanbanCellHasLoadMore("Todo", "Bug")).resolves.toBe(false);
+  });
+
+  it("throws for unknown lanes, columns and missing cells", async () => {
+    const page = cellPage({});
+    const driver = new WebNewDriver(page);
+    await expect(driver.kanbanCellCards("Todo", "Nope")).rejects.toThrow(/no kanban swimlane/);
+    await expect(driver.kanbanCellCards("Nope", "Bug")).rejects.toThrow(/no kanban cell/);
+    const keyless = cellPage({ key: null });
+    await expect(new WebNewDriver(keyless).kanbanCellCards("Todo", "Bug")).rejects.toThrow(/no kanban cell/);
+    const missing = cellPage({ missingCell: true });
+    await expect(new WebNewDriver(missing).kanbanCellCards("Todo", "Bug")).rejects.toThrow(/no kanban cell/);
+  });
+
+  it("skips headers whose name will not read", async () => {
+    const lane = locator({
+      getByTestId: (id: string) =>
+        id === "kanban-lane-name" ? locator({ getAttribute: async () => "Bug" }) : locator({ count: async () => 0 }),
+      locator: () => locator({ getByTestId: () => list([]) }),
+    });
+    const unreadable = locator({
+      getByTestId: (id: string) =>
+        id === "kanban-group-name"
+          ? locator({
+              getAttribute: async () => null,
+              innerText: async () => {
+                throw new Error("gone");
+              },
+            })
+          : locator({ count: async () => 0 }),
+    });
+    const page = pageOf({
+      getByTestId: (id: string) => {
+        if (id === "kanban-lane") return list([lane]);
+        if (id === "kanban-group-header") return list([unreadable, groupHeaderStub("Todo", "todo")]);
+        return list([]);
+      },
+    });
+    await expect(new WebNewDriver(page).kanbanCellCards("Todo", "Bug")).resolves.toEqual([]);
   });
 });

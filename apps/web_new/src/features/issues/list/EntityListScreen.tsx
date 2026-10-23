@@ -1,11 +1,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// List layout host for cycle and module pages (parity/specs/issues.md §2,
-// ISS-007–014). The cycles and modules areas own those pages; the issues
-// slice only mounts the same layout root and list renderer the project
-// route uses, so grouping, creation and the inline strip behave the same
-// in every issues-bearing context.
+// Layout host for cycle and module pages (parity/specs/issues.md §2/§5,
+// ISS-007–014, ISS-036). The cycles and modules areas own those pages;
+// the issues slice only mounts the same layout root and renderers the
+// project route uses, so grouping, creation and the inline strip behave
+// the same in every issues-bearing context.
 
 import { useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import * as React from "react";
@@ -14,6 +14,7 @@ import { getAppClient } from "../../../core/api/client.js";
 import { projectsQueryOptions } from "../../projects/index.js";
 import { canEditInProject } from "../../../shared/shell/contextual/index.js";
 import { CalendarEntry } from "../calendar/CalendarEntry.js";
+import { resolvedKanbanLayout } from "../kanban/lazy.js";
 import { DisplayControl } from "../display/DisplayControl.js";
 import type { LayoutKind } from "../layouts/kinds.js";
 import { IssuesLayoutRoot } from "../layouts/IssuesLayoutRoot.js";
@@ -133,7 +134,7 @@ export function EntityListScreen({
     }) &&
     !resolvedCompletedCycle &&
     !resolvedCompletedModule;
-  const offered: readonly LayoutKind[] = ["list", "calendar"];
+  const offered: readonly LayoutKind[] = ["list", "kanban", "calendar"];
   const display = (
     <DisplayControl
       workspaceSlug={workspaceSlug}
@@ -179,21 +180,43 @@ export function EntityListScreen({
         totalCount={firstPage.total_count}
         resultCount={resultCount}
         offered={offered}
-        renderLayout={(layout, prefs) =>
-          layout === "calendar" ? (
-            <CalendarEntry
-              workspaceSlug={workspaceSlug}
-              projectId={projectId}
-              projectIdentifier={project.identifier}
-              entity={entity}
-              canEdit={canEdit}
-              canAddExisting
-              membership={{
-                ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
-                ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
-              }}
-            />
-          ) : (
+        renderLayout={(layout, prefs) => {
+          if (layout === "calendar") {
+            return (
+              <CalendarEntry
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                projectIdentifier={project.identifier}
+                entity={entity}
+                canEdit={canEdit}
+                canAddExisting
+                membership={{
+                  ...(entity.scope === "cycle" ? { cycleId: entity.cycleId } : {}),
+                  ...(entity.scope === "module" ? { moduleId: entity.moduleId } : {}),
+                }}
+              />
+            );
+          }
+          if (layout === "kanban") {
+            const ResolvedKanbanLayout = resolvedKanbanLayout();
+            return (
+              <ResolvedKanbanLayout
+                workspaceSlug={workspaceSlug}
+                entity={entity}
+                projectId={projectId}
+                projectIdentifier={project.identifier}
+                prefs={prefs}
+                canEdit={canEdit}
+                richFilters={richFilters}
+                cycleId={cycleId}
+                moduleId={moduleId}
+                completedCycle={resolvedCompletedCycle}
+                peekKey={peekKey}
+                onPeekChange={onPeekChange}
+              />
+            );
+          }
+          return (
             <ListLayout
               workspaceSlug={workspaceSlug}
               entity={entity}
@@ -211,8 +234,8 @@ export function EntityListScreen({
               compact={compact}
               onRegisterOverlays={setOverlays}
             />
-          )
-        }
+          );
+        }}
         emptyState={emptyCard(filteredNow, filters)}
         noMatchState={emptyCard(filteredNow, filters)}
         headerActions={display}
