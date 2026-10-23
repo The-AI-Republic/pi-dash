@@ -1,13 +1,15 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Analytics screen (parity/specs/analytics.md §§1, 3–7, 8,
-// ANL-001–008). Workspace shell: section breadcrumb,
+// Analytics screen (parity/specs/analytics.md §§1, 3–10,
+// ANL-001–011). Workspace shell: section breadcrumb,
 // workspace-naming title, pending state, no-project empty view,
 // and the toolbar (tab strip plus picker) over the selected tab's
 // panel. The overview panel pairs its headline grid with the radar
-// and active-projects sections; unknown segments keep the strip
-// and picker with no panel.
+// and active-projects sections; the work-items panel pairs its
+// grid with the created-vs-resolved and custom-insights sections
+// (NEWFRONT-733). Unknown segments keep the strip and picker with
+// no panel.
 
 import { useQuery } from "@tanstack/react-query";
 import { Breadcrumbs, Button, Skeleton } from "@pidash/kit";
@@ -23,6 +25,8 @@ import { ActiveProjectsSection } from "./ActiveProjectsSection.js";
 import { AnalyticsEmptyView } from "./AnalyticsEmptyView.js";
 import { AnalyticsPicker } from "./AnalyticsPicker.js";
 import { AnalyticsTabStrip } from "./AnalyticsTabStrip.js";
+import { CreatedResolvedSection } from "./CreatedResolvedSection.js";
+import { CustomInsightsSection } from "./CustomInsightsSection.js";
 import { HeadlineCards } from "./HeadlineCards.js";
 import { RadarSection } from "./RadarSection.js";
 
@@ -101,7 +105,12 @@ export function AnalyticsScreen({
                   <RadarSection workspaceSlug={workspaceSlug} projectIds={scope} projects={selectable} />
                   <ActiveProjectsSection workspaceSlug={workspaceSlug} projectIds={scope} projects={selectable} />
                 </div>
-              ) : null}
+              ) : (
+                <div className="grid gap-(--space-6)">
+                  <CreatedResolvedSection workspaceSlug={workspaceSlug} projectIds={scope} />
+                  <CustomInsightsSection workspaceSlug={workspaceSlug} projectIds={scope} />
+                </div>
+              )}
             </section>
           )}
         </>

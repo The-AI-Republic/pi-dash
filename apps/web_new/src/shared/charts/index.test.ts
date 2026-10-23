@@ -22,6 +22,7 @@ import {
   mapTooltipLabel,
   RadarChart,
   resolveChartScheme,
+  roundedEnds,
   singleBarRadius,
   stackedBarRadii,
   stackedSegmentRadius,
@@ -38,6 +39,7 @@ describe("charts barrel", () => {
     expect(typeof chartPalette).toBe("function");
     expect(typeof resolveChartScheme).toBe("function");
     expect(typeof singleBarRadius).toBe("function");
+    expect(typeof roundedEnds).toBe("function");
     expect(typeof stackedSegmentRadius).toBe("function");
     expect(typeof stackedBarRadii).toBe("function");
     expect(typeof mapRadarData).toBe("function");

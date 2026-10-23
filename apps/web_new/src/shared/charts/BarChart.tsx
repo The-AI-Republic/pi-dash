@@ -18,7 +18,7 @@ import { useResolvedScheme } from "../../core/theme/index.js";
 import { ChartTooltipContent } from "./ChartTooltip.js";
 import { resolveChartScheme } from "./colors.js";
 import type { BarShapeRenderProps, RechartsModule } from "./recharts.js";
-import { singleBarRadius, stackedSegmentRadius } from "./rounding.js";
+import { roundedEnds, singleBarRadius, stackedSegmentRadius } from "./rounding.js";
 import { barSegmentKey, mapBarData, mapBarPayloadValues, type BarInput } from "./series.js";
 
 /** One stacked segment: its tooltip name and concrete color. */
@@ -34,6 +34,14 @@ export interface BarChartProps {
   segments: readonly BarSegmentDef[];
   /** Stack the segments; single-series bars otherwise. */
   stacked?: boolean;
+  /**
+   * Per-bar fills in plotted order (NEWFRONT-733). Only read when
+   * `stacked` is off: each series renders one cell per bar, so
+   * single-series bars can each carry their own color. Entries past
+   * the bars are ignored; bars past the entries keep the series
+   * color.
+   */
+  fills?: readonly string[] | undefined;
   /** Plot height in pixels. */
   height?: number;
 }
@@ -48,13 +56,14 @@ interface BarPlotProps {
   bars: readonly BarInput[];
   segments: readonly BarSegmentDef[];
   stacked: boolean;
+  fills: readonly string[] | undefined;
   height: number;
   grid: string;
   tick: string;
 }
 
 function createBarPlot(charts: RechartsModule): React.ComponentType<BarPlotProps> {
-  const { Bar, BarChart: Plot, CartesianGrid, Rectangle, ResponsiveContainer, Tooltip, XAxis, YAxis } = charts;
+  const { Bar, BarChart: Plot, CartesianGrid, Cell, Rectangle, ResponsiveContainer, Tooltip, XAxis, YAxis } = charts;
 
   /** Custom segment shape: per-bar extreme rounding the stock bar cannot vary per datum. */
   function SegmentShape(
@@ -62,6 +71,8 @@ function createBarPlot(charts: RechartsModule): React.ComponentType<BarPlotProps
     segmentIndex: number,
     segmentCount: number
   ): React.ReactElement {
+    const radius = stackedSegmentRadius(mapBarPayloadValues(shapeProps.payload, segmentCount), segmentIndex);
+    const ends = roundedEnds(radius);
     return (
       <Rectangle
         x={shapeProps.x}
@@ -69,12 +80,14 @@ function createBarPlot(charts: RechartsModule): React.ComponentType<BarPlotProps
         width={shapeProps.width}
         height={shapeProps.height}
         fill={shapeProps.fill}
-        radius={stackedSegmentRadius(mapBarPayloadValues(shapeProps.payload, segmentCount), segmentIndex)}
+        radius={radius}
+        data-top-rounded={ends.top}
+        data-bottom-rounded={ends.bottom}
       />
     );
   }
 
-  function BarPlot({ bars, segments, stacked, height, grid, tick }: BarPlotProps): React.ReactElement {
+  function BarPlot({ bars, segments, stacked, fills, height, grid, tick }: BarPlotProps): React.ReactElement {
     return (
       <ResponsiveContainer width="100%" height={height}>
         <Plot data={mapBarData(bars, segments.length)}>
@@ -96,7 +109,13 @@ function createBarPlot(charts: RechartsModule): React.ComponentType<BarPlotProps
                 name={segment.name}
                 fill={segment.color}
                 {...rounding}
-              />
+              >
+                {!stacked && fills !== undefined
+                  ? bars.map((bar, barIndex) => (
+                      <Cell key={`${bar.label}-${barIndex}`} fill={fills[barIndex] ?? segment.color} />
+                    ))
+                  : null}
+              </Bar>
             );
           })}
         </Plot>
@@ -118,6 +137,7 @@ export function BarChart({
   bars,
   segments,
   stacked = false,
+  fills,
   height = DEFAULT_BAR_HEIGHT,
 }: BarChartProps): React.ReactElement {
   const { scheme, customDark } = useResolvedScheme();
@@ -129,6 +149,7 @@ export function BarChart({
           bars={bars}
           segments={segments}
           stacked={stacked}
+          fills={fills}
           height={height}
           grid={colors.grid}
           tick={colors.tick}

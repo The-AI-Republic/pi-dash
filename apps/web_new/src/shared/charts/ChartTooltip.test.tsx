@@ -26,6 +26,24 @@ describe("ChartTooltipContent", () => {
     expect(screen.getByText("3")).toBeInTheDocument();
   });
 
+  it("tags rows for the parity driver (NEWFRONT-733)", () => {
+    render(
+      <ChartTooltipContent
+        label="Urgent"
+        payload={[
+          { name: "Backlog", value: 1 },
+          { name: "Done", value: 1 },
+        ]}
+      />
+    );
+    expect(screen.getByTestId("chart-tooltip-label")).toHaveTextContent("Urgent");
+    const rows = screen.getAllByTestId("chart-tooltip-row");
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]!).getByTestId("chart-tooltip-name")).toHaveTextContent("Backlog");
+    expect(within(rows[0]!).getByTestId("chart-tooltip-value")).toHaveTextContent("1");
+    expect(within(rows[1]!).getByTestId("chart-tooltip-name")).toHaveTextContent("Done");
+  });
+
   it("renders nothing without hovered entries", () => {
     const { container: missing } = render(<ChartTooltipContent label="Work Items" />);
     expect(missing).toBeEmptyDOMElement();
