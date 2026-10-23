@@ -709,10 +709,14 @@ async fn ensure_public_member(
         .await
         .map_err(|_| HandlerError::ServerError)?;
     if existing.is_none() {
+        // `created_by` is the request user (`member_id` at every call
+        // site); `updated_by` stays NULL on create (`BaseModel.save`,
+        // `db/models/base.py:23-43`).
         sqlx::query(pidash_jobs::space::PUBLIC_MEMBER_INSERT_SQL)
             .bind(uuid::Uuid::new_v4())
             .bind(project_id)
             .bind(workspace_id)
+            .bind(member_id)
             .bind(member_id)
             .execute(pool)
             .await
