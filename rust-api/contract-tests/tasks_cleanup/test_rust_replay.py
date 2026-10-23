@@ -73,6 +73,7 @@ from _harness import rust_queue, taskspec as _taskspec
 from _harness import s3 as s3_helpers
 from _harness import seed as seed_helpers
 from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
+from _harness.soft_delete_entries import ENTRY_CASES, seed_draft_tree
 
 M = "pi_dash.bgtasks"
 
@@ -2118,3 +2119,74 @@ def test_rust_metadata_task_stores_head_dict(db_conn, broker_url):
     assert meta["ContentType"] == "application/octet-stream"
     assert meta["ETag"], "missing ETag"
     assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]
+
+
+def _assert_rust_soft_delete_acked(conn, celery_id: str, model_name: str) -> None:
+    """Terminal-state poll: the row is gone (ack) or parked failed.
+
+    A `Verdict::Fail` (e.g. the pre-fix `UnknownModel`) parks
+    immediately, so this fails fast with the worker's error text instead
+    of timing out on the missing stamp.
+    """
+
+    def terminal():
+        if not rust_queue.row_present(celery_id):
+            return "acked"
+        failure = _queue_failure(conn, celery_id)
+        return f"failed: {failure}" if failure else None
+
+    outcome = wait_for(
+        terminal, what=f"soft-delete of {model_name} settled by rust worker"
+    )
+    assert outcome == "acked", f"rust worker did not ack {model_name}: {outcome}"
+
+
+def test_rust_soft_delete_draftissue_cascades(db_conn, broker_url):
+    """PIDASHCONV-1293: the Rust worker resolves ("db", "draftissue") and
+    stamps the CASCADE children plus the draft itself, exactly like the
+    Django oracle. Pre-fix this job parked as UnknownModel and every
+    child row stayed live.
+    """
+    tag = uuid.uuid4().hex[:8]
+    pk, extra = seed_draft_tree(db_conn, tag)
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "draftissue", str(pk)],
+        kwargs={"using": None},
+    )
+    _assert_rust_soft_delete_acked(db_conn, celery_id, "draftissue")
+    assert _soft_deleted(db_conn, "draft_issues", pk), "draft row not stamped"
+    for table, child_id in extra["children"]:
+        assert _soft_deleted(db_conn, table, child_id), (
+            f"cascade parity broken: live {table} row under a stamped draft"
+        )
+
+
+@pytest.mark.parametrize(
+    "model_name,table,seeder", ENTRY_CASES, ids=[case[0] for case in ENTRY_CASES]
+)
+def test_rust_soft_delete_entry_models_ack(
+    db_conn, broker_url, model_name, table, seeder
+):
+    """PIDASHCONV-1293: every model name the Rust API enqueues resolves —
+    the job acks and stamps the row instead of parking as UnknownModel.
+    The draft case re-pins the CASCADE children; the schedulerbinding
+    case pins the `agent_run.scheduler_binding_id` SET_NULL.
+    """
+    tag = uuid.uuid4().hex[:8]
+    pk, extra = seeder(db_conn, tag)
+    celery_id = rust_queue.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", model_name, str(pk)],
+        kwargs={"using": None},
+    )
+    _assert_rust_soft_delete_acked(db_conn, celery_id, model_name)
+    assert _soft_deleted(db_conn, table, pk), f"{table} row not stamped"
+    for child_table, child_id in extra.get("children", []):
+        assert _soft_deleted(db_conn, child_table, child_id), (
+            f"cascade parity broken: live {child_table} row under stamped {model_name}"
+        )
+    if "agent_run_id" in extra:
+        assert _column_is_null(
+            db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
+        ), "SET_NULL parity broken: agent_run still points at the stamped binding"

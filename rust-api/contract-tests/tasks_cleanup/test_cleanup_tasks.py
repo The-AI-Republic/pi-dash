@@ -23,6 +23,7 @@ from _harness import broker_probe, celery_wire, taskspec
 from _harness import s3 as s3_helpers
 from _harness import seed as seed_helpers
 from _harness.db import insert_row, snapshot, wait_for_condition as wait_for
+from _harness.soft_delete_entries import ENTRY_CASES, seed_draft_tree
 
 M = "pi_dash.bgtasks"
 
@@ -1473,3 +1474,61 @@ def test_metadata_task_stores_head_dict(db_conn, broker_url):
     assert meta["ContentType"] == "application/octet-stream"
     assert meta["ETag"], "missing ETag"
     assert meta["LastModified"].endswith("+00:00"), meta["LastModified"]
+
+
+def test_soft_delete_draftissue_cascades(db_conn, broker_url):
+    """PIDASHCONV-1293 oracle: ("db", "draftissue") resolves and the walk
+    stamps the CASCADE children — assignees, labels, modules, cycles
+    (``db/models/draft.py``) plus the ``file_assets.draft_issue_id`` row
+    (``db/models/asset.py``) — and the draft itself. The Rust replay pins
+    the identical walk; pre-fix the Rust worker failed it as UnknownModel
+    with nothing stamped.
+    """
+    tag = uuid.uuid4().hex[:8]
+    pk, extra = seed_draft_tree(db_conn, tag)
+    celery_wire.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", "draftissue", str(pk)],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, "draft_issues", pk),
+        what="draft_issues row stamped by django worker",
+    )
+    for table, child_id in extra["children"]:
+        assert _soft_deleted(db_conn, table, child_id), (
+            f"cascade broken: live {table} row under a stamped draft"
+        )
+
+
+@pytest.mark.parametrize(
+    "model_name,table,seeder", ENTRY_CASES, ids=[case[0] for case in ENTRY_CASES]
+)
+def test_soft_delete_entry_models_ack(
+    db_conn, broker_url, model_name, table, seeder
+):
+    """PIDASHCONV-1293 oracle: every model name the Rust API enqueues
+    resolves on Django — the job acks (the self-stamp is the task's last
+    write, so a LookupError would leave it NULL) instead of failing. The
+    draft case re-pins the CASCADE children; the schedulerbinding case
+    pins the ``agent_run.scheduler_binding_id`` SET_NULL.
+    """
+    tag = uuid.uuid4().hex[:8]
+    pk, extra = seeder(db_conn, tag)
+    celery_wire.publish(
+        f"{M}.deletion_task.soft_delete_related_objects",
+        args=["db", model_name, str(pk)],
+        kwargs={"using": None},
+    )
+    wait_for(
+        lambda: _soft_deleted(db_conn, table, pk),
+        what=f"{table} row stamped by django worker",
+    )
+    for child_table, child_id in extra.get("children", []):
+        assert _soft_deleted(db_conn, child_table, child_id), (
+            f"cascade broken: live {child_table} row under stamped {model_name}"
+        )
+    if "agent_run_id" in extra:
+        assert _column_is_null(
+            db_conn, "agent_run", extra["agent_run_id"], "scheduler_binding_id"
+        ), "SET_NULL broken: agent_run still points at the stamped binding"
