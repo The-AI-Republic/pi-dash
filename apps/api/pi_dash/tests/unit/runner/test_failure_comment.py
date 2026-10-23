@@ -614,3 +614,69 @@ def test_backfill_migration_classifies_existing_failed_rows(
     assert auth_run.failure_reason == "agent_error.provider_auth_or_access"
     assert stall_run.failure_reason == "timeout"
     assert ok_run.failure_reason == ""
+
+
+@pytest.mark.unit
+def test_clock_stop_notifies_issue_creator_and_runner_owner(
+    db, create_user, workspace, pod, issue
+):
+    """A needs-human failure raises an in-app notification to the people
+    who can act. Creator and runner owner are the same user here, so the
+    fan-out dedupes to one row."""
+    from pi_dash.db.models.notification import Notification
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="401 authentication_failed: invalid authentication credentials",
+        runner_failure_reason="agent_crash",
+    )
+
+    notifications = list(Notification.objects.filter(entity_identifier=issue.id))
+    assert len(notifications) == 1
+    note = notifications[0]
+    assert note.receiver_id == create_user.id
+    assert note.sender == "in_app:agent_runs:clock_stopped"
+    assert note.data["agent_run"]["failure_reason"] == "agent_error.provider_auth_or_access"
+    assert "paused" in note.message_html
+
+
+@pytest.mark.unit
+def test_normal_clock_failure_does_not_notify(db, create_user, workspace, pod, issue):
+    from pi_dash.db.models.notification import Notification
+
+    runner = _make_runner(create_user, workspace, pod)
+    run = _make_run(create_user, workspace, pod, runner, issue)
+    finalize_run_terminal(
+        runner,
+        run.id,
+        AgentRunStatus.FAILED,
+        error_detail="codex exited with status 101",
+        runner_failure_reason="agent_crash",
+    )
+    assert Notification.objects.filter(entity_identifier=issue.id).count() == 0
+
+
+@pytest.mark.unit
+def test_metrics_reports_failed_runs_by_reason(db, create_user, workspace, pod, issue):
+    from rest_framework.test import APIRequestFactory
+
+    from pi_dash.runner.views.metrics import MetricsEndpoint
+
+    runner = _make_runner(create_user, workspace, pod)
+    for reason in (
+        "agent_error.provider_auth_or_access",
+        "agent_error.provider_auth_or_access",
+        "timeout",
+    ):
+        run = _make_run(create_user, workspace, pod, runner, issue, status=AgentRunStatus.FAILED)
+        AgentRun.objects.filter(pk=run.pk).update(failure_reason=reason)
+
+    response = MetricsEndpoint.as_view()(APIRequestFactory().get("/api/v1/runner/metrics/"))
+    body = response.content.decode()
+    assert 'pi_dash_runs_failed_by_reason{reason="agent_error.provider_auth_or_access"} 2' in body
+    assert 'pi_dash_runs_failed_by_reason{reason="timeout"} 1' in body

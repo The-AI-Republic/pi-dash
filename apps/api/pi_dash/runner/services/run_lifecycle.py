@@ -438,6 +438,74 @@ def _post_failure_comment(run_id: UUID | str, error_detail: str) -> None:
         speaker_agent_run_id=run.id,
     )
 
+    if clock_stopped:
+        # A stopped clock with nobody told is exactly the failure mode the
+        # taxonomy exists to prevent — raise an in-app notification to the
+        # people who can act: the issue's creator and the runner's owner.
+        # Behind the one-comment-per-run dedupe above, so repeated terminal
+        # hooks cannot fan out duplicates.
+        try:
+            _notify_clock_stopped(run, label=label, action=action)
+        except Exception:
+            logger.exception("run_lifecycle: clock-stop notification failed for run %s", run.id)
+
+
+def _notify_clock_stopped(run: AgentRun, *, label: str, action: str) -> None:
+    from pi_dash.db.models.notification import Notification
+
+    issue = run.work_item
+    receivers = []
+    seen: set = set()
+    runner_owner = run.runner.owner if run.runner_id and run.runner else None
+    for candidate in (issue.created_by, runner_owner):
+        candidate_id = getattr(candidate, "id", None)
+        if candidate_id is None or candidate_id in seen:
+            continue
+        if not getattr(candidate, "is_active", False) or getattr(candidate, "is_bot", False):
+            continue
+        seen.add(candidate_id)
+        receivers.append(candidate)
+    if not receivers:
+        return
+
+    from django.utils.html import format_html
+
+    message_html = format_html(
+        "<p>Automatic agent runs on <strong>{}</strong> are paused: {}. {}</p>",
+        issue.name,
+        label or "the last run failed",
+        action or "Fix the cause, then press Re-tick to resume.",
+    )
+    Notification.objects.bulk_create(
+        [
+            Notification(
+                workspace=issue.workspace,
+                project=issue.project,
+                receiver=receiver,
+                triggered_by=None,
+                sender="in_app:agent_runs:clock_stopped",
+                entity_identifier=issue.id,
+                entity_name="issue",
+                title=issue.name,
+                message_html=message_html,
+                data={
+                    "issue": {
+                        "id": str(issue.id),
+                        "name": issue.name,
+                        "identifier": str(issue.project.identifier) if issue.project_id else "",
+                        "sequence_id": issue.sequence_id,
+                    },
+                    "agent_run": {
+                        "id": str(run.id),
+                        "failure_reason": run.failure_reason,
+                        "action": action,
+                    },
+                },
+            )
+            for receiver in receivers
+        ]
+    )
+
 
 def finalize_run_terminal(
     runner: Runner,
