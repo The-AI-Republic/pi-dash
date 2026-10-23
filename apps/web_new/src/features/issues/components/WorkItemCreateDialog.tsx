@@ -231,7 +231,6 @@ export interface WorkItemCreateDialogProps {
 export interface CopySeed {
   title: string;
   snapshot: unknown;
->>>>>>> beabd9667 (NEWFRONT-636 Issues slice: row + layout quick actions (ISS-060-067))
 }
 
 /** The draft payload a copy or a blank draft entry opens with. */
