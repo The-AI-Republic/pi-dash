@@ -17319,7 +17319,9 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesSetSort");
   }
   async modulesSortLabel(): Promise<string> {
-    return todo("modulesSortLabel");
+    const label = this.modulesSortTriggerLabelLocator();
+    if ((await label.count()) === 0) return "";
+    return ((await label.innerText({ timeout: WebNewDriver.WAIT_MS })) ?? "").trim();
   }
   async modulesRowDateText(_name: string): Promise<string> {
     return todo("modulesRowDateText");
@@ -19884,111 +19886,175 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async modulesSearchVisible(): Promise<boolean> {
-    return todo("modulesSearchVisible");
+    return this.isShown(this.modulesSearchField());
   }
 
   async modulesOpenSearch(): Promise<void> {
-    return todo("modulesOpenSearch");
+    if (await this.modulesSearchVisible()) return;
+    await this.modulesSearchTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    await this.modulesSearchField().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesTypeSearch(_text: string): Promise<void> {
-    return todo("modulesTypeSearch");
+  async modulesTypeSearch(text: string): Promise<void> {
+    await this.modulesSearchInput().fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesSearchText(): Promise<string> {
-    return todo("modulesSearchText");
+    const input = this.modulesSearchInput();
+    if ((await input.count()) === 0) return "";
+    return input.inputValue({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesSearchFocused(): Promise<boolean> {
-    return todo("modulesSearchFocused");
+    if (!(await this.modulesSearchVisible())) return false;
+    return this.modulesSearchInput().evaluate((element) => element === document.activeElement);
   }
 
   async modulesEscapeSearch(): Promise<void> {
-    return todo("modulesEscapeSearch");
+    await this.modulesSearchInput().press("Escape", { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesClickOutsideSearch(): Promise<void> {
-    return todo("modulesClickOutsideSearch");
+    // The trailing Modules crumb sits outside the search box, so clicking it
+    // trips the outside-press detector while staying on the list.
+    await this.page
+      .getByRole("navigation", { name: "Breadcrumb" })
+      .last()
+      .locator("li")
+      .last()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesSortTriggerLabel(): Promise<string> {
-    return todo("modulesSortTriggerLabel");
+    return this.modulesSortLabel();
   }
 
-  async modulesSetSortViaMenu(_label: string): Promise<void> {
-    return todo("modulesSetSortViaMenu");
+  async modulesSetSortViaMenu(label: string): Promise<void> {
+    await this.modulesSortTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const item = this.page.getByRole("menuitem", { name: label, exact: true }).first();
+    await item.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await item.click({ timeout: WebNewDriver.WAIT_MS });
+    await item.waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS }).catch(() => undefined);
   }
 
   async modulesSortMenuItems(): Promise<string[]> {
-    return todo("modulesSortMenuItems");
+    await this.modulesSortTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    const items = this.page.locator('[role="menuitem"]:visible');
+    await items.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await items.allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts.map((text) => text.replace(/\s+/g, " ").trim()).filter((text) => text !== "");
   }
 
   async modulesOpenFilters(): Promise<void> {
-    return todo("modulesOpenFilters");
+    if (!(await this.isShown(this.modulesFilterPanel()))) {
+      await this.modulesFilterTrigger().click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    await this.modulesFilterPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesCloseFilters(): Promise<void> {
-    return todo("modulesCloseFilters");
+    await this.page.keyboard.press("Escape");
+    await this.modulesFilterPanel()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
   }
 
   async modulesFilterGroups(): Promise<string[]> {
-    return todo("modulesFilterGroups");
+    const groups = this.modulesFilterPanel().locator("[data-filter-group]");
+    if ((await groups.count()) === 0) return [];
+    const titles = await groups.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-filter-group") ?? "").filter((title) => title !== "")
+    );
+    return titles;
   }
 
-  async modulesFilterGroupOptions(_group: string): Promise<string[]> {
-    return todo("modulesFilterGroupOptions");
+  async modulesFilterGroupOptions(group: string): Promise<string[]> {
+    const options = this.modulesFilterGroup(group).locator('[role="checkbox"]');
+    if ((await options.count()) === 0) return [];
+    const labels = await options.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("aria-label") ?? (node.textContent ?? "").trim())
+    );
+    return labels.filter((label) => label !== "");
   }
 
-  async modulesToggleFilterOption(_group: string, _label: string): Promise<void> {
-    return todo("modulesToggleFilterOption");
+  async modulesToggleFilterOption(group: string, label: string): Promise<void> {
+    if (group === "Favorites") {
+      await this.modulesFilterPanel()
+        .getByTestId("modules-filter-favorites")
+        .getByRole("checkbox")
+        .click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.modulesFilterGroup(group)
+      .getByRole("checkbox", { name: label, exact: true })
+      .first()
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesExpandFilterGroup(_group: string): Promise<void> {
-    return todo("modulesExpandFilterGroup");
+  async modulesExpandFilterGroup(group: string): Promise<void> {
+    await this.modulesFilterGroup(group)
+      .getByRole("button", { name: "View all", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesFilterGroupExpandable(_group: string): Promise<boolean> {
-    return todo("modulesFilterGroupExpandable");
+  async modulesFilterGroupExpandable(group: string): Promise<boolean> {
+    return (await this.modulesFilterGroup(group).getByRole("button", { name: "View all", exact: true }).count()) > 0;
   }
 
-  async modulesMenuSearch(_text: string): Promise<void> {
-    return todo("modulesMenuSearch");
+  async modulesMenuSearch(text: string): Promise<void> {
+    await this.modulesFilterPanel()
+      .getByRole("textbox", { name: "Search filters", exact: true })
+      .fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesFiltersActive(): Promise<boolean> {
-    return todo("modulesFiltersActive");
+    // The marker is decorative, so its presence is the signal.
+    return (await this.page.getByTestId("modules-filter-active").count()) > 0;
   }
 
-  async modulesOpenCustomDate(_group: "Start date" | "Due date"): Promise<void> {
-    return todo("modulesOpenCustomDate");
+  async modulesOpenCustomDate(group: "Start date" | "Due date"): Promise<void> {
+    await this.modulesFilterGroup(group)
+      .getByRole("checkbox", { name: "Custom", exact: true })
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesCustomDateOpen(): Promise<boolean> {
-    return todo("modulesCustomDateOpen");
+    return this.isShown(this.page.getByTestId("modules-custom-date").last());
   }
 
   async modulesApplyCustomDate(): Promise<void> {
-    return todo("modulesApplyCustomDate");
+    await this.page.getByTestId("modules-custom-apply").last().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesChips(): Promise<ModulesChip[]> {
-    return todo("modulesChips");
+    const strip = this.modulesChipStrip();
+    if ((await strip.count()) === 0) return [];
+    return strip.evaluate((root) =>
+      [...root.querySelectorAll('[data-testid="modules-filter-chip"]')].map((chip) => ({
+        key: chip.getAttribute("data-chip-key") ?? "",
+        text: (chip.textContent ?? "").replace(/\s+/g, " ").trim(),
+      }))
+    );
   }
 
-  async modulesRemoveChipValue(_key: string, _value: string): Promise<void> {
-    return todo("modulesRemoveChipValue");
+  async modulesRemoveChipValue(key: string, value: string): Promise<void> {
+    await this.modulesChip(key)
+      .locator(`[data-chip-value="${value}"]`)
+      .getByRole("button")
+      .click({ timeout: WebNewDriver.WAIT_MS });
   }
 
-  async modulesRemoveChipDimension(_key: string): Promise<void> {
-    return todo("modulesRemoveChipDimension");
+  async modulesRemoveChipDimension(key: string): Promise<void> {
+    await this.modulesChip(key).getByTestId("modules-filter-chip-clear").click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesClearFilters(): Promise<void> {
-    return todo("modulesClearFilters");
+    await this.page.getByTestId("modules-filter-clear-all").first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesChipsVisible(): Promise<boolean> {
-    return todo("modulesChipsVisible");
+    return (await this.modulesChipStrip().count()) > 0;
   }
 
   async modulesGateFacts(): Promise<ModulesGateFacts> {
@@ -20538,6 +20604,63 @@ export class WebNewDriver implements ParityDriver {
     return this.page.getByTestId("modules-feature-gate").last();
   }
 
+  /** The header control cluster of the modules list. */
+  private modulesHeader(): Locator {
+    return this.page.getByTestId("modules-list-header").last();
+  }
+
+  /** The expanded search box (absent while the icon-only trigger shows). */
+  private modulesSearchField(): Locator {
+    return this.modulesHeader().getByTestId("modules-search-field").first();
+  }
+
+  /** The icon-only control that opens the search. */
+  private modulesSearchTrigger(): Locator {
+    return this.modulesHeader().getByRole("button", { name: "Search modules", exact: true }).first();
+  }
+
+  private modulesSearchInput(): Locator {
+    return this.modulesHeader().getByRole("textbox", { name: "Search modules by name", exact: true }).first();
+  }
+
+  /** The ordering menu's trigger; its label names the active key. */
+  private modulesSortTrigger(): Locator {
+    return this.modulesHeader().getByTestId("modules-sort-trigger").first();
+  }
+
+  private modulesSortTriggerLabelLocator(): Locator {
+    return this.modulesHeader().getByTestId("modules-sort-label").first();
+  }
+
+  private modulesFilterTrigger(): Locator {
+    return this.modulesHeader().getByTestId("modules-filter-trigger").first();
+  }
+
+  /** The open filters popover; the popover portal keeps it outside the header. */
+  private modulesFilterPanel(): Locator {
+    return this.page.getByTestId("modules-filter-panel").last();
+  }
+
+  /** One filter group by its stable title. */
+  private modulesFilterGroup(title: string): Locator {
+    return this.modulesFilterPanel().locator(`[data-filter-group="${title}"]`).first();
+  }
+
+  /** The applied-filter strip; absent entirely while nothing is applied. */
+  private modulesChipStrip(): Locator {
+    return this.page.getByTestId("modules-filter-chips").last();
+  }
+
+  /** One dimension chip by its rendered key. */
+  private modulesChip(key: string): Locator {
+    return this.modulesChipStrip().locator(`[data-chip-key="${key}"]`).first();
+  }
+
+  /** The no-match container that replaces the rows when narrowing hides all. */
+  private modulesNoMatch(): Locator {
+    return this.page.getByTestId("modules-no-match").last();
+  }
+
   /**
    * The wide layout switcher. The compact menu is a different control, so
    * a small screen reads this as absent (MOD-011).
@@ -20637,19 +20760,24 @@ export class WebNewDriver implements ParityDriver {
       (await this.modulesListBoardCardNames()).length +
       (await this.modulesListTimelineNames()).length;
     if (rendered > 0) return "rows";
-    // The zero and no-match containers belong to slices F (MOD-009) and
-    // B (MOD-010); this slice settles an empty project as rows.
+    // Slice B (MOD-010) proves the narrowed-to-nothing state; the zero
+    // state (MOD-009) is slice F and still settles as an empty row set.
+    if (await this.isShown(this.modulesNoMatch())) return "nomatch";
     return "rows";
   }
 
   async modulesListNoMatchHeading(): Promise<string | null> {
-    // Slice B (NEWFRONT-794) owns the no-match container.
-    return null;
+    if (!(await this.isShown(this.modulesNoMatch()))) return null;
+    const heading = this.modulesNoMatch().getByTestId("modules-no-match-heading");
+    if ((await heading.count()) === 0) return null;
+    return (await heading.innerText()).trim();
   }
 
   async modulesListNoMatchHint(): Promise<string | null> {
-    // Slice B (NEWFRONT-794) owns the no-match container.
-    return null;
+    if (!(await this.isShown(this.modulesNoMatch()))) return null;
+    const hint = this.modulesNoMatch().getByTestId("modules-no-match-hint");
+    if ((await hint.count()) === 0) return null;
+    return (await hint.innerText()).trim();
   }
 
   async modulesListSkeletonVisible(): Promise<boolean> {
@@ -20749,12 +20877,20 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesListCreateDialogVisible");
   }
 
-  async modulesListNoMatchShowViaSearch(_text: string): Promise<void> {
-    return todo("modulesListNoMatchShowViaSearch");
+  async modulesListNoMatchShowViaSearch(text: string): Promise<void> {
+    await this.modulesOpenSearch();
+    await this.modulesTypeSearch(text);
+    await this.modulesNoMatch().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesListNoMatchClearSearch(): Promise<void> {
-    return todo("modulesListNoMatchClearSearch");
+    const input = this.modulesSearchInput();
+    if ((await input.count()) === 0) return;
+    await input.fill("", { timeout: WebNewDriver.WAIT_MS });
+    await this.page
+      .locator('[data-testid="modules-list"], [data-testid="modules-zero-state"]')
+      .last()
+      .waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
 
   async modulesListLayoutOptionCount(): Promise<number> {

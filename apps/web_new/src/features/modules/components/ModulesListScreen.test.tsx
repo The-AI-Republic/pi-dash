@@ -7,7 +7,10 @@
 // no list read at all — the layout-matched skeleton while the project or
 // the list loads, and the content slot once both settle. The layout choice
 // is the viewer's per-project record, restored on mount and followed by the
-// skeleton and the body.
+// skeleton and the body. Slice B adds the header controls: the search,
+// ordering and filters write the same per-project display record, the chip
+// strip follows the applied filters, and the narrowed body (or the no-match
+// container) reads the context those controls provide.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -34,6 +37,7 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { readProjectLayout, writeProjectLayout } from "../lib/listLayoutStore.js";
+import { readProjectDisplay, resetModuleDisplayCache } from "../lib/moduleListDisplayStore.js";
 import { jsonResponse, makeModuleRow, makeProjectRow, MODULES_MODULE_ID, MODULES_PROJECT_ID } from "../testing.js";
 import { ModulesListScreen } from "./ModulesListScreen.js";
 
@@ -44,9 +48,83 @@ interface Harness {
   roles: Record<string, number>;
   modulesDelayMs: number;
   modulesStatus: number;
+  meStatus: number;
   modulesCalls: number;
   modules: ReturnType<typeof makeModuleRow>[];
 }
+
+const ME_ID = "423e4567-e89b-12d3-a456-426614174003";
+const TEAMMATE_ID = "623e4567-e89b-12d3-a456-426614174005";
+
+function directoryMember(id: string, display: string, membershipId: string) {
+  return {
+    id: membershipId,
+    role: 15,
+    member: {
+      id,
+      first_name: display,
+      last_name: "",
+      avatar: "",
+      avatar_url: null,
+      display_name: display,
+      is_bot: false,
+    },
+  };
+}
+
+const ME = {
+  id: ME_ID,
+  email: "rich@test.dev",
+  username: "rich",
+  first_name: "Rich",
+  last_name: "Owner",
+  display_name: "Rich Owner",
+  avatar: "",
+  avatar_url: null,
+  cover_image: null,
+  cover_image_url: null,
+  date_joined: "2026-01-02T03:04:05Z",
+  user_timezone: "UTC",
+  is_active: true,
+  is_bot: false,
+  is_email_verified: true,
+  is_password_autoset: false,
+  last_login_medium: "password",
+  last_login_time: null,
+};
+
+const PROFILE = {
+  id: "523e4567-e89b-12d3-a456-426614174004",
+  user: ME_ID,
+  theme: {},
+  is_app_rail_docked: false,
+  is_tour_completed: false,
+  onboarding_step: {},
+  use_case: null,
+  role: null,
+  is_onboarded: true,
+  last_workspace_id: null,
+  billing_address_country: "",
+  billing_address: null,
+  has_billing_address: false,
+  company_name: "",
+  notification_view_mode: "all",
+  is_smooth_cursor_enabled: false,
+  is_mobile_onboarded: false,
+  mobile_onboarding_step: {},
+  mobile_timezone_auto_set: true,
+  language: "en",
+  start_of_the_week: 0,
+  goals: {},
+  background_color: "",
+  is_navigation_tour_completed: false,
+  has_marketing_email_consent: false,
+  is_subscribed_to_changelog: false,
+  product_tour: {},
+  settings: {},
+  created_at: "2026-01-02T03:04:05Z",
+  updated_at: "2026-02-03T04:05:06Z",
+};
 
 let harness: Harness;
 
@@ -54,6 +132,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 beforeEach(() => {
   hostReset();
+  resetModuleDisplayCache();
   globalThis.localStorage.clear();
   routerHarness.navigate.mockReset();
   viewportHarness.narrow = false;
@@ -64,6 +143,7 @@ beforeEach(() => {
     roles: { [MODULES_PROJECT_ID]: 20 },
     modulesDelayMs: 0,
     modulesStatus: 200,
+    meStatus: 200,
     modulesCalls: 0,
     modules: [makeModuleRow()],
   };
@@ -74,6 +154,14 @@ beforeEach(() => {
       return jsonResponse(url, harness.projectStatus, harness.project);
     }
     if (url.endsWith("/project-roles/")) return jsonResponse(url, 200, harness.roles);
+    if (url.endsWith("/api/workspaces/acme/members/")) {
+      return jsonResponse(url, 200, [
+        directoryMember(ME_ID, "Rich Owner", "123e4567-e89b-12d3-a456-426614174101"),
+        directoryMember(TEAMMATE_ID, "Pat Member", "123e4567-e89b-12d3-a456-426614174102"),
+      ]);
+    }
+    if (url.endsWith("/api/users/me/")) return jsonResponse(url, harness.meStatus, ME);
+    if (url.endsWith("/api/users/me/profile/")) return jsonResponse(url, 200, PROFILE);
     if (url.endsWith(`/api/workspaces/acme/projects/${MODULES_PROJECT_ID}/modules/`)) {
       harness.modulesCalls += 1;
       if (harness.modulesDelayMs > 0) await sleep(harness.modulesDelayMs);
@@ -90,6 +178,7 @@ function hostReset(): void {
 
 afterEach(() => {
   resetAppClient();
+  resetModuleDisplayCache();
   document.title = "";
 });
 
@@ -237,5 +326,105 @@ describe("ModulesListScreen", () => {
     renderScreen();
     await waitFor(() => expect(document.title).toBe("Modules"));
     await waitFor(() => expect(document.title).toBe("Website relaunch - Modules"));
+  });
+
+  it("narrows the rows through the header search and restores them when cleared", async () => {
+    harness.modules = [
+      makeModuleRow({ name: "Alpha" }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174009", name: "Bravo" }),
+    ];
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByRole("button", { name: "Search modules" }));
+    const field = screen.getByRole("textbox", { name: "Search modules by name" });
+    fireEvent.change(field, { target: { value: "alph" } });
+    await waitFor(() =>
+      expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Alpha"])
+    );
+    expect(readProjectDisplay(MODULES_PROJECT_ID).query).toBe("alph");
+    fireEvent.keyDown(field, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Alpha", "Bravo"])
+    );
+  });
+
+  it("shows the no-match container when the search hides every row", async () => {
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByRole("button", { name: "Search modules" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search modules by name" }), { target: { value: "zzz" } });
+    expect(await screen.findByTestId("modules-no-match")).toBeInTheDocument();
+    expect(screen.queryByTestId("modules-list")).not.toBeInTheDocument();
+    expect(screen.getByTestId("modules-list-header")).toBeInTheDocument();
+  });
+
+  it("writes the chosen ordering to the display record", async () => {
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    expect(screen.getByTestId("modules-sort-label")).toHaveTextContent("Name");
+    fireEvent.click(screen.getByTestId("modules-sort-trigger"));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Created date" }));
+    await waitFor(() => expect(readProjectDisplay(MODULES_PROJECT_ID).sort.key).toBe("created-date"));
+    expect(screen.getByTestId("modules-sort-label")).toHaveTextContent("Created date");
+  });
+
+  it("raises the chip strip with the applied filters and clears it through clear-all", async () => {
+    harness.modules = [
+      makeModuleRow({ name: "Done", status: "completed" }),
+      makeModuleRow({ id: "323e4567-e89b-12d3-a456-426614174010", name: "Open", status: "planned" }),
+    ];
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    expect(screen.queryByTestId("modules-filter-chips")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Completed" }));
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Done"])
+    );
+    expect(screen.getByTestId("modules-filter-active")).toBeInTheDocument();
+    expect(screen.getAllByTestId("modules-filter-chip").map((node) => node.getAttribute("data-chip-key"))).toEqual([
+      "status",
+    ]);
+    fireEvent.click(screen.getByTestId("modules-filter-clear-all"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("modules-row-name").map((node) => node.textContent)).toEqual(["Done", "Open"])
+    );
+    expect(screen.queryByTestId("modules-filter-chips")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("modules-filter-active")).not.toBeInTheDocument();
+  });
+
+  it("offers the current user first in the people filters once the directory loads", async () => {
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    // The popover's own chrome is aria-hidden while it animates in, so read
+    // the group's rows by their stable attributes.
+    await waitFor(() => {
+      const lead = screen
+        .getAllByTestId("modules-filter-group")
+        .find((node) => node.getAttribute("data-filter-group") === "Lead")!;
+      expect([...lead.querySelectorAll('[role="checkbox"]')].map((node) => node.getAttribute("aria-label"))).toEqual([
+        "You",
+        "Pat Member",
+      ]);
+    });
+  });
+
+  it("keeps the controls usable before the viewer resolves, without a You row", async () => {
+    // A failed viewer read leaves meId null; the directory still offers names.
+    harness.meStatus = 500;
+    harness.modules = [makeModuleRow({ name: "Undecided Owner" })];
+    renderScreen();
+    await screen.findByTestId("modules-list");
+    fireEvent.click(screen.getByTestId("modules-filter-trigger"));
+    await waitFor(() => {
+      const lead = screen
+        .getAllByTestId("modules-filter-group")
+        .find((node) => node.getAttribute("data-filter-group") === "Lead")!;
+      expect(
+        [...lead.querySelectorAll('[role="checkbox"]')].map((node) => node.getAttribute("aria-label"))
+      ).not.toContain("You");
+    });
   });
 });

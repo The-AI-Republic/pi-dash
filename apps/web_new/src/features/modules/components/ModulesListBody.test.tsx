@@ -4,7 +4,11 @@
 // See the LICENSE file for details.
 // One module set, three renditions (MOD-001/011): rows for the list, cards
 // for the board, name rows for the timeline, each in the default name order
-// and each absent from the other layouts.
+// and each absent from the other layouts. Slice B narrows that set through
+// the header's search, filters and ordering (MOD-004/005/006/010) — from the
+// list context or explicit props — and swaps the rows for the no-match
+// container when modules exist but nothing matches, without touching the
+// underlying set.
 
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
@@ -19,7 +23,9 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ),
 }));
 
+import { emptyModuleFilters, toggleModuleFilterValue } from "../lib/moduleListControls.js";
 import { MODULES_PROJECT_ID, makeModuleRow } from "../testing.js";
+import { ModuleListProvider, type ModuleListContextValue } from "./moduleListContext.js";
 import { ModulesListBody } from "./ModulesListBody.js";
 
 const ROWS = [
@@ -30,6 +36,35 @@ const ROWS = [
 
 function renderBody(layout: "list" | "board" | "timeline", modules = ROWS): void {
   render(<ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout={layout} modules={modules} />);
+}
+
+function context(overrides: Partial<ModuleListContextValue> = {}): ModuleListContextValue {
+  return {
+    query: "",
+    setQuery: vi.fn(),
+    sort: { key: "name", direction: "ascending" },
+    setSort: vi.fn(),
+    filters: emptyModuleFilters(),
+    setFilters: vi.fn(),
+    filtersActive: false,
+    ...overrides,
+  };
+}
+
+function renderWithContext(
+  value: ModuleListContextValue,
+  modules = ROWS,
+  props: Partial<React.ComponentProps<typeof ModulesListBody>> = {}
+): ReturnType<typeof render> {
+  return render(
+    <ModuleListProvider value={value}>
+      <ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout="list" modules={modules} {...props} />
+    </ModuleListProvider>
+  );
+}
+
+function names(): Array<string | null> {
+  return screen.getAllByTestId("modules-row-name").map((node) => node.textContent);
 }
 
 describe("ModulesListBody", () => {
@@ -72,5 +107,56 @@ describe("ModulesListBody", () => {
     renderBody("list", []);
     expect(screen.getByRole("list", { name: "Modules" })).toBeEmptyDOMElement();
     expect(screen.queryAllByTestId("modules-row")).toHaveLength(0);
+  });
+
+  it("narrows by the name search through the list context", () => {
+    renderWithContext(context({ query: "module" }));
+    expect(names()).toEqual(["Module 2", "Module 10"]);
+  });
+
+  it("orders the narrowed set through the context sort", () => {
+    renderWithContext(context({ sort: { key: "name", direction: "descending" } }));
+    expect(names()).toEqual(["Module 10", "Module 2", "Alpha"]);
+  });
+
+  it("takes explicit props over the context", () => {
+    renderWithContext(context({ query: "module" }), ROWS, {
+      query: "alpha",
+      sort: { key: "name", direction: "ascending" },
+      filters: emptyModuleFilters(),
+    });
+    expect(names()).toEqual(["Alpha"]);
+  });
+
+  it("shows the no-match container when a search hides every module", () => {
+    renderWithContext(context({ query: "zzz" }));
+    expect(screen.getByTestId("modules-no-match")).toBeInTheDocument();
+    expect(screen.queryByTestId("modules-list")).not.toBeInTheDocument();
+  });
+
+  it("shows the no-match container when a filter hides every module", () => {
+    renderWithContext(context({ filters: toggleModuleFilterValue(emptyModuleFilters(), "status", "completed") }));
+    expect(screen.getByTestId("modules-no-match")).toBeInTheDocument();
+  });
+
+  it("restores every module when the search and filters clear", () => {
+    const filters = toggleModuleFilterValue(emptyModuleFilters(), "status", "completed");
+    const { rerender } = renderWithContext(context({ query: "zzz", filters }));
+    expect(screen.getByTestId("modules-no-match")).toBeInTheDocument();
+    rerender(
+      <ModuleListProvider value={context()}>
+        <ModulesListBody workspaceSlug="acme" projectId={MODULES_PROJECT_ID} layout="list" modules={ROWS} />
+      </ModuleListProvider>
+    );
+    expect(names()).toEqual(["Alpha", "Module 2", "Module 10"]);
+  });
+
+  it("keeps an empty project out of the no-match container", () => {
+    renderWithContext(
+      context({ query: "zzz", filters: toggleModuleFilterValue(emptyModuleFilters(), "favorites") }),
+      []
+    );
+    expect(screen.queryByTestId("modules-no-match")).not.toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Modules" })).toBeEmptyDOMElement();
   });
 });

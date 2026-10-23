@@ -2,9 +2,11 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Unit tests for the modules list shell driver methods (NEWFRONT-793,
-// MOD-001/002/008/011): the trail, the tab title, the flag gate, the layout
-// switcher in both widths, the slow-fetch skeleton probe and the reload.
+// Unit tests for the modules list driver methods (NEWFRONT-793/794,
+// MOD-001/002/004–008/010/011): the trail, the tab title, the flag gate,
+// the layout switcher in both widths, the slow-fetch skeleton probe, the
+// reload, and slice B's search, ordering, filter menu, chips and no-match
+// readers.
 // A fake Page answers from a path-keyed table so each case pins the hook a
 // method reads or the control it activates; no browser runs here.
 import type { Locator, Page } from "@playwright/test";
@@ -17,9 +19,11 @@ interface Answer {
   visible?: boolean;
   texts?: string[];
   text?: string;
+  value?: string;
   attrs?: Record<string, string | null>;
   disabled?: boolean;
   evaluate?: unknown;
+  evaluated?: unknown;
 }
 
 type Table = Record<string, Answer>;
@@ -42,6 +46,8 @@ function keyFor(parent: string, kind: string, args: unknown[]): string {
 class FakePage {
   readonly clicks: string[] = [];
   readonly keys: string[] = [];
+  readonly fills: string[] = [];
+  readonly presses: string[] = [];
   readonly pageCalls: string[] = [];
   readonly routes: unknown[] = [];
   path = "/acme/projects/p1/modules";
@@ -72,12 +78,20 @@ class FakePage {
       isDisabled: async () => self.answer(id).disabled ?? false,
       innerText: async () => self.answer(id).text ?? "",
       allInnerTexts: async () => self.answer(id).texts ?? [],
+      inputValue: async () => self.answer(id).value ?? "",
       getAttribute: async (name: string) => self.answer(id).attrs?.[name] ?? null,
       click: async () => {
         self.clicks.push(id);
       },
+      fill: async (value: string) => {
+        self.fills.push(`${id}=${value}`);
+      },
+      press: async (key: string) => {
+        self.presses.push(`${id}:${key}`);
+      },
       waitFor: async () => undefined,
-      evaluate: async () => self.answer(id).evaluate ?? {},
+      evaluate: async () => self.answer(id).evaluate ?? self.answer(id).evaluated ?? {},
+      evaluateAll: async () => self.answer(id).evaluated ?? [],
     };
     Object.defineProperty(node, "__id", { value: id, enumerable: false });
     return node as unknown as Locator;
@@ -298,10 +312,33 @@ describe("modulesListEmptyKind", () => {
     expect(await new WebNewDriver(fake.asPage()).modulesListEmptyKind()).toBe("rows");
   });
 
-  it("leaves the zero and no-match readers to slices F and B", async () => {
-    const driver = new WebNewDriver(new FakePage().asPage());
+  it("settles as the no-match state when that container shows (MOD-010)", async () => {
+    const fake = new FakePage({
+      'page css([data-testid="modules-list"], [data-testid="modules-zero-state"], [data-testid="modules-no-match"])': {
+        count: 1,
+      },
+      "page testid(modules-list)": { count: 0 },
+      "page testid(modules-no-match)": { count: 1, visible: true },
+    });
+    expect(await new WebNewDriver(fake.asPage()).modulesListEmptyKind()).toBe("nomatch");
+  });
+
+  it("reads no heading or hint while the no-match container is absent", async () => {
+    const fake = new FakePage({ "page testid(modules-no-match)": { count: 0 } });
+    const driver = new WebNewDriver(fake.asPage());
     expect(await driver.modulesListNoMatchHeading()).toBeNull();
     expect(await driver.modulesListNoMatchHint()).toBeNull();
+  });
+
+  it("reads the no-match heading and hint from their own hooks", async () => {
+    const fake = new FakePage({
+      "page testid(modules-no-match)": { count: 1, visible: true },
+      "page testid(modules-no-match) testid(modules-no-match-heading)": { text: " No modules match " },
+      "page testid(modules-no-match) testid(modules-no-match-hint)": { text: " Adjust the search. " },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesListNoMatchHeading()).toBe("No modules match");
+    expect(await driver.modulesListNoMatchHint()).toBe("Adjust the search.");
   });
 });
 
@@ -534,5 +571,218 @@ describe("modulesListSkeletonShownOnSlowFetch", () => {
     vi.spyOn(page, "reload").mockRejectedValue(new Error("reload broke"));
     await expect(driver.modulesListSkeletonShownOnSlowFetch("acme", "p1", "board")).rejects.toThrow(/reload broke/);
     expect(fake.pageCalls).toContain("unrouteAll");
+  });
+});
+
+// --- Slice B (NEWFRONT-794, MOD-004/005/006/007/010). The hook names are the
+// --- shared driver contract; each method must read or activate the control
+// --- this slice built, not an old-app selector.
+
+const HEADER = "page testid(modules-list-header)";
+const SEARCH_FIELD = `${HEADER} testid(modules-search-field)`;
+const SEARCH_INPUT = `${HEADER} role(textbox,Search modules by name)`;
+const FILTER_PANEL = "page testid(modules-filter-panel)";
+
+describe("modules search hooks (MOD-004)", () => {
+  it("reads the expanded field and types into its text box", async () => {
+    const fake = new FakePage({ [SEARCH_FIELD]: { count: 1, visible: true } });
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesSearchVisible()).toBe(true);
+    await driver.modulesTypeSearch("Alpha");
+    expect(fake.fills).toEqual([`${SEARCH_INPUT}=Alpha`]);
+  });
+
+  it("reads the collapsed state when the field is absent", async () => {
+    const fake = new FakePage({ [SEARCH_FIELD]: { count: 0 } });
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesSearchVisible()).toBe(false);
+    expect(await driver.modulesSearchFocused()).toBe(false);
+    expect(await driver.modulesSearchText()).toBe("");
+  });
+
+  it("opens the field through the icon trigger when it is collapsed", async () => {
+    const fake = new FakePage({ [SEARCH_FIELD]: { count: 0 } });
+    await new WebNewDriver(fake.asPage()).modulesOpenSearch();
+    expect(fake.clicks).toEqual([`${HEADER} role(button,Search modules)`]);
+  });
+
+  it("does not click the trigger when the field is already open", async () => {
+    const fake = new FakePage({ [SEARCH_FIELD]: { count: 1, visible: true } });
+    await new WebNewDriver(fake.asPage()).modulesOpenSearch();
+    expect(fake.clicks).toEqual([]);
+  });
+
+  it("reads the field text and Escape presses it", async () => {
+    const fake = new FakePage({
+      [SEARCH_FIELD]: { count: 1, visible: true },
+      [SEARCH_INPUT]: { value: "Bravo" },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesSearchText()).toBe("Bravo");
+    await driver.modulesEscapeSearch();
+    expect(fake.presses).toEqual([`${SEARCH_INPUT}:Escape`]);
+  });
+
+  it("clicks the trailing crumb to trip the outside-press detector", async () => {
+    const fake = new FakePage();
+    await new WebNewDriver(fake.asPage()).modulesClickOutsideSearch();
+    expect(fake.clicks).toEqual(["page role(navigation,Breadcrumb) css(li)"]);
+  });
+});
+
+describe("modules sort hooks (MOD-005)", () => {
+  it("reads the active key's label from the trigger", async () => {
+    const fake = new FakePage({ [`${HEADER} testid(modules-sort-label)`]: { text: " Due date " } });
+    expect(await new WebNewDriver(fake.asPage()).modulesSortTriggerLabel()).toBe("Due date");
+  });
+
+  it("opens the menu, clicks the named entry and waits for it to close", async () => {
+    const fake = new FakePage();
+    await new WebNewDriver(fake.asPage()).modulesSetSortViaMenu("Descending");
+    expect(fake.clicks).toEqual([`${HEADER} testid(modules-sort-trigger)`, "page role(menuitem,Descending)"]);
+  });
+
+  it("lists the visible menu entries and closes the menu", async () => {
+    const fake = new FakePage({
+      'page css([role="menuitem"]:visible)': { texts: ["Name", " Progress ", "Ascending"] },
+    });
+    const page = fake.asPage();
+    const pressed: string[] = [];
+    vi.spyOn(page.keyboard, "press").mockImplementation(async (key: string) => {
+      pressed.push(key);
+    });
+    const items = await new WebNewDriver(page).modulesSortMenuItems();
+    expect(items).toEqual(["Name", "Progress", "Ascending"]);
+    expect(pressed).toEqual(["Escape"]);
+  });
+});
+
+describe("modules filter menu hooks (MOD-006)", () => {
+  it("opens the popover and waits for the panel", async () => {
+    const fake = new FakePage({ [FILTER_PANEL]: { count: 0 } });
+    await new WebNewDriver(fake.asPage()).modulesOpenFilters();
+    expect(fake.clicks).toEqual([`${HEADER} testid(modules-filter-trigger)`]);
+  });
+
+  it("does not re-click the trigger when the panel already shows", async () => {
+    const fake = new FakePage({ [FILTER_PANEL]: { count: 1, visible: true } });
+    await new WebNewDriver(fake.asPage()).modulesOpenFilters();
+    expect(fake.clicks).toEqual([]);
+  });
+
+  it("dismisses the popover with Escape", async () => {
+    const fake = new FakePage();
+    const page = fake.asPage();
+    const pressed: string[] = [];
+    vi.spyOn(page.keyboard, "press").mockImplementation(async (key: string) => {
+      pressed.push(key);
+    });
+    await new WebNewDriver(page).modulesCloseFilters();
+    expect(pressed).toEqual(["Escape"]);
+  });
+
+  it("reads the group titles, options and expander from the panel", async () => {
+    const fake = new FakePage({
+      [`${FILTER_PANEL} css([data-filter-group])`]: {
+        evaluated: ["Status", "Lead", "Members", "Start date", "Due date"],
+      },
+      [`${FILTER_PANEL} css([data-filter-group="Lead"]) css([role="checkbox"])`]: {
+        evaluated: ["You", "Pat Member"],
+      },
+      [`${FILTER_PANEL} css([data-filter-group="Lead"]) role(button,View all)`]: { count: 1 },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesFilterGroups()).toEqual(["Status", "Lead", "Members", "Start date", "Due date"]);
+    expect(await driver.modulesFilterGroupOptions("Lead")).toEqual(["You", "Pat Member"]);
+    expect(await driver.modulesFilterGroupExpandable("Lead")).toBe(true);
+  });
+
+  it("toggles a group option and the favorites switch by its own control", async () => {
+    const fake = new FakePage();
+    const driver = new WebNewDriver(fake.asPage());
+    await driver.modulesToggleFilterOption("Status", "Completed");
+    await driver.modulesToggleFilterOption("Favorites", "Favorites");
+    expect(fake.clicks).toEqual([
+      `${FILTER_PANEL} css([data-filter-group="Status"]) role(checkbox,Completed)`,
+      `${FILTER_PANEL} testid(modules-filter-favorites) role(checkbox,)`,
+    ]);
+  });
+
+  it("expands a group and searches the menu's own box", async () => {
+    const fake = new FakePage();
+    const driver = new WebNewDriver(fake.asPage());
+    await driver.modulesExpandFilterGroup("Members");
+    await driver.modulesMenuSearch("cancel");
+    expect(fake.clicks).toEqual([`${FILTER_PANEL} css([data-filter-group="Members"]) role(button,View all)`]);
+    expect(fake.fills).toEqual([`${FILTER_PANEL} role(textbox,Search filters)=cancel`]);
+  });
+
+  it("reads the active marker by presence", async () => {
+    expect(
+      await new WebNewDriver(
+        new FakePage({ "page testid(modules-filter-active)": { count: 1 } }).asPage()
+      ).modulesFiltersActive()
+    ).toBe(true);
+    expect(
+      await new WebNewDriver(
+        new FakePage({ "page testid(modules-filter-active)": { count: 0 } }).asPage()
+      ).modulesFiltersActive()
+    ).toBe(false);
+  });
+
+  it("opens and applies the custom date window", async () => {
+    const fake = new FakePage({
+      "page testid(modules-custom-date)": { count: 1, visible: true },
+      "page testid(modules-custom-apply)": { count: 1 },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    await driver.modulesOpenCustomDate("Due date");
+    expect(await driver.modulesCustomDateOpen()).toBe(true);
+    await driver.modulesApplyCustomDate();
+    expect(fake.clicks).toEqual([
+      `${FILTER_PANEL} css([data-filter-group="Due date"]) role(checkbox,Custom)`,
+      "page testid(modules-custom-apply)",
+    ]);
+  });
+});
+
+describe("modules chip hooks (MOD-007)", () => {
+  it("reads the strip's chips in display order", async () => {
+    const fake = new FakePage({
+      "page testid(modules-filter-chips)": {
+        count: 1,
+        evaluated: [
+          { key: "status", text: "status Completed" },
+          { key: "lead", text: "lead You" },
+        ],
+      },
+    });
+    expect(await new WebNewDriver(fake.asPage()).modulesChips()).toEqual([
+      { key: "status", text: "status Completed" },
+      { key: "lead", text: "lead You" },
+    ]);
+  });
+
+  it("reads an empty list while the strip is hidden", async () => {
+    const fake = new FakePage({ "page testid(modules-filter-chips)": { count: 0 } });
+    const driver = new WebNewDriver(fake.asPage());
+    expect(await driver.modulesChips()).toEqual([]);
+    expect(await driver.modulesChipsVisible()).toBe(false);
+  });
+
+  it("removes one value, one dimension and every filter", async () => {
+    const fake = new FakePage({
+      "page testid(modules-filter-chips)": { count: 1 },
+      "page testid(modules-filter-clear-all)": { count: 1 },
+    });
+    const driver = new WebNewDriver(fake.asPage());
+    await driver.modulesRemoveChipValue("status", "completed");
+    await driver.modulesRemoveChipDimension("lead");
+    await driver.modulesClearFilters();
+    expect(fake.clicks).toEqual([
+      'page testid(modules-filter-chips) css([data-chip-key="status"]) css([data-chip-value="completed"]) role(button,)',
+      'page testid(modules-filter-chips) css([data-chip-key="lead"]) testid(modules-filter-chip-clear)',
+      "page testid(modules-filter-clear-all)",
+    ]);
   });
 });
