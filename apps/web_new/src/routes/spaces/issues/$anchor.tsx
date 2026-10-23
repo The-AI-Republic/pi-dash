@@ -3,10 +3,12 @@
 // See the LICENSE file for details.
 // Published board address (SPC-001). The search schema settles only the
 // board parameters this slice consumes; unknown values fall back without
-// throwing. Address rewriting and the full view/filter contract belong to
-// slices E/F and mount onto this route.
+// throwing. Pasted slash-less addresses settle on the canonical
+// trailing-slash form on the first client navigation, keeping their search
+// and fragment. The full view/filter contract belongs to slices E/F and
+// mounts onto this route.
 
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import * as React from "react";
 
 import { BoardScreen } from "../../../features/spaces/components/BoardScreen.js";
@@ -14,6 +16,12 @@ import { parseSpaceBoardSearch, type SpaceBoardSearch } from "../../../features/
 
 export const Route = createFileRoute("/spaces/issues/$anchor")({
   validateSearch: parseSpaceBoardSearch,
+  beforeLoad: ({ location }) => {
+    if (!location.pathname.endsWith("/")) {
+      const hash = location.hash === "" ? "" : `#${location.hash}`;
+      throw redirect({ href: `${location.pathname}/${location.searchStr}${hash}` });
+    }
+  },
   component: function SpaceBoardRoute() {
     const { anchor } = Route.useParams();
     const search = Route.useSearch();

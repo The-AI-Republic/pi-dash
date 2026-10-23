@@ -145,6 +145,20 @@ describe("spaces route tree", () => {
     expect(router.state.location.search).toMatchObject({ board: "kanban", peekId: "issue-1" });
   });
 
+  it("rewrites a pasted slash-less board address to the trailing-slash form", async () => {
+    const router = renderSpace("/spaces/issues/anchor-1?board=kanban&peekId=issue-1&labels=x");
+    await waitFor(() => expect(screen.getByTestId("space-navbar-name")).toHaveTextContent("Public board"));
+    expect(router.state.location.pathname).toBe("/spaces/issues/anchor-1/");
+    expect(router.state.location.search).toMatchObject({ board: "kanban", peekId: "issue-1" });
+  });
+
+  it("keeps the fragment when rewriting a slash-less board address", async () => {
+    const router = renderSpace("/spaces/issues/anchor-1?board=list#discussion");
+    await waitFor(() => expect(router.state.location.pathname).toBe("/spaces/issues/anchor-1/"));
+    expect(router.state.location.hash).toBe("discussion");
+    expect(router.state.location.search).toEqual({ board: "list" });
+  });
+
   it("renders the anchor illustration for an invalid anchor without a settings read", async () => {
     renderSpace("/spaces/issues/bad%20anchor/");
     expect(await screen.findByTestId("space-anchor-not-found")).toBeInTheDocument();

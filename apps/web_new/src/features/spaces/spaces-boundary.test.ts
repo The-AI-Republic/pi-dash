@@ -36,7 +36,8 @@ const forbidden = (specifier: string): boolean =>
   specifier.startsWith("desktop-overlay/") ||
   specifier.includes("shared/shell/index") ||
   specifier.includes("core/session") ||
-  specifier.includes("features/instance/queries") ||
+  specifier.includes("features/instance/index") ||
+  specifier.includes("features/instance/") ||
   specifier.includes("AppShell") ||
   specifier.includes("features/issues");
 

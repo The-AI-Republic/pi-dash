@@ -11,7 +11,6 @@ import {
   getInstanceBootstrapForStartup,
   getMe,
   getSpaceBoardSettings,
-  isApiError,
   listSpaceBoardIssues,
   listSpaceBoardStates,
   resolveSpaceBoardAnchor,
@@ -41,8 +40,7 @@ export function spaceInstanceQueryOptions(client: ApiClient) {
 export async function readSpaceViewer(client: ApiClient): Promise<Me | null> {
   try {
     return await getMe(client);
-  } catch (error) {
-    if (isApiError(error) && error.status === 401) return null;
+  } catch {
     return null;
   }
 }

@@ -10,7 +10,7 @@ import { Spinner } from "@pidash/kit";
 import { useQuery } from "@tanstack/react-query";
 import * as React from "react";
 
-import { decideAppInstanceGate } from "../../instance/index.js";
+import { decideAppInstanceGate } from "../../../core/instance/status.js";
 import { spaceRuntime } from "../api/client.js";
 import { spaceInstanceQueryOptions } from "../api/queries.js";
 import { SpaceInstanceFailureScreen } from "./InstanceFailureScreen.js";
