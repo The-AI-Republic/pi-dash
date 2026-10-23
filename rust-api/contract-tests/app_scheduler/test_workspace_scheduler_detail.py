@@ -1,17 +1,17 @@
 """Workspace scheduler detail get/patch/delete contract."""
 
 from . import seed_scheduler as seed_s
-from .test_workspace_schedulers import SCHEDULER_KEYS, SLUG_TAKEN, sched_list
+from .test_workspace_schedulers import NAME_NEEDS_ALNUM, NAME_TAKEN, SCHEDULER_KEYS, sched_list
 
 
 def sched_detail(world, sid):
     return f"/api/workspaces/{world.workspace['slug']}/schedulers/{sid}/"
 
 
-def _create(org, slug="one", name="One"):
+def _create(org, name="One"):
     r = org.request(
         "POST", sched_list(org), "admin",
-        json={"slug": slug, "name": name, "prompt": "x"},
+        json={"name": name, "prompt": "x"},
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -59,6 +59,7 @@ def test_patch_fields(org):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["name"] == "Renamed"
+    assert body["slug"] == "renamed"  # re-derived from the new name
     assert body["color"] == "#ff0000"
     assert body["is_enabled"] is False
 
@@ -73,42 +74,98 @@ def test_patch_bad_color(org):
     assert "color" in r.json()
 
 
-def test_patch_duplicate_slug(org):
-    _create(org, slug="keep", name="Keep")
-    created = _create(org, slug="change", name="Change")
+def test_patch_duplicate_name(org):
+    _create(org, name="Keep")
+    created = _create(org, name="Change")
     r = org.request(
         "PATCH", sched_detail(org, created["id"]), "admin",
-        json={"slug": "keep"},
+        json={"name": "KEEP!"},
     )
     assert r.status_code == 400
-    assert r.json() == SLUG_TAKEN
+    assert r.json() == NAME_TAKEN
+    # Nothing saved.
+    r = org.request("GET", sched_detail(org, created["id"]), "admin")
+    assert (r.json()["name"], r.json()["slug"]) == ("Change", "change")
 
 
-def test_patch_duplicate_slug_accumulates_with_other_errors(org):
-    _create(org, slug="keep", name="Keep")
-    created = _create(org, slug="change", name="Change")
+def test_patch_duplicate_name_accumulates_with_other_errors(org):
+    _create(org, name="Keep")
+    created = _create(org, name="Change")
     r = org.request(
         "PATCH", sched_detail(org, created["id"]), "admin",
-        json={"slug": "keep", "name": "   "},
+        json={"name": "keep", "prompt": "   "},
     )
     assert r.status_code == 400
-    assert list(r.json().keys()) == ["slug", "name"]
+    assert list(r.json().keys()) == ["name", "prompt"]
     assert r.json() == {
-        **SLUG_TAKEN,
-        "name": ["This field may not be blank."],
+        **NAME_TAKEN,
+        "prompt": ["This field may not be blank."],
     }
 
 
-def test_patch_keep_own_slug(org):
-    created = _create(org, slug="mine", name="Mine")
-    # Re-saving the row's own slug excludes self: allowed.
+def test_patch_name_without_letter_or_digit(org):
+    created = _create(org, name="Mine")
     r = org.request(
         "PATCH", sched_detail(org, created["id"]), "admin",
-        json={"slug": "mine", "name": "Renamed"},
+        json={"name": "!!!"},
+    )
+    assert r.status_code == 400
+    assert r.json() == NAME_NEEDS_ALNUM
+
+
+def test_patch_own_name_variant(org):
+    created = _create(org, name="Mine")
+    # The own row is excluded from the duplicate check.
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"name": "MINE"},
+    )
+    assert r.status_code == 200, r.text
+    assert (r.json()["name"], r.json()["slug"]) == ("MINE", "mine")
+
+
+def test_patch_body_slug_ignored(org):
+    created = _create(org, name="Mine")
+    r = org.request(
+        "PATCH", sched_detail(org, created["id"]), "admin",
+        json={"slug": "other", "prompt": "new"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["slug"] == "mine"
-    assert r.json()["name"] == "Renamed"
+    assert r.json()["prompt"] == "new"
+
+
+def test_patch_rename_builtin_keeps_slug(org):
+    # ensure_builtin_schedulers matches built-ins by slug, so a rename only
+    # changes the display name.
+    sched = seed_s.create_scheduler(
+        org.conn, workspace_id=org.workspace["id"], slug="security-audit",
+        name="Security Audit",
+    )
+    r = org.request(
+        "PATCH", sched_detail(org, sched["id"]), "admin",
+        json={"name": "Weekly Sec Sweep"},
+    )
+    assert r.status_code == 200, r.text
+    assert (r.json()["name"], r.json()["slug"]) == (
+        "Weekly Sec Sweep", "security-audit",
+    )
+    r = org.request("GET", sched_detail(org, sched["id"]), "admin")
+    assert r.json()["slug"] == "security-audit"
+
+
+def test_patch_rename_builtin_to_taken_name(org):
+    _create(org, name="Keep")
+    sched = seed_s.create_scheduler(
+        org.conn, workspace_id=org.workspace["id"], slug="security-audit",
+        name="Security Audit",
+    )
+    r = org.request(
+        "PATCH", sched_detail(org, sched["id"]), "admin",
+        json={"name": "Keep"},
+    )
+    assert r.status_code == 400
+    assert r.json() == NAME_TAKEN
 
 
 def test_delete(org):
@@ -147,7 +204,7 @@ def test_delete_soft_deletes_bindings_inline(org):
 
 def test_patch_strips_python_whitespace(org):
     # Same Python str.strip() semantics on PATCH (U+001C-U+001F included).
-    created = _create(org, slug="p1", name="One")
+    created = _create(org, name="One")
     r = org.request(
         "PATCH", sched_detail(org, created["id"]), "admin",
         json={"name": "\u001fRenamed\u001c"},
