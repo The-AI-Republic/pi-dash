@@ -499,7 +499,7 @@ async fn fetch_labels(
     issue_id: &Uuid,
 ) -> Result<(Vec<Uuid>, Vec<LabelRow>), sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT \"labels\".\"id\", \"labels\".\"name\", \"labels\".\"color\" FROM \"labels\" INNER JOIN \"issue_labels\" ON (\"labels\".\"id\" = \"issue_labels\".\"label_id\") WHERE \"issue_labels\".\"issue_id\" = $1",
+        "SELECT \"labels\".\"id\", \"labels\".\"name\", \"labels\".\"color\" FROM \"labels\" INNER JOIN \"issue_labels\" ON (\"labels\".\"id\" = \"issue_labels\".\"label_id\") WHERE (\"issue_labels\".\"issue_id\" = $1 AND \"labels\".\"deleted_at\" IS NULL) ORDER BY \"labels\".\"created_at\" DESC",
     )
     .bind(issue_id)
     .fetch_all(pool)
@@ -535,7 +535,7 @@ async fn fetch_assignees(
     issue_id: &Uuid,
 ) -> Result<(Vec<Uuid>, Vec<AssigneeRow>), sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" INNER JOIN \"issue_assignees\" ON (\"users\".\"id\" = \"issue_assignees\".\"assignee_id\") WHERE \"issue_assignees\".\"issue_id\" = $1",
+        "SELECT \"users\".\"id\", \"users\".\"first_name\", \"users\".\"last_name\", \"users\".\"avatar\", \"users\".\"avatar_asset_id\", \"users\".\"is_bot\", \"users\".\"display_name\" FROM \"users\" INNER JOIN \"issue_assignees\" ON (\"users\".\"id\" = \"issue_assignees\".\"assignee_id\") WHERE \"issue_assignees\".\"issue_id\" = $1 ORDER BY \"users\".\"created_at\" DESC",
     )
     .bind(issue_id)
     .fetch_all(pool)
