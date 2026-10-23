@@ -19,7 +19,15 @@ import { Badge, type TBadgeVariant } from "@pi-dash/ui";
  * See ``.ai_design/runner_agent_bridge/design.md`` §4.5.4.
  */
 
-type ActivityBadgeKey = "active" | "thinking" | "stalled" | "dead" | "awaiting_approval" | "unknown";
+type ActivityBadgeKey =
+  | "active"
+  | "thinking"
+  | "quiet"
+  | "stalled"
+  | "unhealthy"
+  | "dead"
+  | "awaiting_approval"
+  | "unknown";
 
 interface RunnerAgentStatusPanelProps {
   runner: Pick<IRunner, "id" | "name" | "status">;
@@ -29,7 +37,9 @@ interface RunnerAgentStatusPanelProps {
 const BADGE_VARIANT: Record<ActivityBadgeKey, TBadgeVariant> = {
   active: "accent-success",
   thinking: "accent-warning",
+  quiet: "accent-neutral",
   stalled: "accent-destructive",
+  unhealthy: "accent-destructive",
   dead: "accent-destructive",
   awaiting_approval: "accent-primary",
   unknown: "accent-neutral",
@@ -38,7 +48,9 @@ const BADGE_VARIANT: Record<ActivityBadgeKey, TBadgeVariant> = {
 const BADGE_LABEL: Record<ActivityBadgeKey, string> = {
   active: "Active",
   thinking: "Thinking",
+  quiet: "Quiet",
   stalled: "Stalled",
+  unhealthy: "Unhealthy",
   dead: "Subprocess dead",
   awaiting_approval: "Awaiting approval",
   unknown: "Unknown",
@@ -47,9 +59,21 @@ const BADGE_LABEL: Record<ActivityBadgeKey, string> = {
 const ACTIVITY_THRESHOLD_SECS = 30;
 const THINKING_THRESHOLD_SECS = 180;
 
+const BADGE_TITLE: Partial<Record<ActivityBadgeKey, string>> = {
+  quiet:
+    "No agent events for a few minutes. The agent may be inside a long tool call; the runner only acts after many hours of silence.",
+  unhealthy:
+    "No agent events for the runner's unhealthy threshold (24h by default). The run is still running; the runner fails it at its kill threshold (48h by default).",
+};
+
 /**
  * Pure derivation: compute the activity badge from the raw live-state
  * scalars + a "now" timestamp. Exported for testing.
+ *
+ * Runners that report ``agent_health`` run the passive-kill watchdog: a few
+ * quiet minutes there is normal (a long tool call), so it reads "quiet", and
+ * only the runner's own ``unhealthy`` verdict reads as a problem. Older
+ * runners keep the short "stalled" heuristic, matching their stall timer.
  */
 export function deriveActivityBadge(
   state: IRunnerLiveState | null | undefined,
@@ -61,15 +85,18 @@ export function deriveActivityBadge(
 
   if ((state.approvals_pending ?? 0) > 0) return "awaiting_approval";
 
-  if (!state.last_event_at) return "unknown";
+  if (state.agent_health === "unhealthy") return "unhealthy";
 
-  const ageMs = now - new Date(state.last_event_at).getTime();
+  const lastActivity = state.last_event_at ?? state.agent_last_activity_at;
+  if (!lastActivity) return "unknown";
+
+  const ageMs = now - new Date(lastActivity).getTime();
   if (Number.isNaN(ageMs) || ageMs < 0) return "unknown";
 
   const ageSecs = ageMs / 1000;
   if (ageSecs <= ACTIVITY_THRESHOLD_SECS) return "active";
   if (ageSecs <= THINKING_THRESHOLD_SECS) return "thinking";
-  return "stalled";
+  return state.agent_health ? "quiet" : "stalled";
 }
 
 function formatRelative(ts: string | null): string {
@@ -110,7 +137,7 @@ export function RunnerAgentStatusPanel({ runner, liveState }: RunnerAgentStatusP
     [liveState, tick]
   );
 
-  const lastEventLabel = formatRelative(liveState?.last_event_at ?? null);
+  const lastEventLabel = formatRelative(liveState?.last_event_at ?? liveState?.agent_last_activity_at ?? null);
   const tokensLabel = liveState?.total_tokens != null ? formatNumber(liveState.total_tokens) : "—";
   const modelLabel = liveState?.llm_model?.trim() || "—";
 
@@ -119,7 +146,7 @@ export function RunnerAgentStatusPanel({ runner, liveState }: RunnerAgentStatusP
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-medium">Agent</h3>
-          <Badge variant={BADGE_VARIANT[activityBadge]} size="sm">
+          <Badge variant={BADGE_VARIANT[activityBadge]} size="sm" title={BADGE_TITLE[activityBadge]}>
             {BADGE_LABEL[activityBadge]}
           </Badge>
         </div>
