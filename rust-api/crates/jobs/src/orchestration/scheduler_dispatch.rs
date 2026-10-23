@@ -366,7 +366,7 @@ where
     ) -> Result<RunView, CreationError> {
         // `$1..$10` in [`NewSchedulerRun`] order: id, workspace_id,
         // created_by_id, pod_id, pinned_runner_id, binding_id,
-        // executor_kind, error_code, tool_plan, now.
+        // executor_kind, error_details, tool_plan, now.
         let inserted: PgRow = sqlx::query(&scheduler_run_insert_returning_sql())
             .bind(row.id)
             .bind(row.workspace_id)
@@ -375,7 +375,7 @@ where
             .bind(row.pinned_runner_id)
             .bind(row.binding_id)
             .bind(row.executor_kind.value())
-            .bind(row.error_code.as_str())
+            .bind(&row.error_details)
             .bind(&row.tool_plan)
             .bind(row.now)
             .fetch_one(&mut **self.dispatch_tx().inner())
@@ -485,8 +485,9 @@ where
 // ---------------------------------------------------------------------------
 
 /// The produced run's status line for the `(run, fail_reason)`
-/// contract: `status` + `error` off the committed row.
-const RUN_STATUS_SQL: &str = r#"SELECT status, error FROM agent_run WHERE id = $1"#;
+/// contract: `status` + `error` off the committed row (`run.error`,
+/// the `message` key of `error_details` — PDASHOSS01-187).
+const RUN_STATUS_SQL: &str = r#"SELECT status, COALESCE(error_details ->> 'message', '') AS error FROM agent_run WHERE id = $1"#;
 
 /// Map a services outcome onto the `(run, fail_reason)` contract
 /// (`service.py:848`): a produced run (even FAILED) carries

@@ -1910,15 +1910,14 @@ impl<'t, 'p> TxStores<'t, 'p> {
 /// The revoke-finalize SET order (planned `status`, `ended_at`,
 /// `queue_position`, the two markers, then our extras in dict order):
 /// pinned so a kernel drift fails loudly instead of mis-binding.
-const REVOKE_FINALIZE_COLUMNS: [&str; 8] = [
+const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
     "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
-    "error",
-    "error_code",
     "cancel_reason",
+    "error_details",
 ];
 
 impl RevokeStore for TxStores<'_, '_> {
@@ -2012,9 +2011,8 @@ impl RevokeStore for TxStores<'_, '_> {
             .bind(None::<i16>)
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
-            .bind("runner revoked")
-            .bind("runner_revoked")
             .bind(stored_reason)
+            .bind(finalize_kernel::error_details_patch(&values))
             .bind(run_id)
             .execute(&mut **self.tx)
             .await

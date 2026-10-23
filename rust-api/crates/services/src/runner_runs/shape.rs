@@ -419,9 +419,9 @@ fn run_to_representation<'a>(
         started_at: drf_datetime_opt(&run.started_at),
         ended_at: drf_datetime_opt(&run.ended_at),
         done_payload: run.done_payload.as_ref(),
-        error: &run.error,
-        error_code: &run.error_code,
-        error_diagnostic: error_diagnostic(Some(run.error.as_str()), is_list),
+        error: run.error(),
+        error_code: run.error_code(),
+        error_diagnostic: error_diagnostic(Some(run.error()), is_list),
         refusal_category: &run.refusal_category,
         llm_model: &run.llm_model,
         input_tokens: run.input_tokens,
@@ -963,7 +963,6 @@ mod tests {
             dispatch_attempts: body["dispatch_attempts"].as_i64().expect("n") as i32,
             cancel_requested_at: dt_opt(&body["cancel_requested_at"]),
             cancel_reason: text(&body["cancel_reason"]),
-            error_code: text(&body["error_code"]),
             tool_plan: body["tool_plan"].clone(),
             terminal_hooks_applied_at: None,
             terminal_capacity_released_at: None,
@@ -980,7 +979,14 @@ mod tests {
                 Value::Null => None,
                 payload => Some(payload.clone()),
             },
-            error: text(&body["error"]),
+            error_details: pidash_db::runner_runs::agent_run::merge_error_details(
+                &json!({}),
+                &[
+                    ("error_code", body["error_code"].clone()),
+                    ("error", body["error"].clone()),
+                    ("refusal_category", body["refusal_category"].clone()),
+                ],
+            ),
             refusal_category: text(&body["refusal_category"]),
             llm_model: text(&body["llm_model"]),
             usage: body["usage"].clone(),
@@ -1062,7 +1068,7 @@ mod tests {
     fn error_diagnostic_list_vs_detail_rule() {
         let gold = &fx08()["list"]["golden_row"];
         let mut run = run_row(gold);
-        run.error = "boom x".to_string();
+        run.error_details = json!({"message": "boom x"});
         let mini = MiniStorage::from_detail(&gold["pod_detail"]);
         let mini_row = mini.row();
         let list = serde_json::to_value(run_list_to_representation(&run, &mini_row, &[], None))
@@ -1082,7 +1088,7 @@ mod tests {
         );
         // …and the detail renders `None` for an empty error (the
         // classifier returns `None` there; the list rule is separate).
-        run.error = String::new();
+        run.error_details = json!({});
         let detail_empty =
             serde_json::to_value(run_detail_to_representation(&run, &mini_row, &[], None))
                 .expect("serializes");

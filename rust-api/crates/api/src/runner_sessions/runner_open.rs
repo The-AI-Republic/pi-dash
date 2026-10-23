@@ -187,17 +187,16 @@ const CHAT_RELEASE_DETAIL: &str =
 /// default): claim everything pending, however fresh.
 const CLAIM_MIN_IDLE_MS: i64 = 0;
 /// The reaper's finalize `SET` order (`status`, `ended_at`,
-/// `queue_position`, the two markers, then `error`, `error_code` in
-/// updates order): pinned so a kernel drift fails loudly instead of
+/// `queue_position`, the two markers, then the `error_details` patch the
+/// `error` / `error_code` updates fold into): pinned so a kernel drift fails loudly instead of
 /// mis-binding (the `runs.rs` `CANCEL_FINALIZE_COLUMNS` precedent).
-const REAP_FINALIZE_COLUMNS: [&str; 7] = [
+const REAP_FINALIZE_COLUMNS: [&str; 6] = [
     "status",
     "ended_at",
     "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
-    "error",
-    "error_code",
+    "error_details",
 ];
 /// The hello `SET` order with a capabilities change (model
 /// field-definition order, `capabilities` first).
@@ -1163,16 +1162,14 @@ async fn execute_reap_finalize(
     let Some(row) = found else {
         return Ok(());
     };
-    let error = set_text(&values.clauses, 5)?;
-    let error_code = set_text(&values.clauses, 6)?;
+    let error_details = set_json(&values.clauses, 5)?;
     sqlx::query(&finalization::finalize_update_sql(&values))
         .bind(AgentRunStatus::Failed.value())
         .bind(Utc::now())
         .bind(None::<i16>)
         .bind(None::<DateTime<Utc>>)
         .bind(None::<DateTime<Utc>>)
-        .bind(error)
-        .bind(error_code)
+        .bind(error_details)
         .bind(run_id)
         .execute(&mut **tx)
         .await
@@ -1191,8 +1188,11 @@ async fn execute_reap_finalize(
                 .fetch_optional(&mut **tx)
                 .await
                 .map_err(TxnFail::from)?;
-            let event =
-                finalization::plan_terminal_event(max_seq, AgentRunStatus::Failed, error_code);
+            let event = finalization::plan_terminal_event(
+                max_seq,
+                AgentRunStatus::Failed,
+                &finalization::finalize_error_code(&values),
+            );
             sqlx::query(&finalization::terminal_event_insert_sql())
                 .bind(run_id)
                 .bind(event.seq)

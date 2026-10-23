@@ -371,15 +371,14 @@ struct DeleteStore<'t> {
 /// `:631-640` updates in dict order); the binds below are positional, so
 /// a mismatch fails loudly instead of binding wrong (the L6a sweeps
 /// precedent).
-const REVOKE_FINALIZE_COLUMNS: [&str; 8] = [
+const REVOKE_FINALIZE_COLUMNS: [&str; 7] = [
     "status",
     "ended_at",
     "queue_position",
     "terminal_hooks_applied_at",
     "terminal_capacity_released_at",
-    "error",
-    "error_code",
     "cancel_reason",
+    "error_details",
 ];
 
 /// Bind `ids` positionally (`$1..$N`, fetch order) and fetch one UUID
@@ -505,9 +504,8 @@ impl revoke::RevokeStore for DeleteStore<'_> {
             .bind(None::<i16>)
             .bind(None::<DateTime<Utc>>)
             .bind(None::<DateTime<Utc>>)
-            .bind(revoke::FINALIZE_ERROR)
-            .bind(revoke::FINALIZE_ERROR_CODE)
             .bind(stored_reason)
+            .bind(finalization::error_details_patch(&values))
             .bind(run_id)
             .execute(&mut *self.tx)
             .await

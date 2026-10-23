@@ -1885,12 +1885,12 @@ mod tests {
             let id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, status, \
-                 executor_kind, dispatch_attempts, cancel_reason, error_code, tool_plan, \
+                 executor_kind, dispatch_attempts, cancel_reason, tool_plan, \
                  prompt, trigger, phase_kind, run_config, required_capabilities, thread_id, \
-                 agent_metadata, lease_expires_at, error, refusal_category, llm_model, usage, \
+                 agent_metadata, lease_expires_at, error_details, llm_model, usage, \
                  created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, 0, '', '', '{}', '', 'direct', '', '{}', \
-                 '[]', '', '{}', $7, '', '', '', '{}', $8)",
+                 VALUES ($1, $2, $3, $4, $5, $6, 0, '', '{}', '', 'direct', '', '{}', \
+                 '[]', '', '{}', $7, '{}', '', '{}', $8)",
             )
             .bind(id)
             .bind(graph.ws)

@@ -384,7 +384,7 @@ async fn fail_runs_txn(
         let barrier_sql = kernel::sweep_cancel_barrier_stamped_sql(cancel_ids.len());
         let mut barrier = sqlx::query(&barrier_sql)
             .bind(Utc::now())
-            .bind(RUNNER_OFFLINE_ERROR_CODE);
+            .bind(kernel::offline_stamp_patch(RUNNER_OFFLINE_ERROR_CODE));
         for id in &cancel_ids {
             barrier = barrier.bind(*id);
         }

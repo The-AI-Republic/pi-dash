@@ -1062,7 +1062,9 @@ pub async fn execute_terminal_effects(
     // `lock_run_for_effects_sql`: same predicates and lock, targeted
     // columns (status, config, error, category, binding, marker).
     let locked: Option<EffectsLockRow> = sqlx::query_as(
-        r#"SELECT "status", "run_config", "error", "refusal_category",
+        r#"SELECT "status", "run_config",
+                  COALESCE("agent_run"."error_details" ->> 'message', '') AS "error",
+                  "refusal_category",
                   "scheduler_binding_id", "terminal_hooks_applied_at"
                FROM "agent_run"
                WHERE ("agent_run"."id" = $1 AND "agent_run"."status" IN ($2, $3, $4, $5, $6))

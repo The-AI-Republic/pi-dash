@@ -78,7 +78,9 @@ def _set_run_times(seeder, run_id, created_sql, assigned_sql=None):
 
 def _run_row(seeder, run_id):
     return seeder.db.fetchone(
-        "SELECT status, runner_id, pinned_runner_id, error, error_code, "
+        "SELECT status, runner_id, pinned_runner_id, "
+        "COALESCE(error_details ->> 'message', '') AS error, "
+        "COALESCE(error_details ->> 'code', '') AS error_code, "
         "ended_at, queue_position, thread_id FROM agent_run WHERE id = %s",
         (run_id,),
     )

@@ -60,17 +60,18 @@ use pidash_services::orchestration::creation::{
     BUNDLE_LABELS_SQL, BUNDLE_OVERRIDES_SQL, BUNDLE_PARENT_COLS_SQL, BUNDLE_PARENT_DESCRIPTION_SQL,
     BUNDLE_PRIOR_RUN_COUNT_SQL, BUNDLE_PROJECT_IDENTIFIER_SQL, BUNDLE_PROJECT_STATES_SQL,
     BUNDLE_RELATIONS_SQL, BUNDLE_RELATION_TARGETS_SQL, BUNDLE_REMOTE_SQL, BUNDLE_SEQUENCE_SQL,
-    BUNDLE_TICKER_SQL, BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, FINALIZE_UPDATE_SQL,
-    ISSUE_LOCK_SQL, ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
+    BUNDLE_TICKER_SQL, BUNDLE_WORKSPACE_SQL, DEFAULT_POD_SELECT_SQL, ISSUE_LOCK_SQL,
+    ISSUE_SELECT_SQL, PROJECT_SELECT_SQL, PROMPT_UPDATE_SQL, RUNNER_SELECT_SQL,
     RUN_CONFIG_UPDATE_SQL, STATE_SELECT_SQL, TERMINAL_EVENT_EXISTS_SQL, TERMINAL_EVENT_INSERT_SQL,
     TERMINAL_EVENT_SEQ_SQL, TICKER_RESUME_SELECT_SQL, USER_FLAGS_SELECT_SQL,
     WORK_ITEM_ID_SELECT_SQL,
 };
 use pidash_services::orchestration::creation::{
-    finalize_lock_sql, AdmissionError as ServiceAdmissionError, CreationError, CreationSeam,
-    ExecutionError, ExecutionFields as ServiceExecutionFields, ExecutionRequest,
-    FinalizeAgentRunSeam, IssueView, LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle,
-    RunView, RunnerView, StateView, TickerBudget,
+    finalize_error_details_patch, finalize_lock_sql, finalize_update_sql,
+    AdmissionError as ServiceAdmissionError, CreationError, CreationSeam, ExecutionError,
+    ExecutionFields as ServiceExecutionFields, ExecutionRequest, FinalizeAgentRunSeam, IssueView,
+    LockedIssue, NewAgentRun, PodView, ProjectView, RenderBundle, RunView, RunnerView, StateView,
+    TickerBudget,
 };
 use pidash_services::prompting::{composer, context};
 use pidash_types::dispatch::AgentExecutorKind;
@@ -271,8 +272,7 @@ pub(crate) fn map_run_view(row: &PgRow) -> Result<RunView, sqlx::Error> {
         phase_kind: row.try_get("phase_kind")?,
         run_config: row.try_get("run_config")?,
         tool_plan: row.try_get("tool_plan")?,
-        error_code: row.try_get("error_code")?,
-        error: row.try_get("error")?,
+        error_details: row.try_get("error_details")?,
         prompt: row.try_get("prompt")?,
         prompt_manifest: row.try_get("prompt_manifest")?,
         ended_at: row.try_get("ended_at")?,
@@ -521,7 +521,7 @@ where
             .bind(row.work_item_id)
             .bind(row.parent_run_id)
             .bind(row.executor_kind.value())
-            .bind(&row.error_code)
+            .bind(&row.error_details)
             .bind(&row.tool_plan)
             .bind(&row.trigger)
             .bind(&row.phase_kind)
@@ -1324,10 +1324,9 @@ where
                 .map_err(db)?;
             return map_run_view(&row).map_err(db);
         }
-        sqlx::query(FINALIZE_UPDATE_SQL)
+        sqlx::query(&finalize_update_sql())
             .bind(now)
-            .bind(error_code)
-            .bind(error)
+            .bind(finalize_error_details_patch(error_code, error))
             .bind(run_id)
             .execute(&mut **self.tx.inner())
             .await
@@ -1966,11 +1965,11 @@ mod tests {
         sqlx::query(
             "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, runner_id, \
              pinned_runner_id, parent_run_id, work_item_id, status, executor_kind, \
-             dispatch_attempts, cancel_reason, error_code, tool_plan, prompt, trigger, \
+             dispatch_attempts, cancel_reason, tool_plan, prompt, trigger, \
              phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-             error, refusal_category, llm_model, usage, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, '', '', '{}', '', $11, \
-             $12, $13, '[]', '', '{}', '', '', '', '{}', $14)",
+             error_details, llm_model, usage, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, '', '{}', '', $11, \
+             $12, $13, '[]', '', '{}', '{}', '', '{}', $14)",
         )
         .bind(id)
         .bind(graph.ws)
@@ -2084,7 +2083,8 @@ mod tests {
     ) {
         sqlx::query_as(
             "SELECT status, parent_run_id, runner_id, pinned_runner_id, owner_id, trigger, \
-             phase_kind, executor_kind, error_code, error, ended_at, prompt, prompt_manifest, \
+             phase_kind, executor_kind, COALESCE(error_details->>'code', '') AS error_code, \
+             COALESCE(error_details->>'message', '') AS error, ended_at, prompt, prompt_manifest, \
              run_config, tool_plan FROM agent_run WHERE id = $1",
         )
         .bind(id)

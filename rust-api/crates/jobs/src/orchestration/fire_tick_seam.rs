@@ -1679,11 +1679,11 @@ mod tests {
         sqlx::query(
             "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, runner_id, \
              pinned_runner_id, parent_run_id, work_item_id, status, executor_kind, \
-             dispatch_attempts, cancel_reason, error_code, tool_plan, prompt, trigger, \
+             dispatch_attempts, cancel_reason, tool_plan, prompt, trigger, \
              phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-             error, refusal_category, llm_model, usage, created_at) \
-             VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, 0, '', '', '{}', '', $9, \
-             $10, $11, '[]', '', '{}', '', '', '', '{}', $12)",
+             error_details, llm_model, usage, created_at) \
+             VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, 0, '', '{}', '', $9, \
+             $10, $11, '[]', '', '{}', '{}', '', '{}', $12)",
         )
         .bind(id)
         .bind(graph.ws)

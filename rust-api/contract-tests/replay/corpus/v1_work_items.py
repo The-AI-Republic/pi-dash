@@ -241,13 +241,13 @@ def _seed_followup(conn) -> None:
             """
             INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
-                refusal_category, trigger, executor_kind, dispatch_attempts,
-                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
+                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                trigger, executor_kind, dispatch_attempts,
+                cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, created_at)
-            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','',
-                    %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                    '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}',
+                    %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
+                    '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
             """,
             (RUN_ID, ws_id, ISS_B_ID, POD_ID, admin_id),
         )
@@ -258,13 +258,13 @@ def _seed_followup(conn) -> None:
             """
             INSERT INTO agent_run
                (id, status, prompt, run_config, required_capabilities, thread_id,
-                error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
-                refusal_category, trigger, executor_kind, dispatch_attempts,
-                cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
+                error_details, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
+                trigger, executor_kind, dispatch_attempts,
+                cancel_reason, tool_plan, phase_kind, agent_metadata,
                 usage, created_at)
-            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','',
-                    %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                    '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
+            VALUES (%s,'running','contract prompt','{}','{}','contract-thread','{}',
+                    %s,%s,%s,%s,'contract-model', 'human', 'local_runner', 0,
+                    '', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())
             """,
             (RUN2_ID, ws_id, ISS_C_ID, POD_ID, admin_id),
         )
