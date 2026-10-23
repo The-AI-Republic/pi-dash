@@ -28686,8 +28686,10 @@ export class WebNewDriver implements ParityDriver {
   async intakeShellBreadcrumbTrail(): Promise<string[]> {
     const trail = this.page.getByTestId("intake-breadcrumb");
     await trail.waitFor({ timeout: WebNewDriver.WAIT_MS });
-    const text = ((await trail.innerText()) ?? "").replace(/\s+/g, " ").trim();
-    return text.length > 0 ? [text] : [];
+    const crumbs = await trail
+      .getByRole("listitem")
+      .evaluateAll((nodes) => nodes.map((node) => (node.textContent ?? "").replace(/\s+/g, " ").trim()));
+    return crumbs.filter((crumb) => crumb.length > 0);
   }
 
   async intakeShellBreadcrumbIntakeHref(): Promise<string | null> {

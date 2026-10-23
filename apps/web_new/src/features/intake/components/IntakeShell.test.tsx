@@ -41,9 +41,15 @@ describe("IntakeShell (INT-001)", () => {
     expect(trail).toHaveTextContent("Intake");
   });
 
-  it("links the Intake crumb back to the canonical address", () => {
+  it("links the visible Intake crumb back to the canonical address", () => {
     render(<IntakeShell {...BASE} />);
-    expect(screen.getByTestId("intake-breadcrumb").querySelector('a[href="/acme/projects/p-1/intake"]')).not.toBeNull();
+    const trail = screen.getByTestId("intake-breadcrumb");
+    const crumb = screen.getByRole("link", { name: "Intake" });
+    expect(trail.contains(crumb)).toBe(true);
+    expect(crumb).toBeVisible();
+    expect(crumb).toHaveAttribute("href", "/acme/projects/p-1/intake");
+    expect(crumb).toHaveAttribute("aria-current", "page");
+    expect(trail.querySelectorAll("a").length).toBe(1);
   });
 
   it("drops the pick placeholder once a request is selected", () => {

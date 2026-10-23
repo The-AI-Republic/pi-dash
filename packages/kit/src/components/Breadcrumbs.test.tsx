@@ -35,6 +35,26 @@ describe("Breadcrumbs", () => {
     expect(screen.getByText("Projects").parentElement).toHaveAttribute("aria-current", "page");
   });
 
+  it("links the terminal entry when the trail opts into a self-referencing crumb", () => {
+    render(
+      <Breadcrumbs
+        terminalAsLink
+        entries={[{ label: "Apollo" }, { label: "Intake", href: "/acme/projects/p-1/intake" }]}
+      />
+    );
+    const terminal = screen.getByRole("link", { name: "Intake" });
+    expect(terminal).toHaveAttribute("href", "/acme/projects/p-1/intake");
+    expect(terminal).toHaveAttribute("aria-current", "page");
+    expect(terminal).toHaveTextContent("Intake");
+    expect(screen.getByText("Apollo").tagName).toBe("SPAN");
+  });
+
+  it("keeps the terminal entry plain text when the opt-in crumb has no target", () => {
+    render(<Breadcrumbs terminalAsLink entries={[{ label: "Apollo" }, { label: "Intake" }]} />);
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText("Intake").parentElement).toHaveAttribute("aria-current", "page");
+  });
+
   it("renders entries without a target as plain text", () => {
     render(<Breadcrumbs entries={[{ label: "Projects" }, { label: "Archived" }]} />);
     expect(screen.queryByRole("link")).toBeNull();
