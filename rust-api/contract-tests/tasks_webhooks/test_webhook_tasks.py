@@ -873,6 +873,59 @@ def test_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
     assert poisoned == []
 
 
+def test_page_transaction_second_chunk_poison_inserts_nothing(db_conn, broker_url):
+    """A poison id past the first 50 rolls back the whole bulk_create (PIDASHCONV-1282).
+
+    ``bulk_create(..., batch_size=50)`` wraps every batch in one
+    ``transaction.atomic(savepoint=False)`` (Django 4.2
+    ``QuerySet.bulk_create``), so a non-UUID mention id on the 51st
+    component rolls back the first batch too: zero new page_logs rows,
+    and the job still acks.
+
+    Completion signal: same marker-job pattern as
+    ``test_page_transaction_url_src_inserts_nothing`` (solo pool, FIFO).
+    """
+    owner = seed_helpers.user(db_conn, "contract-txchunk-owner")
+    workspace = seed_helpers.workspace(db_conn, "contracttxchunk", owner["id"])
+    page = _seed_page(db_conn, workspace["id"], owner["id"])
+    marker_page = _seed_page(db_conn, workspace["id"], owner["id"])
+    parts = [
+        f'<mention-component id="{uuid.uuid4()}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-{n}" entity_type="issue"></mention-component>'
+        for n in range(50)
+    ]
+    parts.append(
+        f'<mention-component id="not-a-uuid" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="ISS-50" entity_type="issue"></mention-component>'
+    )
+    html = "".join(parts)
+    before = snapshot(db_conn, ["page_logs"])
+    celery_wire.publish(
+        f"{M}.page_transaction_task.page_transaction",
+        args=[html, "", str(page["id"])],
+    )
+    marker_id = str(uuid.uuid4())
+    marker_html = (
+        f'<mention-component id="{marker_id}" entity_identifier="{uuid.uuid4()}" '
+        f'entity_name="M-1" entity_type="issue"></mention-component>'
+    )
+    celery_wire.publish(
+        f"{M}.page_transaction_task.page_transaction",
+        args=[marker_html, "", str(marker_page["id"])],
+    )
+    wait_for(
+        lambda: _live_page_logs(db_conn, marker_page["id"]) or None,
+        what="marker page_logs row",
+    )
+    assert _added_rows(db_conn, "page_logs", before) != []
+    poisoned = [
+        row
+        for row in snapshot(db_conn, ["page_logs"])["page_logs"].values()
+        if row["page_id"] == str(page["id"])
+    ]
+    assert poisoned == []
+
+
 #: ``data:image/svg+xml;base64,`` + DEFAULT_FAVICON
 #: (``work_item_link_task.py:24``), the favicon fallback.
 DEFAULT_FAVICON_DATA_URI = (
