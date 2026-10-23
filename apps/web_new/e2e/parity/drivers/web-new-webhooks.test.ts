@@ -313,20 +313,22 @@ describe("web_new webhook driver — list", () => {
 });
 
 describe("web_new webhook driver — rows and creation entry", () => {
+  /**
+   * The list markup: a row `li` holding the row link and, beside it, the
+   * active switch. `selector` is `li`; `filter` selects the row by the link
+   * it holds, and the switch is read from the row itself.
+   */
   function rowLinks(checked: boolean, switchPresent = true): (selector: string) => Locator {
-    return (selector) =>
-      selector === 'a[href*="/settings/webhooks/"]'
-        ? fake({
-            by: (query) =>
-              query.kind.startsWith("filter:")
-                ? fake({
-                    click: async () => undefined,
-                    by: (nested) =>
-                      nested.kind.startsWith("role:switch") ? (switchPresent ? fake({ checked }) : gone()) : gone(),
-                  })
-                : gone(),
-          })
-        : gone();
+    return (selector) => {
+      if (selector === 'a[href*="/settings/webhooks/"]') return fake();
+      if (selector !== "li") return gone();
+      const row = fake({
+        click: async () => undefined,
+        by: (query) => (query.kind.startsWith("role:switch") ? (switchPresent ? fake({ checked }) : gone()) : gone()),
+      });
+      row.filter = () => row;
+      return row;
+    };
   }
 
   it("opens a row, reads and flips its switch, and watches the patch", async () => {

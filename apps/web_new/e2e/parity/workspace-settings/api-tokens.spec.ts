@@ -70,7 +70,9 @@ test(
       await test.step("a fresh user sees the empty state with its creation action", async () => {
         expect(await driver.wsSettingsApiTokenHeading()).toBe("Personal Access Tokens");
         expect(await driver.wsSettingsApiTokenAddVisible()).toBe(true);
-        expect(await driver.wsSettingsApiTokenEmptyVisible()).toBe(true);
+        // The empty state replaces the loader once the list resolves; the
+        // heading and Add control above are static, so wait for this pair.
+        await expect.poll(() => driver.wsSettingsApiTokenEmptyVisible(), { timeout: 30_000 }).toBe(true);
         expect(await driver.wsSettingsApiTokenRows()).toEqual([]);
         expect(await serverApiTokens(member.session)).toEqual([]);
       });
@@ -364,12 +366,16 @@ test(
       const future = `${tag}-future`;
       const never = `${tag}-never`;
       const expired = `${tag}-expired`;
+      // Both apps render expiry lines on the viewer's clock, so seed an
+      // instant that is noon in the viewer's own zone rather than in UTC.
+      // The pinned line below then holds wherever the suite runs.
+      const futureInstant = new Date(2030, 5, 15, 12, 0, 0, 0).toISOString();
 
       await test.step("seed one token per wording variant", async () => {
         await serverCreateApiToken(member.session, {
           label: future,
           description: "future token",
-          expiredAt: "2030-06-15T12:00:00Z",
+          expiredAt: futureInstant,
         });
         await serverCreateApiToken(member.session, { label: never, expiredAt: null });
         await serverCreateApiToken(member.session, { label: expired, expiredAt: "2020-01-01T00:00:00Z" });
