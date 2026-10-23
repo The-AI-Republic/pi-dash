@@ -463,13 +463,14 @@ pub fn sub_issues_from_where(binder: &mut Binder, slug: &str, parent_id: uuid::U
     )
 }
 
-/// Default sub-issue order: `order_issue_queryset(sub_issues, "-created_at")`
-/// echoes the param through (`ordering.rs`, pilot-2's).
+/// The `Issue` model ordering (`-created_at`): what `order_issue_queryset`
+/// echoes for the default param, and the order the GET's full-set
+/// `state_distribution` query reads in (no explicit `order_by`).
 pub const SUB_ISSUES_DEFAULT_ORDER: &str = "ORDER BY issue.created_at DESC";
 
-/// Full default-order sub-issues statement (GET with no `order_by` override).
-/// Ordering variants and the `state_distribution` / `group_by` shaping are
-/// handler-owned (`ordering.rs`, `SUB_ISSUES_KEYS`).
+/// Full sub-issues statement in the model ordering, unpaginated. The GET
+/// handler pages with its own paginator `ORDER BY` and owns the
+/// `state_distribution` / `group_by` shaping (`SUB_ISSUES_KEYS`).
 pub fn sub_issues_sql(binder: &mut Binder, slug: &str, parent_id: uuid::Uuid) -> String {
     let selects = sub_issues_selects();
     let from_where = sub_issues_from_where(binder, slug, parent_id);
