@@ -578,7 +578,7 @@ pub fn request_runner_id(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-/// Render an `AuthenticationFailed(code)` denial: 401 `{"Detail": code}`
+/// Render an `AuthenticationFailed(code)` denial: 401 `{"detail": code}`
 /// through the default DRF handler (the project's `auth_exception_handler`
 /// only rewrites `Throttled`), plus the `WWW-Authenticate: Bearer`
 /// challenge from `authenticate_header`.
@@ -588,7 +588,7 @@ pub fn auth_failed(code: &str) -> Response {
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::WWW_AUTHENTICATE, "Bearer")
         .body(axum::body::Body::from(
-            serde_json::json!({"Detail": code}).to_string(),
+            serde_json::json!({"detail": code}).to_string(),
         ))
         .expect("auth denial builds")
 }
@@ -703,7 +703,7 @@ async fn workspace_member_exists(
 /// (`authentication.py:79-162`) as data: `Ok(None)` when no Bearer
 /// credential is presented (every endpoint then resolves "not owned"
 /// or 500s, per its own `_resolve`); `Err(response)` for a rejected
-/// credential (401 `{"Detail": code}`).
+/// credential (401 `{"detail": code}`).
 ///
 /// The URL carries no `runner_id` on run/chat routes, so step 5 of the
 /// docstring (`token.sub == url_runner_id`) never applies and the
@@ -746,18 +746,18 @@ async fn authenticate_legacy_jwt(
         Ok(claims) => claims,
         Err(error) => return Err(auth_failed(error.code())),
     };
-    // `Runner.objects...get(id=runner_id)` (`authentication.py:91-94`):
-    // a non-UUID `sub` is the source's `ValidationError` (500), a
-    // missing row is `runner_not_found` (401).
-    let runner_id: uuid::Uuid = match payload.sub.parse() {
-        Ok(id) => id,
-        Err(_) => return Err(server_error()),
+    // `_is_uuid(sub)` then `Runner.objects...get(id=sub)`
+    // (`authentication.py:116-123`): a non-UUID `sub` is
+    // `runner_not_found`; the signature verified, so a missing row is a
+    // deleted runner, `runner_gone` (PDASHOSS01-306).
+    let Some(runner_id) = runs::parse_py_uuid(&payload.sub) else {
+        return Err(auth_failed("runner_not_found"));
     };
     let row = fetch_runner_for_auth(pool, runner_id)
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(auth_failed("runner_not_found"));
+        return Err(auth_failed("runner_gone"));
     };
     if row.revoked_at.is_some() {
         return Err(auth_failed("runner_revoked"));
@@ -821,17 +821,18 @@ async fn authenticate_machine_token(
     let Some(runner_raw) = request_runner_id(headers) else {
         return Err(auth_failed("runner_id_required"));
     };
-    // `Runner.objects...get(id=runner_id)` (`authentication.py:137-140`):
-    // non-UUID header is `ValidationError` (500), missing row is 401.
-    let runner_id: uuid::Uuid = match runner_raw.parse() {
-        Ok(id) => id,
-        Err(_) => return Err(server_error()),
+    // `_is_uuid(runner_id)` then `Runner.objects...get(id=runner_id)`
+    // (`authentication.py:166-174`): a non-UUID header is
+    // `runner_not_found`; the machine verified above, so a missing row is
+    // a deleted runner, `runner_gone` (PDASHOSS01-306).
+    let Some(runner_id) = runs::parse_py_uuid(&runner_raw) else {
+        return Err(auth_failed("runner_not_found"));
     };
     let row = fetch_runner_for_auth(pool, runner_id)
         .await
         .map_err(|_| server_error())?;
     let Some(row) = row else {
-        return Err(auth_failed("runner_not_found"));
+        return Err(auth_failed("runner_gone"));
     };
     if row.revoked_at.is_some() {
         return Err(auth_failed("runner_revoked"));
@@ -912,8 +913,8 @@ mod auth_tests {
         );
     }
 
-    #[test]
-    fn auth_failed_renders_401_detail_with_challenge() {
+    #[tokio::test]
+    async fn auth_failed_renders_401_detail_with_challenge() {
         let response = auth_failed("machine_token_invalid");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
@@ -923,6 +924,12 @@ mod auth_tests {
                 .expect("challenge"),
             "Bearer"
         );
+        // DRF renders `AuthenticationFailed` as lowercase `detail`; the
+        // daemon matches `runner_gone` on that key (PDASHOSS01-306).
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], br#"{"detail":"machine_token_invalid"}"#);
     }
 
     #[test]
