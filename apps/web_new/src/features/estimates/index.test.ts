@@ -31,7 +31,7 @@ describe("estimates feature barrel", () => {
     expect(estimates.ESTIMATE_FAMILY_POINTS).toBe("points");
     expect(estimates.ESTIMATE_FAMILY_CATEGORIES).toBe("categories");
     expect(estimates.CUSTOM_STARTER_ID).toBe("custom");
-    expect(estimates.ESTIMATE_VALUE_MAX_LENGTH).toBe(40);
+    expect(estimates.ESTIMATE_VALUE_MAX_LENGTH).toBe(20);
     expect(estimates.ESTIMATE_FAMILIES).toHaveLength(2);
     expect(estimates.familySystemName("categories")).toBe("Categories");
     expect(estimates.renumberValues(["1", "2"])).toEqual([
