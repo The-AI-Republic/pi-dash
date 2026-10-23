@@ -88,7 +88,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use pidash_db::app_pages::strip::{ml_strip_tags, sync_description_stripped};
+use pidash_db::app_pages::strip::sync_description_stripped;
 use pidash_services::space::guards::{self, AnchorLookup, ExceptionKind};
 use pidash_services::space::queries::intake_assets as queries;
 
@@ -2434,16 +2434,12 @@ async fn detail_partial_update(
     // `update()`: the 3 attrs plus the save backfills (`updated_at`,
     // `updated_by`, recomputed stripped text, `completed_at`).
     let now = Utc::now();
-    let description_stripped = if description_html.is_empty() {
-        None
-    } else {
-        let stripped = ml_strip_tags(&description_html);
-        if stripped.is_empty() {
-            None
-        } else {
-            Some(stripped)
-        }
-    };
+    // `Issue.save` update branch (`db/models/issue.py:344-349` over
+    // `utils/html_processor.py`): `None` only when the *input* html is
+    // `""`/`None`, else MLStripper-decoded text — an empty strip (e.g. the
+    // editor's cleared `"<p></p>"`) is stored as `""`, not collapsed to
+    // `None`. Same helper as the create path (PIDASHCONV-1258).
+    let description_stripped = sync_description_stripped(Some(description_html.as_str()));
     // `Issue.save`: `completed_at = now` only when the state group is
     // `completed`, else `None` (the state never changes on this path).
     let completed_at = match pre_save.issue.state_id {
