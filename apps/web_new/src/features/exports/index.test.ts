@@ -12,9 +12,11 @@ import {
   EXPORT_SUCCESS_TITLE,
   exportRequestBody,
   ExportsForm,
+  ExportsGuide,
   exportsKeys,
   formatLabel,
   parseExportForm,
+  registerExportsGuide,
   selectExportProjectIds,
   selectExportSuccessMessage,
   selectPickedIdentifiers,
@@ -66,5 +68,12 @@ describe("exports barrel", () => {
       "queued",
       "unknown",
     ]);
+  });
+
+  it("exposes the settings guide and its seam registration", () => {
+    expect(typeof ExportsGuide).toBe("function");
+    expect(typeof registerExportsGuide).toBe("function");
+    expect(barrel.ExportsGuide).toBe(ExportsGuide);
+    expect(barrel.registerExportsGuide).toBe(registerExportsGuide);
   });
 });

@@ -26,5 +26,11 @@ function WorkspaceSettingsSectionPage(): React.ReactElement {
   // stays the only render path, and the exports area's page has exactly one
   // entry point.
   React.useLayoutEffect(() => registerWorkspaceSettingsPage("exports", ExportsSettingsPage), []);
+  // The guide chunk registers itself into the frame's seam on import, so
+  // the load starts from the route body and the form + history stay out of
+  // the initial bundle (NEWFRONT-768).
+  React.useEffect(() => {
+    void import("../../../../../../features/exports/register.js");
+  }, []);
   return <SettingsSectionOutlet workspaceSlug={ws} section="exports" />;
 }
