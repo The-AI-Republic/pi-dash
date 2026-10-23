@@ -13,8 +13,10 @@ import {
   sortWorkspaceViewsNewestFirst,
   WORKSPACE_DEFAULT_VIEWS,
   WORKSPACE_VIEW_NAME_LIMIT,
+  WORKSPACE_VIEWS_CRUMB,
   workspaceCustomViewHref,
   workspaceDefaultViewHref,
+  workspaceViewsListHref,
   workspaceViewsTitle,
 } from "./workspaceViews.js";
 
@@ -47,6 +49,14 @@ describe("hrefs", () => {
 
   it("links a custom by its id", () => {
     expect(workspaceCustomViewHref("acme", "view-9")).toBe("/acme/workspace-views/view-9");
+  });
+
+  it("links the list for the detail crumb", () => {
+    expect(workspaceViewsListHref("acme")).toBe("/acme/workspace-views");
+  });
+
+  it("names the list crumb", () => {
+    expect(WORKSPACE_VIEWS_CRUMB).toBe("Views");
   });
 });
 

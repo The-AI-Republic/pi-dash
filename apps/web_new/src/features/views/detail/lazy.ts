@@ -36,3 +36,38 @@ export function resolvedSavedViewDetail(): SavedViewDetailChunk {
   }
   return resolved;
 }
+
+type WorkspaceDetailModule = typeof import("./WorkspaceViewScreen.js");
+type WorkspacePreloadModule = typeof import("./workspacePreload.js");
+
+interface WorkspaceViewDetailChunk {
+  WorkspaceViewScreen: WorkspaceDetailModule["WorkspaceViewScreen"];
+  preloadWorkspaceView: WorkspacePreloadModule["preloadWorkspaceView"];
+}
+
+let workspaceRequest: Promise<WorkspaceViewDetailChunk> | null = null;
+let workspaceResolved: WorkspaceViewDetailChunk | null = null;
+
+/** Start (or reuse) the workspace detail chunk request. */
+export function loadWorkspaceViewDetail(): Promise<WorkspaceViewDetailChunk> {
+  workspaceRequest ??= Promise.all([import("./WorkspaceViewScreen.js"), import("./workspacePreload.js")]).then(
+    ([screen, preload]) => {
+      workspaceResolved = {
+        WorkspaceViewScreen: screen.WorkspaceViewScreen,
+        preloadWorkspaceView: preload.preloadWorkspaceView,
+      };
+      return workspaceResolved;
+    }
+  );
+  return workspaceRequest;
+}
+
+/** The screen once the chunk resolved; throws before the route's await. */
+export function resolvedWorkspaceViewDetail(): WorkspaceViewDetailChunk {
+  if (workspaceResolved === null) {
+    throw new Error(
+      "WorkspaceViewScreen rendered before its chunk loaded; await loadWorkspaceViewDetail() in beforeLoad."
+    );
+  }
+  return workspaceResolved;
+}

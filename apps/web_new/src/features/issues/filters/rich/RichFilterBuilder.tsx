@@ -132,10 +132,16 @@ export function useRichFilterBuilder(props: RichFilterBuilderProps): RichFilterB
   // View writes are a project power: the old row asks for ADMIN or MEMBER
   // standing on this project, so a workspace member who has not joined it
   // sees no Save view rather than a 403. Workspace admins keep their
-  // standing everywhere.
+  // standing everywhere. A row editing a workspace view (a record that
+  // spans projects) instead asks for workspace member standing, matching
+  // the views area's Add-view rule (VIEW-038).
   const projectRoles = useProjectRoles(workspaceSlug);
   const projectRole = projectRoles.data?.[projectId];
-  const canWriteViews = permissions.isAdmin || (projectRole !== undefined && projectRole >= ROLE_MEMBER);
+  const rowEditsWorkspaceView = props.view?.view.project === null;
+  const canWriteViews =
+    permissions.isAdmin ||
+    (projectRole !== undefined && projectRole >= ROLE_MEMBER) ||
+    (rowEditsWorkspaceView && permissions.canEdit);
   const me = useMe();
   // A persisted instance is named after its entity; a temporary one gets
   // a client-only TEMP- id that dies with the mount.

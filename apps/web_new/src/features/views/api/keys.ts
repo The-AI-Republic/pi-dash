@@ -20,4 +20,11 @@ export const viewKeys = {
     [...workspaceScope(workspaceSlug), "issues", "saved-view", projectId, viewId] as const,
   /** The workspace's custom saved views, defaults excluded (VIEW-029). */
   workspaceList: (workspaceSlug: string) => [...viewKeys.all(workspaceSlug), "workspace", "list"] as const,
+  /**
+   * One workspace view's detail record. The tail deliberately matches the
+   * issues filter row's saved-view key, so a dialog's PATCH echo and a
+   * row action's cache adoption reach the same entry the detail reads.
+   */
+  workspaceDetail: (workspaceSlug: string, viewId: string) =>
+    [...workspaceScope(workspaceSlug), "issues", "saved-view", "workspace", viewId] as const,
 };

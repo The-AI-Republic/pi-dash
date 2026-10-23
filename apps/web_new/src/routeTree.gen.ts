@@ -102,6 +102,7 @@ import { Route as WsGatedSettingsWorkspaceIndexRouteImport } from './routes/$ws/
 import { Route as WsGatedSettingsWorkspaceSplatRouteImport } from './routes/$ws/_gated/settings/_workspace/$'
 import { Route as WsGatedSettingsAccountSplatRouteImport } from './routes/$ws/_gated/settings/account/$'
 import { Route as WsGatedSettingsProjectsIndexRouteImport } from './routes/$ws/_gated/settings/projects/index'
+import { Route as WsGatedWorkspaceViewsViewIdIndexRouteImport } from './routes/$ws/_gated/workspace-views/$viewId/index'
 import { Route as WsGatedProjectsProjectIdArchivesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/archives/index'
 import { Route as WsGatedProjectsProjectIdCyclesIndexRouteImport } from './routes/$ws/_gated/projects/$projectId/cycles/index'
 import { Route as WsGatedProjectsProjectIdCyclesCycleIdRouteImport } from './routes/$ws/_gated/projects/$projectId/cycles/$cycleId'
@@ -645,6 +646,12 @@ const WsGatedSettingsProjectsIndexRoute =
     path: '/settings/projects/',
     getParentRoute: () => WsGatedRouteRoute,
   } as any)
+const WsGatedWorkspaceViewsViewIdIndexRoute =
+  WsGatedWorkspaceViewsViewIdIndexRouteImport.update({
+    id: '/workspace-views/$viewId/',
+    path: '/workspace-views/$viewId/',
+    getParentRoute: () => WsGatedRouteRoute,
+  } as any)
 const WsGatedProjectsProjectIdArchivesIndexRoute =
   WsGatedProjectsProjectIdArchivesIndexRouteImport.update({
     id: '/archives/',
@@ -1007,6 +1014,7 @@ export interface FileRoutesByFullPath {
   '/$ws/runners/runs/': typeof WsGatedRunnersRunsIndexRoute
   '/$ws/settings/': typeof WsGatedSettingsWorkspaceIndexRoute
   '/$ws/settings/projects/': typeof WsGatedSettingsProjectsIndexRoute
+  '/$ws/workspace-views/$viewId/': typeof WsGatedWorkspaceViewsViewIdIndexRoute
   '/$ws/projects/$projectId/cycles/$cycleId': typeof WsGatedProjectsProjectIdCyclesCycleIdRoute
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
@@ -1130,6 +1138,7 @@ export interface FileRoutesByTo {
   '/$ws/runners/runs': typeof WsGatedRunnersRunsIndexRoute
   '/$ws/settings': typeof WsGatedSettingsWorkspaceIndexRoute
   '/$ws/settings/projects': typeof WsGatedSettingsProjectsIndexRoute
+  '/$ws/workspace-views/$viewId': typeof WsGatedWorkspaceViewsViewIdIndexRoute
   '/$ws/projects/$projectId/cycles/$cycleId': typeof WsGatedProjectsProjectIdCyclesCycleIdRoute
   '/$ws/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
@@ -1271,6 +1280,7 @@ export interface FileRoutesById {
   '/$ws/_gated/runners/runs/': typeof WsGatedRunnersRunsIndexRoute
   '/$ws/_gated/settings/_workspace/': typeof WsGatedSettingsWorkspaceIndexRoute
   '/$ws/_gated/settings/projects/': typeof WsGatedSettingsProjectsIndexRoute
+  '/$ws/_gated/workspace-views/$viewId/': typeof WsGatedWorkspaceViewsViewIdIndexRoute
   '/$ws/_gated/projects/$projectId/cycles/$cycleId': typeof WsGatedProjectsProjectIdCyclesCycleIdRoute
   '/$ws/_gated/projects/$projectId/issues/$issueId': typeof WsGatedProjectsProjectIdIssuesIssueIdRoute
   '/$ws/_gated/projects/$projectId/modules/$moduleId': typeof WsGatedProjectsProjectIdModulesModuleIdRoute
@@ -1410,6 +1420,7 @@ export interface FileRouteTypes {
     | '/$ws/runners/runs/'
     | '/$ws/settings/'
     | '/$ws/settings/projects/'
+    | '/$ws/workspace-views/$viewId/'
     | '/$ws/projects/$projectId/cycles/$cycleId'
     | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/projects/$projectId/modules/$moduleId'
@@ -1533,6 +1544,7 @@ export interface FileRouteTypes {
     | '/$ws/runners/runs'
     | '/$ws/settings'
     | '/$ws/settings/projects'
+    | '/$ws/workspace-views/$viewId'
     | '/$ws/projects/$projectId/cycles/$cycleId'
     | '/$ws/projects/$projectId/issues/$issueId'
     | '/$ws/projects/$projectId/modules/$moduleId'
@@ -1673,6 +1685,7 @@ export interface FileRouteTypes {
     | '/$ws/_gated/runners/runs/'
     | '/$ws/_gated/settings/_workspace/'
     | '/$ws/_gated/settings/projects/'
+    | '/$ws/_gated/workspace-views/$viewId/'
     | '/$ws/_gated/projects/$projectId/cycles/$cycleId'
     | '/$ws/_gated/projects/$projectId/issues/$issueId'
     | '/$ws/_gated/projects/$projectId/modules/$moduleId'
@@ -2399,6 +2412,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WsGatedSettingsProjectsIndexRouteImport
       parentRoute: typeof WsGatedRouteRoute
     }
+    '/$ws/_gated/workspace-views/$viewId/': {
+      id: '/$ws/_gated/workspace-views/$viewId/'
+      path: '/workspace-views/$viewId'
+      fullPath: '/$ws/workspace-views/$viewId/'
+      preLoaderRoute: typeof WsGatedWorkspaceViewsViewIdIndexRouteImport
+      parentRoute: typeof WsGatedRouteRoute
+    }
     '/$ws/_gated/projects/$projectId/archives/': {
       id: '/$ws/_gated/projects/$projectId/archives/'
       path: '/archives'
@@ -2962,6 +2982,7 @@ interface WsGatedRouteRouteChildren {
   WsGatedSettingsAccountSplatRoute: typeof WsGatedSettingsAccountSplatRoute
   WsGatedProjectsArchivesIndexRoute: typeof WsGatedProjectsArchivesIndexRoute
   WsGatedSettingsProjectsIndexRoute: typeof WsGatedSettingsProjectsIndexRoute
+  WsGatedWorkspaceViewsViewIdIndexRoute: typeof WsGatedWorkspaceViewsViewIdIndexRoute
   WsGatedSettingsProjectsProjectIdAiWorkersRoute: typeof WsGatedSettingsProjectsProjectIdAiWorkersRoute
   WsGatedSettingsProjectsProjectIdAutomationsRoute: typeof WsGatedSettingsProjectsProjectIdAutomationsRoute
   WsGatedSettingsProjectsProjectIdEstimatesRoute: typeof WsGatedSettingsProjectsProjectIdEstimatesRoute
@@ -3004,6 +3025,7 @@ const WsGatedRouteRouteChildren: WsGatedRouteRouteChildren = {
   WsGatedSettingsAccountSplatRoute: WsGatedSettingsAccountSplatRoute,
   WsGatedProjectsArchivesIndexRoute: WsGatedProjectsArchivesIndexRoute,
   WsGatedSettingsProjectsIndexRoute: WsGatedSettingsProjectsIndexRoute,
+  WsGatedWorkspaceViewsViewIdIndexRoute: WsGatedWorkspaceViewsViewIdIndexRoute,
   WsGatedSettingsProjectsProjectIdAiWorkersRoute:
     WsGatedSettingsProjectsProjectIdAiWorkersRoute,
   WsGatedSettingsProjectsProjectIdAutomationsRoute:

@@ -10,7 +10,12 @@
 // reach every visible issue rather than the first window of them.
 
 import { infiniteQueryOptions } from "@tanstack/react-query";
-import { listGlobalIssues, type ApiClient, type GlobalIssueListResponse } from "@pidash/api-client";
+import {
+  listGlobalIssues,
+  type ApiClient,
+  type GlobalIssueListResponse,
+  type IssueListQuery,
+} from "@pidash/api-client";
 
 import { LIST_STALE_TIME_MS } from "../../../core/query/client.js";
 import { issueKeys } from "../api/keys.js";
@@ -18,18 +23,56 @@ import { issueKeys } from "../api/keys.js";
 /** Rows per request for the workspace all-issues view. */
 export const GLOBAL_ISSUES_PAGE_SIZE = 100;
 
+/** A read with no scope beyond the workspace: the plain all-issues list. */
+function isPlainGlobalQuery(query: IssueListQuery): boolean {
+  const filters = query.filters;
+  return (
+    query.orderBy === undefined &&
+    query.groupBy === undefined &&
+    query.subGroupBy === undefined &&
+    query.perPage === undefined &&
+    (filters === undefined || Object.keys(filters).length === 0)
+  );
+}
+
+/**
+ * Extra key parts for a scoped read. Empty for the plain all-issues read
+ * so its key (and cache entry) stays exactly what ISS-223 pins; a view's
+ * stored expression, a default's static condition or an order keys its
+ * own entry.
+ */
+function scopedGlobalKeyParts(query: IssueListQuery): unknown[] {
+  if (isPlainGlobalQuery(query)) return [];
+  return [
+    {
+      orderBy: query.orderBy ?? null,
+      groupBy: query.groupBy ?? null,
+      subGroupBy: query.subGroupBy ?? null,
+      perPage: query.perPage ?? GLOBAL_ISSUES_PAGE_SIZE,
+      filters: query.filters ?? null,
+    },
+  ];
+}
+
 /**
  * The workspace-wide issue list, every joined project included, one
  * cursor page at a time. `next_cursor` is an opaque position the server
  * hands back; an empty cursor (or `next_page_results: false`) ends the
- * chain.
+ * chain. The optional scope (a saved view's expression, a default's
+ * static condition, an order) rides the request and the key; without it
+ * the read is the plain all-issues list.
  */
-export function globalIssuesQueryOptions(client: ApiClient, workspaceSlug: string) {
+export function globalIssuesQueryOptions(client: ApiClient, workspaceSlug: string, query: IssueListQuery = {}) {
   return infiniteQueryOptions({
-    queryKey: [...issueKeys.all(workspaceSlug), "global"] as const,
+    queryKey: [...issueKeys.all(workspaceSlug), "global", ...scopedGlobalKeyParts(query)] as const,
     queryFn: ({ pageParam }) =>
+      // The cursor stays the page param's: a scope never carries one.
       listGlobalIssues(client, workspaceSlug, {
-        perPage: GLOBAL_ISSUES_PAGE_SIZE,
+        perPage: query.perPage ?? GLOBAL_ISSUES_PAGE_SIZE,
+        ...(query.orderBy === undefined ? {} : { orderBy: query.orderBy }),
+        ...(query.groupBy === undefined ? {} : { groupBy: query.groupBy }),
+        ...(query.subGroupBy === undefined ? {} : { subGroupBy: query.subGroupBy }),
+        ...(query.filters === undefined ? {} : { filters: query.filters }),
         ...(pageParam === null ? {} : { cursor: pageParam }),
       }),
     initialPageParam: null as string | null,

@@ -22,6 +22,12 @@ export const MISSING_VIEW_DESCRIPTION = "This view does not exist, or you do not
 export const MISSING_VIEW_BACK_LABEL = "Back to views";
 
 /**
+ * The way back from an unreadable workspace view (VIEW-038/039): the
+ * default view, not the list. Pinned exactly by the oracle.
+ */
+export const MISSING_WORKSPACE_VIEW_BACK_LABEL = "Go to All work items";
+
+/**
  * Browser tab title: the project name, a separator, then the view name
  * (VIEW-021). A project that has not resolved yet leaves its half out
  * rather than rendering a leading separator.

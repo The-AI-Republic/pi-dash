@@ -24,8 +24,11 @@ export interface SavedViewSwitcherProps {
   onPick: (viewId: string) => void;
 }
 
-/** The leading mark for one option: the view's stored logo or the default. */
-export function ViewSwitcherMark({ view }: { view: SavedView }): React.ReactElement {
+/**
+ * The leading mark for one option: the view's stored logo or the default.
+ * Static workspace defaults reuse it with their label and an empty logo.
+ */
+export function ViewSwitcherMark({ view }: { view: Pick<SavedView, "name" | "logo_props"> }): React.ReactElement {
   const mark = projectMark(view.logo_props);
   if (mark.kind === "emoji") {
     return <span className="grid size-4 shrink-0 place-items-center text-[16px] leading-none">{mark.glyph}</span>;

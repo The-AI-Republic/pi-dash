@@ -509,3 +509,14 @@ export function preloadRichFilterBuilder(): void {
 export type { FieldConfigRegistry } from "./filters/rich/temporary.js";
 export type { RichCondition, RichExpression } from "./filters/rich/expression.js";
 export type { ViewSnapshot } from "./filters/rich/views.js";
+
+// Workspace view detail seam (VIEW-038/040, NEWFRONT-729). The views area
+// embeds the workspace issue list scoped to the open view and mounts the
+// lazy filter row beneath the view header. The query helper stays eager:
+// it only adds the date bridge over the already-eager legacy dimensions
+// (the expression import is type-only), so the size gate is unaffected.
+export { withRichFilters } from "./filters/rich/query.js";
+export type { IssueFiltersProps } from "./filters/rich/IssueFilters.js";
+export { GlobalIssuesScreen } from "./global/GlobalIssuesScreen.js";
+export type { GlobalIssuesScreenProps } from "./global/GlobalIssuesScreen.js";
+export { GLOBAL_ISSUES_PAGE_SIZE, globalIssuesQueryOptions } from "./global/queries.js";
