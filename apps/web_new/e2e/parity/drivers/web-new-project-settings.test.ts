@@ -604,6 +604,10 @@ class GeneralFakeLocator {
   getByPlaceholder(text: string): GeneralFakeLocator {
     return this.queries.placeholder?.(text) ?? generalAbsent();
   }
+
+  filter(_options?: unknown): GeneralFakeLocator {
+    return this;
+  }
 }
 
 function generalAbsent(): GeneralFakeLocator {
@@ -961,11 +965,8 @@ describe("WebNewDriver general tab emblem", () => {
   it("opens the picker and reports its visibility", async () => {
     const openButton = new GeneralFakeLocator();
     const stub = generalSettingsPageDouble({
-      testId: (testId) => {
-        if (testId === "general-emblem-open") return openButton;
-        if (testId === "general-emblem-picker") return new GeneralFakeLocator();
-        return generalAbsent();
-      },
+      testId: (testId) => (testId === "general-emblem-open" ? openButton : generalAbsent()),
+      role: () => new GeneralFakeLocator(),
     });
     const driver = new WebNewDriver(stub.page);
     await driver.settingsGeneralEmblemOpen();
@@ -979,17 +980,36 @@ describe("WebNewDriver general tab emblem", () => {
   it("picks the alphabet choice matching the glyph", async () => {
     const choice = new GeneralFakeLocator();
     const search = new GeneralFakeLocator();
+    const tab = new GeneralFakeLocator({ attr: { "aria-selected": "false" } });
     const dialog = new GeneralFakeLocator(
       {},
       {
-        testId: () => new GeneralFakeLocator(),
+        testId: (testId) => (testId === "general-emblem-tab-emoji" ? tab : new GeneralFakeLocator()),
         label: () => search,
         role: () => choice,
       }
     );
-    const stub = generalSettingsPageDouble({ testId: () => dialog });
+    const stub = generalSettingsPageDouble({ role: () => dialog });
     await new WebNewDriver(stub.page).settingsGeneralEmblemPick("🚀");
+    expect(tab.click).toHaveBeenCalledTimes(1);
     expect(search.fill).toHaveBeenCalledWith("🚀", { timeout: 30_000 });
+    expect(choice.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the emoji tab click when it is already selected", async () => {
+    const choice = new GeneralFakeLocator();
+    const tab = new GeneralFakeLocator({ attr: { "aria-selected": "true" } });
+    const dialog = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => (testId === "general-emblem-tab-emoji" ? tab : new GeneralFakeLocator()),
+        label: () => new GeneralFakeLocator(),
+        role: () => choice,
+      }
+    );
+    const stub = generalSettingsPageDouble({ role: () => dialog });
+    await new WebNewDriver(stub.page).settingsGeneralEmblemPick("🚀");
+    expect(tab.click).not.toHaveBeenCalled();
     expect(choice.click).toHaveBeenCalledTimes(1);
   });
 
@@ -1003,7 +1023,7 @@ describe("WebNewDriver general tab emblem", () => {
         role: () => generalAbsent(),
       }
     );
-    const stub = generalSettingsPageDouble({ testId: () => dialog });
+    const stub = generalSettingsPageDouble({ role: () => dialog });
     await new WebNewDriver(stub.page).settingsGeneralEmblemPick("🛸");
     expect(typed.click).toHaveBeenCalledTimes(1);
   });
