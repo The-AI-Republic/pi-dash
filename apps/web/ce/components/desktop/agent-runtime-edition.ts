@@ -38,6 +38,7 @@ export const AGENT_RUNTIME_REASON_MESSAGES: Record<string, string> = {
     "Pi Dash Agent can't run on this computer with your own API key yet. Pi Dash AI and cloud runs keep using your key.",
   llm_config_missing: "This server has no model the desktop agent can use. Configure one in Settings → AI Assistant.",
   desktop_not_connected: "Pi Dash Agent isn't connected. Open and sign in to the desktop app to connect it.",
+  managed_runner_paused: "Pi Dash Agent is paused for this project. Resume it to run here.",
   desktop_session_required: "Sign out and sign in through the desktop app to connect Pi Dash Agent.",
   gateway_scopes_missing: "Sign out and sign in again to give Pi Dash Agent access to the model gateway.",
   gateway_session_revoked: "Sign in again to reconnect Pi Dash Agent.",

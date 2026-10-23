@@ -165,3 +165,22 @@ def test_bundled_runners_excluded_from_max_per_user(project, create_user, bundle
         make_runner(owner=create_user, project=project, provisioning=RunnerProvisioning.MANUAL)
     assert matcher.count_active(create_user.id, project.workspace_id) == Runner.MAX_PER_USER
     assert matcher.can_register_another(create_user.id, project.workspace_id) is False
+
+
+@override_settings(**MANAGED_SETTINGS)
+def test_paused_bundled_runner_reports_paused_not_disconnected(project, create_user, openhub_lane, bundled_runner):
+    """A connected-but-paused desktop needs "resume it", not "open the app"."""
+    Runner.objects.filter(pk=bundled_runner.pk).update(paused_at=timezone.now())
+    available, reason = managed_runner_availability(project, create_user)
+    assert available is False
+    assert reason == ManagedRunnerReason.RUNNER_PAUSED
+    assert online_managed_runner(project, create_user) is None
+
+
+@override_settings(**MANAGED_SETTINGS)
+def test_local_option_reports_paused_when_every_online_runner_is_paused(project, create_user, openhub_lane):
+    manual = make_runner(owner=create_user, project=project, provisioning=RunnerProvisioning.MANUAL)
+    Runner.objects.filter(pk=manual.pk).update(paused_at=timezone.now())
+    options = {o["kind"]: o for o in agent_executor_options(project, create_user)}
+    assert options[AgentExecutorKind.LOCAL_RUNNER]["available"] is False
+    assert options[AgentExecutorKind.LOCAL_RUNNER]["reason_code"] == "local_runner_paused"

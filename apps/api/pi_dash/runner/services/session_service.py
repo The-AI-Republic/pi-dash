@@ -20,6 +20,7 @@ from uuid import UUID
 from django.utils import timezone
 
 from pi_dash.runner.models import (
+    AgentHealth,
     AgentRun,
     AgentRunStatus,
     Runner,
@@ -360,6 +361,10 @@ SNAPSHOT_FIELDS = (
     "approvals_pending",
     "llm_model",
     "turn_count",
+    # Activity-watchdog health. Sent on every busy poll, not gated by the
+    # runner's observability flag, alongside ``observed_run_id``.
+    "agent_health",
+    "agent_last_activity_at",
 )
 
 
@@ -424,7 +429,11 @@ def upsert_runner_live_state(runner: Runner, status_entry: Dict[str, Any]) -> No
 
     for f in SNAPSHOT_FIELDS:
         if f in status_entry:
-            setattr(state, f, status_entry[f])
+            value = status_entry[f]
+            if f == "agent_health" and value not in AgentHealth.values:
+                # Unknown label from a newer runner: keep the known-good value.
+                continue
+            setattr(state, f, value)
             update_fields.append(f)
 
     if "tokens" in status_entry:
