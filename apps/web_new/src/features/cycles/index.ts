@@ -3,8 +3,15 @@
 // See the LICENSE file for details.
 // Cycles area barrel (NEWFRONT-859 seeds it with the member-timezone
 // date display; slice A extends it with the route shell and states;
-// slice B adds the list body, rows, search, peek, and share helpers).
+// slice B adds the list body, rows, search, peek, and share helpers;
+// slice C adds the list filters, menu, chips, and predicate).
 export { cycleDetailKeys, cycleDetailQueryOptions, useCycleDetail } from "./api/cycleDetail.js";
+export {
+  resetCycleFilterStore,
+  useCycleFilterStore,
+  useCycleListFilter,
+  type CycleListFilter,
+} from "./api/filterStore.js";
 export {
   invalidateAfterCycleTransfer,
   invalidateAfterCycleWrite,
@@ -23,6 +30,13 @@ export {
 } from "./components/CycleMemberDates.js";
 export { CycleDateSpan, type CycleDateSpanProps } from "./components/CycleDateSpan.js";
 export { CycleDetailGate, type CycleDetailGateProps } from "./components/CycleDetailGate.js";
+export { CycleFilterChips, type CycleFilterChipsProps } from "./components/CycleFilterChips.js";
+export {
+  CYCLE_FILTER_DIMENSIONS,
+  CycleFilterMenu,
+  focusFirstCalendarDay,
+  type CycleFilterMenuProps,
+} from "./components/CycleFilterMenu.js";
 export { CycleGoneAway, type CycleGoneAwayProps } from "./components/CycleGoneAway.js";
 export { CycleGroup, type CycleGroupProps } from "./components/CycleGroup.js";
 export { CyclePeekPanel, type CyclePeekPanelProps } from "./components/CyclePeekPanel.js";
@@ -79,6 +93,20 @@ export {
   lifecycleTone,
   type CycleListGroup,
 } from "./lib/cycleGroups.js";
+export {
+  countCycleFilters,
+  CYCLE_FILTER_CHIP_LABELS,
+  CYCLE_FILTER_SECTION_TITLES,
+  CYCLE_FILTER_STATUS_VALUES,
+  EMPTY_CYCLE_FILTERS,
+  hasCycleFilters,
+  makeCycleFilter,
+  parseCycleDateEntry,
+  type CycleDateEntry,
+  type CycleDateFilterDimension,
+  type CycleFilterDimension,
+  type CycleListFilters,
+} from "./lib/cycleFilters.js";
 export { parseCyclesListSearch } from "./lib/cycleListSearch.js";
 export { selectCycleMemberDirectory, UNKNOWN_CYCLE_MEMBER, type CycleMemberEntry } from "./lib/cycleMembers.js";
 export {

@@ -43,6 +43,8 @@ export interface CyclesListBodyProps {
   cycleFilter?: ((cycle: CycleRowData) => boolean) | undefined;
   /** Clears every filter dimension. Slot owner: NEWFRONT-709. */
   onClearFilters?: (() => void) | undefined;
+  /** Applied-filter chips above the list. Slot owner: NEWFRONT-709. */
+  chips?: React.ReactNode;
   /** Peeked cycle id from ?peekCycle=; null when no peek is open. */
   peekCycleId: string | null;
   onPeekChange: (cycleId: string | null) => void;
@@ -56,6 +58,7 @@ export function CyclesListBody({
   headerActions,
   cycleFilter,
   onClearFilters,
+  chips,
   peekCycleId,
   onPeekChange,
 }: CyclesListBodyProps): React.ReactElement {
@@ -112,6 +115,7 @@ export function CyclesListBody({
         {filterControl}
         {headerActions}
       </div>
+      {chips}
       {hero}
       {noMatch ? (
         <CyclesNoMatch

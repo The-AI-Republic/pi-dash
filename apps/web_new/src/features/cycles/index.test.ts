@@ -5,6 +5,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   archivedCyclesQueryOptions,
+  countCycleFilters,
+  CYCLE_FILTER_CHIP_LABELS,
+  CYCLE_FILTER_DIMENSIONS,
+  CYCLE_FILTER_SECTION_TITLES,
+  CYCLE_FILTER_STATUS_VALUES,
   CYCLE_GROUP_HEADINGS,
   CYCLE_LINK_COPIED_TITLE,
   CYCLE_LINK_COPY_FAILED_TITLE,
@@ -27,6 +32,8 @@ import {
   cycleFormDays,
   CycleDateSpan,
   CycleDetailGate,
+  CycleFilterChips,
+  CycleFilterMenu,
   CycleGoneAway,
   CycleGroup,
   CycleMemberDates,
@@ -55,12 +62,15 @@ import {
   CyclesSearchBox,
   cyclesTitle,
   CyclesZeroState,
+  EMPTY_CYCLE_FILTERS,
   filterCyclesByQuery,
+  focusFirstCalendarDay,
   formatCycleSpanText,
   formatMemberDate,
   formatOffsetChip,
   formatZoneDay,
   groupOfCycle,
+  hasCycleFilters,
   instantToProjectDate,
   instantZoneDay,
   invalidateAfterCycleTransfer,
@@ -71,16 +81,21 @@ import {
   isCycleGoneAway,
   lifecycleLabel,
   lifecycleTone,
+  makeCycleFilter,
   matchesCycleQuery,
   openCycleInNewTab,
+  parseCycleDateEntry,
   parseCyclesListSearch,
   projectOffsetChip,
   projectToday,
+  resetCycleFilterStore,
   resetCycleSearchStore,
   resolveCyclesBody,
   selectCycleMemberDirectory,
   UNKNOWN_CYCLE_MEMBER,
   useCycleDetail,
+  useCycleFilterStore,
+  useCycleListFilter,
   useCycleSearchStore,
   zoneOffsetMinutes,
 } from "./index.js";
@@ -161,6 +176,24 @@ describe("cycles barrel", () => {
     expect(CyclesListBody).toBeDefined();
     expect(CyclesNoMatch).toBeDefined();
     expect(CyclesSearchBox).toBeDefined();
+  });
+
+  it("re-exports the list filters, menu, chips, and predicate", () => {
+    expect(EMPTY_CYCLE_FILTERS).toEqual({ status: [], startDate: [], endDate: [] });
+    expect(CYCLE_FILTER_DIMENSIONS).toEqual(["status", "startDate", "endDate"]);
+    expect(CYCLE_FILTER_SECTION_TITLES.status).toBe("Status of the cycle");
+    expect(CYCLE_FILTER_STATUS_VALUES).toContain("draft");
+    expect(CYCLE_FILTER_CHIP_LABELS.endDate).toBe("Due date");
+    expect(hasCycleFilters).toBeDefined();
+    expect(countCycleFilters).toBeDefined();
+    expect(parseCycleDateEntry).toBeDefined();
+    expect(makeCycleFilter).toBeDefined();
+    expect(useCycleFilterStore).toBeDefined();
+    expect(resetCycleFilterStore).toBeDefined();
+    expect(useCycleListFilter).toBeDefined();
+    expect(CycleFilterMenu).toBeDefined();
+    expect(CycleFilterChips).toBeDefined();
+    expect(focusFirstCalendarDay).toBeDefined();
   });
 
   it("re-exports the save dialog, its header and its validation", () => {
