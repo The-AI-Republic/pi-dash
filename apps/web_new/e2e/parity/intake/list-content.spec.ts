@@ -530,6 +530,80 @@ test(
 );
 
 test(
+  specTitle(["INT-009"], "Closed tab filter offers the resolved statuses with a pinned last value"),
+  { tag: specTags(["INT-009"]) },
+  async ({ driver, seed }) => {
+    test.setTimeout(600_000);
+    const tag = `NF256 closed filter ${Date.now()}`;
+    const session = await signInSession(seed.email, seed.password);
+    const projectId = await serverCreateProjectWithFlags(
+      seed.workspaceSlug,
+      `${tag} project`,
+      parityProjectIdentifier("N256"),
+      { inboxView: true },
+      session
+    );
+    try {
+      const accepted = await serverIntakeListCreate(seed.workspaceSlug, projectId, `${tag} accepted`, session);
+      await serverIntakeListPatch(seed.workspaceSlug, projectId, accepted.issueId, { status: 1 }, session);
+      const declined = await serverIntakeListCreate(seed.workspaceSlug, projectId, `${tag} declined`, session);
+      await serverIntakeListPatch(seed.workspaceSlug, projectId, declined.issueId, { status: -1 }, session);
+      const duplicate = await serverIntakeListCreate(seed.workspaceSlug, projectId, `${tag} duplicate`, session);
+      await serverIntakeListPatch(
+        seed.workspaceSlug,
+        projectId,
+        duplicate.issueId,
+        { status: 2, duplicateTo: accepted.issueId },
+        session
+      );
+
+      await driver.page.context().addCookies(sessionBrowserCookies(session));
+      await driver.intakeListBeginRequestSpy();
+      await driver.intakeListOpen(seed.workspaceSlug, projectId, "closed");
+      await driver.intakeListWaitForRowCount(3);
+
+      await test.step("status options and default chips cover the resolved three", async () => {
+        await expect
+          .poll(() => driver.intakeListFilterOptions("status"), { timeout: 60_000 })
+          .toEqual(["Accepted", "Declined", "Duplicate"]);
+        const statusChips = await driver.intakeListChips().then((chips) => chips.find((chip) => chip.key === "status"));
+        expect(statusChips?.values).toEqual(["Accepted", "Declined", "Duplicate"]);
+        expect(await driver.intakeListFilterSectionCount("status")).toBe(3);
+      });
+
+      await test.step("chip removals narrow the resolved set server-side", async () => {
+        await driver.intakeListChipRemove("status", "Accepted");
+        await expect
+          .poll(() => driver.intakeListLastRequestParams(), { timeout: 60_000 })
+          .toMatchObject({
+            status: "-1,2",
+          });
+        await driver.intakeListWaitForRowCount(2);
+        const narrowed = await driver.intakeListChips().then((chips) => chips.find((chip) => chip.key === "status"));
+        expect(narrowed?.values).toEqual(["Declined", "Duplicate"]);
+
+        await driver.intakeListChipRemove("status", "Declined");
+        await expect
+          .poll(() => driver.intakeListLastRequestParams(), { timeout: 60_000 })
+          .toMatchObject({
+            status: "2",
+          });
+        await driver.intakeListWaitForRowCount(1);
+      });
+
+      await test.step("clearing the last resolved status is refused and keeps the row", async () => {
+        await driver.intakeListFilterPick("status", "Duplicate");
+        expect(await driver.intakeListFilterChecked("status", "Duplicate")).toBe(true);
+        expect(await driver.intakeListFilterSectionCount("status")).toBe(1);
+        await driver.intakeListWaitForRowCount(1);
+      });
+    } finally {
+      await serverCleanupProject(seed.workspaceSlug, projectId, session);
+    }
+  }
+);
+
+test(
   specTitle(["INT-010"], "quick and explicit date ranges filter created and updated dates"),
   { tag: specTags(["INT-010"]) },
   async ({ driver, seed }) => {

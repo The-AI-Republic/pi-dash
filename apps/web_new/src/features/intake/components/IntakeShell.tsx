@@ -1,13 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Intake two-pane frame (parity/specs/intake.md INT-001). The trail and
-// header sit above a body split into the list pane and the content pane.
-// The screen supplies the request detail for the content pane; with no
-// selection it shows the pick placeholder. The frame owns layout only;
-// the screen owns reads and the address.
+// Intake two-pane frame (parity/specs/intake.md INT-001, INT-007). The
+// trail and header sit above a body split into the list pane and the
+// content pane. The screen supplies the request detail for the content
+// pane; with no selection it shows the pick placeholder. While a list
+// read is in flight the header shows the syncing hint (INT-007). The
+// frame owns layout only; the screen owns reads and the address.
 
-import { Button } from "@pidash/kit";
+import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
 
 import { intakeHref } from "../lib/paths.js";
@@ -26,6 +27,8 @@ export interface IntakeShellProps {
   openTotal: number | undefined;
   loading: boolean;
   failed: boolean;
+  /** True while a list read is in flight; the header hints at it (INT-007). */
+  syncing: boolean;
   rows: React.ComponentProps<typeof IntakeListPane>["rows"];
   emptyKind: React.ComponentProps<typeof IntakeListPane>["emptyKind"];
   selectedId: string | undefined;
@@ -40,6 +43,24 @@ export interface IntakeShellProps {
    * intake is on. The header control renders only when this is true.
    */
   canCreate?: boolean | undefined;
+  projectIdentifier: React.ComponentProps<typeof IntakeListPane>["projectIdentifier"];
+  labels: React.ComponentProps<typeof IntakeListPane>["labels"];
+  directory: React.ComponentProps<typeof IntakeListPane>["directory"];
+  hasNextPage: React.ComponentProps<typeof IntakeListPane>["hasNextPage"];
+  loadingMore: React.ComponentProps<typeof IntakeListPane>["loadingMore"];
+  onLoadMore: React.ComponentProps<typeof IntakeListPane>["onLoadMore"];
+  selection: React.ComponentProps<typeof IntakeListPane>["selection"];
+  assigneeOptions: React.ComponentProps<typeof IntakeListPane>["assigneeOptions"];
+  createdByOptions: React.ComponentProps<typeof IntakeListPane>["createdByOptions"];
+  membersLoading: React.ComponentProps<typeof IntakeListPane>["membersLoading"];
+  membersFailed: React.ComponentProps<typeof IntakeListPane>["membersFailed"];
+  labelsLoading: React.ComponentProps<typeof IntakeListPane>["labelsLoading"];
+  labelsFailed: React.ComponentProps<typeof IntakeListPane>["labelsFailed"];
+  today: React.ComponentProps<typeof IntakeListPane>["today"];
+  weekStart: React.ComponentProps<typeof IntakeListPane>["weekStart"];
+  onSelectionChange: React.ComponentProps<typeof IntakeListPane>["onSelectionChange"];
+  order: React.ComponentProps<typeof IntakeListPane>["order"];
+  onOrderChange: React.ComponentProps<typeof IntakeListPane>["onOrderChange"];
 }
 
 export function IntakeShell({
@@ -51,6 +72,7 @@ export function IntakeShell({
   openTotal,
   loading,
   failed,
+  syncing,
   rows,
   emptyKind,
   selectedId,
@@ -60,6 +82,24 @@ export function IntakeShell({
   onCreate,
   detail,
   canCreate = false,
+  projectIdentifier,
+  labels,
+  directory,
+  hasNextPage,
+  loadingMore,
+  onLoadMore,
+  selection,
+  assigneeOptions,
+  createdByOptions,
+  membersLoading,
+  membersFailed,
+  labelsLoading,
+  labelsFailed,
+  today,
+  weekStart,
+  onSelectionChange,
+  order,
+  onOrderChange,
 }: IntakeShellProps): React.ReactElement {
   return (
     <section
@@ -76,6 +116,16 @@ export function IntakeShell({
               href={intakeHref(workspaceSlug, projectId)}
             />
           </div>
+          {syncing ? (
+            <p
+              data-testid="intake-syncing"
+              role="status"
+              className="text-meta inline-flex items-center gap-(--space-1) text-(--text-muted)"
+            >
+              <Spinner size="small" label="Syncing" />
+              Syncing
+            </p>
+          ) : null}
           {canCreate && onCreate !== undefined ? (
             <Button variant="primary" size="small" data-testid="intake-header-create" onClick={onCreate}>
               Create request
@@ -96,6 +146,24 @@ export function IntakeShell({
           onSelectRow={onSelectRow}
           onRetry={onRetry}
           onCreate={onCreate}
+          projectIdentifier={projectIdentifier}
+          labels={labels}
+          directory={directory}
+          hasNextPage={hasNextPage}
+          loadingMore={loadingMore}
+          onLoadMore={onLoadMore}
+          selection={selection}
+          assigneeOptions={assigneeOptions}
+          createdByOptions={createdByOptions}
+          membersLoading={membersLoading}
+          membersFailed={membersFailed}
+          labelsLoading={labelsLoading}
+          labelsFailed={labelsFailed}
+          today={today}
+          weekStart={weekStart}
+          onSelectionChange={onSelectionChange}
+          order={order}
+          onOrderChange={onOrderChange}
         />
         <div data-testid="intake-content-pane" className="min-h-0 min-w-0 flex-1">
           {detail ?? <IntakePlaceholder />}

@@ -31,6 +31,20 @@ export interface FilterSectionOption {
 
 export interface FilterSectionProps {
   title: string;
+  /**
+   * Controlled search text. Absent keeps the section's own search state;
+   * a host with one search box over several sections (the intake filter
+   * panel, NEWFRONT-690) drives every section from that box instead.
+   */
+  searchText?: string | undefined;
+  /** Reports host-driven search edits; pairs with `searchText`. */
+  onSearchTextChange?: ((value: string) => void) | undefined;
+  /**
+   * Hide the section's own search box while still filtering by
+   * `searchText`. Only meaningful with a controlled search; an
+   * uncontrolled hidden box filters nothing.
+   */
+  hideSearch?: boolean | undefined;
   /** Multi sections mark every applied row; single sections mark one. */
   kind: "multi" | "single";
   /**
@@ -189,6 +203,9 @@ export function FilterSectionFrame({
  */
 export function FilterSection({
   title,
+  searchText,
+  onSearchTextChange,
+  hideSearch = false,
   kind,
   selectionRole = "semantic",
   cap = FILTER_SECTION_CAP,
@@ -210,8 +227,15 @@ export function FilterSection({
 }: FilterSectionProps): React.ReactElement {
   const [uncontrolledOpen, setUncontrolledOpen] = React.useState(true);
   const open = controlledOpen ?? uncontrolledOpen;
-  const [query, setQuery] = React.useState("");
+  const [ownQuery, setOwnQuery] = React.useState("");
+  const query = searchText ?? ownQuery;
   const [expanded, setExpanded] = React.useState(false);
+
+  function setQuery(next: string): void {
+    setExpanded(false);
+    if (searchText === undefined) setOwnQuery(next);
+    else onSearchTextChange?.(next);
+  }
 
   function setOpen(next: boolean): void {
     if (controlledOpen === undefined) setUncontrolledOpen(next);
@@ -243,20 +267,20 @@ export function FilterSection({
             children
           ) : (
             <>
-              <label className="mb-(--space-1) flex items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) px-(--space-2)">
-                <Search size={12} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
-                <input
-                  type="search"
-                  value={query}
-                  onChange={(event) => {
-                    setQuery(event.target.value);
-                    setExpanded(false);
-                  }}
-                  aria-label={`Search ${title}`}
-                  placeholder={`Search ${title.toLowerCase()}`}
-                  className="text-body w-full bg-transparent py-(--space-1) text-(--text) outline-none placeholder:text-(--text-muted)"
-                />
-              </label>
+              {hideSearch ? null : (
+                <label className="mb-(--space-1) flex items-center gap-(--space-2) rounded-(--radius-control) border border-(--border) px-(--space-2)">
+                  <Search size={12} aria-hidden="true" className="shrink-0 text-(--text-muted)" />
+                  <input
+                    type="search"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    readOnly={searchText !== undefined && onSearchTextChange === undefined}
+                    aria-label={`Search ${title}`}
+                    placeholder={`Search ${title.toLowerCase()}`}
+                    className="text-body w-full bg-transparent py-(--space-1) text-(--text) outline-none placeholder:text-(--text-muted)"
+                  />
+                </label>
+              )}
               {errorText !== undefined ? (
                 <p role="alert" className="text-caption px-(--space-3) py-(--space-2) text-(--danger)">
                   {errorText}

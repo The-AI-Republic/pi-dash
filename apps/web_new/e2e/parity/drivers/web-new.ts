@@ -18691,110 +18691,398 @@ export class WebNewDriver implements ParityDriver {
     return todo("modulesRowFacts");
   }
 
-  // --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011). Throwing
-  // --- stubs: the web_new driver implements these when the area is built.
+  // --- Intake list content (NEWFRONT-256, INT-006/007/009/010/011).
+  // --- Implemented for slice B (NEWFRONT-690) against the new intake
+  // --- list pane: rows, the paging tail, the filter panel + chips, the
+  // --- custom-range dialog and the order menu.
 
-  async intakeListOpen(_workspaceSlug: string, _projectId: string, _tab: "open" | "closed"): Promise<void> {
-    return todo("intakeListOpen");
+  private intakeListRequests: URL[] = [];
+  private intakeListSpying = false;
+
+  private intakeListRow(issueId: string): Locator {
+    return this.page.locator(`[data-testid="intake-row"][data-issue-id="${issueId}"]`);
   }
+
+  async intakeListOpen(workspaceSlug: string, projectId: string, tab: "open" | "closed"): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/intake?currentTab=${tab}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 120_000,
+    });
+    await this.page.getByRole("tab", { name: /^Open/ }).first().waitFor({ timeout: 120_000 });
+    await Promise.race([
+      this.page.getByTestId("intake-row-title").first().waitFor({ timeout: WebNewDriver.WAIT_MS }),
+      this.page
+        .getByTestId("intake-list-pane")
+        .getByRole("heading", {
+          name: /No matching results\.|No requests waiting for triage\.|Nothing has been resolved yet\./,
+        })
+        .first()
+        .waitFor({ timeout: WebNewDriver.WAIT_MS }),
+      this.page.getByTestId("intake-list-error").waitFor({ timeout: WebNewDriver.WAIT_MS }),
+    ]);
+  }
+
   async intakeListRowIds(): Promise<string[]> {
-    return todo("intakeListRowIds");
+    const ids = await this.page
+      .getByTestId("intake-row")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-issue-id") ?? ""));
+    return ids.filter((id) => id.length > 0);
   }
-  async intakeListRowIdLabel(_issueId: string): Promise<string> {
-    return todo("intakeListRowIdLabel");
+
+  async intakeListRowIdLabel(issueId: string): Promise<string> {
+    return ((await this.intakeListRow(issueId).getByTestId("intake-row-id").innerText()) ?? "").trim();
   }
-  async intakeListRowStatusChip(_issueId: string): Promise<string | null> {
-    return todo("intakeListRowStatusChip");
+
+  async intakeListRowStatusChip(issueId: string): Promise<string | null> {
+    const chip = this.intakeListRow(issueId).getByTestId("intake-row-status");
+    if ((await chip.count()) === 0) return null;
+    const text = ((await chip.innerText()) ?? "").trim();
+    return text === "" ? null : text;
   }
-  async intakeListRowTitle(_issueId: string): Promise<string> {
-    return todo("intakeListRowTitle");
+
+  async intakeListRowTitle(issueId: string): Promise<string> {
+    return ((await this.intakeListRow(issueId).getByTestId("intake-row-title").innerText()) ?? "").trim();
   }
-  async intakeListRowCreatedText(_issueId: string): Promise<string> {
-    return todo("intakeListRowCreatedText");
+
+  async intakeListRowCreatedText(issueId: string): Promise<string> {
+    const date = this.intakeListRow(issueId).getByTestId("intake-row-date");
+    await date.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await date.innerText()) ?? "").trim();
   }
-  async intakeListRowCreatedTooltip(_issueId: string): Promise<IntakeListTooltip> {
-    return todo("intakeListRowCreatedTooltip");
+
+  private async intakeListReadTooltip(target: Locator): Promise<string> {
+    await target.hover({ timeout: WebNewDriver.WAIT_MS });
+    const popup = this.page.getByRole("tooltip");
+    await popup.first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return ((await popup.first().innerText()) ?? "").trim();
   }
-  async intakeListRowPriority(_issueId: string): Promise<string> {
-    return todo("intakeListRowPriority");
+
+  async intakeListRowCreatedTooltip(issueId: string): Promise<IntakeListTooltip> {
+    const date = this.intakeListRow(issueId).getByTestId("intake-row-date");
+    await date.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const text = await this.intakeListReadTooltip(date);
+    const separator = text.indexOf(": ");
+    if (separator < 0) return { heading: "", content: text };
+    return { heading: text.slice(0, separator), content: text.slice(separator + 2) };
   }
-  async intakeListRowLabels(_issueId: string): Promise<string[]> {
-    return todo("intakeListRowLabels");
+
+  async intakeListRowPriority(issueId: string): Promise<string> {
+    // The new marker is a real tooltip trigger (NEWFRONT-273 intended):
+    // hovering opens the tooltip, which carries the priority key.
+    const marker = this.intakeListRow(issueId).getByTestId("intake-row-priority");
+    await marker.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    return this.intakeListReadTooltip(marker);
   }
-  async intakeListRowAvatarKind(_issueId: string): Promise<"member" | "intake" | "none"> {
-    return todo("intakeListRowAvatarKind");
+
+  async intakeListRowLabels(issueId: string): Promise<string[]> {
+    const wrap = this.intakeListRow(issueId).getByTestId("intake-row-labels");
+    if ((await wrap.count()) === 0) return [];
+    const texts = await wrap.getByTestId("intake-row-label").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text.length > 0);
   }
+
+  async intakeListRowAvatarKind(issueId: string): Promise<"member" | "intake" | "none"> {
+    const avatar = this.intakeListRow(issueId).getByTestId("intake-row-avatar");
+    if ((await avatar.count()) === 0) return "none";
+    return ((await avatar.getAttribute("data-avatar-kind")) ?? "member") as "member" | "intake";
+  }
+
   async intakeListScrollToBottom(): Promise<void> {
-    return todo("intakeListScrollToBottom");
+    await this.page.getByTestId("intake-row").last().scrollIntoViewIfNeeded({ timeout: WebNewDriver.WAIT_MS });
   }
+
   async intakeListSkeletonsVisible(): Promise<boolean> {
-    return todo("intakeListSkeletonsVisible");
+    return this.isShown(this.page.getByTestId("intake-page-skeleton"));
   }
+
   async intakeListSyncingVisible(): Promise<boolean> {
-    return todo("intakeListSyncingVisible");
+    return this.isShown(this.page.getByTestId("intake-syncing"));
   }
-  async intakeListWaitForRowCount(_count: number): Promise<void> {
-    return todo("intakeListWaitForRowCount");
+
+  async intakeListWaitForRowCount(count: number): Promise<void> {
+    await expect.poll(async () => (await this.intakeListRowIds()).length, { timeout: 60_000 }).toBe(count);
   }
-  async intakeListDelayNextListReads(_ms: number): Promise<void> {
-    return todo("intakeListDelayNextListReads");
+
+  async intakeListDelayNextListReads(ms: number): Promise<void> {
+    await this.page.route(
+      "**/api/workspaces/*/projects/*/intake-issues/*",
+      async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+        await route.continue();
+      },
+      { times: 1 }
+    );
   }
-  async intakeListOpenFilters(): Promise<void> {
-    return todo("intakeListOpenFilters");
-  }
-  async intakeListCloseFilters(): Promise<void> {
-    return todo("intakeListCloseFilters");
-  }
-  async intakeListFilterSearch(_query: string): Promise<void> {
-    return todo("intakeListFilterSearch");
-  }
-  async intakeListFilterSections(): Promise<IntakeListFilterKey[]> {
-    return todo("intakeListFilterSections");
-  }
-  async intakeListFilterOptions(_key: IntakeListFilterKey): Promise<string[]> {
-    return todo("intakeListFilterOptions");
-  }
-  async intakeListFilterPick(_key: IntakeListFilterKey, _option: string): Promise<void> {
-    return todo("intakeListFilterPick");
-  }
-  async intakeListFilterChecked(_key: IntakeListFilterKey, _option: string): Promise<boolean> {
-    return todo("intakeListFilterChecked");
-  }
-  async intakeListFilterSectionCount(_key: IntakeListFilterKey): Promise<number> {
-    return todo("intakeListFilterSectionCount");
-  }
-  async intakeListChips(): Promise<IntakeListChip[]> {
-    return todo("intakeListChips");
-  }
-  async intakeListChipRemove(_key: IntakeListFilterKey, _value: string): Promise<void> {
-    return todo("intakeListChipRemove");
-  }
-  async intakeListChipClearGroup(_key: IntakeListFilterKey): Promise<void> {
-    return todo("intakeListChipClearGroup");
-  }
+
   async intakeListBeginRequestSpy(): Promise<void> {
-    return todo("intakeListBeginRequestSpy");
+    if (this.intakeListSpying) return;
+    this.intakeListSpying = true;
+    this.page.on("request", (req) => {
+      const url = req.url();
+      if (/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/intake-issues\/\?/.test(url)) {
+        this.intakeListRequests.push(new URL(url));
+      }
+    });
   }
+
   async intakeListLastRequestParams(): Promise<Record<string, string> | null> {
-    return todo("intakeListLastRequestParams");
+    const last = this.intakeListRequests.at(-1);
+    if (!last) return null;
+    return Object.fromEntries(last.searchParams.entries());
   }
+
+  private intakeListFilterPanel(): Locator {
+    return this.page.getByTestId("intake-filters-panel");
+  }
+
+  async intakeListOpenFilters(): Promise<void> {
+    if (await this.isShown(this.intakeListFilterPanel())) return;
+    await this.page.getByTestId("intake-filters-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeListFilterPanel().waitFor({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async intakeListCloseFilters(): Promise<void> {
+    if (!(await this.isShown(this.intakeListFilterPanel()))) return;
+    await this.page.keyboard.press("Escape");
+    await this.intakeListFilterPanel()
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+  }
+
+  async intakeListFilterSearch(query: string): Promise<void> {
+    await this.intakeListOpenFilters();
+    await this.intakeListFilterPanel()
+      .getByRole("searchbox", { name: "Search filters" })
+      .fill(query, { timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForTimeout(300);
+  }
+
+  private intakeListSection(key: IntakeListFilterKey): Locator {
+    return this.page.getByTestId(`intake-filter-${key}`);
+  }
+
+  async intakeListFilterSections(): Promise<IntakeListFilterKey[]> {
+    await this.intakeListOpenFilters();
+    const testIds = await this.intakeListFilterPanel()
+      .getByTestId(/^intake-filter-/)
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-testid") ?? ""));
+    return testIds
+      .map((testId) => testId.replace(/^intake-filter-/, "") as IntakeListFilterKey)
+      .filter((key) => key.length > 0);
+  }
+
+  private async intakeListSectionOptions(section: Locator): Promise<Locator[]> {
+    const rows = section.locator('[role="checkbox"], [role="radio"]');
+    const count = await rows.count();
+    const options: Locator[] = [];
+    for (let index = 0; index < count; index += 1) options.push(rows.nth(index));
+    return options;
+  }
+
+  async intakeListFilterOptions(key: IntakeListFilterKey): Promise<string[]> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    const texts: string[] = [];
+    for (const option of options) texts.push(((await option.getAttribute("aria-label")) ?? "").trim());
+    return texts;
+  }
+
+  async intakeListFilterPick(key: IntakeListFilterKey, option: string): Promise<void> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    for (const candidate of options) {
+      if (((await candidate.getAttribute("aria-label")) ?? "").trim() === option) {
+        const refetch = this.page
+          .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/intake-issues\/\?/, { timeout: 15_000 })
+          .catch(() => undefined);
+        await candidate.click({ timeout: WebNewDriver.WAIT_MS });
+        await refetch;
+        await this.page.waitForTimeout(500);
+        return;
+      }
+    }
+    throw new Error(`[parity] intake filter option not found: ${key} / ${option}.`);
+  }
+
+  async intakeListFilterChecked(key: IntakeListFilterKey, option: string): Promise<boolean> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    for (const candidate of options) {
+      if (((await candidate.getAttribute("aria-label")) ?? "").trim() === option) {
+        return (await candidate.getAttribute("aria-checked")) === "true";
+      }
+    }
+    throw new Error(`[parity] intake filter option not found: ${key} / ${option}.`);
+  }
+
+  async intakeListFilterSectionCount(key: IntakeListFilterKey): Promise<number> {
+    await this.intakeListOpenFilters();
+    const text = ((await this.intakeListSection(key).getByRole("heading").first().innerText()) ?? "").trim();
+    const match = /\((\d+)\)/.exec(text);
+    return match === null ? 0 : Number(match[1]);
+  }
+
+  private intakeListChipGroup(key: IntakeListFilterKey): Locator {
+    return this.page.locator(`[data-testid="intake-chip-group"][data-chip-group="${key}"]`);
+  }
+
+  async intakeListChips(): Promise<IntakeListChip[]> {
+    await this.intakeListCloseFilters();
+    const groups = this.page.getByTestId("intake-chip-group");
+    const count = await groups.count();
+    const chips: IntakeListChip[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const group = groups.nth(index);
+      const key = ((await group.getAttribute("data-chip-group")) ?? "") as IntakeListFilterKey;
+      const values = await group
+        .getByTestId("intake-chip-value")
+        .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-chip-value") ?? ""));
+      chips.push({ key, values: values.map((value) => value.trim()).filter((value) => value.length > 0) });
+    }
+    return chips;
+  }
+
+  async intakeListChipRemove(key: IntakeListFilterKey, value: string): Promise<void> {
+    await this.intakeListCloseFilters();
+    const group = this.intakeListChipGroup(key);
+    if ((await group.count()) === 0) throw new Error(`[parity] intake chip group not found: ${key}.`);
+    const pills = group.getByTestId("intake-chip-value");
+    const count = await pills.count();
+    for (let index = 0; index < count; index += 1) {
+      const pill = pills.nth(index);
+      if (((await pill.getAttribute("data-chip-value")) ?? "").trim() !== value) continue;
+      const remove = pill.getByRole("button");
+      if ((await remove.count()) === 0) throw new Error(`[parity] intake chip value is not removable: ${value}.`);
+      const refetch = this.page
+        .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/intake-issues\/\?/, { timeout: 15_000 })
+        .catch(() => undefined);
+      await remove.click({ timeout: WebNewDriver.WAIT_MS });
+      await refetch;
+      await this.page.waitForTimeout(500);
+      return;
+    }
+    throw new Error(`[parity] intake chip value not found: ${key} / ${value}.`);
+  }
+
+  async intakeListChipClearGroup(key: IntakeListFilterKey): Promise<void> {
+    await this.intakeListCloseFilters();
+    const group = this.intakeListChipGroup(key);
+    if ((await group.count()) === 0) throw new Error(`[parity] intake chip group not found: ${key}.`);
+    const clear = group.getByTestId("intake-chip-clear");
+    if ((await clear.count()) === 0) throw new Error(`[parity] intake chip group has no clear action: ${key}.`);
+    const refetch = this.page
+      .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/intake-issues\/\?/, { timeout: 15_000 })
+      .catch(() => undefined);
+    await clear.click({ timeout: WebNewDriver.WAIT_MS });
+    await refetch;
+    await this.page.waitForTimeout(500);
+  }
+
+  private static readonly INTAKE_LIST_ORDER_FIELDS: Record<IntakeListOrderField, string> = {
+    created: "Created date",
+    updated: "Last updated date",
+    id: "ID",
+  };
+
+  private static readonly INTAKE_LIST_ORDER_DIRECTIONS: Record<"asc" | "desc", string> = {
+    asc: "Ascending",
+    desc: "Descending",
+  };
+
+  private intakeListOrderItems(): Locator {
+    return this.page.getByRole("menuitem");
+  }
+
   async intakeListOpenOrderMenu(): Promise<void> {
-    return todo("intakeListOpenOrderMenu");
+    if (await this.isShown(this.intakeListOrderItems())) return;
+    await this.page.getByTestId("intake-order-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.intakeListOrderItems().first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
+
   async intakeListOrderState(): Promise<IntakeListOrderState> {
-    return todo("intakeListOrderState");
+    await this.intakeListOpenOrderMenu();
+    let field: IntakeListOrderField = "created";
+    let direction: "asc" | "desc" = "desc";
+    for (const candidate of ["created", "updated", "id"] as IntakeListOrderField[]) {
+      const mark = this.page.getByTestId(`intake-order-field-${candidate}`);
+      if ((await mark.count()) > 0 && ((await mark.getAttribute("data-order-checked")) ?? "") === "true") {
+        field = candidate;
+      }
+    }
+    for (const candidate of ["asc", "desc"] as ("asc" | "desc")[]) {
+      const mark = this.page.getByTestId(`intake-order-direction-${candidate}`);
+      if ((await mark.count()) > 0 && ((await mark.getAttribute("data-order-checked")) ?? "") === "true") {
+        direction = candidate;
+      }
+    }
+    await this.page.keyboard.press("Escape");
+    return { field, direction };
   }
-  async intakeListPickOrderField(_field: IntakeListOrderField): Promise<void> {
-    return todo("intakeListPickOrderField");
+
+  private async intakeListPickOrderItem(label: string): Promise<void> {
+    await this.intakeListOpenOrderMenu();
+    const refetch = this.page
+      .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/intake-issues\/\?/, { timeout: 15_000 })
+      .catch(() => undefined);
+    await this.page.getByRole("menuitem", { name: label }).click({ timeout: WebNewDriver.WAIT_MS });
+    await refetch;
+    await this.page.waitForTimeout(500);
   }
-  async intakeListPickOrderDirection(_direction: "asc" | "desc"): Promise<void> {
-    return todo("intakeListPickOrderDirection");
+
+  async intakeListPickOrderField(field: IntakeListOrderField): Promise<void> {
+    await this.intakeListPickOrderItem(WebNewDriver.INTAKE_LIST_ORDER_FIELDS[field]);
   }
-  async intakeListOpenCustomDate(_key: "createdAt" | "updatedAt"): Promise<void> {
-    return todo("intakeListOpenCustomDate");
+
+  async intakeListPickOrderDirection(direction: "asc" | "desc"): Promise<void> {
+    await this.intakeListPickOrderItem(WebNewDriver.INTAKE_LIST_ORDER_DIRECTIONS[direction]);
   }
-  async intakeListCustomDateApply(_fromISO: string, _toISO: string): Promise<void> {
-    return todo("intakeListCustomDateApply");
+
+  private intakeListCustomDialog(): Locator {
+    return this.page.getByRole("dialog");
+  }
+
+  async intakeListOpenCustomDate(key: "createdAt" | "updatedAt"): Promise<void> {
+    await this.intakeListOpenFilters();
+    const options = await this.intakeListSectionOptions(this.intakeListSection(key));
+    for (const candidate of options) {
+      if (((await candidate.getAttribute("aria-label")) ?? "").trim() === "Custom") {
+        await candidate.click({ timeout: WebNewDriver.WAIT_MS });
+        await this.intakeListCustomDialog()
+          .getByRole("button", { name: "Apply", exact: true })
+          .waitFor({ timeout: WebNewDriver.WAIT_MS });
+        return;
+      }
+    }
+    throw new Error(`[parity] intake custom-date option not found: ${key}.`);
+  }
+
+  private async intakeListPickCalendarDay(calendar: Locator, iso: string): Promise<void> {
+    const target = new Date(`${iso}T00:00:00Z`);
+    await calendar.getByLabel("Month").selectOption(String(target.getUTCMonth()), { timeout: WebNewDriver.WAIT_MS });
+    await calendar.getByLabel("Year").selectOption(String(target.getUTCFullYear()), { timeout: WebNewDriver.WAIT_MS });
+    await calendar.locator(`button[data-day="${iso}"]`).click({ timeout: WebNewDriver.WAIT_MS });
+  }
+
+  async intakeListCustomDateApply(fromISO: string, toISO: string): Promise<void> {
+    const dialog = this.intakeListCustomDialog();
+    await dialog.getByRole("button", { name: "Apply", exact: true }).waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const range = dialog.getByRole("radio", { name: "Range" });
+    if ((await range.getAttribute("aria-checked")) !== "true") {
+      await range.click({ timeout: WebNewDriver.WAIT_MS });
+    }
+    const calendar = dialog.getByTestId(/intake-date-.*-calendar/);
+    await this.intakeListPickCalendarDay(calendar, fromISO);
+    await this.intakeListPickCalendarDay(calendar, toISO);
+    const refetch = this.page
+      .waitForResponse(/\/api\/workspaces\/[^/]+\/projects\/[^/]+\/intake-issues\/\?/, { timeout: 15_000 })
+      .catch(() => undefined);
+    await dialog.getByRole("button", { name: "Apply", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await refetch;
+    await dialog
+      .getByRole("button", { name: "Apply", exact: true })
+      .waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS })
+      .catch(() => undefined);
+    await this.page.waitForTimeout(500);
   }
 
   // --- Active-cycle hero and cycles cross-cutting (NEWFRONT-254,
@@ -34540,9 +34828,9 @@ export class WebNewDriver implements ParityDriver {
     return this.currentPath();
   }
 
-  async intakeShellFilterToggleStatus(_option: "Pending" | "Snoozed"): Promise<void> {
-    // The filter panel is slice B (INT-009); this slice ships no filter UI.
-    return todo("intakeShellFilterToggleStatus");
+  async intakeShellFilterToggleStatus(option: "Pending" | "Snoozed"): Promise<void> {
+    // Slice B (NEWFRONT-690) owns the filter panel: the toggle is a status pick.
+    await this.intakeListFilterPick("status", option);
   }
 
   async intakeShellBeginListSpy(): Promise<void> {
