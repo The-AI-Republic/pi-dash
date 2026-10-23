@@ -2207,6 +2207,8 @@ export interface ParityDriver {
   createProjectErrorText(): Promise<string | null>;
   /** Whether the open create form shows its prefilled cover image. */
   createFormCoverVisible(): Promise<boolean>;
+  /** Creation-dialog description placeholder text (target main#503). */
+  createFormDescriptionPlaceholder(): Promise<string>;
   /** Whether the open create form shows its prefilled project icon. */
   createFormIconVisible(): Promise<boolean>;
 
@@ -10531,6 +10533,8 @@ export interface WsSettingsMemberRowFacts {
   settingsGeneralFill(field: SettingsGeneralField, value: string): Promise<void>;
   /** Whether the cover banner renders on the tab. */
   settingsGeneralCoverVisible(): Promise<boolean>;
+  /** General-tab description placeholder text (target main#503). */
+  settingsGeneralDescriptionPlaceholder(): Promise<string>;
   /** Banner headline text (project name plus identifier line). */
   settingsGeneralHeaderText(): Promise<string>;
   /** Visibility network label as rendered. */

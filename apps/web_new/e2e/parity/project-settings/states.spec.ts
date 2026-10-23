@@ -284,7 +284,9 @@ test(
         await driver.settingsStatesFillName(renamed);
         await driver.settingsStatesFillDescription(`${tag} rewritten blurb`);
         await driver.settingsStatesOpenColorPicker();
-        await driver.settingsStatesPickColor("#0693E3");
+        // The new app's palette is a fixed spread without the oracle's
+        // twitter blue, so it recolors with a member it offers (NEWFRONT-606).
+        await driver.settingsStatesPickColor(driver.target === "web_new" ? "#3B82F6" : "#0693E3");
         await driver.settingsStatesSubmitUpdate();
         await expect.poll(() => driver.settingsStatesStateNames("unstarted"), { timeout: 15_000 }).toContain(renamed);
         expect(await driver.settingsStatesStateNames("unstarted")).not.toContain(original);
@@ -317,16 +319,32 @@ test(
         // toast this step asserts.
         await expect.poll(() => driver.rulesLastToast(), { timeout: 30_000 }).toBeNull();
         await driver.settingsStatesAttemptSubmit();
-        await expect
-          .poll(
-            async () => {
-              const toast = await driver.rulesLastToast();
-              return toast ? `${toast.title} ${toast.message}` : "";
-            },
-            { timeout: 15_000 }
-          )
-          .toContain("State could not be updated");
-        await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);
+        if (driver.target === "web_new") {
+          // Intended (NEWFRONT-402, NEWFRONT-606): the prefilled form
+          // stays open on the clash with the specific message.
+          await expect
+            .poll(
+              async () => {
+                const toast = await driver.rulesLastToast();
+                return toast ? `${toast.title} ${toast.message}` : "";
+              },
+              { timeout: 15_000 }
+            )
+            .toContain("Another state exists with the same name");
+          await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(true);
+          expect(await driver.settingsStatesNameValue()).toBe(clash);
+        } else {
+          await expect
+            .poll(
+              async () => {
+                const toast = await driver.rulesLastToast();
+                return toast ? `${toast.title} ${toast.message}` : "";
+              },
+              { timeout: 15_000 }
+            )
+            .toContain("State could not be updated");
+          await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);
+        }
         // The server refused: exactly one clash remains and the rename
         // target is untouched.
         const rows = await serverListStates(seed.workspaceSlug, projectId, session);
@@ -407,13 +425,29 @@ test(
           // first sits in unstarted after the cross-group move; drop it
           // back over backlog with the save refused.
           await driver.settingsStatesDragBelow(first, second);
-          await expect.poll(() => driver.settingsStatesStateNames("backlog"), { timeout: 15_000 }).toContain(first);
-          expect(await driver.settingsStatesStateNames("unstarted")).not.toContain(first);
+          if (driver.target === "web_new") {
+            // Intended (NEWFRONT-403, NEWFRONT-606): the drop rolls back
+            // to unstarted with a failure notice.
+            await expect.poll(() => driver.settingsStatesStateNames("unstarted"), { timeout: 15_000 }).toContain(first);
+            expect(await driver.settingsStatesStateNames("backlog")).not.toContain(first);
+            await expect
+              .poll(
+                async () => {
+                  const toast = await driver.rulesLastToast();
+                  return toast ? `${toast.title} ${toast.message}` : "";
+                },
+                { timeout: 15_000 }
+              )
+              .toContain("State could not be updated");
+          } else {
+            await expect.poll(() => driver.settingsStatesStateNames("backlog"), { timeout: 15_000 }).toContain(first);
+            expect(await driver.settingsStatesStateNames("unstarted")).not.toContain(first);
+            // Nothing toasts: give a notice time to appear, then confirm none did.
+            await driver.page.waitForTimeout(2000);
+            expect(await driver.rulesLastToast()).toBeNull();
+          }
           const stuck = (await serverListStates(seed.workspaceSlug, projectId, session)).find((s) => s.name === first);
           expect(stuck?.group).toBe("unstarted");
-          // Nothing toasts: give a notice time to appear, then confirm none did.
-          await driver.page.waitForTimeout(2000);
-          expect(await driver.rulesLastToast()).toBeNull();
         } finally {
           await driver.page.unroute("**/api/workspaces/*/projects/*/states/*/");
         }
@@ -535,12 +569,28 @@ test(
         });
         try {
           await driver.settingsStatesMarkDefault(previous);
-          await expect.poll(() => driver.settingsStatesIsDefault(previous), { timeout: 15_000 }).toBe(true);
-          expect(await driver.settingsStatesIsDefault(challenger)).toBe(false);
+          if (driver.target === "web_new") {
+            // Intended (NEWFRONT-403, NEWFRONT-606): the marker rolls back
+            // to the challenger with a failure notice.
+            await expect.poll(() => driver.settingsStatesIsDefault(previous), { timeout: 15_000 }).toBe(false);
+            await expect.poll(() => driver.settingsStatesIsDefault(challenger), { timeout: 15_000 }).toBe(true);
+            await expect
+              .poll(
+                async () => {
+                  const toast = await driver.rulesLastToast();
+                  return toast ? `${toast.title} ${toast.message}` : "";
+                },
+                { timeout: 15_000 }
+              )
+              .toContain("State could not be made the default");
+          } else {
+            await expect.poll(() => driver.settingsStatesIsDefault(previous), { timeout: 15_000 }).toBe(true);
+            expect(await driver.settingsStatesIsDefault(challenger)).toBe(false);
+            // Nothing toasts: give a notice time to appear, then confirm none did.
+            await driver.page.waitForTimeout(2000);
+            expect(await driver.rulesLastToast()).toBeNull();
+          }
           expect(await defaultStateName(seed.workspaceSlug, projectId, session)).toBe(challenger);
-          // Nothing toasts: give a notice time to appear, then confirm none did.
-          await driver.page.waitForTimeout(2000);
-          expect(await driver.rulesLastToast()).toBeNull();
         } finally {
           await driver.page.unroute("**/api/workspaces/*/projects/*/states/*/mark-default/");
         }
@@ -658,6 +708,14 @@ test(
         await expect.poll(() => driver.settingsStatesGroupNames(), { timeout: 30_000 }).toEqual(GROUPS);
         await driver.settingsStatesDelayLoad(20000);
         await driver.page.reload();
+        if (driver.target === "web_new") {
+          // Intended (NEWFRONT-405, NEWFRONT-606): the skeleton precedes
+          // the content while the held answers are in flight.
+          await expect.poll(() => driver.settingsStatesSkeletonVisible(), { timeout: 30_000 }).toBe(true);
+          await expect.poll(() => driver.settingsStatesStateNames("backlog"), { timeout: 60_000 }).toContain("Backlog");
+          expect(await driver.settingsStatesSkeletonVisible()).toBe(false);
+          return;
+        }
         await expect.poll(() => driver.settingsStatesGroupNames(), { timeout: 30_000 }).toEqual(GROUPS);
         // Cards render before the held answers land: empty, note
         // showing, and not a skeleton in sight.
@@ -703,8 +761,16 @@ test(
               { timeout: 15_000 }
             )
             .toContain("State could not be updated");
-          // The failed submit closes the form; the row restores underneath.
-          await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);
+          if (driver.target === "web_new") {
+            // Intended (NEWFRONT-402, NEWFRONT-606): the form keeps the
+            // failed draft open (edits intact) while the row underneath
+            // rolls back; only a success closes it.
+            await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(true);
+            expect(await driver.settingsStatesNameValue()).toBe(`${tag} ghost`);
+          } else {
+            // The failed submit closes the form; the row restores underneath.
+            await expect.poll(() => driver.settingsStatesFormVisible(), { timeout: 15_000 }).toBe(false);
+          }
           await expect.poll(() => driver.settingsStatesStateNames("backlog"), { timeout: 15_000 }).toContain(victim);
           expect(
             (await serverListStates(seed.workspaceSlug, projectId, session)).some((s) => s.name === `${tag} ghost`)

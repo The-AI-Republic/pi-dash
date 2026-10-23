@@ -10128,6 +10128,12 @@ export class WebDriver implements ParityDriver {
     return this.isShown(this.modalScope().getByRole("img", { name: "Project cover image" }));
   }
 
+  async createFormDescriptionPlaceholder(): Promise<string> {
+    const box = this.modalScope().locator("textarea").first();
+    await box.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await box.getAttribute("placeholder")) ?? "";
+  }
+
   async createFormIconVisible(): Promise<boolean> {
     // The icon picker label holds the prefilled emoji glyph or icon and
     // stays empty until a logo value exists.
@@ -55111,6 +55117,12 @@ export class WebDriver implements ParityDriver {
 
   async settingsGeneralCoverVisible(): Promise<boolean> {
     return (await this.page.locator('[data-testid="general-banner"] img').count()) > 0;
+  }
+
+  async settingsGeneralDescriptionPlaceholder(): Promise<string> {
+    const box = this.page.locator("#description").first();
+    await box.waitFor({ state: "visible", timeout: WebDriver.OPEN_MS });
+    return (await box.getAttribute("placeholder")) ?? "";
   }
 
   async settingsGeneralHeaderText(): Promise<string> {

@@ -388,9 +388,23 @@ test(
               .map((l) => [l.id, l.sortOrder] as const)
           );
           expect(orderAfter).toEqual(orderBefore);
-          // Nothing toasts: give a notice time to appear, then confirm none did.
-          await driver.page.waitForTimeout(2000);
-          expect(await driver.rulesLastToast()).toBeNull();
+          if (driver.target === "web_new") {
+            // Intended (NEWFRONT-408, NEWFRONT-606): the rollback lands
+            // with a failure notice.
+            await expect
+              .poll(
+                async () => {
+                  const toast = await driver.rulesLastToast();
+                  return toast ? `${toast.title} ${toast.message}` : "";
+                },
+                { timeout: 15_000 }
+              )
+              .toContain("Error while updating the label");
+          } else {
+            // Nothing toasts: give a notice time to appear, then confirm none did.
+            await driver.page.waitForTimeout(2000);
+            expect(await driver.rulesLastToast()).toBeNull();
+          }
         } finally {
           await driver.page.unroute("**/api/workspaces/*/projects/*/issue-labels/*/");
         }

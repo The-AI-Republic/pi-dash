@@ -2204,3 +2204,26 @@ describe("WebNewDriver AI Workers tab", () => {
     await expect(new WebNewDriver(generalSettingsPageDouble().page).aiWorkersSkeletonVisible()).resolves.toBe(false);
   });
 });
+
+describe("WebNewDriver description placeholders", () => {
+  it("reads the creation-dialog placeholder", async () => {
+    const box = new GeneralFakeLocator({ attr: { placeholder: "Project Context (Will be shown to AI agents)" } });
+    const dialog = new GeneralFakeLocator({}, { locator: () => box });
+    const stub = generalSettingsPageDouble({
+      locator: (selector) => (selector === '[role="dialog"]' ? dialog : generalAbsent()),
+    });
+    await expect(new WebNewDriver(stub.page).createFormDescriptionPlaceholder()).resolves.toBe(
+      "Project Context (Will be shown to AI agents)"
+    );
+  });
+
+  it("reads the general-tab placeholder", async () => {
+    const box = new GeneralFakeLocator({ attr: { placeholder: "Project Context (Will be shown to AI agents)" } });
+    const stub = generalSettingsPageDouble({
+      locator: (selector) => (selector === "#description" ? box : generalAbsent()),
+    });
+    await expect(new WebNewDriver(stub.page).settingsGeneralDescriptionPlaceholder()).resolves.toBe(
+      "Project Context (Will be shown to AI agents)"
+    );
+  });
+});

@@ -7045,6 +7045,12 @@ export class WebNewDriver implements ParityDriver {
     return (await img.count()) > 0 || (await upload.count()) > 0;
   }
 
+  async createFormDescriptionPlaceholder(): Promise<string> {
+    const box = this.projectDialog().locator("textarea").first();
+    await box.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await box.getAttribute("placeholder")) ?? "";
+  }
+
   async createFormIconVisible(): Promise<boolean> {
     // The prefilled icon button (the picker group behind it opens from
     // a popover only on demand).
@@ -38894,6 +38900,11 @@ export class WebNewDriver implements ParityDriver {
     if ((await banner.count()) === 0) return false;
     if ((await banner.getByRole("button", { name: /cover/i }).count()) > 0) return true;
     return (await banner.locator('img:not([data-testid="project-mark-image"])').count()) > 0;
+  }
+  async settingsGeneralDescriptionPlaceholder(): Promise<string> {
+    const box = this.page.locator("#description").first();
+    await box.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    return (await box.getAttribute("placeholder")) ?? "";
   }
   async settingsGeneralHeaderText(): Promise<string> {
     const banner = this.page.locator('[data-testid="general-banner"]').first();
