@@ -629,7 +629,7 @@ const SCOPED_ISSUES_FILTER: &str = "FROM issues \
      LEFT OUTER JOIN states ON states.id = issues.state_id \
      WHERE workspaces.slug = $2 \
      AND issues.deleted_at IS NULL \
-     AND NOT (states.group = 'triage') \
+     AND NOT (states.group = 'triage' AND states.group IS NOT NULL) \
      AND NOT (issues.archived_at IS NOT NULL) \
      AND NOT (projects.archived_at IS NOT NULL) \
      AND NOT (issues.is_draft)";
@@ -1021,7 +1021,7 @@ impl ToolStore for PgToolStore {
              LEFT OUTER JOIN states ON states.id = issues.state_id \
              WHERE workspaces.slug = $1 AND UPPER(projects.identifier) = UPPER($2) \
              AND issues.sequence_id = $3::int AND issues.deleted_at IS NULL \
-             AND NOT (states.group = 'triage') AND NOT (issues.archived_at IS NOT NULL) \
+             AND NOT (states.group = 'triage' AND states.group IS NOT NULL) AND NOT (issues.archived_at IS NOT NULL) \
              AND NOT (projects.archived_at IS NOT NULL) AND NOT (issues.is_draft) \
              ORDER BY issues.created_at DESC LIMIT 1"
         ))
