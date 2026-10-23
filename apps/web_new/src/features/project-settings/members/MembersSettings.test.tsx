@@ -88,11 +88,11 @@ function directoryMember(
   first: string,
   last: string,
   display: string,
-  extra: { email?: string | undefined; avatarUrl?: string | null; bot?: boolean } = {}
+  extra: { email?: string | undefined; avatarUrl?: string | null; bot?: boolean; role?: number } = {}
 ): WorkspaceMemberList[number] {
   return {
     id: `${id}-membership`,
-    role: 15,
+    role: extra.role ?? 15,
     member: {
       id,
       first_name: first,
@@ -525,8 +525,29 @@ describe("MembersSettings writes (PSET-022–026)", () => {
     expect(within(graceRow).getByRole("button", { name: "Change Grace Hopper's role" })).toHaveTextContent("Member");
   });
 
-  it("caps a guest row's editor at Guest even for an admin", async () => {
+  it("offers every role on a project-guest row held by a workspace member", async () => {
+    // Linus holds a project guest seat as a workspace member: the grant
+    // must restore, so the editor offers Member and Admin too (PSET-023).
     happyPath();
+    const user = userEvent.setup();
+    renderSection();
+    const linusRow = screen.getAllByTestId("member-roster-row")[2]!;
+    await user.click(within(linusRow).getByRole("button", { name: "Change Linus Torvalds's role" }));
+    expect((await screen.findAllByRole("option")).map((option) => option.textContent)).toEqual([
+      "Guest",
+      "Member",
+      "Admin",
+    ]);
+  });
+
+  it("caps a workspace guest's row at Guest even for an admin", async () => {
+    vi.mocked(useProjectMemberships).mockReturnValue(resolved(MEMBERSHIPS) as never);
+    vi.mocked(useWorkspaceDirectory).mockReturnValue(
+      resolved([
+        ...DIRECTORY.filter((entry) => entry.member.id !== LINUS),
+        directoryMember(LINUS, "Linus", "Torvalds", "linus", { role: 5 }),
+      ]) as never
+    );
     const user = userEvent.setup();
     renderSection();
     const linusRow = screen.getAllByTestId("member-roster-row")[2]!;
