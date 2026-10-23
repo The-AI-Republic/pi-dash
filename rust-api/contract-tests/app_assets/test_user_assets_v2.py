@@ -1,4 +1,4 @@
-"""User assets v2: avatar/cover presigned uploads scoped to the caller."""
+"""User assets v2: avatar presigned uploads scoped to the caller."""
 
 from . import seed_assets as seed_a
 
@@ -39,10 +39,11 @@ def test_post_shape(org):
     assert row["entity_type"] == "USER_AVATAR"
 
 
-def test_post_user_cover_shape(org):
+def test_post_user_cover_removed(org):
+    # PDASHOSS01-237: USER_COVER is no longer accepted (avatar only).
     r = org.request("POST", base(), "admin", json=payload(entity_type="USER_COVER"))
-    assert r.status_code == 200, r.text
-    assert r.json()["asset_url"].startswith("/api/assets/v2/static/")
+    assert r.status_code == 400
+    assert r.json() == {"error": "Invalid entity type.", "status": False}
 
 
 def test_post_invalid_entity_type(org):

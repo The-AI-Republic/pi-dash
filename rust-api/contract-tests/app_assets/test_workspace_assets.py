@@ -103,6 +103,18 @@ def test_post_invalid_entity_type(org):
     assert r.json() == {"error": "Invalid entity type.", "status": False}
 
 
+def test_post_removed_cover_types_invalid(org):
+    # PDASHOSS01-237: the cover types left EntityTypeContext.values.
+    for entity_type in ("PROJECT_COVER", "USER_COVER"):
+        r = org.request(
+            "POST", ws_base(org), "admin",
+            json=ws_payload(org, entity_type=entity_type,
+                            entity_identifier=org.project["id"]),
+        )
+        assert r.status_code == 400, entity_type
+        assert r.json() == {"error": "Invalid entity type.", "status": False}
+
+
 def test_post_invalid_file_type(org):
     r = org.request(
         "POST", ws_base(org), "admin",

@@ -918,8 +918,6 @@ const PROJECT_ORDER_COLUMNS: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
-    "cover_image_asset_id",
     "estimate_id",
     "archive_in",
     "close_in",

@@ -999,7 +999,6 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
     "archive_in",
     "close_in",
     "logo_props",
@@ -1020,7 +1019,6 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "workspace",
     "default_assignee",
     "project_lead",
-    "cover_image_asset",
     "estimate",
     "default_state",
 ];
@@ -1035,7 +1033,6 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "member_role",
     "anchor",
     "members",
-    "cover_image_url",
     "inbox_view",
     "next_work_item_sequence",
     "agent_executor_options",
@@ -1060,7 +1057,6 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
     "archive_in",
     "close_in",
     "logo_props",
@@ -1081,7 +1077,6 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "workspace",
     "default_assignee",
     "project_lead",
-    "cover_image_asset",
     "estimate",
     "default_state",
 ];
@@ -1092,8 +1087,6 @@ pub const PROJECT_LITE_FIELDS: &[&str] = &[
     "id",
     "identifier",
     "name",
-    "cover_image",
-    "cover_image_url",
     "logo_props",
     "description",
     "is_default",
@@ -1133,7 +1126,6 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "is_default",
     "guest_view_all_features",
     "members_can_edit_states",
-    "cover_image",
     "archive_in",
     "close_in",
     "logo_props",
@@ -1152,7 +1144,6 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "created_by",
     "updated_by",
     "workspace",
-    "cover_image_asset",
     "estimate",
     "default_state",
 ];
@@ -1253,8 +1244,6 @@ pub struct ProjectRead {
     pub guest_view_all_features: bool,
     /// `default=True`.
     pub members_can_edit_states: bool,
-    /// `TextField(blank=True, null=True)`.
-    pub cover_image: Option<String>,
     /// `IntegerField(default=0)`.
     pub archive_in: i64,
     /// `IntegerField(default=0)`.
@@ -1295,8 +1284,6 @@ pub struct ProjectRead {
     pub default_assignee: Option<String>,
     /// User FK (`PrimaryKeyRelatedField`).
     pub project_lead: Option<String>,
-    /// `FileAsset` FK (`PrimaryKeyRelatedField`).
-    pub cover_image_asset: Option<String>,
     /// `Estimate` FK (`PrimaryKeyRelatedField`).
     pub estimate: Option<String>,
     /// `State` FK (`PrimaryKeyRelatedField`).
@@ -1330,9 +1317,6 @@ pub struct ProjectListRead {
     pub anchor: Option<Option<String>>,
     /// [`project_list_members`] output, stringified.
     pub members: Vec<String>,
-    /// Model `cover_image_url` property (asset URL, else `cover_image`,
-    /// else `None`) — always present, unlike the annotations.
-    pub cover_image_url: Option<String>,
     /// `source="intake_view"` alias.
     pub inbox_view: bool,
     /// [`next_work_item_sequence`] output.
@@ -1381,8 +1365,6 @@ pub struct ProjectListRead {
     pub guest_view_all_features: bool,
     /// `default=True`.
     pub members_can_edit_states: bool,
-    /// `TextField(blank=True, null=True)`.
-    pub cover_image: Option<String>,
     /// `IntegerField(default=0)`.
     pub archive_in: i64,
     /// `IntegerField(default=0)`.
@@ -1423,8 +1405,6 @@ pub struct ProjectListRead {
     pub default_assignee: Option<String>,
     /// User FK (PK rendering).
     pub project_lead: Option<String>,
-    /// `FileAsset` FK.
-    pub cover_image_asset: Option<String>,
     /// `Estimate` FK.
     pub estimate: Option<String>,
     /// `State` FK.
@@ -1432,7 +1412,7 @@ pub struct ProjectListRead {
 }
 
 /// `ProjectLiteSerializer` read shape (`:120-133`,
-/// [`PROJECT_LITE_FIELDS`]): the 8-key `Meta.fields` order.
+/// [`PROJECT_LITE_FIELDS`]): the 6-key `Meta.fields` order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectLiteRead {
     /// PK.
@@ -1441,10 +1421,6 @@ pub struct ProjectLiteRead {
     pub identifier: String,
     /// `CharField(max_length=255)`.
     pub name: String,
-    /// `TextField(blank=True, null=True)`.
-    pub cover_image: Option<String>,
-    /// Model `cover_image_url` property (read-only `ReadOnlyField` here).
-    pub cover_image_url: Option<String>,
     /// `JSONField(default=dict)`.
     pub logo_props: Value,
     /// `TextField(blank=True)`.
@@ -1526,8 +1502,6 @@ pub struct ProjectDetailRead {
     pub guest_view_all_features: bool,
     /// `default=True`.
     pub members_can_edit_states: bool,
-    /// `TextField(blank=True, null=True)`.
-    pub cover_image: Option<String>,
     /// `IntegerField(default=0)`.
     pub archive_in: i64,
     /// `IntegerField(default=0)`.
@@ -1564,8 +1538,6 @@ pub struct ProjectDetailRead {
     pub updated_by: Option<String>,
     /// Workspace FK.
     pub workspace: String,
-    /// `FileAsset` FK.
-    pub cover_image_asset: Option<String>,
     /// `Estimate` FK.
     pub estimate: Option<String>,
     /// `State` FK.
@@ -2650,7 +2622,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 49);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 47);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2661,7 +2633,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 55);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 52);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2676,7 +2648,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 51);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 49);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(

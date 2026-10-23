@@ -149,8 +149,6 @@ pub mod user {
         "last_name",
         "avatar",
         "avatar_asset_id",
-        "cover_image",
-        "cover_image_asset_id",
         "date_joined",
         "created_at",
         "updated_at",
@@ -190,8 +188,6 @@ pub mod user {
 
     /// `avatar_asset` FK: `SET_NULL`, nullable (`user.py:69-75`).
     pub const AVATAR_ASSET_ON_DELETE: OnDelete = OnDelete::SetNull;
-    /// `cover_image_asset` FK: `SET_NULL`, nullable (`user.py:78-84`).
-    pub const COVER_IMAGE_ASSET_ON_DELETE: OnDelete = OnDelete::SetNull;
 
     /// `USERNAME_FIELD` (`user.py:128`).
     pub const USERNAME_FIELD: &str = "email";
@@ -236,9 +232,8 @@ pub mod user {
 
     /// Resolve `avatar`-style image URLs (`user.py:142-162`): the asset URL
     /// wins when the FK is set, else the direct value when non-empty, else
-    /// `None`. Both `avatar_url` and `cover_image_url` share this shape
-    /// (mirroring `Workspace.logo_url`); the two public wrappers name the
-    /// field so call sites read like the Python.
+    /// `None` (mirroring `Workspace.logo_url`); the public wrapper names
+    /// the field so call sites read like the Python.
     fn resolve_image_url<'a>(
         asset_attached: bool,
         asset_url: Option<&'a str>,
@@ -268,25 +263,6 @@ pub mod user {
         avatar: &'a str,
     ) -> Option<&'a str> {
         resolve_image_url(avatar_asset_attached, avatar_asset_url, avatar)
-    }
-
-    /// `User.cover_image_url` (`user.py:153-162`): same shape as
-    /// [`avatar_url`] over `cover_image_asset` / `cover_image`.
-    pub fn cover_image_url<'a>(
-        cover_image_asset_attached: bool,
-        cover_image_asset_url: Option<&'a str>,
-        cover_image: Option<&'a str>,
-    ) -> Option<&'a str> {
-        // `cover_image` is nullable (`:77`) while `avatar` is not (`:68`),
-        // so the direct arm takes `Option`; `None` and `""` both fall to
-        // `None`, matching `if self.cover_image:`.
-        if cover_image_asset_attached {
-            return cover_image_asset_url;
-        }
-        match cover_image {
-            Some(value) if !value.is_empty() => Some(value),
-            _ => None,
-        }
     }
 
     /// `User.full_name` (`user.py:164-167`):
@@ -924,7 +900,6 @@ mod tests {
         let is_fk = matches!(
             (model, field),
             ("User", "avatar_asset")
-                | ("User", "cover_image_asset")
                 | ("Profile", "user")
                 | ("Account", "user")
                 | ("APIToken", "user")
@@ -966,7 +941,7 @@ mod tests {
             .iter()
             .map(|f| attname("User", f))
             .collect();
-        assert_eq!(expected.len(), 38, "F-W24-08 User has 38 columns");
+        assert_eq!(expected.len(), 36, "F-W24-08 User has 36 columns");
         assert_eq!(owned(user::DECLARED_COLUMNS), expected);
     }
 
@@ -1025,30 +1000,6 @@ mod tests {
             Some("https://x/b.png")
         );
         assert_eq!(user::avatar_url(false, None, ""), None);
-    }
-
-    #[test]
-    fn user_cover_image_url_goldens() {
-        assert_eq!(
-            user::cover_image_url(true, Some("https://cdn/c.png"), Some("https://x/d.png")),
-            Some("https://cdn/c.png")
-        );
-        // Attached with no URL: no fall-through (Python returns None).
-        assert_eq!(
-            user::cover_image_url(true, None, Some("https://x/d.png")),
-            None
-        );
-        assert_eq!(
-            user::cover_image_url(false, None, Some("https://x/d.png")),
-            Some("https://x/d.png")
-        );
-        // cover_image is nullable: None and "" both fall to None.
-        assert_eq!(user::cover_image_url(false, None, Some("")), None);
-        assert_eq!(user::cover_image_url(false, None, None), None);
-        assert_eq!(
-            user::cover_image_url(true, Some("https://cdn/c.png"), None),
-            Some("https://cdn/c.png")
-        );
     }
 
     #[test]
@@ -1628,7 +1579,6 @@ mod tests {
     fn on_delete_contracts() {
         // SET_NULL arms (nullable FKs) vs CASCADE arms, per the Python.
         assert_eq!(user::AVATAR_ASSET_ON_DELETE, OnDelete::SetNull);
-        assert_eq!(user::COVER_IMAGE_ASSET_ON_DELETE, OnDelete::SetNull);
         assert_eq!(profile::USER_ON_DELETE, OnDelete::Cascade);
         assert_eq!(account::USER_ON_DELETE, OnDelete::Cascade);
         assert_eq!(api_token::USER_ON_DELETE, OnDelete::Cascade);

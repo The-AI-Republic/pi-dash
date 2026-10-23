@@ -72,6 +72,23 @@ def test_static_disallowed_entity_type_400(org):
     assert r.json() == {"error": "Invalid entity type.", "status": False}
 
 
+def test_static_legacy_cover_rows_400(org):
+    # PDASHOSS01-237 dropped the cover types from the static allow-list:
+    # a pre-existing uploaded cover row is now refused like any other type.
+    for entity_type in ("PROJECT_COVER", "USER_COVER"):
+        asset = seed_a.create_asset(
+            org.conn,
+            workspace_id=org.workspace["id"],
+            created_by_id=org.admin["id"],
+            name="cover.png",
+            entity_type=entity_type,
+            uploaded=True,
+        )
+        r = org.request("GET", f"/api/assets/v2/static/{asset['id']}/", "admin")
+        assert r.status_code == 400, entity_type
+        assert r.json() == {"error": "Invalid entity type.", "status": False}
+
+
 def test_restore_round_trip(org):
     asset_id = ws_post(org).json()["asset_id"]
     seed_a.mark_uploaded(org.conn, asset_id)

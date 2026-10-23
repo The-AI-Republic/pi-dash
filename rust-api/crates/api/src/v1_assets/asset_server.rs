@@ -125,10 +125,7 @@ mod tests {
     // `asset.py:299,306-312` match `:126,133-139` line for line).
     #[test]
     fn server_guards_match_user_trio() {
-        assert_eq!(
-            asset_user::USER_ENTITY_TYPES,
-            &["USER_AVATAR", "USER_COVER"]
-        );
+        assert_eq!(asset_user::USER_ENTITY_TYPES, &["USER_AVATAR"]);
         assert_eq!(asset_user::USER_MIME_TYPES.len(), 5);
     }
 }

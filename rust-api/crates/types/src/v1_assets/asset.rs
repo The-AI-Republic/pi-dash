@@ -64,7 +64,7 @@ pub const DEFAULT_USER_ASSET_TYPE: &str = "image/jpeg";
 /// `UserAssetUploadSerializer.entity_type` choices, from
 /// `FileAsset.EntityTypeContext` (`db/models/asset.py:38-39`, used at
 /// `serializers/asset.py:36-42`).
-pub const USER_ENTITY_TYPES: &[&str] = &["USER_AVATAR", "USER_COVER"];
+pub const USER_ENTITY_TYPES: &[&str] = &["USER_AVATAR"];
 
 /// DRF `required` failure (`fields.py`, `Field.validate_empty_values`).
 pub const MSG_REQUIRED: &str = "This field is required.";

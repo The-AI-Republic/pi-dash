@@ -879,7 +879,7 @@ pub async fn insert_user(
     sqlx::query(
         r#"INSERT INTO users
            (id, username, mobile_number, email, display_name, first_name, last_name,
-            avatar, avatar_asset_id, cover_image, cover_image_asset_id,
+            avatar, avatar_asset_id,
             date_joined, created_at, updated_at,
             last_location, created_location,
             is_superuser, is_managed, is_password_expired, is_active, is_staff,
@@ -889,7 +889,7 @@ pub async fn insert_user(
             last_login_ip, last_logout_ip, last_login_medium, last_login_uagent,
             token_updated_at, is_bot, bot_type, masked_at,
             password)
-           VALUES ($1,$2,NULL,$3,$4,$5,$6,'',NULL,NULL,NULL,
+           VALUES ($1,$2,NULL,$3,$4,$5,$6,'',NULL,
                    $7,$7,$7,'','',FALSE,FALSE,FALSE,TRUE,FALSE,
                    TRUE,TRUE,FALSE,'','UTC',FALSE,
                    NULL,NULL,NULL,'','',$8,'',NULL,FALSE,NULL,NULL,$9)"#,

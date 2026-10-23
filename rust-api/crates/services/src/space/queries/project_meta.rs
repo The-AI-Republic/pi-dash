@@ -197,17 +197,17 @@ pub fn workspace_boards_sql(_anchor: &str) -> Result<String, BoardsError> {
 }
 
 /// The SQL Django WOULD have emitted for M2 without the bug (fixture M2,
-/// `views/project.py:33-49`): the 7-key project `.values(...)` with the
+/// `views/project.py:33-48`): the 6-key project `.values(...)` with the
 /// `Exists(... anchor + project_id + entity_name ...)` `is_public`
 /// annotation, filtered to `is_public=True` within the board's workspace.
 /// Documentation for the follow-up fix ONLY — never executed. `$1` = anchor
 /// (bound twice: annotation subquery + outer `EXISTS`), `$2` = workspace id.
 pub fn workspace_boards_intended_sql() -> String {
-    "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", \"projects\".\"cover_image\", EXISTS(SELECT 1 AS \"a\" FROM \"deploy_boards\" U1 WHERE (U1.\"deleted_at\" IS NULL AND U1.\"anchor\" = $1 AND U1.\"project_id\" = (\"projects\".\"id\") AND U1.\"entity_name\" = 'project')) AS \"is_public\" FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"workspace_id\" = $2 AND EXISTS(SELECT 1 AS \"a\" FROM \"deploy_boards\" U2 WHERE (U2.\"deleted_at\" IS NULL AND U2.\"anchor\" = $1 AND U2.\"project_id\" = (\"projects\".\"id\") AND U2.\"entity_name\" = 'project')))".to_string()
+    "SELECT \"projects\".\"id\", \"projects\".\"identifier\", \"projects\".\"name\", \"projects\".\"description\", \"projects\".\"emoji\", \"projects\".\"icon_prop\", EXISTS(SELECT 1 AS \"a\" FROM \"deploy_boards\" U1 WHERE (U1.\"deleted_at\" IS NULL AND U1.\"anchor\" = $1 AND U1.\"project_id\" = (\"projects\".\"id\") AND U1.\"entity_name\" = 'project')) AS \"is_public\" FROM \"projects\" WHERE (\"projects\".\"deleted_at\" IS NULL AND \"projects\".\"workspace_id\" = $2 AND EXISTS(SELECT 1 AS \"a\" FROM \"deploy_boards\" U2 WHERE (U2.\"deleted_at\" IS NULL AND U2.\"anchor\" = $1 AND U2.\"project_id\" = (\"projects\".\"id\") AND U2.\"entity_name\" = 'project')))".to_string()
 }
 
 /// One row of the intended M2 `.values("id", "identifier", "name",
-/// "description", "emoji", "icon_prop", "cover_image")` list plus the
+/// "description", "emoji", "icon_prop")` list plus the
 /// `is_public` annotation (`views/project.py:35-49`). Unreachable until the
 /// bug is fixed; kept so the fix's row shape is already pinned.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,8 +224,6 @@ pub struct WorkspaceBoardRow {
     pub emoji: Option<String>,
     /// `icon_prop` (`:47`, nullable jsonb).
     pub icon_prop: Option<serde_json::Value>,
-    /// `cover_image` (`:48`, nullable).
-    pub cover_image: Option<String>,
     /// `is_public` `Exists` annotation (`:35-39`).
     pub is_public: bool,
 }
@@ -286,8 +284,6 @@ pub const PROJECT_COLUMNS: &[&str] = &[
     "project_lead_id",
     "emoji",
     "icon_prop",
-    "cover_image",
-    "cover_image_asset_id",
     "estimate_id",
     "archive_in",
     "close_in",
@@ -501,11 +497,12 @@ mod tests {
             workspace_boards_sql("pub-abc123"),
             Err(BoardsError::ValuesListNotCalled)
         );
-        // The intended shape stays pinned for the follow-up fix: 7 project
+        // The intended shape stays pinned for the follow-up fix: 6 project
         // keys + is_public EXISTS over anchor + project_id + entity_name.
         let intended = workspace_boards_intended_sql();
+        assert!(!intended.contains("cover_image"));
         for frag in [
-            "\"projects\".\"cover_image\",",
+            "\"projects\".\"icon_prop\", EXISTS",
             "AS \"is_public\"",
             "U1.\"anchor\" = $1",
             "U1.\"project_id\" = (\"projects\".\"id\")",

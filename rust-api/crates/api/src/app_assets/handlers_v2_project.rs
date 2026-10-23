@@ -51,9 +51,6 @@
 //!
 //! Ported bugs (translate, don't redesign — also listed in the PR):
 //!
-//! * BUG-project-cover-500 (`v2.py:554-563`): `PROJECT_COVER` spreads
-//!   `{"project_id": ...}` over the explicit `project_id=project_id`
-//!   kwarg → `TypeError` → generic 500. Answered directly (same bytes).
 //! * BUG-FLAG-pk-quirk (`v2.py:609`): project `get` looks up `pk=pk`
 //!   while siblings use `id=pk`; Django aliases `pk` to the primary key
 //!   so the predicate is identical.
@@ -95,17 +92,16 @@ use pidash_auth::scope::TenantScope;
 use pidash_services::app_assets::queries_v2_project as q;
 use pidash_types::WorkspaceId;
 
-/// All ten `EntityTypeContext` values (`db/models/asset.py:33-43`): the
-/// project mint accepts any of them (`v2.py:521`).
+/// All eight `EntityTypeContext` values (`db/models/asset.py:33-41`): the
+/// project mint accepts any of them (`v2.py:451`). `USER_COVER` /
+/// `PROJECT_COVER` were removed (PDASHOSS01-237) and now answer the 400.
 const ENTITY_TYPES: &[&str] = &[
     "ISSUE_ATTACHMENT",
     "ISSUE_DESCRIPTION",
     "COMMENT_DESCRIPTION",
     "PAGE_DESCRIPTION",
-    "USER_COVER",
     "USER_AVATAR",
     "WORKSPACE_LOGO",
-    "PROJECT_COVER",
     "DRAFT_ISSUE_ATTACHMENT",
     "DRAFT_ISSUE_DESCRIPTION",
 ];
@@ -769,7 +765,7 @@ fn asset_url_for(
     asset_id: &Uuid,
 ) -> Value {
     match entity_type {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
+        "WORKSPACE_LOGO" | "USER_AVATAR" => {
             Value::String(format!("/api/assets/v2/static/{asset_id}/"))
         }
         "ISSUE_ATTACHMENT" => Value::String(format!(
@@ -901,12 +897,6 @@ async fn post_project_asset(
         Ok(id) => id,
         Err(denial) => return denial,
     };
-    // BUG (`v2.py:554-563`): `PROJECT_COVER` resolves the spread to
-    // `{"project_id": ...}`, colliding with the explicit kwarg →
-    // `TypeError` → generic 500. Same bytes, answered directly.
-    if entity_type == "PROJECT_COVER" {
-        return server_error();
-    }
     let spread_col = q::project_entity_id_field(&entity_type);
     let spread_val = match coerce_uuid_or_400(data.get("entity_identifier")) {
         Ok(val) => val,
@@ -927,8 +917,7 @@ async fn post_project_asset(
     let now = Utc::now();
     // `FileAsset.objects.create(...)` (`:554-563`): explicit kwargs
     // first, `**spread` second; a shadowing spread (`workspace_id`,
-    // only reachable shape here — `PROJECT_COVER` already 500s above)
-    // rebinds the explicit position instead of adding a column.
+    // the only reachable shape here) rebinds the explicit position instead of adding a column.
     let (rebind, suffix) = resolve_spread(spread_col);
     let ws_value = if rebind {
         spread_val
@@ -1232,10 +1221,9 @@ async fn get_project_asset(
 // Bulk — link uploaded rows to an entity
 // ---------------------------------------------------------------------------
 
-/// One bulk candidate: id plus the first-row-governing type (creation
-/// order comes from the `ORDER BY created_at DESC` below).
+/// One bulk candidate: the first-row-governing type (creation order
+/// comes from the `ORDER BY created_at DESC` below).
 struct BulkRow {
-    id: Uuid,
     entity_type: Option<String>,
 }
 
@@ -1331,13 +1319,10 @@ async fn post_bulk_asset(
     };
     let mut ordered = Vec::with_capacity(rows.len());
     for row in &rows {
-        let Ok(id) = row.try_get::<Uuid, _>("id") else {
-            return server_error();
-        };
         let Ok(entity_type) = row.try_get::<Option<String>, _>("entity_type") else {
             return server_error();
         };
-        ordered.push(BulkRow { id, entity_type });
+        ordered.push(BulkRow { entity_type });
     }
     let Some(first) = ordered.first() else {
         return raw(StatusCode::NOT_FOUND, BULK_MISSING_BODY);
@@ -1349,53 +1334,6 @@ async fn post_bulk_asset(
     // Single dispatch off the first row's type (`:657-686`): a mixed-type
     // id list follows ONLY the first row — ported as-is.
     match q::bulk_branch(first.entity_type.as_deref().unwrap_or("")) {
-        q::BulkBranch::ProjectCover => {
-            // `assets.update(project_id=project_id)` (`:658`) plus the
-            // per-row cover stamp (`:659`); the LAST row wins.
-            if sqlx::query(
-                r#"UPDATE "file_assets" SET "project_id" = $3
-                   WHERE ("file_assets"."id" = ANY($1)
-                   AND "file_assets"."workspace_id" = $2
-                   AND "file_assets"."deleted_at" IS NULL)"#,
-            )
-            .bind(&asset_ids)
-            .bind(workspace_id)
-            .bind(project_id)
-            .execute(&pool)
-            .await
-            .is_err()
-            {
-                return server_error();
-            }
-            for row in &ordered {
-                // `save_project_cover` (`:631-634`): re-get the project
-                // per row (default manager) and stamp
-                // `cover_image_asset_id` — a full `save()`, so
-                // `updated_by`/`updated_at` too.
-                let exists: Option<(Uuid,)> = match sqlx::query_as(q::SAVE_PROJECT_COVER_GET_SQL)
-                    .bind(project_id)
-                    .fetch_optional(&pool)
-                    .await
-                {
-                    Ok(exists) => exists,
-                    Err(_) => return server_error(),
-                };
-                if exists.is_none() {
-                    return does_not_exist();
-                }
-                if sqlx::query(q::SAVE_PROJECT_COVER_SQL)
-                    .bind(project_id)
-                    .bind(row.id)
-                    .bind(Utc::now())
-                    .bind(actor.id)
-                    .execute(&pool)
-                    .await
-                    .is_err()
-                {
-                    return server_error();
-                }
-            }
-        }
         q::BulkBranch::IssueDescription => {
             // Integrity errors swallowed (`:664-667`).
             let result = sqlx::query(
@@ -1684,12 +1622,6 @@ async fn post_duplicate_asset(
     // Duplicate create (`:761-775`): `created_by_id` (unlike the mints),
     // `storage_metadata` copied verbatim, the 7-branch entity map (no
     // DRAFT arm — port the difference as-is), project possibly NULL.
-    // BUG (same class as the mint cover bug, verified live): the
-    // `PROJECT_COVER` spread carries `project_id`, colliding with the
-    // explicit kwarg → `TypeError` → generic 500.
-    if entity_type == "PROJECT_COVER" {
-        return server_error();
-    }
     let spread_col = q::duplicate_entity_id_field(&entity_type);
     let spread_val = match coerce_uuid_or_400(data.get("entity_id")) {
         Ok(val) => val,
@@ -2916,10 +2848,12 @@ mod tests {
 
     #[test]
     fn entity_type_vocabulary_matches_model() {
-        assert_eq!(ENTITY_TYPES.len(), 10);
+        assert_eq!(ENTITY_TYPES.len(), 8);
+        // The removed cover types are rejected by the mint guard.
+        assert!(!ENTITY_TYPES.contains(&"PROJECT_COVER"));
+        assert!(!ENTITY_TYPES.contains(&"USER_COVER"));
         for known in [
             "ISSUE_ATTACHMENT",
-            "PROJECT_COVER",
             "DRAFT_ISSUE_DESCRIPTION",
             "WORKSPACE_LOGO",
         ] {

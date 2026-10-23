@@ -983,13 +983,13 @@ async fn complete_login_or_signup(
             sqlx::query(
             r#"INSERT INTO "users" ("id", "password", "last_login", "username", "mobile_number", "email",
                 "display_name", "first_name", "last_name", "avatar", "avatar_asset_id",
-                "cover_image", "cover_image_asset_id", "date_joined", "created_at", "updated_at",
+                "date_joined", "created_at", "updated_at",
                 "last_location", "created_location", "is_superuser", "is_managed", "is_password_expired",
                 "is_active", "is_staff", "is_email_verified", "is_password_autoset", "is_password_reset_required",
                 "token", "last_active", "last_login_time", "last_logout_time", "last_login_ip", "last_logout_ip",
                 "last_login_medium", "last_login_uagent", "token_updated_at", "is_bot", "bot_type",
                 "user_timezone", "is_email_valid", "masked_at")
-               VALUES ($1, $2, NULL, $3, NULL, $4, $9, $5, $6, $7, NULL, NULL, NULL, $8, $8, $8,
+               VALUES ($1, $2, NULL, $3, NULL, $4, $9, $5, $6, $7, NULL, $8, $8, $8,
                 '', '', FALSE, FALSE, FALSE, TRUE, FALSE, TRUE, TRUE, FALSE,
                 '', $8, NULL, NULL, '', '', 'email', '', NULL, FALSE, NULL, 'UTC', FALSE, NULL)"#,
         )

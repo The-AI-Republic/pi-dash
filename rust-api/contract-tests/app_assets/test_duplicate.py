@@ -49,6 +49,20 @@ def test_duplicate_invalid_entity_type_400(org):
     assert r.json() == {"error": "Invalid entity type or entity id"}
 
 
+def test_duplicate_removed_cover_types_400(org):
+    # PDASHOSS01-237: the cover types left EntityTypeContext.values (the
+    # PROJECT_COVER kwarg-collision 500 is gone with them).
+    asset_id = mint_uploaded(org)
+    for entity_type in ("PROJECT_COVER", "USER_COVER"):
+        r = org.request(
+            "POST", dup_path(org, asset_id), "admin",
+            json=dup_payload(org, entity_type=entity_type,
+                             entity_id=org.project["id"]),
+        )
+        assert r.status_code == 400, entity_type
+        assert r.json() == {"error": "Invalid entity type or entity id"}
+
+
 def test_duplicate_unknown_asset_404(org):
     r = org.request(
         "POST",

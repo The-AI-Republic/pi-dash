@@ -178,9 +178,6 @@
         "archived_at",
         "base_branch",
         "close_in",
-        "cover_image",
-        "cover_image_asset",
-        "cover_image_url",
         "created_at",
         "created_by",
         "cycle_view",
@@ -233,7 +230,6 @@
           "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
           "018b320f-5095-415f-a49f-d142f56d58c3"
         ],
-        "cover_image_url": null,
         "inbox_view": false,
         "next_work_item_sequence": 1,
         "agent_executor_options": [
@@ -274,7 +270,6 @@
         "is_default": true,
         "guest_view_all_features": false,
         "members_can_edit_states": true,
-        "cover_image": null,
         "archive_in": 0,
         "close_in": 0,
         "logo_props": {},
@@ -295,7 +290,6 @@
         "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
         "default_assignee": null,
         "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-        "cover_image_asset": null,
         "estimate": null,
         "default_state": null
       }
@@ -443,7 +437,6 @@
             "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
             "018b320f-5095-415f-a49f-d142f56d58c3"
           ],
-          "cover_image_url": null,
           "inbox_view": false,
           "next_work_item_sequence": 1,
           "agent_executor_options": [
@@ -484,7 +477,6 @@
           "is_default": true,
           "guest_view_all_features": false,
           "members_can_edit_states": true,
-          "cover_image": null,
           "archive_in": 0,
           "close_in": 0,
           "logo_props": {},
@@ -505,7 +497,6 @@
           "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
           "default_assignee": null,
           "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-          "cover_image_asset": null,
           "estimate": null,
           "default_state": null
         }
@@ -524,7 +515,6 @@
             "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
             "018b320f-5095-415f-a49f-d142f56d58c3"
           ],
-          "cover_image_url": null,
           "inbox_view": false,
           "next_work_item_sequence": 1,
           "agent_executor_options": [
@@ -565,7 +555,6 @@
           "is_default": true,
           "guest_view_all_features": false,
           "members_can_edit_states": true,
-          "cover_image": null,
           "archive_in": 0,
           "close_in": 0,
           "logo_props": {},
@@ -586,7 +575,6 @@
           "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
           "default_assignee": null,
           "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-          "cover_image_asset": null,
           "estimate": null,
           "default_state": null
         }
@@ -617,7 +605,6 @@
               "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
               "018b320f-5095-415f-a49f-d142f56d58c3"
             ],
-            "cover_image_url": null,
             "inbox_view": false,
             "next_work_item_sequence": 1,
             "agent_executor_options": [
@@ -658,7 +645,6 @@
             "is_default": true,
             "guest_view_all_features": false,
             "members_can_edit_states": true,
-            "cover_image": null,
             "archive_in": 0,
             "close_in": 0,
             "logo_props": {},
@@ -679,7 +665,6 @@
             "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
             "default_assignee": null,
             "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-            "cover_image_asset": null,
             "estimate": null,
             "default_state": null
           }
@@ -700,9 +685,6 @@
         "archived_at",
         "base_branch",
         "close_in",
-        "cover_image",
-        "cover_image_asset",
-        "cover_image_url",
         "created_at",
         "created_by",
         "cycle_view",
@@ -787,7 +769,6 @@
           "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
           "018b320f-5095-415f-a49f-d142f56d58c3"
         ],
-        "cover_image_url": null,
         "inbox_view": false,
         "next_work_item_sequence": 1,
         "agent_executor_options": [
@@ -828,7 +809,6 @@
         "is_default": true,
         "guest_view_all_features": false,
         "members_can_edit_states": true,
-        "cover_image": null,
         "archive_in": 0,
         "close_in": 0,
         "logo_props": {},
@@ -849,7 +829,6 @@
         "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
         "default_assignee": null,
         "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-        "cover_image_asset": null,
         "estimate": null,
         "default_state": null
       }
@@ -872,7 +851,6 @@
           "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
           "018b320f-5095-415f-a49f-d142f56d58c3"
         ],
-        "cover_image_url": null,
         "inbox_view": true,
         "next_work_item_sequence": 1,
         "agent_executor_options": [
@@ -913,7 +891,6 @@
         "is_default": true,
         "guest_view_all_features": false,
         "members_can_edit_states": true,
-        "cover_image": null,
         "archive_in": 0,
         "close_in": 0,
         "logo_props": {},
@@ -934,7 +911,6 @@
         "workspace": "f93a08eb-1e03-4130-8a55-2eb967d91ea5",
         "default_assignee": null,
         "project_lead": "29976dbf-40ef-4fab-b6c0-f75c09ae8dda",
-        "cover_image_asset": null,
         "estimate": null,
         "default_state": null
       }
@@ -1085,8 +1061,6 @@
           "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
           "identifier": "GB2D9514",
           "name": "Gold B2D9514E",
-          "cover_image": null,
-          "cover_image_url": null,
           "logo_props": {},
           "description": "patched desc",
           "is_default": true
@@ -1155,8 +1129,6 @@
           "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
           "identifier": "GB2D9514",
           "name": "Gold B2D9514E",
-          "cover_image": null,
-          "cover_image_url": null,
           "logo_props": {},
           "description": "patched desc",
           "is_default": true
@@ -1200,8 +1172,6 @@
           "id": "f7db7c35-f211-4f70-b995-3f5d916555cf",
           "identifier": "GB2D9514",
           "name": "Gold B2D9514E",
-          "cover_image": null,
-          "cover_image_url": null,
           "logo_props": {},
           "description": "patched desc",
           "is_default": true
@@ -1333,8 +1303,6 @@
           "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
           "identifier": "M7DE496C",
           "name": "M 7DE496CF",
-          "cover_image": null,
-          "cover_image_url": null,
           "logo_props": {},
           "description": "",
           "is_default": true
@@ -1445,8 +1413,6 @@
           "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
           "identifier": "M7DE496C",
           "name": "M 7DE496CF",
-          "cover_image": null,
-          "cover_image_url": null,
           "logo_props": {},
           "description": "",
           "is_default": true
@@ -1670,8 +1636,6 @@
           "id": "3e0008a4-62ec-448c-abe2-5fca6ee60c5a",
           "identifier": "S694743F",
           "name": "ST 694743F6",
-          "cover_image": null,
-          "cover_image_url": null,
           "logo_props": {},
           "description": "",
           "is_default": true
@@ -1771,8 +1735,6 @@
             "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
             "identifier": "M7DE496C",
             "name": "M 7DE496CF",
-            "cover_image": null,
-            "cover_image_url": null,
             "logo_props": {},
             "description": "",
             "is_default": true
@@ -1842,8 +1804,6 @@
             "id": "5952e951-baad-4770-8ee8-64faf7f753fd",
             "identifier": "M7DE496C",
             "name": "M 7DE496CF",
-            "cover_image": null,
-            "cover_image_url": null,
             "logo_props": {},
             "description": "",
             "is_default": true

@@ -116,17 +116,15 @@ type MachineTokenLookup = Option<(
     Option<Uuid>,
     Option<chrono::DateTime<chrono::Utc>>,
 )>;
-/// One project lite row for `expand=project` (direct columns + cover asset FK).
+/// One project lite row for `expand=project` (direct columns).
 type ProjectLiteLookup = Option<(
     Uuid,
-    Option<String>,
     Option<String>,
     Option<String>,
     Option<serde_json::Value>,
     Option<String>,
     Option<String>,
     bool,
-    Option<Uuid>,
 )>;
 /// One user lite row for `expand=created_by/updated_by` (+ avatar asset FK).
 type UserLiteLookup = Option<(
@@ -981,40 +979,21 @@ async fn render_state(
 }
 
 /// `ProjectLiteSerializer` (`serializers/project.py:354-377`): wire order is the
-/// `Meta.fields` list order (probed: `id, identifier, name, cover_image, icon_prop,
-/// emoji, description, is_default, cover_image_url`).
+/// `Meta.fields` list order (`id, identifier, name, icon_prop, emoji,
+/// description, is_default`).
 async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value, HandlerError> {
     let row: ProjectLiteLookup = sqlx::query_as(
-        r#"SELECT id, identifier, name, cover_image, icon_prop, emoji, description,
-                  is_default, cover_image_asset_id
+        r#"SELECT id, identifier, name, icon_prop, emoji, description, is_default
            FROM projects WHERE id = $1"#,
     )
     .bind(project_id)
     .fetch_optional(pool)
     .await
     .map_err(|_| HandlerError::ServerError)?;
-    let Some((
-        id,
-        identifier,
-        name,
-        cover_image,
-        icon_prop,
-        emoji,
-        description,
-        is_default,
-        cover_asset,
-    )) = row
-    else {
+    let Some((id, identifier, name, icon_prop, emoji, description, is_default)) = row else {
         return Ok(Value::Null);
     };
-    // `cover_image_url` (`db/models/project.py:176-184`): the asset URL when a
-    // cover asset exists (even when that URL is null); else the raw value when
-    // truthy; else null. A dangling asset FK raises (`DoesNotExist` → 404).
-    let cover_url = match cover_asset {
-        Some(aid) => asset_url_for(pool, aid).await?,
-        None => cover_image.clone().filter(|raw| !raw.is_empty()),
-    };
-    let mut map = serde_json::Map::with_capacity(9);
+    let mut map = serde_json::Map::with_capacity(7);
     map.insert("id".to_owned(), Value::String(id.to_string()));
     map.insert(
         "identifier".to_owned(),
@@ -1023,10 +1002,6 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
     map.insert(
         "name".to_owned(),
         name.map(Value::String).unwrap_or(Value::Null),
-    );
-    map.insert(
-        "cover_image".to_owned(),
-        cover_image.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("icon_prop".to_owned(), icon_prop.unwrap_or(Value::Null));
     map.insert(
@@ -1038,10 +1013,6 @@ async fn expand_project(pool: &sqlx::PgPool, project_id: &Uuid) -> Result<Value,
         description.map(Value::String).unwrap_or(Value::Null),
     );
     map.insert("is_default".to_owned(), Value::Bool(is_default));
-    map.insert(
-        "cover_image_url".to_owned(),
-        cover_url.map(Value::String).unwrap_or(Value::Null),
-    );
     Ok(Value::Object(map))
 }
 
@@ -1105,8 +1076,8 @@ async fn expand_user(pool: &sqlx::PgPool, user_id: &Uuid) -> Result<Value, Handl
     Ok(Value::Object(map))
 }
 
-/// Shared `avatar_url` / `cover_image_url` rendering (`db/models/user.py:142-151`,
-/// `db/models/project.py:176-184` via `Asset.asset_url`, `db/models/asset.py:80-99`).
+/// `avatar_url` rendering (`db/models/user.py:142-151` via `Asset.asset_url`,
+/// `db/models/asset.py:80-99`).
 /// A dangling asset FK raises `DoesNotExist`, which `handle_exception` maps to
 /// the 404 branch — hence [`HandlerError::NotFound`] here.
 async fn asset_url_for(
@@ -1124,9 +1095,7 @@ async fn asset_url_for(
         return Err(HandlerError::NotFound);
     };
     match entity_type.as_str() {
-        "WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER" => {
-            Ok(Some(format!("/api/assets/v2/static/{asset_id}/")))
-        }
+        "WORKSPACE_LOGO" | "USER_AVATAR" => Ok(Some(format!("/api/assets/v2/static/{asset_id}/"))),
         "ISSUE_ATTACHMENT" => {
             let slug: Option<(String,)> = match workspace_id {
                 Some(ws) => sqlx::query_as(r#"SELECT slug FROM workspaces WHERE id = $1"#)

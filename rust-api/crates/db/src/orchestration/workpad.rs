@@ -16,7 +16,7 @@
 //! like `update_fields=["workpad", "updated_at"]` (the `SET` order
 //! follows Django's `_meta` order per the fixture).
 //!
-//! The agent-user `INSERT` spells out all 40 physical `users` columns
+//! The agent-user `INSERT` spells out all 38 physical `users` columns
 //! in `_meta` order with Django-side values, including the two
 //! `User.save()` normalizations (`db/models/user.py:168-182`): the
 //! email is already lowercase, and `display_name` defaults to the
@@ -167,15 +167,15 @@ where
     row.map(|row| map_agent_system_user(&row)).transpose()
 }
 
-/// `get_or_create` insert (`workpad.py:53-61`): all 40 physical
+/// `get_or_create` insert (`workpad.py:53-61`): all 38 physical
 /// `users` columns in `_meta` order (per
 /// `FX-AUTH-03.models.json`, which pins the columns + nullability),
 /// so the statement holds every `NOT NULL` constraint with no
-/// database default. `$1..$40` follow the column order; see
+/// database default. `$1..$38` follow the column order; see
 /// [`get_agent_system_user`] for the values.
 pub const AGENT_USER_INSERT_SQL: &str = "INSERT INTO users (password, last_login, id, username,
     mobile_number, email, display_name, first_name, last_name, avatar, avatar_asset_id,
-    cover_image, cover_image_asset_id, date_joined, created_at, updated_at, last_location,
+    date_joined, created_at, updated_at, last_location,
     created_location, is_superuser, is_managed, is_password_expired, is_active, is_staff,
     is_email_verified, is_password_autoset, is_password_reset_required, token, last_active,
     last_login_time, last_logout_time, last_login_ip, last_logout_ip, last_login_medium,
@@ -183,7 +183,7 @@ pub const AGENT_USER_INSERT_SQL: &str = "INSERT INTO users (password, last_login
     masked_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
     $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35,
-    $36, $37, $38, $39, $40)";
+    $36, $37, $38)";
 
 /// `set_unusable_password` + `save(update_fields=["password"])`
 /// (`workpad.py:62-65`). `$1` is the unusable hash, `$2` the user id.
@@ -244,8 +244,6 @@ async fn insert_agent_row(
         .bind(AGENT_USER_LAST_NAME)
         .bind("") // avatar
         .bind(Option::<uuid::Uuid>::None) // avatar_asset_id
-        .bind(Option::<String>::None) // cover_image
-        .bind(Option::<uuid::Uuid>::None) // cover_image_asset_id
         .bind(now) // date_joined
         .bind(now) // created_at
         .bind(now) // updated_at
@@ -422,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_insert_lists_all_40_physical_columns() {
+    fn agent_insert_lists_all_38_physical_columns() {
         // `_meta` order per FX-AUTH-03.models.json (the two trailing
         // ManyToMany entries are relations, not columns).
         let columns = [
@@ -437,8 +435,6 @@ mod tests {
             "last_name",
             "avatar",
             "avatar_asset_id",
-            "cover_image",
-            "cover_image_asset_id",
             "date_joined",
             "created_at",
             "updated_at",
@@ -467,7 +463,7 @@ mod tests {
             "is_email_valid",
             "masked_at",
         ];
-        assert_eq!(columns.len(), 40);
+        assert_eq!(columns.len(), 38);
         let head = AGENT_USER_INSERT_SQL;
         let mut cursor = 0;
         for column in columns {
@@ -476,7 +472,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{column} listed"));
             cursor += found + column.len();
         }
-        for bind in 1..=40 {
+        for bind in 1..=38 {
             assert!(head.contains(&format!("${bind}")), "bind ${bind} present");
         }
         assert_eq!(
@@ -504,14 +500,13 @@ mod tests {
     const ISSUES_DDL: &str = "CREATE TEMPORARY TABLE issues (
         id UUID PRIMARY KEY, workpad TEXT, updated_at TIMESTAMPTZ NOT NULL)";
 
-    /// Temp `users`: the 40 insert columns with production nullability
+    /// Temp `users`: the 38 insert columns with production nullability
     /// plus the `username` unique index the race seam relies on.
     const USERS_DDL: &str = "CREATE TEMPORARY TABLE users (
         password TEXT NOT NULL, last_login TIMESTAMPTZ, id UUID PRIMARY KEY,
         username TEXT NOT NULL UNIQUE, mobile_number TEXT, email TEXT UNIQUE,
         display_name TEXT NOT NULL, first_name TEXT NOT NULL, last_name TEXT NOT NULL,
-        avatar TEXT NOT NULL, avatar_asset_id UUID, cover_image TEXT,
-        cover_image_asset_id UUID, date_joined TIMESTAMPTZ NOT NULL,
+        avatar TEXT NOT NULL, avatar_asset_id UUID, date_joined TIMESTAMPTZ NOT NULL,
         created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
         last_location TEXT NOT NULL, created_location TEXT NOT NULL,
         is_superuser BOOLEAN NOT NULL, is_managed BOOLEAN NOT NULL,

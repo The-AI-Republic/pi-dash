@@ -20,8 +20,8 @@ DETAIL_KEYS = [
     "agent_default_interval_seconds", "agent_default_max_ticks",
     "agent_executor_options", "agent_review_default_interval_seconds",
     "agent_test_default_interval_seconds", "agent_ticking_enabled", "anchor",
-    "archive_in", "archived_at", "base_branch", "close_in", "cover_image",
-    "cover_image_asset", "cover_image_url", "created_at", "created_by",
+    "archive_in", "archived_at", "base_branch", "close_in", "created_at",
+    "created_by",
     "cycle_view", "default_agent_executor", "default_assignee",
     "default_state", "deleted_at", "description", "description_html",
     "description_text", "emoji", "estimate", "external_id", "external_source",
@@ -155,6 +155,18 @@ def test_partial_update_project(world):
     assert resp.status_code == 200
     assert_keys(resp.json(), DETAIL_KEYS, "partial_update")
     assert resp.json()["name"] == "Renamed Project"
+
+
+def test_cover_image_body_keys_ignored(world):
+    # PDASHOSS01-237: the cover columns are gone, so `cover_image` /
+    # `cover_image_asset` are unknown to the `__all__` serializer and
+    # silently dropped on create and partial update.
+    client, _, ws, project = world.full_stack()
+    resp = client.patch(f"/api/workspaces/{ws['slug']}/projects/{project['id']}/",
+                        json={"cover_image": "https://example.com/c.png",
+                              "cover_image_asset": "not-a-uuid"})
+    assert resp.status_code == 200, resp.text[:300]
+    assert_keys(resp.json(), DETAIL_KEYS, "partial_update_cover")
 
 
 def test_partial_update_archived_project_400(world):

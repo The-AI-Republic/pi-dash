@@ -192,7 +192,6 @@ pub const CREATE_META_FIELDS: &[&str] = &[
     "identifier",
     "icon_prop",
     "emoji",
-    "cover_image",
     "module_view",
     "cycle_view",
     "issue_views_view",
@@ -242,7 +241,6 @@ pub const READ_ANNOTATION_FIELDS: &[&str] = &[
     "sort_order",
     "member_role",
     "is_deployed",
-    "cover_image_url",
 ];
 
 /// `ProjectSerializer.Meta.read_only_fields` (`:271-281`).
@@ -255,7 +253,6 @@ pub const READ_READ_ONLY_FIELDS: &[&str] = &[
     "created_by",
     "updated_by",
     "deleted_at",
-    "cover_image_url",
 ];
 
 /// `ProjectLiteSerializer.Meta.fields` (`:366-376`); `read_only_fields` is
@@ -264,12 +261,10 @@ pub const LITE_FIELDS: &[&str] = &[
     "id",
     "identifier",
     "name",
-    "cover_image",
     "icon_prop",
     "emoji",
     "description",
     "is_default",
-    "cover_image_url",
 ];
 
 /// `PROJECT_ICON_DEFAULT_COLORS` (`serializers/project.py:57-66`).
@@ -1054,9 +1049,9 @@ mod tests {
 
     #[test]
     fn shape_consts_match_python_source() {
-        assert_eq!(CREATE_META_FIELDS.len(), 26);
+        assert_eq!(CREATE_META_FIELDS.len(), 25);
         assert_eq!(CREATE_META_FIELDS[0], "name");
-        assert_eq!(CREATE_META_FIELDS[25], "default_agent_executor");
+        assert_eq!(CREATE_META_FIELDS[24], "default_agent_executor");
         assert!(CREATE_META_FIELDS.contains(&"identifier"));
         assert_eq!(
             CREATE_META_READ_ONLY_FIELDS,
@@ -1080,24 +1075,20 @@ mod tests {
                 "is_member",
                 "sort_order",
                 "member_role",
-                "is_deployed",
-                "cover_image_url"
+                "is_deployed"
             ]
         );
-        assert_eq!(READ_READ_ONLY_FIELDS.len(), 9);
-        assert!(READ_READ_ONLY_FIELDS.contains(&"cover_image_url"));
+        assert_eq!(READ_READ_ONLY_FIELDS.len(), 8);
         assert_eq!(
             LITE_FIELDS,
             [
                 "id",
                 "identifier",
                 "name",
-                "cover_image",
                 "icon_prop",
                 "emoji",
                 "description",
-                "is_default",
-                "cover_image_url"
+                "is_default"
             ]
         );
     }

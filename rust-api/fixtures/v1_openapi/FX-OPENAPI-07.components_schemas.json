@@ -4116,7 +4116,7 @@
     },
     "PageCreateRequest": {
       "type": "object",
-      "description": "``POST .../pages/`` — ``name`` is required.",
+      "description": "``POST .../pages/`` \u2014 ``name`` is required.",
       "properties": {
         "name": {
           "type": "string",
@@ -4219,7 +4219,7 @@
     },
     "PageLite": {
       "type": "object",
-      "description": "Page metadata only — no body.\n\nUsed by the list endpoint: a project wiki can hold long documents, and an\nagent listing pages wants the index, not every body at once.",
+      "description": "Page metadata only \u2014 no body.\n\nUsed by the list endpoint: a project wiki can hold long documents, and an\nagent listing pages wants the index, not every body at once.",
       "properties": {
         "id": {
           "type": "string",
@@ -6210,7 +6210,7 @@
     },
     "PatchedPageUpdateRequest": {
       "type": "object",
-      "description": "``PATCH .../pages/{page_id}/`` — any subset, but at least one field.",
+      "description": "``PATCH .../pages/{page_id}/`` \u2014 any subset, but at least one field.",
       "properties": {
         "name": {
           "type": "string",
@@ -6297,10 +6297,6 @@
           "type": "string",
           "nullable": true,
           "maxLength": 255
-        },
-        "cover_image": {
-          "type": "string",
-          "nullable": true
         },
         "module_view": {
           "type": "boolean"
@@ -6990,10 +6986,6 @@
           "type": "boolean",
           "readOnly": true
         },
-        "cover_image_url": {
-          "type": "string",
-          "readOnly": true
-        },
         "created_at": {
           "type": "string",
           "format": "date-time",
@@ -7081,10 +7073,6 @@
         },
         "members_can_edit_states": {
           "type": "boolean"
-        },
-        "cover_image": {
-          "type": "string",
-          "nullable": true
         },
         "archive_in": {
           "type": "integer",
@@ -7622,11 +7610,6 @@
           "format": "uuid",
           "nullable": true
         },
-        "cover_image_asset": {
-          "type": "string",
-          "format": "uuid",
-          "nullable": true
-        },
         "estimate": {
           "type": "string",
           "format": "uuid",
@@ -7680,10 +7663,6 @@
           "type": "string",
           "nullable": true,
           "maxLength": 255
-        },
-        "cover_image": {
-          "type": "string",
-          "nullable": true
         },
         "module_view": {
           "type": "boolean"
@@ -8362,7 +8341,7 @@
             "refused"
           ],
           "type": "string",
-          "description": "* `queued` - Queued\n* `assigned` - Assigned\n* `waiting_for_worktree` - Waiting for Worktree\n* `running` - Running\n* `cancel_requested` - Cancellation Requested\n* `awaiting_approval` - Awaiting Approval\n* `awaiting_reauth` - Awaiting Reauth\n* `paused_awaiting_input` - Paused — Awaiting Input\n* `blocked` - Blocked\n* `completed` - Completed\n* `failed` - Failed\n* `cancelled` - Cancelled\n* `refused` - Refused",
+          "description": "* `queued` - Queued\n* `assigned` - Assigned\n* `waiting_for_worktree` - Waiting for Worktree\n* `running` - Running\n* `cancel_requested` - Cancellation Requested\n* `awaiting_approval` - Awaiting Approval\n* `awaiting_reauth` - Awaiting Reauth\n* `paused_awaiting_input` - Paused \u2014 Awaiting Input\n* `blocked` - Blocked\n* `completed` - Completed\n* `failed` - Failed\n* `cancelled` - Cancelled\n* `refused` - Refused",
           "x-spec-enum-id": "7901560e77d9cb0a",
           "readOnly": true
         },
@@ -8770,12 +8749,11 @@
         },
         "entity_type": {
           "enum": [
-            "USER_AVATAR",
-            "USER_COVER"
+            "USER_AVATAR"
           ],
           "type": "string",
-          "x-spec-enum-id": "ddb7b8ca3e92601a",
-          "description": "Type of user asset\n\n* `USER_AVATAR` - User Avatar\n* `USER_COVER` - User Cover"
+          "x-spec-enum-id": "1bc1df2b4e40084f",
+          "description": "Type of user asset\n\n* `USER_AVATAR` - User Avatar"
         }
       },
       "required": [

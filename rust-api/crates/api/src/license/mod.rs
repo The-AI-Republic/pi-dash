@@ -203,7 +203,7 @@ pub fn file_asset_url(
     workspace_slug: Option<&str>,
 ) -> AssetUrl {
     match entity {
-        Some("WORKSPACE_LOGO" | "USER_AVATAR" | "USER_COVER" | "PROJECT_COVER") => {
+        Some("WORKSPACE_LOGO" | "USER_AVATAR") => {
             AssetUrl::Present(Some(format!("/api/assets/v2/static/{id}/")))
         }
         Some("ISSUE_ATTACHMENT") => {

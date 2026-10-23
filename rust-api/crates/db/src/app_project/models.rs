@@ -189,8 +189,6 @@ pub mod project {
         "is_default",
         "guest_view_all_features",
         "members_can_edit_states",
-        "cover_image",
-        "cover_image_asset_id",
         "estimate_id",
         "archive_in",
         "close_in",
@@ -356,9 +354,7 @@ pub mod project {
     pub const DEFAULT_ASSIGNEE_ON_DELETE: OnDelete = OnDelete::Cascade;
     pub const PROJECT_LEAD_ON_DELETE: OnDelete = OnDelete::Cascade;
 
-    /// `cover_image_asset` / `estimate` / `default_state` FKs: `SET_NULL`,
-    /// nullable (`:108-115,119`).
-    pub const COVER_IMAGE_ASSET_ON_DELETE: OnDelete = OnDelete::SetNull;
+    /// `estimate` / `default_state` FKs: `SET_NULL`, nullable.
     pub const ESTIMATE_ON_DELETE: OnDelete = OnDelete::SetNull;
     pub const DEFAULT_STATE_ON_DELETE: OnDelete = OnDelete::SetNull;
 
@@ -379,24 +375,6 @@ pub mod project {
     /// `self.identifier.strip().upper()`. `name` is untouched.
     pub fn normalize_identifier(raw: &str) -> String {
         raw.trim_matches(is_py_strip_ws).to_uppercase()
-    }
-
-    /// `Project.cover_image_url` (`project.py:175-185`): when a cover-asset
-    /// row is attached its URL is returned as-is — even `None` (an asset
-    /// whose `entity_type` `FileAsset.asset_url` does not recognize yields
-    /// `None`, with *no* fallback to the legacy text). Otherwise the legacy
-    /// `cover_image` text wins only when non-empty (`if self.cover_image:`
-    /// is falsy for `""`), else `None`. Callers pass whether a
-    /// `cover_image_asset` row is attached plus the resolved `asset_url`.
-    pub fn cover_image_url<'a>(
-        has_cover_asset: bool,
-        asset_url: Option<&'a str>,
-        cover_image: Option<&'a str>,
-    ) -> Option<&'a str> {
-        if has_cover_asset {
-            return asset_url;
-        }
-        cover_image.filter(|s| !s.is_empty())
     }
 
     /// `Project.__str__` (`project.py:187-189`): `"{name} <{workspace_name}>"`.
@@ -496,8 +474,6 @@ pub mod project {
         pub is_default: bool,
         pub guest_view_all_features: bool,
         pub members_can_edit_states: bool,
-        pub cover_image: Option<String>,
-        pub cover_image_asset_id: Option<uuid::Uuid>,
         pub estimate_id: Option<uuid::Uuid>,
         pub archive_in: i64,
         pub close_in: i64,
@@ -1536,9 +1512,9 @@ pub mod estimate_point {
 #[cfg(test)]
 mod tests {
     use super::project::{
-        auto_default_on_create, classify_lookup, clear_old_default_condition, cover_image_url,
-        display_name, normalize_identifier, resolve_condition, timezone_on_create,
-        unset_default_check, ProjectLookup,
+        auto_default_on_create, classify_lookup, clear_old_default_condition, display_name,
+        normalize_identifier, resolve_condition, timezone_on_create, unset_default_check,
+        ProjectLookup,
     };
     use super::project::{
         AgentExecutorKind, ProjectNetwork, NOT_FOUND_DETAIL, UNSET_DEFAULT_ERROR,
@@ -1631,8 +1607,6 @@ mod tests {
                 "is_default",
                 "guest_view_all_features",
                 "members_can_edit_states",
-                "cover_image",
-                "cover_image_asset_id",
                 "estimate_id",
                 "archive_in",
                 "close_in",
@@ -2203,7 +2177,6 @@ mod tests {
         assert_eq!(project::WORKSPACE_ON_DELETE, OnDelete::Cascade);
         assert_eq!(project::DEFAULT_ASSIGNEE_ON_DELETE, OnDelete::Cascade);
         assert_eq!(project::PROJECT_LEAD_ON_DELETE, OnDelete::Cascade);
-        assert_eq!(project::COVER_IMAGE_ASSET_ON_DELETE, OnDelete::SetNull);
         assert_eq!(project::ESTIMATE_ON_DELETE, OnDelete::SetNull);
         assert_eq!(project::DEFAULT_STATE_ON_DELETE, OnDelete::SetNull);
         assert_eq!(project_member::MEMBER_ON_DELETE, OnDelete::Cascade);
@@ -2305,17 +2278,6 @@ mod tests {
         assert_eq!(normalize_identifier("ENG"), "ENG");
         // `save` uses the same `strip().upper()` (PIDASHCONV-728).
         assert_eq!(normalize_identifier("\u{1c}x709770\u{1c}"), "X709770");
-        // cover_image_url precedence: asset > legacy text > None.
-        assert_eq!(
-            cover_image_url(true, Some("https://cdn/a.png"), Some("legacy")),
-            Some("https://cdn/a.png")
-        );
-        assert_eq!(cover_image_url(false, None, Some("legacy")), Some("legacy"));
-        assert_eq!(cover_image_url(false, None, None), None);
-        // Empty-string legacy text is falsy, like Python (`if cover_image:`).
-        assert_eq!(cover_image_url(false, None, Some("")), None);
-        // Attached asset with no URL returns None without falling back.
-        assert_eq!(cover_image_url(true, None, Some("legacy")), None);
         assert_eq!(display_name("Eng", "Acme"), "Eng <Acme>");
         // timezone backfill on create.
         assert_eq!(

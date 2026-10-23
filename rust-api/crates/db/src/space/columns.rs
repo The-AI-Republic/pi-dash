@@ -203,8 +203,6 @@ pub mod project {
         "project_lead_id",
         "emoji",
         "icon_prop",
-        "cover_image",
-        "cover_image_asset_id",
         "estimate_id",
         "archive_in",
         "close_in",
@@ -693,10 +691,8 @@ pub mod file_asset {
         "ISSUE_DESCRIPTION",
         "COMMENT_DESCRIPTION",
         "PAGE_DESCRIPTION",
-        "USER_COVER",
         "USER_AVATAR",
         "WORKSPACE_LOGO",
-        "PROJECT_COVER",
         "DRAFT_ISSUE_ATTACHMENT",
         "DRAFT_ISSUE_DESCRIPTION",
     ];
@@ -1197,7 +1193,7 @@ mod tests {
             .map(ToString::to_string)
             .collect();
         assert_eq!(column_names(&fixture["columns"]), expected);
-        assert_eq!(file_asset::ENTITY_TYPES.len(), 10);
+        assert_eq!(file_asset::ENTITY_TYPES.len(), 8);
         for entity_type in file_asset::SPACE_READ_ENTITY_TYPES {
             assert!(
                 file_asset::ENTITY_TYPES.contains(entity_type),

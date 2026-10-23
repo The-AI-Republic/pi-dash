@@ -841,10 +841,9 @@ pub struct AssetRef {
 /// Render `FileAsset.asset_url` for one asset row.
 pub fn render_asset_url(asset: &AssetRef) -> Option<String> {
     match asset.entity_type.as_deref() {
-        Some("WORKSPACE_LOGO")
-        | Some("USER_AVATAR")
-        | Some("USER_COVER")
-        | Some("PROJECT_COVER") => Some(format!("/api/assets/v2/static/{}/", asset.id)),
+        Some("WORKSPACE_LOGO") | Some("USER_AVATAR") => {
+            Some(format!("/api/assets/v2/static/{}/", asset.id))
+        }
         Some("ISSUE_ATTACHMENT") => Some(format!(
             "/api/assets/v2/workspaces/{}/projects/{}/issues/{}/attachments/{}/",
             asset.workspace_slug.as_deref().unwrap_or(""),

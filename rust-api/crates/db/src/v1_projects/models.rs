@@ -120,8 +120,6 @@ pub mod project {
         "is_default",
         "guest_view_all_features",
         "members_can_edit_states",
-        "cover_image",
-        "cover_image_asset_id",
         "estimate_id",
         "archive_in",
         "close_in",
@@ -191,9 +189,7 @@ pub mod project {
     pub const DEFAULT_ASSIGNEE_ON_DELETE: OnDelete = OnDelete::Cascade;
     pub const PROJECT_LEAD_ON_DELETE: OnDelete = OnDelete::Cascade;
 
-    /// `cover_image_asset` / `estimate` / `default_state` FKs: `SET_NULL`,
-    /// nullable (`:108-119`).
-    pub const COVER_IMAGE_ASSET_ON_DELETE: OnDelete = OnDelete::SetNull;
+    /// `estimate` / `default_state` FKs: `SET_NULL`, nullable.
     pub const ESTIMATE_ON_DELETE: OnDelete = OnDelete::SetNull;
     pub const DEFAULT_STATE_ON_DELETE: OnDelete = OnDelete::SetNull;
 
@@ -219,7 +215,7 @@ pub mod project {
 
     /// One `Project` row. `name`/`description`/`repo_url`/`base_branch` are
     /// `NOT NULL` (blank string when unset); every `*_id` user/asset FK and
-    /// the `cover_image`, `emoji`, `external_*` columns are nullable.
+    /// the `emoji`, `external_*` columns are nullable.
     /// Python `IntegerField` (unbounded) maps to `i64`;
     /// `PositiveSmallIntegerField` (`network`) to `i32` (see Semantic traps).
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,8 +247,6 @@ pub mod project {
         pub is_default: bool,
         pub guest_view_all_features: bool,
         pub members_can_edit_states: bool,
-        pub cover_image: Option<String>,
-        pub cover_image_asset_id: Option<uuid::Uuid>,
         pub estimate_id: Option<uuid::Uuid>,
         pub archive_in: i64,
         pub close_in: i64,
@@ -1125,8 +1119,6 @@ mod tests {
                 "is_default",
                 "guest_view_all_features",
                 "members_can_edit_states",
-                "cover_image",
-                "cover_image_asset_id",
                 "estimate_id",
                 "archive_in",
                 "close_in",
@@ -1607,8 +1599,6 @@ mod tests {
             is_default: false,
             guest_view_all_features: false,
             members_can_edit_states: true,
-            cover_image: None,
-            cover_image_asset_id: None,
             estimate_id: None,
             archive_in: 0,
             close_in: 0,

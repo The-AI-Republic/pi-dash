@@ -21,8 +21,10 @@ def test_meta_shape(anon_client, world):
     assert response.status_code == 200
     body = response.json()
     # space/serializer/project.py ProjectLiteSerializer.
-    for key in ("id", "identifier", "name", "cover_image", "icon_prop", "emoji", "description"):
+    for key in ("id", "identifier", "name", "icon_prop", "emoji", "description"):
         assert key in body, f"meta missing {key}: {sorted(body)}"
+    # PDASHOSS01-237: the cover image feature is gone.
+    assert "cover_image" not in body
     assert body["name"].startswith("Contract Project")
 
 
@@ -170,29 +172,21 @@ def test_issues_group_keys_exclude_soft_deleted_and_triage(anon_client, world, s
     assert deleted_cycle["id"] not in cycle_keys
 
 
-def test_settings_soft_deleted_cover_asset_still_200(anon_client, world, seeder, db):
-    # Forward FKs use the unscoped _base_manager (no base_manager_name), so a
-    # soft-deleted cover asset still renders its static URL (PIDASHCONV-1262).
-    cover = seeder.create_asset(
-        world["workspace"]["id"], world["project"]["id"], world["owner"]["id"],
-        entity_type="PROJECT_COVER",
-    )
-    db.execute(
-        "UPDATE projects SET cover_image_asset_id = %s WHERE id = %s",
-        (cover["id"], world["project"]["id"]),
-    )
-    db.execute("UPDATE file_assets SET deleted_at = now() WHERE id = %s", (cover["id"],))
+PROJECT_DETAILS_KEYS = ["id", "identifier", "name", "logo_props", "description", "is_default"]
 
-    expected = f"/api/assets/v2/static/{cover['id']}/"
+
+def test_settings_project_details_have_no_cover_keys(anon_client, world):
+    # PDASHOSS01-237: app ProjectLiteSerializer dropped cover_image and
+    # cover_image_url; the board nest renders the remaining six keys in order.
     settings = anon_client.get(f"{BASE}/anchor/{world['anchor']}/settings/")
     assert settings.status_code == 200
-    assert settings.json()["project_details"]["cover_image_url"] == expected
+    assert list(settings.json()["project_details"]) == PROJECT_DETAILS_KEYS
 
     slug = world["workspace"]["slug"]
     project_id = world["project"]["id"]
     anchor = anon_client.get(f"{BASE}/workspaces/{slug}/projects/{project_id}/anchor/")
     assert anchor.status_code == 200
-    assert anchor.json()["project_details"]["cover_image_url"] == expected
+    assert list(anchor.json()["project_details"]) == PROJECT_DETAILS_KEYS
 
 
 def test_settings_soft_deleted_logo_asset_still_200(anon_client, world, seeder, db):

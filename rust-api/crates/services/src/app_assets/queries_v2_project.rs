@@ -24,17 +24,13 @@
 //!   bump); `save(update_fields=[...])` writes exactly the named columns
 //!   too (Django builds the UPDATE from that list only — no `auto_now`
 //!   bump for the rest).
-//! * `save_project_cover` (`v2.py:631-634`) re-gets the project per row and
-//!   the LAST row wins; the per-row write is a full `save()`, so it stamps
-//!   `updated_by`/`updated_at` too (unlike the `QuerySet.update` branches).
+//! * `USER_COVER` / `PROJECT_COVER` are no longer `EntityTypeContext`
+//!   values (PDASHOSS01-237): the mint/duplicate guards reject them, the
+//!   static allow-list drops them, and a legacy `PROJECT_COVER` first row
+//!   in the bulk endpoint takes the no-op arm.
 //!
 //! # Ported bugs (translate, don't redesign)
 //!
-//! * BUG (`v2.py:554-563`): project `post` with `PROJECT_COVER` resolves
-//!   `get_entity_id_field` to `{"project_id": ...}`, colliding with the
-//!   explicit `project_id=project_id` kwarg → `TypeError` → generic 500.
-//!   [`project_create_columns`] keeps the spread order (explicit kwarg
-//!   first, `**spread` second) so the collision reproduces.
 //! * BUG-FLAG (`v2.py:609`): project `get` looks up `pk=pk` while siblings
 //!   use `id=pk`. Django aliases `pk` to the primary key, so the SQL is
 //!   identical; [`PROJECT_GET_SQL`] keeps the same predicate for trace
@@ -54,8 +50,6 @@
 pub const FILE_ASSET_TABLE: &str = "file_assets";
 /// Tenant table for `workspace__slug` joins.
 pub const WORKSPACE_TABLE: &str = "workspaces";
-/// Projects table for the cover-link write.
-pub const PROJECT_TABLE: &str = "projects";
 
 // ---------------------------------------------------------------------------
 // Entity-type vocabulary
@@ -71,12 +65,7 @@ pub const INVALID_ENTITY_TYPE_BODY: &str = r#"{"error":"Invalid entity type.","s
 pub const DUPLICATE_INVALID_ENTITY_BODY: &str = r#"{"error":"Invalid entity type or entity id"}"#;
 
 /// `entity_type` values the static endpoint serves (`v2.py:449-456`).
-pub const STATIC_ENTITY_ALLOWLIST: &[&str] = &[
-    "USER_AVATAR",
-    "USER_COVER",
-    "WORKSPACE_LOGO",
-    "PROJECT_COVER",
-];
+pub const STATIC_ENTITY_ALLOWLIST: &[&str] = &["USER_AVATAR", "WORKSPACE_LOGO"];
 
 /// Mintable file types for the project `post` (`v2.py:528-535`).
 pub const PROJECT_ALLOWED_FILE_TYPES: &[&str] = &[
@@ -94,13 +83,12 @@ pub const DUPLICATE_ENTITY_ID_REQUEST_KEY: &str = "entity_id";
 
 /// Port of `ProjectAssetEndpoint.get_entity_id_field` (`v2.py:483-510`):
 /// the create-kwarg column for an entity type, or `None` for the `{}` fallthrough.
-/// 8 branches — the workspace variant's 7 plus `DRAFT_ISSUE_DESCRIPTION`.
+/// 7 branches — the workspace variant's 6 plus `DRAFT_ISSUE_DESCRIPTION`.
 /// Do not unify the two maps.
 pub fn project_entity_id_field(entity_type: &str) -> Option<&'static str> {
     match entity_type {
         "WORKSPACE_LOGO" => Some("workspace_id"),
-        "PROJECT_COVER" => Some("project_id"),
-        "USER_AVATAR" | "USER_COVER" => Some("user_id"),
+        "USER_AVATAR" => Some("user_id"),
         "ISSUE_ATTACHMENT" | "ISSUE_DESCRIPTION" => Some("issue_id"),
         "PAGE_DESCRIPTION" => Some("page_id"),
         "COMMENT_DESCRIPTION" => Some("comment_id"),
@@ -110,13 +98,12 @@ pub fn project_entity_id_field(entity_type: &str) -> Option<&'static str> {
 }
 
 /// Port of `DuplicateAssetEndpoint.get_entity_id_field` (`v2.py:703-734`):
-/// 7 branches — NO `DRAFT_ISSUE_DESCRIPTION` arm (differs from the project
+/// 6 branches — NO `DRAFT_ISSUE_DESCRIPTION` arm (differs from the project
 /// variant; port the difference as-is).
 pub fn duplicate_entity_id_field(entity_type: &str) -> Option<&'static str> {
     match entity_type {
         "WORKSPACE_LOGO" => Some("workspace_id"),
-        "PROJECT_COVER" => Some("project_id"),
-        "USER_AVATAR" | "USER_COVER" => Some("user_id"),
+        "USER_AVATAR" => Some("user_id"),
         "ISSUE_ATTACHMENT" | "ISSUE_DESCRIPTION" => Some("issue_id"),
         "PAGE_DESCRIPTION" => Some("page_id"),
         "COMMENT_DESCRIPTION" => Some("comment_id"),
@@ -149,12 +136,11 @@ pub fn duplicate_destination_key(
     }
 }
 
-/// Column order for the project-mint create (`v2.py:554-563`): the explicit
+/// Column order for the project-mint create (`v2.py:484-493`): the explicit
 /// `project_id=project_id` kwarg comes FIRST and the
-/// `**get_entity_id_field(...)` spread SECOND — so `PROJECT_COVER` (which
-/// spreads `{"project_id": ...}`) collides and raises `TypeError` (500).
-/// The `Vec` order below is that kwarg order; handlers must apply it
-/// verbatim.
+/// `**get_entity_id_field(...)` spread SECOND. No admitted entity type
+/// spreads `project_id`, so the two never collide. The `Vec` order below
+/// is that kwarg order; handlers must apply it verbatim.
 pub fn project_create_columns(entity_type: &str) -> Vec<&'static str> {
     let mut cols = vec![
         "attributes",
@@ -232,7 +218,6 @@ pub const BULK_LOOKUP_SQL: &str = "SELECT \"file_assets\".\"id\" FROM \"file_ass
 /// first row — single dispatch, ported as-is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BulkBranch {
-    ProjectCover,
     IssueDescription,
     CommentDescription,
     PageDescription,
@@ -244,7 +229,6 @@ pub enum BulkBranch {
 /// Resolve the dispatch arm from the first row's `entity_type`.
 pub fn bulk_branch(first_entity_type: &str) -> BulkBranch {
     match first_entity_type {
-        "PROJECT_COVER" => BulkBranch::ProjectCover,
         "ISSUE_DESCRIPTION" => BulkBranch::IssueDescription,
         "COMMENT_DESCRIPTION" => BulkBranch::CommentDescription,
         "PAGE_DESCRIPTION" => BulkBranch::PageDescription,
@@ -256,12 +240,9 @@ pub fn bulk_branch(first_entity_type: &str) -> BulkBranch {
 /// Per-branch `UPDATE` text. `$1` is the id array, `$2` the entity link id
 /// (`entity_id` path arg), `$3` the project id where the branch sets it.
 /// `IntegrityError` is swallowed (`pass`) on every branch except
-/// `PAGE_DESCRIPTION` and `PROJECT_COVER` (`v2.py:664-667,672-675,683-686`).
+/// `PAGE_DESCRIPTION` (`v2.py:581-608`).
 pub fn bulk_update_sql(branch: BulkBranch) -> Option<&'static str> {
     match branch {
-        BulkBranch::ProjectCover => Some(
-            "UPDATE \"file_assets\" SET \"project_id\" = $3 WHERE \"file_assets\".\"id\" = ANY($1)",
-        ),
         BulkBranch::IssueDescription => Some(
             "UPDATE \"file_assets\" SET \"issue_id\" = $2, \"project_id\" = $3 WHERE \"file_assets\".\"id\" = ANY($1)",
         ),
@@ -285,19 +266,9 @@ pub fn bulk_swallows_integrity_error(branch: BulkBranch) -> bool {
         BulkBranch::IssueDescription
         | BulkBranch::CommentDescription
         | BulkBranch::DraftIssueDescription => true,
-        BulkBranch::ProjectCover | BulkBranch::PageDescription | BulkBranch::Noop => false,
+        BulkBranch::PageDescription | BulkBranch::Noop => false,
     }
 }
-
-/// `save_project_cover` (`v2.py:631-634`): per row, re-get the project and
-/// stamp `cover_image_asset_id`; the LAST row wins. The re-get uses the
-/// default manager, so it carries `deleted_at IS NULL`. The write is a
-/// FULL `project.save()` (`db/models/base.py:24-44`, `db/mixins.py:18-19`),
-/// so it also stamps `updated_by` (CRUM request user) and `updated_at`.
-pub const SAVE_PROJECT_COVER_GET_SQL: &str =
-    "SELECT \"projects\".\"id\" FROM \"projects\" WHERE \"projects\".\"id\" = $1 AND \"projects\".\"deleted_at\" IS NULL";
-pub const SAVE_PROJECT_COVER_SQL: &str =
-    "UPDATE \"projects\" SET \"cover_image_asset_id\" = $2, \"updated_at\" = $3, \"updated_by_id\" = $4 WHERE \"projects\".\"id\" = $1";
 
 // ---------------------------------------------------------------------------
 // Check endpoint (`v2.py:691-697`)
@@ -394,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn project_entity_map_has_eight_branches() {
+    fn project_entity_map_has_seven_branches() {
         let g = golden();
         let branches = g["ProjectAssetEndpoint"]["get_entity_id_field"]["branches"]
             .as_str()
@@ -404,9 +375,10 @@ mod tests {
             project_entity_id_field("WORKSPACE_LOGO"),
             Some("workspace_id")
         );
-        assert_eq!(project_entity_id_field("PROJECT_COVER"), Some("project_id"));
         assert_eq!(project_entity_id_field("USER_AVATAR"), Some("user_id"));
-        assert_eq!(project_entity_id_field("USER_COVER"), Some("user_id"));
+        // The removed cover types fall through to the `{}` default.
+        assert_eq!(project_entity_id_field("PROJECT_COVER"), None);
+        assert_eq!(project_entity_id_field("USER_COVER"), None);
         assert_eq!(
             project_entity_id_field("ISSUE_ATTACHMENT"),
             Some("issue_id")
@@ -438,10 +410,8 @@ mod tests {
             duplicate_entity_id_field("WORKSPACE_LOGO"),
             Some("workspace_id")
         );
-        assert_eq!(
-            duplicate_entity_id_field("PROJECT_COVER"),
-            Some("project_id")
-        );
+        assert_eq!(duplicate_entity_id_field("PROJECT_COVER"), None);
+        assert_eq!(duplicate_entity_id_field("USER_COVER"), None);
         assert_eq!(duplicate_entity_id_field("USER_AVATAR"), Some("user_id"));
         assert_eq!(
             duplicate_entity_id_field("ISSUE_ATTACHMENT"),
@@ -465,17 +435,15 @@ mod tests {
     }
 
     #[test]
-    fn project_cover_create_collides_on_project_id() {
+    fn project_create_spreads_a_distinct_column() {
         let g = golden();
-        let bug = g["ProjectAssetEndpoint"]["post"]["project_cover_500"]
+        let note = g["ProjectAssetEndpoint"]["post"]["removed_cover_types"]
             .as_str()
-            .expect("bug prose");
-        assert!(bug.contains("COLLIDES"));
-        // Explicit kwarg first, **spread second: PROJECT_COVER repeats it.
-        let cols = project_create_columns("PROJECT_COVER");
-        assert_eq!(cols[6], "project_id");
-        assert_eq!(cols[7], "project_id");
-        // Non-cover types spread a distinct column.
+            .expect("removal prose");
+        assert!(note.contains("Invalid entity type."));
+        // The removed PROJECT_COVER spreads nothing (it is rejected first).
+        assert_eq!(project_create_columns("PROJECT_COVER").len(), 7);
+        // Admitted types spread a column distinct from project_id.
         let cols = project_create_columns("ISSUE_DESCRIPTION");
         assert_eq!(cols[6], "project_id");
         assert_eq!(cols[7], "issue_id");
@@ -515,7 +483,8 @@ mod tests {
             .as_str()
             .expect("prose")
             .contains("ONLY the first"));
-        assert_eq!(bulk_branch("PROJECT_COVER"), BulkBranch::ProjectCover);
+        // A legacy PROJECT_COVER first row takes the no-op arm.
+        assert_eq!(bulk_branch("PROJECT_COVER"), BulkBranch::Noop);
         assert_eq!(
             bulk_branch("ISSUE_DESCRIPTION"),
             BulkBranch::IssueDescription
@@ -538,7 +507,7 @@ mod tests {
         let issue = bulk_update_sql(BulkBranch::IssueDescription).expect("sql");
         assert!(issue.contains("\"issue_id\" = $2"));
         assert!(issue.contains("\"project_id\" = $3"));
-        // Swallow matrix: issue/comment/draft yes, page/cover/noop no.
+        // Swallow matrix: issue/comment/draft yes, page/noop no.
         assert!(bulk_swallows_integrity_error(BulkBranch::IssueDescription));
         assert!(bulk_swallows_integrity_error(
             BulkBranch::CommentDescription
@@ -547,14 +516,6 @@ mod tests {
             BulkBranch::DraftIssueDescription
         ));
         assert!(!bulk_swallows_integrity_error(BulkBranch::PageDescription));
-        assert!(!bulk_swallows_integrity_error(BulkBranch::ProjectCover));
-        // Cover loop re-gets the project per row; last row wins (documented).
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"cover_image_asset_id\" = $2"));
-        // Full save(): stamps updated_by (CRUM user) + updated_at (auto_now).
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_at\" = $3"));
-        assert!(SAVE_PROJECT_COVER_SQL.contains("\"updated_by_id\" = $4"));
-        // The per-row project re-get uses the default manager.
-        assert!(SAVE_PROJECT_COVER_GET_SQL.contains("\"deleted_at\" IS NULL"));
         // Lookup scopes ids + slug + active rows.
         assert!(BULK_LOOKUP_SQL.contains("= ANY($1)"));
         assert!(BULK_LOOKUP_SQL.contains("\"workspaces\".\"slug\" = $2"));
@@ -611,15 +572,12 @@ mod tests {
         // Static lookup has NO workspace scoping (AllowAny, id only).
         assert!(!STATIC_GET_SQL.contains("workspaces"));
         assert!(STATIC_GET_SQL.contains("\"deleted_at\" IS NULL"));
-        // Static allowlist is exactly the four golden entity types.
+        // Static allowlist is exactly the two golden entity types.
+        assert_eq!(STATIC_ENTITY_ALLOWLIST, &["USER_AVATAR", "WORKSPACE_LOGO"]);
+        let g = golden();
         assert_eq!(
-            STATIC_ENTITY_ALLOWLIST,
-            &[
-                "USER_AVATAR",
-                "USER_COVER",
-                "WORKSPACE_LOGO",
-                "PROJECT_COVER"
-            ]
+            g["StaticFileAssetEndpoint_get"]["entity_allowlist_400"]["allowed"],
+            serde_json::json!(["USER_AVATAR", "WORKSPACE_LOGO"])
         );
         // Download filename falls back to a fresh uuid hex (unlike fetch .get).
         assert_eq!(download_filename(Some("a.png"), "hex"), "a.png");

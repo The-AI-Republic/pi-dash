@@ -345,28 +345,6 @@ pub const USER_AUTH_COLUMNS: &[ColumnSpec] = &[
         default: None,
     },
     ColumnSpec {
-        name: "cover_image",
-        column: Some("cover_image"),
-        django_type: "URLField",
-        max_length: Some(800),
-        null: true,
-        primary_key: false,
-        db_index: false,
-        unique: false,
-        default: None,
-    },
-    ColumnSpec {
-        name: "cover_image_asset",
-        column: Some("cover_image_asset_id"),
-        django_type: "ForeignKey",
-        max_length: None,
-        null: true,
-        primary_key: false,
-        db_index: true,
-        unique: false,
-        default: None,
-    },
-    ColumnSpec {
         name: "date_joined",
         column: Some("date_joined"),
         django_type: "DateTimeField",
@@ -831,7 +809,7 @@ mod tests {
             fx["user"]["auth_columns"]["columns"],
             columns_json(USER_AUTH_COLUMNS)
         );
-        assert_eq!(USER_AUTH_COLUMNS.len(), 42);
+        assert_eq!(USER_AUTH_COLUMNS.len(), 40);
         assert_eq!(fx["user"]["auth_columns"]["db_table"], json!(USER_DB_TABLE));
     }
 
