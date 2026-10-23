@@ -911,9 +911,12 @@ pub async fn insert_user(
 /// `save_user_data` (`base.py:220-234`): login enrichment plus the
 /// activation branch. The UPDATE writes the D-16 `SAVE_USER_DATA_FIELDS`
 /// plus the avatar pair the signup block assigned in memory (persisted only
-/// by this save) and the rotated `token` (`User.save()` rotates whenever
-/// `token_updated_at` is set — always, here). Returns whether the
-/// activation email must fire (`not user.is_active` before the save).
+/// by this save), the rotated `token` (`User.save()` rotates whenever
+/// `token_updated_at` is set — always, here), the refreshed `updated_at`,
+/// the blank-`display_name` backfill from the email local part, and the
+/// `is_staff`-from-`is_superuser` sync (`user.py:169-187`; PIDASHCONV-1364,
+/// the github twin is PIDASHCONV-1081). Returns whether the activation
+/// email must fire (`not user.is_active` before the save).
 #[allow(clippy::too_many_arguments)]
 pub async fn save_user_data(
     pool: &sqlx::PgPool,
@@ -933,7 +936,9 @@ pub async fn save_user_data(
              token = $3,
              last_login_ip = $4, last_login_uagent = $5,
              avatar = $6, avatar_asset_id = $7,
-             is_active = TRUE
+             is_active = TRUE, updated_at = $2,
+             display_name = CASE WHEN display_name = '' THEN split_part(email, '@', 1) ELSE display_name END,
+             is_staff = is_staff OR is_superuser
            WHERE id = $1"#,
     )
     .bind(user_id)
