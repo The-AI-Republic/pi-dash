@@ -230,7 +230,7 @@ describe("EstimateCreateDialog steps and dismissal", () => {
     renderClosableDialog();
     await user.click(within(dialog()).getByRole("radio", { name: "Categories" }));
     await pickStarter(user, "Custom");
-    await editValue(user, 0, "99");
+    await editValue(user, 0, "Big");
     await user.click(within(dialog()).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Toggle estimate dialog" }));
@@ -422,9 +422,12 @@ describe("EstimateCreateDialog validation", () => {
     await pickStarter(user, "Custom");
     await editValue(user, 0, "2");
     expect(within(dialog()).getByText("This value already exists in the set.")).toBeInTheDocument();
+    expect(within(dialog()).getByRole("textbox", { name: "Value 1" })).toBeInTheDocument();
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("This value already exists in the set.")).toBeInTheDocument();
     expect(posts).toHaveLength(0);
+    await user.click(within(dialog()).getAllByRole("button", { name: "Cancel" })[0] as HTMLElement);
+    expect(values()).toEqual(["1", "2"]);
   });
 
   it("refuses non-numeric and non-positive numeric values", async () => {
@@ -436,14 +439,15 @@ describe("EstimateCreateDialog validation", () => {
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("Enter a numeric value.")).toBeInTheDocument();
     expect(posts).toHaveLength(0);
-    await user.click(within(dialog()).getByRole("button", { name: "Edit value 1" }));
     const input = within(dialog()).getByRole("textbox", { name: "Value 1" });
     await user.clear(input);
-    await user.type(within(dialog()).getByRole("textbox", { name: "Value 1" }), "0");
+    await user.type(input, "0");
     await user.click(within(dialog()).getByRole("button", { name: "Save" }));
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("Use a value greater than 0.")).toBeInTheDocument();
     expect(posts).toHaveLength(0);
+    await user.click(within(dialog()).getAllByRole("button", { name: "Cancel" })[0] as HTMLElement);
+    expect(values()).toEqual(["1", "2"]);
   });
 
   it("refuses numeric category text and empty edits", async () => {
@@ -456,14 +460,26 @@ describe("EstimateCreateDialog validation", () => {
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("Categories need text characters, not a number.")).toBeInTheDocument();
     expect(posts).toHaveLength(0);
-    await user.click(within(dialog()).getByRole("button", { name: "Edit value 1" }));
     const input = within(dialog()).getByRole("textbox", { name: "Value 1" });
     await user.clear(input);
     await user.click(within(dialog()).getByRole("button", { name: "Save" }));
     expect(within(dialog()).getByText("An estimate value cannot be empty.")).toBeInTheDocument();
     expect(within(dialog()).getByRole("textbox", { name: "Value 1" })).toBeInTheDocument();
-    expect(within(dialog()).getByTestId("estimate-value")).toHaveTextContent("Hard");
+    await user.click(within(dialog()).getAllByRole("button", { name: "Cancel" })[0] as HTMLElement);
+    expect(values()).toEqual(["Easy", "Hard"]);
     expect(posts).toHaveLength(0);
+  });
+
+  it("closes an unchanged edit without a row problem", async () => {
+    const user = userEvent.setup();
+    const { posts } = stubApi();
+    renderDialog();
+    await pickStarter(user, "Custom");
+    await editValue(user, 0, "1");
+    expect(within(dialog()).queryByRole("textbox")).not.toBeInTheDocument();
+    expect(within(dialog()).queryByText("This value already exists in the set.")).not.toBeInTheDocument();
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
+    await waitFor(() => expect(posts).toHaveLength(1));
   });
 
   it("caps typed values at 20 characters and submits the capped text", async () => {
@@ -491,6 +507,38 @@ describe("EstimateCreateDialog validation", () => {
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_ADD_LABEL }));
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("An estimate value cannot be empty.")).toBeInTheDocument();
+    expect(posts).toHaveLength(0);
+  });
+
+  it("commits a valid pending edit on submit instead of dropping it", async () => {
+    const user = userEvent.setup();
+    const { posts } = stubApi();
+    renderDialog();
+    await pickStarter(user, "Custom");
+    await user.click(within(dialog()).getByRole("button", { name: "Edit value 1" }));
+    const input = within(dialog()).getByRole("textbox", { name: "Value 1" });
+    await user.clear(input);
+    await user.type(input, "9");
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]?.estimate_points).toEqual([
+      { key: 1, value: "9" },
+      { key: 2, value: "2" },
+    ]);
+  });
+
+  it("keeps a rejected pending edit open on submit", async () => {
+    const user = userEvent.setup();
+    const { posts } = stubApi();
+    renderDialog();
+    await pickStarter(user, "Custom");
+    await user.click(within(dialog()).getByRole("button", { name: "Edit value 1" }));
+    const input = within(dialog()).getByRole("textbox", { name: "Value 1" });
+    await user.clear(input);
+    await user.type(input, "-1");
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
+    expect(within(dialog()).getByText("Use a value greater than 0.")).toBeInTheDocument();
+    expect(within(dialog()).getByRole("textbox", { name: "Value 1" })).toBeInTheDocument();
     expect(posts).toHaveLength(0);
   });
 });

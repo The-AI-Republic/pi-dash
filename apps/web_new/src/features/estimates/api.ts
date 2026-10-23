@@ -50,8 +50,8 @@ export function useProjectEstimates(workspaceSlug: string, projectId: string) {
 
 export const ESTIMATE_CREATED_TITLE = "Estimate created";
 export const ESTIMATE_CREATED_BODY = "The estimate system is now the project’s active one.";
-export const ESTIMATE_CREATE_FAILED_TITLE = "Couldn’t create the estimate";
-export const ESTIMATE_CREATE_FAILED_BODY = "The system was not saved. Check the values and try again.";
+export const ESTIMATE_CREATE_FAILED_TITLE = "Estimate creation failed — nothing was saved";
+export const ESTIMATE_CREATE_FAILED_BODY = "Nothing was stored. Adjust the name or values and try again.";
 export const ESTIMATE_DELETED_TITLE = "Estimate deleted";
 export const ESTIMATE_DELETED_BODY = "The system and its values were removed.";
 export const ESTIMATE_DELETE_FAILED_TITLE = "Couldn’t delete the estimate";

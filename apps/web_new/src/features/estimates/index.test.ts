@@ -26,7 +26,7 @@ describe("estimates feature barrel", () => {
       "The delete did not finish. Reload the page to see whether the system is still listed."
     );
     expect(estimates.ESTIMATE_DISABLED_BODY).toBe("Work items no longer offer estimate values.");
-    expect(estimates.ESTIMATE_CREATE_FAILED_TITLE).toBe("Couldn’t create the estimate");
+    expect(estimates.ESTIMATE_CREATE_FAILED_TITLE).toContain("creation failed");
     expect(estimates.ESTIMATE_DELETED_BODY).toBe("The system and its values were removed.");
     expect(estimates.ESTIMATE_FAMILY_POINTS).toBe("points");
     expect(estimates.ESTIMATE_FAMILY_CATEGORIES).toBe("categories");

@@ -17,8 +17,14 @@ import { edition } from "../../core/edition/index.js";
 import { useCreateEstimate } from "./api.js";
 import {
   ESTIMATE_FAMILY_POINTS,
+  ESTIMATE_FAMILY_CATEGORIES,
   ESTIMATE_VALUE_MAX_LENGTH,
+  VALUE_DUPLICATE,
+  VALUE_NOT_CATEGORY,
+  VALUE_NOT_NUMBER,
+  VALUE_NOT_POSITIVE,
   VALUE_REQUIRED,
+  CUSTOM_STARTER_ID,
   estimateFamilies,
   estimateFamilyEnabled,
   estimatePreview,
@@ -37,7 +43,7 @@ import {
 
 export const ESTIMATE_DIALOG_TITLE = "New estimate system";
 export const ESTIMATE_DIALOG_DESCRIPTION = "Choose how your team measures effort, then arrange the values.";
-export const ESTIMATE_STEP_ONE_HEADING = "Choose an estimate system";
+export const ESTIMATE_STEP_ONE_HEADING = "Measurement family";
 export const ESTIMATE_SCRATCH_HEADING = "Start from scratch";
 export const ESTIMATE_TEMPLATE_HEADING = "Choose a template";
 export const ESTIMATE_ADD_LABEL = "Add a value";
@@ -73,6 +79,31 @@ function moveControlLabel(direction: "up" | "down", index: number): string {
   return `Move value ${index + 1} ${direction}`;
 }
 
+/** The first rule a draft breaks, or undefined when it can be committed. */
+function draftProblem(
+  family: EstimateFamily,
+  values: readonly string[],
+  index: number,
+  draft: string
+): string | undefined {
+  const value = truncateEstimateValue(draft.trim());
+  if (value === "") return VALUE_REQUIRED;
+  const numeric = family !== ESTIMATE_FAMILY_CATEGORIES;
+  if (numeric) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return VALUE_NOT_NUMBER;
+    if (parsed <= 0) return VALUE_NOT_POSITIVE;
+  } else if (!Number.isNaN(Number(value))) {
+    return VALUE_NOT_CATEGORY;
+  }
+  const duplicates = values.some((other, at) => {
+    if (at === index) return false;
+    const committed = other.trim();
+    return numeric ? Number(committed) === Number(value) : committed === value;
+  });
+  return duplicates ? VALUE_DUPLICATE : undefined;
+}
+
 export function EstimateCreateDialog({
   workspaceSlug,
   projectId,
@@ -83,7 +114,6 @@ export function EstimateCreateDialog({
   const families = React.useMemo(() => estimateFamilies(edition.flags), []);
   const [step, setStep] = React.useState<1 | 2>(1);
   const [family, setFamily] = React.useState<EstimateFamily>(ESTIMATE_FAMILY_POINTS);
-  const [starterId, setStarterId] = React.useState<string | null>(null);
   const [values, setValues] = React.useState<string[]>([]);
   const [editing, setEditing] = React.useState<{ index: number; draft: string } | null>(null);
   const [editingError, setEditingError] = React.useState<string | null>(null);
@@ -96,7 +126,6 @@ export function EstimateCreateDialog({
     if (!open) return;
     setStep(1);
     setFamily(ESTIMATE_FAMILY_POINTS);
-    setStarterId(null);
     setValues([]);
     setEditing(null);
     setEditingError(null);
@@ -108,7 +137,6 @@ export function EstimateCreateDialog({
   }, [open]);
 
   const problems = valueSetProblems(family, values);
-  const blocked = problems.length > 0;
   // Committed rows surface their marker immediately; the row being edited
   // stays quiet until its draft is committed or submit reveals everything.
   const shownProblems = submitted ? problems : problems.filter((problem) => problem.index !== editing?.index);
@@ -122,7 +150,6 @@ export function EstimateCreateDialog({
   const begin = (nextFamily: EstimateFamily, starter: EstimateStarter): void => {
     if (!estimateFamilyEnabled(nextFamily, edition.flags)) return;
     setFamily(nextFamily);
-    setStarterId(starter.id);
     setValues([...starter.values]);
     setEditing(null);
     setEditingError(null);
@@ -132,7 +159,6 @@ export function EstimateCreateDialog({
   };
 
   const back = (): void => {
-    setStarterId(null);
     setValues([]);
     setEditing(null);
     setDragIndex(null);
@@ -142,10 +168,17 @@ export function EstimateCreateDialog({
 
   const commitValue = (index: number, draft: string): void => {
     const value = truncateEstimateValue(draft.trim());
-    // An empty commit is a problem, never a row mutation: keep the editor
-    // open and leave the committed row as it was (EST-012).
-    if (value === "") {
-      setEditingError(VALUE_REQUIRED);
+    // An unchanged commit needs no write; an invalid one is a problem,
+    // never a row mutation. Keep the editor open and leave the committed
+    // row as it was (EST-012).
+    if (value === (values[index] as string).trim()) {
+      setEditing(null);
+      setEditingError(null);
+      return;
+    }
+    const problem = draftProblem(family, values, index, draft);
+    if (problem !== undefined) {
+      setEditingError(problem);
       setSubmitted(true);
       return;
     }
@@ -177,16 +210,31 @@ export function EstimateCreateDialog({
   };
 
   const dragValue = (sourceIndex: number, targetIndex: number): void => {
-    setValues((current) => renumberValues(moveValueBefore(current, sourceIndex, targetIndex)).map((row) => row.value));
+    setValues((current) => moveValueBefore(current, sourceIndex, targetIndex));
     setEditing(null);
     setDragIndex(null);
   };
 
   const submit = (): void => {
     setSubmitted(true);
-    if (blocked || starterId === null || !estimateFamilyEnabled(family, edition.flags)) return;
+    const pending = editing;
+    let committed = values;
+    if (pending !== null) {
+      const problem = draftProblem(family, values, pending.index, pending.draft);
+      if (problem !== undefined) {
+        setEditingError(problem);
+        return;
+      }
+      committed = values.map((entry, at) =>
+        at === pending.index ? truncateEstimateValue(pending.draft.trim()) : entry
+      );
+      setValues(committed);
+      setEditing(null);
+      setEditingError(null);
+    }
+    if (!estimateFamilyEnabled(family, edition.flags)) return;
     create.mutate(
-      { name: familySystemName(family), type: family, values: values.map((value) => value.trim()) },
+      { name: familySystemName(family), type: family, values: committed.map((value) => value.trim()) },
       {
         onSuccess: (estimate) => {
           onCreated?.(estimate);
@@ -197,7 +245,7 @@ export function EstimateCreateDialog({
   };
 
   const starters = estimateStarters(family);
-  const templates = starters.filter((starter) => starter.id !== "custom");
+  const templates = starters.filter((starter) => starter.id !== CUSTOM_STARTER_ID);
 
   const renderFamilyRadio = (choice: EstimateFamilyOption): React.ReactElement => (
     <label key={choice.value} className="text-body flex items-center gap-(--space-2) text-(--text)">
@@ -256,7 +304,7 @@ export function EstimateCreateDialog({
           <div className="flex flex-col gap-(--space-2)">
             <p className="text-emphasis text-(--text)">{ESTIMATE_SCRATCH_HEADING}</p>
             {starters
-              .filter((starter) => starter.id === "custom")
+              .filter((starter) => starter.id === CUSTOM_STARTER_ID)
               .map((starter) => (
                 <button
                   key={starter.id}
