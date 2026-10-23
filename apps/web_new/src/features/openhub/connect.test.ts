@@ -72,6 +72,22 @@ describe("reserveConnectTab", () => {
     expect(reserveConnectTab({ open } as unknown as Window)).toBeNull();
   });
 
+  it("still reserves the tab when policy has already severed its opener (CLOUD-025)", () => {
+    const tab = fakeTab();
+    Object.defineProperty(tab, "opener", {
+      configurable: true,
+      get() {
+        return null;
+      },
+      set() {
+        throw new Error("opener is not settable");
+      },
+    });
+    const open = vi.fn(() => tab);
+    expect(reserveConnectTab({ open } as unknown as Window)).toBe(tab);
+    expect(tab.document.title).toBe(CONNECT_TAB_TITLE);
+  });
+
   it("still reserves a tab that will not take a title", () => {
     const tab = fakeTab();
     Object.defineProperty(tab, "document", {
