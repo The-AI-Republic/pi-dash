@@ -9,11 +9,11 @@ import { BAR_END_RADIUS, singleBarRadius, stackedBarRadii, stackedSegmentRadius 
 
 describe("singleBarRadius", () => {
   it("rounds both ends of every bar", () => {
-    expect(singleBarRadius()).toEqual([BAR_END_RADIUS, BAR_END_RADIUS, 0, 0]);
+    expect(singleBarRadius()).toEqual([BAR_END_RADIUS, BAR_END_RADIUS, BAR_END_RADIUS, BAR_END_RADIUS]);
   });
 
   it("honors a custom radius", () => {
-    expect(singleBarRadius(8)).toEqual([8, 8, 0, 0]);
+    expect(singleBarRadius(8)).toEqual([8, 8, 8, 8]);
   });
 });
 

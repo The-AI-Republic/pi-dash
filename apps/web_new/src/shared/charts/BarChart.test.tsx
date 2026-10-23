@@ -99,8 +99,8 @@ describe("BarChart", () => {
     expect(bars.map((node) => node.dataset["fill"])).toEqual(["#6172e8", "#8b6edb"]);
     expect(bars.map((node) => node.getAttribute("data-stackid"))).toEqual([null, null]);
     expect(bars.map((node) => node.dataset["radius"])).toEqual([
-      JSON.stringify([4, 4, 0, 0]),
-      JSON.stringify([4, 4, 0, 0]),
+      JSON.stringify([4, 4, 4, 4]),
+      JSON.stringify([4, 4, 4, 4]),
     ]);
     expect(bars.map((node) => node.dataset["shape"])).toEqual(["none", "none"]);
     expect(screen.queryByTestId("mock-rectangle")).not.toBeInTheDocument();

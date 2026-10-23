@@ -18,7 +18,7 @@ const SQUARE: BarSegmentRadius = [0, 0, 0, 0];
 
 /** Single-series bars: every bar rounds both ends. */
 export function singleBarRadius(radius: number = BAR_END_RADIUS): BarSegmentRadius {
-  return [radius, radius, 0, 0];
+  return [radius, radius, radius, radius];
 }
 
 /**
