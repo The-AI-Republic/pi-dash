@@ -28,6 +28,9 @@ function chain(count: number): StubLocator {
     count: async () => count,
     first: () => node,
     filter: () => node,
+    locator: () => node,
+    waitFor: vi.fn(async () => undefined),
+    fill: vi.fn(async () => undefined),
   };
   return node;
 }
@@ -151,22 +154,36 @@ describe("signOutViaCommandPalette", () => {
   });
 
   it("gives up with a bounded error instead of waiting on a palette that never appears", async () => {
-    const click = vi.fn(async () => {
+    // The sign-out option is read through the palette modal, so the click
+    // that never lands is the option's own.
+    const optionClick = vi.fn(async (_options?: unknown) => {
       throw new Error("timeout");
     });
+    const option = element({ click: optionClick });
+    const palette = element({ filter: () => option, locator: () => option });
     const page = {
       getByPlaceholder: () => element({ isVisible: async () => false }),
-      getByRole: () => element({ click }),
+      getByRole: () => element(),
+      getByLabel: () => element(),
+      getByTestId: () => element({ count: async () => 0 }),
+      locator: (selector: string) => {
+        if (selector === "#main-sidebar") return element({ count: async () => 1 });
+        return selector === '[role="dialog"]' ? palette : element({ count: async () => 0 });
+      },
+      url: () => "http://localhost:3010/projects/",
       keyboard: { press: async () => undefined },
     } as unknown as Page;
     const driver = new WebNewDriver(page);
     vi.spyOn(driver as unknown as { dismissTourIfShown: () => Promise<void> }, "dismissTourIfShown").mockImplementation(
       async () => undefined
     );
+    // The chord itself is covered by the shell's palette tests; here the
+    // palette opens and the option click is what never lands.
+    vi.spyOn(driver, "pressPaletteOpenChord").mockResolvedValue(undefined);
 
     await expect(driver.signOutViaCommandPalette()).rejects.toThrow("sign-out never reached the entry");
 
-    expect(click).toHaveBeenCalledTimes(3);
+    expect(optionClick).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -202,5 +219,61 @@ describe("reloadPage", () => {
     await driver.reloadPage();
 
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Sign-in's email step (NEWFRONT-550). The card paints exactly one of the
+// password or code fields once the email check round-trips. Waiting on the
+// two fields separately spent the absent field's whole timeout on every
+// email step, which alone pushed long gate tests past their budget, so the
+// wait is one locator over either field.
+describe("nextAuthStepShown", () => {
+  interface StepLocator {
+    or?: (other: unknown) => StepLocator;
+    first: () => StepLocator;
+    waitFor: (options: unknown) => Promise<void>;
+  }
+
+  function stepPage(waitFor: (options: unknown) => Promise<void>) {
+    const locator: StepLocator = {
+      first: () => locator,
+      waitFor,
+    };
+    locator.or = (other: unknown) => {
+      orCalls.push(other);
+      return locator;
+    };
+    const orCalls: unknown[] = [];
+    const getByPlaceholder = vi.fn((_placeholder: string) => locator);
+    return {
+      page: { getByPlaceholder } as unknown as Page,
+      getByPlaceholder,
+      orCalls,
+    };
+  }
+
+  function call(driver: WebNewDriver, timeoutMs: number) {
+    return (driver as unknown as { nextAuthStepShown: (ms: number) => Promise<boolean> }).nextAuthStepShown(timeoutMs);
+  }
+
+  it("waits once, on the password-or-code step, instead of on each field", async () => {
+    const waitFor = vi.fn(async () => undefined);
+    const { page, getByPlaceholder, orCalls } = stepPage(waitFor);
+    const driver = new WebNewDriver(page);
+
+    expect(await call(driver, 4_000)).toBe(true);
+
+    expect(getByPlaceholder.mock.calls.map(([placeholder]) => placeholder)).toEqual(["Enter password", "123456"]);
+    expect(orCalls).toHaveLength(1);
+    expect(waitFor).toHaveBeenCalledTimes(1);
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 4_000 });
+  });
+
+  it("answers false when neither step paints in time", async () => {
+    const { page } = stepPage(async () => {
+      throw new Error("Timeout 4000ms exceeded.");
+    });
+
+    expect(await call(new WebNewDriver(page), 4_000)).toBe(false);
   });
 });

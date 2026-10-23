@@ -12,12 +12,21 @@ import { WebNewDriver, wsSettingsSurfaceSettled } from "./web-new";
 type Fn = (...args: never[]) => unknown;
 
 function capturePage(overrides: Record<string, unknown> = {}): Page {
+  const empty = () => ({
+    count: async () => 0,
+    first: () => empty(),
+    locator: () => empty(),
+    waitFor: async () => undefined,
+  });
   return {
+    getByTestId: () => empty(),
     goto: vi.fn(async () => undefined),
     waitForLoadState: vi.fn(async () => undefined),
     waitForFunction: vi.fn(async () => undefined),
     waitForTimeout: vi.fn(async () => undefined),
     waitForResponse: vi.fn(async () => undefined),
+    // wsSettingsOpen installs the asset bridge before it navigates.
+    route: vi.fn(async () => undefined),
     url: () => "http://localhost:3000/acme/settings/",
     getByRole: () => ({
       first: () => ({ click: vi.fn(async () => undefined) }),
@@ -43,41 +52,44 @@ afterEach(() => {
 });
 
 describe("wsSettingsOpen settle probe", () => {
-  it("settles on a titled document", async () => {
-    document.title = "General";
+  // The served document already has a title, so the title is never the
+  // settle signal: the helper shares the surface predicate and then waits
+  // for the frame heading (NEWFRONT-550).
+  function headingPage(waitFor: ReturnType<typeof vi.fn>): Page {
+    return capturePage({
+      // Only the plus-shaped shell frame carries a section heading.
+      getByTestId: (id: string) =>
+        id === "workspace-settings-shell"
+          ? { count: async () => 1 }
+          : { count: async () => 0, first: () => ({ count: async () => 0 }) },
+      locator: vi.fn(() => ({ first: () => ({ waitFor }) })),
+    });
+  }
+
+  it("hands the surface predicate to Playwright instead of a title check", async () => {
+    document.title = "Pi Dash";
     const page = capturePage();
     await new WebNewDriver(page).wsSettingsOpen("acme", "general");
     const [settled] = predicates(page, "waitForFunction");
-    expect(settled()).toBe(true);
-  });
-
-  it("settles on the shell placeholder", async () => {
-    document.body.innerHTML = "<div data-testid='workspace-settings-section-placeholder'><span>x</span></div>";
-    const page = capturePage();
-    await new WebNewDriver(page).wsSettingsOpen("acme", "general");
-    expect(predicates(page, "waitForFunction")[0]()).toBe(true);
-  });
-
-  it("settles on a visible denial message and ignores it when collapsed", async () => {
-    document.body.innerHTML = "<p>You are not authorized</p>";
-    const node = document.querySelector("p") as HTMLElement;
-    const page = capturePage();
-    await new WebNewDriver(page).wsSettingsOpen("acme", "general");
-    const [settled] = predicates(page, "waitForFunction");
-
-    node.getBoundingClientRect = () => rect(0);
+    expect(settled).toBe(wsSettingsSurfaceSettled);
     expect(settled()).toBe(false);
-    node.getBoundingClientRect = () => rect(120);
-    expect(settled()).toBe(true);
   });
 
-  it("does not settle on an unrelated visible node", async () => {
-    document.body.innerHTML = "<div><p>Loading</p></div>";
-    const node = document.querySelector("p") as HTMLElement;
-    node.getBoundingClientRect = () => rect(120);
-    const page = capturePage();
-    await new WebNewDriver(page).wsSettingsOpen("acme", "general");
-    expect(predicates(page, "waitForFunction")[0]()).toBe(false);
+  it("waits for the frame heading after the surface settles", async () => {
+    document.body.innerHTML = "<div data-testid='workspace-settings-shell'></div>";
+    document.title = "Pi Dash";
+    const waitFor = vi.fn(async () => undefined);
+    const page = headingPage(waitFor);
+    await new WebNewDriver(page).wsSettingsOpen("acme", "");
+    expect(predicates(page, "waitForFunction")[0]()).toBe(true);
+    expect(waitFor).toHaveBeenCalledWith({ state: "visible", timeout: expect.any(Number) });
+  });
+
+  it("still returns when the frame heading never paints", async () => {
+    const waitFor = vi.fn(async () => {
+      throw new Error("timeout");
+    });
+    await expect(new WebNewDriver(headingPage(waitFor)).wsSettingsOpen("acme", "members")).resolves.toBeUndefined();
   });
 });
 
@@ -188,5 +200,56 @@ describe("wsSettingsSizeLabel", () => {
 
     const blank = capturePage({ getByRole: () => ({ first: () => ({ innerText: async () => null }) }) });
     await expect(new WebNewDriver(blank).wsSettingsSizeLabel()).resolves.toBe("");
+  });
+});
+
+describe("settings navigation reads (NEWFRONT-550)", () => {
+  // The denial and instance screens render the settings frame without a
+  // navigation at all. A read that waits on that node spends the whole
+  // bound and then fails a row that should simply see no entries.
+  function navLocator(count: () => Promise<number>) {
+    const node = {
+      count,
+      evaluate: vi.fn(),
+      getByTestId: () => node,
+      locator: () => node,
+      first: () => node,
+    };
+    return node;
+  }
+
+  it("reads an absent navigation as no groups and no entries", async () => {
+    const nav = navLocator(async () => 0);
+    const page = capturePage({ getByTestId: () => ({ getByTestId: () => nav, first: () => nav }) });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.wsSettingsGroups()).resolves.toEqual([]);
+    await expect(driver.wsSettingsItems()).resolves.toEqual([]);
+    expect(nav.evaluate).not.toHaveBeenCalled();
+  });
+
+  it("reads visible group headings and entries in document order", async () => {
+    document.body.innerHTML = `<nav>
+      <section><h2> Workspace </h2><ul><li><a>General</a></li><li><a>Members</a></li></ul></section>
+      <section><h2>Developer</h2><ul><li><a>Webhooks</a></li></ul></section>
+      <section hidden><h2>Hidden</h2><ul><li><a>Secret</a></li></ul></section>
+    </nav>`;
+    const root = document.querySelector("nav") as HTMLElement;
+    root.querySelectorAll("a").forEach((link) => {
+      Object.defineProperty(link, "getBoundingClientRect", { value: () => rect(120), configurable: true });
+      Object.defineProperty(link, "innerText", { get: () => link.textContent, configurable: true });
+    });
+    const hidden = root.querySelector("section[hidden]") as HTMLElement;
+    Object.defineProperty(hidden, "getBoundingClientRect", { value: () => rect(0), configurable: true });
+    root.querySelectorAll("section:not([hidden])").forEach((section) => {
+      Object.defineProperty(section, "getBoundingClientRect", { value: () => rect(400), configurable: true });
+    });
+    const nav = navLocator(async () => 1);
+    nav.evaluate = vi.fn((callback: (node: Element) => unknown) => Promise.resolve(callback(root)));
+    const page = capturePage({ getByTestId: () => ({ getByTestId: () => nav, first: () => nav }) });
+    const driver = new WebNewDriver(page);
+
+    await expect(driver.wsSettingsGroups()).resolves.toEqual(["Workspace", "Developer"]);
+    await expect(driver.wsSettingsItems()).resolves.toEqual(["General", "Members", "Webhooks"]);
   });
 });

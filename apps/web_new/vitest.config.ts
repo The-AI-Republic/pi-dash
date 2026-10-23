@@ -58,6 +58,7 @@ export default defineConfig({
       "e2e/parity/helpers/parity-guard.test.ts",
       "e2e/parity/helpers/api.test.ts",
       "e2e/parity/helpers/seed-settle.test.ts",
+      "e2e/parity/helpers/asset-bucket.test.ts",
       "e2e/parity/drivers/web-toast.test.ts",
       "e2e/parity/drivers/web-sameness.test.ts",
       "e2e/parity/drivers/web-assistant-core.test.ts",

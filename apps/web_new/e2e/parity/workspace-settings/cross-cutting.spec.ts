@@ -348,31 +348,45 @@ test(
 );
 
 test(
-  specTitle(ROW_037, "bug:418 invite and token-create dialogs ignore Escape and need explicit dismissal"),
+  specTitle(
+    ROW_037,
+    "bug:418 invite and token-create dialogs need explicit dismissal on the old app (the new app closes them on Escape, §37)"
+  ),
   { tag: specTags(ROW_037) },
   async ({ driver }) => {
     const world = await setupWsWorld("parity-wset037b");
+    // §37 target: the new frontend closes the invite and token-create
+    // dialogs on Escape like their siblings. The old app ignores it
+    // (NEWFRONT-418), so that leg is pinned for the oracle only.
+    const escapeCloses = driver.target === "web_new";
+    // The invite dialog's submit control is named for its action; the
+    // wording is not pinned text, so accept either label.
+    const sendLabel = /^(Send invitations|Send invites)$/;
 
-    await test.step("invite dialog stays open on Escape, no invitation created", async () => {
+    await test.step("invite dialog Escape behavior, no invitation created either way", async () => {
       const before = await listInvitations(world.workspaceSlug, world.owner.cookie);
       await driver.wsSettingsOpenInviteDialog(world.workspaceSlug, browserSessionCookies(world.owner));
       const buttons = await driver.wsSettingsDialogButtons();
       expect(buttons).toContain("Cancel");
-      expect(buttons).toContain("Send invitations");
+      expect(buttons.some((label) => sendLabel.test(label))).toBe(true);
       await driver.wsSettingsPressEscape();
-      expect(await driver.wsSettingsDialogOpen()).toBe(true);
-      await driver.wsSettingsCloseDialogExplicit();
+      expect(await driver.wsSettingsDialogOpen()).toBe(!escapeCloses);
+      if (await driver.wsSettingsDialogOpen()) {
+        await driver.wsSettingsCloseDialogExplicit();
+      }
       expect(await driver.wsSettingsDialogOpen()).toBe(false);
       const after = await listInvitations(world.workspaceSlug, world.owner.cookie);
       expect(after.map((inv) => inv.id).sort()).toEqual(before.map((inv) => inv.id).sort());
     });
 
-    await test.step("token-create dialog stays open on Escape, no token minted", async () => {
+    await test.step("token-create dialog Escape behavior, no token minted either way", async () => {
       await driver.wsSettingsOpenTokenCreateDialog(browserSessionCookies(world.owner));
       expect(await driver.wsSettingsDialogOpen()).toBe(true);
       await driver.wsSettingsPressEscape();
-      expect(await driver.wsSettingsDialogOpen()).toBe(true);
-      await driver.wsSettingsCloseDialogExplicit();
+      expect(await driver.wsSettingsDialogOpen()).toBe(!escapeCloses);
+      if (await driver.wsSettingsDialogOpen()) {
+        await driver.wsSettingsCloseDialogExplicit();
+      }
       expect(await driver.wsSettingsDialogOpen()).toBe(false);
       expect(await serverListApiTokens(world.owner)).toHaveLength(0);
     });
@@ -392,7 +406,7 @@ test(
       expect(order).toHaveLength(8);
       expect(order.every((label) => label !== "" && label !== "<none>")).toBe(true);
       expect(order).toContain("input:name@company.com");
-      expect(order).toContain("button:Send invitations");
+      expect(order.some((label) => label === "button:Send invitations" || label === "button:Send invites")).toBe(true);
       await driver.wsSettingsCloseDialogExplicit();
     });
 
