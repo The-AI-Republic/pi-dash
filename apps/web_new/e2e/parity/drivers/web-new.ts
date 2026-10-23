@@ -4649,112 +4649,267 @@ export class WebNewDriver implements ParityDriver {
     return todo("ganttShowsIssue");
   }
 
-  async settingsLabelsOpen(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("settingsLabelsOpen");
+  // --- Project settings labels (NEWFRONT-393, PSET-036–042; new-app surface
+  // --- NEWFRONT-606). Selectors follow the slice testids (label-row*,
+  // --- label-form-*, labels-*).
+  private async labelsRowByName(name: string): Promise<Locator> {
+    // Rows key off data-label-id (the id, not the name), and group rows
+    // nest their children, so match the row whose own name span reads
+    // exactly: the group header's span precedes its children in the DOM.
+    const rows = this.page.locator('[data-testid="label-row"]');
+    const total = await rows.count();
+    for (let i = 0; i < total; i++) {
+      const row = rows.nth(i);
+      const text = (
+        (await row
+          .getByTestId("label-row-name")
+          .first()
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text === name) return row;
+    }
+    throw new Error(`[parity] label row "${name}" not found.`);
+  }
+
+  private labelsForm(): Locator {
+    return this.page.getByTestId("label-form");
+  }
+
+  async settingsLabelsOpen(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/settings/projects/${projectId}/labels`);
+    await this.page.waitForLoadState("domcontentloaded");
+    // Settles on the list heading (members), the labels denial view
+    // (guests) or the project join restriction (outsiders); callers
+    // assert which one they got.
+    const settle = (target: { waitFor: (options: { timeout: number }) => Promise<void> }): Promise<boolean> =>
+      target.waitFor({ timeout: 60_000 }).then(
+        () => true,
+        () => false
+      );
+    const settled = await Promise.race([
+      settle(this.page.getByRole("heading", { name: "Labels", exact: true }).first()),
+      settle(this.page.getByRole("heading", { name: /not authorized/i }).first()),
+      settle(this.page.getByRole("heading", { name: /don.t have access/i }).first()),
+    ]);
+    if (!settled) throw new Error("[parity] labels settings settled on neither the list nor the denial view.");
   }
 
   async settingsLabelsNames(): Promise<string[]> {
-    return todo("settingsLabelsNames");
+    const heads = this.page.getByTestId("label-row-name");
+    const total = await heads.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await heads
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
 
   async settingsLabelsAddVisible(): Promise<boolean> {
-    return todo("settingsLabelsAddVisible");
+    return this.page.getByTestId("label-add").isVisible();
   }
 
   async settingsLabelsOpenCreate(): Promise<void> {
-    return todo("settingsLabelsOpenCreate");
+    await this.page.getByTestId("label-add").click({ timeout: 30_000 });
+    await this.page.getByTestId("label-form-name").waitFor({ timeout: 30_000 });
   }
 
   async settingsLabelsFormVisible(): Promise<boolean> {
-    return todo("settingsLabelsFormVisible");
+    return (await this.page.getByTestId("label-form-name").count()) > 0;
   }
 
-  async settingsLabelsFillName(_name: string): Promise<void> {
-    return todo("settingsLabelsFillName");
+  async settingsLabelsFillName(name: string): Promise<void> {
+    await this.page.getByTestId("label-form-name").fill(name, { timeout: 30_000 });
   }
 
   async settingsLabelsFormError(): Promise<string> {
-    return todo("settingsLabelsFormError");
+    const err = this.labelsForm().getByRole("alert").first();
+    if ((await err.count()) === 0) return "";
+    return ((await err.innerText().catch(() => "")) ?? "").trim();
   }
 
   async settingsLabelsSubmitCreate(): Promise<void> {
-    return todo("settingsLabelsSubmitCreate");
+    await this.labelsForm().getByRole("button", { name: "Create label", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("label-form-name").waitFor({ state: "detached", timeout: 30_000 });
   }
 
   async settingsLabelsSubmitUpdate(): Promise<void> {
-    return todo("settingsLabelsSubmitUpdate");
+    await this.labelsForm().getByRole("button", { name: "Save changes", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("label-form-name").waitFor({ state: "detached", timeout: 30_000 });
   }
 
   async settingsLabelsCancelForm(): Promise<void> {
-    return todo("settingsLabelsCancelForm");
+    await this.labelsForm().getByRole("button", { name: "Cancel", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("label-form-name").waitFor({ state: "detached", timeout: 30_000 });
   }
 
   async settingsLabelsDotColor(): Promise<string> {
-    return todo("settingsLabelsDotColor");
+    const dot = this.labelsForm().getByTestId("label-form-dot").first();
+    await dot.waitFor({ timeout: 30_000 });
+    return ((await dot.evaluate((el) => getComputedStyle(el).backgroundColor).catch(() => "")) ?? "").trim();
   }
 
   async settingsLabelsOpenColorPicker(): Promise<void> {
-    return todo("settingsLabelsOpenColorPicker");
+    await this.labelsForm().getByTestId("label-form-dot").first().click({ timeout: 30_000 });
+    await this.page.getByRole("group", { name: "Pick a color" }).waitFor({ timeout: 30_000 });
   }
 
-  async settingsLabelsPickColor(_hex: string): Promise<void> {
-    return todo("settingsLabelsPickColor");
+  async settingsLabelsPickColor(hex: string): Promise<void> {
+    const palette = this.page.getByRole("group", { name: "Pick a color" });
+    await palette.waitFor({ timeout: 30_000 });
+    const swatches = palette.getByTestId("label-swatch");
+    const total = await swatches.count();
+    const want = hex.toLowerCase();
+    for (let i = 0; i < total; i++) {
+      const color = ((await swatches.nth(i).getAttribute("data-color")) ?? "").toLowerCase();
+      if (color === want) {
+        await swatches.nth(i).click({ timeout: 15_000 });
+        return;
+      }
+    }
+    throw new Error(`[parity] label palette offers no swatch matching "${hex}".`);
   }
 
-  async settingsLabelsOpenRowMenu(_name: string): Promise<void> {
-    return todo("settingsLabelsOpenRowMenu");
+  async settingsLabelsOpenRowMenu(name: string): Promise<void> {
+    const row = await this.labelsRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.getByTestId("label-row-menu").first().click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: 15_000 });
   }
 
   async settingsLabelsMenuItems(): Promise<string[]> {
-    return todo("settingsLabelsMenuItems");
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const texts: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const text = (
+        (await items
+          .nth(i)
+          .innerText()
+          .catch(() => "")) ?? ""
+      ).trim();
+      if (text !== "") texts.push(text);
+    }
+    return texts;
   }
 
-  async settingsLabelsMenuPick(_text: string): Promise<void> {
-    return todo("settingsLabelsMenuPick");
+  async settingsLabelsMenuPick(text: string): Promise<void> {
+    const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    await this.page
+      .getByRole("menuitem", { name: new RegExp(escaped) })
+      .first()
+      .click({ timeout: 30_000 });
+    await this.page.getByRole("menuitem").first().waitFor({ state: "detached", timeout: 15_000 });
   }
 
-  async settingsLabelsIsGroup(_name: string): Promise<boolean> {
-    return todo("settingsLabelsIsGroup");
+  async settingsLabelsIsGroup(name: string): Promise<boolean> {
+    return ((await (await this.labelsRowByName(name)).getAttribute("data-group")) ?? "") === "true";
   }
 
-  async settingsLabelsDeleteViaTrash(_name: string): Promise<void> {
-    return todo("settingsLabelsDeleteViaTrash");
+  async settingsLabelsDeleteViaTrash(name: string): Promise<void> {
+    const row = await this.labelsRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    await row.getByTestId("label-delete").first().click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Delete label" }).waitFor({ timeout: 30_000 });
   }
 
   async settingsLabelsDeleteModalText(): Promise<string> {
-    return todo("settingsLabelsDeleteModalText");
+    const dialog = this.page.getByRole("dialog").first();
+    if ((await dialog.count()) === 0) return "";
+    return ((await dialog.innerText().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
   }
 
   async settingsLabelsDeleteConfirm(): Promise<void> {
-    return todo("settingsLabelsDeleteConfirm");
+    const heading = this.page.getByRole("heading", { name: "Delete label" });
+    await heading.waitFor({ timeout: 30_000 });
+    await this.page.getByRole("button", { name: "Delete label", exact: true }).first().click({ timeout: 30_000 });
+    await heading.waitFor({ state: "detached", timeout: 30_000 });
   }
 
   async settingsLabelsDeleteCancel(): Promise<void> {
-    return todo("settingsLabelsDeleteCancel");
+    await this.page.getByRole("button", { name: "Cancel", exact: true }).first().click({ timeout: 30_000 });
+    await this.page.getByRole("heading", { name: "Delete label" }).waitFor({ state: "detached", timeout: 15_000 });
   }
 
-  async settingsLabelsDragOnto(_source: string, _target: string): Promise<void> {
-    return todo("settingsLabelsDragOnto");
+  private async dragLabelHandle(source: string, target: string, edge: "center" | "top"): Promise<void> {
+    // Pointer-based reorder: the grip's pointerdown starts the drag and
+    // window pointer moves preview it, so a stepped mouse gesture drives
+    // the whole flow. Center drops nest; near-top drops slot above.
+    const row = await this.labelsRowByName(source);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const handle = row.getByTestId("label-drag-handle").first();
+    await handle.waitFor({ timeout: 30_000 });
+    const from = await handle.boundingBox();
+    const targetRow = await this.labelsRowByName(target);
+    await targetRow.scrollIntoViewIfNeeded();
+    const targetBox = await targetRow.boundingBox();
+    if (from === null || targetBox === null) throw new Error("[parity] label drag endpoints have no boxes.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    const end =
+      edge === "center"
+        ? { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height / 2 }
+        : { x: targetBox.x + targetBox.width / 2, y: targetBox.y - 8 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 12; i++) {
+      await this.page.mouse.move(start.x + ((end.x - start.x) * i) / 12, start.y + ((end.y - start.y) * i) / 12);
+    }
+    await this.page.mouse.up();
   }
 
-  async settingsLabelsDragAbove(_source: string, _target: string): Promise<void> {
-    return todo("settingsLabelsDragAbove");
+  async settingsLabelsDragOnto(source: string, target: string): Promise<void> {
+    await this.dragLabelHandle(source, target, "center");
+  }
+
+  async settingsLabelsDragAbove(source: string, target: string): Promise<void> {
+    await this.dragLabelHandle(source, target, "top");
   }
 
   async settingsLabelsEmptyTitle(): Promise<string> {
-    return todo("settingsLabelsEmptyTitle");
+    const empty = this.page.getByText("No labels yet", { exact: true });
+    if ((await empty.count()) === 0) return "";
+    return (
+      (await empty
+        .first()
+        .innerText()
+        .catch(() => "")) ?? ""
+    ).trim();
   }
 
   async settingsLabelsEmptyAction(): Promise<void> {
-    return todo("settingsLabelsEmptyAction");
+    await this.page.getByRole("button", { name: "Create your first label", exact: true }).click({ timeout: 30_000 });
+    await this.page.getByTestId("label-form-name").waitFor({ timeout: 30_000 });
   }
 
   async settingsLabelsSkeletonVisible(): Promise<boolean> {
-    return todo("settingsLabelsSkeletonVisible");
+    const bones = this.page.getByTestId("labels-skeleton").locator(":scope > *");
+    if ((await bones.count()) < 4) return false;
+    return bones.first().isVisible();
   }
 
-  async settingsLabelsDelayLoad(_ms: number): Promise<void> {
-    return todo("settingsLabelsDelayLoad");
+  async settingsLabelsDelayLoad(ms: number): Promise<void> {
+    // Hold the label-list answers (project and workspace alike, since
+    // either one lets the store render) so the skeleton stays up long
+    // enough to observe; writes pass through untouched.
+    const hold = async (route: Parameters<Parameters<Page["route"]>[1]>[0]) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      await route.continue();
+    };
+    await this.page.route("**/issue-labels/*", hold);
+    await this.page.route("**/api/workspaces/*/labels/", hold);
   }
 
   async issueLabelsOpenPicker(): Promise<void> {
@@ -4770,15 +4925,23 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsLabelsNameValue(): Promise<string> {
-    return todo("settingsLabelsNameValue");
+    return (await this.page.getByTestId("label-form-name").inputValue({ timeout: 30_000 })) ?? "";
   }
 
   async settingsLabelsAttemptSubmit(): Promise<void> {
-    return todo("settingsLabelsAttemptSubmit");
+    // Error paths keep the form open, so this never waits for close.
+    const form = this.labelsForm();
+    const update = form.getByRole("button", { name: "Save changes", exact: true });
+    if ((await update.count()) > 0) {
+      await update.first().click({ timeout: 30_000 });
+      return;
+    }
+    await form.getByRole("button", { name: "Create label", exact: true }).click({ timeout: 30_000 });
   }
 
   async settingsLabelsAttemptDeleteConfirm(): Promise<void> {
-    return todo("settingsLabelsAttemptDeleteConfirm");
+    // The modal stays open when the delete fails, so this never waits.
+    await this.page.getByRole("button", { name: "Delete label", exact: true }).first().click({ timeout: 30_000 });
   }
 
   async reloadPage(): Promise<void> {
@@ -4802,7 +4965,7 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async settingsLabelsAccessDenied(): Promise<boolean> {
-    return todo("settingsLabelsAccessDenied");
+    return (await this.page.getByRole("heading", { name: /not authorized/i }).count()) > 0;
   }
 
   async globalViewIssueVisible(_name: string): Promise<boolean> {
@@ -29522,31 +29685,103 @@ export class WebNewDriver implements ParityDriver {
       .trim();
   }
 
-  // --- Project settings labels gaps (NEWFRONT-392, PSET-036–042). ---
-  async settingsLabelsChildrenOf(_parent: string): Promise<string[]> {
-    return todo("settingsLabelsChildrenOf");
+  // --- Project settings labels gaps (NEWFRONT-392, PSET-036–042; new-app
+  // --- surface NEWFRONT-606). ---
+  async settingsLabelsChildrenOf(parent: string): Promise<string[]> {
+    // The group's own name span sits outside the child lists, so every
+    // name under a nested list is a child's. Only visible ones count:
+    // collapsing unmounts the panel outright.
+    const row = await this.labelsRowByName(parent);
+    const body = row.locator("ul [data-testid='label-row-name']");
+    const total = await body.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const head = body.nth(i);
+      if (!(await head.isVisible().catch(() => false))) continue;
+      const text = ((await head.innerText().catch(() => "")) ?? "").trim();
+      if (text !== "") names.push(text);
+    }
+    return names;
   }
-  async settingsLabelsToggleGroup(_name: string): Promise<void> {
-    return todo("settingsLabelsToggleGroup");
+  async settingsLabelsToggleGroup(name: string): Promise<void> {
+    const row = await this.labelsRowByName(name);
+    const before = await this.settingsLabelsGroupCollapsed(name);
+    await row.getByTestId("label-group-toggle").first().click({ timeout: 30_000 });
+    await expect.poll(() => this.settingsLabelsGroupCollapsed(name), { timeout: 15_000 }).toBe(!before);
   }
-  async settingsLabelsGroupCollapsed(_name: string): Promise<boolean> {
-    return todo("settingsLabelsGroupCollapsed");
+  async settingsLabelsGroupCollapsed(name: string): Promise<boolean> {
+    const row = await this.labelsRowByName(name);
+    return (
+      ((await row
+        .getByTestId("label-group-toggle")
+        .first()
+        .getAttribute("aria-expanded")
+        .catch(() => "")) ?? "") === "false"
+    );
   }
-  async settingsLabelsGripVisible(_name: string): Promise<boolean> {
-    return todo("settingsLabelsGripVisible");
+  async settingsLabelsGripVisible(name: string): Promise<boolean> {
+    const row = await this.labelsRowByName(name);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const grip = row.getByTestId("label-drag-handle").first();
+    if ((await grip.count()) === 0) return false;
+    return grip.isVisible().catch(() => false);
   }
   async settingsLabelsDragFeedback(
-    _source: string,
-    _target: string,
-    _edge: "nest" | "above"
+    source: string,
+    target: string,
+    edge: "nest" | "above"
   ): Promise<"line" | "ring" | "none"> {
-    return todo("settingsLabelsDragFeedback");
+    const row = await this.labelsRowByName(source);
+    await row.scrollIntoViewIfNeeded();
+    await row.hover({ timeout: 30_000 });
+    const handle = row.getByTestId("label-drag-handle").first();
+    await handle.waitFor({ timeout: 30_000 });
+    const targetRow = await this.labelsRowByName(target);
+    await targetRow.scrollIntoViewIfNeeded();
+    const from = await handle.boundingBox();
+    const targetBox = await targetRow.boundingBox();
+    if (from === null || targetBox === null) throw new Error("[parity] label drag endpoints have no boxes.");
+    const start = { x: from.x + from.width / 2, y: from.y + from.height / 2 };
+    const end =
+      edge === "nest"
+        ? { x: targetBox.x + targetBox.width / 2, y: targetBox.y + targetBox.height / 2 }
+        : { x: targetBox.x + targetBox.width / 2, y: targetBox.y - 8 };
+    await this.page.mouse.move(start.x, start.y);
+    await this.page.mouse.down();
+    for (let i = 1; i <= 12; i++) {
+      await this.page.mouse.move(start.x + ((end.x - start.x) * i) / 12, start.y + ((end.y - start.y) * i) / 12);
+    }
+    await this.page.waitForTimeout(500);
+    const feedback = await this.page
+      .evaluate(() => {
+        if (document.querySelector('[data-testid="label-drop-line"]') !== null) return "line";
+        if (document.querySelector('[data-drop-into="true"]') !== null) return "ring";
+        return "none";
+      })
+      .catch(() => "none" as const);
+    await this.page.mouse.up();
+    return feedback;
   }
   async settingsLabelsListScrollable(): Promise<boolean> {
-    return todo("settingsLabelsListScrollable");
+    return this.page
+      .evaluate(() => {
+        const first = document.querySelector('[data-testid="label-row-name"]');
+        if (first === null) return false;
+        let el: HTMLElement | null = first.parentElement;
+        while (el !== null) {
+          if (el.scrollHeight > el.clientHeight + 10) return true;
+          el = el.parentElement;
+        }
+        return false;
+      })
+      .catch(() => false);
   }
   async settingsLabelsDeleteAttemptConfirm(): Promise<void> {
-    return todo("settingsLabelsDeleteAttemptConfirm");
+    // The modal stays open when the delete fails, so this never waits.
+    const heading = this.page.getByRole("heading", { name: "Delete label" });
+    await heading.waitFor({ timeout: 30_000 });
+    await this.page.getByRole("button", { name: "Delete label", exact: true }).first().click({ timeout: 30_000 });
   }
 
   // --- Workspace-settings cross-cutting oracle (NEWFRONT-415). Throwing

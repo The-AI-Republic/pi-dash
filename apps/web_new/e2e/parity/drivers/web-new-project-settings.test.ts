@@ -614,6 +614,7 @@ interface GeneralPageHooks {
   locator?: GeneralLocatorQuery;
   testId?: GeneralTestIdQuery;
   role?: GeneralRoleQuery;
+  text?: (text: string) => GeneralFakeLocator;
   response?: "resolve" | "reject";
   responseStatus?: number;
 }
@@ -648,6 +649,15 @@ function generalSettingsPageDouble(hooks: GeneralPageHooks = {}) {
     getByRole: vi.fn((role: string, options?: { name?: string | RegExp; exact?: boolean }) => {
       return hooks.role?.(role, options) ?? generalAbsent();
     }),
+    getByText: vi.fn((text: string) => {
+      return hooks.text?.(text) ?? generalAbsent();
+    }),
+    evaluate: vi.fn(async () => "none"),
+    mouse: {
+      move: vi.fn(async (_x: number, _y: number) => undefined),
+      down: vi.fn(async () => undefined),
+      up: vi.fn(async () => undefined),
+    },
   };
   return { page: page as unknown as Page, pageObject: page, calls, routes };
 }
@@ -1442,5 +1452,429 @@ describe("WebNewDriver states tab toggle, skeleton and notes", () => {
       "No states available"
     );
     await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsStatesEmptyNote("x")).resolves.toBe("");
+  });
+});
+
+describe("WebNewDriver labels tab list and form", () => {
+  function labelRowDouble(name: string, group: boolean) {
+    const nameSpan = new GeneralFakeLocator({ text: name });
+    return new GeneralFakeLocator(
+      { attr: group ? { "data-group": "true" } : {} },
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name") return new GeneralFakeLocator({ items: [nameSpan] });
+          return new GeneralFakeLocator();
+        },
+      }
+    );
+  }
+
+  it("opens the labels address", async () => {
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator(),
+      role: () => new GeneralFakeLocator(),
+    });
+    await new WebNewDriver(stub.page).settingsLabelsOpen("acme", "p1");
+    expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/settings/projects/p1/labels");
+  });
+
+  it("reads names in DOM order and matches rows exactly", async () => {
+    const rows = new GeneralFakeLocator({
+      items: [labelRowDouble("beta", false), labelRowDouble("alphabet", false)],
+    });
+    const stub = generalSettingsPageDouble({ locator: () => rows });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsLabelsIsGroup("alphabet")).resolves.toBe(false);
+    await expect(driver.settingsLabelsIsGroup("missing")).rejects.toThrow('label row "missing" not found');
+
+    const names = new GeneralFakeLocator({
+      items: [new GeneralFakeLocator({ text: " beta " }), new GeneralFakeLocator({ text: "" })],
+    });
+    const namesStub = generalSettingsPageDouble({ testId: () => names });
+    await expect(new WebNewDriver(namesStub.page).settingsLabelsNames()).resolves.toEqual(["beta"]);
+  });
+
+  it("reads group membership off the row marker", async () => {
+    const rows = new GeneralFakeLocator({ items: [labelRowDouble("parent", true)] });
+    const stub = generalSettingsPageDouble({ locator: () => rows });
+    await expect(new WebNewDriver(stub.page).settingsLabelsIsGroup("parent")).resolves.toBe(true);
+  });
+
+  it("opens creation and reports the form", async () => {
+    const add = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "label-add") return add;
+        if (testId === "label-form-name") return new GeneralFakeLocator();
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsLabelsAddVisible()).resolves.toBe(true);
+    await driver.settingsLabelsOpenCreate();
+    expect(add.click).toHaveBeenCalledTimes(1);
+    await expect(driver.settingsLabelsFormVisible()).resolves.toBe(true);
+    const bare = generalSettingsPageDouble();
+    await expect(new WebNewDriver(bare.page).settingsLabelsAddVisible()).resolves.toBe(false);
+    await expect(new WebNewDriver(bare.page).settingsLabelsFormVisible()).resolves.toBe(false);
+  });
+
+  it("fills the name, reads values and errors, and submits", async () => {
+    const name = new GeneralFakeLocator({ input: "beta" });
+    const create = new GeneralFakeLocator();
+    const update = new GeneralFakeLocator();
+    const cancel = new GeneralFakeLocator();
+    const form = new GeneralFakeLocator(
+      {},
+      {
+        role: (_role, options) => {
+          const label = String(options?.name ?? "");
+          if (label === "Create label") return create;
+          if (label === "Save changes") return update;
+          if (label === "Cancel") return cancel;
+          return new GeneralFakeLocator({ text: "Name is taken" });
+        },
+      }
+    );
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "label-form-name") return name;
+        if (testId === "label-form") return form;
+        return generalAbsent();
+      },
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsLabelsFillName("gamma");
+    expect(name.fill).toHaveBeenCalledWith("gamma", { timeout: 30_000 });
+    await expect(driver.settingsLabelsNameValue()).resolves.toBe("beta");
+    await expect(driver.settingsLabelsFormError()).resolves.toBe("Name is taken");
+    await driver.settingsLabelsSubmitCreate();
+    await driver.settingsLabelsSubmitUpdate();
+    await driver.settingsLabelsCancelForm();
+    await driver.settingsLabelsAttemptSubmit();
+    expect(create.click).toHaveBeenCalledTimes(1);
+    expect(update.click).toHaveBeenCalledTimes(2);
+    expect(cancel.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("attempts creation when no update button renders and reads no error", async () => {
+    const create = new GeneralFakeLocator();
+    const form = new GeneralFakeLocator(
+      {},
+      {
+        role: (_role, options) => (String(options?.name ?? "") === "Save changes" ? generalAbsent() : create),
+      }
+    );
+    const plainForm = new GeneralFakeLocator({}, { role: () => generalAbsent() });
+    const stub = generalSettingsPageDouble({
+      testId: (testId) => {
+        if (testId === "label-form") return form;
+        return generalAbsent();
+      },
+    });
+    await new WebNewDriver(stub.page).settingsLabelsAttemptSubmit();
+    expect(create.click).toHaveBeenCalledTimes(1);
+    const clean = generalSettingsPageDouble({ testId: () => plainForm });
+    await expect(new WebNewDriver(clean.page).settingsLabelsFormError()).resolves.toBe("");
+  });
+
+  it("reads the dot color and picks palette members", async () => {
+    const dot = new GeneralFakeLocator();
+    dot.evaluate.mockResolvedValue("rgb(255, 105, 0)");
+    const form = new GeneralFakeLocator(
+      {},
+      { testId: (testId) => (testId === "label-form-dot" ? dot : generalAbsent()) }
+    );
+    const palette = new GeneralFakeLocator(
+      {},
+      {
+        testId: () =>
+          new GeneralFakeLocator({
+            items: [
+              new GeneralFakeLocator({ attr: { "data-color": "#FF6900" } }),
+              new GeneralFakeLocator({ attr: { "data-color": "#0693E3" } }),
+            ],
+          }),
+      }
+    );
+    const stub = generalSettingsPageDouble({
+      testId: () => form,
+      role: (role) => (role === "group" ? palette : generalAbsent()),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsLabelsDotColor()).resolves.toBe("rgb(255, 105, 0)");
+    await driver.settingsLabelsOpenColorPicker();
+    await driver.settingsLabelsPickColor("#0693e3");
+    await expect(driver.settingsLabelsPickColor("#123456")).rejects.toThrow('no swatch matching "#123456"');
+  });
+});
+
+describe("WebNewDriver labels tab rows and menus", () => {
+  function menuRowDouble() {
+    const nameSpan = new GeneralFakeLocator({ text: "beta" });
+    return new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name") return new GeneralFakeLocator({ items: [nameSpan] });
+          return new GeneralFakeLocator();
+        },
+      }
+    );
+  }
+
+  it("opens the row menu and reads its items", async () => {
+    const menu = new GeneralFakeLocator();
+    const row = menuRowDouble();
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator({ items: [row] }),
+      testId: () => menu,
+      role: (role) =>
+        role === "menuitem"
+          ? new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "Edit label" })] })
+          : generalAbsent(),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsLabelsOpenRowMenu("beta");
+    await expect(driver.settingsLabelsMenuItems()).resolves.toEqual(["Edit label"]);
+  });
+
+  it("picks menu entries by escaped text", async () => {
+    const entry = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({ role: () => entry });
+    await new WebNewDriver(stub.page).settingsLabelsMenuPick("Remove from group (2)");
+    expect(entry.click).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes through the trash control and the dialog", async () => {
+    const trash = new GeneralFakeLocator();
+    const nameSpan = new GeneralFakeLocator({ text: "beta" });
+    const row = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name") return new GeneralFakeLocator({ items: [nameSpan] });
+          if (testId === "label-delete") return trash;
+          return new GeneralFakeLocator();
+        },
+      }
+    );
+    const dialog = new GeneralFakeLocator({ text: "  Delete label\nbeta will go  " });
+    const confirm = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator({ items: [row] }),
+      testId: (testId) => (testId === "label-delete" ? trash : new GeneralFakeLocator()),
+      role: (role) => (role === "dialog" ? dialog : confirm),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsLabelsDeleteViaTrash("beta");
+    expect(trash.click).toHaveBeenCalledTimes(1);
+    await expect(driver.settingsLabelsDeleteModalText()).resolves.toBe("Delete label beta will go");
+    await driver.settingsLabelsDeleteConfirm();
+    await driver.settingsLabelsDeleteCancel();
+    await driver.settingsLabelsAttemptDeleteConfirm();
+    await driver.settingsLabelsDeleteAttemptConfirm();
+    expect(confirm.click).toHaveBeenCalledTimes(4);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsLabelsDeleteModalText()).resolves.toBe("");
+  });
+
+  it("denies guests on the heading", async () => {
+    const denied = generalSettingsPageDouble({ role: () => new GeneralFakeLocator() });
+    await expect(new WebNewDriver(denied.page).settingsLabelsAccessDenied()).resolves.toBe(true);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsLabelsAccessDenied()).resolves.toBe(false);
+  });
+});
+
+describe("WebNewDriver labels tab groups and drag", () => {
+  function groupRowDouble(expanded: { value: boolean }) {
+    const nameSpan = new GeneralFakeLocator({ text: "parent" });
+    const toggle = new GeneralFakeLocator({
+      attr: { "aria-expanded": expanded.value ? "true" : "false" },
+    });
+    toggle.click.mockImplementation(async () => {
+      expanded.value = !expanded.value;
+      toggle.state.attr = { "aria-expanded": expanded.value ? "true" : "false" };
+    });
+    return new GeneralFakeLocator(
+      { attr: { "data-group": "true" } },
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name") return new GeneralFakeLocator({ items: [nameSpan] });
+          if (testId === "label-group-toggle") return toggle;
+          if (testId === "label-drag-handle") return new GeneralFakeLocator();
+          return generalAbsent();
+        },
+        locator: (selector) =>
+          selector === "ul [data-testid='label-row-name']"
+            ? new GeneralFakeLocator({
+                items: [new GeneralFakeLocator({ text: "child" }), new GeneralFakeLocator({ text: "" })],
+              })
+            : generalAbsent(),
+      }
+    );
+  }
+
+  it("reads children, toggles groups and reports collapse", async () => {
+    const expanded = { value: true };
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator({ items: [groupRowDouble(expanded)] }),
+    });
+    // The toggle lookup re-resolves the row per call, so each double
+    // needs its own expansion cell; share one through the stub.
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsLabelsChildrenOf("parent")).resolves.toEqual(["child"]);
+    await expect(driver.settingsLabelsGroupCollapsed("parent")).resolves.toBe(false);
+    await driver.settingsLabelsToggleGroup("parent");
+    expect(expanded.value).toBe(false);
+  });
+
+  it("reports the grip only when it renders visibly", async () => {
+    const shown = generalSettingsPageDouble({
+      locator: () =>
+        new GeneralFakeLocator({
+          items: [
+            new GeneralFakeLocator(
+              {},
+              {
+                testId: (testId) => {
+                  if (testId === "label-row-name")
+                    return new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "beta" })] });
+                  if (testId === "label-drag-handle") return new GeneralFakeLocator();
+                  return generalAbsent();
+                },
+              }
+            ),
+          ],
+        }),
+    });
+    await expect(new WebNewDriver(shown.page).settingsLabelsGripVisible("beta")).resolves.toBe(true);
+    const hidden = generalSettingsPageDouble({ locator: () => new GeneralFakeLocator({ items: [] }) });
+    await expect(new WebNewDriver(hidden.page).settingsLabelsGripVisible("beta")).rejects.toThrow(
+      'label row "beta" not found'
+    );
+  });
+
+  it("drags the handle onto targets and above them", async () => {
+    const handle = new GeneralFakeLocator();
+    handle.boundingBox.mockResolvedValue({ x: 0, y: 0, width: 10, height: 10 });
+    const sourceRow = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name")
+            return new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "one" })] });
+          if (testId === "label-drag-handle") return handle;
+          return generalAbsent();
+        },
+      }
+    );
+    const targetRow = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name")
+            return new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "target-row" })] });
+          return generalAbsent();
+        },
+      }
+    );
+    targetRow.boundingBox.mockResolvedValue({ x: 100, y: 100, width: 200, height: 40 });
+    const stub = generalSettingsPageDouble({
+      locator: () => new GeneralFakeLocator({ items: [sourceRow, targetRow] }),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await driver.settingsLabelsDragOnto("one", "target-row");
+    expect(stub.pageObject.mouse.down).toHaveBeenCalledTimes(1);
+    expect(stub.pageObject.mouse.up).toHaveBeenCalledTimes(1);
+    expect(stub.pageObject.mouse.move).toHaveBeenCalledTimes(13);
+    await driver.settingsLabelsDragAbove("one", "target-row");
+    expect(stub.pageObject.mouse.down).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when the drag endpoints have no boxes", async () => {
+    const row = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name")
+            return new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "one" })] });
+          return new GeneralFakeLocator();
+        },
+      }
+    );
+    const stub = generalSettingsPageDouble({ locator: () => new GeneralFakeLocator({ items: [row, row] }) });
+    await expect(new WebNewDriver(stub.page).settingsLabelsDragOnto("one", "one")).rejects.toThrow("no boxes");
+  });
+
+  it("samples the drop feedback mid-drag", async () => {
+    const handle = new GeneralFakeLocator();
+    handle.boundingBox.mockResolvedValue({ x: 0, y: 0, width: 10, height: 10 });
+    const row = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) => {
+          if (testId === "label-row-name")
+            return new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "one" })] });
+          if (testId === "label-drag-handle") return handle;
+          return new GeneralFakeLocator();
+        },
+      }
+    );
+    const target = new GeneralFakeLocator(
+      {},
+      {
+        testId: (testId) =>
+          testId === "label-row-name"
+            ? new GeneralFakeLocator({ items: [new GeneralFakeLocator({ text: "two" })] })
+            : new GeneralFakeLocator(),
+      }
+    );
+    target.boundingBox.mockResolvedValue({ x: 0, y: 0, width: 10, height: 10 });
+    const stub = generalSettingsPageDouble({
+      locator: (selector) =>
+        selector === '[data-testid="label-row"]' ? new GeneralFakeLocator({ items: [row, target] }) : target,
+    });
+    stub.pageObject.evaluate.mockResolvedValue("ring");
+    const driver = new WebNewDriver(stub.page);
+    // Both rows resolve through the same list double: the source matches
+    // "one" while the target lookup falls through to the second row.
+    await expect(driver.settingsLabelsDragFeedback("one", "two", "nest")).resolves.toBe("ring");
+    expect(stub.pageObject.mouse.up).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads scrollability, the empty state and the skeleton", async () => {
+    const scrollable = generalSettingsPageDouble();
+    scrollable.pageObject.evaluate.mockResolvedValue(true);
+    await expect(new WebNewDriver(scrollable.page).settingsLabelsListScrollable()).resolves.toBe(true);
+
+    const title = new GeneralFakeLocator({ text: "  No labels yet  " });
+    const action = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      text: () => title,
+      role: () => action,
+      testId: () => new GeneralFakeLocator(),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsLabelsEmptyTitle()).resolves.toBe("No labels yet");
+    await driver.settingsLabelsEmptyAction();
+    expect(action.click).toHaveBeenCalledTimes(1);
+    await expect(new WebNewDriver(generalSettingsPageDouble().page).settingsLabelsEmptyTitle()).resolves.toBe("");
+
+    const bones = new GeneralFakeLocator({
+      items: [new GeneralFakeLocator(), new GeneralFakeLocator(), new GeneralFakeLocator(), new GeneralFakeLocator()],
+    });
+    const skeleton = new GeneralFakeLocator({}, { locator: () => bones });
+    const skeletonStub = generalSettingsPageDouble({ testId: () => skeleton });
+    await expect(new WebNewDriver(skeletonStub.page).settingsLabelsSkeletonVisible()).resolves.toBe(true);
+    const thin = new GeneralFakeLocator({}, { locator: () => new GeneralFakeLocator({ count: 2 }) });
+    const thinStub = generalSettingsPageDouble({ testId: () => thin });
+    await expect(new WebNewDriver(thinStub.page).settingsLabelsSkeletonVisible()).resolves.toBe(false);
+  });
+
+  it("holds list reads across both label endpoints", async () => {
+    const stub = generalSettingsPageDouble();
+    await new WebNewDriver(stub.page).settingsLabelsDelayLoad(5);
+    expect(stub.pageObject.route).toHaveBeenCalledTimes(2);
+    expect(stub.routes.map((entry) => entry.pattern)).toEqual(["**/issue-labels/*", "**/api/workspaces/*/labels/"]);
   });
 });
