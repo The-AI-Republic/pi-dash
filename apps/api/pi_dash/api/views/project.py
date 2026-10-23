@@ -419,6 +419,21 @@ class ProjectDetailAPIEndpoint(BaseAPIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
+            # Changing the project's default work type is a human decision:
+            # issues inheriting it (work_type NULL) would switch guidance
+            # mid-flight, and an agent could otherwise sidestep the per-issue
+            # work-type lock (PDASHOSS01-234) by patching the project instead.
+            # A request carrying the agent run-id header may not change it.
+            from pi_dash.api.views.issue import RUN_ID_HEADER
+
+            if (request.headers.get(RUN_ID_HEADER) or "").strip() and "default_work_type" in request.data:
+                new_default = request.data.get("default_work_type") or ""
+                if new_default != project.default_work_type:
+                    return Response(
+                        {"error": "default_work_type is locked for agent runs; only a human can change it"},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+
             serializer = ProjectUpdateSerializer(
                 project,
                 data={**request.data, "intake_view": intake_view},

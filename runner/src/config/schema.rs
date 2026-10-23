@@ -787,7 +787,6 @@ impl Config {
 
         Ok(())
     }
-
 }
 
 /// User-facing config validation errors. Each variant's `Display` is the
@@ -1166,7 +1165,10 @@ mod tests {
             AgentKind::OpenClaw.default_binary(),
             OpenClawSection::default().binary
         );
-        assert_eq!(AgentKind::Grok.default_binary(), GrokSection::default().binary);
+        assert_eq!(
+            AgentKind::Grok.default_binary(),
+            GrokSection::default().binary
+        );
         assert_eq!(
             AgentKind::MuseCode.default_binary(),
             MuseCodeSection::default().binary
@@ -1337,7 +1339,11 @@ mod tests {
 
     #[test]
     fn validate_accepts_complete_managed_codex_set() {
-        assert!(config_with(vec![managed_runner("desktop-host")]).validate().is_ok());
+        assert!(
+            config_with(vec![managed_runner("desktop-host")])
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1391,7 +1397,10 @@ mod tests {
         let text = toml::to_string(&cfg).expect("serialise");
         let back: Config = toml::from_str(&text).expect("deserialise");
         let codex = &back.runners[0].codex;
-        assert_eq!(codex.codex_home.as_deref(), Some(Path::new("/app/managed/codex-home")));
+        assert_eq!(
+            codex.codex_home.as_deref(),
+            Some(Path::new("/app/managed/codex-home"))
+        );
         assert_eq!(codex.path_prepend.as_deref(), Some(Path::new("/app/bin")));
         assert_eq!(
             codex.model_token_file.as_deref(),
@@ -1408,6 +1417,9 @@ mod tests {
         let text = toml::to_string(&cfg).expect("serialise");
         assert!(!text.contains("codex_home"), "unexpected key in:\n{text}");
         assert!(!text.contains("path_prepend"), "unexpected key in:\n{text}");
-        assert!(!text.contains("model_token_file"), "unexpected key in:\n{text}");
+        assert!(
+            !text.contains("model_token_file"),
+            "unexpected key in:\n{text}"
+        );
     }
 }

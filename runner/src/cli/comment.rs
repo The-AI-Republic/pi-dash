@@ -560,7 +560,10 @@ mod tests {
     #[test]
     fn compose_comment_html_joins_body_and_images() {
         let node = image_component_html("abc");
-        assert_eq!(compose_comment_html(Some("<p>hi</p>"), &node), format!("<p>hi</p>{node}"));
+        assert_eq!(
+            compose_comment_html(Some("<p>hi</p>"), &node),
+            format!("<p>hi</p>{node}")
+        );
         assert_eq!(compose_comment_html(None, &node), node);
         assert_eq!(compose_comment_html(Some("only text"), ""), "only text");
     }
@@ -570,7 +573,10 @@ mod tests {
         assert_eq!(image_mime_type(Path::new("a.png")).unwrap(), "image/png");
         assert_eq!(image_mime_type(Path::new("a.JPG")).unwrap(), "image/jpeg");
         assert_eq!(image_mime_type(Path::new("a.jpeg")).unwrap(), "image/jpeg");
-        assert_eq!(image_mime_type(Path::new("dir/b.WebP")).unwrap(), "image/webp");
+        assert_eq!(
+            image_mime_type(Path::new("dir/b.WebP")).unwrap(),
+            "image/webp"
+        );
         assert_eq!(image_mime_type(Path::new("a.gif")).unwrap(), "image/gif");
     }
 
@@ -616,7 +622,11 @@ mod tests {
         let batch: Result<Vec<_>, _> = [good, bad].iter().map(|p| PreparedImage::load(p)).collect();
         let err = batch.expect_err("a .txt anywhere in the batch fails the batch");
         assert_eq!(err.exit_code, crate::api_client::EXIT_INVALID);
-        assert!(err.message.contains("unsupported image type"), "{}", err.message);
+        assert!(
+            err.message.contains("unsupported image type"),
+            "{}",
+            err.message
+        );
     }
 
     #[test]

@@ -72,7 +72,9 @@ impl Bridge {
         Ok(Self::from_process(
             proc,
             model_default,
-            resume_session_id.filter(|s| !s.is_empty()).map(ToOwned::to_owned),
+            resume_session_id
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned),
         ))
     }
 
@@ -196,7 +198,10 @@ impl Bridge {
                 anyhow::bail!("grok rpc error: {msg}");
             }
             if value.get("result").is_some() {
-                return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                return Ok(value
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
             }
             // A notification (has `method`, no `result`) arrived mid-handshake;
             // stash it so the turn translator still sees it.
@@ -247,7 +252,10 @@ impl Bridge {
             return Ok(false);
         }
         let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
-        let params = value.get("params").cloned().unwrap_or(serde_json::Value::Null);
+        let params = value
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         match schema::select_allow_option(&params) {
             Some(option_id) => {
                 let line = schema::permission_selected_response(&id, &option_id);
@@ -275,7 +283,9 @@ impl Bridge {
             "grok bridge received an approval decision but approvals are \
              auto-answered inline; refusing to silently drop it"
         );
-        anyhow::bail!("grok bridge received approval {approval_id} but approvals are auto-answered");
+        anyhow::bail!(
+            "grok bridge received approval {approval_id} but approvals are auto-answered"
+        );
     }
 
     pub async fn interrupt(&mut self) -> Result<()> {
@@ -519,7 +529,9 @@ exec cat >/dev/null
 "#;
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c").arg(script);
-        let proc = GrokProcess::spawn_command(cmd).await.expect("spawn fake grok");
+        let proc = GrokProcess::spawn_command(cmd)
+            .await
+            .expect("spawn fake grok");
         let mut bridge = Bridge::from_process(proc, None, None);
 
         let payload = RunPayload {
@@ -550,7 +562,10 @@ exec cat >/dev/null
                 break;
             }
         }
-        assert!(saw_raw, "expected the streamed session/update as a Raw event");
+        assert!(
+            saw_raw,
+            "expected the streamed session/update as a Raw event"
+        );
         assert!(completed, "expected the stopReason to complete the turn");
     }
 }

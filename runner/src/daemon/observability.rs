@@ -1049,7 +1049,10 @@ mod tests {
             },
         });
         let text = extract_agent_message_text("item/completed", &params).expect("narrative");
-        assert_eq!(text, "Let me first explore the original color of the button.");
+        assert_eq!(
+            text,
+            "Let me first explore the original color of the button."
+        );
     }
 
     #[test]

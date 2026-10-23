@@ -225,6 +225,17 @@ class Issue(ProjectBaseModel):
         null=True,
         blank=True,
     )
+    # Per-issue work-type override — which per-work-type prompt guidance fills
+    # the stage recipes' slots (prompting/work_types.py). NULL means "inherit
+    # the project's ``default_work_type``" — the state every issue starts in,
+    # so the project-level default keeps working untouched and this field is
+    # purely additive for existing rows. Resolved by
+    # ``prompting.work_types.effective_work_type``; validated against the
+    # work-type registry at the serializer boundary (no model choices, so a
+    # new work type needs no migration). Once the issue enters a ticking
+    # stage, only a human may change it (enforced in the PATCH views), so
+    # review/test always match what was built.
+    work_type = models.CharField(max_length=32, null=True, blank=True)
 
     issue_objects = IssueManager()
 

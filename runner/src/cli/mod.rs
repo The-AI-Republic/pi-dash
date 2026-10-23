@@ -26,8 +26,8 @@ pub mod run_cmd;
 // (`add`, `remove`) directly without going through clap.
 pub mod runner;
 pub mod runner_ops;
-mod start;
 mod scheduler;
+mod start;
 mod state;
 mod status;
 mod stop;

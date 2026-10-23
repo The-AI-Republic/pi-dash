@@ -21,7 +21,7 @@ pub mod focus;
 pub mod tab;
 
 pub use focus::{
-    border_style, breadcrumb, is_focused, is_in_path, CardId, FocusNode, FocusPath, NavDir,
+    CardId, FocusNode, FocusPath, NavDir, border_style, breadcrumb, is_focused, is_in_path,
 };
 pub use tab::{Tab as TabView, TabKind};
 

@@ -204,11 +204,7 @@ impl Renderable for AddRunnerView {
             )));
         }
         let p = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Add runner "),
-            )
+            .block(Block::default().borders(Borders::ALL).title(" Add runner "))
             .wrap(Wrap { trim: false });
         p.render(modal, buf);
     }
@@ -225,9 +221,7 @@ impl View for AddRunnerView {
         }
 
         match (key.code, key.modifiers) {
-            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
-                KeyHandled::NotConsumed
-            }
+            (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => KeyHandled::NotConsumed,
             (KeyCode::Esc, _) => {
                 self.complete = true;
                 self.completion = Some(ViewCompletion::Cancelled);

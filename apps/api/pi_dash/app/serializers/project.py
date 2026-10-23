@@ -58,6 +58,18 @@ class ProjectSerializer(BaseSerializer):
         fields = "__all__"
         read_only_fields = ["workspace", "deleted_at"]
 
+    def validate_default_work_type(self, default_work_type):
+        # Same rule as the external serializers: a registered key or blank
+        # (``Project.save`` resolves the default at creation). Without this,
+        # the web settings form could store any string and every inheriting
+        # issue would silently compose with the fallback work type.
+        if default_work_type:
+            from pi_dash.prompting.work_types import WORK_TYPES
+
+            if default_work_type not in WORK_TYPES:
+                raise serializers.ValidationError(f"unknown work type; expected one of {sorted(WORK_TYPES)}")
+        return default_work_type
+
     def validate_name(self, name):
         project_id = self.instance.id if self.instance else None
         workspace_id = self.context["workspace_id"]

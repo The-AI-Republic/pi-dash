@@ -228,6 +228,20 @@ class IssueSerializer(BaseSerializer):
         except Exception:
             raise serializers.ValidationError("Invalid HTML passed")
 
+        # ``work_type`` must name a registered work type; NULL/"" clears the
+        # override back to "inherit the project default". The registry is
+        # code-owned, so validating here (not model choices) means a new work
+        # type needs no migration.
+        if "work_type" in data and not data["work_type"]:
+            data["work_type"] = None  # normalize "" to the inherit state
+        if data.get("work_type"):
+            from pi_dash.prompting.work_types import WORK_TYPES
+
+            if data["work_type"] not in WORK_TYPES:
+                raise serializers.ValidationError(
+                    {"work_type": f"unknown work type; expected one of {sorted(WORK_TYPES)}"}
+                )
+
         # Validate description content for security
         if data.get("description_html") and not from_markdown:
             is_valid, error_msg, sanitized_html = validate_html_content(data["description_html"])

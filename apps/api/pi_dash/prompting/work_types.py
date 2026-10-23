@@ -181,11 +181,14 @@ def effective_work_type(issue) -> str:
     """The work-type key that applies to ``issue``.
 
     ``issue.work_type`` (explicit per-issue override) → the project's
-    ``default_work_type`` → :data:`DEFAULT_WORK_TYPE`. The attribute reads are
-    defensive so the resolver already works while the model fields ship in a
-    later part. An unknown stored key is treated as absent — the next rung of
-    the chain applies — rather than failing the run: composing with the
-    project's (or the default) guidance beats not running.
+    ``default_work_type`` → ``general``. The final rung is a safety net only:
+    the data migration stamped ``software`` on every pre-existing project and
+    ``Project.save`` resolves the default at creation, so a blank project
+    default should not occur in practice. An unknown stored key is treated as
+    absent — the next rung of the chain applies — rather than failing the
+    run: composing with the project's (or the safety-net) guidance beats not
+    running. The attribute reads are defensive so the resolver also works on
+    non-model stand-ins (previews, tests).
     """
     for key in (
         getattr(issue, "work_type", None),
@@ -193,4 +196,6 @@ def effective_work_type(issue) -> str:
     ):
         if key and key in WORK_TYPES:
             return key
+    if WORK_TYPE_GENERAL in WORK_TYPES:
+        return WORK_TYPE_GENERAL
     return DEFAULT_WORK_TYPE
