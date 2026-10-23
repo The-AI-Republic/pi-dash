@@ -14603,19 +14603,63 @@ export class WebNewDriver implements ParityDriver {
     await this.notificationsListSettled();
   }
 
-  // --- Archived cycles (NEWFRONT-224, ARCH-014–019). Oracle-stage stubs;
-  // --- the new-app implementation lands with the area.
-  async archivesCyclesOpenTabViaLive(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesCyclesOpenTabViaLive");
+  // --- Archived cycles (NEWFRONT-224, ARCH-014–019). Implemented by
+  // --- NEWFRONT-701: the tab opens, skeleton probe, and live-screen
+  // --- entry below; the list/peek/search/filter/state/menu/dialog
+  // --- methods follow the shell block, and the cycle-peek family with
+  // --- the modules block. Filter/chip and row-menu methods delegate to
+  // --- the cycles slices' own drivers over the shared markup.
+
+  /** One settled marker on the live cycles screen: body, zero, error, or gate. */
+  private liveCyclesSettledMarker(): Locator {
+    return this.page.locator(
+      '[data-testid="cycles-list-body"], [data-testid="cycles-zero-state"], [data-testid="cycles-load-error"], [data-testid="cycles-feature-gate"]'
+    );
   }
-  async archivesCyclesOpenTabRaw(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesCyclesOpenTabRaw");
+
+  /** Open the live cycles screen and settle on whatever it renders. */
+  private async openLiveCyclesSettled(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
+    await this.liveCyclesSettledMarker().first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** One settled marker on the archived tab: rows, empty, no-match, or error. */
+  private archivedCyclesSettledMarker(): Locator {
+    return this.page.locator(
+      'div[data-testid="cycle-row"], [data-testid="archived-cycles-empty"], [data-testid="cycles-no-match"], [data-testid="cycles-load-error"]'
+    );
+  }
+
+  /** Wait until the archived tab shows rows, empty, no-match, or error. */
+  private async archivedCyclesSettled(): Promise<void> {
+    await this.archivedCyclesSettledMarker().first().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /**
+   * From the live screen, follow the sidebar project menu's Archives
+   * entry and the tab strip's Cycles tab, then settle. The navigation
+   * stays client-side; the new app also settles on a raw load.
+   */
+  private async enterArchivedCyclesFromLive(projectId: string): Promise<void> {
+    await this.archivesGoToProjectArchives(projectId);
+    await this.archivesOpenTab("cycles");
+    await this.archivedCyclesSettled();
+  }
+
+  async archivesCyclesOpenTabViaLive(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.openLiveCyclesSettled(workspaceSlug, projectId);
+    await this.enterArchivedCyclesFromLive(projectId);
+  }
+  async archivesCyclesOpenTabRaw(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
   async archivesCyclesSkeletonVisible(): Promise<boolean> {
-    return todo("archivesCyclesSkeletonVisible");
+    return this.isShown(this.page.getByTestId("archived-cycles-skeleton"));
   }
-  async archivesCyclesOpenLive(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesCyclesOpenLive");
+  async archivesCyclesOpenLive(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.openLiveCyclesSettled(workspaceSlug, projectId);
   }
   /** The archives tab strip (NEWFRONT-698 shell). */
   private archivesStrip(): Locator {
@@ -14661,107 +14705,290 @@ export class WebNewDriver implements ParityDriver {
     await this.page.waitForLoadState("domcontentloaded");
     await this.archivesStrip().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async archivesCyclesVisibleNames(): Promise<string[]> {
-    return todo("archivesCyclesVisibleNames");
+  /**
+   * Cycle names currently rendered as rows, in display order. Read
+   * from the row menu triggers' labels, which carry the exact row
+   * name; the row bodies mix the name with badges, dates and counts.
+   */
+  private async cycleRowNames(): Promise<string[]> {
+    const triggers = this.page.locator('div[data-testid="cycle-row"] button[data-testid="cycle-row-menu-trigger"]');
+    const total = await triggers.count();
+    const names: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const label = await triggers.nth(i).getAttribute("aria-label");
+      if (label === null) continue;
+      names.push(label.replace(/^Cycle actions for /, ""));
+    }
+    return names;
   }
-  async archivesCyclesLiveGroupOpen(_section: string): Promise<void> {
-    return todo("archivesCyclesLiveGroupOpen");
+
+  /** The open archived-cycle peek panel. */
+  private archivedCyclePeekPanel(): Locator {
+    return this.page.getByTestId("archived-cycle-preview");
+  }
+
+  /** Peek panel heading, or null when no peek is open. */
+  private async archivedCyclePeekName(): Promise<string | null> {
+    const panel = this.archivedCyclePeekPanel();
+    if (!(await this.isShown(panel))) return null;
+    return (await panel.getByRole("heading").first().innerText()).trim();
+  }
+
+  /** Open the named row's archived peek through its quick-look control. */
+  private async openArchivedCyclePeek(name: string): Promise<void> {
+    const row = this.cycleRowRoot(name);
+    await row.hover({ timeout: WebNewDriver.WAIT_MS });
+    await row.getByRole("button", { name: `Quick look at ${name}` }).click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(() => new URL(location.href).searchParams.has("peekCycle"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+    await this.archivedCyclePeekPanel().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+  }
+
+  /** Close the archived peek and wait until the address param clears. */
+  private async closeArchivedCyclePeek(): Promise<void> {
+    const panel = this.archivedCyclePeekPanel();
+    await panel.getByRole("button", { name: "Close preview" }).click({ timeout: WebNewDriver.WAIT_MS });
+    await panel.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(() => !new URL(location.href).searchParams.has("peekCycle"), undefined, {
+      timeout: WebNewDriver.WAIT_MS,
+    });
+  }
+
+  async archivesCyclesVisibleNames(): Promise<string[]> {
+    return this.cycleRowNames();
+  }
+  async archivesCyclesLiveGroupOpen(section: string): Promise<void> {
+    const group = this.page.locator(`section[data-testid^="cycle-group-"][aria-label*="${section}"]`).first();
+    const toggle = group.getByRole("button").first();
+    await toggle.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    if ((await toggle.getAttribute("aria-expanded")) !== "true") {
+      await toggle.click({ timeout: WebNewDriver.WAIT_MS });
+      await this.page.waitForFunction(
+        (label: string) =>
+          document
+            .querySelector(`section[data-testid^="cycle-group-"][aria-label*="${label}"] button`)
+            ?.getAttribute("aria-expanded") === "true",
+        section,
+        { timeout: WebNewDriver.WAIT_MS }
+      );
+    }
   }
   async archivesCyclesGroupHeadings(): Promise<string[]> {
-    return todo("archivesCyclesGroupHeadings");
+    const groups = this.page.locator('section[data-testid^="cycle-group-"]');
+    const total = await groups.count();
+    const headings: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const label = await groups.nth(i).getAttribute("aria-label");
+      if (label !== null && label !== "") headings.push(label);
+    }
+    return headings;
   }
-  async archivesCyclesOpenPeek(_name: string): Promise<void> {
-    return todo("archivesCyclesOpenPeek");
+  async archivesCyclesOpenPeek(name: string): Promise<void> {
+    await this.openArchivedCyclePeek(name);
   }
-  async archivesCyclesOpenPeekLink(_workspaceSlug: string, _projectId: string, _cycleId: string): Promise<void> {
-    return todo("archivesCyclesOpenPeekLink");
+  async archivesCyclesOpenPeekLink(workspaceSlug: string, projectId: string, cycleId: string): Promise<void> {
+    await this.page.goto(`/${workspaceSlug}/projects/${projectId}/archives/cycles?peekCycle=${cycleId}`);
+    await this.page.waitForLoadState("domcontentloaded");
   }
   async archivesCyclesPeekName(): Promise<string | null> {
-    return todo("archivesCyclesPeekName");
+    return this.archivedCyclePeekName();
   }
   async archivesCyclesPeekParam(): Promise<string | null> {
-    return todo("archivesCyclesPeekParam");
+    return new URL(this.page.url()).searchParams.get("peekCycle");
   }
   async archivesCyclesClosePeek(): Promise<void> {
-    return todo("archivesCyclesClosePeek");
+    await this.closeArchivedCyclePeek();
   }
+  /** The expanded archived search box. */
+  private archivedCyclesSearchBox(): Locator {
+    return this.page.getByTestId("archived-cycles-search-box");
+  }
+
+  /** The expanded box's text input. */
+  private archivedCyclesSearchInput(): Locator {
+    return this.page.getByTestId("archived-cycles-search-input");
+  }
+
   async archivesCyclesSearchExpanded(): Promise<boolean> {
-    return todo("archivesCyclesSearchExpanded");
+    return this.isShown(this.archivedCyclesSearchBox());
   }
   async archivesCyclesSearchOpen(): Promise<void> {
-    return todo("archivesCyclesSearchOpen");
+    await this.page.getByTestId("archived-cycles-search-toggle").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.archivedCyclesSearchInput().waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
+    await this.page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Search archived cycles",
+      undefined,
+      { timeout: WebNewDriver.WAIT_MS }
+    );
   }
   async archivesCyclesSearchFocused(): Promise<boolean> {
-    return todo("archivesCyclesSearchFocused");
+    const input = this.archivedCyclesSearchInput();
+    if ((await input.count()) === 0) return false;
+    return input
+      .first()
+      .evaluate((element) => element.ownerDocument.activeElement === element)
+      .catch(() => false);
   }
-  async archivesCyclesSearchFill(_text: string): Promise<void> {
-    return todo("archivesCyclesSearchFill");
+  async archivesCyclesSearchFill(text: string): Promise<void> {
+    await this.archivedCyclesSearchInput().fill(text, { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesSearchText(): Promise<string> {
-    return todo("archivesCyclesSearchText");
+    const input = this.archivedCyclesSearchInput();
+    if ((await input.count()) === 0) return "";
+    return input.first().inputValue();
   }
   async archivesCyclesSearchEscape(): Promise<void> {
-    return todo("archivesCyclesSearchEscape");
+    await this.archivedCyclesSearchInput().press("Escape", { timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesSearchClear(): Promise<void> {
-    return todo("archivesCyclesSearchClear");
+    await this.page.getByTestId("archived-cycles-search-clear").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.archivedCyclesSearchBox().waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesClickAway(): Promise<void> {
-    return todo("archivesCyclesClickAway");
+    await this.page.getByTestId("archived-cycles-header-spacer").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async archivesCyclesFiltersOpen(): Promise<void> {
-    return todo("archivesCyclesFiltersOpen");
+    await this.cyclesFiltersOpen();
   }
   async archivesCyclesFiltersClose(): Promise<void> {
-    return todo("archivesCyclesFiltersClose");
+    await this.cyclesFiltersClose();
   }
   async archivesCyclesFilterSections(): Promise<string[]> {
-    return todo("archivesCyclesFilterSections");
+    return this.cyclesFilterSections();
   }
   async archivesCyclesFilterOptionNames(): Promise<string[]> {
-    return todo("archivesCyclesFilterOptionNames");
+    return this.cyclesFilterOptionNames();
   }
-  async archivesCyclesFilterPick(_section: string, _optionName: string): Promise<void> {
-    return todo("archivesCyclesFilterPick");
+  async archivesCyclesFilterPick(section: string, optionName: string): Promise<void> {
+    await this.cyclesFilterPick(section, optionName);
   }
   async archivesCyclesFilterChipTexts(): Promise<string[]> {
-    return todo("archivesCyclesFilterChipTexts");
+    return this.cyclesFilterChipTexts();
   }
-  async archivesCyclesFilterRemoveChip(_chipText: string): Promise<void> {
-    return todo("archivesCyclesFilterRemoveChip");
+  async archivesCyclesFilterRemoveChip(chipText: string): Promise<void> {
+    await this.cyclesFilterRemoveChip(chipText);
   }
   async archivesCyclesFiltersClearAll(): Promise<void> {
-    return todo("archivesCyclesFiltersClearAll");
+    await this.cyclesFiltersClearAll();
   }
   async archivesCyclesFiltersActive(): Promise<boolean> {
-    return todo("archivesCyclesFiltersActive");
+    return this.cyclesFiltersActive();
   }
   async archivesCyclesEmptyHeading(): Promise<string | null> {
-    return todo("archivesCyclesEmptyHeading");
+    const heading = this.page.getByRole("heading", { name: "No archived cycles yet" }).first();
+    if (!(await this.isShown(heading))) return null;
+    return (await heading.innerText()).trim();
   }
   async archivesCyclesNoMatchHint(): Promise<string | null> {
-    return todo("archivesCyclesNoMatchHint");
+    const view = this.page.getByTestId("cycles-no-match");
+    if (!(await this.isShown(view))) return null;
+    return (await view.locator("p").first().innerText()).trim();
   }
-  async archivesCyclesSkeletonShownOnSlowFetchViaLive(_workspaceSlug: string, _projectId: string): Promise<boolean> {
-    return todo("archivesCyclesSkeletonShownOnSlowFetchViaLive");
+  async archivesCyclesSkeletonShownOnSlowFetchViaLive(workspaceSlug: string, projectId: string): Promise<boolean> {
+    await this.archivesArmSkeletonObserver();
+    const holdsArchivedReads = (url: URL): boolean => url.pathname.includes("/archived-cycles/");
+    await this.page.route(holdsArchivedReads, async (route) => {
+      if (route.request().method() === "GET") {
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      }
+      await route.continue().catch(() => undefined);
+    });
+    try {
+      await this.openLiveCyclesSettled(workspaceSlug, projectId);
+      await this.enterArchivedCyclesFromLive(projectId);
+      return await this.archivesSkeletonWasSeen();
+    } finally {
+      await this.page.unroute(holdsArchivedReads).catch(() => undefined);
+    }
   }
-  async archivesCyclesOpenRowMenu(_name: string): Promise<void> {
-    return todo("archivesCyclesOpenRowMenu");
+  async archivesCyclesOpenRowMenu(name: string): Promise<void> {
+    await this.cycleRowMenuOpen(name);
   }
   async archivesCyclesMenuEntries(): Promise<{ title: string; disabled: boolean; description: string | null }[]> {
-    return todo("archivesCyclesMenuEntries");
+    const items = this.page.getByRole("menuitem");
+    const total = await items.count();
+    const entries: { title: string; disabled: boolean; description: string | null }[] = [];
+    for (let i = 0; i < total; i++) {
+      const item = items.nth(i);
+      const title = (
+        await item
+          .locator("h5")
+          .first()
+          .innerText()
+          .catch(() => "")
+      ).trim();
+      const hint = item.locator("p");
+      const description =
+        (await hint.count()) === 0
+          ? null
+          : (
+              await hint
+                .first()
+                .innerText()
+                .catch(() => "")
+            ).trim() || null;
+      const ariaDisabled = await item.getAttribute("aria-disabled").catch(() => null);
+      const dataDisabled = await item.getAttribute("data-disabled").catch(() => null);
+      entries.push({ title, disabled: ariaDisabled === "true" || dataDisabled !== null, description });
+    }
+    return entries;
   }
-  async archivesCyclesMenuPick(_title: string): Promise<void> {
-    return todo("archivesCyclesMenuPick");
+  async archivesCyclesMenuPick(title: string): Promise<void> {
+    await this.cycleRowMenuPick(title);
+  }
+  /** The open archive dialog, scoped by its heading (toasts also carry role=dialog). */
+  private cycleArchiveDialog(): Locator {
+    return this.page
+      .getByRole("dialog")
+      .filter({ has: this.page.getByRole("heading", { name: "Archive cycle" }) })
+      .first();
   }
   async archivesCyclesArchiveDialogText(): Promise<{ heading: string; body: string } | null> {
-    return todo("archivesCyclesArchiveDialogText");
+    const dialog = this.cycleArchiveDialog();
+    try {
+      await this.page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('[role="dialog"]')).some((candidate) =>
+            (candidate.textContent ?? "").includes("Archive cycle")
+          ),
+        undefined,
+        { timeout: WebNewDriver.WAIT_MS }
+      );
+    } catch {
+      return null;
+    }
+    const heading = dialog.getByRole("heading", { name: "Archive cycle" }).first();
+    const title = (await heading.innerText().catch(() => "")).trim();
+    // The consequence copy is the description directly under the
+    // heading; read it from the heading element so the kit's heading
+    // level and wrapper nesting do not matter.
+    const body = await heading.evaluate(descriptionAfterHeading).catch(() => "");
+    return { heading: title, body };
   }
   async archivesCyclesArchiveDialogConfirm(): Promise<void> {
-    return todo("archivesCyclesArchiveDialogConfirm");
+    const dialog = this.cycleArchiveDialog();
+    // Attach before clicking: an instantly-fulfilled write would
+    // otherwise complete before the wait exists. Returns once the
+    // write lands (the toast renders with it); callers read the toast
+    // immediately and let later assertions imply the close, so a slow
+    // detach can never outlast the toast.
+    const responded = this.page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().includes("/cycles/") &&
+          response.url().includes("/archive/"),
+        { timeout: WebNewDriver.WAIT_MS }
+      )
+      .catch(() => null);
+    await dialog.getByRole("button", { name: "Archive", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await responded;
   }
   async archivesCyclesArchiveDialogCancel(): Promise<void> {
-    return todo("archivesCyclesArchiveDialogCancel");
+    const dialog = this.cycleArchiveDialog();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click({ timeout: WebNewDriver.WAIT_MS });
+    await dialog.waitFor({ state: "detached", timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Archived modules (NEWFRONT-225, ARCH-020..025). Throwing stubs;
@@ -14769,8 +14996,10 @@ export class WebNewDriver implements ParityDriver {
   async archivesOpenModulesTab(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("archivesOpenModulesTab");
   }
-  async archivesOpenCyclesTab(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesOpenCyclesTab");
+  async archivesOpenCyclesTab(_workspaceSlug: string, projectId: string): Promise<void> {
+    // Callers arrive on the live screen, so the sidebar Archives entry
+    // is the client-side way in (NEWFRONT-701 owns this tab).
+    await this.enterArchivedCyclesFromLive(projectId);
   }
   async archivesGoToProjectArchives(projectId: string): Promise<void> {
     const row = this.page.locator(`li[data-project-row="${projectId}"]`).first();
@@ -14813,8 +15042,8 @@ export class WebNewDriver implements ParityDriver {
   async archivesOpenLiveModules(_workspaceSlug: string, _projectId: string): Promise<void> {
     return todo("archivesOpenLiveModules");
   }
-  async archivesOpenLiveCycles(_workspaceSlug: string, _projectId: string): Promise<void> {
-    return todo("archivesOpenLiveCycles");
+  async archivesOpenLiveCycles(workspaceSlug: string, projectId: string): Promise<void> {
+    await this.openLiveCyclesSettled(workspaceSlug, projectId);
   }
   async archivesDirectLoadRenders(workspaceSlug: string, projectId: string): Promise<boolean> {
     // A fresh session carries no live visit: the tab either settles from
@@ -14841,7 +15070,7 @@ export class WebNewDriver implements ParityDriver {
     return todo("archivesModuleRowNames");
   }
   async archivesCycleRowNames(): Promise<string[]> {
-    return todo("archivesCycleRowNames");
+    return this.cycleRowNames();
   }
   async archivesModuleSortLabel(): Promise<string> {
     return todo("archivesModuleSortLabel");
@@ -14909,20 +15138,29 @@ export class WebNewDriver implements ParityDriver {
   async archivesCloseModulePeek(): Promise<void> {
     return todo("archivesCloseModulePeek");
   }
-  async archivesOpenCyclePeek(_name: string): Promise<void> {
-    return todo("archivesOpenCyclePeek");
+  async archivesOpenCyclePeek(name: string): Promise<void> {
+    await this.openArchivedCyclePeek(name);
   }
   async archivesCyclePeekName(): Promise<string | null> {
-    return todo("archivesCyclePeekName");
+    return this.archivedCyclePeekName();
   }
   async archivesCloseCyclePeek(): Promise<void> {
-    return todo("archivesCloseCyclePeek");
+    await this.closeArchivedCyclePeek();
   }
   async archivesModulePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
     return todo("archivesModulePeekReadOnly");
   }
   async archivesCyclePeekReadOnly(): Promise<ArchivesPeekReadOnly> {
-    return todo("archivesCyclePeekReadOnly");
+    // The archived peek carries a static status marker and no link
+    // action, so "locked" reads as no status control and "offered" as
+    // no add-link/attach control. With no peek open the name, the
+    // offer and the summary are all absent while the lock holds.
+    const panel = this.archivedCyclePeekPanel();
+    const name = await this.archivedCyclePeekName();
+    const statusLocked = (await panel.getByRole("button", { name: /status/i }).count()) === 0;
+    const addLinkOffered = (await panel.getByRole("button", { name: /add link|attach/i }).count()) > 0;
+    const summaryShown = await this.isShown(panel.getByTestId("archived-cycle-peek-summary"));
+    return { name, statusLocked, addLinkOffered, summaryShown };
   }
   async archivesLiveModuleMenuEntries(_name: string): Promise<ArchivesMenuEntry[]> {
     return todo("archivesLiveModuleMenuEntries");
