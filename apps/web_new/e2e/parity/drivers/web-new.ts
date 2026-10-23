@@ -7,7 +7,7 @@
 // fill these in method by method; the oracle driver stays untouched.
 import { readFileSync } from "node:fs";
 
-import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route, type WebSocket } from "@playwright/test";
 
 import { bridgeParityAssetBucket } from "../helpers/asset-bucket.js";
 import { calendarDayLabel, isoDayOffset, localTodayISO, zonedTodayISO } from "../helpers/calendar-dates.js";
@@ -27564,7 +27564,13 @@ export class WebNewDriver implements ParityDriver {
 
   async settingsShellCountSockets(tabHrefs: string[], workspaceSlug: string, projectId: string): Promise<number> {
     let count = 0;
-    const handler = (): void => {
+    const handler = (socket: WebSocket): void => {
+      // The vite dev server opens one HMR socket per full-page load at
+      // the server root with a token query; the oracle's production
+      // build has no equivalent. The pin is about app realtime sockets,
+      // so HMR never counts (NEWFRONT-606).
+      const url = new URL(socket.url());
+      if (url.pathname === "/" && url.searchParams.has("token")) return;
       count += 1;
     };
     this.page.on("websocket", handler);
