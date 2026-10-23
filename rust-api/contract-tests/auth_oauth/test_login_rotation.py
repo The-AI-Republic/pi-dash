@@ -226,7 +226,12 @@ def _assert_csrf_rotated(resp, planted):
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
-def test_anonymous_login_rotates_session_and_stamps_last_login(base_url: str, provider: str):
+# ensure_instance: initiate 302s INSTANCE_NOT_CONFIGURED (no `state`) on a
+# fresh database without the setup marker, so this file must not rely on
+# another module's session fixture having seeded it.
+def test_anonymous_login_rotates_session_and_stamps_last_login(
+    base_url: str, provider: str, ensure_instance
+):
     """Full app login from an anonymous initiate session: the callback 302s
     without ``error_code``, the session key rotates (old row gone, new row
     bound to the created user), ``last_login`` is stamped, anonymous data
@@ -295,7 +300,9 @@ def test_anonymous_login_rotates_session_and_stamps_last_login(base_url: str, pr
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
-def test_login_on_other_user_session_flushes(base_url: str, provider: str):
+def test_login_on_other_user_session_flushes(
+    base_url: str, provider: str, ensure_instance
+):
     """A login on another user's session flushes it: the callback 302s, the
     new key differs, A's row is gone, the new session carries only B's
     login keys (A's marker dropped), and B's ``last_login`` is stamped.
