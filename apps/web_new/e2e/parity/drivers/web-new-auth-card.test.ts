@@ -185,6 +185,65 @@ describe("signOutViaCommandPalette", () => {
 
     expect(optionClick).toHaveBeenCalledTimes(3);
   });
+
+  it("drops the session when the entry bounces to onboarding, which has no sign-out", async () => {
+    // A user with no workspace lands on onboarding, whose account menu
+    // carries only the switch-account entry (PSET-003, NEWFRONT-606).
+    const clearCookies = vi.fn(async () => undefined);
+    const goto = vi.fn(async () => undefined);
+    const page = {
+      goto,
+      url: () => "https://parity.test/onboarding/",
+      context: () => ({ clearCookies }),
+      getByPlaceholder: () => element({ isVisible: async () => false }),
+      getByRole: (role: string) =>
+        role === "progressbar" ? element({ count: async () => 1 }) : element({ count: async () => 0 }),
+      keyboard: { press: async () => undefined },
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver as unknown as { waitForSignedOut: () => Promise<void> }, "waitForSignedOut").mockImplementation(
+      async () => undefined
+    );
+
+    await driver.signOutViaCommandPalette();
+
+    expect(clearCookies).toHaveBeenCalledTimes(1);
+    expect(goto).toHaveBeenCalledWith("/", { waitUntil: "domcontentloaded", timeout: 60_000 });
+  });
+
+  it("takes the session-drop path when onboarding paints late mid-loop", async () => {
+    // The bounce can outlast the first probe; a late paint still drops
+    // the session instead of retrying a menu the page has none of.
+    let probes = 0;
+    const triggerWait = vi.fn(async () => {
+      throw new Error("timeout");
+    });
+    const clearCookies = vi.fn(async () => undefined);
+    const page = {
+      goto: vi.fn(async () => undefined),
+      url: () => "https://parity.test/parity-ws/",
+      context: () => ({ clearCookies }),
+      locator: () => element({ waitFor: triggerWait }),
+      getByPlaceholder: () => element({ isVisible: async () => false }),
+      getByRole: (role: string) => {
+        if (role !== "progressbar") return element({});
+        probes += 1;
+        return element({ count: async () => (probes >= 2 ? 1 : 0) });
+      },
+      keyboard: { press: async () => undefined },
+    } as unknown as Page;
+    const driver = new WebNewDriver(page);
+    vi.spyOn(driver as unknown as { dismissTourIfShown: () => Promise<void> }, "dismissTourIfShown").mockImplementation(
+      async () => undefined
+    );
+    vi.spyOn(driver as unknown as { waitForSignedOut: () => Promise<void> }, "waitForSignedOut").mockImplementation(
+      async () => undefined
+    );
+
+    await driver.signOutViaCommandPalette();
+
+    expect(clearCookies).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("reloadPage", () => {

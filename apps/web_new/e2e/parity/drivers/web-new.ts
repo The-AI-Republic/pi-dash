@@ -5073,7 +5073,31 @@ export class WebNewDriver implements ParityDriver {
       .catch(() => undefined);
   }
 
+  /** The onboarding shell, whose account menu carries no sign-out entry. */
+  private async onOnboarding(): Promise<boolean> {
+    return (await this.page.getByRole("progressbar", { name: "Onboarding progress" }).count()) > 0;
+  }
+
+  /** Drop the session when no sign-out control exists (the onboarding shell). */
+  private async resetToEntry(): Promise<void> {
+    await this.resetSession();
+    await this.waitForSignedOut();
+  }
+
   async signOutViaCommandPalette(): Promise<void> {
+    // The palette belongs to the workspace shell, so enter it first when
+    // the page has none; an already signed-out page skips that and the
+    // loop below returns at once.
+    if (!(await this.isSignedOut().catch(() => false))) {
+      await this.openEntry();
+    }
+    // A user with no workspace lands on onboarding, whose account menu
+    // carries only the switch-account entry; drop the session there
+    // instead of hunting a shell menu that never paints (PSET-003).
+    if (await this.onOnboarding().catch(() => false)) {
+      await this.resetToEntry();
+      return;
+    }
     // A slow paint can outlast the whole attempt even though the sign-out
     // already happened, so every attempt ends by checking for the entry;
     // an already signed-out page returns instead of retrying a palette that
@@ -5093,6 +5117,13 @@ export class WebNewDriver implements ParityDriver {
       } catch {
         await this.page.keyboard.press("Escape").catch(() => {});
         if (await this.isSignedOut().catch(() => false)) return;
+        // The bounce to onboarding can outlast the entry check above; a
+        // late paint still takes the session-drop path, not another menu
+        // attempt against a page that has no shell menu.
+        if (await this.onOnboarding().catch(() => false)) {
+          await this.resetToEntry();
+          return;
+        }
       }
     }
     throw new Error("[parity] sign-out never reached the entry.");
