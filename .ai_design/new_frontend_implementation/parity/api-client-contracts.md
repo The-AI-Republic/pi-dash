@@ -237,6 +237,8 @@ contract suites (`src/contract/*.contract.test.ts`) skip unless
 | Page live health | `getLiveHealth` | `pages-live.contract.test.ts` — status OK, ISO timestamp parses, version non-empty against `PIDASH_CONTRACT_LIVE_URL` (NEWFRONT-834) |
 | Page live convert | `convertDocument`, `convertDocumentErrorFrom` | `pages-live.contract.test.ts` — markup converts to the three stored forms (fresh and onto a base binary); the six malformed classes 400 with per-field violations (NEWFRONT-834) |
 | Page live export | `exportPagePdf`, `pdfExportErrorFrom` | `pages-live.contract.test.ts` — a persisted probe page exports to `%PDF` bytes under the disposition filename; no cookie 401→auth, bad body 400→validation, missing page 404/502→fetch; the 504/500 kinds are pinned by mapper unit tests (server timeouts are fixed constants, generation crashes are not triggerable) (NEWFRONT-834) |
+| Workspace export create | `createWorkspaceExport` | `exports.contract.test.ts` — POST of provider + projects answers the `{ message }` acknowledgement; an unknown provider 400s with the server's `Provider … not found.` message; `multiple` derives from the project count in the stub suite (NEWFRONT-765) |
+| Workspace export history | `listWorkspaceExports`, `isKnownExportProvider`, `isKnownExportStatus` | `exports.contract.test.ts` — first read `cursor=10:0:0&per_page=10` parses the full paginator envelope incl. `next_page_results`/`prev_page_results`; missing params 400; the created row joins the list with the user-lite initiator (no email); unknown provider/status tolerance pinned by stub tests (NEWFRONT-765) |
 
 ## From a clean checkout
 
