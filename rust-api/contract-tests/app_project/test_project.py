@@ -23,7 +23,7 @@ DETAIL_KEYS = [
     "archive_in", "archived_at", "base_branch", "close_in", "cover_image",
     "cover_image_asset", "cover_image_url", "created_at", "created_by",
     "cycle_view", "default_agent_executor", "default_assignee",
-    "default_state", "deleted_at", "description", "description_html",
+    "default_state", "default_work_type", "deleted_at", "description", "description_html",
     "description_text", "emoji", "estimate", "external_id", "external_source",
     "guest_view_all_features", "icon_prop", "id", "identifier", "inbox_view",
     "intake_view", "is_default", "is_favorite", "is_issue_type_enabled",

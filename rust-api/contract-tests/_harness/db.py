@@ -411,10 +411,10 @@ class Database:
                         agent_ticking_enabled, is_default,
                         agent_review_default_interval_seconds,
                         default_agent_executor,
-                        agent_test_default_interval_seconds)
+                        agent_test_default_interval_seconds, default_work_type)
                        values (%s,%s,%s,%s,'',0,%s,%s,true,true,true,true,true,
                                365,365,'{}',true,false,false,'UTC',true,'','',
-                               10800,10,true,false,10800,'local_runner',10800)""",
+                               10800,10,true,false,10800,'local_runner',10800, 'software')""",
                     (now, now, pid, name or f"proj-{identifier}",
                      identifier, workspace_id),
                 )
@@ -732,7 +732,8 @@ def _insert(conn):
                     agent_ticking_enabled, is_default,
                     agent_review_default_interval_seconds,
                     default_agent_executor,
-                    agent_test_default_interval_seconds
+                    agent_test_default_interval_seconds,
+                    default_work_type
                 ) VALUES (
                     %s, now(), now(), %s, '', 0,
                     %s, %s, true, true,
@@ -745,7 +746,8 @@ def _insert(conn):
                     false, false,
                     0,
                     '',
-                    0
+                    0,
+                    'software'
                 )
                 """,
                 [pid, f"CT Project {identifier}", identifier, ws],
@@ -1092,7 +1094,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
                 repo_url, base_branch, agent_default_interval_seconds,
                 agent_default_max_ticks, agent_ticking_enabled, is_default,
                 agent_review_default_interval_seconds, default_agent_executor,
-                agent_test_default_interval_seconds, created_at, updated_at)
+                agent_test_default_interval_seconds, created_at, updated_at, default_work_type)
             VALUES (%s, %s, '', %s, %s,
                 %s, %s, true, true,
                 true, true, false, 0, 0,
@@ -1100,7 +1102,7 @@ def create_project(conn, workspace_id, tag, *, name=None, identifier=None, creat
                 false, 'UTC', false,
                 '', '', 0,
                 0, false, false,
-                0, '', 0, now(), now())
+                0, '', 0, now(), now(), 'software')
             """,
             (pid, name, NETWORK_SECRET, identifier, workspace_id, created_by_id),
         )

@@ -112,10 +112,10 @@ def make_project(workspace_id: str, owner_id: str, identifier: str | None = None
                repo_url, base_branch, agent_default_interval_seconds,
                agent_default_max_ticks, agent_ticking_enabled, is_default,
                agent_review_default_interval_seconds, default_agent_executor,
-               agent_test_default_interval_seconds, created_at, updated_at)
+               agent_test_default_interval_seconds, created_at, updated_at, default_work_type)
            VALUES (%s,%s,'',0,%s,%s,true,true,true,true,true,365,365,'{}',
                    true,false,false,'UTC',true,'','',10800,10,true,false,
-                   10800,'local_runner',10800,now(),now())""",
+                   10800,'local_runner',10800,now(),now(), 'software')""",
         (proj_id, f"proj-{ident}", ident, workspace_id),
     )
     return proj_id, ident
@@ -199,7 +199,7 @@ def make_run(issue_id: str, workspace_id: str, creator_id: str, pod_id: str,
         "pod_id": pod_id, "created_by_id": creator_id, "work_item_id": issue_id,
         "llm_model": "", "refusal_category": "", "trigger": "tick",
         "executor_kind": "local_runner", "dispatch_attempts": 0, "cancel_reason": "",
-        "error_code": "", "tool_plan": "{}", "phase_kind": "",
+        "error_code": "", "tool_plan": "{}", "phase_kind": "", "work_type": "",
         "agent_metadata": "{}", "usage": "{}",
     }
     row.update(fields)

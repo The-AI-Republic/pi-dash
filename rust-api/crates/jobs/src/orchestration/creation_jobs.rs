@@ -298,6 +298,7 @@ fn map_issue(row: &PgRow) -> Result<IssueView, sqlx::Error> {
         priority: row.try_get("priority")?,
         sequence_id: row.try_get("sequence_id")?,
         target_date: row.try_get("target_date")?,
+        work_type: row.try_get("work_type")?,
     })
 }
 
@@ -322,6 +323,7 @@ fn map_project(row: &PgRow) -> Result<ProjectView, sqlx::Error> {
         interval_impl: i64::from(interval_impl),
         interval_review: i64::from(interval_review),
         interval_test: i64::from(interval_test),
+        default_work_type: row.try_get("default_work_type")?,
     })
 }
 
@@ -527,6 +529,7 @@ where
             .bind(&row.phase_kind)
             .bind(&row.run_config)
             .bind(row.now)
+            .bind(&row.work_type)
             .fetch_one(&mut **self.tx.inner())
             .await
             .map_err(Self::db)?;
@@ -1861,10 +1864,10 @@ mod tests {
              logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
              agent_default_max_ticks, agent_review_default_interval_seconds, \
              agent_test_default_interval_seconds, agent_ticking_enabled, \
-             default_agent_executor, workspace_id) \
+             default_agent_executor, default_work_type, workspace_id) \
              VALUES ($1, $2, $2, 'FX6', 'FX6', '', 2, false, false, false, true, false, false, \
              false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/fx6.git', \
-             'main', 10800, 10, 10800, 10800, true, 'local_runner', $3)",
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', 'software', $3)",
         )
         .bind(project)
         .bind(at)
@@ -1967,10 +1970,10 @@ mod tests {
             "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, runner_id, \
              pinned_runner_id, parent_run_id, work_item_id, status, executor_kind, \
              dispatch_attempts, cancel_reason, error_code, tool_plan, prompt, trigger, \
-             phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-             error, refusal_category, llm_model, usage, created_at) \
+             phase_kind, work_type, run_config, required_capabilities, thread_id, \
+             agent_metadata, error, refusal_category, llm_model, usage, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, '', '', '{}', '', $11, \
-             $12, $13, '[]', '', '{}', '', '', '', '{}', $14)",
+             $12, '', $13, '[]', '', '{}', '', '', '', '{}', $14)",
         )
         .bind(id)
         .bind(graph.ws)
@@ -2000,9 +2003,10 @@ mod tests {
              refresh_token_fingerprint, refresh_token_generation, \
              previous_refresh_token_hash, access_token_signing_key_version, \
              enrollment_token_hash, enrollment_token_fingerprint, capabilities, status, \
-             os, arch, runner_version, dev_metadata, protocol_version, revoked_reason) \
+             os, arch, runner_version, dev_metadata, protocol_version, revoked_reason, \
+             last_heartbeat_at) \
              VALUES ($1, $2, $2, $3, $4, $5, $6, '', 'desktop_bundled', 0, '', '', 0, '', \
-             1, '', '', '[]', $7, '', '', '', '{}', 1, '')",
+             1, '', '', '[]', $7, '', '', '', '{}', 1, '', $2)",
         )
         .bind(id)
         .bind(now())
@@ -2406,7 +2410,7 @@ mod tests {
         assert_eq!(row.3, None);
         assert_eq!(row.6, "review");
         assert!(row.11.contains("You are reviewing"));
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 10);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 11);
         cleanup(
             &pool,
             graph,
@@ -2580,7 +2584,7 @@ mod tests {
         assert_eq!(row.3, Some(runner));
         assert_eq!(row.5, "comment_and_run");
         assert!(!row.11.is_empty());
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 16);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 17);
         cleanup(
             &pool,
             graph,
@@ -2810,7 +2814,7 @@ mod tests {
             })
         );
         assert!(!row.11.is_empty());
-        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 16);
+        assert_eq!(row.12.as_ref().unwrap().as_array().unwrap().len(), 17);
         cleanup(
             &pool,
             graph,

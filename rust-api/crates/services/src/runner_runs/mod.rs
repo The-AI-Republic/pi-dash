@@ -391,6 +391,7 @@ pub(crate) const ISSUE_COLUMNS: &[&str] = &[
     "created_via",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
 ];
 
 /// `projects` columns in Django `_meta` order (captured from
@@ -442,6 +443,7 @@ pub(crate) const PROJECT_COLUMNS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
 ];
 
 /// `states` columns in Django `_meta` order (captured from
@@ -559,7 +561,7 @@ mod tests {
 
     #[test]
     fn shared_column_snapshots_match_django_meta() {
-        assert_eq!(ISSUE_COLUMNS.len(), 34);
+        assert_eq!(ISSUE_COLUMNS.len(), 35);
         assert_eq!(
             &ISSUE_COLUMNS[..6],
             [
@@ -578,11 +580,12 @@ mod tests {
                 "workpad",
                 "created_via",
                 "assigned_pod_id",
-                "agent_executor"
+                "agent_executor",
+                "work_type"
             ]
         );
         assert!(ISSUE_COLUMNS.contains(&"sequence_id"));
-        assert_eq!(PROJECT_COLUMNS.len(), 46);
+        assert_eq!(PROJECT_COLUMNS.len(), 47);
         assert_eq!(
             &PROJECT_COLUMNS[..6],
             [
@@ -596,7 +599,11 @@ mod tests {
         );
         assert_eq!(
             &PROJECT_COLUMNS[44..],
-            ["agent_ticking_enabled", "default_agent_executor"]
+            [
+                "agent_ticking_enabled",
+                "default_agent_executor",
+                "default_work_type"
+            ]
         );
         assert!(PROJECT_COLUMNS.contains(&"agent_default_max_ticks"));
         assert_eq!(STATE_COLUMNS.len(), 18);

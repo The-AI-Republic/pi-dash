@@ -222,6 +222,7 @@ pub mod project {
         "agent_test_default_interval_seconds",
         "agent_ticking_enabled",
         "default_agent_executor",
+        "default_work_type",
         "module_view",
         "cycle_view",
         "issue_views_view",
@@ -391,6 +392,7 @@ pub mod issue {
         "created_via",
         "assigned_pod_id",
         "agent_executor",
+        "work_type",
     ];
     /// M2M entries in [`COLUMNS`] that are not physical columns.
     pub const M2M_ENTRIES: &[&str] = &["assignees", "labels"];

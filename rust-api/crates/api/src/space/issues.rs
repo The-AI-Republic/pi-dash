@@ -867,6 +867,7 @@ const ISSUE_ORDER_COLUMNS: &[&str] = &[
     "created_via",
     "assigned_pod_id",
     "agent_executor",
+    "work_type",
 ];
 
 const STATE_ORDER_COLUMNS: &[&str] = &[
@@ -937,6 +938,7 @@ const PROJECT_ORDER_COLUMNS: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
 ];
 
 const WORKSPACE_ORDER_COLUMNS: &[&str] = &[

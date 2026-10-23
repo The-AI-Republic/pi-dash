@@ -384,6 +384,7 @@ class Seed:
             agent_review_default_interval_seconds=0,
             default_agent_executor="",
             agent_test_default_interval_seconds=0,
+            default_work_type="software",
             created_at=_now(),
             updated_at=_now(),
         )
@@ -876,11 +877,11 @@ def create_project(
             agent_default_max_ticks, agent_ticking_enabled, is_default,
             agent_review_default_interval_seconds, default_agent_executor,
             agent_test_default_interval_seconds, created_at, updated_at,
-            created_by_id)
+            created_by_id, default_work_type)
         VALUES (%s,%s,'Seeded for contract tests',1,%s,%s,
             true,true,true,true,true,30,30,'{}',
             true,true,false,'UTC',true,'','main',60,10,true,false,
-            60,'local_runner',60,%s,%s,%s)""",
+            60,'local_runner',60,%s,%s,%s, 'software')""",
         (pid, name, identifier, workspace_id, now, now, created_by_id),
     )
     return {"id": pid, "identifier": identifier}
@@ -1124,7 +1125,7 @@ class Seeder:
                 agent_default_interval_seconds, agent_default_max_ticks,
                 agent_review_default_interval_seconds, agent_test_default_interval_seconds,
                 agent_ticking_enabled, default_agent_executor,
-                created_at, updated_at)
+                created_at, updated_at, default_work_type)
                VALUES (%s,%s,'',2,%s,%s,
                        false,false,false,true,false,
                        false,false,false,
@@ -1132,7 +1133,7 @@ class Seeder:
                        0,0,'{}','UTC','','main',
                        10800,10,10800,10800,
                        true,'local_runner',
-                       now(),now())""",
+                       now(),now(), 'software')""",
             (
                 project_id,
                 # Unique per project within a workspace (partial unique index
@@ -1852,10 +1853,10 @@ class Seeder:
                 error, workspace_id, work_item_id, pod_id, created_by_id, llm_model,
                 refusal_category, trigger, executor_kind, dispatch_attempts,
                 cancel_reason, error_code, tool_plan, phase_kind, agent_metadata,
-                usage, created_at)
+                usage, created_at, work_type)
                VALUES (%s,%s,'contract prompt','{}','{}','contract-thread','',
                        %s,%s,%s,%s,'contract-model','', 'human', 'local_runner', 0,
-                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now())""",
+                       '','', '{}', 'work', '{}', '{"input": 0, "output": 0, "total": 0}', now(),'')""",
             (run_id, status, workspace_id, work_item_id, pod_id, created_by_id),
         )
         self._put("agent_run", run_id)
@@ -1991,13 +1992,13 @@ class Seeder:
                 required_capabilities, thread_id, agent_metadata, tool_plan,
                 usage, dispatch_attempts, error, refusal_category, llm_model,
                 cancel_reason, error_code, phase_kind,
-                created_at)
+                created_at, work_type)
                VALUES (%s,%s,%s,%s,%s,%s,
                        %s,'','direct','local_runner','{}',
                        '[]','{}','{}','{}',
                        '{}',0,'','','',
                        '','','',
-                       now())""",
+                       now(),'')""",
             (run_id, workspace_id, owner_id, owner_id, pod_id, runner_id, status),
         )
         self._put("agent_run", run_id)
@@ -2173,6 +2174,7 @@ def issue_chain(conn, slug: str) -> dict:
             "agent_test_default_interval_seconds": 10800,
             "agent_ticking_enabled": True,
             "default_agent_executor": "local_runner",
+            "default_work_type": "software",
         },
     )
     state = insert_row(
@@ -2433,6 +2435,7 @@ def project(conn, workspace_id, name: str = "Contract Project", **over) -> dict:
         "agent_review_default_interval_seconds": 0,
         "default_agent_executor": "",
         "agent_test_default_interval_seconds": 0,
+        "default_work_type": "software",
     }
     values.update(over)
     return insert_row(conn, "projects", values)

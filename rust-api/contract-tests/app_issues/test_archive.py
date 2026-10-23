@@ -11,7 +11,7 @@ ARCHIVE_DETAIL_KEYS = {
     "id", "name", "state_id", "sort_order", "completed_at",
     "estimate_point", "priority", "complexity_score", "start_date",
     "target_date", "sequence_id", "project_id", "parent_id",
-    "assigned_pod_id", "agent_executor", "created_at", "updated_at",
+    "assigned_pod_id", "agent_executor", "work_type", "created_at", "updated_at",
     "created_by", "updated_by", "is_draft", "archived_at", "is_synced",
     "description_html", "is_subscribed", "agent_ticker", "agent_status",
     "relations_summary", "has_open_blockers",

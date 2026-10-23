@@ -1015,6 +1015,7 @@ pub const PROJECT_KEY_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -1076,6 +1077,7 @@ pub const PROJECT_LIST_KEY_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -1149,6 +1151,7 @@ pub const PROJECT_DETAIL_KEY_ORDER: &[&str] = &[
     "agent_test_default_interval_seconds",
     "agent_ticking_enabled",
     "default_agent_executor",
+    "default_work_type",
     "created_by",
     "updated_by",
     "workspace",
@@ -1285,6 +1288,8 @@ pub struct ProjectRead {
     pub agent_ticking_enabled: bool,
     /// `CharField` over `AgentExecutorKind`.
     pub default_agent_executor: String,
+    /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
+    pub default_work_type: String,
     /// Audit FK (`PrimaryKeyRelatedField`).
     pub created_by: Option<String>,
     /// Audit FK (`PrimaryKeyRelatedField`).
@@ -1413,6 +1418,8 @@ pub struct ProjectListRead {
     pub agent_ticking_enabled: bool,
     /// `CharField` over `AgentExecutorKind`.
     pub default_agent_executor: String,
+    /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
+    pub default_work_type: String,
     /// Audit FK.
     pub created_by: Option<String>,
     /// Audit FK.
@@ -1558,6 +1565,8 @@ pub struct ProjectDetailRead {
     pub agent_ticking_enabled: bool,
     /// `CharField` over `AgentExecutorKind`.
     pub default_agent_executor: String,
+    /// `CharField(max_length=32, blank=True)` (PDASHOSS01-234).
+    pub default_work_type: String,
     /// Audit FK.
     pub created_by: Option<String>,
     /// Audit FK.
@@ -2650,7 +2659,7 @@ mod tests {
     #[test]
     fn key_order_consts_match_fixture() {
         let fx = fixture();
-        assert_eq!(PROJECT_KEY_ORDER.len(), 49);
+        assert_eq!(PROJECT_KEY_ORDER.len(), 50);
         assert_eq!(
             PROJECT_KEY_ORDER,
             str_list(
@@ -2661,7 +2670,7 @@ mod tests {
             )
             .as_slice()
         );
-        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 55);
+        assert_eq!(PROJECT_LIST_KEY_ORDER.len(), 56);
         assert_eq!(
             PROJECT_LIST_KEY_ORDER,
             str_list(
@@ -2676,7 +2685,7 @@ mod tests {
             PROJECT_LITE_FIELDS,
             str_list(fx.get("lite").expect("lite").get("key_order").expect("ko")).as_slice()
         );
-        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 51);
+        assert_eq!(PROJECT_DETAIL_KEY_ORDER.len(), 52);
         assert_eq!(
             PROJECT_DETAIL_KEY_ORDER,
             str_list(

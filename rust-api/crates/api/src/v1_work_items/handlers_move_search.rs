@@ -1456,6 +1456,7 @@ async fn render_moved_issue_api(
         git_work_branch: &issue.git_work_branch,
         created_via: issue.created_via.as_deref(),
         agent_executor: issue.agent_executor.as_deref(),
+        work_type: issue.work_type.as_deref(),
         created_by: created_by.as_deref(),
         updated_by: updated_by.as_deref(),
         project: &project,
@@ -1633,6 +1634,7 @@ fn map_source_row(
         git_work_branch: row.try_get("git_work_branch").map_err(fail)?,
         created_via: row.try_get("created_via").map_err(fail)?,
         agent_executor: row.try_get("agent_executor").map_err(fail)?,
+        work_type: row.try_get("work_type").map_err(fail)?,
         created_by_id: row.try_get("created_by_id").map_err(fail)?,
         updated_by_id: row.try_get("updated_by_id").map_err(fail)?,
     })

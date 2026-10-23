@@ -1516,10 +1516,10 @@ mod tests {
              logo_props, timezone, repo_url, base_branch, agent_default_interval_seconds, \
              agent_default_max_ticks, agent_review_default_interval_seconds, \
              agent_test_default_interval_seconds, agent_ticking_enabled, \
-             default_agent_executor, workspace_id, project_lead_id, default_assignee_id) \
+             default_agent_executor, default_work_type, workspace_id, project_lead_id, default_assignee_id) \
              VALUES ($1, $2, $2, 'FX8', 'FX8', '', 2, false, false, false, true, false, false, \
              false, false, false, true, 0, 0, '{}', 'UTC', 'https://example.com/fx8.git', \
-             'main', 10800, 10, 10800, 10800, true, 'local_runner', $3, $4, $5)",
+             'main', 10800, 10, 10800, 10800, true, 'local_runner', 'software', $3, $4, $5)",
         )
         .bind(project)
         .bind(at)
@@ -1680,10 +1680,10 @@ mod tests {
             "INSERT INTO agent_run (id, workspace_id, created_by_id, pod_id, runner_id, \
              pinned_runner_id, parent_run_id, work_item_id, status, executor_kind, \
              dispatch_attempts, cancel_reason, error_code, tool_plan, prompt, trigger, \
-             phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
-             error, refusal_category, llm_model, usage, created_at) \
+             phase_kind, work_type, run_config, required_capabilities, thread_id, \
+             agent_metadata, error, refusal_category, llm_model, usage, created_at) \
              VALUES ($1, $2, $3, $4, NULL, NULL, $5, $6, $7, $8, 0, '', '', '{}', '', $9, \
-             $10, $11, '[]', '', '{}', '', '', '', '{}', $12)",
+             $10, '', $11, '[]', '', '{}', '', '', '', '{}', $12)",
         )
         .bind(id)
         .bind(graph.ws)
