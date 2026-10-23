@@ -9,8 +9,11 @@ unauthenticated cases are part of the suite's denied-permission tripwire.
 """
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+from _harness.http import api_client
 
 pytestmark = pytest.mark.contract
 
@@ -291,3 +294,37 @@ def test_intake_assignees_newest_first(user_client, world, seeder, db):
     assert got.status_code == 200
     assert got.json()["assignees"] == [newer["id"], older["id"]]
     assert [d["id"] for d in got.json()["assignee_details"]] == [newer["id"], older["id"]]
+
+
+def test_concurrent_creates_get_distinct_sequence_ids(user_client, world, seeder, db, settings):
+    # PIDASHCONV-1265: Issue.save takes a per-project advisory lock and
+    # assigns MAX(sequence)+1 inside one transaction
+    # (db/models/issue.py:313-343), so N concurrent intake creates must
+    # yield N distinct sequence_ids. The triage state is pre-seeded so
+    # every create takes the reuse path — the triage get-or-create race
+    # is separate Django behavior, out of scope here.
+    seeder.create_state(
+        world["workspace"]["id"], world["project"]["id"], name="Triage", group="triage"
+    )
+    url = _list_url(world)
+    cookies = dict(user_client.cookies)
+    count = 20
+
+    def _one(n):
+        with api_client(settings.base_url) as client:
+            client.cookies.update(cookies)
+            response = client.post(url, json={"issue": {"name": f"race idea {n}"}})
+            assert response.status_code == 200, response.text[:200]
+            return response.json()["sequence_id"]
+
+    with ThreadPoolExecutor(max_workers=count) as pool:
+        sequence_ids = list(pool.map(_one, range(count)))
+    assert len(set(sequence_ids)) == count, f"shared sequence_ids: {sorted(sequence_ids)}"
+    # The world's seeded issue bypasses Issue.save (no issue_sequences
+    # row), so the dupe scan covers only the created rows.
+    dupes = db.fetchall(
+        "SELECT sequence_id, count(*) AS c FROM issues WHERE project_id=%s AND id != %s"
+        " GROUP BY 1 HAVING count(*) > 1",
+        (world["project"]["id"], world["issue"]["id"]),
+    )
+    assert dupes == []
