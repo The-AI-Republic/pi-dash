@@ -13,13 +13,13 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../core/api/client.js";
-import { ESTIMATE_TIME_FAMILY_FLAG } from "../../core/edition/types.js";
 import {
   EstimateCreateDialog,
   ESTIMATE_ADD_LABEL,
   ESTIMATE_DIALOG_TITLE,
   ESTIMATE_SUBMIT_LABEL,
 } from "./EstimateCreateDialog.js";
+import { ESTIMATE_TIME_FAMILY_FLAG } from "./model.js";
 
 const WORKSPACE = "acme";
 const PROJECT = "223e4567-e89b-12d3-a456-426614174001";

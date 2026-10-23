@@ -43,13 +43,6 @@ export const SIDEBAR_TOGGLE_FLAG = "sidebar-toggle";
  * this; the community edition leaves it absent and renders nothing.
  */
 export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
-/**
- * Cloud estimate family capability (EST-009). The estimate creation dialog
- * offers the time family only when the active edition sets this flag;
- * community builds omit time entirely rather than rendering it disabled.
- */
-export const ESTIMATE_TIME_FAMILY_FLAG = "estimate-time-family";
-
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
   id: string;

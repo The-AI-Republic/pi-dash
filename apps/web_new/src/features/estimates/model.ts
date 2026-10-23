@@ -9,8 +9,10 @@
 
 import type { Estimate, EstimateList } from "@pidash/api-client";
 
-import { ESTIMATE_TIME_FAMILY_FLAG } from "../../core/edition/types.js";
 import { formatEstimatePoint } from "../../shared/shell/contextual/workItems.js";
+
+/** Edition capability that makes the time family available (EST-009). */
+export const ESTIMATE_TIME_FAMILY_FLAG = "estimate-time-family";
 
 /** Measurement families the creation dialog can offer. */
 export const ESTIMATE_FAMILY_POINTS = "points";

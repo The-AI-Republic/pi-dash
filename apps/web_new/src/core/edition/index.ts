@@ -21,7 +21,7 @@ export type {
   ViewPublishSlot,
   WorkspaceViewLayoutsSlot,
 } from "./types.js";
-export { APP_RAIL_FLAG, ESTIMATE_TIME_FAMILY_FLAG, ISSUE_DEDUPE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
+export { APP_RAIL_FLAG, ISSUE_DEDUPE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
 export { isAppRailEnabled, isSidebarToggleEnabled } from "./flags.js";
 export {
   APPS_CATALOG_ROUTE_PATH,
