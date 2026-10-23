@@ -1,10 +1,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline rows (parity/specs/issues.md §6, ISS-044/049). Every listed
+// Timeline rows (parity/specs/issues.md §6, ISS-044/049/056). Every listed
 // work item becomes one sidebar row; rows whose dates are set also get a
-// bar. A half-dated row keeps its bar (the later chrome slice fades it),
-// and an undated row keeps its row so the add-block affordance can live
+// bar. A half-dated row keeps its bar, faded toward its missing end, and
+// an undated row keeps its row so the add-block affordance can live
 // there. Bars are day-snapped: both ends cover their whole column.
 
 import type { IssueListItem } from "@pidash/api-client";
@@ -41,6 +41,11 @@ export interface GanttRow {
    * that bar immediately (ISS-055).
    */
   unconfirmed: boolean;
+  /**
+   * True for an epic row (ISS-056/116). Epics never expose bulk
+   * selection; their bars carry the same chrome as any other row.
+   */
+  isEpic: boolean;
 }
 
 /** A bar's box in the timeline strip. */
@@ -74,6 +79,7 @@ export function buildRows(issues: readonly IssueListItem[], projectIdentifier: s
       sequenceId: issue.sequence_id,
       archived: issue.archived_at !== null,
       unconfirmed: isTempRowId(issue.id),
+      isEpic: issue.is_epic ?? false,
     };
   });
 }
@@ -104,6 +110,19 @@ export function barBox(row: GanttRow, range: GanttRange, zoom: GanttZoom): Gantt
       width: PARTIAL_BAR_DAYS * dayWidth,
     };
   }
+  return null;
+}
+
+/**
+ * Fade mask for a half-dated bar (ISS-056). The bar stays opaque over the
+ * half it knows and dissolves toward the missing end; fully dated and
+ * undated rows need no mask. Masks read alpha only, so the gradient runs
+ * black-to-transparent whatever the bar's tint.
+ */
+export function barMask(row: Pick<GanttRow, "startIso" | "targetIso">): string | null {
+  if (row.startIso !== null && row.targetIso !== null) return null;
+  if (row.startIso !== null) return "linear-gradient(to right, black 50%, transparent 95%)";
+  if (row.targetIso !== null) return "linear-gradient(to left, black 50%, transparent 95%)";
   return null;
 }
 

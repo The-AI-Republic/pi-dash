@@ -29,6 +29,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     sequenceId: 1,
     archived: false,
     unconfirmed: false,
+    isEpic: false,
     ...overrides,
   };
 }
@@ -171,6 +172,12 @@ describe("GanttSidebar", () => {
     unmount();
     renderSidebar({ loadingMore: true });
     expect(screen.getByTestId("gantt-load-more")).toBeInTheDocument();
+  });
+
+  it("shows the load-more placeholder while the server holds more rows (ISS-059)", () => {
+    renderSidebar({ hasMore: true });
+    const trailing = screen.getByTestId("gantt-load-more");
+    expect(trailing.querySelector(".animate-pulse")).not.toBeNull();
   });
 
   it("renders an empty list with zero-height spacers", () => {
@@ -332,5 +339,46 @@ describe("GanttSidebar reorder (ISS-050)", () => {
     fireEvent.mouseMove(second, { clientY: 80 });
     fireEvent.mouseUp(second);
     expect(onReorder).not.toHaveBeenCalled();
+  });
+});
+
+describe("GanttSidebar bulk selection (ISS-116)", () => {
+  function selectionStub(selected: readonly string[] = []) {
+    const onRowToggle = vi.fn();
+    return {
+      selection: {
+        isSelected: (id: string) => selected.includes(id),
+        onRowToggle,
+      },
+      onRowToggle,
+    };
+  }
+
+  it("toggles rows through the binding and carries the reveal attribute", () => {
+    const { selection, onRowToggle } = selectionStub(["row-2"]);
+    renderSidebar({ selection });
+    expect(screen.getByLabelText("Select WEB-1")).not.toBeChecked();
+    expect(screen.getByLabelText("Select WEB-2")).toBeChecked();
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    expect(onRowToggle).toHaveBeenCalledWith("row-1", false);
+    fireEvent.click(screen.getByLabelText("Select WEB-3"), { shiftKey: true });
+    expect(onRowToggle).toHaveBeenCalledWith("row-3", true);
+    const rows = screen.getAllByTestId("gantt-sidebar-row");
+    expect(rows[0]?.getAttribute("data-selection-id")).toBe("row-1");
+  });
+
+  it("hides checkboxes without a binding, for epics and for unconfirmed rows", () => {
+    const { unmount } = renderSidebar();
+    expect(screen.queryByLabelText("Select WEB-1")).toBeNull();
+    unmount();
+    const { selection } = selectionStub();
+    renderSidebar({
+      selection,
+      rows: [
+        row({ id: "epic-1", identifier: "WEB-9", name: "Epic", isEpic: true }),
+        row({ id: "temp-abc", identifier: "WEB-0", name: "Draft", unconfirmed: true }),
+      ],
+    });
+    expect(screen.queryByRole("checkbox")).toBeNull();
   });
 });

@@ -16,6 +16,7 @@ import {
   diffDays,
   edgeAt,
   extendRange,
+  growRangeToCover,
   headerTiers,
   initialRange,
   isGanttZoom,
@@ -87,6 +88,33 @@ describe("zoom windows", () => {
     expect(extendRange(range, "right", "week")).toEqual({ startIso: "2026-10-01", dayCount: 42 });
     expect(extendRange(range, "left", "week")).toEqual({ startIso: "2026-09-17", dayCount: 42 });
     expect(extendRange(range, "right", "quarter").dayCount).toBe(28 + EXTENSION_DAYS.quarter);
+  });
+
+  it("leaves a window that already covers the span alone", () => {
+    const range = { startIso: "2026-10-01", dayCount: 28 };
+    expect(growRangeToCover(range, "week", "2026-10-05", "2026-10-10")).toBe(range);
+  });
+
+  it("grows the short side in whole steps until the span fits", () => {
+    const range = { startIso: "2026-10-01", dayCount: 28 };
+    // Window ends 2026-10-28; the span needs two 14-day steps right.
+    expect(growRangeToCover(range, "week", "2026-10-05", "2026-11-20")).toEqual({
+      startIso: "2026-10-01",
+      dayCount: 56,
+    });
+    // Reversed ends still grow the left side, overshooting in whole steps.
+    expect(growRangeToCover(range, "week", "2026-10-10", "2026-09-01")).toEqual({
+      startIso: "2026-08-20",
+      dayCount: 70,
+    });
+  });
+
+  it("grows both sides when the span straddles the window", () => {
+    const range = { startIso: "2026-10-01", dayCount: 28 };
+    expect(growRangeToCover(range, "week", "2026-09-20", "2026-11-20")).toEqual({
+      startIso: "2026-09-17",
+      dayCount: 70,
+    });
   });
 
   it("converts days to pixel offsets and full width", () => {

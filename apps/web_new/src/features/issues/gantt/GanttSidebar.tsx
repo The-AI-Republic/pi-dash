@@ -1,24 +1,33 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline sidebar (parity/specs/issues.md §6, ISS-049). The sticky list
-// beside the chart: one link per row with the short key ahead of the name
-// and, for fully dated rows, a trailing day count. Rows scroll together
-// with the chart's vertical axis, are windowed to the visible slice, and
-// mark the hovered and peeked row. The href is absolute (workspace browse
-// route) so Cmd/middle-click and copy-link land on the work item; a plain
-// click opens the row through the layout instead. An unconfirmed create has
-// no server key yet: its row pulses and is inert (no link, no peek), matching
-// the list layout's temporary row (ISS-006/049). In manual sort the rows
-// also drag to reorder (ISS-050): a pointer drag shows a drop line and the
-// layout persists a neighbour-derived rank on release; outside manual sort
-// the gesture is not mounted at all.
+// Timeline sidebar (parity/specs/issues.md §6, ISS-049/059/116). The
+// sticky list beside the chart: one link per row with the short key ahead
+// of the name and, for fully dated rows, a trailing day count. Rows
+// scroll together with the chart's vertical axis, are windowed to the
+// visible slice, and mark the hovered and peeked row. The href is absolute
+// (workspace browse route) so Cmd/middle-click and copy-link land on the
+// work item; a plain click opens the row through the layout instead. An
+// unconfirmed create has no server key yet: its row pulses and is inert
+// (no link, no peek), matching the list layout's temporary row
+// (ISS-006/049). In manual sort the rows also drag to reorder (ISS-050):
+// a pointer drag shows a drop line and the layout persists a
+// neighbour-derived rank on release; outside manual sort the gesture is
+// not mounted at all. Bulk builds add a selection checkbox per eligible
+// row, and a pulsing sentinel trails the list while the server holds more.
 
 import { cn } from "@pidash/kit";
 import * as React from "react";
 
+import { RowSelectionCheckbox, SELECTION_ROW_ATTR } from "../bulk/index.js";
 import { DRAG_THRESHOLD_PX, type DropPlacement } from "./drag.js";
 import { ROW_HEIGHT, durationLabel, type GanttRow } from "./rows.js";
+
+/** Row half of the chart's bulk selection binding (ISS-116). */
+export interface GanttRowSelection {
+  isSelected: (id: string) => boolean;
+  onRowToggle: (id: string, shiftKey: boolean) => void;
+}
 
 export interface GanttSidebarProps {
   rows: readonly GanttRow[];
@@ -32,6 +41,10 @@ export interface GanttSidebarProps {
   onOpenRow: (row: GanttRow) => void;
   /** Rows still loading from the next page (pulsing placeholder). */
   loadingMore?: boolean;
+  /** The server holds more rows than rendered (pulsing placeholder). */
+  hasMore?: boolean;
+  /** Bulk row toggles; null hides every checkbox (ISS-116). */
+  selection?: GanttRowSelection | null;
   /** Virtualization window (row indices) shared with the chart lanes. */
   windowStart?: number;
   windowEnd?: number;
@@ -73,6 +86,8 @@ interface SidebarRowProps {
   renderPreview?:
     | ((row: GanttRow, trigger: React.ReactElement<Record<string, unknown>>) => React.ReactNode)
     | undefined;
+  /** Bulk row toggle; null hides the checkbox (ISS-116). */
+  selection?: GanttRowSelection | null;
 }
 
 export function SidebarRowItem({
@@ -87,6 +102,7 @@ export function SidebarRowItem({
   onDragOver,
   suppressClick,
   renderPreview,
+  selection = null,
 }: SidebarRowProps): React.ReactElement {
   const duration = durationLabel(row);
   const disabled = row.unconfirmed;
@@ -126,6 +142,7 @@ export function SidebarRowItem({
       data-testid="gantt-sidebar-row"
       data-row-id={row.id}
       data-dragging={dragging ? "true" : undefined}
+      {...{ [SELECTION_ROW_ATTR]: row.id }}
       style={{ height: ROW_HEIGHT }}
       onMouseEnter={() => onHover(row.id)}
       onMouseLeave={() => onHover(null)}
@@ -138,6 +155,14 @@ export function SidebarRowItem({
         dragging && "opacity-60"
       )}
     >
+      {/* Epics never select and unconfirmed creates have no server identity for the bulk endpoints (ISS-116). */}
+      {selection === null || row.unconfirmed || row.isEpic ? null : (
+        <RowSelectionCheckbox
+          checked={selection.isSelected(row.id)}
+          label={`Select ${row.identifier}`}
+          onChange={(event) => selection.onRowToggle(row.id, event.shiftKey)}
+        />
+      )}
       <div
         className={cn(
           "relative flex min-w-0 flex-1 items-center gap-(--space-2) rounded-(--radius-control) px-(--space-1) py-(--space-1)",
@@ -196,6 +221,8 @@ export function GanttSidebar({
   onHover,
   onOpenRow,
   loadingMore = false,
+  hasMore = false,
+  selection = null,
   windowStart = 0,
   windowEnd = rows.length,
   reorder = null,
@@ -299,10 +326,11 @@ export function GanttSidebar({
           onDragOver={onDragOver}
           suppressClick={suppressClick}
           renderPreview={renderPreview}
+          selection={selection}
         />
       ))}
       <div style={{ height: Math.max(0, rows.length - windowEnd) * ROW_HEIGHT }} aria-hidden="true" />
-      {loadingMore ? (
+      {loadingMore || hasMore ? (
         <div data-testid="gantt-load-more" className="flex h-11 items-center px-(--space-3)">
           <span aria-hidden="true" className="h-4 w-full animate-pulse rounded-(--radius-control) bg-(--subtle)" />
         </div>

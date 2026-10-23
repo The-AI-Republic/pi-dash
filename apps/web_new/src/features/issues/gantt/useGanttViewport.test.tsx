@@ -87,6 +87,25 @@ describe("useGanttViewport", () => {
     act(() => result.current.setZoom("day" as never));
     expect(result.current.zoom).toBe("week");
   });
+
+  it("grows the window to cover a span without touching the offset", () => {
+    const { result } = renderHook(() => useGanttViewport(TODAY, 0));
+    act(() => result.current.measure(900));
+    act(() => result.current.setScrollLeft(500));
+    const before = result.current.range;
+    act(() => result.current.cover("2026-12-20", "2026-12-25"));
+    expect(result.current.range.dayCount).toBeGreaterThan(before.dayCount);
+    expect(result.current.scrollLeft).toBe(500);
+    const end = result.current.range;
+    expect(end.startIso <= "2026-12-20").toBe(true);
+  });
+
+  it("leaves the window alone when the span is already covered", () => {
+    const { result } = renderHook(() => useGanttViewport(TODAY, 0));
+    const before = result.current.range;
+    act(() => result.current.cover(TODAY, TODAY));
+    expect(result.current.range).toBe(before);
+  });
 });
 
 describe("clampScroll", () => {

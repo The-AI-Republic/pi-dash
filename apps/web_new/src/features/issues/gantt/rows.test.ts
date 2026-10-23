@@ -9,8 +9,9 @@ import {
   PARTIAL_BAR_DAYS,
   ROW_OVERSCAN,
   type GanttRow,
-  barInView,
   barBox,
+  barInView,
+  barMask,
   buildRows,
   durationLabel,
   hasBar,
@@ -87,6 +88,28 @@ describe("buildRows", () => {
     expect(temp?.unconfirmed).toBe(true);
     expect(real?.unconfirmed).toBe(false);
   });
+
+  it("marks epic rows and treats a missing marker as a plain work item", () => {
+    const [epic, plain] = buildRows([issue({ id: "e", is_epic: true }), issue({ id: "p" })], "WEB");
+    expect(epic?.isEpic).toBe(true);
+    expect(plain?.isEpic).toBe(false);
+  });
+});
+
+describe("barMask", () => {
+  it("leaves fully dated and undated rows unmasked", () => {
+    expect(barMask({ startIso: "2026-10-01", targetIso: "2026-10-03" })).toBeNull();
+    expect(barMask({ startIso: null, targetIso: null })).toBeNull();
+  });
+
+  it("fades toward the missing end on half-dated rows", () => {
+    const startOnly = barMask({ startIso: "2026-10-01", targetIso: null });
+    expect(startOnly).toContain("gradient");
+    expect(startOnly).toContain("to right");
+    const targetOnly = barMask({ startIso: null, targetIso: "2026-10-03" });
+    expect(targetOnly).toContain("gradient");
+    expect(targetOnly).toContain("to left");
+  });
 });
 
 describe("barBox", () => {
@@ -103,6 +126,7 @@ describe("barBox", () => {
     sequenceId: 7,
     archived: false,
     unconfirmed: false,
+    isEpic: false,
   };
 
   it("places a dated bar by day column, inclusive", () => {

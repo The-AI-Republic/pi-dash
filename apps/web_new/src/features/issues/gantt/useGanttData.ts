@@ -57,6 +57,31 @@ export function useProjectArchived(workspaceSlug: string, projectId: string): bo
   return project !== undefined && project.archived_at !== null;
 }
 
+/** Bulk toolbar field flags for one project (ISS-116). */
+export interface GanttBulkFlags {
+  hideCycle: boolean;
+  hideModule: boolean;
+  hideEstimate: boolean;
+}
+
+/**
+ * The bulk toolbar's field flags from the workspace's project list
+ * (ISS-116). The gated route already holds the list, so the timeline
+ * gates the cycle, module and estimate entries without another request.
+ * A project the list does not carry shows every field.
+ */
+export function useProjectBulkFlags(workspaceSlug: string, projectId: string): GanttBulkFlags {
+  const client = getAppClient();
+  const { data: projects } = useQuery(projectsQueryOptions(client, workspaceSlug));
+  const project = projects?.find((row) => row.id === projectId);
+  if (project === undefined) return { hideCycle: false, hideModule: false, hideEstimate: false };
+  return {
+    hideCycle: !project.cycle_view,
+    hideModule: !project.module_view,
+    hideEstimate: project.estimate == null,
+  };
+}
+
 /** Pick the state that colors a row's bar. */
 export function stateColorOf(states: readonly State[], stateId: string | null): string | null {
   if (stateId === null) return null;

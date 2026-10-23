@@ -1,21 +1,24 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline chart (parity/specs/issues.md §6, ISS-044–048). One scroll
-// container holds a sticky-left sidebar and a day-indexed strip: the
-// header carries two tiers, every lane lines up with its sidebar row and
-// scrolls vertically with it, and bars sit on their day columns. Today
-// draws as a marked column (its week at Month zoom, its month at Quarter
-// zoom) and the strip extends endlessly at either horizontal edge.
-// Fullscreen renders the same chart inside the full-screen portal.
+// Timeline chart (parity/specs/issues.md §6, ISS-044–048/056–059/116). One
+// scroll container holds a sticky-left sidebar and a day-indexed strip:
+// the header carries two tiers, every lane lines up with its sidebar row
+// and scrolls vertically with it, and bars sit on their day columns.
+// Today draws as a marked column (its week at Month zoom, its month at
+// Quarter zoom) and the strip extends endlessly at either horizontal
+// edge. Fullscreen renders the same chart inside the full-screen portal.
 // Edit standing (ISS-050–055/058) turns on the bar gestures, the add-block
 // control on undated lanes and the sticky quick-add; without it the chart
-// is read-only.
+// is read-only. Bars fade toward a missing end with the name pinned
+// visible on scroll, off-screen bars offer a scroll-to-block arrow, and
+// the sidebar carries bulk checkboxes plus the load-more sentinel.
 
 import { cn } from "@pidash/kit";
 import * as React from "react";
 
 import { FULL_SCREEN_PORTAL_ID, OverlayPortal } from "../../../shared/shell/index.js";
+import { GroupSelectionCheckbox, type GroupSelectionState } from "../bulk/index.js";
 import { formatDay, todayIsoDay } from "../dropdowns/calendar.js";
 import {
   addBlockDate,
@@ -32,8 +35,9 @@ import { GanttSidebar, type ReorderBinding } from "./GanttSidebar.js";
 import {
   HEADER_HEIGHT,
   ROW_HEIGHT,
-  barInView,
   barBox,
+  barInView,
+  barMask,
   datedBarBox,
   hasBar,
   rowWindow,
@@ -42,7 +46,9 @@ import {
 } from "./rows.js";
 import {
   DAY_WIDTHS,
+  addDays,
   dayColumns,
+  growRangeToCover,
   headerTiers,
   timelineWidth,
   windowTodaySegment,
@@ -59,6 +65,20 @@ const EDGE_TRIGGER_PX = 240;
 /** Ignore re-extension for this long after one, so a pinned edge settles. */
 const EXTEND_COOLDOWN_MS = 350;
 
+/**
+ * Bulk selection binding for the sidebar (ISS-116). The layout owns the
+ * selection state; the chart only renders the header tri-state and hands
+ * the row toggles to the sidebar. Null hides every checkbox.
+ */
+export interface GanttSelectionBinding {
+  isSelected: (id: string) => boolean;
+  onRowToggle: (id: string, shiftKey: boolean) => void;
+  groupState: GroupSelectionState;
+  onGroupToggle: () => void;
+  /** False when no row can be selected (all epics, all unconfirmed). */
+  hasSelectables: boolean;
+}
+
 export interface GanttChartProps {
   rows: readonly GanttRow[];
   /** Workspace slug for the sidebar's browse links. */
@@ -73,6 +93,10 @@ export interface GanttChartProps {
   onOpenRow: (row: GanttRow) => void;
   /** Rows still arriving from the next page. */
   loadingMore?: boolean;
+  /** The server holds more rows than rendered (ISS-059). */
+  hasMore?: boolean;
+  /** Bulk selection binding; null hides every checkbox (ISS-116). */
+  selection?: GanttSelectionBinding | null;
   /** Manual-sort reorder seam; null disables row dragging (ISS-050). */
   reorder?: ReorderBinding | null;
   /** Project admin/member standing: bars drag and lanes plant (ISS-058). */
@@ -226,6 +250,10 @@ function Bar({
     drag !== null && drag.dates.startDate !== null && drag.dates.targetDate !== null
       ? datedBarBox(drag.dates.startDate, drag.dates.targetDate, range, zoom)
       : box;
+  // The fade follows the committed dates, not the live gesture: while a
+  // resize fills a missing end the bar keeps its half-dated look until
+  // the release persists (ISS-051/056).
+  const mask = barMask(row);
   const bar = (
     <div
       id={`gantt-block-${row.id}`}
@@ -236,7 +264,6 @@ function Bar({
       style={{
         left: boxNow.left,
         width: boxNow.width,
-        backgroundColor: colors?.[row.id] ?? "var(--accent)",
       }}
       onClick={() => {
         // A handle press or a move still dispatches a click after mouseup;
@@ -252,11 +279,27 @@ function Bar({
       aria-disabled={openable ? undefined : true}
       tabIndex={openable ? 0 : -1}
       className={cn(
-        "group/bar absolute top-1/2 h-6 -translate-y-1/2 overflow-visible rounded-(--radius-control) opacity-90 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)",
+        "group/bar absolute top-1/2 h-6 -translate-y-1/2 overflow-visible opacity-90 hover:opacity-100 focus-visible:outline-2 focus-visible:outline-(--accent)",
         openable ? "cursor-pointer" : "cursor-default"
       )}
     >
-      <span className="text-caption block truncate px-(--space-2) leading-6 text-(--on-accent)">{row.name}</span>
+      <div
+        aria-hidden="true"
+        data-testid="gantt-bar-body"
+        style={{
+          backgroundColor: colors?.[row.id] ?? "var(--accent)",
+          maskImage: mask ?? undefined,
+          WebkitMaskImage: mask ?? undefined,
+        }}
+        className="absolute inset-0 rounded-(--radius-control)"
+      />
+      <div
+        data-testid="gantt-bar-name"
+        style={{ left: SIDEBAR_WIDTH, maskImage: mask ?? undefined, WebkitMaskImage: mask ?? undefined }}
+        className="text-caption sticky w-fit max-w-full truncate px-(--space-2) leading-6 text-(--on-accent)"
+      >
+        {row.name}
+      </div>
       {canEdit ? (
         <>
           <span
@@ -375,7 +418,7 @@ function GanttLanes({
   onHover: (id: string | null) => void;
   onOpenRow: (row: GanttRow) => void;
   /** Bring an off-viewport bar into the visible slice. */
-  onScrollToBar: (id: string, box: GanttBarBox) => void;
+  onScrollToBar: (row: GanttRow) => void;
   windowStart: number;
   windowEnd: number;
   /** Visible strip slice, in strip coordinates. */
@@ -505,7 +548,7 @@ function GanttLanes({
                 type="button"
                 data-testid="gantt-scroll-arrow"
                 aria-label={`Scroll to ${row.name}`}
-                onClick={() => onScrollToBar(row.id, box)}
+                onClick={() => onScrollToBar(row)}
                 className="sticky left-0 z-20 mx-(--space-1) my-(--space-1) grid size-6 place-items-center rounded-(--radius-control) border border-(--border) bg-(--bg) text-(--text-muted)"
               >
                 {box.left + box.width <= viewportLeft ? "←" : "→"}
@@ -528,6 +571,8 @@ function GanttSurface({
   peekedId = null,
   onOpenRow,
   loadingMore = false,
+  hasMore = false,
+  selection = null,
   reorder = null,
   canEdit = false,
   onDatesChange,
@@ -550,7 +595,7 @@ function GanttSurface({
   const [host, setHost] = React.useState<HTMLDivElement | null>(null);
   const [scrollRequest, setScrollRequest] = React.useState<number | null>(null);
   const cooldown = React.useRef(false);
-  const { zoom, range, scrollLeft, setZoom, centerToday, setScrollLeft, extend, measure } = viewport;
+  const { zoom, range, scrollLeft, setZoom, centerToday, setScrollLeft, extend, cover, measure } = viewport;
   const width = DAY_WIDTHS[zoom];
   const total = timelineWidth(range, zoom);
 
@@ -576,9 +621,23 @@ function GanttSurface({
   );
 
   /** Queue a smooth scroll that brings an off-viewport bar into view. */
-  const scrollToBar = React.useCallback((_id: string, box: GanttBarBox) => {
-    setScrollRequest(Math.max(0, box.left - SIDEBAR_WIDTH - EDGE_TRIGGER_PX / 2));
-  }, []);
+  const scrollToBar = React.useCallback(
+    (row: GanttRow) => {
+      // A bar far outside the rendered window has no columns to land on,
+      // so the range grows to cover its span first (ISS-057). A partial
+      // bar draws two days from its known end; the covered span mirrors
+      // that geometry so the whole bar lands on rendered columns. The
+      // lane renders an arrow only for a dated row, so one end — and the
+      // box below — is always set.
+      const from = row.startIso ?? addDays(row.targetIso!, -1);
+      const to = row.targetIso ?? addDays(row.startIso!, 1);
+      const grown = growRangeToCover(range, zoom, from, to);
+      cover(from, to);
+      const box = barBox(row, grown, zoom)!;
+      setScrollRequest(Math.max(0, box.left - SIDEBAR_WIDTH - EDGE_TRIGGER_PX / 2));
+    },
+    [cover, range, zoom]
+  );
 
   React.useEffect(() => {
     if (host === null || scrollRequest === null) return;
@@ -639,12 +698,24 @@ function GanttSurface({
             style={{ width: SIDEBAR_WIDTH }}
           >
             <div
-              aria-hidden="true"
               className="sticky top-0 z-30 flex items-end justify-between border-r border-b border-(--border) bg-(--surface) px-(--space-3)"
               style={{ height: HEADER_HEIGHT }}
             >
-              <span className="text-caption font-medium text-(--text-muted)">Issue</span>
-              <span className="text-caption text-(--text-muted)">Duration</span>
+              <span className="flex items-center gap-(--space-2)">
+                {selection !== null && selection.hasSelectables ? (
+                  <GroupSelectionCheckbox
+                    state={selection.groupState}
+                    label="Select all work items"
+                    onToggle={selection.onGroupToggle}
+                  />
+                ) : null}
+                <span aria-hidden="true" className="text-caption font-medium text-(--text-muted)">
+                  Issue
+                </span>
+              </span>
+              <span aria-hidden="true" className="text-caption text-(--text-muted)">
+                Duration
+              </span>
             </div>
             {empty ? (
               <div data-testid="gantt-sidebar-skeleton" className="flex flex-col gap-(--space-3) p-(--space-3)">
@@ -661,6 +732,8 @@ function GanttSurface({
                 onHover={setHoveredId}
                 onOpenRow={onOpenRow}
                 loadingMore={loadingMore}
+                hasMore={hasMore}
+                selection={selection}
                 windowStart={window.start}
                 windowEnd={window.end}
                 reorder={reorder}

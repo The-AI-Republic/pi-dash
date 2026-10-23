@@ -113,6 +113,21 @@ export function extendRange(range: GanttRange, side: "left" | "right", zoom: Gan
   return { startIso: addDays(range.startIso, -days), dayCount: range.dayCount + days };
 }
 
+/**
+ * The smallest window grown from `range` that covers both days (ISS-057).
+ * A scroll-to-block lands on a bar the initial window never rendered, so
+ * the range grows in whole extension steps on the side that falls short —
+ * both sides when the span straddles the window — before the scroll runs.
+ */
+export function growRangeToCover(range: GanttRange, zoom: GanttZoom, fromIso: string, toIso: string): GanttRange {
+  const first = fromIso < toIso ? fromIso : toIso;
+  const last = fromIso < toIso ? toIso : fromIso;
+  let next = range;
+  while (addDays(next.startIso, next.dayCount - 1) < last) next = extendRange(next, "right", zoom);
+  while (next.startIso > first) next = extendRange(next, "left", zoom);
+  return next;
+}
+
 /** Pixels from the window's first column to a given day. */
 export function dayOffset(iso: string, range: GanttRange, zoom: GanttZoom): number {
   return diffDays(iso, range.startIso) * DAY_WIDTHS[zoom];

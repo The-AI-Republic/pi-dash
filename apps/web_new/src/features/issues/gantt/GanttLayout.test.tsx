@@ -7,18 +7,20 @@
 // from the project's states, and docks the shared peek for a clicked row
 // while the chart keeps its own scroll state.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { edition } from "../../../core/edition/index.js";
 import { sessionKeys } from "../../../core/session/queries.js";
 import { authKeys } from "../../auth/queries.js";
 import { projectKeys } from "../../projects/api/keys.js";
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { issueKeys } from "../api/keys.js";
+import { BULK_OPERATIONS_FLAG } from "../bulk/edition.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import { GanttLayout, barColorsFor, orderedRows } from "./GanttLayout.js";
@@ -28,6 +30,67 @@ import { ganttStatesKey } from "./useGanttData.js";
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => vi.fn(),
+}));
+
+const bulkMocks = vi.hoisted(() => ({
+  update: vi.fn(),
+  remove: vi.fn(),
+  archive: vi.fn(),
+  subscribe: vi.fn(),
+}));
+
+const bulkPending = vi.hoisted(() => ({
+  update: false,
+  remove: false,
+  archive: false,
+  subscribe: false,
+}));
+
+vi.mock("../bulk/index.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../bulk/index.js")>()),
+  useBulkMutations: () => ({
+    update: { mutateAsync: bulkMocks.update, isPending: bulkPending.update },
+    remove: { mutateAsync: bulkMocks.remove, isPending: bulkPending.remove },
+    archive: { mutateAsync: bulkMocks.archive, isPending: bulkPending.archive },
+    subscribe: { mutateAsync: bulkMocks.subscribe, isPending: bulkPending.subscribe },
+  }),
+  BulkToolbar: (props: {
+    count: number;
+    busy: boolean;
+    hideCycle: boolean;
+    hideModule: boolean;
+    hideEstimate: boolean;
+    onUpdate: (properties: unknown) => void;
+    onDelete: () => void;
+    onArchive: () => void;
+    onSubscribe: () => void;
+    onClear: () => void;
+  }) => (
+    <div
+      data-testid="bulk-toolbar"
+      data-busy={props.busy ? "true" : undefined}
+      data-hide-cycle={props.hideCycle ? "true" : undefined}
+      data-hide-module={props.hideModule ? "true" : undefined}
+      data-hide-estimate={props.hideEstimate ? "true" : undefined}
+    >
+      <span>{props.count} selected</span>
+      <button type="button" onClick={() => props.onUpdate({ priority: "high" })}>
+        Update
+      </button>
+      <button type="button" onClick={props.onDelete}>
+        Delete
+      </button>
+      <button type="button" onClick={props.onArchive}>
+        Archive
+      </button>
+      <button type="button" onClick={props.onSubscribe}>
+        Subscribe
+      </button>
+      <button type="button" onClick={props.onClear}>
+        Clear
+      </button>
+    </div>
+  ),
 }));
 
 const SLUG = "acme";
@@ -93,6 +156,10 @@ function renderLayout(
     completedCycle?: boolean;
     /** Seed the project list with an archived project (ISS-222). */
     archived?: boolean;
+    /** Feature flags on the seeded project row (ISS-116 toolbar fields). */
+    projectFlags?: { cycleView?: boolean; moduleView?: boolean; estimate?: string | null };
+    /** Seed an empty project list (ISS-116 missing-row default). */
+    missingProject?: boolean;
     transport?: (url: string, init: { method?: string; body?: string }) => Promise<unknown>;
   } = {}
 ) {
@@ -131,14 +198,24 @@ function renderLayout(
     authKeys.projectRoles(SLUG),
     options.projectRole === null ? {} : { [PROJECT]: options.projectRole ?? 15 }
   );
-  queryClient.setQueryData(projectKeys.list(SLUG), [
-    {
-      id: PROJECT,
-      name: "Website",
-      identifier: "WEB",
-      archived_at: options.archived === true ? "2026-10-01" : null,
-    },
-  ]);
+  const flagSeed = { cycleView: true, moduleView: true, estimate: "estimate-1" as string | null };
+  const projectFlags = { ...flagSeed, ...options.projectFlags };
+  queryClient.setQueryData(
+    projectKeys.list(SLUG),
+    options.missingProject === true
+      ? []
+      : [
+          {
+            id: PROJECT,
+            name: "Website",
+            identifier: "WEB",
+            archived_at: options.archived === true ? "2026-10-01" : null,
+            cycle_view: projectFlags.cycleView,
+            module_view: projectFlags.moduleView,
+            estimate: projectFlags.estimate,
+          },
+        ]
+  );
   render(
     <QueryClientProvider client={queryClient}>
       <React.Suspense fallback={<p>suspended</p>}>
@@ -159,8 +236,14 @@ function renderLayout(
 }
 
 afterEach(() => {
+  delete edition.flags[BULK_OPERATIONS_FLAG];
+  bulkPending.update = false;
+  bulkPending.remove = false;
+  bulkPending.archive = false;
+  bulkPending.subscribe = false;
   resetAppClient();
   vi.unstubAllGlobals();
+  vi.clearAllMocks();
 });
 
 describe("orderedRows", () => {
@@ -473,5 +556,173 @@ describe("GanttLayout write wiring (ISS-050–055)", () => {
       start_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
       target_date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
     });
+  });
+});
+
+describe("GanttLayout guest standing (ISS-058)", () => {
+  it("gives a project guest the chart without edit affordances", () => {
+    renderLayout({
+      projectRole: 5,
+      issues: [issue({ start_date: "2026-10-01", target_date: "2026-10-05" }), ...ISSUES.slice(1)],
+    });
+    expect(screen.getAllByTestId("gantt-sidebar-row")).toHaveLength(3);
+    expect(screen.queryByTestId("gantt-quick-add")).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId("gantt-resize-left")).toHaveLength(0);
+    expect(screen.queryAllByTestId("gantt-undated-lane")).toHaveLength(0);
+    expect(screen.getByTestId("gantt-sidebar")).not.toHaveAttribute("data-reorder");
+  });
+});
+
+describe("GanttLayout load-more sentinel (ISS-059)", () => {
+  it("trails a pulsing placeholder while the server holds more rows", () => {
+    renderLayout({ totalCount: ISSUES.length + 2 });
+    expect(screen.getByTestId("gantt-load-more")).toBeInTheDocument();
+    cleanup();
+    renderLayout();
+    expect(screen.queryByTestId("gantt-load-more")).toBeNull();
+  });
+});
+
+describe("GanttLayout bulk selection (ISS-116)", () => {
+  beforeEach(() => {
+    for (const action of Object.values(bulkMocks)) action.mockResolvedValue(undefined);
+  });
+
+  function enableBulk(): void {
+    edition.flags[BULK_OPERATIONS_FLAG] = true;
+  }
+
+  it("shows no checkbox without the bulk operations flag", () => {
+    renderLayout({ projectRole: 15 });
+    expect(screen.queryByLabelText("Select all work items")).toBeNull();
+    expect(screen.queryByLabelText("Select WEB-1")).toBeNull();
+    expect(screen.queryByTestId("bulk-toolbar")).toBeNull();
+  });
+
+  it("shows sidebar and header checkboxes for a member on a bulk build", () => {
+    enableBulk();
+    renderLayout({ projectRole: 15 });
+    expect(screen.getByLabelText("Select all work items")).toBeInTheDocument();
+    expect(screen.getByLabelText("Select WEB-1")).toBeInTheDocument();
+    expect(screen.getByLabelText("Select WEB-2")).toBeInTheDocument();
+    expect(screen.getByLabelText("Select WEB-3")).toBeInTheDocument();
+    expect(screen.queryByTestId("bulk-toolbar")).toBeNull();
+  });
+
+  it("hides every checkbox from a guest even on a bulk build", () => {
+    enableBulk();
+    renderLayout({ projectRole: 5 });
+    expect(screen.queryByLabelText("Select all work items")).toBeNull();
+    expect(screen.queryByLabelText("Select WEB-1")).toBeNull();
+  });
+
+  it("reveals the toolbar on selection and clears it", async () => {
+    enableBulk();
+    renderLayout({ projectRole: 15 });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    fireEvent.click(screen.getByLabelText("Select WEB-2"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveTextContent("2 selected");
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(screen.queryByTestId("bulk-toolbar")).toBeNull());
+  });
+
+  it("selects the whole list from the header tri-state", () => {
+    enableBulk();
+    renderLayout({ projectRole: 15 });
+    fireEvent.click(screen.getByLabelText("Select all work items"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveTextContent("3 selected");
+  });
+
+  it("runs the four bulk actions across the selection, then clears", async () => {
+    enableBulk();
+    const ids = [ISSUES[0]!.id, ISSUES[2]!.id];
+    const cases = [
+      { button: "Update", mock: bulkMocks.update, args: [{ issueIds: ids, properties: { priority: "high" } }] },
+      { button: "Delete", mock: bulkMocks.remove, args: [ids] },
+      { button: "Archive", mock: bulkMocks.archive, args: [ids] },
+      { button: "Subscribe", mock: bulkMocks.subscribe, args: [ids] },
+    ] as const;
+    for (const { button, mock, args } of cases) {
+      renderLayout({ projectRole: 15 });
+      fireEvent.click(screen.getByLabelText("Select WEB-1"));
+      fireEvent.click(screen.getByLabelText("Select WEB-3"));
+      fireEvent.click(screen.getByRole("button", { name: button }));
+      await waitFor(() => expect(mock).toHaveBeenCalledWith(...args));
+      await waitFor(() => expect(screen.queryByTestId("bulk-toolbar")).toBeNull());
+      cleanup();
+    }
+  });
+
+  it("keeps the selection when a bulk action fails", async () => {
+    enableBulk();
+    const cases = [
+      { button: "Update", mock: bulkMocks.update },
+      { button: "Delete", mock: bulkMocks.remove },
+      { button: "Archive", mock: bulkMocks.archive },
+      { button: "Subscribe", mock: bulkMocks.subscribe },
+    ] as const;
+    for (const { button, mock } of cases) {
+      mock.mockRejectedValueOnce(new Error("bulk failed"));
+      renderLayout({ projectRole: 15 });
+      fireEvent.click(screen.getByLabelText("Select WEB-1"));
+      fireEvent.click(screen.getByRole("button", { name: button }));
+      await waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+      expect(screen.getByTestId("bulk-toolbar")).toHaveTextContent("1 selected");
+      cleanup();
+    }
+  });
+
+  it("marks the toolbar busy while any bulk mutation is pending", () => {
+    enableBulk();
+    for (const key of ["update", "remove", "archive", "subscribe"] as const) {
+      bulkPending[key] = true;
+      renderLayout({ projectRole: 15 });
+      fireEvent.click(screen.getByLabelText("Select WEB-1"));
+      expect(screen.getByTestId("bulk-toolbar")).toHaveAttribute("data-busy", "true");
+      bulkPending[key] = false;
+      cleanup();
+    }
+    renderLayout({ projectRole: 15 });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    expect(screen.getByTestId("bulk-toolbar")).not.toHaveAttribute("data-busy");
+  });
+
+  it("excludes epics and unconfirmed rows from selection", () => {
+    enableBulk();
+    renderLayout({
+      projectRole: 15,
+      issues: [
+        issue({ id: "epic-1", sequence_id: 9, name: "Epic row", is_epic: true }),
+        issue({ id: "temp-draft", sequence_id: 10, name: "Draft row" }),
+        ...ISSUES.slice(0, 1),
+      ],
+    });
+    expect(screen.queryByLabelText("Select WEB-9")).toBeNull();
+    expect(screen.queryByLabelText("Select WEB-10")).toBeNull();
+    fireEvent.click(screen.getByLabelText("Select all work items"));
+    expect(screen.getByTestId("bulk-toolbar")).toHaveTextContent("1 selected");
+  });
+
+  it("passes the project's feature flags to the toolbar", () => {
+    enableBulk();
+    renderLayout({
+      projectRole: 15,
+      projectFlags: { cycleView: false, moduleView: true, estimate: null },
+    });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    const toolbar = screen.getByTestId("bulk-toolbar");
+    expect(toolbar).toHaveAttribute("data-hide-cycle", "true");
+    expect(toolbar).not.toHaveAttribute("data-hide-module");
+    expect(toolbar).toHaveAttribute("data-hide-estimate", "true");
+  });
+
+  it("shows every toolbar field when the project row is missing", () => {
+    enableBulk();
+    renderLayout({ projectRole: 15, missingProject: true });
+    fireEvent.click(screen.getByLabelText("Select WEB-1"));
+    const toolbar = screen.getByTestId("bulk-toolbar");
+    expect(toolbar).not.toHaveAttribute("data-hide-cycle");
+    expect(toolbar).not.toHaveAttribute("data-hide-module");
+    expect(toolbar).not.toHaveAttribute("data-hide-estimate");
   });
 });
