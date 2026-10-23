@@ -4,7 +4,7 @@
 // Cursor paging for the workspace all-issues view (ISS-223): the read
 // asks for the first window, follows the server's cursor until a page
 // reports no successor, and the flattening step keeps row order.
-import type { ApiClient, GlobalIssueListResponse } from "@pidash/api-client";
+import type { ApiClient, GlobalIssueListResponse, IssueListQuery } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
 import type { GlobalIssueRow } from "@pidash/api-client";
@@ -133,6 +133,52 @@ describe("globalIssuesQueryOptions", () => {
 
   it("keys the cache on the workspace alone so a deep link shares the plain entry", () => {
     expect(options.queryKey).toEqual(["ws", "acme", "issues", "global"]);
+  });
+
+  it("keeps the plain key for an empty scope object", () => {
+    const run = globalIssuesQueryOptions({} as ApiClient, "acme", {});
+    expect(run.queryKey).toEqual(["ws", "acme", "issues", "global"]);
+  });
+
+  it("keeps the plain key for empty filters", () => {
+    const run = globalIssuesQueryOptions({} as ApiClient, "acme", { filters: {} });
+    expect(run.queryKey).toEqual(["ws", "acme", "issues", "global"]);
+  });
+
+  it.each<[string, IssueListQuery]>([
+    ["order", { orderBy: "-created_at" }],
+    ["group", { groupBy: "state" }],
+    ["sub-group", { subGroupBy: "priority" }],
+    ["page size", { perPage: 25 }],
+    ["expression", { filters: { filters: '{"and":[]}' } }],
+  ])("keys a %s scope on its own entry", (_label, scope) => {
+    const run = globalIssuesQueryOptions({} as ApiClient, "acme", scope);
+    expect(run.queryKey).not.toEqual(["ws", "acme", "issues", "global"]);
+    expect(run.queryKey.slice(0, 4)).toEqual(["ws", "acme", "issues", "global"]);
+  });
+
+  it("sends the scope with the request and never the caller's cursor", async () => {
+    const { client, calls } = stubClient([response([row("a", 1)])]);
+    const run = globalIssuesQueryOptions(client, "acme", {
+      orderBy: "-created_at",
+      groupBy: "state",
+      subGroupBy: "priority",
+      perPage: 25,
+      filters: { assignees: "me" },
+      cursor: "stale",
+    });
+    const queryFn = run.queryFn as (context: unknown) => Promise<GlobalIssueListResponse>;
+    await queryFn({ pageParam: null });
+    expect(calls[0]).toMatchObject({
+      per_page: 25,
+      order_by: "-created_at",
+      group_by: "state",
+      sub_group_by: "priority",
+      assignees: "me",
+    });
+    expect(calls[0]?.["cursor"]).toBeUndefined();
+    await queryFn({ pageParam: "7:1:0" });
+    expect(calls[1]).toMatchObject({ cursor: "7:1:0" });
   });
 });
 

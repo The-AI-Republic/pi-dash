@@ -583,6 +583,40 @@ describe("view row wiring", () => {
     await waitFor(() => expect(patches).toHaveLength(1));
   });
 
+  it("offers the view actions to a workspace member on a workspace view (VIEW-038)", async () => {
+    const user = userEvent.setup();
+    setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, project: null, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      },
+      { workspaceRole: 15, projectRole: null }
+    );
+    const pill = await screen.findByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
+    expect(await screen.findByRole("button", { name: "Save as" })).toBeInTheDocument();
+  });
+
+  it("hides the view actions from a workspace guest on a workspace view (VIEW-038)", async () => {
+    const user = userEvent.setup();
+    setupView(
+      { priority__in: "none" },
+      {
+        view: { ...VIEW_RECORD, project: null, rich_filters: { priority__in: "urgent" } } as never,
+        isDefault: false,
+      },
+      { workspaceRole: 5, projectRole: null }
+    );
+    const pill = await screen.findByTestId("rich-condition");
+    await user.click(within(pill).getByRole("button", { name: /^is$/ }));
+    await user.click(await screen.findByRole("option", { name: "is not" }));
+    // Dirty, yet a guest still gets no save entries.
+    expect(screen.queryByRole("button", { name: "Save as" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update view" })).not.toBeInTheDocument();
+  });
+
   it("offers no fork on a clean saved view; clearing offers only Update view", async () => {
     const user = userEvent.setup();
     setupView(

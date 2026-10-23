@@ -19,6 +19,7 @@ export type {
   ViewPublishInput,
   ViewPublishResult,
   ViewPublishSlot,
+  WorkspaceViewLayoutsSlot,
 } from "./types.js";
 export { APP_RAIL_FLAG, ISSUE_DEDUPE_FLAG, SIDEBAR_TOGGLE_FLAG } from "./types.js";
 export { isAppRailEnabled, isSidebarToggleEnabled } from "./flags.js";

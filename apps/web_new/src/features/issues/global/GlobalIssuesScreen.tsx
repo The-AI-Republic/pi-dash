@@ -12,7 +12,7 @@
 // and the per-project role decides which write entries appear.
 
 import { useSuspenseInfiniteQuery, useSuspenseQuery } from "@tanstack/react-query";
-import type { GlobalIssueRow } from "@pidash/api-client";
+import type { GlobalIssueRow, IssueListQuery } from "@pidash/api-client";
 import { Link, useParams } from "@tanstack/react-router";
 import { Button, VirtualList } from "@pidash/kit";
 import * as React from "react";
@@ -91,15 +91,32 @@ function GlobalRow({
   return <RowContextMenu state={menu} trigger={body} />;
 }
 
+export interface GlobalIssuesScreenProps {
+  /** Scope the read: a saved view's expression, a default's static condition, an order. */
+  query?: IssueListQuery | undefined;
+  /** Hide the list's own header; an embedding screen carries its own chrome. */
+  hideHeader?: boolean | undefined;
+  /** Empty surface override; the workspace card renders by default. */
+  emptyState?: React.ReactNode | undefined;
+  /** List title for the header and the accessible names. */
+  label?: string | undefined;
+}
+
 /**
  * Every visible issue in the workspace, one flat list. The mounted
  * route supplies both inputs: its workspace param and its raw search.
+ * A saved-view detail embeds the same list scoped to the view.
  */
-export function GlobalIssuesScreen(): React.ReactElement {
+export function GlobalIssuesScreen({
+  query = {},
+  hideHeader = false,
+  emptyState,
+  label = "All issues",
+}: GlobalIssuesScreenProps = {}): React.ReactElement {
   const params = useParams({ strict: false }) as { ws?: string };
   const workspaceSlug = params.ws ?? "";
   const client = getAppClient();
-  const issues = useSuspenseInfiniteQuery(globalIssuesQueryOptions(client, workspaceSlug));
+  const issues = useSuspenseInfiniteQuery(globalIssuesQueryOptions(client, workspaceSlug, query));
   const { data: projects } = useSuspenseQuery(projectsQueryOptions(client, workspaceSlug));
   const identifiers = React.useMemo(
     () => new Map(projects.map((project) => [project.id, project.identifier])),
@@ -133,22 +150,25 @@ export function GlobalIssuesScreen(): React.ReactElement {
   }, [issues.hasNextPage, issues.isFetchingNextPage, issues.fetchNextPage]);
   const sentinel = useLoadMoreSentinel(loadMore, issues.hasNextPage);
   if (rows.length === 0) {
+    if (emptyState !== undefined) return <>{emptyState}</>;
     // The empty surface is the workspace card (ISS-073): the old list
     // shows the same two-tier card with or without query params, because
     // the read ignores them (ISS-223).
     return <GlobalIssuesEmptyState workspaceSlug={workspaceSlug} projects={projects} />;
   }
   return (
-    <section aria-label="All issues" className="flex h-full min-h-0 flex-col">
-      <header className="flex items-center justify-between border-b border-(--border) px-(--space-3) py-(--space-2)">
-        <h1 className="text-h3 text-(--text)">All issues</h1>
-        <div className="ml-auto flex items-center gap-(--space-3)">
-          <span className="text-meta text-(--text-muted)">{total}</span>
-          <ListPageQuickActions />
-        </div>
-      </header>
+    <section aria-label={label} className="flex h-full min-h-0 flex-col">
+      {hideHeader ? null : (
+        <header className="flex items-center justify-between border-b border-(--border) px-(--space-3) py-(--space-2)">
+          <h1 className="text-h3 text-(--text)">{label}</h1>
+          <div className="ml-auto flex items-center gap-(--space-3)">
+            <span className="text-meta text-(--text-muted)">{total}</span>
+            <ListPageQuickActions />
+          </div>
+        </header>
+      )}
       <VirtualList
-        label="All issues"
+        label={label}
         items={rows}
         estimateSize={GLOBAL_ROW_HEIGHT}
         getKey={(row) => row.id}

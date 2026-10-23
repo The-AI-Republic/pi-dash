@@ -14,9 +14,14 @@ import { MISSING_VIEW_BACK_LABEL, MISSING_VIEW_DESCRIPTION, MISSING_VIEW_TITLE }
 
 export interface SavedViewMissingStateProps {
   onBack: () => void;
+  /** Way-back label; the workspace detail names the default view (VIEW-038). */
+  backLabel?: string | undefined;
 }
 
-export function SavedViewMissingState({ onBack }: SavedViewMissingStateProps): React.ReactElement {
+export function SavedViewMissingState({
+  onBack,
+  backLabel = MISSING_VIEW_BACK_LABEL,
+}: SavedViewMissingStateProps): React.ReactElement {
   return (
     <section data-testid="saved-view-missing" className="flex min-h-0 flex-1 items-center justify-center p-(--space-8)">
       <div className="flex w-full max-w-96 flex-col items-center gap-(--space-6) px-(--space-6) py-(--space-12)">
@@ -30,7 +35,7 @@ export function SavedViewMissingState({ onBack }: SavedViewMissingStateProps): R
         />
         <p className="text-body text-center text-(--text-muted)">{MISSING_VIEW_DESCRIPTION}</p>
         <Button variant="primary" onClick={() => onBack()}>
-          {MISSING_VIEW_BACK_LABEL}
+          {backLabel}
         </Button>
       </div>
     </section>

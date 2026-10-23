@@ -111,10 +111,31 @@ export interface SlotComponents {
    * The name is stable across editions; a rename is a breaking change.
    */
   viewPublish?: ViewPublishSlot;
+  /**
+   * Workspace view layouts (VIEW-040, NEWFRONT-729; Decisions D25). The
+   * server layout keys the edition offers on the workspace views
+   * surface, in selector order. The app owns the selector chrome (the
+   * issues layout switcher) and the persist (the workspace view's
+   * display-filter PATCH, an OSS endpoint); the slot only decides which
+   * layouts may be picked. The OSS edition leaves it absent: no
+   * selector renders and the spreadsheet body renders. The name is
+   * stable across editions; a rename is a breaking change.
+   */
+  workspaceViewLayouts?: WorkspaceViewLayoutsSlot;
 }
 
 /** Access values the slot trades in: 1 shared, 0 owner-only. */
 export type ViewAccessValue = 0 | 1;
+
+/**
+ * Layouts an edition offers on the workspace views surface (VIEW-040).
+ * Entries are server layout keys (`list`, `kanban`, `calendar`,
+ * `spreadsheet`, `gantt_chart`); the app ignores keys it does not know.
+ */
+export interface WorkspaceViewLayoutsSlot {
+  /** Offered layouts, in the order the selector shows them. */
+  layouts: readonly string[];
+}
 
 /** Props the edition's access selector receives inside the dialog. */
 export interface ViewAccessFieldProps {

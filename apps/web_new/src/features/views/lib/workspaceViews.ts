@@ -46,6 +46,14 @@ export function workspaceCustomViewHref(workspaceSlug: string, viewId: string): 
   return `/${workspaceSlug}/workspace-views/${viewId}`;
 }
 
+/** The workspace views list (VIEW-030); the detail's "Views" crumb lands here. */
+export function workspaceViewsListHref(workspaceSlug: string): string {
+  return `/${workspaceSlug}/workspace-views`;
+}
+
+/** The list crumb on the workspace detail (VIEW-038). */
+export const WORKSPACE_VIEWS_CRUMB = "Views";
+
 /** Escape a query for a case-insensitive literal substring match. */
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

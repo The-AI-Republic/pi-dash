@@ -10,3 +10,11 @@ describe("saved-view detail chunk", () => {
     expect(() => resolvedSavedViewDetail()).toThrow(/await loadSavedViewDetail/);
   });
 });
+
+describe("workspace view detail chunk", () => {
+  it("refuses to resolve the screen before the route awaited the chunk", async () => {
+    vi.resetModules();
+    const { resolvedWorkspaceViewDetail } = await import("./lazy.js");
+    expect(() => resolvedWorkspaceViewDetail()).toThrow(/await loadWorkspaceViewDetail/);
+  });
+});

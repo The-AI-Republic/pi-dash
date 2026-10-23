@@ -10,17 +10,21 @@ export { resetViewFavoriteIds, selectPendingViewId, useToggleViewFavorite } from
 export type { ToggleViewFavoriteInput } from "./api/viewFavorites.js";
 export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
 export { loadSavedViewDetail, resolvedSavedViewDetail } from "./detail/lazy.js";
+export { loadWorkspaceViewDetail, resolvedWorkspaceViewDetail } from "./detail/lazy.js";
 export type { SavedViewScreenProps } from "./detail/SavedViewScreen.js";
 export { SavedViewHeader } from "./detail/SavedViewHeader.js";
 export type { SavedViewHeaderProps } from "./detail/SavedViewHeader.js";
 export { SavedViewMissingState } from "./detail/SavedViewMissingState.js";
 export type { SavedViewMissingStateProps } from "./detail/SavedViewMissingState.js";
 export { SavedViewSwitcher, viewSwitcherOptions } from "./detail/SavedViewSwitcher.js";
+export { ViewSwitcherMark } from "./detail/SavedViewSwitcher.js";
 export type { SavedViewSwitcherProps } from "./detail/SavedViewSwitcher.js";
 export type { SavedViewDetailParams } from "./detail/preload.js";
+export type { WorkspaceViewDetailParams } from "./detail/workspacePreload.js";
 export {
   MISSING_VIEW_BACK_LABEL,
   MISSING_VIEW_DESCRIPTION,
+  MISSING_WORKSPACE_VIEW_BACK_LABEL,
   MISSING_VIEW_TITLE,
   saveAsTitle,
   savedViewDocumentTitle,
@@ -28,7 +32,13 @@ export {
   savedViewTitle,
   showsPrivateLock,
 } from "./detail/model.js";
-export { projectViewDetailQueryOptions } from "./api/detail.js";
+export { projectViewDetailQueryOptions, workspaceViewDetailQueryOptions } from "./api/detail.js";
+export { WorkspaceViewHeader } from "./detail/WorkspaceViewHeader.js";
+export type { WorkspaceViewHeaderProps } from "./detail/WorkspaceViewHeader.js";
+export { WorkspaceViewScreen } from "./detail/WorkspaceViewScreen.js";
+export type { WorkspaceViewScreenProps } from "./detail/WorkspaceViewScreen.js";
+export { WorkspaceViewSwitcher, workspaceSwitcherOptions } from "./detail/WorkspaceViewSwitcher.js";
+export type { WorkspaceViewSwitcherProps } from "./detail/WorkspaceViewSwitcher.js";
 export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
 export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
 export { WorkspaceViewMenu, selectWorkspaceViewMenuEntries } from "./components/WorkspaceViewMenu.js";
@@ -110,8 +120,10 @@ export {
   sortWorkspaceViewsNewestFirst,
   WORKSPACE_DEFAULT_VIEWS,
   WORKSPACE_VIEW_NAME_LIMIT,
+  WORKSPACE_VIEWS_CRUMB,
   workspaceCustomViewHref,
   workspaceDefaultViewHref,
+  workspaceViewsListHref,
   workspaceViewsTitle,
 } from "./lib/workspaceViews.js";
 export type { WorkspaceCustomsState, WorkspaceDefaultView, WorkspaceViewGroups } from "./lib/workspaceViews.js";

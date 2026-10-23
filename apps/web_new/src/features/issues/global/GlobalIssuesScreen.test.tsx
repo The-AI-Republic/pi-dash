@@ -103,6 +103,8 @@ function renderScreen(
     onFetch?: (url: string) => void;
     /** Visible projects; the empty surface picks its card from them. */
     projects?: Array<Record<string, unknown>>;
+    /** Props for an embedding view: scoped read, hidden header, empty override, label. */
+    screenProps?: React.ComponentProps<typeof GlobalIssuesScreen>;
   } = {}
 ) {
   createAppClient("https://api.test", ((url: string) => {
@@ -123,7 +125,11 @@ function renderScreen(
   });
   networkPages = { first: firstPage, ...(options.nextPage === undefined ? {} : { next: options.nextPage }) };
   queryClient.setQueryData(
-    globalIssuesQueryOptions(getAppClient(), options.withoutWorkspaceParam ? "" : SLUG).queryKey,
+    globalIssuesQueryOptions(
+      getAppClient(),
+      options.withoutWorkspaceParam ? "" : SLUG,
+      options.screenProps?.query ?? {}
+    ).queryKey,
     { pages: [firstPage], pageParams: [null] }
   );
   queryClient.setQueryData(
@@ -143,7 +149,7 @@ function renderScreen(
     getParentRoute: () => allIssuesParent,
     path: allIssuesPath,
     validateSearch: (search: Record<string, unknown>) => search as Record<string, string>,
-    component: () => <GlobalIssuesScreen />,
+    component: () => <GlobalIssuesScreen {...(options.screenProps ?? {})} />,
   });
   const query = new URLSearchParams(routeFilters).toString();
   const router = createRouter({
@@ -395,5 +401,47 @@ describe("GlobalIssuesScreen", () => {
       "Open in new tab",
       "Copy link",
     ]);
+  });
+
+  it("scopes the read to the embedding view's expression and order", async () => {
+    const seen: string[] = [];
+    renderScreen(
+      { results: [row("scoped", { sequence_id: 1 })], total_count: 2 },
+      {},
+      {
+        nextPage: page([row("scoped-next", { sequence_id: 2 })], { total: 2 }),
+        onFetch: (url) => seen.push(url),
+        screenProps: { query: { orderBy: "-created_at", filters: { assignees: "me" } } },
+      }
+    );
+    expect(await screen.findByText("Issue scoped")).toBeInTheDocument();
+    const more = await screen.findByRole("button", { name: GLOBAL_LOAD_MORE_LABEL });
+    await userEvent.setup().click(more);
+    await waitFor(() => expect(seen.some((url) => url.includes("cursor=page-2"))).toBe(true));
+    const continuation = seen.find((url) => url.includes("cursor=page-2")) ?? "";
+    expect(continuation).toContain("order_by=-created_at");
+    expect(decodeURIComponent(continuation)).toContain("assignees=me");
+  });
+
+  it("hides its header and labels the list for the embedding view", async () => {
+    renderScreen(
+      { results: [row("a1", { sequence_id: 1 })] },
+      {},
+      { screenProps: { hideHeader: true, label: "Triage" } }
+    );
+    // The section and the virtual list share the view's label.
+    expect(await screen.findAllByRole("region", { name: "Triage" })).toHaveLength(2);
+    expect(screen.queryByRole("heading")).toBeNull();
+    expect(screen.getByText("Issue a1")).toBeInTheDocument();
+  });
+
+  it("renders the empty override instead of the workspace card", async () => {
+    renderScreen(
+      { results: [] },
+      {},
+      { screenProps: { emptyState: <p data-testid="view-empty-override">Nothing matches this view.</p> } }
+    );
+    expect(await screen.findByTestId("view-empty-override")).toBeInTheDocument();
+    expect(screen.queryByText("No Views yet")).toBeNull();
   });
 });

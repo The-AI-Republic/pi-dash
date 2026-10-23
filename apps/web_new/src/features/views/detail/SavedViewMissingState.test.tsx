@@ -6,7 +6,12 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import { MISSING_VIEW_BACK_LABEL, MISSING_VIEW_DESCRIPTION, MISSING_VIEW_TITLE } from "./model.js";
+import {
+  MISSING_VIEW_BACK_LABEL,
+  MISSING_VIEW_DESCRIPTION,
+  MISSING_VIEW_TITLE,
+  MISSING_WORKSPACE_VIEW_BACK_LABEL,
+} from "./model.js";
 import { SavedViewMissingState } from "./SavedViewMissingState.js";
 
 describe("SavedViewMissingState", () => {
@@ -22,5 +27,13 @@ describe("SavedViewMissingState", () => {
   it("names the back control in a way the oracle's views|back|list matcher finds", () => {
     render(<SavedViewMissingState onBack={vi.fn()} />);
     expect(MISSING_VIEW_BACK_LABEL).toMatch(/views|back|list/i);
+  });
+
+  it("names the default view as the way back for a workspace detail (VIEW-038)", () => {
+    const onBack = vi.fn();
+    render(<SavedViewMissingState onBack={onBack} backLabel={MISSING_WORKSPACE_VIEW_BACK_LABEL} />);
+    expect(MISSING_WORKSPACE_VIEW_BACK_LABEL).toBe("Go to All work items");
+    fireEvent.click(screen.getByRole("button", { name: "Go to All work items" }));
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 });
