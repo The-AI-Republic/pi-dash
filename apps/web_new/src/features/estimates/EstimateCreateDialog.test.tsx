@@ -352,6 +352,30 @@ describe("EstimateCreateDialog value arrangement", () => {
     ]);
   });
 
+  it("places a dragged row in the final slot when dropped on the lower half", async () => {
+    const user = userEvent.setup();
+    stubApi();
+    renderDialog();
+    await pickStarter(user, "Fibonacci");
+    const handles = within(dialog()).getAllByRole("button", { name: /^Reorder value/ });
+    const targetValue = within(dialog()).getAllByTestId("estimate-value")[5] as HTMLElement;
+    const targetRow = targetValue.closest("li") as HTMLElement;
+    vi.spyOn(targetRow, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 100,
+      width: 200,
+      height: 40,
+      top: 100,
+      right: 200,
+      bottom: 140,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    fireEvent.dragStart(handles[0] as HTMLElement);
+    fireEvent(targetRow, new MouseEvent("drop", { bubbles: true, cancelable: true, clientY: 135 }));
+    expect(values()).toEqual(["2", "3", "5", "8", "13", "1"]);
+  });
+
   it("reorders with keyboard move controls and disables the edges", async () => {
     const user = userEvent.setup();
     stubApi();
@@ -395,6 +419,7 @@ describe("EstimateCreateDialog value arrangement", () => {
     expect(within(dialog()).queryByRole("textbox")).not.toBeInTheDocument();
     await user.dblClick(within(dialog()).getByText("2", { selector: "[data-testid='estimate-value']" }));
     const input = within(dialog()).getByRole("textbox", { name: "Value 2" });
+    expect(document.activeElement).toBe(input);
     await user.type(input, "0");
     await user.keyboard("{Enter}");
     expect(values()).toEqual(["1", "20"]);
@@ -499,12 +524,33 @@ describe("EstimateCreateDialog validation", () => {
     expect(posts[0]?.estimate_points.at(-1)).toEqual({ key: 3, value: "x".repeat(20) });
   });
 
-  it("blocks submit when the add form is open and empty", async () => {
+  it("refuses an empty added value without closing the editor", async () => {
     const user = userEvent.setup();
     const { posts } = stubApi();
     renderDialog();
     await pickStarter(user, "Custom");
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_ADD_LABEL }));
+    await user.click(within(dialog()).getByRole("button", { name: "Save" }));
+    expect(within(dialog()).getByText("An estimate value cannot be empty.")).toBeInTheDocument();
+    expect(within(dialog()).getByRole("textbox", { name: "Value 3" })).toBeInTheDocument();
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
+    expect(within(dialog()).getByText("An estimate value cannot be empty.")).toBeInTheDocument();
+    expect(posts).toHaveLength(0);
+  });
+
+  it("blocks submit when another committed row is still empty", async () => {
+    const user = userEvent.setup();
+    const { posts } = stubApi();
+    renderDialog();
+    await pickStarter(user, "Custom");
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_ADD_LABEL }));
+    await user.click(within(dialog()).getAllByRole("button", { name: "Cancel" })[0] as HTMLElement);
+    await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_ADD_LABEL }));
+    await user.click(within(dialog()).getAllByRole("button", { name: "Save" })[0] as HTMLElement);
+    await user.click(within(dialog()).getByRole("button", { name: "Edit value 1" }));
+    const input = within(dialog()).getByRole("textbox", { name: "Value 1" });
+    await user.clear(input);
+    await user.type(input, "9");
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("An estimate value cannot be empty.")).toBeInTheDocument();
     expect(posts).toHaveLength(0);

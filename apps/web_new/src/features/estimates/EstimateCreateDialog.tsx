@@ -31,8 +31,7 @@ import {
   estimateStarters,
   estimateValueLabel,
   familySystemName,
-  moveValueBefore,
-  renumberValues,
+  moveValueTo,
   truncateEstimateValue,
   valueSetProblems,
   type EstimateFamily,
@@ -168,10 +167,10 @@ export function EstimateCreateDialog({
 
   const commitValue = (index: number, draft: string): void => {
     const value = truncateEstimateValue(draft.trim());
-    // An unchanged commit needs no write; an invalid one is a problem,
-    // never a row mutation. Keep the editor open and leave the committed
-    // row as it was (EST-012).
-    if (value === (values[index] as string).trim()) {
+    // An unchanged non-empty commit needs no write. An empty commit is
+    // never clean, even when the row already holds an empty add placeholder:
+    // keep the editor open and leave committed rows untouched (EST-012).
+    if (value !== "" && value === (values[index] as string).trim()) {
       setEditing(null);
       setEditingError(null);
       return;
@@ -209,8 +208,8 @@ export function EstimateCreateDialog({
     setDragIndex(null);
   };
 
-  const dragValue = (sourceIndex: number, targetIndex: number): void => {
-    setValues((current) => moveValueBefore(current, sourceIndex, targetIndex));
+  const dragValue = (sourceIndex: number, targetIndex: number, position: "before" | "after"): void => {
+    setValues((current) => moveValueTo(current, sourceIndex, targetIndex, position));
     setEditing(null);
     setDragIndex(null);
   };
@@ -232,6 +231,10 @@ export function EstimateCreateDialog({
       setEditing(null);
       setEditingError(null);
     }
+    // Every committed row must be clean before the write. A pending edit was
+    // folded in above; a blank row left behind by another action still stops
+    // the request (EST-012, §3.6/§3.7).
+    if (valueSetProblems(family, committed).length > 0) return;
     if (!estimateFamilyEnabled(family, edition.flags)) return;
     create.mutate(
       { name: familySystemName(family), type: family, values: committed.map((value) => value.trim()) },
@@ -352,7 +355,9 @@ export function EstimateCreateDialog({
                       setDragIndex(null);
                       return;
                     }
-                    dragValue(dragIndex, index);
+                    const bounds = event.currentTarget.getBoundingClientRect();
+                    const after = bounds.height > 0 && event.clientY > bounds.top + bounds.height / 2;
+                    dragValue(dragIndex, index, after ? "after" : "before");
                   }}
                 >
                   <div className="flex items-center gap-(--space-2)">
@@ -382,6 +387,7 @@ export function EstimateCreateDialog({
                         <Input
                           label={`Value ${index + 1}`}
                           value={editing.draft}
+                          autoFocus
                           maxLength={ESTIMATE_VALUE_MAX_LENGTH}
                           disabled={create.isPending}
                           onChange={(event) => {
@@ -454,9 +460,7 @@ export function EstimateCreateDialog({
                         label={`Remove value ${index + 1}`}
                         disabled={create.isPending}
                         onClick={() => {
-                          setValues((current) =>
-                            renumberValues(current.filter((_, at) => at !== index)).map((row) => row.value)
-                          );
+                          setValues((current) => current.filter((_, at) => at !== index));
                           setEditing(null);
                           setEditingError(null);
                           setDragIndex(null);

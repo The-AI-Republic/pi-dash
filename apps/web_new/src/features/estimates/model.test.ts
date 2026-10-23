@@ -20,6 +20,7 @@ import {
   estimateValueLabel,
   familySystemName,
   moveValueBefore,
+  moveValueTo,
   renumberValues,
   selectActiveSystem,
   selectSupersededSystems,
@@ -230,8 +231,12 @@ describe("value rules", () => {
     ]);
   });
 
-  it("moves a value before a target and refuses no-op requests", () => {
+  it("moves a value before or after a target and refuses no-op requests", () => {
     expect(moveValueBefore(["1", "2", "3"], 0, 2)).toEqual(["2", "1", "3"]);
+    expect(moveValueTo(["1", "2", "3"], 0, 2, "after")).toEqual(["2", "3", "1"]);
+    expect(moveValueTo(["1", "2", "3"], 2, 0, "after")).toEqual(["1", "3", "2"]);
+    expect(moveValueTo(["1", "2", "3"], 2, 0, "before")).toEqual(["3", "1", "2"]);
+    expect(moveValueTo(["1", "2", "3"], 0, 2, "after").length).toBe(3);
     expect(moveValueBefore(["1", "2", "3"], 2, 0)).toEqual(["3", "1", "2"]);
     expect(moveValueBefore(["1", "2", "3"], 1, 1)).toEqual(["1", "2", "3"]);
     expect(moveValueBefore(["1", "2", "3"], -1, 1)).toEqual(["1", "2", "3"]);

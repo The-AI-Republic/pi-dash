@@ -215,10 +215,17 @@ export function renumberValues(values: readonly string[]): { key: number; value:
 }
 
 /**
- * Move the value at `sourceIndex` before the row currently at `targetIndex`
- * (EST-011). Out-of-range or same-row requests return an unchanged copy.
+ * Move the value at `sourceIndex` next to the row currently at `targetIndex`
+ * (EST-011). `position` follows the pointer: dropping on the upper half of a
+ * row inserts before it, the lower half after it, so the list's final slot is
+ * reachable. Out-of-range or same-row requests return an unchanged copy.
  */
-export function moveValueBefore(values: readonly string[], sourceIndex: number, targetIndex: number): string[] {
+export function moveValueTo(
+  values: readonly string[],
+  sourceIndex: number,
+  targetIndex: number,
+  position: "before" | "after"
+): string[] {
   if (
     sourceIndex === targetIndex ||
     sourceIndex < 0 ||
@@ -230,7 +237,13 @@ export function moveValueBefore(values: readonly string[], sourceIndex: number, 
   }
   const next = [...values];
   const moved = next.splice(sourceIndex, 1)[0] as string;
-  const insertAt = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
+  let insertAt = targetIndex + (position === "after" ? 1 : 0);
+  if (sourceIndex < targetIndex) insertAt -= 1;
   next.splice(insertAt, 0, moved);
   return next;
+}
+
+/** Move a value before the target row. */
+export function moveValueBefore(values: readonly string[], sourceIndex: number, targetIndex: number): string[] {
+  return moveValueTo(values, sourceIndex, targetIndex, "before");
 }
