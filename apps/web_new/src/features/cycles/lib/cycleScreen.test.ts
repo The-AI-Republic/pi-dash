@@ -14,6 +14,8 @@ import {
   cyclesListHref,
   cyclesTitle,
   isCycleGoneAway,
+  projectIssuesHref,
+  switchCycleTarget,
   resolveCyclesBody,
   type CyclesBodyInput,
 } from "./cycleScreen.js";
@@ -45,6 +47,16 @@ describe("cycles screen model", () => {
 
   it("addresses one cycle's detail without a trailing slash", () => {
     expect(cycleDetailPath("acme", PROJECT, "c1")).toBe(`/acme/projects/${PROJECT}/cycles/c1`);
+  });
+
+  it("addresses the project work-items page for the detail trail", () => {
+    expect(projectIssuesHref("acme", PROJECT)).toBe(`/acme/projects/${PROJECT}/issues`);
+  });
+
+  it("stays put on a cleared or repeated switcher pick", () => {
+    expect(switchCycleTarget("acme", PROJECT, "c1", null)).toBe(null);
+    expect(switchCycleTarget("acme", PROJECT, "c1", "c1")).toBe(null);
+    expect(switchCycleTarget("acme", PROJECT, "c1", "c2")).toBe(`/acme/projects/${PROJECT}/cycles/c2`);
   });
 
   it("shows the skeleton while either read is pending", () => {

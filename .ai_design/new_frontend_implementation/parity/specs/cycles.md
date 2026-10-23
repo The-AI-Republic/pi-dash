@@ -791,20 +791,16 @@ marker, a cycle switcher, a work-item count badge, and actions:
   is zero. It is shown to every role that can read items; the intended
   guest behavior is in §26.
 - Analytics is a member+ action on desktop; on the narrow bar every role
-  gets it. It opens the **scoped analytics dialog** owned by
-  NEWFRONT-738 with the cycle scope (see the reuse map, §22): the
-  dialog is project-scoped and takes an optional cycle scope so its
-  heading reads `Analytics for {project} in {cycle}` and its requests
-  carry `project_ids=<projectId>&cycle_id=<cycleId>`. The cycle header
-  must not mount the Issues surface's `AnalyticsEntry` component: that
-  component is the issues-list header entry, it is member+ on every
-  width, it takes `rows`/`totalCount`/`isEpics` and reads "Work items in
-  {project}", and it has no cycle scope. NEWFRONT-738 supplies the
-  dialog and the cycle-scope props it needs; slice F (NEWFRONT-712)
-  supplies the two triggers (wide header button, narrow-bar item) and
-  passes the cycle. If 738 has not added cycle scope by the time slice F
-  runs, slice F blocks on it and records the gap; it never forks a
-  dialog.
+  gets it. The cycle header mounts the shared `AnalyticsEntry` with a
+  cycle scope (slice F, NEWFRONT-712), so the dialog reads `Analytics
+for {project} in {cycle}`; the mount keeps the desktop trigger
+  member+ and adds a narrow-only trigger for every role. (Maintainer
+  decision on NEWFRONT-712: slice F mounts the entry with cycle scope
+  instead of blocking on NEWFRONT-738 for the dialog.) NEWFRONT-738
+  keeps the dialog body: it refactors the interim body into the scoped
+  dialog leaf, adds the `cycle_id` parameter to its project-scoped
+  requests, and owns the `analyticsDialog*` driver hooks. Slice F never
+  forks a dialog.
 - Add work item is a member+ action and is hidden for a finished cycle
   (read-only, §8). Its label is **"Add work item"** and it opens the
   shared create modal pre-filled with this cycle (NEWFRONT-630).
@@ -1232,21 +1228,18 @@ slice that owns it. Nothing here is an import from the old frontend.
   frame; the cycle peek body is cycles-owned and reads the cycle
   summary. Bulk selection is NEWFRONT-633 and is not used by the cycle
   rows.
-- Analytics: NEWFRONT-738, the **scoped analytics dialog** (the
-  destination the issues header entry opens; where 619 has landed it is
-  the `AnalyticsDialog` leaf under `src/features/issues/analytics/`,
-  otherwise it is the dialog body inside the existing
-  `AnalyticsEntry.tsx` refactored into its own leaf). NEWFRONT-738 must
-  give it the cycle scope: an optional cycle (`id`, `name`) and the
-  `cycle_id` query parameter on its project-scoped requests, with the
-  heading `Analytics for {project} in {cycle}` and every role (including
-  guests) allowed to open it. The cycle area consumes the dialog, never
-  the issues-header entry: `AnalyticsEntry.tsx` stays the Issues surface
-  entry (member+, `rows`/`totalCount`/`isEpics`, "Work items in
-  {project}") and is not mounted on a cycle page. The cycle header's
-  wide trigger (NEWFRONT-712, member+ on desktop) and narrow-bar trigger
-  (every role) live in the cycles slice; 738 owns the dialog content, not
-  these triggers.
+- Analytics: the shared `AnalyticsEntry.tsx` (ISS-107) mounted with a
+  cycle scope by slice F (NEWFRONT-712): an optional cycle (`id`,
+  `name`) switches the heading to `Analytics for {project} in {cycle}`,
+  the desktop trigger stays member+, and a narrow-only trigger opens it
+  for every role including guests. (Maintainer decision on NEWFRONT-712,
+  superseding the earlier plan that slice F block on NEWFRONT-738 for
+  the dialog.) NEWFRONT-738 keeps the dialog body: it refactors the
+  interim body inside `AnalyticsEntry.tsx` into the scoped
+  `AnalyticsDialog` leaf, adds the `cycle_id` query parameter to its
+  project-scoped requests, and owns the `analyticsDialog*` driver
+  hooks. The cycle area consumes the shared entry and never forks a
+  dialog.
 
 **Shared plumbing cycles reuses**
 
@@ -1398,11 +1391,11 @@ payload.
   switcher or transfer. The transfer destination adds its own
   eligibility rule (open cycles except the source) on top of the shared
   picker.
-- **Analytics**: NEWFRONT-738's scoped dialog is the only analytics
-  surface; the cycle detail's wide header (member+) and narrow bar
-  (every role) open it with the cycle scope, and its heading names the
-  project and the cycle. It is not the issues-header `AnalyticsEntry`,
-  which stays on the Issues surface.
+- **Analytics**: the shared `AnalyticsEntry` mounted with the cycle
+  scope is the only analytics surface (NEWFRONT-712; maintainer
+  decision on that issue); the cycle detail's wide header (member+) and
+  narrow bar (every role) open it, and its heading names the project
+  and the cycle. NEWFRONT-738 keeps the dialog body.
 - **Archives**: NEWFRONT-698's shell is the frame for the archived
   cycles list; the cycles slice supplies the rows, search, filters and
   restore.
@@ -1460,7 +1453,7 @@ or wrongly. Slices must build exactly these:
 | CYC-027                            | Archived reads are **member+**; activating an archived row opens its peek, while "Open in new tab" goes to the canonical detail address (gone-away for an archived cycle). The archived search box is collapsed on arrival and opens focused; the live box opens unfocused. §3, §9.                                                                                                                                                                  |
 | CYC-029                            | Favorites are **member+ only**; guests get no star, not a disabled one. §11.                                                                                                                                                                                                                                                                                                                                                                         |
 | CYC-031                            | Transfer has **two entry points** — the finished detail banner and an inline action on a completed list row — opening one shared dialog. Row gate: completed **and** `total - (cancelled + completed) > 0`. Banner gate: the same count **and** an empty `progress_snapshot`. The server writes the source snapshot on success. §12.                                                                                                                 |
-| CYC-033                            | The analytics trigger opens NEWFRONT-738's **cycle-scoped** dialog (`Analytics for {project} in {cycle}`), not the issues-header `AnalyticsEntry`. §13, §22.                                                                                                                                                                                                                                                                                         |
+| CYC-033                            | The analytics trigger opens the shared `AnalyticsEntry` mounted with the cycle scope (`Analytics for {project} in {cycle}`); NEWFRONT-738 keeps the dialog body. §13, §22.                                                                                                                                                                                                                                                                           |
 | CYC-044                            | The offset chip renders for any **non-zero project offset** (no browser-zone comparison) and is suppressed by a zero offset, not by the `"UTC"` label. §17.                                                                                                                                                                                                                                                                                          |
 | CYC-037                            | An empty description renders nothing and a missing lead renders an empty avatar with no name; no "No description"/"No lead" strings. §14.                                                                                                                                                                                                                                                                                                            |
 | CYC-038                            | The sidebar Work items row and state-group total use the raw `completed_issues/total_issues` counters (cancelled included); only the ring excludes cancelled. §2, §14.                                                                                                                                                                                                                                                                               |

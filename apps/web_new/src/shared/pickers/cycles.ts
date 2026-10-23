@@ -20,6 +20,11 @@ export interface CycleOptionsInput {
   cycles: CycleList;
   excludeIds?: readonly string[] | undefined;
   allowClear?: boolean | undefined;
+  /**
+   * True lists completed cycles too (the cycle detail switcher,
+   * CYC-033). Assignment callers leave it off (ISS-212).
+   */
+  includeCompleted?: boolean | undefined;
 }
 
 /** Completed cycles never list; a missing status keeps the row. */
@@ -29,7 +34,11 @@ export function isCompletedCycle(status: string | undefined): boolean {
 
 export function selectCycleOptions(input: CycleOptionsInput): CycleOption[] {
   const options = input.cycles
-    .filter((cycle) => !isCompletedCycle(cycle.status) && !(input.excludeIds?.includes(cycle.id) ?? false))
+    .filter(
+      (cycle) =>
+        ((input.includeCompleted ?? false) || !isCompletedCycle(cycle.status)) &&
+        !(input.excludeIds?.includes(cycle.id) ?? false)
+    )
     .map((cycle) => ({ id: cycle.id, name: cycle.name, clear: false }));
   if (input.allowClear ?? true) options.unshift({ id: "", name: "No cycle", clear: true });
   return options;

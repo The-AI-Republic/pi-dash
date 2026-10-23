@@ -6920,6 +6920,15 @@ export class WebNewDriver implements ParityDriver {
     { key: "kanban", label: "Board" },
   ];
 
+  /** Cycle detail layout names as the switcher and mobile menu read them. */
+  private static readonly CYCLE_LAYOUT_LABELS: Record<LayoutsLayoutKey, string> = {
+    list: "List",
+    kanban: "Board",
+    calendar: "Calendar",
+    spreadsheet: "Spreadsheet",
+    gantt_chart: "Timeline",
+  };
+
   private async layoutsWaitForProfileLayout(layout: LayoutsLayoutKey): Promise<void> {
     const target = layout === "kanban" ? this.page.getByTestId("profile-board") : this.page.getByTestId("profile-list");
     await target.waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
@@ -16768,43 +16777,83 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesSidebarCollapsedStored");
   }
   async cyclesHeaderBadgeText(): Promise<string | null> {
-    return todo("cyclesHeaderBadgeText");
+    const badge = this.page.getByTestId("cycle-detail-badge");
+    if ((await badge.count()) === 0) return null;
+    if (!(await badge.isVisible().catch(() => false))) return null;
+    return ((await badge.innerText()) ?? "").trim();
   }
   async cyclesHeaderAddVisible(): Promise<boolean> {
-    return todo("cyclesHeaderAddVisible");
+    const button = this.page.getByTestId("issues-header").getByRole("button", { name: "Add work item" });
+    return (
+      (await button.count()) > 0 &&
+      (await button
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
   async cyclesHeaderAnalyticsVisible(): Promise<boolean> {
-    return todo("cyclesHeaderAnalyticsVisible");
+    const entry = this.page.getByTestId("cycle-analytics-entry");
+    return (
+      (await entry.count()) > 0 &&
+      (await entry
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
   async cyclesOpenAnalytics(): Promise<void> {
-    return todo("cyclesOpenAnalytics");
+    // Scoped to the desktop header: the entry also mounts in the narrow
+    // header, so the bare testid matches twice (NEWFRONT-712 review D1).
+    await this.page
+      .getByTestId("issues-header")
+      .getByTestId("cycle-analytics-entry")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issues-analytics-body").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesAnalyticsDialogVisible(): Promise<boolean> {
-    return todo("cyclesAnalyticsDialogVisible");
+    const body = this.page.getByTestId("issues-analytics-body");
+    return (
+      (await body.count()) > 0 &&
+      (await body
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
   async cyclesDismissAnalytics(): Promise<void> {
-    return todo("cyclesDismissAnalytics");
+    await this.page.keyboard.press("Escape");
+    await this.page.getByTestId("issues-analytics-body").waitFor({ state: "hidden", timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesSwitcherOpen(_currentName: string): Promise<void> {
-    return todo("cyclesSwitcherOpen");
+    await this.page.getByTestId("cycle-switcher-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("option").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesSwitcherOptions(): Promise<string[]> {
-    return todo("cyclesSwitcherOptions");
+    const texts = await this.page.getByRole("option").allInnerTexts();
+    return texts.map((text) => text.trim()).filter((text) => text !== "");
   }
-  async cyclesSwitcherPick(_name: string): Promise<void> {
-    return todo("cyclesSwitcherPick");
+  async cyclesSwitcherPick(name: string): Promise<void> {
+    await this.page.getByRole("option", { name }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesClickCyclesCrumb(): Promise<void> {
-    return todo("cyclesClickCyclesCrumb");
+    await this.page.getByTestId("cycle-crumb-cycles").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesClickProjectCrumb(_projectName: string): Promise<void> {
-    return todo("cyclesClickProjectCrumb");
+    await this.page.getByTestId("cycle-crumb-project").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesMobileBackVisible(): Promise<boolean> {
-    return todo("cyclesMobileBackVisible");
+    const back = this.page.getByTestId("cycle-mobile-back");
+    return (
+      (await back.count()) > 0 &&
+      (await back
+        .first()
+        .isVisible()
+        .catch(() => false))
+    );
   }
   async cyclesMobileBack(): Promise<void> {
-    return todo("cyclesMobileBack");
+    await this.page.getByTestId("cycle-mobile-back").click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesSidebarDateText(): Promise<string> {
     return todo("cyclesSidebarDateText");
@@ -16858,16 +16907,52 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesProgressEntryClick");
   }
   async cyclesMobileOpenAnalytics(): Promise<void> {
-    return todo("cyclesMobileOpenAnalytics");
+    // Scoped to the narrow header: the trigger also mounts (hidden) in
+    // the desktop header, so the bare testid matches twice with the
+    // first match unactionable (NEWFRONT-712 review D1).
+    await this.page
+      .getByTestId("issues-mobile-header")
+      .getByTestId("cycle-analytics-entry-narrow")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByTestId("issues-analytics-body").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
-  async cyclesSwitchLayout(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("cyclesSwitchLayout");
+  async cyclesSwitchLayout(layout: LayoutsLayoutKey): Promise<void> {
+    const label = WebNewDriver.CYCLE_LAYOUT_LABELS[layout];
+    // Wide containers show the segmented switcher; narrow ones collapse
+    // it to a dropdown with the same rows.
+    const segmented = this.page.getByTestId("layout-switcher-segmented").locator(`[data-layout="${layout}"]`);
+    if (
+      (await segmented.count()) > 0 &&
+      (await segmented
+        .first()
+        .isVisible()
+        .catch(() => false))
+    ) {
+      await segmented.first().click({ timeout: WebNewDriver.WAIT_MS });
+      return;
+    }
+    await this.page
+      .getByTestId("layout-switcher-dropdown")
+      .getByRole("button")
+      .click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesMobileOfferedLayouts(): Promise<LayoutsLayoutKey[]> {
-    return todo("cyclesMobileOfferedLayouts");
+    const names = WebNewDriver.CYCLE_LAYOUT_LABELS;
+    const keys = Object.keys(names) as LayoutsLayoutKey[];
+    await this.page.getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    await this.page.getByRole("menuitem").first().waitFor({ timeout: WebNewDriver.WAIT_MS });
+    const texts = await this.page.getByRole("menuitem").allInnerTexts();
+    await this.page.keyboard.press("Escape");
+    return texts
+      .map((text) => text.trim())
+      .map((text) => keys.find((key) => names[key] === text))
+      .filter((key): key is LayoutsLayoutKey => key !== undefined);
   }
-  async cyclesMobileSwitchTo(_layout: LayoutsLayoutKey): Promise<void> {
-    return todo("cyclesMobileSwitchTo");
+  async cyclesMobileSwitchTo(layout: LayoutsLayoutKey): Promise<void> {
+    await this.page.getByTestId("mobile-layout-trigger").click({ timeout: WebNewDriver.WAIT_MS });
+    const label = WebNewDriver.CYCLE_LAYOUT_LABELS[layout];
+    await this.page.getByRole("menuitem", { name: label }).first().click({ timeout: WebNewDriver.WAIT_MS });
   }
 
   // --- Cycles empty states, gone-away, create, validation (NEWFRONT-250,

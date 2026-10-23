@@ -43,6 +43,29 @@ export function cyclesFeatureHref(workspaceSlug: string, projectId: string): str
   return `/${workspaceSlug}/settings/projects/${projectId}/features/cycles`;
 }
 
+/**
+ * Project work-items address: the detail trail's project crumb lands
+ * here (CYC-034).
+ */
+export function projectIssuesHref(workspaceSlug: string, projectId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/issues`;
+}
+
+/**
+ * Detail address a switcher pick navigates to (CYC-033): null stays
+ * put — clearing is impossible (the menu hides its clear row) and
+ * re-picking the current cycle is a no-op.
+ */
+export function switchCycleTarget(
+  workspaceSlug: string,
+  projectId: string,
+  currentCycleId: string,
+  pickedCycleId: string | null
+): string | null {
+  if (pickedCycleId === null || pickedCycleId === currentCycleId) return null;
+  return cycleDetailPath(workspaceSlug, projectId, pickedCycleId);
+}
+
 /** The one body the cycles screen renders. */
 export type CyclesBodyState = "skeleton" | "error" | "gate" | "zero" | "list";
 

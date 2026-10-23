@@ -7,7 +7,9 @@
 // a work-items dialog scoped to the current project, with the epic flag
 // carried through. The analytics area owns the destination; until it
 // lands this mount names the project and the server's total, plus the
-// per-group counts once the full list is loaded.
+// per-group counts once the full list is loaded. The cycle detail
+// (CYC-033, NEWFRONT-712) mounts it with a cycle scope and a narrow-only
+// trigger for every role; the desktop trigger stays member+.
 
 import { Button, Dialog } from "@pidash/kit";
 import { ChartColumn } from "lucide-react";
@@ -28,6 +30,16 @@ export interface AnalyticsEntryProps {
   rows?: readonly AnalyticsRow[] | undefined;
   /** Server total; the dialog always reports this number. */
   totalCount?: number | undefined;
+  /**
+   * Cycle scope (NEWFRONT-712): the dialog reads
+   * `Analytics for {project} in {cycle}`. NEWFRONT-738 fills the body.
+   */
+  cycle?: { id: string; name: string } | undefined;
+  /**
+   * True also renders a narrow-only trigger for every role (the cycle
+   * detail bar, CYC-033). The desktop trigger stays member+.
+   */
+  narrowGuestAccess?: boolean | undefined;
 }
 
 /** One list row, reduced to the state it belongs to. */
@@ -56,6 +68,8 @@ export function AnalyticsEntry({
   isEpics = false,
   rows = [],
   totalCount = 0,
+  cycle,
+  narrowGuestAccess = false,
 }: AnalyticsEntryProps): React.ReactElement | null {
   const permissions = usePermissions(workspaceSlug);
   const projectRoles = useProjectRoles(workspaceSlug);
@@ -71,23 +85,40 @@ export function AnalyticsEntry({
   const workspaceAdmin = permissions.role !== null && permissions.role >= ROLE_ADMIN;
   const projectRole = projectRoles.data?.[projectId];
   const allowed = workspaceAdmin || (projectRole !== undefined && projectRole >= ROLE_MEMBER);
-  if (!allowed) return null;
+  if (!allowed && !narrowGuestAccess) return null;
   // A partial page would undercount, so the breakdown waits for the full
   // list; the server total is authoritative either way.
   const groups = rows.length === totalCount ? groupCounts(rows, states.data) : [];
   const total = totalCount > 0 ? totalCount : rows.length;
+  const description =
+    cycle === undefined ? `Work items in ${projectName}` : `Analytics for ${projectName} in ${cycle.name}`;
 
   return (
     <>
-      <Button variant="ghost" size="small" onClick={() => setOpen(true)} data-testid="issues-analytics-entry">
-        <ChartColumn size={14} strokeWidth={2} aria-hidden="true" />
-        <span>Analytics</span>
-      </Button>
+      {allowed ? (
+        <Button
+          variant="ghost"
+          size="small"
+          onClick={() => setOpen(true)}
+          data-testid={cycle === undefined ? "issues-analytics-entry" : "cycle-analytics-entry"}
+        >
+          <ChartColumn size={14} strokeWidth={2} aria-hidden="true" />
+          <span>Analytics</span>
+        </Button>
+      ) : null}
+      {narrowGuestAccess ? (
+        <span className="md:hidden">
+          <Button variant="ghost" size="small" onClick={() => setOpen(true)} data-testid="cycle-analytics-entry-narrow">
+            <ChartColumn size={14} strokeWidth={2} aria-hidden="true" />
+            <span>Analytics</span>
+          </Button>
+        </span>
+      ) : null}
       <Dialog
         open={open}
         onOpenChange={setOpen}
         title={isEpics ? "Epic analytics" : "Work items analytics"}
-        description={`Work items in ${projectName}`}
+        description={description}
       >
         <div className="flex flex-col gap-(--space-3)" data-testid="issues-analytics-body">
           <p className="text-body text-(--text)">
