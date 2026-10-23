@@ -31,6 +31,7 @@ import {
 } from "../create/issueTypeSeam.js";
 import { loadWorkItemDraft } from "../lib/createDraft.js";
 import { AI_BUTTON_LABEL } from "../create/ModalDescription.js";
+import { draftKeys } from "../drafts/api.js";
 import { CREATE_DIALOG_TITLE, WorkItemCreateDialog, type WorkItemCreateProject } from "./WorkItemCreateDialog.js";
 
 // These cases drive the whole strip through real menus, calendars and a
@@ -1524,6 +1525,35 @@ describe("WorkItemCreateDialog discard guard (ISS-120)", () => {
   it("closes from the close control on a clean form", async () => {
     const h = setup();
     fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
+    expect(h.onOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
+describe("WorkItemCreateDialog keep-as-draft confirmation (DRAFT-005/006)", () => {
+  it("confirms a kept draft, refreshes the drafts list and resets the kept title", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    const invalidate = vi.spyOn(h.queryClient, "invalidateQueries");
+    await user.type(titleField(), "Kept draft");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await screen.findByText("Save this draft?");
+    await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(notifySuccess).toHaveBeenCalledWith("Draft saved", expect.stringMatching(/drafts/));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: draftKeys.all(SLUG) });
+    expect(loadWorkItemDraft(SLUG)).toBeNull();
+  });
+
+  it("stores a whitespace title as Untitled when the guard keeps the draft", async () => {
+    const user = userEvent.setup();
+    const h = setup();
+    fireEvent.change(titleField(), { target: { value: "   " } });
+    await typeDescription(user, "Body without a name");
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    await screen.findByText("Save this draft?");
+    await user.click(screen.getByRole("button", { name: "Save to Drafts" }));
+    await waitFor(() => expect(posts(h.sent)).toHaveLength(1));
+    expect(posts(h.sent)[0]).toMatchObject({ name: "Untitled" });
     expect(h.onOpenChange).toHaveBeenCalledWith(false);
   });
 });

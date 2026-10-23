@@ -434,6 +434,59 @@ describe("the modal project chip", () => {
   });
 });
 
+describe("discard guard and modal fields (DRAFT-005/006)", () => {
+  it("discards and cancels from the guard dialog", async () => {
+    const recorder = new Recorder();
+    const driver = new WebNewDriver(recorder.page());
+    await driver.discardDialogDiscard();
+    await driver.cancelDiscardDialog();
+    expectTrace(recorder.trace(), [
+      "click",
+      'getByRole("dialog"',
+      "Save this draft?",
+      "Discard",
+      "click",
+      'getByRole("dialog"',
+      "Save this draft?",
+      "Cancel",
+    ]);
+  });
+
+  it("types into the modal description editor", async () => {
+    const recorder = new Recorder();
+    await new WebNewDriver(recorder.page()).fillDescription("Kept body");
+    expectTrace(recorder.trace(), [
+      "waitFor",
+      '[contenteditable=\\"true\\"]',
+      "click",
+      '[contenteditable=\\"true\\"]',
+      "press keyboard",
+      "type keyboard",
+    ]);
+    expect(recorder.pressed()).toEqual(["ControlOrMeta+a", "Kept body"]);
+  });
+
+  it("reads the title error, or blank when the field is fine", async () => {
+    const recorder = new Recorder();
+    recorder.respond = ({ method, path }) => {
+      if (method === "count" && path.includes("name-error")) return 1;
+      if (method === "textContent") return " Give the work item a title. ";
+      return undefined;
+    };
+    await expect(new WebNewDriver(recorder.page()).createTitleError()).resolves.toBe("Give the work item a title.");
+    expectTrace(recorder.trace(), ["count", "name-error", "textContent", "name-error"]);
+    const clean = new Recorder();
+    await expect(new WebNewDriver(clean.page()).createTitleError()).resolves.toBe("");
+    const nullish = new Recorder();
+    nullish.respond = ({ method, path }) => {
+      if (method === "count" && path.includes("name-error")) return 1;
+      if (method === "textContent") return null;
+      return undefined;
+    };
+    await expect(new WebNewDriver(nullish.page()).createTitleError()).resolves.toBe("");
+  });
+});
+
 describe("sign-in retry", () => {
   it("delegates to the standard sign-in flow", async () => {
     const recorder = new Recorder();

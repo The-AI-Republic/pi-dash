@@ -36,6 +36,7 @@ import {
 
 import { getAppClient } from "../../../core/api/client.js";
 import { issueKeys } from "../api/keys.js";
+import { draftKeys } from "../drafts/api.js";
 import { REFERENCE_STALE_TIME_MS, workspaceScope } from "../../../core/query/client.js";
 import { TITLE_GENERATION_TIMEOUT_MS, type CreateMembership } from "./createForm.js";
 import { changedCycleId, changedModuleIds, type EditMembership } from "./editForm.js";
@@ -106,12 +107,16 @@ export function useGenerateTitle(workspaceSlug: string) {
 
 /**
  * Save the discard guard's form as a workspace draft (ISS-120). The
- * discard prompt shows its own "Draft saved" notice once the write lands,
- * so the mutation stays silent; the form's inline save announces itself.
+ * write re-reads the drafts list so the kept row joins it; the caller
+ * announces the save (the guard's own notice, the inline footer toast).
  */
 export function useSaveDraft(workspaceSlug: string) {
+  const queryClient = useQueryClient();
   return useMutation<DraftIssue, Error, DraftIssueCreateInput>({
     mutationFn: (input) => createDraftIssue(getAppClient(), workspaceSlug, input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: draftKeys.all(workspaceSlug) });
+    },
   });
 }
 

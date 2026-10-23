@@ -1784,7 +1784,9 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async createTitleError(): Promise<string> {
-    return todo("createTitleError");
+    const error = this.createDialog().locator("#name-error").first();
+    if ((await error.count()) === 0) return "";
+    return ((await error.textContent()) ?? "").trim();
   }
 
   async submitCreateModal(): Promise<void> {
@@ -1824,11 +1826,19 @@ export class WebNewDriver implements ParityDriver {
   }
 
   async cancelDiscardDialog(): Promise<void> {
-    return todo("cancelDiscardDialog");
+    // Scoped to the guard: the form behind it carries its own Discard,
+    // and in draft mode its own Save to Drafts too.
+    await this.page
+      .getByRole("dialog", { name: "Save this draft?" })
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
   }
 
   async discardDialogDiscard(): Promise<void> {
-    return todo("discardDialogDiscard");
+    await this.page
+      .getByRole("dialog", { name: "Save this draft?" })
+      .getByRole("button", { name: "Discard", exact: true })
+      .click();
   }
 
   async openDraftForEdit(name: string): Promise<void> {
@@ -1962,8 +1972,14 @@ export class WebNewDriver implements ParityDriver {
     return todo("gitBranchError");
   }
 
-  async fillDescription(_text: string): Promise<void> {
-    return todo("fillDescription");
+  async fillDescription(text: string): Promise<void> {
+    // The modal's rich editor tracks real keystrokes like the title
+    // field, so type through the keyboard rather than filling.
+    const editor = this.createDialog().locator('[contenteditable="true"]').first();
+    await editor.waitFor({ timeout: WebNewDriver.WAIT_MS });
+    await editor.click();
+    await this.page.keyboard.press("ControlOrMeta+a");
+    await this.page.keyboard.type(text);
   }
 
   async countText(text: string): Promise<number> {
