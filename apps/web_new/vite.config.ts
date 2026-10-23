@@ -164,7 +164,10 @@ export default defineConfig(({ mode }) => {
           // the barrel drags the whole widget into the initial bundle
           // (NEWFRONT-647, size gate). The store keeps its registration:
           // it only loads with the widget, and a store nobody loaded has
-          // no state to reset.
+          // no state to reset. The saved-view layout body is lazy-only: it
+          // builds its per-layout React.lazy loaders at module scope, which
+          // otherwise pins them (and the layouts behind them) into the
+          // initial chunk through the issues barrel (NEWFRONT-869).
           // Every other module keeps the default: a blanket false reshapes
           // the TanStack route splits the size gate keys on.
           moduleSideEffects: (id) =>
@@ -180,7 +183,8 @@ export default defineConfig(({ mode }) => {
             id.includes("features/issues/subIssues/SubIssueProperties.") ||
             id.includes("features/issues/subIssues/SubIssueFilterMenu.") ||
             id.includes("features/issues/subIssues/SubIssueDisplayMenu.") ||
-            id.includes("features/issues/subIssues/AddExistingDialog.")
+            id.includes("features/issues/subIssues/AddExistingDialog.") ||
+            id.includes("features/issues/layouts/ViewLayoutBody.")
               ? false
               : true,
         },
