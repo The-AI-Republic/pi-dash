@@ -2,15 +2,12 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-import type { SpaceBoardIssuePage, SpaceBoardSettings } from "@pidash/api-client";
+import type { SpaceBoardSettings } from "@pidash/api-client";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it } from "vitest";
 
-import { BoardIssues, BoardLoading, BoardNavbar, issueKey } from "./BoardShell.js";
-
-const STATE_ID = "22222222-2222-4222-8222-222222222222";
-const ISSUE_ID = "33333333-3333-4333-8333-333333333333";
+import { BoardLoading, BoardNavbar, issueKey } from "./BoardShell.js";
 
 function settingsWith(logo: Record<string, unknown>, name = "Public board"): SpaceBoardSettings {
   return {
@@ -44,41 +41,6 @@ function settingsWith(logo: Record<string, unknown>, name = "Public board"): Spa
     intake: null,
   };
 }
-
-const page: SpaceBoardIssuePage = {
-  grouped_by: "state_id",
-  total_count: 1,
-  next_cursor: null,
-  next_page_results: false,
-  results: {
-    [STATE_ID]: {
-      results: [
-        {
-          id: ISSUE_ID,
-          name: "Read this issue",
-          state_id: STATE_ID,
-          sort_order: 1,
-          estimate_point: null,
-          priority: null,
-          start_date: null,
-          target_date: null,
-          sequence_id: 7,
-          project_id: "11111111-1111-4111-8111-111111111111",
-          parent_id: null,
-          created_by: null,
-          state__group: "unstarted",
-          cycle_id: null,
-          assignee_ids: [],
-          label_ids: [],
-          module_ids: [],
-          vote_items: [],
-          reaction_items: [],
-        },
-      ],
-      total_results: 1,
-    },
-  },
-};
 
 describe("BoardNavbar", () => {
   it("shows placeholder chrome without inventing a mark", () => {
@@ -125,38 +87,10 @@ describe("BoardNavbar", () => {
   });
 });
 
-describe("BoardIssues", () => {
-  it("groups rows by state and builds the public key from settings", () => {
-    render(
-      <BoardIssues
-        page={page}
-        states={[{ id: STATE_ID, name: "Todo", color: "#000", group: "unstarted", sequence: 1 }]}
-        projectIdentifier="SPC"
-      />
-    );
-    expect(screen.getByRole("heading", { name: "Todo" })).toBeInTheDocument();
-    expect(screen.getByText("Read this issue")).toBeInTheDocument();
-    expect(screen.getByText("SPC-7")).toBeInTheDocument();
-  });
-
-  it("labels a group whose state is missing without failing the board", () => {
-    render(<BoardIssues page={page} states={[]} projectIdentifier="SPC" />);
-    expect(screen.getByRole("heading", { name: "Issues" })).toBeInTheDocument();
-  });
-
-  it("renders nothing for empty groups", () => {
-    render(
-      <BoardIssues
-        page={{ ...page, results: { [STATE_ID]: { results: [], total_results: 0 } } }}
-        states={[]}
-        projectIdentifier="SPC"
-      />
-    );
-    expect(screen.queryByRole("heading")).not.toBeInTheDocument();
-  });
-
+describe("issueKey", () => {
   it("builds keys without a project identifier", () => {
     expect(issueKey("", { sequence_id: 3 })).toBe("-3");
+    expect(issueKey("SPC", { sequence_id: 7 })).toBe("SPC-7");
   });
 });
 

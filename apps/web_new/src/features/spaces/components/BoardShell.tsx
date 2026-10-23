@@ -4,11 +4,12 @@
 // Public board shell (SPC-001, SPC-016). The shell is deliberately
 // separate from the workspace AppShell: no sidebar, title bar, palette,
 // workspace switcher or session gate. Slice D fills the navbar controls,
-// slice B the landing gate and slice E the layouts; this slice owns the
-// composition points and the loading/failure states around them.
+// slice B the landing gate and slice E the layouts (features/spaces/layouts);
+// this slice owns the composition points and the loading/failure states
+// around them.
 
 import { Spinner } from "@pidash/kit";
-import type { SpaceBoardIssue, SpaceBoardIssuePage, SpaceBoardSettings, SpaceBoardState } from "@pidash/api-client";
+import type { SpaceBoardIssue, SpaceBoardSettings } from "@pidash/api-client";
 import * as React from "react";
 
 import { projectMarkGlyph } from "../lib/projectMark.js";
@@ -64,55 +65,6 @@ export function BoardLoading(): React.ReactElement {
     >
       <Spinner size="large" label="Loading board" />
     </div>
-  );
-}
-
-/** Minimal read-only grouped list; slice E replaces this with the real layouts. */
-export function BoardIssues({
-  page,
-  states,
-  projectIdentifier,
-}: {
-  page: SpaceBoardIssuePage;
-  states: SpaceBoardState[];
-  projectIdentifier: string;
-}): React.ReactElement {
-  const stateById = new Map(states.map((state) => [state.id, state]));
-  const groups = Object.entries(page.results).filter(([, group]) => group.results.length > 0);
-  return (
-    <div data-testid="space-board-issues" className="flex flex-col gap-(--space-6) p-(--space-4)">
-      {groups.map(([stateId, group]) => {
-        const state = stateById.get(stateId);
-        return (
-          <section key={stateId} className="flex flex-col gap-(--space-2)">
-            <h2 className="text-emphasis">{state?.name ?? "Issues"}</h2>
-            <ul className="flex flex-col gap-(--space-1)">
-              {group.results.map((issue) => (
-                <IssueRow key={issue.id} issue={issue} projectIdentifier={projectIdentifier} />
-              ))}
-            </ul>
-          </section>
-        );
-      })}
-    </div>
-  );
-}
-
-function IssueRow({
-  issue,
-  projectIdentifier,
-}: {
-  issue: SpaceBoardIssue;
-  projectIdentifier: string;
-}): React.ReactElement {
-  return (
-    <li
-      data-testid="space-board-issue"
-      className="rounded-(--radius-control) border border-(--border) px-(--space-3) py-(--space-2)"
-    >
-      <span className="text-meta text-(--text-muted)">{issueKey(projectIdentifier, issue)}</span>
-      <span className="text-body ml-(--space-2)">{issue.name}</span>
-    </li>
   );
 }
 

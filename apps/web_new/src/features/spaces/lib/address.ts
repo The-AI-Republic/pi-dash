@@ -12,9 +12,27 @@ export const SPACE_BASE = "/spaces";
 export const SPACE_BOARD_PREFIX = `${SPACE_BASE}/issues`;
 export const SPACE_GENERIC_NOT_FOUND = "/404";
 
-export type SpaceLayout = "list" | "kanban";
+/**
+ * The two layouts the public board can render, in the order the board
+ * settles on one (list first). Anything else a publisher enabled — calendar,
+ * gantt, spreadsheet — is never offered here.
+ */
+export const SPACE_LAYOUTS = ["list", "kanban"] as const;
+export type SpaceLayout = (typeof SPACE_LAYOUTS)[number];
 
-export interface SpaceBoardSearch {
+/** Priorities a board address may narrow by, highest first. */
+export const SPACE_PRIORITIES = ["urgent", "high", "medium", "low", "none"] as const;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The filter facets a board address can carry (slice F owns their UI). */
+export interface SpaceBoardFilters {
+  state?: readonly string[] | undefined;
+  priority?: readonly string[] | undefined;
+  labels?: readonly string[] | undefined;
+}
+
+export interface SpaceBoardSearch extends SpaceBoardFilters {
   board?: SpaceLayout | undefined;
   peekId?: string | undefined;
 }
@@ -35,28 +53,86 @@ function stringParam(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 
-/** Parse only the board parameters this slice settles; unknown keys are dropped. */
+/**
+ * A comma-joined facet arrives as one string from a pasted address and as an
+ * array from a validated search object; both shapes read the same way.
+ */
+function listParam(value: unknown): string[] | undefined {
+  const raw =
+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((part) => typeof part === "string") : [];
+  const parts = raw
+    .flatMap((part) => part.split(","))
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  return parts.length === 0 ? undefined : parts;
+}
+
+function validLayout(value: string | undefined): SpaceLayout | undefined {
+  return SPACE_LAYOUTS.find((layout) => layout === value);
+}
+
+/** Ids survive only when they look like ids; anything else is dropped. */
+function validIds(value: unknown): string[] | undefined {
+  const ids = listParam(value)?.filter((id) => UUID_PATTERN.test(id));
+  return ids === undefined || ids.length === 0 ? undefined : ids;
+}
+
+function validPriorities(value: unknown): string[] | undefined {
+  const levels = listParam(value)?.filter((level) => SPACE_PRIORITIES.some((known) => known === level));
+  return levels === undefined || levels.length === 0 ? undefined : levels;
+}
+
+/**
+ * Parse the board parameters this subtree understands. Unknown keys, unknown
+ * layouts, malformed ids and unknown priorities are dropped; the layout
+ * settles later against the publisher-enabled set (SPC-022).
+ */
 export function parseSpaceBoardSearch(search: Record<string, unknown>): SpaceBoardSearch {
-  const board = stringParam(search["board"]);
+  const board = validLayout(stringParam(search["board"]));
   const peekId = stringParam(search["peekId"]);
+  const state = validIds(search["state"]);
+  const priority = validPriorities(search["priority"]);
+  const labels = validIds(search["labels"]);
   return {
-    ...(board === "list" || board === "kanban" ? { board } : {}),
+    ...(board === undefined ? {} : { board }),
     ...(peekId === undefined ? {} : { peekId }),
+    ...(state === undefined ? {} : { state }),
+    ...(priority === undefined ? {} : { priority }),
+    ...(labels === undefined ? {} : { labels }),
   };
 }
 
-/** The canonical board address for an anchor and settled search. */
+function appendList(params: URLSearchParams, key: string, values: readonly string[] | undefined): void {
+  if (values !== undefined && values.length > 0) params.set(key, values.join(","));
+}
+
+/**
+ * The canonical board address for an anchor and settled search. Parameter
+ * order is stable — board, peekId, then the filter facets — so a settled
+ * address is byte-identical to a pasted one.
+ */
 export function normalizeBoardHref(anchor: string, search: SpaceBoardSearch): string {
+  // The router merges keys the validator did not return back into the search,
+  // so a facet here can still be the raw address string; read it the same way
+  // the parser does rather than trusting the caller's shape.
+  const settled = parseSpaceBoardSearch({ ...search });
   const params = new URLSearchParams();
-  if (search.board !== undefined) params.set("board", search.board);
-  if (search.peekId !== undefined) params.set("peekId", search.peekId);
+  if (settled.board !== undefined) params.set("board", settled.board);
+  if (settled.peekId !== undefined) params.set("peekId", settled.peekId);
+  appendList(params, "priority", settled.priority);
+  appendList(params, "state", settled.state);
+  appendList(params, "labels", settled.labels);
   const query = params.toString();
   return `${spaceBoardPath(anchor)}${query === "" ? "" : `?${query}`}`;
 }
 
 /** Legacy links keep exactly `board` and `peekId`; filters are not forwarded. */
 export function legacyForwardHref(anchor: string, search: SpaceBoardSearch | Record<string, unknown>): string {
-  return normalizeBoardHref(anchor, parseSpaceBoardSearch({ ...search }));
+  const parsed = parseSpaceBoardSearch({ ...search });
+  return normalizeBoardHref(anchor, {
+    ...(parsed.board === undefined ? {} : { board: parsed.board }),
+    ...(parsed.peekId === undefined ? {} : { peekId: parsed.peekId }),
+  });
 }
 
 /** Subtree-relative return address carried by sign-in links. */

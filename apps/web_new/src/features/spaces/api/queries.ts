@@ -23,7 +23,8 @@ import {
   type SpaceBoardState,
 } from "@pidash/api-client";
 
-import { isValidAnchor } from "../lib/address.js";
+import { isValidAnchor, type SpaceBoardFilters } from "../lib/address.js";
+import { spaceBoardQuery, spaceFilterSignature } from "../layouts/model.js";
 import { spaceKeys } from "./keys.js";
 
 /** The public instance probe: one attempt, no client retries. */
@@ -65,11 +66,38 @@ export function spaceSettingsQueryOptions(client: ApiClient, anchor: string) {
   });
 }
 
-export function spaceIssuesQueryOptions(client: ApiClient, anchor: string) {
+/**
+ * The board's first page: one bucket of 50 per workflow state, filtered by
+ * the address's facets (SPC-026). Layout is not part of the key, so switching
+ * layout re-reads nothing.
+ */
+export function spaceIssuesQueryOptions(client: ApiClient, anchor: string, filters: SpaceBoardFilters = {}) {
+  const signature = spaceFilterSignature(filters);
   return queryOptions({
-    queryKey: spaceKeys.issues(anchor),
-    queryFn: () => listSpaceBoardIssues(client, anchor, { groupBy: "state_id", perPage: 50 }),
+    queryKey: spaceKeys.issues(anchor, signature),
+    queryFn: () => listSpaceBoardIssues(client, anchor, spaceBoardQuery(filters)),
     retry: false,
+  });
+}
+
+/**
+ * One group's later page, addressed by that group's opaque cursor. Keyed by
+ * state and cursor so two triggers for the same page share one request and
+ * cannot duplicate rows.
+ */
+export function spaceGroupQueryOptions(
+  client: ApiClient,
+  anchor: string,
+  filters: SpaceBoardFilters,
+  stateId: string,
+  cursor: string
+) {
+  const signature = spaceFilterSignature(filters);
+  return queryOptions({
+    queryKey: [...spaceKeys.group(anchor, stateId, signature), cursor] as const,
+    queryFn: () => listSpaceBoardIssues(client, anchor, spaceBoardQuery(filters, cursor, stateId)),
+    retry: false,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 

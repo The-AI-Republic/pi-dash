@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   readSpaceViewer,
   resolveLegacySpaceAnchor,
+  spaceGroupQueryOptions,
   spaceInstanceQueryOptions,
   spaceIssuesQueryOptions,
   spaceMetaQueryOptions,
@@ -44,7 +45,13 @@ describe("space query options", () => {
     expect(valid.queryKey).toEqual(["spaces", "anchor", "anchor-1", "settings"]);
     expect(valid.enabled).toBe(true);
     expect(spaceSettingsQueryOptions(client, "bad anchor").enabled).toBe(false);
-    expect(spaceIssuesQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "issues"]);
+    expect(spaceIssuesQueryOptions(client, "anchor-1").queryKey).toEqual([
+      "spaces",
+      "anchor",
+      "anchor-1",
+      "issues",
+      "||",
+    ]);
     expect(spaceStatesQueryOptions(client, "anchor-1").queryKey).toEqual(["spaces", "anchor", "anchor-1", "states"]);
   });
 
@@ -56,6 +63,74 @@ describe("space query options", () => {
     expect(valid.retry).toBe(false);
     await expect(valid.queryFn!({} as never)).resolves.toMatchObject(meta);
     expect(spaceMetaQueryOptions(clientWith(transportOf(200, meta)), "bad anchor").enabled).toBe(false);
+  });
+
+  it("requests the board's first grouped page with the address filters (SPC-026/036)", async () => {
+    const urls: string[] = [];
+    const client = clientWith(async (url) => {
+      urls.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              grouped_by: "state_id",
+              total_count: 0,
+              next_cursor: null,
+              next_page_results: false,
+              results: {},
+            })
+          ),
+      };
+    });
+    const state = "11111111-1111-4111-8111-111111111111";
+    await spaceIssuesQueryOptions(client, "anchor-1", { state: [state] }).queryFn!({} as never);
+    await spaceIssuesQueryOptions(client, "anchor-1", {}).queryFn!({} as never);
+    expect(urls).toHaveLength(2);
+    const filtered = new URL(urls[0] ?? "", "https://api.test");
+    expect(filtered.pathname).toBe("/api/public/anchor/anchor-1/issues/");
+    expect(filtered.searchParams.get("group_by")).toBe("state_id");
+    expect(filtered.searchParams.get("per_page")).toBe("50");
+    expect(filtered.searchParams.get("cursor")).toBe("50:0:0");
+    expect(filtered.searchParams.get("order_by")).toBe("-created_at");
+    expect(filtered.searchParams.get("state")).toBe(state);
+    expect(filtered.searchParams.get("priority")).toBeNull();
+    const all = new URL(urls[1] ?? "", "https://api.test");
+    expect(all.searchParams.get("state")).toBeNull();
+  });
+
+  it("keys a later group page by anchor, state, filters and cursor", async () => {
+    const urls: string[] = [];
+    const client = clientWith(async (url) => {
+      urls.push(url);
+      return {
+        status: 200,
+        url,
+        headers: { get: () => "application/json" },
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              grouped_by: "state_id",
+              total_count: 0,
+              next_cursor: null,
+              next_page_results: false,
+              results: {},
+            })
+          ),
+      };
+    });
+    const state = "11111111-1111-4111-8111-111111111111";
+    const options = spaceGroupQueryOptions(client, "anchor-1", { priority: ["high"] }, state, "50:1:0");
+    expect(options.queryKey).toEqual(["spaces", "anchor", "anchor-1", "issues", "|high|", "group", state, "50:1:0"]);
+    await options.queryFn!({} as never);
+    const url = new URL(urls[0] ?? "", "https://api.test");
+    expect(url.searchParams.get("cursor")).toBe("50:1:0");
+    expect(url.searchParams.get("state")).toBe(state);
+    expect(url.searchParams.get("priority")).toBe("high");
+    // Grouped stays on so a single group's page parses like the first one.
+    expect(url.searchParams.get("group_by")).toBe("state_id");
   });
 
   it("reads the viewer as anonymous on 401 and on any other failure", async () => {

@@ -4,7 +4,8 @@
 // See the LICENSE file for details.
 import type { SpaceBoardSettings, Transport } from "@pidash/api-client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -13,12 +14,16 @@ const runtime = vi.hoisted(() => ({
   queryClient: null as unknown,
 }));
 
+const navigation = vi.hoisted(() => ({ navigate: vi.fn() }));
+
 vi.mock("../api/client.js", () => ({ spaceRuntime: runtime }));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigation.navigate }));
 
 import { createClient } from "@pidash/api-client";
 
+import type { SpaceBoardSearch } from "../lib/address.js";
 import { SPACE_HEAD_DESCRIPTION_FALLBACK, SPACE_HEAD_TITLE_FALLBACK } from "../lib/boardHead.js";
-import { BoardScreen } from "./BoardScreen.js";
+import { BoardScreen, boardFiltersOf } from "./BoardScreen.js";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const STATE_ID = "22222222-2222-4222-8222-222222222222";
@@ -51,7 +56,7 @@ const settings: SpaceBoardSettings = {
   is_comments_enabled: false,
   is_reactions_enabled: false,
   is_votes_enabled: false,
-  view_props: {},
+  view_props: { list: true, kanban: true, calendar: true, gantt: true, spreadsheet: true },
   is_disabled: false,
   intake: null,
 };
@@ -95,7 +100,7 @@ interface Routes {
   states?: () => Promise<Awaited<ReturnType<Transport>>> | Awaited<ReturnType<Transport>>;
 }
 
-function renderBoard(routes: Routes = {}, anchor = ANCHOR): string[] {
+function renderBoard(routes: Routes = {}, anchor = ANCHOR, search: SpaceBoardSearch = {}): string[] {
   const requests: string[] = [];
   const transport: Transport = async (url) => {
     requests.push(url);
@@ -117,7 +122,7 @@ function renderBoard(routes: Routes = {}, anchor = ANCHOR): string[] {
   runtime.queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={runtime.queryClient as QueryClient}>
-      <BoardScreen anchor={anchor} search={{}} />
+      <BoardScreen anchor={anchor} search={search} />
     </QueryClientProvider>
   );
   return requests;
@@ -126,6 +131,7 @@ function renderBoard(routes: Routes = {}, anchor = ANCHOR): string[] {
 afterEach(() => {
   document.title = "";
   for (const tag of [...document.head.querySelectorAll("meta")]) tag.remove();
+  navigation.navigate.mockReset();
   vi.restoreAllMocks();
 });
 
@@ -221,35 +227,131 @@ describe("BoardScreen", () => {
     expectGenericFallbackHead("Board error");
   });
 
-  it("renders grouped issue rows with the public key once data settles", async () => {
-    renderBoard();
+  it("renders the list layout grouped by state with the public key once data settles", async () => {
+    renderBoard({}, ANCHOR, { board: "list" });
     expect(await screen.findByText("Anonymous visitors can read this")).toBeInTheDocument();
     expect(screen.getByText("SPC-7")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Todo" })).toBeInTheDocument();
+    expect(screen.getByTestId("space-list-layout")).toBeInTheDocument();
+    expect(screen.getByTestId("space-group-name")).toHaveTextContent("Todo");
     expect(screen.getByRole("link", { name: "Sign in" })).toHaveAttribute(
       "href",
-      "/spaces/?next_path=/issues/anchor-1/"
+      "/spaces/?next_path=/issues/anchor-1/%3Fboard%3Dlist"
     );
   });
 
+  it("renders the board layout from a pasted address", async () => {
+    renderBoard({}, ANCHOR, { board: "kanban" });
+    expect(await screen.findByTestId("space-board-layout")).toBeInTheDocument();
+    expect(screen.getByText("Anonymous visitors can read this")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-list-layout")).not.toBeInTheDocument();
+  });
+
+  it("offers exactly the publisher-enabled layouts and settles a missing view on list", async () => {
+    renderBoard({}, ANCHOR, {});
+    const switcher = await screen.findByTestId("space-layout-switcher");
+    const options = within(switcher).getAllByTestId("space-layout-option");
+    expect(options.map((option) => option.getAttribute("data-layout"))).toEqual(["list", "kanban"]);
+    await waitFor(() =>
+      expect(navigation.navigate).toHaveBeenCalledWith({ href: "/spaces/issues/anchor-1/?board=list", replace: true })
+    );
+  });
+
+  it("offers only what the publisher enabled even when other views are on", async () => {
+    renderBoard(
+      { settings: () => reply(200, { ...settings, view_props: { kanban: true, calendar: true } }) },
+      ANCHOR,
+      {}
+    );
+    const options = await screen.findAllByTestId("space-layout-option");
+    expect(options.map((option) => option.getAttribute("data-layout"))).toEqual(["kanban"]);
+    expect(await screen.findByTestId("space-board-layout")).toBeInTheDocument();
+  });
+
+  it("switches layout without fetching the issues again, keeping filters and peek", async () => {
+    const requests = renderBoard({}, ANCHOR, { board: "list", peekId: "p1", priority: ["high"] });
+    await screen.findByTestId("space-list-layout");
+    const issuesBefore = requests.filter((url) => url.includes("/issues/")).length;
+    await userEvent.click(screen.getByRole("button", { name: "Board layout" }));
+    expect(navigation.navigate).toHaveBeenCalledWith({
+      href: "/spaces/issues/anchor-1/?board=kanban&peekId=p1&priority=high",
+    });
+    expect(requests.filter((url) => url.includes("/issues/")).length).toBe(issuesBefore);
+  });
+
+  it("does not rewrite the address when it already names an offered layout", async () => {
+    renderBoard({}, ANCHOR, { board: "kanban" });
+    await screen.findByTestId("space-board-layout");
+    expect(navigation.navigate).not.toHaveBeenCalled();
+  });
+
+  it("sends the address filters on the board's first fetch", async () => {
+    const state = "44444444-4444-4444-8444-444444444444";
+    const requests = renderBoard({}, ANCHOR, { board: "list", state: [state], priority: ["low"] });
+    await screen.findByTestId("space-list-layout");
+    const issues = requests.filter((url) => url.includes("/issues/"));
+    expect(issues).toHaveLength(1);
+    const url = new URL(issues[0] ?? "", "https://api.test");
+    expect(url.searchParams.get("state")).toBe(state);
+    expect(url.searchParams.get("priority")).toBe("low");
+    expect(url.searchParams.get("cursor")).toBe("50:0:0");
+    expect(url.searchParams.get("group_by")).toBe("state_id");
+  });
+
   it("omits the project key prefix when settings carry no project details", async () => {
-    renderBoard({ settings: () => reply(200, { ...settings, project_details: null }) });
+    renderBoard({ settings: () => reply(200, { ...settings, project_details: null }) }, ANCHOR, { board: "list" });
     expect(await screen.findByText("Anonymous visitors can read this")).toBeInTheDocument();
     expect(screen.getByText("-7")).toBeInTheDocument();
   });
 
-  it("drops empty state groups instead of rendering empty sections", async () => {
-    renderBoard({
-      issues: () =>
-        reply(200, {
-          grouped_by: "state_id",
-          total_count: 0,
-          next_cursor: null,
-          next_page_results: false,
-          results: { [STATE_ID]: { results: [], total_results: 0 } },
-        }),
+  it("shows the dedicated empty notice on a zero-issue board in both layouts", async () => {
+    const empty = {
+      grouped_by: "state_id",
+      total_count: 0,
+      next_cursor: null,
+      next_page_results: false,
+      results: {},
+    };
+    renderBoard({ issues: () => reply(200, empty) }, ANCHOR, { board: "list" });
+    expect(await screen.findByTestId("space-board-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-list-layout")).not.toBeInTheDocument();
+    expect(screen.getByTestId("space-layout-switcher")).toBeInTheDocument();
+  });
+
+  it("shows the empty notice in the board layout too", async () => {
+    renderBoard(
+      {
+        issues: () =>
+          reply(200, {
+            grouped_by: "state_id",
+            total_count: 0,
+            next_cursor: null,
+            next_page_results: false,
+            results: {},
+          }),
+      },
+      ANCHOR,
+      { board: "kanban" }
+    );
+    expect(await screen.findByTestId("space-board-empty")).toBeInTheDocument();
+    expect(screen.queryByTestId("space-board-layout")).not.toBeInTheDocument();
+  });
+});
+
+describe("boardFiltersOf", () => {
+  it("keeps only the facets the fetch consumes", () => {
+    expect(boardFiltersOf({ board: "kanban", peekId: "p1" })).toEqual({});
+    const state = "22222222-2222-4222-8222-222222222222";
+    const label = "33333333-3333-4333-8333-333333333333";
+    expect(boardFiltersOf({ state: [state], priority: ["high"], labels: [label] })).toEqual({
+      state: [state],
+      priority: ["high"],
+      labels: [label],
     });
-    await waitFor(() => expect(screen.getByTestId("space-board-issues")).toBeInTheDocument());
-    expect(screen.queryByRole("heading", { name: "Todo" })).not.toBeInTheDocument();
+  });
+
+  it("reads raw address strings and drops malformed values", () => {
+    const state = "22222222-2222-4222-8222-222222222222";
+    const raw = { state: `${state},nope`, priority: "high,unset" } as unknown as SpaceBoardSearch;
+    expect(boardFiltersOf(raw)).toEqual({ state: [state], priority: ["high"] });
   });
 });
