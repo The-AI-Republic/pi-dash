@@ -1,21 +1,30 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// List pane (parity/specs/intake.md INT-001/004/005/008). Owns the panel
-// the tabs control, the tabs, and exactly one body state: a loading
-// skeleton for the first page, the empty state that fits the situation,
-// or the fetched requests as selectable links. Row content beyond the
-// title (status, dates, priority, labels, author) is INT-006, slice B;
-// title links are the minimum this frame needs for selection and
-// auto-selection.
+// List pane (parity/specs/intake.md INT-001/004/005/008/009/011). Owns
+// the panel the tabs control: the tabs, the filter and order toolbar,
+// the applied chips, and exactly one body state — a loading skeleton
+// for the first page, the empty state that fits the situation, or the
+// fetched requests as selectable rows with the paging tail below them.
+// Nearing the pane's end reads the next page (INT-007).
 
 import { Skeleton } from "@pidash/kit";
-import type { IntakeIssueRow } from "@pidash/api-client";
+import type { IntakeIssueRow, WorkspaceMemberList } from "@pidash/api-client";
 import * as React from "react";
 
 import type { IntakeEmptyState as IntakeEmptyKind } from "../lib/emptyStates.js";
+import type { IntakeFilterSelection } from "../lib/filters.js";
+import type { IntakeMemberOption } from "../lib/members.js";
+import type { IntakeOrder } from "../lib/order.js";
+import { nearListEnd } from "../lib/paging.js";
+import { uniqueIntakeRows } from "../lib/rows.js";
 import type { IntakeTab } from "../lib/tabs.js";
+import { IntakeChips } from "./IntakeChips.js";
 import { IntakeEmptyState } from "./IntakeEmptyState.js";
+import { IntakeFilterPanel, type IntakeLabelOption } from "./IntakeFilterPanel.js";
+import { IntakeListPager } from "./IntakeListPager.js";
+import { IntakeOrderMenu } from "./IntakeOrderMenu.js";
+import { IntakeRow } from "./IntakeRow.js";
 import { INTAKE_LIST_PANEL_ID, IntakeTabs } from "./IntakeTabs.js";
 
 export interface IntakeListPaneProps {
@@ -32,6 +41,27 @@ export interface IntakeListPaneProps {
   onSelectRow: (issueId: string) => void;
   onRetry: () => void;
   onCreate?: (() => void) | undefined;
+  /** Project prefix for the row id labels (INT-006). */
+  projectIdentifier: string;
+  labels: readonly IntakeLabelOption[];
+  directory: WorkspaceMemberList | undefined;
+  /** Whether the server reports another page (INT-007). */
+  hasNextPage: boolean;
+  /** True while a page beyond the first is in flight. */
+  loadingMore: boolean;
+  onLoadMore: () => void;
+  selection: IntakeFilterSelection;
+  assigneeOptions: readonly IntakeMemberOption[];
+  createdByOptions: readonly IntakeMemberOption[];
+  membersLoading: boolean;
+  membersFailed: boolean;
+  labelsLoading: boolean;
+  labelsFailed: boolean;
+  today: string;
+  weekStart: number;
+  onSelectionChange: (next: IntakeFilterSelection) => void;
+  order: IntakeOrder;
+  onOrderChange: (order: IntakeOrder) => void;
 }
 
 export function IntakeListPane({
@@ -46,11 +76,72 @@ export function IntakeListPane({
   onSelectRow,
   onRetry,
   onCreate,
+  projectIdentifier,
+  labels,
+  directory,
+  hasNextPage,
+  loadingMore,
+  onLoadMore,
+  selection,
+  assigneeOptions,
+  createdByOptions,
+  membersLoading,
+  membersFailed,
+  labelsLoading,
+  labelsFailed,
+  today,
+  weekStart,
+  onSelectionChange,
+  order,
+  onOrderChange,
 }: IntakeListPaneProps): React.ReactElement {
+  const labelById = React.useMemo(
+    () => new Map(labels.map((label) => [label.id, { name: label.name, color: label.color }])),
+    [labels]
+  );
+  const memberNameById = React.useMemo(
+    () => new Map(assigneeOptions.map((option) => [option.userId, option.displayName])),
+    [assigneeOptions]
+  );
+  const labelNameById = React.useMemo(() => new Map(labels.map((label) => [label.id, label.name])), [labels]);
+
+  function handleScroll(event: React.UIEvent<HTMLDivElement>): void {
+    if (!hasNextPage || loadingMore) return;
+    const pane = event.currentTarget;
+    if (nearListEnd({ scrollHeight: pane.scrollHeight, scrollTop: pane.scrollTop, clientHeight: pane.clientHeight })) {
+      onLoadMore();
+    }
+  }
+
   return (
     <aside className="flex min-h-0 w-80 shrink-0 flex-col border-r border-(--border)">
       <div className="shrink-0 border-b border-(--border) px-(--space-2) py-(--space-2)">
         <IntakeTabs activeTab={tab} openTotal={openTotal} onSelect={onSelectTab} />
+      </div>
+      <div className="flex shrink-0 items-center gap-(--space-1) px-(--space-2) py-(--space-1)">
+        <IntakeFilterPanel
+          tab={tab}
+          selection={selection}
+          assigneeOptions={assigneeOptions}
+          createdByOptions={createdByOptions}
+          membersLoading={membersLoading}
+          membersFailed={membersFailed}
+          labelOptions={labels}
+          labelsLoading={labelsLoading}
+          labelsFailed={labelsFailed}
+          today={today}
+          weekStart={weekStart}
+          onSelectionChange={onSelectionChange}
+        />
+        <IntakeOrderMenu order={order} onChange={onOrderChange} />
+      </div>
+      <div className="shrink-0 px-(--space-4) py-(--space-1)">
+        <IntakeChips
+          selection={selection}
+          memberNameById={memberNameById}
+          labelNameById={labelNameById}
+          onSelectionChange={onSelectionChange}
+        />
       </div>
       <div
         id={INTAKE_LIST_PANEL_ID}
@@ -58,6 +149,7 @@ export function IntakeListPane({
         aria-label={`${tab === "open" ? "Open" : "Closed"} intake requests`}
         data-testid="intake-list-pane"
         tabIndex={-1}
+        onScroll={handleScroll}
         className="min-h-0 flex-1 overflow-y-auto"
       >
         <IntakeListBody
@@ -69,6 +161,10 @@ export function IntakeListPane({
           onSelectRow={onSelectRow}
           onRetry={onRetry}
           onCreate={onCreate}
+          projectIdentifier={projectIdentifier}
+          labelById={labelById}
+          directory={directory}
+          hasNextPage={hasNextPage}
         />
       </div>
     </aside>
@@ -84,7 +180,24 @@ function IntakeListBody({
   onSelectRow,
   onRetry,
   onCreate,
-}: Omit<IntakeListPaneProps, "tab" | "openTotal" | "onSelectTab">): React.ReactElement {
+  projectIdentifier,
+  labelById,
+  directory,
+  hasNextPage,
+}: {
+  loading: boolean;
+  failed: boolean;
+  rows: readonly IntakeIssueRow[];
+  emptyKind: IntakeEmptyKind;
+  selectedId: string | undefined;
+  onSelectRow: (issueId: string) => void;
+  onRetry: () => void;
+  onCreate?: (() => void) | undefined;
+  projectIdentifier: string;
+  labelById: ReadonlyMap<string, { name: string; color: string }>;
+  directory: WorkspaceMemberList | undefined;
+  hasNextPage: boolean;
+}): React.ReactElement {
   if (loading) {
     return (
       <div data-testid="intake-list-loading" className="flex flex-col">
@@ -107,30 +220,24 @@ function IntakeListBody({
     );
   }
   if (rows.length === 0) return <IntakeEmptyState kind={emptyKind} onCreate={onCreate} />;
+  const unique = uniqueIntakeRows(rows);
   return (
-    <ul data-testid="intake-list" className="flex flex-col">
-      {rows.map((row) => {
-        const selected = row.issue.id === selectedId;
-        return (
+    <>
+      <ul data-testid="intake-list" className="flex flex-col">
+        {unique.map((row) => (
           <li key={row.id}>
-            <button
-              type="button"
-              data-testid="intake-row"
-              aria-current={selected ? "true" : undefined}
-              onClick={() => onSelectRow(row.issue.id)}
-              className={
-                selected
-                  ? "flex w-full flex-col gap-(--space-1) border-b border-(--border) bg-(--subtle) px-(--space-4) py-(--space-2) text-left"
-                  : "flex w-full flex-col gap-(--space-1) border-b border-(--border) px-(--space-4) py-(--space-2) text-left hover:bg-(--subtle)"
-              }
-            >
-              <h3 data-testid="intake-row-title" className="text-body truncate text-(--text)">
-                {row.issue.name}
-              </h3>
-            </button>
+            <IntakeRow
+              row={row}
+              projectIdentifier={projectIdentifier}
+              labelById={labelById}
+              directory={directory}
+              selected={row.issue.id === selectedId}
+              onSelect={onSelectRow}
+            />
           </li>
-        );
-      })}
-    </ul>
+        ))}
+      </ul>
+      <IntakeListPager hasNextPage={hasNextPage} />
+    </>
   );
 }

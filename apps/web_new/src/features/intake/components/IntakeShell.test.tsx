@@ -6,6 +6,8 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
+import { defaultSelectionForTab } from "../lib/filters.js";
+import { DEFAULT_INTAKE_ORDER_VALUE } from "../lib/order.js";
 import { IntakeShell } from "./IntakeShell.js";
 
 const BASE = {
@@ -17,15 +19,34 @@ const BASE = {
   openTotal: 2,
   loading: false,
   failed: false,
+  syncing: false,
   rows: [],
   emptyKind: "open-guidance",
   selectedId: undefined,
   onSelectTab: () => {},
   onSelectRow: () => {},
   onRetry: () => {},
+  projectIdentifier: "APO",
+  labels: [],
+  directory: undefined,
+  hasNextPage: false,
+  loadingMore: false,
+  onLoadMore: () => {},
+  selection: defaultSelectionForTab("open"),
+  assigneeOptions: [],
+  createdByOptions: [],
+  membersLoading: false,
+  membersFailed: false,
+  labelsLoading: false,
+  labelsFailed: false,
+  today: "2026-10-23",
+  weekStart: 0,
+  onSelectionChange: () => {},
+  order: DEFAULT_INTAKE_ORDER_VALUE,
+  onOrderChange: () => {},
 } as const;
 
-describe("IntakeShell (INT-001)", () => {
+describe("IntakeShell (INT-001/007)", () => {
   it("splits the body into a list pane and a content pane", () => {
     render(<IntakeShell {...BASE} />);
     expect(screen.getByTestId("intake-list-pane")).toBeInTheDocument();
@@ -57,6 +78,15 @@ describe("IntakeShell (INT-001)", () => {
     expect(screen.getByTestId("intake-content-pane")).toBeInTheDocument();
     expect(screen.getByText("request detail")).toBeInTheDocument();
     expect(screen.queryByTestId("intake-placeholder")).toBeNull();
+  });
+
+  it("hints at syncing while a list read is in flight", () => {
+    const { rerender } = render(<IntakeShell {...BASE} syncing />);
+    const hint = screen.getByTestId("intake-syncing");
+    expect(hint).toHaveTextContent("Syncing");
+    expect(hint).toHaveAttribute("role", "status");
+    rerender(<IntakeShell {...BASE} syncing={false} />);
+    expect(screen.queryByTestId("intake-syncing")).not.toBeInTheDocument();
   });
 });
 

@@ -34,12 +34,18 @@ const ISSUE_1 = "11111111-1111-4111-8111-111111111111";
 const ISSUE_2 = "22222222-2222-4222-8222-222222222222";
 const CLOSED_1 = "33333333-3333-4333-8333-333333333333";
 const WS_ID = "123e4567-e89b-12d3-a456-426614174000";
+const ME_ID = "99999999-9999-4999-8999-999999999999";
+const MEMBER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const LABEL_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 interface FakeRow {
   /** Full work-item UUID; the list contract validates it. */
   issueId: string;
   name: string;
   status?: number;
+  priority?: string;
+  labelIds?: string[];
+  createdBy?: string | null;
 }
 
 function jsonResponse(url: string, status: number, body: unknown): TransportResponse {
@@ -85,28 +91,69 @@ function intakeRow(row: FakeRow, index: number) {
     issue: {
       id: row.issueId,
       name: row.name,
-      priority: "none",
+      priority: row.priority ?? "none",
       sequence_id: 1,
       project_id: PROJECT_ID,
       created_at: "2026-10-01T00:00:00Z",
-      label_ids: [],
-      created_by: null,
+      label_ids: row.labelIds ?? [],
+      created_by: row.createdBy === undefined ? null : row.createdBy,
     },
   };
 }
 
-function listResponse(rows: FakeRow[]) {
+function listResponse(rows: FakeRow[], page: { nextCursor?: string; nextPage?: boolean } = {}) {
   return {
     grouped_by: null,
     sub_grouped_by: null,
     total_count: rows.length,
-    next_cursor: "",
+    next_cursor: page.nextCursor ?? "",
     prev_cursor: "",
-    next_page_results: false,
+    next_page_results: page.nextPage ?? false,
     prev_page_results: false,
     count: rows.length,
     total_results: rows.length,
     results: rows.map(intakeRow),
+  };
+}
+
+function labelRow() {
+  return {
+    id: LABEL_ID,
+    project_id: PROJECT_ID,
+    workspace_id: WS_ID,
+    name: "Alpha",
+    color: "#ff0000",
+    parent: null,
+    sort_order: 0,
+  };
+}
+
+function projectMemberRow(memberId: string, rowId: string) {
+  return {
+    id: rowId,
+    role: 15,
+    member: memberId,
+    project: PROJECT_ID,
+    original_role: 15,
+    created_at: "2026-10-01T00:00:00Z",
+  };
+}
+
+function directoryRow(memberId: string, rowId: string, displayName: string, email: string) {
+  return {
+    id: rowId,
+    member: {
+      id: memberId,
+      first_name: displayName,
+      last_name: "",
+      avatar: "",
+      avatar_url: null,
+      display_name: displayName,
+      is_bot: false,
+      email,
+    },
+    role: 15,
+    is_active: true,
   };
 }
 
@@ -121,6 +168,10 @@ interface Server {
   detailStatus?: number;
   rolesFail?: boolean;
   roles?: Record<string, number>;
+  /** Cursor-paged rows for the paging tests; empty disables paging. */
+  paged: FakeRow[];
+  /** Deferred list reads wait on this gate when set. */
+  listGate?: Promise<void>;
 }
 
 function detailPayload(issueId: string) {
@@ -201,11 +252,42 @@ function installServer(server: Server): void {
       ]);
     }
     if (path.endsWith("/api/users/me/")) return jsonResponse(url, 200, ME_PAYLOAD);
+    if (path.endsWith("/issue-labels/")) return jsonResponse(url, 200, [labelRow()]);
+    if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/members/`) {
+      return jsonResponse(url, 200, [
+        projectMemberRow(ME_ID, "cccccccc-cccc-4ccc-8ccc-000000000001"),
+        projectMemberRow(MEMBER_ID, "cccccccc-cccc-4ccc-8ccc-000000000002"),
+      ]);
+    }
+    if (path === "/api/workspaces/acme/members/") {
+      return jsonResponse(url, 200, [
+        directoryRow(ME_ID, "dddddddd-dddd-4ddd-8ddd-000000000001", "Me Mine", "me@example.com"),
+        directoryRow(MEMBER_ID, "dddddddd-dddd-4ddd-8ddd-000000000002", "Rin", "rin@example.com"),
+      ]);
+    }
     if (path === `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/`) {
       server.listRequests.push(parsed.search);
+      if (server.listGate !== undefined) await server.listGate;
       if (server.listFails) return jsonResponse(url, 500, { error: "boom" });
-      const status = parsed.searchParams.get("status");
-      const rows = status === "1,-1,2" ? server.closed : status === "-2" ? server.pending : [];
+      if (server.paged.length > 0) {
+        const cursor = parsed.searchParams.get("cursor");
+        if (cursor === null) {
+          return jsonResponse(
+            url,
+            200,
+            listResponse(server.paged.slice(0, 10), { nextCursor: "cursor-1", nextPage: true })
+          );
+        }
+        return jsonResponse(url, 200, listResponse(server.paged.slice(10), {}));
+      }
+      const status = parsed.searchParams.get("status") ?? "";
+      let rows = status.includes("1") ? server.closed : server.pending;
+      const priorities = parsed.searchParams.get("priority");
+      if (priorities !== null) {
+        const wanted = priorities.split(",");
+        rows = rows.filter((row) => wanted.includes(row.priority ?? "none"));
+      }
+      if (parsed.searchParams.get("order_by") === "issue__sequence_id") rows = [...rows].reverse();
       return jsonResponse(url, 200, listResponse(rows));
     }
     const detailPrefix = `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/`;
@@ -236,6 +318,9 @@ function renderScreen(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn
 
 function renderScreenWithRerender(search: IntakeSearch, onSearchChange: SearchWriter = vi.fn(), onCreate?: () => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The session reads resolve from the cache so no transport stub is needed.
+  client.setQueryData(["session", "me"], { id: ME_ID });
+  client.setQueryData(["session", "profile"], { start_of_the_week: 0 });
   const tree = (next: IntakeSearch) => (
     <QueryClientProvider client={client}>
       <IntakeScreen
@@ -259,7 +344,7 @@ let server: Server;
 beforeEach(() => {
   navigate.mockReset();
   document.title = "";
-  server = { inboxView: true, projectName: "Apollo", pending: [], closed: [], listRequests: [], writes: [] };
+  server = { inboxView: true, projectName: "Apollo", pending: [], closed: [], listRequests: [], writes: [], paged: [] };
 });
 
 afterEach(() => {
@@ -651,5 +736,207 @@ describe("IntakeScreen triage advance (INT-020–025)", () => {
 
     rerender({ currentTab: "open" });
     await waitFor(() => expect(screen.getByTestId("intake-placeholder")).toBeInTheDocument());
+  });
+});
+
+function openFilters(): void {
+  fireEvent.click(screen.getByTestId("intake-filters-trigger"));
+}
+
+function lastListParams(): URLSearchParams {
+  return new URLSearchParams(server.listRequests.at(-1) ?? "");
+}
+
+function scrollPaneToEnd(): void {
+  const panel = screen.getByTestId("intake-list-pane");
+  for (const [key, value] of [
+    ["scrollHeight", 1000],
+    ["scrollTop", 800],
+    ["clientHeight", 200],
+  ] as const) {
+    Object.defineProperty(panel, key, { value, configurable: true });
+  }
+  fireEvent.scroll(panel);
+}
+
+function pagedRows(count: number): FakeRow[] {
+  return Array.from({ length: count }, (_, index) => ({
+    issueId: `10000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    name: `Row ${String(index).padStart(2, "0")}`,
+  }));
+}
+
+describe("IntakeScreen rows (INT-006)", () => {
+  it("reads the id, priority, labels and author at a glance", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Tagged request", priority: "urgent", labelIds: [LABEL_ID], createdBy: MEMBER_ID },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Tagged request");
+    expect(screen.getByTestId("intake-row-id")).toHaveTextContent("APO-1");
+    expect(screen.getByTestId("intake-row-priority")).toHaveAttribute("data-priority-key", "urgent");
+    expect(screen.getByTestId("intake-row-label")).toHaveTextContent("Alpha");
+    expect(screen.getByTestId("intake-row-avatar")).toHaveAttribute("data-avatar-kind", "member");
+    expect(screen.queryByTestId("intake-row-status")).not.toBeInTheDocument();
+  });
+});
+
+describe("IntakeScreen paging (INT-007)", () => {
+  it("pages ten at a time on scroll without duplicates", async () => {
+    server.paged = pagedRows(12);
+    installServer(server);
+    renderScreen({ currentTab: "open" });
+    await waitFor(() => expect(screen.getAllByTestId("intake-row")).toHaveLength(10));
+    expect(screen.getAllByTestId("intake-page-skeleton").length).toBeGreaterThan(0);
+    scrollPaneToEnd();
+    await waitFor(() => expect(screen.getAllByTestId("intake-row")).toHaveLength(12));
+    const ids = screen.getAllByTestId("intake-row").map((node) => node.getAttribute("data-issue-id"));
+    expect(new Set(ids).size).toBe(12);
+    expect(screen.queryByTestId("intake-page-skeleton")).not.toBeInTheDocument();
+    expect(new URLSearchParams(server.listRequests[0] ?? "").get("per_page")).toBe("10");
+    expect(lastListParams().get("cursor")).toBe("cursor-1");
+  });
+
+  it("hints at syncing while a read is in flight, then clears", async () => {
+    let release!: () => void;
+    server.listGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    expect(await screen.findByTestId("intake-syncing")).toBeInTheDocument();
+    release();
+    await screen.findByText("Alpha");
+    await waitFor(() => expect(screen.queryByTestId("intake-syncing")).not.toBeInTheDocument());
+  });
+});
+
+describe("IntakeScreen filters (INT-009)", () => {
+  it("picks a priority and refetches narrowed with chips", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha", priority: "urgent" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Beta");
+    openFilters();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Urgent" }));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("intake-row-title").map((node) => node.textContent)).toEqual(["Alpha"])
+    );
+    expect(lastListParams().get("status")).toBe("-2");
+    expect(lastListParams().get("priority")).toBe("urgent");
+    expect(screen.getByTestId("intake-filters-count")).toHaveTextContent("2");
+  });
+
+  it("clears a filter through its chip", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha", priority: "urgent" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Beta");
+    openFilters();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Urgent" }));
+    await waitFor(() => expect(screen.getAllByTestId("intake-row")).toHaveLength(1));
+    fireEvent.click(screen.getByRole("button", { name: "Remove Urgent Priority filter" }));
+    await waitFor(() => expect(screen.getAllByTestId("intake-row")).toHaveLength(2));
+    expect(lastListParams().get("priority")).toBe(null);
+  });
+
+  it("restores the tab defaults when tabs switch", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha", priority: "urgent" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    server.closed = [{ issueId: CLOSED_1, name: "Closed one", status: 1 }];
+    installServer(server);
+    const { rerender } = renderScreenWithRerender({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Beta");
+    openFilters();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Urgent" }));
+    await waitFor(() => expect(screen.getAllByTestId("intake-row")).toHaveLength(1));
+    screen.getByRole("tab", { name: /Closed/ }).click();
+    rerender({ currentTab: "closed" });
+    await screen.findByText("Closed one");
+    expect(lastListParams().get("status")).toBe("1,-1,2");
+    expect(lastListParams().get("priority")).toBe(null);
+  });
+
+  it("shows the no-results state when filters match nothing", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open" });
+    await screen.findByText("Alpha");
+    openFilters();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Urgent" }));
+    expect(await screen.findByTestId("intake-empty-filtered")).toBeInTheDocument();
+  });
+
+  it("drops a selection the narrowed list no longer contains", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta", priority: "urgent" },
+    ];
+    installServer(server);
+    const onSearchChange = renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Beta");
+    openFilters();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Urgent" }));
+    await waitFor(() =>
+      expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_2 }, { replace: true })
+    );
+  });
+});
+
+describe("IntakeScreen dates (INT-010)", () => {
+  it("picks a preset and sends its encoded range", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    openFilters();
+    const section = screen.getByTestId("intake-filter-createdAt");
+    fireEvent.click(within(section).getByRole("radio", { name: "Today" }));
+    const today = new Date().toISOString().slice(0, 10);
+    await waitFor(() => expect(lastListParams().get("created_at")).toBe(`${today};after,${today};before`));
+  });
+
+  it("applies an explicit range from the dialog", async () => {
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Alpha");
+    openFilters();
+    const section = screen.getByTestId("intake-filter-updatedAt");
+    fireEvent.click(within(section).getByRole("radio", { name: "Custom" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    const today = new Date().toISOString().slice(0, 10);
+    const [year, month, day] = today.split("-").map(Number) as [number, number, number];
+    const nextMonth = new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10);
+    await waitFor(() => expect(lastListParams().get("updated_at")).toBe(`${today};after,${nextMonth};before`));
+  });
+});
+
+describe("IntakeScreen order (INT-011)", () => {
+  it("re-sorts server-side and stays marked", async () => {
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
+    await screen.findByText("Beta");
+    expect(new URLSearchParams(server.listRequests[0] ?? "").get("order_by")).toBe("-issue__created_at");
+    fireEvent.click(screen.getByTestId("intake-order-trigger"));
+    expect(screen.getByTestId("intake-order-field-created")).toHaveAttribute("data-order-checked", "true");
+    fireEvent.click(screen.getByRole("menuitem", { name: "ID" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Ascending" }));
+    await waitFor(() => expect(lastListParams().get("order_by")).toBe("issue__sequence_id"));
+    expect(screen.getAllByTestId("intake-row-title").map((node) => node.textContent)).toEqual(["Beta", "Alpha"]);
   });
 });

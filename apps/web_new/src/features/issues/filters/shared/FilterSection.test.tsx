@@ -273,4 +273,30 @@ describe("FilterSection", () => {
     expect(section).toHaveAttribute("data-section-title", "Cycle");
     expect(section.className).toContain("py-4");
   });
+
+  it("filters by a host-driven search instead of its own box", async () => {
+    const user = userEvent.setup();
+    const onSearchTextChange = vi.fn();
+    const { rerender, props } = renderSection({ searchText: "", onSearchTextChange });
+    await user.type(screen.getByRole("searchbox", { name: "Search Cycle" }), "br");
+    expect(onSearchTextChange).toHaveBeenCalledTimes(2);
+    expect(onSearchTextChange).toHaveBeenNthCalledWith(1, "b");
+    // Controlled: the host's value, not internal state, decides.
+    expect(screen.getByRole("checkbox", { name: "Alpha" })).toBeInTheDocument();
+    rerender(<FilterSection {...props} searchText="br" />);
+    expect(screen.queryByRole("checkbox", { name: "Alpha" })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Bravo" })).toBeInTheDocument();
+  });
+
+  it("hides its own box while a hidden host search still filters", () => {
+    renderSection({ searchText: "br", hideSearch: true });
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Alpha" })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Bravo" })).toBeInTheDocument();
+  });
+
+  it("holds a handler-less controlled search read-only", () => {
+    renderSection({ searchText: "br" });
+    expect(screen.getByRole("searchbox", { name: "Search Cycle" })).toHaveAttribute("readonly");
+  });
 });

@@ -1,29 +1,42 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Intake screen (parity/specs/intake.md INT-001–005, 008, 012, 031). Reads
-// the project row for the feature gate and the name, then one list read
-// for the active tab. The address is the source of truth for the tab and
-// the selection: the screen validates what it found, keeps a selection
-// that the settled list contains, auto-selects the first request when the
-// address names none, and otherwise leaves the placeholder in place.
-// Nothing here polls, subscribes or re-reads on focus; switching tabs,
-// choosing a request and the retry control are the only fetch triggers
-// this slice owns.
+// Intake screen (parity/specs/intake.md INT-001–012, 031). Reads the
+// project row for the feature gate and the name, then one list read
+// for the active tab, filter set and order. The address is the source
+// of truth for the tab and the selection: the screen validates what it
+// found, keeps a selection that the settled list contains, auto-selects
+// the first request when the address names none, and otherwise leaves
+// the placeholder in place. Filter values live per project and tab
+// session — switching tabs restores that tab's own defaults — and
+// every filter or order change refetches from the first page (INT-009,
+// INT-011). Nothing here polls, subscribes or re-reads on focus.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
-import { useWorkspace } from "../../../core/session/index.js";
+import { useMe, useWorkspace } from "../../../core/session/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
+import { usePickerProjectMembers, usePickerWorkspaceMembers } from "../../../shared/pickers/index.js";
+import { useLabels, useWeekStart } from "../../issues/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
 import { DetailSkeleton } from "../../issues/index.js";
 import { isProjectAdmin } from "../../projects/index.js";
 import { intakeKeys } from "../api/keys.js";
 import { intakeTotal, intakeRows, useIntakeList } from "../api/queries.js";
+import { todayUtcIsoDay } from "../lib/dates.js";
 import { selectIntakeEmptyState } from "../lib/emptyStates.js";
+import {
+  defaultSelectionForTab,
+  filterActivity,
+  selectionToListFilters,
+  type IntakeFilterSelection,
+} from "../lib/filters.js";
+import { selectIntakeMemberOptions } from "../lib/members.js";
 import { neighborIntakeId } from "../lib/navigation.js";
+import { DEFAULT_INTAKE_ORDER_VALUE, orderByForOrder, type IntakeOrder } from "../lib/order.js";
+import { uniqueIntakeRows } from "../lib/rows.js";
 import { intakeFeatureSettingsHref } from "../lib/paths.js";
 import type { IntakeSearch, IntakeSearchWriteOptions } from "../lib/search.js";
 import {
@@ -71,20 +84,80 @@ export function IntakeScreen({
   const project = useProjectRow(workspaceSlug, projectId);
   const roles = useProjectRoles(workspaceSlug);
   const { workspace } = useWorkspace(workspaceSlug);
+  const me = useMe();
+  const weekStart = useWeekStart();
   const gateOff = project.data?.inbox_view === false;
+  const ready = project.isSuccess && !gateOff;
+  const [today] = React.useState(() => todayUtcIsoDay());
 
   useDocumentHead({ title: intakeDocumentTitle(project.data?.name), robots: "noindex, nofollow" });
 
   const tab = search.currentTab;
-  const list = useIntakeList(workspaceSlug, projectId, { tab, enabled: project.isSuccess && !gateOff });
+
+  // The tab session's filter selection. A new project or tab starts
+  // from that tab's defaults; the render below commits the fresh
+  // session before anything reads it.
+  const sessionKey = `${projectId}:${tab}`;
+  const [filterSession, setFilterSession] = React.useState<{
+    key: string;
+    selection: IntakeFilterSelection;
+  } | null>(null);
+  const selection = filterSession?.key === sessionKey ? filterSession.selection : defaultSelectionForTab(tab);
+  if (filterSession?.key !== sessionKey) {
+    setFilterSession({ key: sessionKey, selection });
+  }
+
+  // The list order, kept across tabs and reset per project.
+  const [orderSession, setOrderSession] = React.useState<{ projectId: string; order: IntakeOrder } | null>(null);
+  const order = orderSession?.projectId === projectId ? orderSession.order : DEFAULT_INTAKE_ORDER_VALUE;
+  if (orderSession?.projectId !== projectId) {
+    setOrderSession({ projectId, order });
+  }
+
+  const list = useIntakeList(workspaceSlug, projectId, {
+    tab,
+    filters: selectionToListFilters(tab, selection, today),
+    orderBy: orderByForOrder(order),
+    enabled: ready,
+  });
+  const labelsQuery = useLabels(workspaceSlug, projectId, ready);
+  const directoryQuery = usePickerWorkspaceMembers(workspaceSlug, ready);
+  const projectMembersQuery = usePickerProjectMembers(workspaceSlug, projectId, ready);
+
+  const meId = me.data?.id ?? null;
+  const assigneeOptions = React.useMemo(
+    () =>
+      selectIntakeMemberOptions({
+        projectMembers: projectMembersQuery.data,
+        directory: directoryQuery.data,
+        meId,
+        selectedIds: selection.assignees,
+      }),
+    [projectMembersQuery.data, directoryQuery.data, meId, selection.assignees]
+  );
+  const createdByOptions = React.useMemo(
+    () =>
+      selectIntakeMemberOptions({
+        projectMembers: projectMembersQuery.data,
+        directory: directoryQuery.data,
+        meId,
+        selectedIds: selection.createdBy,
+      }),
+    [projectMembersQuery.data, directoryQuery.data, meId, selection.createdBy]
+  );
+  const labelOptions = React.useMemo(
+    () => (labelsQuery.data ?? []).map((label) => ({ id: label.id, name: label.name, color: label.color })),
+    [labelsQuery.data]
+  );
+
   const pages = list.data?.pages;
-  const rows = intakeRows(pages);
+  const rows = React.useMemo(() => uniqueIntakeRows(intakeRows(pages)), [pages]);
   const openTotal = intakeTotal(pages);
   const rowIds = React.useMemo(() => rows.map((row) => row.issue.id), [rows]);
 
   // Settle the address once the active tab's first page has landed
-  // (INT-005/INT-028). A user filter is not part of this slice, so an
-  // empty untouched tab still counts as "no user filters" (INT-008).
+  // (INT-005/INT-028). A filter or order change drops a selection the
+  // new first page no longer contains through the same path.
   const settled = list.isSuccess;
   React.useEffect(() => {
     if (!settled) return;
@@ -144,6 +217,27 @@ export function IntakeScreen({
   const retry = React.useCallback(() => {
     void list.refetch();
   }, [list]);
+  // Every filter or order change refetches (INT-009, INT-011): the
+  // invalidation marks the destination key's cache entry stale — even
+  // one still inside its stale time — so remounting a recently read
+  // combination re-reads instead of serving the cache.
+  const changeSelection = React.useCallback(
+    (next: IntakeFilterSelection) => {
+      setFilterSession({ key: sessionKey, selection: next });
+      void queryClient.invalidateQueries({ queryKey: intakeKeys.lists(workspaceSlug, projectId) });
+    },
+    [projectId, queryClient, sessionKey, workspaceSlug]
+  );
+  const changeOrder = React.useCallback(
+    (next: IntakeOrder) => {
+      setOrderSession({ projectId, order: next });
+      void queryClient.invalidateQueries({ queryKey: intakeKeys.lists(workspaceSlug, projectId) });
+    },
+    [projectId, queryClient, workspaceSlug]
+  );
+  const loadMore = React.useCallback(() => {
+    void list.fetchNextPage();
+  }, [list]);
   const manageFeatures = React.useCallback(() => {
     void navigate({ to: intakeFeatureSettingsHref(workspaceSlug, projectId) });
   }, [navigate, projectId, workspaceSlug]);
@@ -174,11 +268,12 @@ export function IntakeScreen({
   // Only a first load shows the skeleton: a background re-read (tab
   // switch invalidation, retry) keeps the rows it already has on screen.
   const firstPagePending = list.isPending;
+  const activity = filterActivity(selection, tab);
   const emptyKind = selectIntakeEmptyState({
     tab,
     rowCount: rows.length,
-    userFilterCount: 0,
-    statusNarrowed: false,
+    userFilterCount: activity.userFilterCount,
+    statusNarrowed: activity.statusNarrowed,
   });
   // Creation is offered to any project standing while intake is on
   // (INT-013); the gate above already returned for a switched-off
@@ -196,6 +291,7 @@ export function IntakeScreen({
       openTotal={openTotal}
       loading={firstPagePending}
       failed={list.isError}
+      syncing={list.isFetching}
       rows={rows}
       emptyKind={emptyKind}
       selectedId={selectedId}
@@ -222,6 +318,24 @@ export function IntakeScreen({
         )
       }
       canCreate={canCreate}
+      projectIdentifier={project.data.identifier}
+      labels={labelOptions}
+      directory={directoryQuery.data}
+      hasNextPage={list.hasNextPage}
+      loadingMore={list.isFetchingNextPage}
+      onLoadMore={loadMore}
+      selection={selection}
+      assigneeOptions={assigneeOptions}
+      createdByOptions={createdByOptions}
+      membersLoading={projectMembersQuery.isPending || directoryQuery.isPending}
+      membersFailed={projectMembersQuery.isError || directoryQuery.isError}
+      labelsLoading={labelsQuery.isPending}
+      labelsFailed={labelsQuery.isError}
+      today={today}
+      weekStart={weekStart}
+      onSelectionChange={changeSelection}
+      order={order}
+      onOrderChange={changeOrder}
     />
   );
 }

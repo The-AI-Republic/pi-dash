@@ -64,6 +64,10 @@ export {
   IntakeDeleteDialog,
 } from "./components/IntakeDeleteDialog.js";
 export type { IntakeDeleteDialogProps } from "./components/IntakeDeleteDialog.js";
+export { IntakeChips } from "./components/IntakeChips.js";
+export type { IntakeChipsProps } from "./components/IntakeChips.js";
+export { IntakeDateFilter } from "./components/IntakeDateFilter.js";
+export type { IntakeDateFilterProps } from "./components/IntakeDateFilter.js";
 export { IntakeDetail } from "./components/IntakeDetail.js";
 export type { IntakeDetailProps } from "./components/IntakeDetail.js";
 export { IntakeDetailHeader } from "./components/IntakeDetailHeader.js";
@@ -92,6 +96,8 @@ export {
 export type { IntakeDuplicateDialogProps } from "./components/IntakeDuplicateDialog.js";
 export { IntakeEmptyState } from "./components/IntakeEmptyState.js";
 export type { IntakeEmptyStateProps } from "./components/IntakeEmptyState.js";
+export { IntakeFilterPanel } from "./components/IntakeFilterPanel.js";
+export type { IntakeFilterPanelProps, IntakeLabelOption } from "./components/IntakeFilterPanel.js";
 export { IntakeProperties } from "./components/IntakeProperties.js";
 export type { IntakePropertiesProps } from "./components/IntakeProperties.js";
 export { SNOOZE_DIALOG_TITLE, IntakeSnoozeDialog } from "./components/IntakeSnoozeDialog.js";
@@ -107,6 +113,12 @@ export {
 export type { IntakeTriageActionsProps } from "./components/IntakeTriageActions.js";
 export { IntakeGate } from "./components/IntakeGate.js";
 export type { IntakeGateProps } from "./components/IntakeGate.js";
+export { INTAKE_PAGE_SKELETON_COUNT, IntakeListPager } from "./components/IntakeListPager.js";
+export type { IntakeListPagerProps } from "./components/IntakeListPager.js";
+export { IntakeOrderMenu } from "./components/IntakeOrderMenu.js";
+export type { IntakeOrderMenuProps } from "./components/IntakeOrderMenu.js";
+export { IntakeRow } from "./components/IntakeRow.js";
+export type { IntakeRowLabel, IntakeRowProps } from "./components/IntakeRow.js";
 export { IntakeScreen } from "./components/IntakeScreen.js";
 export type { IntakeScreenProps } from "./components/IntakeScreen.js";
 export { INTAKE_LIST_PANEL_ID, IntakeTabs, openTabAccessibleName } from "./components/IntakeTabs.js";
@@ -122,8 +134,59 @@ export {
   visibleIntakeDescriptionHtml,
 } from "./lib/createForm.js";
 export type { IntakeCreateForm } from "./lib/createForm.js";
+export {
+  customModeForValue,
+  DEFAULT_INTAKE_CUSTOM_MODE,
+  INTAKE_CUSTOM_MODES,
+  INTAKE_CUSTOM_RANGE_LABEL,
+  INTAKE_DATE_PRESETS,
+  intakeDateChipLabel,
+  intakeDateToken,
+  isIntakeRangeComplete,
+  presetDayRange,
+  sameDayNextMonth,
+  shiftIsoDay,
+  todayUtcIsoDay,
+} from "./lib/dates.js";
+export type { IntakeCustomMode, IntakeDatePresetId, IntakeDateValue } from "./lib/dates.js";
 export { selectIntakeEmptyState } from "./lib/emptyStates.js";
 export type { IntakeEmptyInput, IntakeEmptyState as IntakeEmptyKind } from "./lib/emptyStates.js";
+export {
+  appliedFilterCount,
+  applyCustomDate,
+  clearFilterGroup,
+  defaultSelectionForTab,
+  filterActivity,
+  INTAKE_FILTER_SECTION_TITLES,
+  INTAKE_FILTER_SECTIONS,
+  pickDatePreset,
+  selectionToListFilters,
+  toggleFilterId,
+  toggleFilterStatus,
+} from "./lib/filters.js";
+export type { IntakeDateSection, IntakeFilterSection, IntakeFilterSelection } from "./lib/filters.js";
+export { INTAKE_IDENTITY_EMAIL, isIntakeIdentityCreator } from "./lib/identity.js";
+export { selectIntakeMemberOptions } from "./lib/members.js";
+export type { IntakeMemberOption, IntakeMemberOptionsInput } from "./lib/members.js";
+export {
+  DEFAULT_INTAKE_ORDER_VALUE,
+  INTAKE_ORDER_DIRECTION_LABELS,
+  INTAKE_ORDER_DIRECTIONS,
+  INTAKE_ORDER_FIELD_LABELS,
+  INTAKE_ORDER_FIELDS,
+  orderByForOrder,
+} from "./lib/order.js";
+export type { IntakeOrder, IntakeOrderDirection, IntakeOrderField } from "./lib/order.js";
+export { INTAKE_PAGING_THRESHOLD_PX, nearListEnd } from "./lib/paging.js";
+export type { IntakeScrollMetrics } from "./lib/paging.js";
+export { intakeRowIdLabel, uniqueIntakeRows } from "./lib/rows.js";
+export {
+  INTAKE_STATUS_LABELS,
+  INTAKE_STATUS_OPTIONS,
+  intakeStatusChipLabel,
+  orderStatusesForTab,
+  statusOptionsForTab,
+} from "./lib/statuses.js";
 export { intakeFeatureSettingsHref, intakeHref, retiredInboxHref } from "./lib/paths.js";
 export { INTAKE_NAV_OVERLAY_SELECTOR, neighborIntakeId, suppressIntakeArrowKey } from "./lib/navigation.js";
 export type { IntakeStepDirection } from "./lib/navigation.js";
