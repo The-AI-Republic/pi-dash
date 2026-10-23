@@ -1,13 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Request detail header (parity/specs/intake.md INT-024/027). Previous
-// and next chevrons step through the active list; the work-item link
-// copies from the overflow menu on open requests (admins and members
-// only) and from direct controls, next to the open-work-item entry, on
-// resolved ones — where the menu is gone and every viewer gets both.
-// The action area is slice E's: triage entries arrive through the
-// actions slot.
+// Request detail header (parity/specs/intake.md INT-020–025, 027).
+// Previous and next chevrons step through the active list with the
+// status chip beside them; the work-item link copies from the overflow
+// menu on open requests (admins and members only) and from direct
+// controls, next to the open-work-item entry, on resolved ones — where
+// the menu is gone and every viewer gets both. The triage buttons
+// arrive through the actions slot and the triage menu entries split
+// around the copy-link item.
 
 import { IconButton, Menu, type MenuEntry } from "@pidash/kit";
 import { Link } from "@tanstack/react-router";
@@ -20,6 +21,7 @@ import {
   copyWorkItemLinkAddress,
 } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { workItemPath } from "../../../shared/shell/shareLink.js";
+import { IntakeStatusChip } from "./IntakeStatusChip.js";
 
 /** Accessible name of the previous-request chevron. */
 export const PREV_REQUEST_LABEL = "Previous request";
@@ -40,8 +42,16 @@ export interface IntakeDetailHeaderProps {
   canCopy: boolean;
   onPrev: () => void;
   onNext: () => void;
-  /** Triage entries (slice E); empty until that slice lands. */
+  /** Triage buttons for the action area; absent on resolved requests. */
   actions?: React.ReactNode;
+  /** Triage menu entries ahead of the copy-link item. */
+  menuLeadEntries?: MenuEntry[];
+  /** Triage menu entries behind it. */
+  menuTrailEntries?: MenuEntry[];
+  /** Intake status for the chip; the chip hides while unknown. */
+  status?: number;
+  /** Snooze instant for the chip's countdown, if the request is snoozed. */
+  snoozedTill?: string | null;
 }
 
 export function IntakeDetailHeader({
@@ -52,12 +62,18 @@ export function IntakeDetailHeader({
   onPrev,
   onNext,
   actions,
+  menuLeadEntries = [],
+  menuTrailEntries = [],
+  status,
+  snoozedTill = null,
 }: IntakeDetailHeaderProps): React.ReactElement {
   const menuItems: MenuEntry[] = [
+    ...menuLeadEntries,
     {
       label: COPY_WORK_ITEM_LINK_LABEL,
       onSelect: () => void copyWorkItemLinkAddress(workspaceSlug, issueKey),
     },
+    ...menuTrailEntries,
   ];
   return (
     <div
@@ -75,6 +91,7 @@ export function IntakeDetailHeader({
             <ChevronDown size={16} strokeWidth={1.5} aria-hidden="true" />
           </IconButton>
         </span>
+        {status === undefined ? null : <IntakeStatusChip status={status} snoozedTill={snoozedTill} />}
       </div>
       <div className="flex items-center gap-(--space-2)">
         {actions}

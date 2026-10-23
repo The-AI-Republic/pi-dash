@@ -200,6 +200,25 @@ export interface WorkItemCreateDialogProps {
   onPublish?: ((input: DraftIssueCreateInput) => Promise<void>) | undefined;
   /** A guest may edit their own draft but may not convert it (DRAFT-025). */
   canPublish?: boolean | undefined;
+  /**
+   * Edit-only heading override (INT-020): the intake accept entry names
+   * the request being added instead of the generic update heading.
+   */
+  editTitle?: string | undefined;
+  /** Edit-only save label override (INT-020): the accept entry's add action. */
+  editSaveLabel?: string | undefined;
+  /**
+   * Edit-only gate (INT-020): runs after validation, before the
+   * work-item write. A rejection aborts the submit and the dialog stays
+   * open; the callback reports its own failure to the viewer.
+   */
+  onBeforeEditSubmit?: (() => Promise<void>) | undefined;
+  /**
+   * Edit save hand-back (INT-020): the changed work-item field keys,
+   * fired when an edit save lands. Closing or cancelling never fires
+   * it, so the caller can tell a save from a close.
+   */
+  onEditSaved?: ((changedFields: readonly string[]) => void) | undefined;
 }
 
 /** The draft payload a copy or a blank draft entry opens with. */
@@ -380,6 +399,10 @@ export function WorkItemCreateDialog({
   moveToProject = false,
   onPublish,
   canPublish = true,
+  editTitle,
+  editSaveLabel,
+  onBeforeEditSubmit,
+  onEditSaved,
 }: WorkItemCreateDialogProps): React.ReactElement | null {
   const editing = edit !== null;
   // A draft entry (ISS-139/141): the create form writes a draft instead of
@@ -812,8 +835,7 @@ export function WorkItemCreateDialog({
     if (title === null) return false;
     const named = { ...form, name: title };
     if (edit !== null) {
-      submitEdit(named);
-      return true;
+      return submitEdit(named);
     }
     create.mutate(
       {
@@ -917,17 +939,29 @@ export function WorkItemCreateDialog({
     );
   }
 
-  /** Submit an edit: only the fields that changed travel (ISS-126). */
-  function submitEdit(named: CreateFormState): void {
-    if (baseline === null) return;
+  /**
+   * Submit an edit: only the fields that changed travel (ISS-126). The
+   * pre-submit gate runs first when one is set; a rejection aborts the
+   * write and the form stays open. True when the write started.
+   */
+  async function submitEdit(named: CreateFormState): Promise<boolean> {
+    if (baseline === null) return false;
+    if (onBeforeEditSubmit !== undefined) {
+      try {
+        await onBeforeEditSubmit();
+      } catch {
+        return false;
+      }
+    }
     const target =
       edit?.kind === "draft"
         ? ({ kind: "draft", draftId: edit.id } as const)
         : ({ kind: "issue", projectId: baseline.projectId ?? "", issueId: edit?.id ?? "" } as const);
+    const patch = buildEditPayload(named, baseline);
     writeEdit.mutate(
       {
         target,
-        patch: buildEditPayload(named, baseline),
+        patch,
         membership: editMembership(named, baseline),
         draftProject: edit?.kind === "draft" ? changedDraftProject(named, baseline) : undefined,
       },
@@ -936,6 +970,9 @@ export function WorkItemCreateDialog({
           submitting.current = false;
         },
         onSuccess: () => {
+          // The hand-back runs before the close cascade, so the caller
+          // learns about the save ahead of onChanged (INT-020).
+          onEditSaved?.(Object.keys(patch));
           const liveId = edit?.kind === "issue" ? edit.id : null;
           if (liveId !== null && assetIds.length > 0) {
             attachAssets.mutate({ projectId: baseline.projectId ?? "", issueId: liveId, assetIds });
@@ -955,6 +992,7 @@ export function WorkItemCreateDialog({
         },
       }
     );
+    return true;
   }
 
   async function publishDraftOnce(): Promise<void> {
@@ -1048,7 +1086,8 @@ export function WorkItemCreateDialog({
   const branchValue = form.gitWorkBranch;
   // A new draft stores as a draft, not as an issue: the submit names that
   // action (ISS-139/141), matching the standalone Save to Drafts entry.
-  const submitLabel = busy ? "Saving…" : drafting ? SAVE_DRAFT_BUTTON_LABEL : "Save";
+  const saveLabel = editing && editSaveLabel !== undefined ? editSaveLabel : "Save";
+  const submitLabel = busy ? "Saving…" : drafting ? SAVE_DRAFT_BUTTON_LABEL : saveLabel;
   // An edit diffs against the row it opened with; without one (a draft
   // or issue whose snapshot did not parse) there is nothing to save.
   const saveDisabled = busy || (editing && baseline === null);
@@ -1074,7 +1113,7 @@ export function WorkItemCreateDialog({
   return (
     <>
       <Dialog
-        title={editing ? EDIT_DIALOG_TITLE : drafting ? CREATE_DRAFT_DIALOG_TITLE : CREATE_DIALOG_TITLE}
+        title={editing ? (editTitle ?? EDIT_DIALOG_TITLE) : drafting ? CREATE_DRAFT_DIALOG_TITLE : CREATE_DIALOG_TITLE}
         description={
           editing
             ? "Changed fields are saved; the rest stay as they are."

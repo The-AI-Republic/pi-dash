@@ -9,6 +9,7 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { TransportResponse } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,6 +116,7 @@ interface Server {
   pending: FakeRow[];
   closed: FakeRow[];
   listRequests: string[];
+  writes: unknown[];
   listFails?: boolean;
   detailStatus?: number;
   rolesFail?: boolean;
@@ -182,7 +184,7 @@ const ME_PAYLOAD = {
 };
 
 function installServer(server: Server): void {
-  createAppClient("https://api.test", (async (url: string) => {
+  createAppClient("https://api.test", (async (url: string, init?: { method?: string; body?: string }) => {
     const parsed = new URL(url);
     const path = parsed.pathname;
     if (path.endsWith("/auth/get-csrf-token/")) return jsonResponse(url, 200, { csrf_token: "csrf" });
@@ -208,9 +210,19 @@ function installServer(server: Server): void {
     }
     const detailPrefix = `/api/workspaces/acme/projects/${PROJECT_ID}/intake-issues/`;
     if (path.startsWith(detailPrefix) && path !== detailPrefix) {
+      const issueId = path.slice(detailPrefix.length, -1);
+      if ((init?.method ?? "GET") === "PATCH") {
+        const body = JSON.parse(init?.body ?? "{}") as { status?: number };
+        server.writes.push(body);
+        // A triage move takes the row out of its tab; the echo carries
+        // the new status while the row still resolves by id.
+        server.pending = server.pending.filter((row) => row.issueId !== issueId);
+        const echo = detailPayload(issueId);
+        return jsonResponse(url, 200, { ...echo, status: body.status ?? echo.status });
+      }
       const status = server.detailStatus ?? 200;
       if (status >= 400) return jsonResponse(url, status, {});
-      return jsonResponse(url, 200, detailPayload(path.slice(detailPrefix.length, -1)));
+      return jsonResponse(url, 200, detailPayload(issueId));
     }
     throw new Error(`unexpected request: ${url}`);
   }) as never);
@@ -247,7 +259,7 @@ let server: Server;
 beforeEach(() => {
   navigate.mockReset();
   document.title = "";
-  server = { inboxView: true, projectName: "Apollo", pending: [], closed: [], listRequests: [] };
+  server = { inboxView: true, projectName: "Apollo", pending: [], closed: [], listRequests: [], writes: [] };
 });
 
 afterEach(() => {
@@ -596,5 +608,48 @@ describe("IntakeScreen header create control (INT-013)", () => {
     renderScreen({ currentTab: "open", inboxIssueId: ISSUE_1 });
     await screen.findByText("Alpha");
     expect(screen.queryByTestId("intake-header-create")).toBeNull();
+  });
+});
+
+describe("IntakeScreen triage advance (INT-020–025)", () => {
+  it("moves the address to the neighbour after a triage move", async () => {
+    const user = userEvent.setup();
+    server.pending = [
+      { issueId: ISSUE_1, name: "Alpha" },
+      { issueId: ISSUE_2, name: "Beta" },
+    ];
+    installServer(server);
+    const onSearchChange = vi.fn();
+    const { rerender } = renderScreenWithRerender({ currentTab: "open", inboxIssueId: ISSUE_1 }, onSearchChange);
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+    const dialog = await screen.findByRole("dialog", { name: "Decline work item" });
+    await user.click(within(dialog).getByRole("button", { name: "Decline" }));
+    await waitFor(() => expect(server.writes).toEqual([{ status: -1 }]));
+    // A user move pushes, so back/forward walks it.
+    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open", inboxIssueId: ISSUE_2 }));
+
+    // The router follows the write: the neighbour's detail takes over.
+    rerender({ currentTab: "open", inboxIssueId: ISSUE_2 });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Title" })).toHaveValue("Beta"));
+  });
+
+  it("clears the selection when a triage move empties the tab", async () => {
+    const user = userEvent.setup();
+    server.pending = [{ issueId: ISSUE_1, name: "Alpha" }];
+    installServer(server);
+    const onSearchChange = vi.fn();
+    const { rerender } = renderScreenWithRerender({ currentTab: "open", inboxIssueId: ISSUE_1 }, onSearchChange);
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+    const dialog = await screen.findByRole("dialog", { name: "Decline work item" });
+    await user.click(within(dialog).getByRole("button", { name: "Decline" }));
+    await waitFor(() => expect(server.writes).toEqual([{ status: -1 }]));
+    await waitFor(() => expect(onSearchChange).toHaveBeenCalledWith({ currentTab: "open" }));
+
+    rerender({ currentTab: "open" });
+    await waitFor(() => expect(screen.getByTestId("intake-placeholder")).toBeInTheDocument());
   });
 });

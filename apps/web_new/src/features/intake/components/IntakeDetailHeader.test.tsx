@@ -6,6 +6,7 @@
 // split between open and resolved requests, and the slice E slot.
 
 import { ToastHost } from "@pidash/kit";
+import { INTAKE_STATUS } from "@pidash/api-client";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
@@ -115,5 +116,32 @@ describe("IntakeDetailHeader link controls (INT-024)", () => {
   it("renders the triage action slot", () => {
     renderHeader({ actions: <button type="button">Accept</button> });
     expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+  });
+});
+
+describe("IntakeDetailHeader triage menu and chip (INT-020–025)", () => {
+  it("splits the triage entries around the copy-link item", async () => {
+    const user = userEvent.setup();
+    const onLead = vi.fn();
+    const onTrail = vi.fn();
+    renderHeader({
+      menuLeadEntries: [{ label: "Snooze", onSelect: onLead }],
+      menuTrailEntries: [{ label: "Delete", onSelect: onTrail }],
+    });
+    await user.click(screen.getByRole("button", { name: REQUEST_ACTIONS_LABEL }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Snooze", "Copy work item link", "Delete"]);
+    await user.click(screen.getByRole("menuitem", { name: "Snooze" }));
+    expect(onLead).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the status chip beside the chevrons", () => {
+    renderHeader({ status: INTAKE_STATUS.pending });
+    expect(screen.getByTestId("intake-status-chip")).toHaveTextContent("Pending");
+  });
+
+  it("hides the chip while the status is unknown", () => {
+    renderHeader();
+    expect(screen.queryByTestId("intake-status-chip")).not.toBeInTheDocument();
   });
 });

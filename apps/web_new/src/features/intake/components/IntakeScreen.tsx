@@ -26,7 +26,12 @@ import { selectIntakeEmptyState } from "../lib/emptyStates.js";
 import { neighborIntakeId } from "../lib/navigation.js";
 import { intakeFeatureSettingsHref } from "../lib/paths.js";
 import type { IntakeSearch, IntakeSearchWriteOptions } from "../lib/search.js";
-import { intakeSearchFor, settleIntakeSearch, withoutSelection } from "../lib/searchWrites.js";
+import {
+  intakeSearchAfterRemove,
+  intakeSearchFor,
+  settleIntakeSearch,
+  withoutSelection,
+} from "../lib/searchWrites.js";
 import type { IntakeTab } from "../lib/tabs.js";
 import { intakeDocumentTitle } from "../lib/title.js";
 import { IntakeGate } from "./IntakeGate.js";
@@ -119,6 +124,17 @@ export function IntakeScreen({
   );
   const stepPrev = React.useCallback(() => stepSelection("prev"), [stepSelection]);
   const stepNext = React.useCallback(() => stepSelection("next"), [stepSelection]);
+  // A triage move took the request out of the tab (INT-020–025): the
+  // neighbour takes the selection — pushed, so back/forward walks the
+  // move — and an emptied tab keeps no selection. True when emptied.
+  const advanceAfterTriage = React.useCallback(
+    (removedId: string) => {
+      const next = intakeSearchAfterRemove({ search, rowIds, removedId });
+      onSearchChange(next);
+      return next.inboxIssueId === undefined;
+    },
+    [onSearchChange, rowIds, search]
+  );
   // A stale or forbidden id (INT-028 step 3): drop it from the address
   // and re-read the tab, so the settle pass auto-selects a live row.
   const dropMissing = React.useCallback(() => {
@@ -195,10 +211,12 @@ export function IntakeScreen({
               projectId={projectId}
               issueId={selectedId}
               projectIdentifier={project.data.identifier}
+              projectName={project.data.name}
               role={roles.data?.[projectId] ?? null}
               onPrev={stepPrev}
               onNext={stepNext}
               onMissing={dropMissing}
+              onAdvance={advanceAfterTriage}
             />
           </React.Suspense>
         )
