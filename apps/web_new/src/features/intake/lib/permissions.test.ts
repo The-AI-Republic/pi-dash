@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
 // Intake edit permissions (INT-026): the full actor matrix plus the
-// resolved-status rule.
+// resolved-status rule. Triage visibility (INT-020–023, 025): who sees
+// the buttons, the menu and the delete entry.
 
 import { INTAKE_STATUS } from "@pidash/api-client";
 import { describe, expect, it } from "vitest";
 
-import { isResolvedIntakeStatus, selectIntakeEditability } from "./permissions.js";
+import { isResolvedIntakeStatus, selectIntakeEditability, selectIntakeTriageVisibility } from "./permissions.js";
 
 describe("isResolvedIntakeStatus", () => {
   it.each([
@@ -58,6 +59,62 @@ describe("selectIntakeEditability", () => {
       expect(selectIntakeEditability({ isAdmin: true, isCreator: true, isGuest: false, status })).toEqual({
         canEditContent: false,
         canEditProperties: false,
+      });
+    }
+  );
+});
+
+describe("selectIntakeTriageVisibility", () => {
+  it("shows everything to an admin on an open request", () => {
+    expect(
+      selectIntakeTriageVisibility({
+        isAdmin: true,
+        isAuthorized: true,
+        isCreator: false,
+        status: INTAKE_STATUS.pending,
+      })
+    ).toEqual({ showTriage: true, showDelete: true });
+  });
+
+  it("shows the menu without delete to a member on someone else's request", () => {
+    expect(
+      selectIntakeTriageVisibility({
+        isAdmin: false,
+        isAuthorized: true,
+        isCreator: false,
+        status: INTAKE_STATUS.snoozed,
+      })
+    ).toEqual({ showTriage: true, showDelete: false });
+  });
+
+  it("shows delete to a member on their own request", () => {
+    expect(
+      selectIntakeTriageVisibility({
+        isAdmin: false,
+        isAuthorized: true,
+        isCreator: true,
+        status: INTAKE_STATUS.pending,
+      })
+    ).toEqual({ showTriage: true, showDelete: true });
+  });
+
+  it("shows nothing to a guest, even the creator", () => {
+    expect(
+      selectIntakeTriageVisibility({
+        isAdmin: false,
+        isAuthorized: false,
+        isCreator: true,
+        status: INTAKE_STATUS.pending,
+      })
+    ).toEqual({ showTriage: false, showDelete: false });
+  });
+
+  it.each([INTAKE_STATUS.accepted, INTAKE_STATUS.declined, INTAKE_STATUS.duplicate])(
+    "shows nothing on a resolved request (%i) even to its admin creator",
+    (status) => {
+      expect(selectIntakeTriageVisibility({ isAdmin: true, isAuthorized: true, isCreator: true, status })).toEqual({
+        showTriage: false,
+        showDelete: false,
       });
     }
   );

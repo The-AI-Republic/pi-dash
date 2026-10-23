@@ -2187,6 +2187,116 @@ describe("WorkItemCreateDialog edit mode (ISS-126)", () => {
   });
 });
 
+describe("WorkItemCreateDialog edit gate (INT-020)", () => {
+  it("runs the gate before the write and hands back the changed fields", async () => {
+    const user = userEvent.setup();
+    const { props } = editProps({ description_html: "" });
+    const saved = vi.fn();
+    const gate = vi.fn(async () => {});
+    const h = setup(
+      { issueDetail: detailRow("<p>stored words</p>") },
+      {
+        ...props,
+        editTitle: "Add APO-7 to project work items",
+        editSaveLabel: "Add to project",
+        onBeforeEditSubmit: gate,
+        onEditSaved: saved,
+      }
+    );
+    let patchesAtGate = -1;
+    gate.mockImplementation(async () => {
+      patchesAtGate = patches(h.calls).length;
+    });
+
+    expect(screen.getByRole("dialog", { name: "Add APO-7 to project work items" })).toBeInTheDocument();
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words"));
+    await user.clear(titleField());
+    await user.type(titleField(), "Renamed work");
+    fireEvent.click(screen.getByRole("button", { name: "Add to project" }));
+
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(gate).toHaveBeenCalledTimes(1);
+    // The gate ran ahead of the work-item write.
+    expect(patchesAtGate).toBe(0);
+    expect(patches(h.calls)[0]).toEqual({ name: "Renamed work" });
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(saved).toHaveBeenCalledWith(["name"]);
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it("aborts the submit and stays open when the gate rejects, then resubmits", async () => {
+    const user = userEvent.setup();
+    const { onChanged, props } = editProps({ description_html: "" });
+    const saved = vi.fn();
+    const gate = vi.fn(async (): Promise<void> => {
+      throw new Error("no default state");
+    });
+    const h = setup(
+      { issueDetail: detailRow("<p>stored words</p>") },
+      {
+        ...props,
+        onBeforeEditSubmit: gate,
+        onEditSaved: saved,
+      }
+    );
+
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Description" })).toHaveValue("stored words"));
+    await user.clear(titleField());
+    await user.type(titleField(), "Renamed work");
+    save();
+    await waitFor(() => expect(gate).toHaveBeenCalledTimes(1));
+    expect(patches(h.calls)).toEqual([]);
+    expect(saved).not.toHaveBeenCalled();
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+    expect(onChanged).not.toHaveBeenCalled();
+
+    // The gate heals: the same form resubmits and the save lands.
+    gate.mockImplementation(async () => {});
+    save();
+    await waitFor(() => expect(patches(h.calls)).toHaveLength(1));
+    expect(saved).toHaveBeenCalledWith(["name"]);
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+  });
+
+  it("never fires the hand-back on close", async () => {
+    const user = userEvent.setup();
+    const { props } = editProps();
+    const saved = vi.fn();
+    const h = setup({}, { ...props, onEditSaved: saved });
+
+    await waitFor(() => expect(titleField()).toHaveValue("Existing work"));
+    await user.click(screen.getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(h.onOpenChange).toHaveBeenCalledWith(false));
+    expect(saved).not.toHaveBeenCalled();
+  });
+
+  it("ignores a submit when the snapshot cannot seed a baseline", async () => {
+    const user = userEvent.setup();
+    const gate = vi.fn(async () => {});
+    const saved = vi.fn();
+    const h = setup(
+      {},
+      {
+        edit: { kind: "issue", id: EDIT_ID, projectId: PROJECT_ATLAS, snapshot: null, onChanged: vi.fn() },
+        onBeforeEditSubmit: gate,
+        onEditSaved: saved,
+      }
+    );
+
+    // A title so validation passes and the submit reaches the edit write.
+    await waitFor(() => expect(titleField()).toBeInTheDocument());
+    await user.type(titleField(), "A title");
+    fireEvent.submit(document.getElementById("work-item-create-form") as HTMLFormElement);
+    await waitFor(() => expect(titleField()).toHaveValue("A title"));
+    expect(gate).not.toHaveBeenCalled();
+    expect(saved).not.toHaveBeenCalled();
+    expect(patches(h.calls)).toEqual([]);
+    expect(h.onOpenChange).not.toHaveBeenCalled();
+  });
+});
+
 describe("WorkItemCreateDialog context prefill (ISS-124)", () => {
   it("seeds the cycle from the route and links it after create", async () => {
     const user = userEvent.setup();

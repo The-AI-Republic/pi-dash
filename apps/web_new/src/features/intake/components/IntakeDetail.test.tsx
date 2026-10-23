@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { IntakeIssueDetail, IntakeIssueDetailItem, TransportInit } from "@pidash/api-client";
+import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,6 +26,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { setSessionClient } from "../../../core/session/queries.js";
+import { getToastManager } from "../../../shared/shell/toaster.js";
 import { IntakeDetail } from "./IntakeDetail.js";
 
 const SLUG = "acme";
@@ -291,6 +293,7 @@ function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentPr
   const onPrev = vi.fn();
   const onNext = vi.fn();
   const onMissing = vi.fn();
+  const onAdvance = vi.fn(() => false);
   render(
     <QueryClientProvider client={queryClient}>
       <IntakeDetail
@@ -298,15 +301,17 @@ function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentPr
         projectId={PROJECT}
         issueId={ISSUE}
         projectIdentifier="APO"
+        projectName="Atlas"
         role={20}
         onPrev={onPrev}
         onNext={onNext}
         onMissing={onMissing}
+        onAdvance={onAdvance}
         {...props}
       />
     </QueryClientProvider>
   );
-  return { onPrev, onNext, onMissing };
+  return { onPrev, onNext, onMissing, onAdvance };
 }
 
 afterEach(() => {
@@ -483,5 +488,140 @@ describe("IntakeDetail missing and error states (INT-028)", () => {
     server.detailStatus = 200;
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByTestId("intake-detail")).toBeInTheDocument();
+  });
+});
+
+describe("IntakeDetail triage wiring (INT-020–025)", () => {
+  it("shows the buttons, chip and full menu to an admin on an open request", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accept" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeInTheDocument();
+    expect(screen.getByTestId("intake-status-chip")).toHaveTextContent("Pending");
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Snooze",
+      "Mark as duplicate",
+      "Copy work item link",
+      "Delete",
+    ]);
+  });
+
+  it("declines through the confirmation and advances", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    const { onAdvance } = renderDetail(queryClient);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+    expect(screen.getByRole("dialog", { name: "Decline work item" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+    await waitFor(() => expect(server.writes).toHaveLength(1));
+    expect(server.writes[0]?.body).toEqual({ status: -1 });
+    expect(onAdvance).toHaveBeenCalledWith(ISSUE);
+  });
+
+  it("un-snoozes from the menu and advances", async () => {
+    const user = userEvent.setup();
+    const future = new Date();
+    future.setDate(future.getDate() + 3);
+    const snoozed = detailPayload(0);
+    snoozed.snoozed_till = future.toISOString();
+    const server: DetailServer = { detailStatus: 200, detail: snoozed, writes: [] };
+    const { queryClient } = harness(server);
+    const { onAdvance } = renderDetail(queryClient);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.getByTestId("intake-status-chip")).toHaveTextContent("3 days to go");
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Un snooze" }));
+    await waitFor(() => expect(server.writes).toHaveLength(1));
+    expect(server.writes[0]?.body).toEqual({ status: -2, snoozed_till: null });
+    expect(onAdvance).toHaveBeenCalledWith(ISSUE);
+  });
+
+  it("refuses a member accept with a permission notice", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { role: 15 });
+    render(<ToastHost manager={getToastManager()} />);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Accept" }));
+    expect(await screen.findByText("Permission denied")).toBeInTheDocument();
+    expect(screen.getByText(/project admin/)).toBeInTheDocument();
+    expect(server.writes).toEqual([]);
+  });
+
+  it("opens delete from the overflow menu and cancels without writing", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete work item" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(server.writes).toEqual([]);
+  });
+
+  it("omits delete from the menu on someone else's request for a member", async () => {
+    const user = userEvent.setup();
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { role: 15 });
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Snooze", "Mark as duplicate", "Copy work item link"]);
+  });
+
+  it("hides every triage control from a guest on an open request", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { role: 5 });
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("intake-detail-menu")).not.toBeInTheDocument();
+    expect(screen.getByTestId("intake-status-chip")).toHaveTextContent("Pending");
+  });
+
+  it("hides triage on a resolved request and links the duplicate target", async () => {
+    const duplicate = detailPayload(2);
+    duplicate.duplicate_to = "22222222-2222-4222-8222-222222222222";
+    duplicate.duplicate_issue_detail = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Original work",
+      priority: "none",
+      sequence_id: 3,
+      project_id: PROJECT,
+      created_at: "2026-10-01T00:00:00Z",
+      created_by: null,
+    };
+    const server: DetailServer = { detailStatus: 200, detail: duplicate, writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("intake-detail-menu")).not.toBeInTheDocument();
+    expect(screen.getByTestId("intake-status-chip")).toHaveTextContent("Duplicate");
+    const link = screen.getByTestId("intake-duplicate-of");
+    expect(link).toHaveTextContent("APO-3");
+    expect(link).toHaveAttribute("href", "/acme/browse/APO-3/");
   });
 });

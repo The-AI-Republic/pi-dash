@@ -57,6 +57,7 @@ export function IntakeListPane({
         role="tabpanel"
         aria-label={`${tab === "open" ? "Open" : "Closed"} intake requests`}
         data-testid="intake-list-pane"
+        tabIndex={-1}
         className="min-h-0 flex-1 overflow-y-auto"
       >
         <IntakeListBody

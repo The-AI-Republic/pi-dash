@@ -38,3 +38,34 @@ export function selectIntakeEditability(standing: IntakeStanding): IntakeEditabi
   const canEditProperties = standing.isAdmin || (standing.isCreator && !standing.isGuest);
   return { canEditContent, canEditProperties };
 }
+
+export interface IntakeTriageStanding {
+  /** Project admin standing. */
+  isAdmin: boolean;
+  /** Admin or member standing: the overflow menu's viewers. */
+  isAuthorized: boolean;
+  /** The viewer created this request. */
+  isCreator: boolean;
+  /** Intake status of the request. */
+  status: number;
+}
+
+export interface IntakeTriageVisibility {
+  /** Accept/decline buttons and the overflow menu on an open request. */
+  showTriage: boolean;
+  /** Delete entry inside that menu. */
+  showDelete: boolean;
+}
+
+/**
+ * Triage visibility (parity/specs/intake.md INT-020–023, 025). Admins
+ * and members see the buttons and the menu on open requests; a member
+ * without admin rights is refused with a notice on click instead of
+ * losing the controls. Delete shows for an admin or the creator, and
+ * nothing triage-related shows once the request is resolved.
+ */
+export function selectIntakeTriageVisibility(standing: IntakeTriageStanding): IntakeTriageVisibility {
+  if (isResolvedIntakeStatus(standing.status)) return { showTriage: false, showDelete: false };
+  if (!standing.isAuthorized) return { showTriage: false, showDelete: false };
+  return { showTriage: true, showDelete: standing.isAdmin || standing.isCreator };
+}

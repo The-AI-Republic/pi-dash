@@ -17,6 +17,15 @@ vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };
 });
 
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  Link: ({ to, children, ...rest }: { to: string; children?: React.ReactNode }) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
 import { setSessionClient } from "../../../core/session/queries.js";
 import { notifyError } from "../../../shared/shell/index.js";
@@ -368,6 +377,24 @@ describe("IntakeProperties (INT-019)", () => {
     expect(queryClient.getQueryData<IntakeIssueDetail>(intakeKeys.detail(SLUG, PROJECT, ISSUE))?.issue.priority).toBe(
       "none"
     );
+  });
+});
+
+describe("IntakeProperties duplicate link (INT-023)", () => {
+  it("links the duplicate target below the state row", async () => {
+    const { queryClient } = harness();
+    renderPanel(queryClient, { duplicateOf: { issueKey: "APO-3", href: "/acme/browse/APO-3/" } });
+    const row = await screen.findByRole("group", { name: "Duplicate of" });
+    const link = within(row).getByTestId("intake-duplicate-of");
+    expect(link).toHaveTextContent("APO-3");
+    expect(link).toHaveAttribute("href", "/acme/browse/APO-3/");
+  });
+
+  it("omits the row without a target", async () => {
+    const { queryClient } = harness();
+    renderPanel(queryClient);
+    expect(await screen.findByRole("group", { name: "State" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Duplicate of" })).not.toBeInTheDocument();
   });
 });
 

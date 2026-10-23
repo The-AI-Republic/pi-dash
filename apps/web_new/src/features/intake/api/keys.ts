@@ -54,4 +54,7 @@ export const intakeKeys = {
     [...intakeKeys.all(workspaceSlug), "detail", projectId] as const,
   detail: (workspaceSlug: string, projectId: string, issueId: string) =>
     [...intakeKeys.details(workspaceSlug, projectId), issueId] as const,
+  /** Duplicate-target picker search (INT-023), keyed by the typed term. */
+  search: (workspaceSlug: string, projectId: string, term: string) =>
+    [...intakeKeys.all(workspaceSlug), "search", projectId, term] as const,
 };

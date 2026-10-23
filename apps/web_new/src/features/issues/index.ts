@@ -90,6 +90,7 @@ export { useAttachDescriptionAssets } from "./create/createApi.js";
 export { ModalDescription } from "./create/ModalDescription.js";
 export type { ModalDescriptionProps } from "./create/ModalDescription.js";
 export type { WorkItemCreateDialogProps, WorkItemCreateProject } from "./components/WorkItemCreateDialog.js";
+export type { WorkItemEditTarget } from "./components/WorkItemCreateDialog.js";
 export { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./api/browse.js";
 export { CommentCard, commentDomId, commentMenuItems } from "./comments/CommentCard.js";
 export type { CommentAccessFlags, CommentCardProps } from "./comments/CommentCard.js";

@@ -1,16 +1,18 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Request properties panel (parity/specs/intake.md INT-019/026). The
-// shared pickers composed for intake's limited subset: the state
+// Request properties panel (parity/specs/intake.md INT-019/023/026).
+// The shared pickers composed for intake's limited subset: the state
 // read-only (the triage state, or the workflow state once accepted),
 // assignees, priority, due date and labels editable — every write
 // through the intake update, which reverts to the server value with a
 // notice when refused. Viewers who may not edit get the same rows
-// disabled, and the labels row omits its add control.
+// disabled, and the labels row omits its add control. A request
+// marked duplicate links its target below the state row.
 
 import { cn, type ButtonVariant } from "@pidash/kit";
 import type { Issue } from "@pidash/api-client";
+import { Link } from "@tanstack/react-router";
 import * as React from "react";
 
 import {
@@ -58,6 +60,11 @@ export interface IntakePropertiesProps {
    * state rather than triage; the row names that workflow state.
    */
   accepted: boolean;
+  /**
+   * The duplicate target's route key and browse address, once the
+   * request is marked duplicate; null keeps the row off.
+   */
+  duplicateOf?: { issueKey: string; href: string } | null;
 }
 
 export function IntakeProperties({
@@ -66,6 +73,7 @@ export function IntakeProperties({
   issue,
   canEdit,
   accepted,
+  duplicateOf = null,
 }: IntakePropertiesProps): React.ReactElement {
   const disabled = !canEdit;
   const update = useUpdateIntakeIssue({
@@ -108,6 +116,17 @@ export function IntakeProperties({
           />
         )}
       </SidebarRow>
+      {duplicateOf === null ? null : (
+        <SidebarRow label="Duplicate of">
+          <Link
+            to={duplicateOf.href}
+            data-testid="intake-duplicate-of"
+            className="text-body inline-flex min-w-0 items-center gap-(--space-1) rounded-(--radius-control) px-(--space-2) py-(--space-1) text-(--accent) hover:underline focus-visible:ring-2 focus-visible:ring-(--accent) focus-visible:ring-offset-1 focus-visible:outline-none"
+          >
+            {duplicateOf.issueKey}
+          </Link>
+        </SidebarRow>
+      )}
       <SidebarRow label="Assignees">
         <MemberPicker
           workspaceSlug={workspaceSlug}

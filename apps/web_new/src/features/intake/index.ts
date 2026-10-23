@@ -17,6 +17,35 @@ export {
 export { paintIntakeDetailPatch, useUpdateIntakeIssue } from "./api/mutations.js";
 export type { UpdateIntakeIssueScope } from "./api/mutations.js";
 export {
+  ACCEPT_FAILED_TITLE,
+  DECLINE_FAILED_TITLE,
+  DECLINE_SUCCESS_TITLE,
+  DELETE_FAILED_TITLE,
+  DELETE_SUCCESS_TITLE,
+  DUPLICATE_FAILED_TITLE,
+  DUPLICATE_SUCCESS_TITLE,
+  SNOOZE_FAILED_TITLE,
+  SNOOZE_SUCCESS_TITLE,
+  UNSNOOZE_FAILED_TITLE,
+  UNSNOOZE_SUCCESS_TITLE,
+  duplicateTargetSearchQueryOptions,
+  excludeCurrentTarget,
+  invalidateTriageCaches,
+  useDeleteIntakeRequest,
+  useDuplicateTargetSearch,
+  useTriageControls,
+  useTriageStatusMove,
+} from "./api/triage.js";
+export type {
+  DeleteIntakeRequestScope,
+  TriageActionName,
+  TriageControls,
+  TriageControlsScope,
+  TriageDialogName,
+  TriageMoveScope,
+  TriageStatusInput,
+} from "./api/triage.js";
+export {
   INTAKE_PAGE_SIZE,
   INTAKE_QUERY_POLICY,
   intakeListQueryOptions,
@@ -27,6 +56,14 @@ export {
   useIntakeList,
 } from "./api/queries.js";
 export type { IntakeListRead } from "./api/queries.js";
+export { DECLINE_DIALOG_TITLE, IntakeDeclineDialog } from "./components/IntakeDeclineDialog.js";
+export type { IntakeDeclineDialogProps } from "./components/IntakeDeclineDialog.js";
+export {
+  DELETE_ACCEPTED_DIALOG_TITLE,
+  DELETE_DIALOG_TITLE,
+  IntakeDeleteDialog,
+} from "./components/IntakeDeleteDialog.js";
+export type { IntakeDeleteDialogProps } from "./components/IntakeDeleteDialog.js";
 export { IntakeDetail } from "./components/IntakeDetail.js";
 export type { IntakeDetailProps } from "./components/IntakeDetail.js";
 export { IntakeDetailHeader } from "./components/IntakeDetailHeader.js";
@@ -46,10 +83,28 @@ export {
   IntakeCreateDialog,
 } from "./components/IntakeCreateDialog.js";
 export type { IntakeCreateDialogProps } from "./components/IntakeCreateDialog.js";
+export {
+  DUPLICATE_DIALOG_TITLE,
+  DUPLICATE_SEARCH_DEBOUNCE_MS,
+  DUPLICATE_SEARCH_LABEL,
+  IntakeDuplicateDialog,
+} from "./components/IntakeDuplicateDialog.js";
+export type { IntakeDuplicateDialogProps } from "./components/IntakeDuplicateDialog.js";
 export { IntakeEmptyState } from "./components/IntakeEmptyState.js";
 export type { IntakeEmptyStateProps } from "./components/IntakeEmptyState.js";
 export { IntakeProperties } from "./components/IntakeProperties.js";
 export type { IntakePropertiesProps } from "./components/IntakeProperties.js";
+export { SNOOZE_DIALOG_TITLE, IntakeSnoozeDialog } from "./components/IntakeSnoozeDialog.js";
+export type { IntakeSnoozeDialogProps } from "./components/IntakeSnoozeDialog.js";
+export { IntakeStatusChip } from "./components/IntakeStatusChip.js";
+export type { IntakeStatusChipProps } from "./components/IntakeStatusChip.js";
+export {
+  ACCEPT_SAVE_LABEL,
+  TRIAGE_ACCEPT_LABEL,
+  TRIAGE_DECLINE_LABEL,
+  IntakeTriageActions,
+} from "./components/IntakeTriageActions.js";
+export type { IntakeTriageActionsProps } from "./components/IntakeTriageActions.js";
 export { IntakeGate } from "./components/IntakeGate.js";
 export type { IntakeGateProps } from "./components/IntakeGate.js";
 export { IntakeScreen } from "./components/IntakeScreen.js";
@@ -72,10 +127,37 @@ export type { IntakeEmptyInput, IntakeEmptyState as IntakeEmptyKind } from "./li
 export { intakeFeatureSettingsHref, intakeHref, retiredInboxHref } from "./lib/paths.js";
 export { INTAKE_NAV_OVERLAY_SELECTOR, neighborIntakeId, suppressIntakeArrowKey } from "./lib/navigation.js";
 export type { IntakeStepDirection } from "./lib/navigation.js";
-export { isResolvedIntakeStatus, selectIntakeEditability } from "./lib/permissions.js";
-export type { IntakeEditability, IntakeStanding } from "./lib/permissions.js";
+export { isResolvedIntakeStatus, selectIntakeEditability, selectIntakeTriageVisibility } from "./lib/permissions.js";
+export type {
+  IntakeEditability,
+  IntakeStanding,
+  IntakeTriageStanding,
+  IntakeTriageVisibility,
+} from "./lib/permissions.js";
 export { parseIntakeSearch } from "./lib/search.js";
 export type { IntakeSearch, IntakeSearchWriteOptions } from "./lib/search.js";
+export {
+  TRIAGE_DELETE_LABEL,
+  TRIAGE_DUPLICATE_LABEL,
+  TRIAGE_REFUSED_TITLE,
+  TRIAGE_SNOOZE_LABEL,
+  TRIAGE_UNSNOOZE_LABEL,
+  buildTriageMenuEntries,
+  focusTriageLanding,
+  scheduleTriageFocus,
+  selectIntakeStatusChip,
+  snoozeDayFromTimestamp,
+  snoozeDaysLeft,
+  snoozeTimestampForDay,
+  triageRefusedMessage,
+} from "./lib/triage.js";
+export type {
+  IntakeStatusChipModel,
+  IntakeStatusTone,
+  TriageMenuEntries,
+  TriageMenuHandlers,
+  TriageRefusedAction,
+} from "./lib/triage.js";
 export {
   DEFAULT_INTAKE_SEARCH,
   intakeSearchAfterRemove,
