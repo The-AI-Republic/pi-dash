@@ -17,7 +17,7 @@ export const MISSING_VIEW_TITLE = "View does not exist";
 export const MISSING_VIEW_DESCRIPTION = "This view does not exist, or you do not have permission to open it.";
 
 /** The way back to the project's views list (VIEW-022). */
-export const MISSING_VIEW_BACK_LABEL = "View other views";
+export const MISSING_VIEW_BACK_LABEL = "Back to views";
 
 /**
  * Browser tab title: the project name, a separator, then the view name
