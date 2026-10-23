@@ -117,6 +117,17 @@ describe("Dialog", () => {
     expect(body.parentElement).not.toHaveClass("mt-(--space-8)");
   });
 
+  it("keeps tall bodies reachable inside the viewport (NEWFRONT-557)", () => {
+    render(
+      <Dialog title="Confirm" open onOpenChange={() => undefined}>
+        <p>Body copy</p>
+      </Dialog>
+    );
+    const dialog = screen.getByRole("dialog", { name: "Confirm" });
+    expect(dialog).toHaveClass("max-h-[calc(100dvh-3rem)]");
+    expect(dialog).toHaveClass("overflow-y-auto");
+  });
+
   it("ignores Escape but still closes from the close button when controlled", async () => {
     const user = userEvent.setup();
     const onOpenChange = vi.fn();

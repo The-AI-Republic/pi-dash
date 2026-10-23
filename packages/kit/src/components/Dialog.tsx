@@ -73,7 +73,10 @@ export function Dialog({
         <BaseDialog.Popup
           {...pickDefined({ initialFocus })}
           className={cn(
-            "shadow-dialog fixed top-1/2 left-1/2 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
+            // Tall bodies scroll inside the viewport instead of pushing
+            // their actions below the fold (NEWFRONT-557); kit overlays
+            // portal out, so nothing clips.
+            "shadow-dialog fixed top-1/2 left-1/2 max-h-[calc(100dvh-3rem)] w-full max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-(--radius-dialog) border border-(--border) bg-(--bg) p-(--space-12)",
             className
           )}
         >
