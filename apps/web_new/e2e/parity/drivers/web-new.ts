@@ -16803,7 +16803,12 @@ export class WebNewDriver implements ParityDriver {
     );
   }
   async cyclesOpenAnalytics(): Promise<void> {
-    await this.page.getByTestId("cycle-analytics-entry").click({ timeout: WebNewDriver.WAIT_MS });
+    // Scoped to the desktop header: the entry also mounts in the narrow
+    // header, so the bare testid matches twice (NEWFRONT-712 review D1).
+    await this.page
+      .getByTestId("issues-header")
+      .getByTestId("cycle-analytics-entry")
+      .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByTestId("issues-analytics-body").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesAnalyticsDialogVisible(): Promise<boolean> {
@@ -16902,7 +16907,13 @@ export class WebNewDriver implements ParityDriver {
     return todo("cyclesProgressEntryClick");
   }
   async cyclesMobileOpenAnalytics(): Promise<void> {
-    await this.page.getByTestId("cycle-analytics-entry-narrow").click({ timeout: WebNewDriver.WAIT_MS });
+    // Scoped to the narrow header: the trigger also mounts (hidden) in
+    // the desktop header, so the bare testid matches twice with the
+    // first match unactionable (NEWFRONT-712 review D1).
+    await this.page
+      .getByTestId("issues-mobile-header")
+      .getByTestId("cycle-analytics-entry-narrow")
+      .click({ timeout: WebNewDriver.WAIT_MS });
     await this.page.getByTestId("issues-analytics-body").waitFor({ state: "visible", timeout: WebNewDriver.WAIT_MS });
   }
   async cyclesSwitchLayout(layout: LayoutsLayoutKey): Promise<void> {
