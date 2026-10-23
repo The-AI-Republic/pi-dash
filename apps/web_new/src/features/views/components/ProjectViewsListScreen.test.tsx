@@ -344,7 +344,7 @@ describe("ProjectViewsListScreen", () => {
     await waitFor(() => expect(screen.getByTestId("project-views-zero")).toBeInTheDocument());
     await user.click(screen.getByRole("button", { name: "Create view" }));
     expect(await screen.findByRole("heading", { name: "Create View" })).toBeInTheDocument();
-    await user.click(screen.getByTestId("rich-filter-add"));
+    await user.click(await screen.findByTestId("rich-filter-add"));
     expect(await screen.findByRole("option", { name: "Target date" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Cycle" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Module" })).not.toBeInTheDocument();
