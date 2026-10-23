@@ -53,8 +53,9 @@ use sqlx::{Postgres, Row};
 
 use crate::app_cycles::gates;
 use crate::app_issues::{
-    complex_filter, fetch_count, fetch_json_rows, group_values, legacy_sql, multi_map, order_key,
-    page_denial, query_last, render_condition, shape_row, Binder, Denial, FilteredSet, QueryMap,
+    complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
+    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
+    FilteredSet, QueryMap,
 };
 use crate::state::AppState;
 use crate::v1_cycles_modules::body as shared_body;
@@ -602,6 +603,12 @@ fn bind_values<'a>(
             SeaValue::Char(value) => query.bind(value.map(|char| char.to_string())),
             SeaValue::Bytes(value) => query.bind(value.clone().map(|bytes| (*bytes).clone())),
             SeaValue::Uuid(value) => query.bind(value.clone().map(|id| *id)),
+            SeaValue::ChronoDate(value) => query.bind(value.clone().map(|date| *date)),
+            SeaValue::ChronoDateTimeUtc(value) => query.bind(value.clone().map(|moment| *moment)),
+            SeaValue::ChronoTime(_)
+            | SeaValue::ChronoDateTime(_)
+            | SeaValue::ChronoDateTimeLocal(_)
+            | SeaValue::ChronoDateTimeWithTimeZone(_) => return Err(Denial::ServerError),
         };
     }
     Ok(query)
@@ -614,6 +621,7 @@ fn bind_values<'a>(
 /// project, active membership — the `get_queryset` `:61-68` filters, kept
 /// although the gate already enforces them) + the `ComplexFilterBackend`
 /// tree + the legacy `issue_filters(params, 'GET')` predicates.
+#[allow(clippy::too_many_arguments)]
 fn cycle_filtered_set(
     slug: &str,
     project_id: &uuid::Uuid,
@@ -622,6 +630,7 @@ fn cycle_filtered_set(
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
+    tz: &chrono_tz::Tz,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
     let slug_holder = binder.bind_string(slug.to_owned());
@@ -639,7 +648,7 @@ fn cycle_filtered_set(
                      WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
                        AND pm.is_active AND pm.deleted_at IS NULL)"#
     )];
-    if let Some(cond) = complex_filter(query)? {
+    if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
     }
@@ -751,6 +760,7 @@ async fn cycle_issue_list(
     }
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
+    let timezone = filters_timezone(&pool, &user_id, &query).await?;
     let filtered = cycle_filtered_set(
         &slug,
         &project_id,
@@ -759,6 +769,7 @@ async fn cycle_issue_list(
         &query,
         group_by,
         sub_group_by,
+        &timezone,
     )?;
     // Total count over the pre-annotation set (the `deepcopy` at `:125`).
     let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
@@ -1771,9 +1782,17 @@ mod tests {
         let project = uuid::Uuid::new_v4();
         let user = uuid::Uuid::new_v4();
         let cycle = uuid::Uuid::new_v4();
-        let filtered =
-            cycle_filtered_set("acme", &project, &user, &cycle, &empty_query(), None, None)
-                .expect("scope");
+        let filtered = cycle_filtered_set(
+            "acme",
+            &project,
+            &user,
+            &cycle,
+            &empty_query(),
+            None,
+            None,
+            &chrono_tz::UTC,
+        )
+        .expect("scope");
         for needle in [
             "JOIN cycle_issues AS bridge ON bridge.issue_id = issue.id",
             "bridge.cycle_id = ",

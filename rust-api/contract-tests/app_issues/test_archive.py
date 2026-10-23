@@ -5,6 +5,8 @@ archives I3 and unarchives it again; bulk tests use API-created
 throwaways so the seed is untouched.
 """
 
+import json
+
 ARCHIVE_DETAIL_KEYS = {
     "id", "name", "state_id", "sort_order", "completed_at",
     "estimate_point", "priority", "complexity_score", "start_date",
@@ -178,3 +180,24 @@ def test_bulk_delete_member_denied(clients, seed):
     )
     assert resp.status_code == 403
     assert resp.json() == FORBIDDEN
+
+
+def test_archived_list_state_id_in_filter(clients, seed):
+    # PIDASHCONV-1317: the archived list runs the same rich-filter
+    # compiler; UUID lists must bind typed (pre-fix Rust 500d).
+    admin = clients["admin"]
+    ws, pid, i5 = seed["ws_slug"], seed["project"], seed["issue5"]
+    resp = admin.get(
+        f"{_base(ws, pid)}/archived-issues/",
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": seed["state_done"]}]})},
+    )
+    assert resp.status_code == 200, resp.text
+    assert {row["id"] for row in resp.json()["results"]} == {i5}
+    resp = admin.get(
+        f"{_base(ws, pid)}/archived-issues/",
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": seed["state_backlog"]}]})},
+    )
+    assert resp.status_code == 200, resp.text
+    assert i5 not in {row["id"] for row in resp.json()["results"]}

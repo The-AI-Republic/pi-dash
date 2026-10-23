@@ -17,7 +17,6 @@ Run with the Django worker (and beat) STOPPED and the Rust worker
 running against the same DATABASE_URL::
 
     export DATABASE_URL=postgresql://...  # your own scratch database
-    export CELERY_BROKER_URL=amqp://...   # same broker the Rust worker uses
     pidash-api worker &  # Rust worker; Django worker stopped
     pytest -p no:django tasks_webhooks/test_rust_replay.py -v
 
@@ -128,7 +127,7 @@ PROCESS_LOGS = f"{M}.logger_task.process_logs"
 TRACK_EVENT = f"{M}.event_tracking_task.track_event"
 
 
-def test_rust_worker_liveness(db_conn, broker_url, webhook_sink):
+def test_rust_worker_liveness(db_conn, webhook_sink):
     """Rust inspect-equivalent: an owned send job settles and POSTs.
 
     Replaces ``test_worker_registration`` (Celery broadcast inspect,
@@ -181,7 +180,7 @@ def _send_kwargs(hook, probe_id):
     }
 
 
-def test_rust_webhook_send_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_executes_locally(db_conn, webhook_sink):
     """Send path, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_success`` (same payload incl. the
@@ -219,7 +218,7 @@ def test_rust_webhook_send_executes_locally(db_conn, broker_url, webhook_sink):
 
 
 def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
-    db_conn, broker_url, chunked_keepalive_sink
+    db_conn, chunked_keepalive_sink
 ):
     """Rust side: chunked + keep-alive must not time out, log 500, or retry."""
     hook = _seed_hook_at(db_conn, chunked_keepalive_sink.url)
@@ -246,7 +245,7 @@ def test_rust_webhook_send_chunked_keepalive_returns_at_terminal_chunk(
     assert len(_log_diff_rows(db_conn, before)) == 1
 
 
-def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_failure_executes_locally(db_conn, webhook_sink):
     """First-attempt failure, Rust side: same 500 row, no retry (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_failure_logs_retry_count``: a 500
@@ -273,7 +272,7 @@ def test_rust_webhook_failure_executes_locally(db_conn, broker_url, webhook_sink
 
 
 def test_rust_webhook_send_hostile_content_length_retries_locally(
-    db_conn, broker_url, webhook_sink
+    db_conn, webhook_sink
 ):
     """Hostile Content-Length, Rust side: failure row + requeue, worker alive (PIDASHCONV-1273).
 
@@ -363,7 +362,46 @@ def test_rust_webhook_send_hostile_content_length_retries_locally(
     assert str(alive[0]["response_status"]) == "200"
 
 
-def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_query_on_bare_host_posts_to_root(
+    db_conn, webhook_sink
+):
+    """Query-string URL with no path, Rust side: POST /?token=... (PIDASHCONV-1275).
+
+    Mirrors ``test_webhook_send_query_on_bare_host_posts_to_root_with_query``:
+    the Rust worker must end the URL authority at the first of '/',
+    '?' or '#' (urllib3 ``parse_url`` parity) so the delivery goes
+    to the bare host with '/?token=abc' as the request target and
+    the log row carries the sink's status. Pre-fix the query folded
+    into the host and every delivery failed with a transport error.
+    """
+    owner = seed_helpers.user(db_conn, "rust-replay-query-host-owner")
+    workspace = seed_helpers.workspace(db_conn, "rustreplayqueryhost", owner["id"])
+    token = uuid.uuid4().hex
+    hook = seed_helpers.webhook(
+        db_conn,
+        workspace["id"],
+        f"{config.WEBHOOK_SINK_BASE}?token={token}",
+        issue=True,
+    )
+    hook = dict(hook)
+    hook["workspace_slug"] = workspace["slug"]
+    webhook_sink.clear()
+    before = snapshot(db_conn, ["webhook_logs"])
+    celery_id = rust_queue.publish(
+        WEBHOOK_SEND, kwargs=_send_kwargs(hook, "rust-replay-query-host")
+    )
+    rust_queue.wait_for_settled(celery_id, what=f"{WEBHOOK_SEND} executed")
+    (delivery,) = webhook_sink.wait_for_count(1, what="query-host webhook POST")
+    assert delivery["path"] == f"/?token={token}"
+    (row,) = wait_for(
+        lambda: _log_diff_rows(db_conn, before) or None,
+        what="query-host webhook_logs row",
+    )
+    assert str(row["response_status"]) == "200"
+    assert row["retry_count"] == 0
+
+
+def test_rust_webhook_redelivery_executes_locally(db_conn, webhook_sink):
     """Redelivery: two publishes → two POSTs, two rows (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_redelivery_posts_twice_with_identical_bodies``:
@@ -391,7 +429,7 @@ def test_rust_webhook_redelivery_executes_locally(db_conn, broker_url, webhook_s
     assert all(str(r["response_status"]) == "200" for r in logged)
 
 
-def test_rust_activity_chain_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_activity_chain_executes_locally(db_conn, webhook_sink):
     """Chain entry, Rust side: the whole fan-out runs locally (PIDASHCONV-1105).
 
     Mirrors ``test_activity_chain_fans_out_to_sink`` (same seed, same
@@ -431,7 +469,7 @@ def test_rust_activity_chain_executes_locally(db_conn, broker_url, webhook_sink)
     assert row["event_type"] == "issue"
 
 
-def test_rust_webhook_activity_executes_locally(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_activity_executes_locally(db_conn, webhook_sink):
     """Fan-out midpoint, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Publishes ``webhook_activity`` directly in the oracle arg shape (the
@@ -481,7 +519,7 @@ def _soft_delete(conn, table, row_id):
 
 
 def test_rust_webhook_send_skips_soft_deleted_webhook(
-    db_conn, broker_url, webhook_sink
+    db_conn, webhook_sink
 ):
     """Send task, Rust side: a soft-deleted webhook is swallowed.
 
@@ -509,7 +547,7 @@ def test_rust_webhook_send_skips_soft_deleted_webhook(
     assert _log_diff_rows(db_conn, before) == [], "send logged a soft-deleted webhook"
 
 
-def test_rust_fanout_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sink):
+def test_rust_fanout_skips_soft_deleted_webhook(db_conn, webhook_sink):
     """Fan-out, Rust side: soft-deleted webhooks get no send job.
 
     ``webhook_activity`` selects
@@ -555,7 +593,7 @@ def test_rust_fanout_skips_soft_deleted_webhook(db_conn, broker_url, webhook_sin
     assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted hook"
 
 
-def test_rust_fanout_swallows_soft_deleted_issue(db_conn, broker_url, webhook_sink):
+def test_rust_fanout_swallows_soft_deleted_issue(db_conn, webhook_sink):
     """Fan-out, Rust side: a soft-deleted event model is swallowed.
 
     ``get_model_data`` reads via ``Model.objects.get(pk=...)``, so a
@@ -598,7 +636,7 @@ def test_rust_fanout_swallows_soft_deleted_issue(db_conn, broker_url, webhook_si
     assert _log_diff_rows(db_conn, before) == [], "fan-out logged a deleted issue"
 
 
-def test_rust_deactivation_email_executes_locally(db_conn, broker_url, smtp_sink):
+def test_rust_deactivation_email_executes_locally(db_conn, smtp_sink):
     """Deactivation mail, Rust side: EXECUTE locally (PIDASHCONV-1105).
 
     Mirrors ``test_deactivation_email_delivers`` (same positional
@@ -643,7 +681,7 @@ def _expected_signature(secret, payload):
     ).hexdigest()
 
 
-def test_rust_webhook_send_signature_logged(db_conn, broker_url, webhook_sink):
+def test_rust_webhook_send_signature_logged(db_conn, webhook_sink):
     """Fixed secret, Rust side: identical HMAC over the envelope (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_signature_logged``: the logged
@@ -689,7 +727,7 @@ def test_rust_webhook_send_signature_logged(db_conn, broker_url, webhook_sink):
     assert logged_body == payload
 
 
-def test_rust_webhook_send_exhaustion_deactivates(db_conn, broker_url, smtp_sink):
+def test_rust_webhook_send_exhaustion_deactivates(db_conn, smtp_sink):
     """Retries exhausted, Rust side: same row, disable, mail (PIDASHCONV-1105).
 
     Mirrors ``test_webhook_send_exhaustion_deactivates``: the row lands
@@ -762,7 +800,7 @@ def _added_rows(conn, table, before):
     return [after[k] for k in new_keys]
 
 
-def test_rust_process_logs_executes_locally(db_conn, broker_url):
+def test_rust_process_logs_executes_locally(db_conn):
     """process_logs, Rust side: EXECUTE locally (PIDASHCONV-260, FX-LOG-01).
 
     Revisits ``test_rust_process_logs_forwards_to_python``: EXECUTE
@@ -864,7 +902,7 @@ def _issue_snapshot_row(conn, issue_id):
     return snapshot(conn, ["issues"])["issues"].get(str(issue_id))
 
 
-def test_rust_archive_and_close_executes_locally(db_conn, broker_url):
+def test_rust_archive_and_close_executes_locally(db_conn):
     """archive_and_close, Rust side: EXECUTE locally (PIDASHCONV-837).
 
     Revisits the ``ARCHIVE_AND_CLOSE`` forward case: 837 wired
@@ -905,7 +943,7 @@ def test_rust_archive_and_close_executes_locally(db_conn, broker_url):
     assert moved["state_id"] == str(seeded["close_target"]["id"])
 
 
-def test_rust_track_event_executes_locally(db_conn, broker_url, posthog_sink):
+def test_rust_track_event_executes_locally(db_conn, posthog_sink):
     """track_event, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_track_event_posts_capture_to_posthog`` (same probe
@@ -950,7 +988,7 @@ def test_rust_track_event_executes_locally(db_conn, broker_url, posthog_sink):
     assert msg["properties"]["$geoip_disable"] is True
 
 
-def test_rust_track_event_assigns_workspace_role(db_conn, broker_url, posthog_sink):
+def test_rust_track_event_assigns_workspace_role(db_conn, posthog_sink):
     """Role events, Rust side: same owner/admin/unknown stamp as Django."""
     owner = seed_helpers.user(db_conn, "rust-replay-role-owner")
     member = seed_helpers.user(db_conn, "rust-replay-role-member")
@@ -978,7 +1016,7 @@ def test_rust_track_event_assigns_workspace_role(db_conn, broker_url, posthog_si
     assert roles == {"owner": "owner", "admin": "admin", "unknown": "unknown"}
 
 
-def test_rust_recent_visited_executes_locally(db_conn, broker_url):
+def test_rust_recent_visited_executes_locally(db_conn):
     """recent_visited_task, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_recent_visited_writes_row`` (same payload): create
@@ -1063,7 +1101,7 @@ def _live_page_logs(db_conn, page_id):
     ]
 
 
-def test_rust_page_transaction_executes_locally(db_conn, broker_url):
+def test_rust_page_transaction_executes_locally(db_conn):
     """page_transaction, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_page_transaction_writes_page_logs`` (same payload):
@@ -1120,7 +1158,7 @@ def test_rust_page_transaction_executes_locally(db_conn, broker_url):
     assert all(row["deleted_at"] is not None for row in deleted)
 
 
-def test_rust_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
+def test_rust_page_transaction_url_src_inserts_nothing(db_conn):
     """URL image src, Rust side: same poisoned batch, no rows (PIDASHCONV-1107).
 
     Mirrors ``test_page_transaction_url_src_inserts_nothing``: the UUID
@@ -1147,7 +1185,7 @@ def test_rust_page_transaction_url_src_inserts_nothing(db_conn, broker_url):
     assert _added_rows(db_conn, "page_logs", before) == []
 
 
-def test_rust_page_transaction_second_chunk_poison_inserts_nothing(db_conn, broker_url):
+def test_rust_page_transaction_second_chunk_poison_inserts_nothing(db_conn):
     """Poison id past the first 50, Rust side: no rows (PIDASHCONV-1282).
 
     Mirrors ``test_page_transaction_second_chunk_poison_inserts_nothing``:
@@ -1178,7 +1216,7 @@ def test_rust_page_transaction_second_chunk_poison_inserts_nothing(db_conn, brok
     assert _added_rows(db_conn, "page_logs", before) == []
 
 
-def test_rust_issue_activity_executes_locally(db_conn, broker_url):
+def test_rust_issue_activity_executes_locally(db_conn):
     """issue_activity, Rust side: EXECUTE locally (PIDASHCONV-836).
 
     Revisits ``test_rust_issue_activity_forwards_to_python``: this issue
@@ -1320,7 +1358,7 @@ def _r1277_comment(db_conn, chain, issue, comment_id):
     )
 
 
-def test_rust_issue_activity_comment_reaction_picks_newest(db_conn, broker_url):
+def test_rust_issue_activity_comment_reaction_picks_newest(db_conn):
     """comment_reaction created, Rust side: the NEWEST match (PIDASHCONV-1277).
 
     Mirrors ``test_issue_activity_comment_reaction_picks_newest`` (same
@@ -1375,7 +1413,7 @@ def test_rust_issue_activity_comment_reaction_picks_newest(db_conn, broker_url):
     assert row["comment"] == "added the reaction"
 
 
-def test_rust_issue_activity_issue_reaction_picks_newest(db_conn, broker_url):
+def test_rust_issue_activity_issue_reaction_picks_newest(db_conn):
     """issue_reaction created, Rust side: new_identifier is NEWEST (PIDASHCONV-1277).
 
     Mirrors ``test_issue_activity_issue_reaction_picks_newest`` (same
@@ -1438,7 +1476,7 @@ DEFAULT_FAVICON_DATA_URI = (
 )
 
 
-def test_rust_crawl_link_executes_locally(db_conn, broker_url):
+def test_rust_crawl_link_executes_locally(db_conn):
     """crawl_work_item_link_title, Rust side: EXECUTE locally (PIDASHCONV-1107).
 
     Mirrors ``test_crawl_link_updates_metadata`` (same payload): the
@@ -1517,7 +1555,7 @@ def _seed_closed_to_world(db_conn, slug):
     }
 
 
-def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn, broker_url):
+def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn):
     """closed_to, Rust side: EXECUTE locally (PIDASHCONV-1276).
 
     Mirrors ``test_issue_activity_closed_to_writes_state_row_and_notifies``
@@ -1583,7 +1621,7 @@ def test_rust_issue_activity_closed_to_writes_state_row_and_notifies(db_conn, br
     [socket.AF_INET, socket.AF_INET6],
     ids=["wildcard-ipv4", "wildcard-ipv6"],
 )
-def test_rust_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
+def test_rust_crawl_link_denies_wildcard_hosts(db_conn, family):
     """Rust-side guard refusal for 0.0.0.0 and :: (Django parity).
 
     The listener is bound to the wildcard address and serves a distinctive
@@ -1630,7 +1668,7 @@ def test_rust_crawl_link_denies_wildcard_hosts(db_conn, broker_url, family):
         }
 
 
-def test_rust_crawl_link_nulls_audit_columns(db_conn, broker_url):
+def test_rust_crawl_link_nulls_audit_columns(db_conn):
     """Crawl, Rust side: the save NULLs both audit columns (PIDASHCONV-1281).
 
     Mirrors ``test_crawl_link_nulls_audit_columns``: Django's
@@ -1677,7 +1715,7 @@ def test_rust_crawl_link_nulls_audit_columns(db_conn, broker_url):
     assert crawled["updated_by_id"] is None
 
 
-def test_rust_crawl_link_skips_soft_deleted_link(db_conn, broker_url):
+def test_rust_crawl_link_skips_soft_deleted_link(db_conn):
     """Crawl, Rust side: a soft-deleted link is not touched (PIDASHCONV-1281).
 
     Mirrors ``test_crawl_link_skips_soft_deleted_link``: the Rust lookup

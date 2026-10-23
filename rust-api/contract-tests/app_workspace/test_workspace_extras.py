@@ -16,9 +16,13 @@ user-profile for a non-member is 404; quick-link retrieve 404s with {"error"}
 while partial_update 404s with {"detail"}.
 """
 
+import json
 import uuid
 
 import pytest
+
+from _harness import env
+from _harness.seed import Seed
 
 THEME_KEYS = {
     "actor",
@@ -419,6 +423,44 @@ def test_user_issues_shape(user_api, space, world):
     body = res.json()
     assert set(body.keys()) == PAGINATED_KEYS
     assert body["results"] == []
+
+
+def test_user_issues_state_id_in_filter(user_api, space, world):
+    # PIDASHCONV-1317: the profile-issues list runs the same rich-filter
+    # compiler; UUID lists must bind typed (pre-fix Rust 500d). Issues
+    # land in scope via created_by; the suite wipes them before each test.
+    conn = env.connect()
+    try:
+        seed = Seed(conn)
+        uid, ws_id = world["user"]["id"], space["id"]
+        project_id = seed.project(ws_id)
+        seed.project_member(project_id, ws_id, uid, role=20)
+        state_a = seed.state(project_id, ws_id, name="Profile A",
+                             group="unstarted")
+        state_b = seed.state(project_id, ws_id, name="Profile B",
+                             group="started")
+        issue_a = seed.issue(ws_id, project_id, name="Profile filter A",
+                             state_id=state_a)
+        issue_b = seed.issue(ws_id, project_id, name="Profile filter B",
+                             state_id=state_b)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE issues SET created_by_id = %s WHERE id IN (%s, %s)",
+                (uid, issue_a, issue_b),
+            )
+    finally:
+        conn.close()
+    url = f"/api/workspaces/{space['slug']}/user-issues/{world['user']['id']}/"
+    res = user_api.get(
+        url, params={"filters": json.dumps({"and": [{"state_id__in": state_a}]})})
+    assert res.status_code == 200, res.text
+    assert {row["id"] for row in res.json()["results"]} == {issue_a}
+    res = user_api.get(
+        url,
+        params={"filters": json.dumps(
+            {"and": [{"state_id__in": f"{state_a},{state_b}"}]})})
+    assert res.status_code == 200, res.text
+    assert {row["id"] for row in res.json()["results"]} == {issue_a, issue_b}
 
 
 def test_user_issues_non_member_denied(other_api, space, world):

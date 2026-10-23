@@ -90,8 +90,9 @@ use pidash_services::app_modules::tasks;
 
 use super::gates;
 use crate::app_issues::{
-    complex_filter, fetch_count, fetch_json_rows, group_values, legacy_sql, multi_map, order_key,
-    page_denial, query_last, render_condition, shape_row, Binder, Denial, FilteredSet, QueryMap,
+    complex_filter, fetch_count, fetch_json_rows, filters_timezone, group_values, legacy_sql,
+    multi_map, order_key, page_denial, query_last, render_condition, shape_row, Binder, Denial,
+    FilteredSet, QueryMap,
 };
 use crate::state::AppState;
 use pidash_auth::permissions::allow::AllowFacts;
@@ -630,6 +631,12 @@ fn bind_values<'a>(
             SeaValue::Char(value) => query.bind(value.map(|char| char.to_string())),
             SeaValue::Bytes(value) => query.bind(value.clone().map(|bytes| (*bytes).clone())),
             SeaValue::Uuid(value) => query.bind(value.clone().map(|id| *id)),
+            SeaValue::ChronoDate(value) => query.bind(value.clone().map(|date| *date)),
+            SeaValue::ChronoDateTimeUtc(value) => query.bind(value.clone().map(|moment| *moment)),
+            SeaValue::ChronoTime(_)
+            | SeaValue::ChronoDateTime(_)
+            | SeaValue::ChronoDateTimeLocal(_)
+            | SeaValue::ChronoDateTimeWithTimeZone(_) => return Err(Denial::ServerError),
         };
     }
     Ok(query)
@@ -642,6 +649,7 @@ fn bind_values<'a>(
 /// tenant (workspace slug, project, active membership) + the
 /// `ComplexFilterBackend` tree + the legacy `issue_filters(params, 'GET')`
 /// predicates.
+#[allow(clippy::too_many_arguments)]
 fn module_filtered_set(
     slug: &str,
     project_id: &uuid::Uuid,
@@ -650,6 +658,7 @@ fn module_filtered_set(
     query: &QueryMap,
     group_by: Option<&str>,
     sub_group_by: Option<&str>,
+    tz: &chrono_tz::Tz,
 ) -> Result<FilteredSet, Denial> {
     let mut binder = Binder::new();
     let slug_holder = binder.bind_string(slug.to_owned());
@@ -667,7 +676,7 @@ fn module_filtered_set(
                      WHERE pm.member_id = {user_holder} AND pm.project_id = {project_holder}
                        AND pm.is_active AND pm.deleted_at IS NULL)"#
     )];
-    if let Some(cond) = complex_filter(query)? {
+    if let Some(cond) = complex_filter(query, tz)? {
         let (fragment, values) = render_condition(&cond);
         fragments.push(binder.splice(&fragment, values));
     }
@@ -801,6 +810,7 @@ async fn module_issue_list(
     }
     let group_by = params.group_by.as_deref();
     let sub_group_by = params.sub_group_by.as_deref();
+    let timezone = filters_timezone(&pool, &user_id, &query).await?;
     let filtered = module_filtered_set(
         &slug,
         &project_id,
@@ -809,6 +819,7 @@ async fn module_issue_list(
         &query,
         group_by,
         sub_group_by,
+        &timezone,
     )?;
     // Total count over the pre-annotation set (the `deepcopy` at `:107`).
     let total_sql = format!("SELECT COUNT(DISTINCT issue.id) {}", filtered.from_where);
