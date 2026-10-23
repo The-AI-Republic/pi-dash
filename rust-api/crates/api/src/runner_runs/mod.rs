@@ -1463,11 +1463,15 @@ impl RunnerPorts for LivePorts {
             // `_fire_pending_entry` queues `fire_tick.delay` with
             // `transaction.on_commit`, so a rolled-back hooks transaction
             // must not publish a tick for it.
+            let pool = self.pool.clone();
             tx.on_commit(move || {
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        emit_celery(FIRE_TICK_TASK, vec![Value::String(ticker_id.to_string())])
-                            .await
+                    if let Err(error) = emit_celery(
+                        &pool,
+                        FIRE_TICK_TASK,
+                        vec![Value::String(ticker_id.to_string())],
+                    )
+                    .await
                     {
                         tracing::error!(
                             ?error,
