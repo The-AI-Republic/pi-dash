@@ -1030,6 +1030,22 @@ describe("WebNewDriver general tab emblem", () => {
 });
 
 describe("WebNewDriver general tab danger confirmations", () => {
+  it("opens the archive dialog from the danger zone after navigating there", async () => {
+    const archiveButton = new GeneralFakeLocator();
+    const zone = new GeneralFakeLocator({}, { role: () => archiveButton });
+    const nameField = new GeneralFakeLocator();
+    const dialog = new GeneralFakeLocator();
+    const stub = generalSettingsPageDouble({
+      locator: (selector) =>
+        selector === '[data-testid="general-danger-zone"]' ? zone : selector === "#name" ? nameField : generalAbsent(),
+      role: (role) => (role === "dialog" ? dialog : generalAbsent()),
+    });
+    await new WebNewDriver(stub.page).settingsGeneralOpenArchive("acme", "p1");
+    expect(stub.pageObject.goto).toHaveBeenCalledWith("/acme/settings/projects/p1");
+    expect(archiveButton.click).toHaveBeenCalledTimes(1);
+    expect(dialog.waitFor).toHaveBeenCalledWith({ state: "visible", timeout: 30_000 });
+  });
+
   it("opens the delete dialog from the danger zone", async () => {
     const deleteButton = new GeneralFakeLocator();
     const zone = new GeneralFakeLocator({}, { role: () => deleteButton });
@@ -1330,8 +1346,9 @@ describe("WebNewDriver states tab rows", () => {
     await expect(new WebNewDriver(hidden.page).settingsStatesGripVisible("Solo")).resolves.toBe(false);
   });
 
-  it("drags the grip onto the target edge", async () => {
+  it("drags the grip onto the target edge with a stepped gesture", async () => {
     const grip = new GeneralFakeLocator();
+    grip.boundingBox.mockResolvedValue({ x: 10, y: 100, width: 20, height: 20 });
     const row = new GeneralFakeLocator(
       {},
       { testId: (testId) => (testId === "state-row-grip" ? grip : generalAbsent()) }
@@ -1347,9 +1364,24 @@ describe("WebNewDriver states tab rows", () => {
     });
     const driver = new WebNewDriver(stub.page);
     await driver.settingsStatesDragAbove("one", "two");
-    expect(grip.dragTo).toHaveBeenCalledWith(target, { targetPosition: { x: 50, y: 6 } });
+    const mouse = stub.pageObject.mouse;
+    expect(mouse.move).toHaveBeenCalledWith(20, 110);
+    expect(mouse.down).toHaveBeenCalledTimes(1);
+    expect(mouse.move).toHaveBeenCalledWith(35, 58, { steps: 6 });
+    expect(mouse.move).toHaveBeenCalledWith(50, 6, { steps: 6 });
+    expect(mouse.up).toHaveBeenCalledTimes(1);
     await driver.settingsStatesDragBelow("one", "two");
-    expect(grip.dragTo).toHaveBeenCalledWith(target, { targetPosition: { x: 50, y: 34 } });
+    expect(mouse.move).toHaveBeenCalledWith(50, 34, { steps: 6 });
+  });
+
+  it("refuses a drag with no geometry instead of gesturing blindly", async () => {
+    const row = new GeneralFakeLocator(
+      {},
+      { testId: (testId) => (testId === "state-row-grip" ? new GeneralFakeLocator() : generalAbsent()) }
+    );
+    const stub = generalSettingsPageDouble({ locator: () => row });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.settingsStatesDragAbove("one", "two")).rejects.toThrow("has no geometry");
   });
 
   it("marks the default and reads the marker", async () => {
@@ -1923,6 +1955,19 @@ describe("WebNewDriver lifecycle restriction and leave", () => {
     const bareDriver = new WebNewDriver(bare.page);
     await expect(bareDriver.isProjectRestrictionVisible()).resolves.toBe(false);
     await expect(bareDriver.restrictionJoinLabel()).resolves.toBeNull();
+  });
+
+  it("reads the issues-board access gate when the settings restriction is absent", async () => {
+    const gateJoin = new GeneralFakeLocator({ text: "Join project" });
+    const gate = new GeneralFakeLocator({}, { role: (role) => (role === "button" ? gateJoin : generalAbsent()) });
+    const stub = generalSettingsPageDouble({
+      locator: (selector) => (selector.startsWith("section[aria-label=") ? gate : generalAbsent()),
+    });
+    const driver = new WebNewDriver(stub.page);
+    await expect(driver.isProjectRestrictionVisible()).resolves.toBe(true);
+    await expect(driver.restrictionJoinLabel()).resolves.toBe("Join project");
+    await driver.clickRestrictionJoin();
+    expect(gateJoin.click).toHaveBeenCalledTimes(1);
   });
 
   it("holds the leave write while submitting", async () => {

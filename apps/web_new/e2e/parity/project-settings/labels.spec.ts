@@ -300,20 +300,29 @@ test(
         await expect
           .poll(async () => (await driver.settingsLabelsNames()).filter((n) => n.startsWith(tag)), { timeout: 20_000 })
           .toEqual([drifter, anchor, other, lone]);
-        const order = (await serverLabels(seed.workspaceSlug, projectId, session))
-          .filter((l) => l.name.startsWith(tag))
-          .sort((a, b) => a.sortOrder - b.sortOrder)
-          .map((l) => l.name);
-        expect(order[0]).toBe(drifter);
+        // The row paints optimistically, so the server read polls: the save
+        // lands a beat after the UI settles (NEWFRONT-606).
+        await expect
+          .poll(
+            async () =>
+              (await serverLabels(seed.workspaceSlug, projectId, session))
+                .filter((l) => l.name.startsWith(tag))
+                .sort((a, b) => a.sortOrder - b.sortOrder)
+                .map((l) => l.name)[0],
+            { timeout: 20_000 }
+          )
+          .toBe(drifter);
       });
 
       await test.step("nesting shows the highlight ring and persists the parent", async () => {
         const feedback = await driver.settingsLabelsDragFeedback(drifter, anchor, "nest");
         expect(feedback).toBe("ring");
         await expect.poll(() => driver.settingsLabelsChildrenOf(anchor), { timeout: 20_000 }).toEqual([drifter]);
-        expect((await serverLabelOrNull(seed.workspaceSlug, projectId, drifterRow.id, session))?.parent).toBe(
-          anchorRow.id
-        );
+        await expect
+          .poll(async () => (await serverLabelOrNull(seed.workspaceSlug, projectId, drifterRow.id, session))?.parent, {
+            timeout: 20_000,
+          })
+          .toBe(anchorRow.id);
       });
 
       await test.step("a child moves between parents and persists", async () => {
@@ -321,9 +330,11 @@ test(
         expect(feedback).toBe("ring");
         await expect.poll(() => driver.settingsLabelsChildrenOf(other), { timeout: 20_000 }).toEqual([drifter]);
         expect(await driver.settingsLabelsChildrenOf(anchor)).toEqual([]);
-        expect((await serverLabelOrNull(seed.workspaceSlug, projectId, drifterRow.id, session))?.parent).toBe(
-          otherRow.id
-        );
+        await expect
+          .poll(async () => (await serverLabelOrNull(seed.workspaceSlug, projectId, drifterRow.id, session))?.parent, {
+            timeout: 20_000,
+          })
+          .toBe(otherRow.id);
       });
 
       await test.step("whole groups reorder at top level with their children", async () => {
@@ -331,7 +342,11 @@ test(
         await expect
           .poll(async () => (await driver.settingsLabelsNames()).filter((n) => n.startsWith(tag)), { timeout: 20_000 })
           .toEqual([other, drifter, anchor, lone]);
-        expect((await serverLabelOrNull(seed.workspaceSlug, projectId, otherRow.id, session))?.parent).toBe(null);
+        await expect
+          .poll(async () => (await serverLabelOrNull(seed.workspaceSlug, projectId, otherRow.id, session))?.parent, {
+            timeout: 20_000,
+          })
+          .toBe(null);
       });
 
       await test.step("self, group-onto-child and parent-onto-child drops no-op", async () => {
@@ -353,7 +368,11 @@ test(
         if (!loneRow) throw new Error("[parity] lone label missing before child-row drop.");
         await driver.settingsLabelsDragAbove(lone, drifter);
         await expect.poll(() => driver.settingsLabelsChildrenOf(other), { timeout: 15_000 }).toEqual([lone, drifter]);
-        expect((await serverLabelOrNull(seed.workspaceSlug, projectId, loneRow.id, session))?.parent).toBe(otherRow.id);
+        await expect
+          .poll(async () => (await serverLabelOrNull(seed.workspaceSlug, projectId, loneRow.id, session))?.parent, {
+            timeout: 20_000,
+          })
+          .toBe(otherRow.id);
       });
 
       // bug: NEWFRONT-408 — the drop handler never awaits the save, so

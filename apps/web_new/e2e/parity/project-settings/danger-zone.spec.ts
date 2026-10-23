@@ -56,7 +56,13 @@ test(
       expect(await serverSearchIssueNames(seed.workspaceSlug, projectId, tag, session)).toContain(issueName);
 
       await test.step("the confirm modal names the project and warns what archiving takes", async () => {
-        await driver.openArchiveProjectDialog(seed.workspaceSlug, projectId);
+        // The new driver opens archive from the danger zone itself; the
+        // shared card-menu path never navigates there (NEWFRONT-606).
+        if (driver.target === "web_new") {
+          await driver.settingsGeneralOpenArchive(seed.workspaceSlug, projectId);
+        } else {
+          await driver.openArchiveProjectDialog(seed.workspaceSlug, projectId);
+        }
         await expect
           .poll(() => driver.settingsGeneralConfirmModalText(), { timeout: 30_000 })
           .toContain("will be archived");
@@ -108,7 +114,12 @@ test(
     );
     try {
       await driver.rulesEnsureSignedIn(seed.email, seed.password, seed.workspaceSlug);
-      await driver.openArchiveProjectDialog(seed.workspaceSlug, projectId);
+      // The new driver opens archive from the danger zone itself (see above).
+      if (driver.target === "web_new") {
+        await driver.settingsGeneralOpenArchive(seed.workspaceSlug, projectId);
+      } else {
+        await driver.openArchiveProjectDialog(seed.workspaceSlug, projectId);
+      }
       await driver.confirmArchive();
       await expect
         .poll(() => archivesProjectArchivedAt(seed.workspaceSlug, projectId, session), { timeout: 30_000 })

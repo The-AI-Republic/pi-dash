@@ -58440,6 +58440,11 @@ export class WebDriver implements ParityDriver {
     await this.generalCoverPanel().waitFor({ state: "hidden", timeout: 60_000 });
   }
 
+  async settingsGeneralOpenArchive(workspaceSlug: string, projectId: string): Promise<void> {
+    // The oracle opens archive from the General tab already.
+    await this.openArchiveProjectDialog(workspaceSlug, projectId);
+  }
+
   async settingsGeneralOpenDelete(): Promise<void> {
     await this.page.locator('[data-testid="general-delete-open"]').click({ timeout: WebDriver.OPEN_MS });
     await this.page
