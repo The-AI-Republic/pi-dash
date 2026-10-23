@@ -1134,6 +1134,7 @@ describe("project contracts", () => {
       baseUrl: "https://api.test",
       transport: json({
         ...detail,
+        timezone: "America/New_York",
         agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
         default_agent_executor: "local_runner",
       }),
@@ -1142,8 +1143,23 @@ describe("project contracts", () => {
     expect(parsed.identifier).toBe("WEB");
     expect(parsed.member_role).toBe(20);
     expect("intake_count" in parsed).toBe(false);
+    expect(parsed.timezone).toBe("America/New_York");
     expect(parsed.agent_executor_options).toEqual([{ kind: "managed_runner", available: true, reason_code: "" }]);
     expect(parsed.default_agent_executor).toBe("local_runner");
+  });
+
+  it("parses a project row that predates the timezone field", async () => {
+    const { intake_count: _listOnly, ...detail } = project;
+    const client = createClient({
+      baseUrl: "https://api.test",
+      transport: json({
+        ...detail,
+        agent_executor_options: [{ kind: "managed_runner", available: true, reason_code: "" }],
+        default_agent_executor: "local_runner",
+      }),
+    });
+    const parsed = await getProject(client, "acme", UUID);
+    expect(parsed.timezone).toBeUndefined();
   });
 
   it("hits the project detail URL", async () => {

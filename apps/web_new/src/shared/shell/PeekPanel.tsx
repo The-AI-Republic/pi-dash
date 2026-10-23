@@ -14,12 +14,18 @@ import { IconButton } from "@pidash/kit";
 import { FULL_SCREEN_PORTAL_ID, OverlayPortal } from "./document.js";
 
 export interface PeekPanelProps {
+  /** Accessible name for the panel; work-item panels keep the default. */
+  label?: string | undefined;
+  /** Test handle for the panel; work-item panels keep the default. */
+  testId?: string | undefined;
   /** Context line above the title (e.g. the work-item key). */
   eyebrow?: React.ReactNode;
   /** Current title; the field commits through onCommitTitle. */
   title: string;
   /** Accessible name for the title field. */
   titleLabel: string;
+  /** Render the title as a heading instead of an editable field. */
+  titleAsHeading?: boolean | undefined;
   onClose: () => void;
   /** Commits a renamed title; without it edits stay local to the field. */
   onCommitTitle?: ((next: string) => void) | undefined;
@@ -29,9 +35,12 @@ export interface PeekPanelProps {
 }
 
 export function PeekPanel({
+  label,
+  testId,
   eyebrow,
   title,
   titleLabel,
+  titleAsHeading = false,
   onClose,
   onCommitTitle,
   actions,
@@ -63,8 +72,8 @@ export function PeekPanel({
   return (
     <OverlayPortal rootId={FULL_SCREEN_PORTAL_ID}>
       <aside
-        aria-label="Work item preview"
-        data-testid="issue-preview"
+        aria-label={label ?? "Work item preview"}
+        data-testid={testId ?? "issue-preview"}
         className="fixed top-0 right-0 bottom-0 z-40 flex w-[min(30rem,92vw)] flex-col gap-(--space-4) overflow-y-auto border-l border-(--border) bg-(--surface) p-(--space-6)"
       >
         <div className="flex items-start justify-between gap-(--space-4)">
@@ -76,18 +85,22 @@ export function PeekPanel({
             </IconButton>
           </div>
         </div>
-        <input
-          aria-label={titleLabel}
-          value={draft}
-          onChange={(event) => {
-            setDraft(event.target.value);
-          }}
-          onBlur={commit}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") commit();
-          }}
-          className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
-        />
+        {titleAsHeading ? (
+          <h4 className="text-h3 w-full px-(--space-2) py-(--space-1) text-(--text)">{title}</h4>
+        ) : (
+          <input
+            aria-label={titleLabel}
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value);
+            }}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commit();
+            }}
+            className="text-h3 w-full rounded-(--radius-control) border border-transparent bg-transparent px-(--space-2) py-(--space-1) text-(--text) hover:border-(--border) focus:border-(--accent) focus:outline-none"
+          />
+        )}
         {children}
       </aside>
     </OverlayPortal>

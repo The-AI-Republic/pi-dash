@@ -26,6 +26,15 @@ export function cyclesListHref(workspaceSlug: string, projectId: string): string
 }
 
 /**
+ * Canonical cycle detail address, without a trailing slash: row links,
+ * the peek's full-detail link, and the copy/open helpers all use this
+ * one spelling, so a shared address always reloads the same cycle.
+ */
+export function cycleDetailPath(workspaceSlug: string, projectId: string, cycleId: string): string {
+  return `/${workspaceSlug}/projects/${projectId}/cycles/${cycleId}`;
+}
+
+/**
  * Cycles feature-settings leaf. The shortcut targets the rendered leaf,
  * never the bare features index, which has no page (bug NEWFRONT-247,
  * shared with the views/modules gates).

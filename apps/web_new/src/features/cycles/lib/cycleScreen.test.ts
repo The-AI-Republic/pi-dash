@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@pidash/api-client";
 import {
   CYCLES_CRUMB,
+  cycleDetailPath,
   cyclesFeatureHref,
   cyclesListHref,
   cyclesTitle,
@@ -40,6 +41,10 @@ describe("cycles screen model", () => {
   it("addresses the list and the cycles feature-settings leaf", () => {
     expect(cyclesListHref("acme", PROJECT)).toBe(`/acme/projects/${PROJECT}/cycles/`);
     expect(cyclesFeatureHref("acme", PROJECT)).toBe(`/acme/settings/projects/${PROJECT}/features/cycles`);
+  });
+
+  it("addresses one cycle's detail without a trailing slash", () => {
+    expect(cycleDetailPath("acme", PROJECT, "c1")).toBe(`/acme/projects/${PROJECT}/cycles/c1`);
   });
 
   it("shows the skeleton while either read is pending", () => {
