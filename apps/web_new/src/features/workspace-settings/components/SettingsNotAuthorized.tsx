@@ -21,7 +21,7 @@ export interface SettingsNotAuthorizedProps {
 export function SettingsNotAuthorized({ workspaceSlug }: SettingsNotAuthorizedProps): React.ReactElement {
   useDocumentHead({ title: "", robots: "noindex, nofollow" });
   return (
-    <main className="fixed inset-0 z-10 flex items-center justify-center bg-(--bg) px-(--space-6) py-(--space-12)">
+    <main className="fixed inset-0 flex items-center justify-center bg-(--bg) px-(--space-6) py-(--space-12)">
       <section
         aria-labelledby="workspace-settings-denied-heading"
         data-testid="workspace-settings-not-authorized"

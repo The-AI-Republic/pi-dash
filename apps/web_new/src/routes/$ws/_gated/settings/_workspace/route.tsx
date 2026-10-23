@@ -88,8 +88,11 @@ function WorkspaceSettingsLayout(): React.ReactElement {
   });
   const logoUrl = resolveFileUrl(identity.logoLeg, getAppClient().baseUrl);
 
+  // Full-window frame with no stacking layer of its own: the kit renders
+  // dialogs, menus and popovers in portals after this node, so a z-index
+  // here would paint the frame over them and swallow their clicks.
   return (
-    <div className="fixed inset-0 z-10 bg-(--bg) text-(--text)">
+    <div className="fixed inset-0 bg-(--bg) text-(--text)">
       <SettingsShell
         workspaceSlug={ws}
         workspaceName={identity.workspaceName}
