@@ -52,6 +52,7 @@ const ROW: GanttRow = {
   sequenceId: 7,
   archived: false,
   unconfirmed: false,
+  isEpic: false,
 };
 
 function issue(overrides: Partial<Issue> = {}): Issue {

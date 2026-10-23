@@ -1,23 +1,26 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline layout entry (parity/specs/issues.md §6, ISS-044–055). The
-// layout root renders this with the entity's display preferences: it
+// Timeline layout entry (parity/specs/issues.md §6, ISS-044–059/116).
+// The layout root renders this with the entity's display preferences: it
 // orders the already-fetched rows (manual order by default), colors bars
 // from the project's states, docks the shared peek panel for a clicked
 // row, and owns the timeline's write seams — sidebar reorder in manual
 // sort, bar move/resize, block planting and the sticky quick-add. Edit
 // standing gates every one of them; the read-only chart stays whole.
+// Bulk builds add sidebar selection with the shared bulk toolbar, and a
+// sentinel trails the sidebar while the server holds more rows.
 
 import type { IssueListItem } from "@pidash/api-client";
 import * as React from "react";
 
 import { useCreateWorkItem } from "../api/create.js";
+import { BulkToolbar, isBulkOperationsEnabled, useBulkMutations, useBulkSelection } from "../bulk/index.js";
 import { WorkItemPreviewHover } from "../lifecycle/WorkItemPreviewCard.js";
 import { todayIsoDay } from "../dropdowns/calendar.js";
 import type { DisplayPrefs } from "../prefs/displayPrefs.js";
 import { deriveReorder, type DropPlacement } from "./drag.js";
-import { GanttChart } from "./GanttChart.js";
+import { GanttChart, type GanttSelectionBinding } from "./GanttChart.js";
 import { GanttPeekPanel } from "./GanttPeekPanel.js";
 import { GanttQuickAdd } from "./GanttQuickAdd.js";
 import { canEditTimeline } from "./permissions.js";
@@ -28,9 +31,13 @@ import {
   useGanttPeek,
   useGanttStates,
   useProjectArchived,
+  useProjectBulkFlags,
   useProjectMemberRole,
 } from "./useGanttData.js";
 import { useGanttMutations } from "./useGanttMutations.js";
+
+/** The single selection bucket behind the sidebar's header tri-state. */
+const TIMELINE_SELECTION_GROUP = "gantt";
 
 /**
  * Orders that make the sidebar reorder meaningful (ISS-050). Only the
@@ -108,6 +115,32 @@ export function GanttLayout({
     projectRole,
     archived,
   });
+  // Bulk selection needs the cloud operations flag plus edit standing;
+  // the community build renders no checkboxes at all (ISS-116).
+  const bulkEnabled = isBulkOperationsEnabled() && canEdit;
+  const selectionItems = React.useMemo(
+    () =>
+      rows
+        .filter((row) => !row.unconfirmed && !row.isEpic)
+        .map((row) => ({ id: row.id, groupKey: TIMELINE_SELECTION_GROUP })),
+    [rows]
+  );
+  const selection = useBulkSelection(selectionItems, bulkEnabled);
+  const bulk = useBulkMutations({ workspaceSlug, projectId });
+  const bulkFlags = useProjectBulkFlags(workspaceSlug, projectId);
+  // A selection can only exist while the checkboxes do; forcing the
+  // count to zero when the binding drops (a mid-session demotion) keeps
+  // the toolbar from lingering over a checkbox-free sidebar.
+  const selectedCount = bulkEnabled ? selection.selectedIds.size : 0;
+  const selectionBinding: GanttSelectionBinding | null = bulkEnabled
+    ? {
+        isSelected: selection.isSelected,
+        onRowToggle: selection.onRowToggle,
+        groupState: selection.groupState(TIMELINE_SELECTION_GROUP),
+        onGroupToggle: () => selection.onGroupToggle(TIMELINE_SELECTION_GROUP),
+        hasSelectables: selectionItems.length > 0,
+      }
+    : null;
   // Bars and sidebar links open the hover preview card (ISS-133); the
   // timeline's own state read already holds the name and group.
   const renderPreview = React.useCallback(
@@ -175,6 +208,8 @@ export function GanttLayout({
         barColors={barColors}
         peekedId={peek?.row.id ?? null}
         onOpenRow={openRow}
+        hasMore={totalCount > rows.length}
+        selection={selectionBinding}
         reorder={reorder}
         canEdit={canEdit}
         onDatesChange={(issueId, dates) => mutations.moveBar(issueId, dates)}
@@ -182,6 +217,43 @@ export function GanttLayout({
         quickAdd={quickAdd}
         renderPreview={renderPreview}
       />
+      {selectedCount === 0 ? null : (
+        <BulkToolbar
+          workspaceSlug={workspaceSlug}
+          projectId={projectId}
+          count={selectedCount}
+          hideCycle={bulkFlags.hideCycle}
+          hideModule={bulkFlags.hideModule}
+          hideEstimate={bulkFlags.hideEstimate}
+          weekStart={weekStart}
+          busy={bulk.update.isPending || bulk.remove.isPending || bulk.archive.isPending || bulk.subscribe.isPending}
+          onClear={selection.clear}
+          onUpdate={(properties) => {
+            void bulk.update
+              .mutateAsync({ issueIds: [...selection.selectedIds], properties })
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onDelete={() => {
+            void bulk.remove
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onArchive={() => {
+            void bulk.archive
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+          onSubscribe={() => {
+            void bulk.subscribe
+              .mutateAsync([...selection.selectedIds])
+              .then(() => selection.clear())
+              .catch(() => undefined);
+          }}
+        />
+      )}
       {peek !== null ? (
         <GanttPeekPanel workspaceSlug={workspaceSlug} projectId={projectId} row={peek.row} onClose={closePeek} />
       ) : null}

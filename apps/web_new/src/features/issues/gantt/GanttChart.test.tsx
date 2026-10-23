@@ -2,7 +2,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline chart (parity/specs/issues.md §6, ISS-044–048). jsdom does no
+// Timeline chart (parity/specs/issues.md §6, ISS-044–048/056–059/116). jsdom does no
 // layout, so the scroll host is given a fixed size and a scrollTo stub;
 // everything else is the real chart: bars on their day columns, the
 // two-tier header, today's mark, the zoom switcher with its re-center,
@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FULL_SCREEN_PORTAL_ID } from "../../../shared/shell/document.js";
 import { formatDay } from "../dropdowns/calendar.js";
-import { GanttChart, SIDEBAR_WIDTH } from "./GanttChart.js";
+import { GanttChart, SIDEBAR_WIDTH, type GanttSelectionBinding } from "./GanttChart.js";
 import { ROW_OVERSCAN, ROW_HEIGHT } from "./rows.js";
 import type { GanttRow } from "./rows.js";
 import { DAY_WIDTHS, addDays, centeredScroll, initialRange, timelineWidth } from "./scale.js";
@@ -43,6 +43,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     sequenceId: 1,
     archived: false,
     unconfirmed: false,
+    isEpic: false,
     ...overrides,
   };
 }
@@ -161,6 +162,18 @@ describe("GanttChart layout", () => {
     return bar;
   }
 
+  function bodyOf(id: string): HTMLElement {
+    const body = barOf(id).querySelector<HTMLElement>('[data-testid="gantt-bar-body"]');
+    if (body === null) throw new Error(`no bar body for ${id}`);
+    return body;
+  }
+
+  function nameOf(id: string): HTMLElement {
+    const name = barOf(id).querySelector<HTMLElement>('[data-testid="gantt-bar-name"]');
+    if (name === null) throw new Error(`no bar name for ${id}`);
+    return name;
+  }
+
   it("places a bar on its start..target day columns", () => {
     renderChart();
     const bar = barOf("row-1");
@@ -171,8 +184,49 @@ describe("GanttChart layout", () => {
 
   it("colors a bar from the row's state color", () => {
     renderChart({ barColors: { "row-1": "#ff0000" } });
-    expect(barOf("row-1")).toHaveStyle({ backgroundColor: "#ff0000" });
-    expect(barOf("row-3")).toHaveStyle({ backgroundColor: "var(--accent)" });
+    expect(bodyOf("row-1")).toHaveStyle({ backgroundColor: "#ff0000" });
+    expect(bodyOf("row-3")).toHaveStyle({ backgroundColor: "var(--accent)" });
+  });
+
+  it("fades a half-dated bar toward its missing end and leaves full bars solid (ISS-056)", () => {
+    renderChart({
+      rows: [
+        row({
+          id: "start-only",
+          name: "Start only",
+          startIso: addDays(WEEK_RANGE.startIso, 3),
+          targetIso: null,
+          durationDays: null,
+        }),
+        row({
+          id: "target-only",
+          name: "Target only",
+          startIso: null,
+          targetIso: addDays(WEEK_RANGE.startIso, 6),
+          durationDays: null,
+        }),
+        row({
+          id: "full",
+          name: "Full",
+          startIso: addDays(WEEK_RANGE.startIso, 8),
+          targetIso: addDays(WEEK_RANGE.startIso, 9),
+          durationDays: 2,
+        }),
+      ],
+    });
+    expect(bodyOf("start-only").style.maskImage).toContain("to right");
+    expect(nameOf("start-only").style.maskImage).toContain("to right");
+    expect(bodyOf("target-only").style.maskImage).toContain("to left");
+    expect(bodyOf("full").style.maskImage).toBe("");
+    expect(nameOf("full").style.maskImage).toBe("");
+  });
+
+  it("pins the bar name at the strip's visible edge (ISS-056)", () => {
+    renderChart();
+    const name = nameOf("row-1");
+    expect(name).toHaveClass("sticky");
+    expect(name).toHaveStyle({ left: `${SIDEBAR_WIDTH}px` });
+    expect(name).toHaveTextContent("Dated");
   });
 
   it("keeps undated rows with a no-dates lane", () => {
@@ -409,6 +463,59 @@ describe("GanttChart scroll arrows", () => {
     await waitFor(() => expect(host().scrollLeft).toBeGreaterThan(0));
     expect(screen.getByTestId("gantt-scroll-arrow")).toHaveTextContent("→");
   });
+
+  it("grows the range to a bar outside the window before scrolling (ISS-057)", async () => {
+    renderChart({ rows: [ROWS[2]!] });
+    await waitFor(() => expect(host().scrollLeft).toBeGreaterThan(0));
+    expect(screen.getByTestId("gantt-range")).toHaveTextContent(`+ ${WEEK_RANGE.dayCount} days`);
+    fireEvent.click(screen.getByTestId("gantt-scroll-arrow"));
+    await waitFor(() =>
+      expect(screen.getByTestId("gantt-range")).toHaveTextContent(`+ ${WEEK_RANGE.dayCount + 3 * 14} days`)
+    );
+    expect(Element.prototype.scrollTo as unknown as ReturnType<typeof vi.fn>).toHaveBeenCalledWith(
+      expect.objectContaining({ behavior: "smooth" })
+    );
+  });
+
+  it("covers the drawn span of a start-only bar past the window (ISS-057)", async () => {
+    renderChart({
+      rows: [
+        row({
+          id: "half",
+          name: "Half",
+          startIso: addDays(WEEK_RANGE.startIso, 90),
+          targetIso: null,
+          durationDays: null,
+        }),
+      ],
+    });
+    await waitFor(() => expect(host().scrollLeft).toBeGreaterThan(0));
+    fireEvent.click(screen.getByTestId("gantt-scroll-arrow"));
+    await waitFor(() =>
+      expect(screen.getByTestId("gantt-range")).toHaveTextContent(`+ ${WEEK_RANGE.dayCount + 3 * 14} days`)
+    );
+  });
+
+  it("covers the drawn span of a target-only bar before the window (ISS-057)", async () => {
+    renderChart({
+      rows: [
+        row({
+          id: "half",
+          name: "Half",
+          startIso: null,
+          targetIso: addDays(WEEK_RANGE.startIso, -30),
+          durationDays: null,
+        }),
+      ],
+    });
+    await waitFor(() => expect(host().scrollLeft).toBeGreaterThan(0));
+    const arrow = screen.getByTestId("gantt-scroll-arrow");
+    expect(arrow).toHaveTextContent("←");
+    fireEvent.click(arrow);
+    await waitFor(() =>
+      expect(screen.getByTestId("gantt-range")).not.toHaveTextContent(`+ ${WEEK_RANGE.dayCount} days`)
+    );
+  });
 });
 
 describe("GanttChart fullscreen (ISS-047)", () => {
@@ -478,6 +585,16 @@ describe("GanttChart loading and empty states", () => {
   it("shows the load-more placeholder while the next page arrives", () => {
     renderChart({ loadingMore: true });
     expect(screen.getByTestId("gantt-load-more")).toBeInTheDocument();
+  });
+
+  it("shows the load-more placeholder while the server holds more rows (ISS-059)", () => {
+    renderChart({ rows: ROWS.slice(0, 2), totalCount: 240, hasMore: true });
+    expect(screen.getByTestId("gantt-load-more")).toBeInTheDocument();
+  });
+
+  it("hides the load-more placeholder once every row is rendered", () => {
+    renderChart();
+    expect(screen.queryByTestId("gantt-load-more")).toBeNull();
   });
 
   it("keeps the today highlight inside the seeded window", () => {
@@ -760,5 +877,49 @@ describe("GanttChart resize preview (ISS-052/053)", () => {
     fireEvent.mouseMove(document, { clientX: 140 });
     expect(screen.queryByTestId("gantt-resize-preview")).not.toBeInTheDocument();
     fireEvent.mouseUp(document);
+  });
+});
+
+describe("GanttChart bulk header (ISS-116)", () => {
+  function selectionStub(overrides: Partial<GanttSelectionBinding> = {}) {
+    const onRowToggle = vi.fn();
+    const onGroupToggle = vi.fn();
+    return {
+      binding: {
+        isSelected: () => false,
+        onRowToggle,
+        groupState: "empty" as const,
+        onGroupToggle,
+        hasSelectables: true,
+        ...overrides,
+      },
+      onRowToggle,
+      onGroupToggle,
+    };
+  }
+
+  it("shows the header tri-state and toggles the group through the binding", () => {
+    const { binding, onGroupToggle } = selectionStub({ groupState: "partial" as const });
+    renderChart({ selection: binding });
+    const header = screen.getByLabelText("Select all work items") as HTMLInputElement;
+    expect(header.indeterminate).toBe(true);
+    fireEvent.click(header);
+    expect(onGroupToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the header checkbox without a binding or without selectables", () => {
+    renderChart();
+    expect(screen.queryByLabelText("Select all work items")).toBeNull();
+    cleanup();
+    const { binding } = selectionStub({ hasSelectables: false });
+    renderChart({ selection: binding });
+    expect(screen.queryByLabelText("Select all work items")).toBeNull();
+  });
+
+  it("hands the row toggles to the sidebar", () => {
+    const { binding, onRowToggle } = selectionStub();
+    renderChart({ selection: binding, rows: [row({ id: "row-9", identifier: "WEB-9", name: "Ninth" })] });
+    fireEvent.click(screen.getByLabelText("Select WEB-9"));
+    expect(onRowToggle).toHaveBeenCalledWith("row-9", false);
   });
 });

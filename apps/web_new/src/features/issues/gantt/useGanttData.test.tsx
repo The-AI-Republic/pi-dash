@@ -56,6 +56,7 @@ function row(overrides: Partial<GanttRow> = {}): GanttRow {
     sequenceId: 1,
     archived: false,
     unconfirmed: false,
+    isEpic: false,
     ...overrides,
   };
 }

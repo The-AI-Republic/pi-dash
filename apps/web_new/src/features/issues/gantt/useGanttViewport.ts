@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Timeline viewport state (parity/specs/issues.md §6, ISS-045/046/048).
+// Timeline viewport state (parity/specs/issues.md §6, ISS-045/046/048/057).
 // Zoom, the rendered day window, the measured strip width and the
 // horizontal offset live together here because every operation moves all
 // of them: a zoom switch resets the window and re-centers today, Today
@@ -13,6 +13,7 @@ import * as React from "react";
 import {
   centeredScroll,
   extendRange,
+  growRangeToCover,
   initialRange,
   isGanttZoom,
   timelineWidth,
@@ -36,6 +37,8 @@ export interface GanttViewport {
   setScrollLeft: (value: number) => void;
   /** Grow the window on one side, keeping the viewport still. */
   extend: (side: "left" | "right") => void;
+  /** Grow the window until it covers both days (ISS-057). */
+  cover: (fromIso: string, toIso: string) => void;
   /** Record the measured strip width; centers once per zoom. */
   measure: (stripWidth: number) => void;
 }
@@ -92,6 +95,15 @@ export function useGanttViewport(todayIso: string, weekStart: number): GanttView
     [range, zoom]
   );
 
+  // No offset compensation here: the caller (scroll-to-block) queues an
+  // explicit scroll against the grown window right behind this.
+  const cover = React.useCallback(
+    (fromIso: string, toIso: string) => {
+      setRange(growRangeToCover(range, zoom, fromIso, toIso));
+    },
+    [range, zoom]
+  );
+
   return {
     zoom,
     range,
@@ -100,6 +112,7 @@ export function useGanttViewport(todayIso: string, weekStart: number): GanttView
     centerToday,
     setScrollLeft,
     extend,
+    cover,
     measure,
   };
 }
