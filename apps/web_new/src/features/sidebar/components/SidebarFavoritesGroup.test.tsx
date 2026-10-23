@@ -13,6 +13,22 @@ import { FAVORITES_SECTION_OPEN_KEY, notifyError, notifySuccess } from "../../..
 import { sidebarKeys } from "../api/keys.js";
 import { FAVORITE_REMOVE_LABEL, favoriteDisplayName, SidebarFavoritesGroup } from "./SidebarFavoritesGroup.js";
 
+// Migrated-route links (F-09, NEWFRONT-528) render through the workspace
+// routes this component ships in. The suite has no router; the router
+// link's navigation is TanStack's own tested behavior, so it stands in as
+// an anchor and the assertions still read the href.
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+    const { to, children, ...rest } = props;
+    return (
+      <a href={to} {...rest}>
+        {children}
+      </a>
+    );
+  },
+}));
+
 vi.mock("../../../shared/shell/index.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../../shared/shell/index.js")>();
   return { ...original, notifyError: vi.fn(), notifySuccess: vi.fn() };

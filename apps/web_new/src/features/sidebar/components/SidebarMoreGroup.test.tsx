@@ -4,11 +4,27 @@
 // See the LICENSE file for details.
 import { fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ROLE_GUEST, ROLE_MEMBER } from "../../../core/session/permissions.js";
 import { MORE_SECTION_OPEN_KEY } from "../more.js";
 import { SidebarMoreGroup } from "./SidebarMoreGroup.js";
+
+// Migrated-route links (F-09, NEWFRONT-528) render through the workspace
+// routes this component ships in. The suite has no router; the router
+// link's navigation is TanStack's own tested behavior, so it stands in as
+// an anchor and the assertions still read the href.
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+    const { to, children, ...rest } = props;
+    return (
+      <a href={to} {...rest}>
+        {children}
+      </a>
+    );
+  },
+}));
 
 function setup(role: number | null = ROLE_MEMBER, currentPath: string | null = "/acme/") {
   return render(<SidebarMoreGroup workspaceSlug="acme" role={role} currentPath={currentPath} />);

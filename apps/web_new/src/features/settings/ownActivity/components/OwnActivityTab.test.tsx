@@ -39,6 +39,22 @@ import {
   OwnActivityTab,
 } from "./OwnActivityTab.js";
 
+// Migrated-route links (F-09, NEWFRONT-528) render through the workspace
+// routes this component ships in. The suite has no router; the router
+// link's navigation is TanStack's own tested behavior, so it stands in as
+// an anchor and the assertions still read the href.
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
+  Link: (props: { to?: string; children?: React.ReactNode } & Record<string, unknown>) => {
+    const { to, children, ...rest } = props;
+    return (
+      <a href={to} {...rest}>
+        {children}
+      </a>
+    );
+  },
+}));
+
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
 const UUID2 = "223e4567-e89b-12d3-a456-426614174001";
 
