@@ -33,6 +33,8 @@ export interface DetailMainColumnProps {
   editable: boolean;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
+  /** Agent controls on surfaces without the widget action row (notification peek). */
+  agentActions?: React.ReactNode;
   /** Block under the description-meta row, above the sidebar break (the activity feed). */
   activity?: React.ReactNode;
 }
@@ -43,6 +45,7 @@ export function DetailMainColumn({
   issue,
   editable,
   topSlot,
+  agentActions,
   activity,
 }: DetailMainColumnProps): React.ReactElement {
   const pipeline = useSavePipeline();
@@ -83,6 +86,7 @@ export function DetailMainColumn({
         </div>
       </div>
       <WaitingBanner workspaceSlug={workspaceSlug} projectId={projectId} issue={issue} disabled={readOnly} />
+      {agentActions === undefined ? null : <div className="min-w-0">{agentActions}</div>}
       <IssueTitleField
         value={issue.name}
         disabled={readOnly}

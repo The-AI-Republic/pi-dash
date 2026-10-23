@@ -768,10 +768,13 @@ test(
       // started ⟺ exactly one run attached, failed ⟺ zero runs.
       const dispatch = await driver.issueRunAiDispatch();
       const attached = (await recentRuns(session)).filter((row) => row["work_item"] === issue.id);
-      if (dispatch.toast !== null && /agent run started/i.test(dispatch.toast)) {
+      // web_new writes its own dispatch copy; the old app keeps its wording.
+      const started = driver.target === "web_new" ? /run started/i : /agent run started/i;
+      const failed = driver.target === "web_new" ? /couldn't start the run/i : /failed to start agent run/i;
+      if (dispatch.toast !== null && started.test(dispatch.toast)) {
         expect(attached).toHaveLength(1);
       } else {
-        expect(dispatch.toast).toMatch(/failed to start agent run/i);
+        expect(dispatch.toast).toMatch(failed);
         expect(attached).toHaveLength(0);
       }
       expect(await runsIssueExecutor(seed.workspaceSlug, seed.projectId, issue.id, session)).toBe(pinBefore);

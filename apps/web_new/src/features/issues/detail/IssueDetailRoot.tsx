@@ -29,6 +29,8 @@ export interface IssueDetailRootProps {
   sidebar?: React.ReactNode;
   /** Header row, left of the save indicator (identifier/type). */
   topSlot?: React.ReactNode;
+  /** Agent controls on surfaces without the widget action row (notification peek). */
+  agentActions?: React.ReactNode;
   /** Block under the description-meta row (the activity feed). */
   activity?: React.ReactNode;
   /** Render the parent banner above the title (default true). */
@@ -42,6 +44,7 @@ export function IssueDetailRoot({
   editable,
   sidebar,
   topSlot,
+  agentActions,
   activity,
   showParentBanner = true,
 }: IssueDetailRootProps): React.ReactElement {
@@ -73,6 +76,7 @@ export function IssueDetailRoot({
           issue={issue}
           editable={editable}
           topSlot={topSlot}
+          agentActions={agentActions}
           activity={activity}
         />
       </div>

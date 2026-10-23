@@ -26,6 +26,7 @@ import {
   findPalettePage,
   listCommands,
 } from "../../../../shared/commands/index.js";
+import { sessionKeys, setSessionClient } from "../../../../core/session/index.js";
 import { ASYNC_QUERY_TIMEOUT_MS } from "../../../../testing/testBudget.js";
 import { projectIdentifier, Route } from "./$issueKey.js";
 
@@ -228,6 +229,7 @@ function userPropertiesPayload() {
 interface BrowseExtras {
   details?: "member" | "archived";
   me?: boolean;
+  unresolvedWorkspace?: boolean;
   archivedIssue?: boolean;
   syncedIssue?: boolean;
   estimate?: string | null;
@@ -262,6 +264,9 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
         });
         body = JSON.stringify(lite);
       }
+    } else if (url.endsWith("/users/me/workspaces/")) {
+      status = 200;
+      body = JSON.stringify([{ id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 4, role: 20 }]);
     } else if (url.includes("/project-roles/")) {
       status = 200;
       body = JSON.stringify({ [PROJECT_ID]: 20 });
@@ -439,6 +444,12 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
     return { status, url, headers: { get: () => null }, text: async () => body };
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  setSessionClient(apiClient);
+  if (extras.unresolvedWorkspace !== true) {
+    queryClient.setQueryData(sessionKeys.workspaces, [
+      { id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 4, role: 20 },
+    ]);
+  }
   const component = Route.options.component;
   if (!component) throw new Error("missing component");
   const rootRoute = createRootRouteWithContext<RouterContext>()();
@@ -505,7 +516,7 @@ describe("browse route", () => {
     const actions = await within(widgets).findAllByRole("button", { name: "Attach" });
     const actionRow = actions.find((node) => node.getAttribute("data-widget-action") === "Attach");
     expect(actionRow).toBeDefined();
-    expect(actionRow).toBeEnabled();
+    await waitFor(() => expect(actionRow as HTMLElement).toBeEnabled());
     const clicked = vi.spyOn(HTMLInputElement.prototype, "click");
     await userEvent.setup().click(actionRow as HTMLElement);
     expect(clicked).toHaveBeenCalled();
@@ -520,6 +531,21 @@ describe("browse route", () => {
       node.getAttribute("data-widget-section")
     );
     expect(labels).toEqual(["Relations", "Links", "Attachments"]);
+  });
+
+  it("mounts run-AI in the widget action row and re-tick on the detail", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    const runAI = within(widgets).getByTestId("issue-run-ai");
+    expect(runAI).toHaveTextContent("Manually Run AI");
+    await waitFor(() => expect(runAI).toBeEnabled());
+    expect(screen.queryByTestId("issue-re-tick")).not.toBeInTheDocument();
+  });
+
+  it("keeps run-AI inert until the workspace read resolves", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, unresolvedWorkspace: true });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widgets).getByTestId("issue-run-ai")).toBeDisabled();
   });
 
   it("edits the title inline once membership resolves", async () => {

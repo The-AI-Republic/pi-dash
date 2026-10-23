@@ -16,13 +16,15 @@ import { createFileRoute, Link, Navigate, redirect, useNavigate } from "@tanstac
 import { Button } from "@pidash/kit";
 import * as React from "react";
 
-import { useMe } from "../../../../core/session/index.js";
+import { useMe, useWorkspace } from "../../../../core/session/index.js";
 import {
   CommentThread,
   DetailMissingState,
   DetailSkeleton,
   IssueDetailRoot,
   IssuePropertiesSidebar,
+  IssueReTickAction,
+  IssueRunAIAction,
   SubIssuesWidget,
   issueDetailQueryOptions,
   issueKeys,
@@ -141,6 +143,7 @@ function BrowseIssueDetail({
   const context = Route.useRouteContext();
   const navigate = useNavigate();
   const me = useMe();
+  const { workspace } = useWorkspace(workspaceSlug);
   const { data: issue } = useSuspenseQuery(
     issueDetailQueryOptions(context.apiClient, workspaceSlug, projectId, issueId)
   );
@@ -226,6 +229,17 @@ function BrowseIssueDetail({
         projectIdentifier={projectIdentifier(project, issueKey)}
         canWrite={editable}
         onAttach={() => attachmentsRef.current?.openPicker()}
+        runAIAction={
+          <IssueRunAIAction
+            workspaceSlug={workspaceSlug}
+            workspaceId={workspace?.id ?? null}
+            projectId={projectId}
+            issue={issue}
+            disabled={!writable}
+            label="Manually Run AI"
+            size="medium"
+          />
+        }
         onOpen={(row, identifier) =>
           void navigate({
             to: "/$ws/browse/$issueKey",
@@ -261,6 +275,15 @@ function BrowseIssueDetail({
         projectId={projectId}
         issue={issue}
         editable={editable}
+        agentActions={
+          <IssueReTickAction
+            workspaceSlug={workspaceSlug}
+            workspaceId={workspace?.id ?? null}
+            projectId={projectId}
+            issue={issue}
+            disabled={!writable}
+          />
+        }
         topSlot={
           <div className="flex items-center gap-(--space-2)">
             <span className="text-meta font-medium text-(--text-muted)">{issueKey}</span>

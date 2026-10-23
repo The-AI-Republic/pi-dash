@@ -8,15 +8,17 @@
 // shared portal overlay — so the pane carries the selected content, the
 // notification's own change and the close control (NTF-008, NTF-009).
 import { useQuery } from "@tanstack/react-query";
+import type { Issue } from "@pidash/api-client";
 import { FileSearch, X } from "lucide-react";
 import * as React from "react";
 
 import { Avatar, IconButton, Spinner } from "@pidash/kit";
 import { getAppClient } from "../../../core/api/client.js";
-import { ROLE_MEMBER } from "../../../core/session/index.js";
+import { ROLE_MEMBER, useWorkspace } from "../../../core/session/index.js";
 import { CopyWorkItemLinkButton } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { projectMembershipQueryOptions } from "../../auth/index.js";
 import {
+  IssueAgentActions,
   IssueDetailRoot,
   IssuePropertiesSidebar,
   TriageDetailRoot,
@@ -141,7 +143,7 @@ export function NotificationDetailHost({
           reference={selection.reference}
         />
       ) : (
-        <IssueDetailRoot
+        <IssuePreviewDetail
           workspaceSlug={workspaceSlug}
           projectId={selection.projectId}
           issue={issue.data}
@@ -163,5 +165,40 @@ export function NotificationDetailHost({
         />
       )}
     </div>
+  );
+}
+
+/** The peek mounts the workspace read only once it actually renders. */
+function IssuePreviewDetail(props: {
+  workspaceSlug: string;
+  projectId: string;
+  issue: Issue;
+  editable: boolean;
+  topSlot: React.ReactNode;
+  sidebar: React.ReactNode;
+}): React.ReactElement {
+  const { workspace } = useWorkspace(props.workspaceSlug);
+  // The browse detail's writable rule: member standing plus a live,
+  // unsynced row. Archived and synced items keep their agent controls
+  // inert here just as they do on the full detail.
+  const writable = props.editable && props.issue.archived_at === null && !props.issue.is_synced;
+  return (
+    <IssueDetailRoot
+      workspaceSlug={props.workspaceSlug}
+      projectId={props.projectId}
+      issue={props.issue}
+      editable={props.editable}
+      agentActions={
+        <IssueAgentActions
+          workspaceSlug={props.workspaceSlug}
+          workspaceId={workspace?.id ?? null}
+          projectId={props.projectId}
+          issue={props.issue}
+          disabled={!writable}
+        />
+      }
+      topSlot={props.topSlot}
+      sidebar={props.sidebar}
+    />
   );
 }

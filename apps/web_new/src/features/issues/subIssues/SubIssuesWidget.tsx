@@ -82,6 +82,8 @@ export interface SubIssuesWidgetProps {
   extraSections?: readonly WidgetSectionSlot[] | undefined;
   /** Opens the attachment picker; the Attach entry stays disabled without it. */
   onAttach?: (() => void) | undefined;
+  /** The Run-AI mount; without it the entry keeps the default disabled control. */
+  runAIAction?: React.ReactNode;
 }
 
 export function SubIssuesWidget({
@@ -95,6 +97,7 @@ export function SubIssuesWidget({
   createProjects,
   extraSections = [],
   onAttach,
+  runAIAction,
 }: SubIssuesWidgetProps): React.ReactElement {
   const section = React.useRef<SubIssueSectionHandle>(null);
   const [addMenuOpen, setAddMenuOpen] = React.useState(false);
@@ -125,6 +128,9 @@ export function SubIssuesWidget({
           const slot = extraSections.find((section) => ACTION_SLOT[section.label] === label);
           if (slot?.action !== undefined) {
             return <React.Fragment key={label}>{slot.action}</React.Fragment>;
+          }
+          if (label === "Manually Run AI" && runAIAction !== undefined) {
+            return <React.Fragment key={label}>{runAIAction}</React.Fragment>;
           }
           const implemented =
             SUB_ISSUES_WIDGET_ACTIONS.includes(label) || (label === "Attach" && onAttach !== undefined);
