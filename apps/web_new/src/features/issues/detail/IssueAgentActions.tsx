@@ -56,24 +56,27 @@ export function IssueRunAIAction({
 }: IssueRunAIActionProps): React.ReactElement {
   const refresh = useIssueRefresh(workspaceSlug, issue.id);
   const { triggerRun, isSubmitting } = useTriggerAgentRun({ onSettledRefresh: refresh });
-  const ready = workspaceId !== null;
-
-  function startRun(): void {
-    if (workspaceId === null || disabled) return;
-    void triggerRun({
-      workspaceId,
-      workspaceSlug,
-      projectId,
-      issueId: issue.id,
-      mode: "run_ai",
-    });
-  }
+  // Readiness gates here at render: the handler only exists once the
+  // workspace id has resolved on a writable surface, and the button is
+  // disabled exactly while it does not. There is no in-handler guard.
+  const startRun =
+    workspaceId === null || disabled
+      ? undefined
+      : (): void => {
+          void triggerRun({
+            workspaceId,
+            workspaceSlug,
+            projectId,
+            issueId: issue.id,
+            mode: "run_ai",
+          });
+        };
 
   return (
     <Button
       variant="secondary"
       size={size}
-      disabled={!ready || disabled}
+      disabled={startRun === undefined}
       loading={isSubmitting}
       data-testid="issue-run-ai"
       onClick={startRun}
@@ -96,18 +99,20 @@ export function IssueReTickAction({
   const refresh = useIssueRefresh(workspaceSlug, issue.id);
   const { reTick, isSubmitting } = useReTick({ onSettledRefresh: refresh });
   if (!reTickOffered(issue)) return null;
-  const ready = workspaceId !== null;
-
-  function refillBudget(): void {
-    if (workspaceId === null || disabled) return;
-    void reTick(issue.id);
-  }
+  // Same readiness rule as the Run AI mount: no handler until the
+  // workspace id resolves on a writable surface.
+  const refillBudget =
+    workspaceId === null || disabled
+      ? undefined
+      : (): void => {
+          void reTick(issue.id);
+        };
 
   return (
     <Button
       variant="secondary"
       size="small"
-      disabled={!ready || disabled}
+      disabled={refillBudget === undefined}
       loading={isSubmitting}
       data-testid="issue-re-tick"
       onClick={refillBudget}

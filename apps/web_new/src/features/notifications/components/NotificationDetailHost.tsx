@@ -178,6 +178,10 @@ function IssuePreviewDetail(props: {
   sidebar: React.ReactNode;
 }): React.ReactElement {
   const { workspace } = useWorkspace(props.workspaceSlug);
+  // The browse detail's writable rule: member standing plus a live,
+  // unsynced row. Archived and synced items keep their agent controls
+  // inert here just as they do on the full detail.
+  const writable = props.editable && props.issue.archived_at === null && !props.issue.is_synced;
   return (
     <IssueDetailRoot
       workspaceSlug={props.workspaceSlug}
@@ -190,7 +194,7 @@ function IssuePreviewDetail(props: {
           workspaceId={workspace?.id ?? null}
           projectId={props.projectId}
           issue={props.issue}
-          disabled={!props.editable}
+          disabled={!writable}
         />
       }
       topSlot={props.topSlot}

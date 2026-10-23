@@ -229,6 +229,7 @@ function userPropertiesPayload() {
 interface BrowseExtras {
   details?: "member" | "archived";
   me?: boolean;
+  unresolvedWorkspace?: boolean;
   archivedIssue?: boolean;
   syncedIssue?: boolean;
   estimate?: string | null;
@@ -444,9 +445,11 @@ function renderBrowse(known: boolean, isEpic?: boolean, extras: BrowseExtras = {
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   setSessionClient(apiClient);
-  queryClient.setQueryData(sessionKeys.workspaces, [
-    { id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 4, role: 20 },
-  ]);
+  if (extras.unresolvedWorkspace !== true) {
+    queryClient.setQueryData(sessionKeys.workspaces, [
+      { id: UUID, name: "Acme", slug: "acme", logo_url: null, total_members: 4, role: 20 },
+    ]);
+  }
   const component = Route.options.component;
   if (!component) throw new Error("missing component");
   const rootRoute = createRootRouteWithContext<RouterContext>()();
@@ -537,6 +540,12 @@ describe("browse route", () => {
     expect(runAI).toHaveTextContent("Manually Run AI");
     await waitFor(() => expect(runAI).toBeEnabled());
     expect(screen.queryByTestId("issue-re-tick")).not.toBeInTheDocument();
+  });
+
+  it("keeps run-AI inert until the workspace read resolves", async () => {
+    renderBrowse(true, undefined, { details: "member", me: true, unresolvedWorkspace: true });
+    const widgets = await screen.findByTestId("issue-detail-widgets");
+    expect(within(widgets).getByTestId("issue-run-ai")).toBeDisabled();
   });
 
   it("edits the title inline once membership resolves", async () => {

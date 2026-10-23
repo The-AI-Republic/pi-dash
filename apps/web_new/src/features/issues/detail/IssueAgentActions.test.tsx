@@ -275,4 +275,23 @@ describe("IssueAgentActions", () => {
     expect(screen.getByTestId("issue-run-ai")).toBeEnabled();
     expect(screen.getByTestId("issue-re-tick")).toBeEnabled();
   });
+
+  it("keeps both controls available after a rejected dispatch", async () => {
+    let rejectDispatch!: (reason: unknown) => void;
+    const pending = new Promise<never>((_resolve, reject) => {
+      rejectDispatch = reject;
+    });
+    // Handled from creation: the mount fires and forgets, so the test owns
+    // the rejection and no unhandled rejection escapes the run.
+    void pending.catch(() => {});
+    harness.triggerRun.mockReturnValue(pending);
+    const user = userEvent.setup();
+    renderActions(issueFixture({ agent_ticker: ticker(true) }));
+    await user.click(screen.getByTestId("issue-run-ai"));
+    rejectDispatch(new Error("dispatch failed"));
+    await expect(pending).rejects.toThrow("dispatch failed");
+    expect(harness.triggerRun).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("issue-run-ai")).toBeEnabled();
+    expect(screen.getByTestId("issue-re-tick")).toBeEnabled();
+  });
 });

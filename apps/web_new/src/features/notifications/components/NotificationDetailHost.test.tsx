@@ -5,21 +5,41 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { Issue, TransportResponse } from "@pidash/api-client";
+import type { Issue, TransportResponse, Workspace } from "@pidash/api-client";
 import * as React from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { ROLE_GUEST } from "../../../core/session/index.js";
+import { ROLE_GUEST, sessionKeys } from "../../../core/session/index.js";
 import type { NotificationCardData } from "../lib/card.js";
 import { NotificationDetailHost } from "./NotificationDetailHost.js";
+
+const agentHarness = vi.hoisted(() => ({ triggerRun: vi.fn(), reTick: vi.fn() }));
+
+vi.mock("../../runners/index.js", async () => {
+  const actual = await vi.importActual<typeof import("../../runners/index.js")>("../../runners/index.js");
+  return {
+    ...actual,
+    useTriggerAgentRun: () => ({ triggerRun: agentHarness.triggerRun, isSubmitting: false }),
+    useReTick: () => ({ reTick: agentHarness.reTick, isSubmitting: false }),
+  };
+});
 
 vi.mock("../../issues/index.js", async () => {
   const actual = await vi.importActual<typeof import("../../issues/index.js")>("../../issues/index.js");
   return {
     ...actual,
-    IssueDetailRoot: ({ issue, editable }: { issue: Issue; editable: boolean }) => (
+    IssueDetailRoot: ({
+      issue,
+      editable,
+      agentActions,
+    }: {
+      issue: Issue;
+      editable: boolean;
+      agentActions?: React.ReactNode;
+    }) => (
       <div data-testid="issue-detail-root" data-editable={editable ? "true" : "false"}>
+        {agentActions}
         {issue.name}
       </div>
     ),
@@ -57,7 +77,37 @@ function selection(overrides: Partial<NotificationCardData> = {}): NotificationC
   };
 }
 
-function issue(): Issue {
+function workspaceRow(): Workspace {
+  return {
+    id: "a23e4567-e89b-12d3-a456-426614174010",
+    name: "Acme",
+    slug: "acme",
+    logo_url: null,
+    total_members: 4,
+    role: 20,
+  };
+}
+
+function ticker(canReTick: boolean): NonNullable<Issue["agent_ticker"]> {
+  return {
+    enabled: true,
+    user_disabled: false,
+    used: 2,
+    tick_count: 2,
+    granted: 2,
+    waited: 0,
+    max_ticks: 2,
+    remaining: 0,
+    interval_seconds: 3600,
+    next_run_at: null,
+    last_tick_at: null,
+    disarm_reason: "",
+    pending_entry: false,
+    can_re_tick: canReTick,
+  };
+}
+
+function issue(overrides: Partial<Issue> = {}): Issue {
   return {
     id: ISSUE,
     name: "Ship it",
@@ -91,6 +141,7 @@ function issue(): Issue {
     agent_status: null,
     relations_summary: { blocked_by: [], blocking: [] },
     has_open_blockers: false,
+    ...overrides,
   };
 }
 
@@ -108,8 +159,9 @@ function isAccess(url: string): boolean {
   return url.endsWith(`/projects/${PROJECT}/project-members/me/`);
 }
 
-function renderHost(value: NotificationCardData | null, onClose = vi.fn()) {
+function renderHost(value: NotificationCardData | null, onClose = vi.fn(), workspaces: Workspace[] | null = null) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (workspaces !== null) queryClient.setQueryData(sessionKeys.workspaces, workspaces);
   return {
     ...render(
       <QueryClientProvider client={queryClient}>
@@ -122,6 +174,8 @@ function renderHost(value: NotificationCardData | null, onClose = vi.fn()) {
 
 afterEach(() => {
   resetAppClient();
+  agentHarness.triggerRun.mockReset();
+  agentHarness.reTick.mockReset();
   vi.restoreAllMocks();
 });
 
@@ -245,6 +299,36 @@ describe("NotificationDetailHost", () => {
     await waitFor(() => expect(screen.getByTestId("issue-detail-root")).toHaveAttribute("data-editable", "false"));
     expect(screen.getByTestId("notifications-detail-pane")).toHaveAttribute("data-detail-variant", "peek");
     expect(screen.getByTestId("notifications-detail-summary")).toHaveTextContent("Ada Lovelace commented: detail note");
+  });
+
+  it("enables the agent actions on a live editable peek once the workspace read resolves", async () => {
+    createAppClient("https://api.test", (async (url: string) =>
+      isAccess(url)
+        ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
+        : response(url, issue({ agent_ticker: ticker(true) }))) as never);
+    renderHost(selection(), vi.fn(), [workspaceRow()]);
+    expect(await screen.findByTestId("issue-run-ai")).toBeEnabled();
+    expect(screen.getByTestId("issue-re-tick")).toBeEnabled();
+  });
+
+  it("keeps the peek agent actions inert on an archived work item", async () => {
+    createAppClient("https://api.test", (async (url: string) =>
+      isAccess(url)
+        ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
+        : response(url, issue({ archived_at: "2026-10-01", agent_ticker: ticker(true) }))) as never);
+    renderHost(selection(), vi.fn(), [workspaceRow()]);
+    expect(await screen.findByTestId("issue-run-ai")).toBeDisabled();
+    expect(screen.getByTestId("issue-re-tick")).toBeDisabled();
+  });
+
+  it("keeps the peek agent actions inert on a synced work item", async () => {
+    createAppClient("https://api.test", (async (url: string) =>
+      isAccess(url)
+        ? response(url, { id: "923e4567-e89b-12d3-a456-426614174009", role: 20 })
+        : response(url, issue({ is_synced: true, agent_ticker: ticker(true) }))) as never);
+    renderHost(selection(), vi.fn(), [workspaceRow()]);
+    expect(await screen.findByTestId("issue-run-ai")).toBeDisabled();
+    expect(screen.getByTestId("issue-re-tick")).toBeDisabled();
   });
 
   it("renders the actor avatar when the notification carries one", async () => {
