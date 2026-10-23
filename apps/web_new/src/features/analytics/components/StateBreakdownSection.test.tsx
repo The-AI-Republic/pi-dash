@@ -122,7 +122,9 @@ describe("StateBreakdownSection", () => {
         />
       </QueryClientProvider>
     );
-    expect(await screen.findByText("A")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.querySelector('[data-testid="breakdown-project-mark"] svg')).not.toBeNull();
+    });
     expect(screen.getByText("Alpha")).toBeInTheDocument();
   });
 
