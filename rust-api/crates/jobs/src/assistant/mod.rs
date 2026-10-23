@@ -28,17 +28,19 @@ pub use sweep::{drive_sweep, register_sweep_handler, SWEEP_TASK};
 pub const TASK_NAMES: [&str; 2] = [RUN_TURN_TASK, SWEEP_TASK];
 
 /// Build the handler table for both assistant tasks. The pool feeds the
-/// sweep's live store; the seam drives the turn pipeline (see
-/// [`run_turn::TurnSeam`] for the port boundary). `hard_limit_secs` is the
-/// configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff.
+/// sweep's live store and the Redis client its post-commit `turn_failed`
+/// publish (`None` skips the publish); the seam drives the turn pipeline
+/// (see [`run_turn::TurnSeam`] for the port boundary). `hard_limit_secs` is
+/// the configured `ASSISTANT_TURN_HARD_LIMIT` for the sweep's stale cutoff.
 pub fn register_assistant_tasks<S: TurnSeam + 'static>(
     registry: &mut crate::worker::Registry,
     pool: sqlx::PgPool,
+    redis: Option<redis::Client>,
     seam: std::sync::Arc<S>,
     hard_limit_secs: i64,
 ) {
     register_turn_handler(registry, pool.clone(), seam);
-    register_sweep_handler(registry, pool, hard_limit_secs);
+    register_sweep_handler(registry, pool, redis, hard_limit_secs);
 }
 
 #[cfg(test)]
@@ -168,6 +170,7 @@ mod tests {
         register_assistant_tasks(
             &mut registry,
             pool,
+            None,
             Arc::new(NoopSeam),
             run_turn::TURN_HARD_LIMIT_SECS as i64,
         );

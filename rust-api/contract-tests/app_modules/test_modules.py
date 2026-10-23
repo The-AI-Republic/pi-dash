@@ -206,3 +206,69 @@ def test_create_sort_order_without_siblings(api, tenant_a, project_a, auth_a):
     )
     assert r.status_code == 201, r.text
     assert r.json()["sort_order"] == 42.0 - 10000
+
+
+# `ModuleViewSet.list` (`base.py:353-393`) branches on `fields` =
+# `[f for f in request.GET.get("fields", "").split(",") if f]`
+# (`base.py:180-183`). Non-empty: `ModuleSerializer(queryset, many=True,
+# fields=self.fields).data` — the projection is discarded
+# (`serializers/base.py:16-24`) but the row is the full
+# `ModuleSerializer.Meta.fields` set; otherwise the annotated `.values()`
+# row. The two shapes differ by the extra `archived_at` and the key order,
+# so both are pinned here.
+MODULE_SERIALIZER_ORDER = [
+    "id", "workspace_id", "project_id", "name", "description",
+    "description_text", "description_html", "start_date", "target_date",
+    "status", "lead_id", "member_ids", "view_props", "sort_order",
+    "external_source", "external_id", "logo_props",
+    "total_estimate_points", "completed_estimate_points", "is_favorite",
+    "total_issues", "cancelled_issues", "completed_issues",
+    "started_issues", "unstarted_issues", "backlog_issues",
+    "created_at", "updated_at", "archived_at",
+]
+
+MODULE_VALUES_ORDER = [
+    "id", "workspace_id", "project_id", "name", "description",
+    "description_text", "description_html", "start_date", "target_date",
+    "status", "lead_id", "view_props", "sort_order", "external_source",
+    "external_id", "logo_props", "created_at", "updated_at",
+    "is_favorite", "completed_issues", "cancelled_issues", "started_issues",
+    "unstarted_issues", "backlog_issues", "total_issues",
+    "completed_estimate_points", "total_estimate_points", "member_ids",
+]
+
+
+def test_list_fields_branch_shape(api, seed, tenant_a, project_a, auth_a):
+    """`?fields=name` takes Django's ModuleSerializer branch: 29 keys in
+    Meta.fields order, `archived_at` present as null, and the same values
+    as the annotated row for the 28 shared keys (the projection is not
+    applied)."""
+    mid = seed.module(tenant_a["workspace"]["id"], project_a, name="Projected")
+    r = api.get(modules_url(tenant_a, project_a) + "?fields=name", headers=auth_a)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body, list)
+    entry = next(m for m in body if m["id"] == mid)
+    assert list(entry) == MODULE_SERIALIZER_ORDER, list(entry)
+    assert entry["archived_at"] is None
+    assert entry["name"] == "Projected"
+
+    plain = api.get(modules_url(tenant_a, project_a), headers=auth_a)
+    assert plain.status_code == 200, plain.text
+    plain_entry = next(m for m in plain.json() if m["id"] == mid)
+    assert {k: entry[k] for k in plain_entry} == plain_entry
+
+
+def test_list_no_fields_shape(api, seed, tenant_a, project_a, auth_a):
+    """Absent, empty, and comma-only `fields` all fall through to the
+    annotated `.values()` row: 28 keys in SHARED_ROW_ORDER, no
+    `archived_at`."""
+    mid = seed.module(tenant_a["workspace"]["id"], project_a, name="Annotated")
+    url = modules_url(tenant_a, project_a)
+    for suffix in ("", "?fields=", "?fields=,", "?fields=,,"):
+        r = api.get(url + suffix, headers=auth_a)
+        assert r.status_code == 200, (suffix, r.text)
+        entry = next(m for m in r.json() if m["id"] == mid)
+        assert list(entry) == MODULE_VALUES_ORDER, (suffix, list(entry))
+        assert "archived_at" not in entry
+        assert set(entry) == MODULE_ROW_KEYS, sorted(set(entry) ^ MODULE_ROW_KEYS)
