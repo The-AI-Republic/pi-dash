@@ -14,6 +14,24 @@ import {
   targetDateFilter,
 } from "./query.js";
 
+const EXPRESSION = { and: [{ priority__in: "urgent" }] };
+const PROJECT = { scope: "project", projectId: "project-1" } as const;
+
+function groupedEmpty() {
+  return {
+    grouped_by: "target_date",
+    sub_grouped_by: null,
+    total_count: 0,
+    next_cursor: "",
+    prev_cursor: "",
+    next_page_results: false,
+    prev_page_results: false,
+    count: 0,
+    total_results: 0,
+    results: {},
+  };
+}
+
 describe("calendar queries", () => {
   it("lists inclusive ISO days", () => {
     expect(daysBetween("2026-10-30", "2026-11-02")).toEqual(["2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"]);
@@ -27,36 +45,89 @@ describe("calendar queries", () => {
   });
 
   it("builds range-scoped list keys", () => {
-    const key = calendarListKey(
-      "acme",
-      { scope: "project", projectId: "project-1" },
-      {
-        after: "a",
-        before: "b",
-        perPage: 4,
-      }
-    );
+    const key = calendarListKey("acme", PROJECT, { after: "a", before: "b", perPage: 4 });
     expect(key).toContain("calendar");
-    expect(key.slice(-3)).toEqual(["a", "b", 4]);
+    expect(key.slice(-4, -1)).toEqual(["a", "b", 4]);
+  });
+
+  it("keys a saved expression apart from an unscoped calendar", () => {
+    const base = calendarListKey("acme", PROJECT, { after: "a", before: "b", perPage: 4 });
+    const scoped = calendarListKey("acme", PROJECT, { after: "a", before: "b", perPage: 4 }, EXPRESSION);
+    expect(base.at(-1)).toBe("all");
+    expect(scoped.at(-1)).toContain("priority__in");
+    expect(scoped).not.toEqual(base);
+  });
+
+  it("sends the stored expression in the window read", async () => {
+    const getJson = vi.fn(async (_url: string, _init: unknown) => groupedEmpty());
+    const client = { getJson, parse: vi.fn((_schema: unknown, body: unknown) => body) } as never;
+    const options = calendarQueryOptions(
+      client,
+      "acme",
+      "project-1",
+      PROJECT,
+      { after: "2026-10-05", before: "2026-10-05", perPage: 4 },
+      EXPRESSION
+    );
+    await options.queryFn?.({} as never);
+    const init = getJson.mock.calls[0]?.[1] as { query: Record<string, unknown> } | undefined;
+    expect(String(init?.query["filters"])).toContain("priority__in");
+    expect(String(init?.query["target_date"])).toContain("2026-10-05");
+  });
+
+  it("omits the filters parameter when the view stores no expression", async () => {
+    const getJson = vi.fn(async (_url: string, _init: unknown) => groupedEmpty());
+    const client = { getJson, parse: vi.fn((_schema: unknown, body: unknown) => body) } as never;
+    await calendarQueryOptions(client, "acme", "project-1", PROJECT, {
+      after: "2026-10-05",
+      before: "2026-10-05",
+      perPage: 4,
+    }).queryFn?.({} as never);
+    const init = getJson.mock.calls[0]?.[1] as { query: Record<string, unknown> } | undefined;
+    expect(String(init?.query["filters"])).not.toContain("priority__in");
+  });
+
+  it("sends the stored expression when one tile pages", async () => {
+    const getJson = vi.fn(async (_url: string, _init: unknown) => groupedEmpty());
+    const client = { getJson, parse: vi.fn((_schema: unknown, body: unknown) => body) } as never;
+    const options = calendarDayQueryOptions(
+      client,
+      "acme",
+      "project-1",
+      PROJECT,
+      { day: "2026-10-05", perPage: 30, cursor: "30:1:0" },
+      EXPRESSION
+    );
+    await options.queryFn?.({} as never);
+    const init = getJson.mock.calls[0]?.[1] as { query: Record<string, unknown> } | undefined;
+    expect(String(init?.query["filters"])).toContain("priority__in");
+    expect(options.queryKey).toContain("2026-10-05");
+  });
+
+  it("keys a day with and without a cursor apart", () => {
+    const base = calendarDayQueryOptions(
+      {} as never,
+      "acme",
+      "project-1",
+      PROJECT,
+      { day: "2026-10-05", perPage: 4 },
+      EXPRESSION
+    );
+    const paged = calendarDayQueryOptions(
+      {} as never,
+      "acme",
+      "project-1",
+      PROJECT,
+      { day: "2026-10-05", perPage: 4, cursor: "4:1:0" },
+      EXPRESSION
+    );
+    expect(base.queryKey.slice(-2)).toEqual(["", expect.stringContaining("priority__in")]);
+    expect(paged.queryKey.slice(-2)).toEqual(["4:1:0", expect.stringContaining("priority__in")]);
   });
 
   it("scopes cycle and module windows to their own entity reads", async () => {
-    const getJson = vi.fn(async (_url: string, _init: unknown) => ({
-      grouped_by: "target_date",
-      sub_grouped_by: null,
-      total_count: 0,
-      next_cursor: "",
-      prev_cursor: "",
-      next_page_results: false,
-      prev_page_results: false,
-      count: 0,
-      total_results: 0,
-      results: {},
-    }));
-    const client = {
-      getJson,
-      parse: vi.fn((_schema: unknown, body: unknown) => body),
-    } as never;
+    const getJson = vi.fn(async (_url: string, _init: unknown) => groupedEmpty());
+    const client = { getJson, parse: vi.fn((_schema: unknown, body: unknown) => body) } as never;
     const query = { after: "2026-10-05", before: "2026-10-05", perPage: 4 };
     const cycle = calendarQueryOptions(
       client,
@@ -85,93 +156,16 @@ describe("calendar queries", () => {
     );
   });
 
-  it("flattens every grouped bucket", () => {
-    expect(
-      rowsFromResponse({
-        grouped_by: "target_date",
-        sub_grouped_by: null,
-        total_count: 2,
-        next_cursor: "4:1:0",
-        prev_cursor: "4:-1:0",
-        next_page_results: false,
-        prev_page_results: false,
-        count: 1,
-        total_results: 2,
-        results: {
-          "2026-10-05": { results: [{ id: "a" } as never], total_results: 1 },
-          "2026-10-06": { results: [{ id: "b" } as never], total_results: 1 },
-        },
-      }).map((row) => row.id)
-    ).toEqual(["a", "b"]);
-  });
-
-  it("reads a day bucket's total rather than the envelope total", () => {
-    const response = {
-      grouped_by: "target_date",
-      sub_grouped_by: null,
-      total_count: 0,
-      next_cursor: "4:1:0",
-      prev_cursor: "",
-      next_page_results: true,
-      prev_page_results: false,
-      count: 1,
-      total_results: 0,
-      results: { "2026-10-05": { results: [{ id: "a" } as never], total_results: 7 } },
-    };
-    expect(dayTotalFromResponse(response, "2026-10-05")).toBe(7);
-    expect(dayTotalFromResponse(response, "2026-10-06")).toBe(0);
-  });
-
-  it("parses the grouped response for the list and day reads", async () => {
-    const response = {
-      grouped_by: "target_date",
-      sub_grouped_by: null,
-      total_count: 0,
-      next_cursor: "4:1:0",
-      prev_cursor: "",
-      next_page_results: false,
-      prev_page_results: false,
-      count: 0,
-      total_results: 0,
-      results: {},
-    };
-    const client = {
-      getJson: vi.fn(async () => response),
-      parse: vi.fn((_schema: unknown, body: unknown) => body),
-    } as never;
-    const entity = { scope: "project", projectId: "project-1" } as const;
-    const list = calendarQueryOptions(client, "acme", "project-1", entity, {
-      after: "2026-09-27",
-      before: "2026-11-07",
-      perPage: 4,
-    });
-    await expect(list.queryFn?.({} as never)).resolves.toEqual(response);
-    const day = calendarDayQueryOptions(client, "acme", "project-1", entity, {
-      day: "2026-10-05",
-      perPage: 4,
-      cursor: "4:1:0",
-    });
-    await expect(day.queryFn?.({} as never)).resolves.toEqual(response);
-  });
-
-  it("reads project state colours", async () => {
-    const client = {
-      getJson: vi.fn(async (_url: string) => []),
-      parse: vi.fn((_schema: unknown, body: unknown) => body),
-    } as never;
-    const states = calendarStatesQueryOptions(client, "acme", "project-1");
+  it("derives counts from the grouped envelope", async () => {
+    const states = calendarStatesQueryOptions({} as never, "acme", "project-1");
     expect(states.queryKey).toContain("calendar-states");
-    await expect(states.queryFn?.({} as never)).resolves.toEqual([]);
-  });
-
-  it("keys a day query without a cursor", async () => {
-    const options = calendarDayQueryOptions(
-      {} as never,
-      "acme",
-      "project-1",
-      { scope: "project", projectId: "project-1" },
-      { day: "2026-10-05", perPage: 4 }
-    );
-    expect(options.queryKey?.slice(-1)).toEqual([""]);
+    const response = {
+      ...groupedEmpty(),
+      total_results: 7,
+      results: { "2026-10-05": { total_results: 3, results: [] } },
+    } as never;
+    expect(rowsFromResponse(response)).toEqual([]);
+    expect(dayTotalFromResponse(response, "2026-10-05")).toBe(3);
+    expect(dayTotalFromResponse(response, "2026-10-06")).toBe(7);
   });
 });

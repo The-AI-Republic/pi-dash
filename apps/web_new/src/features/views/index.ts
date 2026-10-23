@@ -9,6 +9,25 @@ export { projectViewsQueryOptions, workspaceViewsQueryOptions } from "./api/quer
 export { resetViewFavoriteIds, selectPendingViewId, useToggleViewFavorite } from "./api/viewFavorites.js";
 export type { ToggleViewFavoriteInput } from "./api/viewFavorites.js";
 export { ProjectViewsListScreen } from "./components/ProjectViewsListScreen.js";
+export { loadSavedViewDetail, resolvedSavedViewDetail } from "./detail/lazy.js";
+export type { SavedViewScreenProps } from "./detail/SavedViewScreen.js";
+export { SavedViewHeader } from "./detail/SavedViewHeader.js";
+export type { SavedViewHeaderProps } from "./detail/SavedViewHeader.js";
+export { SavedViewMissingState } from "./detail/SavedViewMissingState.js";
+export type { SavedViewMissingStateProps } from "./detail/SavedViewMissingState.js";
+export { SavedViewSwitcher, viewSwitcherOptions } from "./detail/SavedViewSwitcher.js";
+export type { SavedViewSwitcherProps } from "./detail/SavedViewSwitcher.js";
+export type { SavedViewDetailParams } from "./detail/preload.js";
+export {
+  MISSING_VIEW_BACK_LABEL,
+  MISSING_VIEW_DESCRIPTION,
+  MISSING_VIEW_TITLE,
+  savedViewDocumentTitle,
+  savedViewLayout,
+  savedViewTitle,
+  showsPrivateLock,
+} from "./detail/model.js";
+export { projectViewDetailQueryOptions } from "./api/detail.js";
 export { WorkspaceViewsListScreen } from "./components/WorkspaceViewsListScreen.js";
 export type { WorkspaceViewsListScreenProps } from "./components/WorkspaceViewsListScreen.js";
 export { WorkspaceViewMenu, selectWorkspaceViewMenuEntries } from "./components/WorkspaceViewMenu.js";
@@ -61,6 +80,7 @@ export {
   isViewLive,
   projectViewHref,
   projectViewsFeatureHref,
+  projectViewsListHref,
   projectViewsTitle,
   resolveProjectViewsBody,
   sortProjectViewsDefault,
