@@ -9,7 +9,7 @@
     "build": "vite build --mode web && vite build --mode desktop",
     "build:web": "vite build --mode web && node tools/prerender.mjs",
     "build:desktop": "vite build --mode desktop",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc/tsconfig.tsbuildinfo",
     "lint": "oxlint --deny-warnings",
     "check:boundaries": "node checks/check-boundaries.mjs",
     "check:headers": "node checks/check-headers.mjs",
