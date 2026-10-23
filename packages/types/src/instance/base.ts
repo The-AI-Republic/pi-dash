@@ -8,7 +8,6 @@ import type { IUserLite } from "../users";
 import type {
   TInstanceAIConfigurationKeys,
   TInstanceEmailConfigurationKeys,
-  TInstanceImageConfigurationKeys,
   TInstanceAuthenticationKeys,
   TInstanceWorkspaceConfigurationKeys,
   TCoreLoginMediums,
@@ -57,7 +56,6 @@ export interface IInstanceConfig {
   slack_client_id: string | undefined;
   posthog_api_key: string | undefined;
   posthog_host: string | undefined;
-  has_unsplash_configured: boolean;
   has_llm_configured: boolean;
   file_size_limit: number | undefined;
   is_smtp_configured: boolean;
@@ -83,7 +81,6 @@ export interface IInstanceAdmin {
 export type TInstanceConfigurationKeys =
   | TInstanceAIConfigurationKeys
   | TInstanceEmailConfigurationKeys
-  | TInstanceImageConfigurationKeys
   | TInstanceAuthenticationKeys
   | TInstanceWorkspaceConfigurationKeys;
 

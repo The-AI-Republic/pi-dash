@@ -64,12 +64,6 @@ class UserAssetEndpoint(BaseAPIView):
             user.avatar_asset_id = None
             user.save()
             return
-        # User Cover
-        if entity_type == FileAsset.EntityTypeContext.USER_COVER:
-            user = User.objects.get(id=asset.user_id)
-            user.cover_image_asset_id = None
-            user.save()
-            return
         return
 
     @asset_docs(
@@ -89,16 +83,6 @@ class UserAssetEndpoint(BaseAPIView):
                     },
                     description="Example request for uploading a user avatar",
                 ),
-                OpenApiExample(
-                    "User Cover Upload",
-                    value={
-                        "name": "cover.jpg",
-                        "type": "image/jpeg",
-                        "size": 1024000,
-                        "entity_type": "USER_COVER",
-                    },
-                    description="Example request for uploading a user cover",
-                ),
             ],
         ),
         responses={
@@ -110,7 +94,7 @@ class UserAssetEndpoint(BaseAPIView):
     def post(self, request):
         """Generate presigned URL for user asset upload.
 
-        Create a presigned URL for uploading user profile assets (avatar or cover image).
+        Create a presigned URL for uploading user profile assets (avatar).
         This endpoint generates the necessary credentials for direct S3 upload.
         """
         # get the asset key
@@ -123,7 +107,7 @@ class UserAssetEndpoint(BaseAPIView):
         size_limit = min(size, settings.FILE_SIZE_LIMIT)
 
         #  Check if the entity type is allowed
-        if not entity_type or entity_type not in ["USER_AVATAR", "USER_COVER"]:
+        if entity_type != FileAsset.EntityTypeContext.USER_AVATAR:
             return Response(
                 {"error": "Invalid entity type.", "status": False},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -231,7 +215,7 @@ class UserAssetEndpoint(BaseAPIView):
     def delete(self, request, asset_id):
         """Delete user asset.
 
-        Delete a user profile asset (avatar or cover image) and remove its reference from the user profile.
+        Delete a user profile asset (avatar) and remove its reference from the user profile.
         This performs a soft delete by marking the asset as deleted and updating the user's profile.
         """
         asset = FileAsset.objects.get(id=asset_id, user_id=request.user.id)
@@ -262,12 +246,6 @@ class UserServerAssetEndpoint(BaseAPIView):
             user.avatar_asset_id = None
             user.save()
             return
-        # User Cover
-        if entity_type == FileAsset.EntityTypeContext.USER_COVER:
-            user = User.objects.get(id=asset.user_id)
-            user.cover_image_asset_id = None
-            user.save()
-            return
         return
 
     @asset_docs(
@@ -283,7 +261,7 @@ class UserServerAssetEndpoint(BaseAPIView):
         """Generate presigned URL for user server asset upload.
 
         Create a presigned URL for uploading user profile assets
-        (avatar or cover image) using server credentials. This endpoint generates the
+        (avatar) using server credentials. This endpoint generates the
         necessary credentials for direct S3 upload with server-side authentication.
         """
         # get the asset key
@@ -296,7 +274,7 @@ class UserServerAssetEndpoint(BaseAPIView):
         size_limit = min(size, settings.FILE_SIZE_LIMIT)
 
         #  Check if the entity type is allowed
-        if not entity_type or entity_type not in ["USER_AVATAR", "USER_COVER"]:
+        if entity_type != FileAsset.EntityTypeContext.USER_AVATAR:
             return Response(
                 {"error": "Invalid entity type.", "status": False},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -387,7 +365,7 @@ class UserServerAssetEndpoint(BaseAPIView):
     def delete(self, request, asset_id):
         """Delete user server asset.
 
-        Delete a user profile asset (avatar or cover image) using server credentials and
+        Delete a user profile asset (avatar) using server credentials and
         remove its reference from the user profile. This performs a soft delete by marking the
         asset as deleted and updating the user's profile.
         """

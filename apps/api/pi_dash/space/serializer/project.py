@@ -14,7 +14,6 @@ class ProjectLiteSerializer(BaseSerializer):
             "id",
             "identifier",
             "name",
-            "cover_image",
             "icon_prop",
             "emoji",
             "description",
