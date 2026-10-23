@@ -102,9 +102,13 @@ describe("ListRow expanded sub-issues", () => {
   it("refetches cached expanded children when issue queries are invalidated", async () => {
     const child = issue({ id: CHILD, name: "Old child", parent_id: ISSUE, sequence_id: 43 });
     const calls: string[] = [];
+    const childCalls = () => calls.filter((url) => url.includes("sub-issues/"));
     createAppClient("https://api.test", async (url) => {
       calls.push(url);
-      return jsonResponse(subIssueResponse(calls.length === 1 ? "Old child" : "Fresh child"));
+      // The row's menu hook reads beside the children read; only the
+      // children URL drives the Old/Fresh payload this case pins.
+      if (!url.includes("sub-issues/")) return jsonResponse([]);
+      return jsonResponse(subIssueResponse(childCalls().length === 1 ? "Old child" : "Fresh child"));
     });
     const queryClient = createQueryClient();
     const onChildrenChange = vi.fn();
@@ -120,13 +124,13 @@ describe("ListRow expanded sub-issues", () => {
       </QueryClientProvider>
     );
 
-    await waitFor(() => expect(calls).toHaveLength(1));
+    await waitFor(() => expect(childCalls()).toHaveLength(1));
     await waitFor(() => expect(onChildrenChange).toHaveBeenCalled());
     onChildrenChange.mockClear();
 
     await act(async () => queryClient.invalidateQueries({ queryKey: issueKeys.all("acme") }));
 
-    await waitFor(() => expect(calls).toHaveLength(2));
+    await waitFor(() => expect(childCalls()).toHaveLength(2));
     expect(onChildrenChange).toHaveBeenCalledWith(
       ISSUE,
       expect.arrayContaining([expect.objectContaining({ id: CHILD, name: "Fresh child" })])

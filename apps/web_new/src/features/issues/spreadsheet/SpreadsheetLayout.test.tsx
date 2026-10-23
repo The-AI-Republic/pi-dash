@@ -611,7 +611,7 @@ describe("SpreadsheetLayout", () => {
     state.release?.();
   });
 
-  it("navigates from the sub-issue count and from the row action to the work item", async () => {
+  it("navigates from the sub-issue count and from the row title to the work item", async () => {
     stub({ pages: [page([issue(ID1, "Fix login", 1, { sub_issues_count: 2 }), issue(ID2, "Second", 2)])] });
     const { router } = renderSheet();
     await screen.findByRole("table");
@@ -621,9 +621,56 @@ describe("SpreadsheetLayout", () => {
     expect(router.state.location.hash.replace(/^#/, "")).toBe("sub-issues");
     await router.navigate({ to: "/$ws/projects/$projectId/issues", params: { ws: SLUG, projectId: PROJECT } });
     await screen.findByRole("table");
-    fireEvent.click(await screen.findByRole("button", { name: "Open Fix login" }));
+    fireEvent.click(await screen.findByRole("link", { name: "Fix login" }));
     await waitFor(() => expect(router.state.location.pathname).toBe(`/${SLUG}/browse/WEB-1`));
     expect(router.state.location.hash).toBe("");
+  });
+
+  it("offers the shared project menu from the row ellipsis and from right-click", async () => {
+    stub();
+    renderSheet();
+    await screen.findByRole("table");
+    const cell = await waitFor(() => {
+      const found = document.getElementById(`issue-${ID1}`);
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    const trigger = await within(cell).findByRole("button", { name: "Actions for WEB-1" });
+    fireEvent.click(trigger);
+    const entries = await screen.findAllByRole("menuitem");
+    expect(entries.map((entry) => entry.textContent)).toEqual([
+      "Edit",
+      "Make a copy",
+      "Open in new tab",
+      "Copy link",
+      "Move to project",
+      expect.stringContaining("Archive"),
+      "Delete",
+    ]);
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(cell);
+    const contextEntries = await screen.findAllByRole("menuitem");
+    expect(contextEntries).toHaveLength(7);
+    expect(within(document.body).getByRole("menuitem", { name: "Edit" })).toBeInTheDocument();
+  });
+
+  it("keeps the pending quick-add row free of a row menu", async () => {
+    const state = stub();
+    state.hold = true;
+    renderSheet();
+    await screen.findByRole("table");
+    fireEvent.click(screen.getByRole("button", { name: "Add work item" }));
+    const input = screen.getByPlaceholderText("Work item title");
+    fireEvent.change(input, { target: { value: "Pending row" } });
+    fireEvent.submit(input.closest("form")!);
+    const pending = await screen.findByText("Pending row");
+    const row = pending.closest("tr") as HTMLElement;
+    expect(row).toHaveAttribute("data-temprow", "true");
+    expect(within(row).queryByRole("button", { name: /^Actions for/ })).toBeNull();
+    state.release?.();
+    await waitFor(() => expect(screen.queryByText("Pending row")).not.toBeInTheDocument());
   });
 
   it("expands a sub-issue inline and indents the child", async () => {

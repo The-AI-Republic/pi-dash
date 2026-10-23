@@ -63,6 +63,29 @@ describe("Menu", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("renders an action's description as its own muted line inside the item", () => {
+    render(
+      <Menu
+        trigger={<Button>Actions</Button>}
+        items={[
+          { label: "Archive", description: "Finish the work item first.", onSelect: () => {}, disabled: true },
+          { label: "Delete", onSelect: () => {} },
+        ]}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Actions" }));
+    const archive = screen.getByRole("menuitem", { name: /Archive/ });
+    const note = archive.querySelector("[data-menu-description='true']");
+    expect(note).not.toBeNull();
+    expect(note?.textContent).toBe("Finish the work item first.");
+    // The note stays inside the item, not beside it.
+    expect(screen.getAllByText("Finish the work item first.")).toHaveLength(1);
+    // The label keeps its own element, matching the heading the parity
+    // driver reads a menu item's title from.
+    expect(archive.querySelector("[data-menu-title='true']")?.textContent).toBe("Archive");
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toHaveTextContent("Delete");
+  });
+
   it("renders leading icons and keys repeated labels by item key", () => {
     const onSelect = vi.fn();
     render(

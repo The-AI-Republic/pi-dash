@@ -1,6 +1,10 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
+// Menu basics (UI kit page): one menu-button popup shared by every
+// dropdown. Actions may carry a secondary description line (a disabled
+// entry explains itself there), and a popup may hold caller-rendered
+// custom rows between its actions.
 import { Menu as BaseMenu } from "@base-ui-components/react/menu";
 import * as React from "react";
 import { cn } from "../lib/cn";
@@ -10,6 +14,11 @@ export interface MenuAction {
   label: string;
   onSelect: () => void;
   disabled?: boolean;
+  /**
+   * Secondary line under the label: why an entry is disabled, or what it
+   * does. The item's accessible name covers the label and the note.
+   */
+  description?: string;
   /** Leading mark (an avatar or glyph); hidden from assistive tech. */
   icon?: React.ReactNode;
   /** React key when sibling labels repeat (project names can collide). */
@@ -74,6 +83,33 @@ const popupClasses =
 const itemClasses =
   "flex cursor-default items-center rounded-(--radius-control) px-(--space-4) py-(--space-3) text-body text-(--text) outline-none data-[disabled]:opacity-50 data-[highlighted]:bg-(--subtle)";
 
+/**
+ * The text block inside a menu item: the label, or the caller's rich
+ * content, followed by the optional secondary note. ContextMenu shares it
+ * so both popups read the same.
+ */
+export function MenuItemBody({
+  label,
+  description,
+  content,
+}: {
+  label: string;
+  description?: string | undefined;
+  content?: React.ReactNode;
+}): React.ReactElement {
+  if (description === undefined) return <>{content ?? label}</>;
+  return (
+    <span className="flex min-w-0 flex-col">
+      <span data-menu-title="true" className="min-w-0">
+        {content ?? label}
+      </span>
+      <span data-menu-description="true" className="text-caption text-(--text-muted)">
+        {description}
+      </span>
+    </span>
+  );
+}
+
 export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.ReactElement {
   return (
     <BaseMenu.Root {...pickDefined({ open, onOpenChange })}>
@@ -103,7 +139,7 @@ export function Menu({ trigger, items, open, onOpenChange }: MenuProps): React.R
                       {entry.icon}
                     </span>
                   )}
-                  {entry.content ?? entry.label}
+                  <MenuItemBody label={entry.label} description={entry.description} content={entry.content} />
                 </BaseMenu.Item>
               )
             )}

@@ -78,4 +78,16 @@ describe("ContextMenu", () => {
     expect(menu).toContainElement(screen.getByTestId("note"));
     expect(screen.getByTestId("note").parentElement).toBe(menu);
   });
+
+  it("carries the action description inside the right-click item too", () => {
+    render(
+      <ContextMenu
+        trigger={<span>Tab</span>}
+        items={[{ label: "Archive", description: "Not finished yet", onSelect: () => {}, disabled: true }]}
+      />
+    );
+    fireEvent.contextMenu(screen.getByText("Tab"));
+    const item = screen.getByRole("menuitem", { name: /Archive/ });
+    expect(item.querySelector("[data-menu-description='true']")?.textContent).toBe("Not finished yet");
+  });
 });

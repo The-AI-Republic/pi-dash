@@ -4,7 +4,7 @@
 // See the LICENSE file for details.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { IssueListItem } from "@pidash/api-client";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -149,6 +149,10 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
     selectionTree?: { expanded: ReadonlySet<string>; children: ReadonlyMap<string, readonly IssueListItem[]> };
     onOpenPeek: (key: string, title: string) => void;
     hrefFor: (row: IssueListItem) => string;
+    menuContext?: string;
+    menuCycleId?: string | null;
+    menuModuleId?: string | null;
+    menuCanWrite?: boolean;
   }) => (
     <div
       data-testid="row-probe"
@@ -158,6 +162,10 @@ vi.mock("./ListRow.js", async (importOriginal) => ({
       data-foreign-key={props.projectIdentifierFor?.(
         row({ id: "foreign-row", project_id: "823e4567-e89b-12d3-a456-426614174008" })
       )}
+      data-menu-context={props.menuContext ?? ""}
+      data-menu-cycle={props.menuCycleId ?? ""}
+      data-menu-module={props.menuModuleId ?? ""}
+      data-menu-write={String(props.menuCanWrite ?? "unset")}
     >
       {props.onSelectionToggle === undefined ? null : props.selectionAvailable === false ? (
         <span role="img" aria-label={`Cannot select ${props.issue.sequence_id}`} />
@@ -735,8 +743,13 @@ describe("ListLayout", () => {
     view.unmount();
     renderLayout({ peekKey: "WEB-42", onPeekChange });
     expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(onPeekChange).toHaveBeenCalledWith(null);
+    // The peek is a lazy chunk: its Escape listener attaches on mount, so
+    // retry the key until the mounted peek has answered (a single fire can
+    // land between the lazy render and the effect under load).
+    await waitFor(() => {
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(onPeekChange).toHaveBeenCalledWith(null);
+    });
   });
 
   it("supports uncontrolled peek state", async () => {
@@ -753,6 +766,12 @@ describe("ListLayout", () => {
     fireEvent.click(screen.getByRole("button", { name: "Nested child" }));
     expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
     expect(screen.getByLabelText("Work item title")).toHaveValue("Nested child");
+  });
+
+  it("opens peek with a blank title when the key matches no loaded row", async () => {
+    renderLayout({ peekKey: "WEB-404" });
+    expect(await screen.findByLabelText("Work item preview")).toBeInTheDocument();
+    expect(screen.getByLabelText("Work item title")).toHaveValue("");
   });
 
   it("passes compact density through and keeps the flat sentinel inside the scroll region", () => {
@@ -819,6 +838,28 @@ describe("ListLayout", () => {
         queryKey: issueKeys.lists("acme", ...entityListsKeyPart({ scope: "project", projectId: PROJECT })),
       })
     );
+  });
+
+  it("hands each row its menu context and the viewer's standing (ISS-060/062/063)", () => {
+    mocks.pages.mockReturnValue(pageState());
+    renderLayout({ cycleId: CYCLE });
+    const row = screen.getAllByTestId("row-probe")[0]!;
+    expect(row).toHaveAttribute("data-menu-context", "cycle");
+    expect(row).toHaveAttribute("data-menu-cycle", CYCLE);
+    expect(row).toHaveAttribute("data-menu-write", "true");
+  });
+
+  it("opens the project context on a plain list and reads a completed cycle as read-only", () => {
+    mocks.pages.mockReturnValue(pageState());
+    renderLayout({});
+    expect(screen.getAllByTestId("row-probe")[0]).toHaveAttribute("data-menu-context", "project");
+    cleanup();
+    mocks.pages.mockReturnValue(pageState());
+    renderLayout({ moduleId: MODULE, completedModule: true });
+    const row = screen.getAllByTestId("row-probe")[0]!;
+    expect(row).toHaveAttribute("data-menu-context", "module");
+    expect(row).toHaveAttribute("data-menu-module", MODULE);
+    expect(row).toHaveAttribute("data-menu-write", "false");
   });
 });
 

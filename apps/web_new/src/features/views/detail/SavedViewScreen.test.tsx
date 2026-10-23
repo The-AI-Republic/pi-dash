@@ -16,9 +16,17 @@ import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Stand-ins for the router: navigation is TanStack's own tested behavior.
-const routerHarness = vi.hoisted(() => ({ navigate: vi.fn() }));
+// The header ellipsis (NEWFRONT-636, ISS-067) reads the page address through
+// useRouterState, so the stand-in answers that too; the pathname mirrors the
+// suite's PARAMS below (the factory is hoisted and cannot see those consts).
+const routerHarness = vi.hoisted(() => ({
+  navigate: vi.fn(),
+  pathname: "/acme/projects/223e4567-e89b-12d3-a456-426614174001/views/323e4567-e89b-12d3-a456-426614174002",
+}));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => routerHarness.navigate,
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string; searchStr: string } }) => unknown }) =>
+    select({ location: { pathname: routerHarness.pathname, searchStr: "" } }),
 }));
 
 // The issues layout root and its five bodies are heavy; the body pin here is

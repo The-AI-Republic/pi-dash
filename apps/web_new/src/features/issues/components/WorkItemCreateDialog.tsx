@@ -219,6 +219,18 @@ export interface WorkItemCreateDialogProps {
    * it, so the caller can tell a save from a close.
    */
   onEditSaved?: ((changedFields: readonly string[]) => void) | undefined;
+  /**
+   * Copy entry (ISS-060): the row a duplicate starts from. The form opens
+   * on that row's fields with the suffixed title and files a new work
+   * item; nothing is written until Save.
+   */
+  copySeed?: CopySeed | null | undefined;
+}
+
+/** The row a "Make a copy" entry opens prefilled (ISS-060). */
+export interface CopySeed {
+  title: string;
+  snapshot: unknown;
 }
 
 /** The draft payload a copy or a blank draft entry opens with. */
@@ -403,6 +415,7 @@ export function WorkItemCreateDialog({
   editSaveLabel,
   onBeforeEditSubmit,
   onEditSaved,
+  copySeed = null,
 }: WorkItemCreateDialogProps): React.ReactElement | null {
   const editing = edit !== null;
   // A draft entry (ISS-139/141): the create form writes a draft instead of
@@ -488,10 +501,22 @@ export function WorkItemCreateDialog({
       draftSeed.input.project_id ?? initialProjectId ?? null
     );
   }, [draftSeed, initialProjectId]);
+  // A duplicate opens on the source row's fields under its "(copy)" title;
+  // its fields seed the form but the submit always creates.
+  const seededCopyForm = React.useMemo((): CreateFormState | null => {
+    if (copySeed === null) return null;
+    const row = typeof copySeed.snapshot === "object" && copySeed.snapshot !== null ? copySeed.snapshot : {};
+    // A snapshot the form cannot read still opens under the copy title,
+    // so the duplicate is recognisable even from a sparse row.
+    return (
+      formFromSnapshot({ ...row, name: copySeed.title }, initialProjectId ?? null) ??
+      seededForm(initialProjectId ?? null, copySeed.title)
+    );
+  }, [copySeed, initialProjectId, seededForm]);
   const [form, setForm] = React.useState<CreateFormState>(() =>
     edit !== null
       ? (editStart(edit, resolveProjectId(offered, initialProjectId ?? editProjectId ?? null)) ?? seededForm(null))
-      : (seededDraftForm ?? seededForm(resolveProjectId(offered, initialProjectId ?? null)))
+      : (seededDraftForm ?? seededCopyForm ?? seededForm(resolveProjectId(offered, initialProjectId ?? null)))
   );
   // What the edit opened with: every submit diffs against it. A create
   // never has one, so its submit always builds a full payload.
@@ -562,6 +587,7 @@ export function WorkItemCreateDialog({
     edit?.projectId ?? "",
     draftSeed?.title ?? "",
     draftSeed?.input.project_id ?? "",
+    copySeed?.title ?? "",
     context?.cycleId ?? "",
     context?.moduleId ?? "",
   ].join(":");
@@ -584,6 +610,7 @@ export function WorkItemCreateDialog({
     let next =
       starting ??
       seededDraftForm ??
+      seededCopyForm ??
       contextForm(workspaceSlug, projectId, editing ? undefined : context, editing ? undefined : initialValues);
     if (seededParent !== null) next = { ...next, parentId: seededParent.id };
     routeMembership.current = membershipForForm(next);
@@ -619,6 +646,7 @@ export function WorkItemCreateDialog({
     editProjectId,
     context,
     initialValues,
+    seededCopyForm,
   ]);
 
   // The detail read answers after the first paint: adopt its description

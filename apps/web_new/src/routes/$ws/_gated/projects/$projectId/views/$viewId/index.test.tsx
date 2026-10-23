@@ -14,6 +14,14 @@ import * as React from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { issueKeys } from "../../../../../../../features/issues/api/keys.js";
+
+// The view's header mounts the whole-list ellipsis (ISS-067), which reads
+// the address it copies from the router. This file renders the screen
+// component alone, so the hook answers a fixed address.
+vi.mock("../../../../../../../features/issues/menus/useCurrentPageHref.js", () => ({
+  useCurrentPageHref: () =>
+    "/acme/projects/223e4567-e89b-12d3-a456-426614174001/views/323e4567-e89b-12d3-a456-426614174002",
+}));
 import { createAppClient, resetAppClient } from "../../../../../../../core/api/client.js";
 import { makeView } from "../../../../../../../features/views/testing.js";
 import { Route } from "./index.js";
@@ -101,8 +109,28 @@ function runBeforeLoad(context: ReturnType<typeof contextFor>["context"]) {
   return Route.options.beforeLoad?.({ context, params: PARAMS, search: {} } as never);
 }
 
+function prefsRecord() {
+  return {
+    id: "423e4567-e89b-12d3-a456-426614174003",
+    workspace: "123e4567-e89b-12d3-a456-426614174000",
+    project: PARAMS.projectId,
+    user: "523e4567-e89b-12d3-a456-426614174004",
+    filters: {},
+    display_filters: { layout: "list", group_by: null, order_by: "sort_order" },
+    display_properties: {},
+    rich_filters: {},
+    preferences: {},
+    sort_order: 1,
+    created_by: null,
+    updated_by: null,
+    created_at: "2024-01-02T03:04:05Z",
+    updated_at: "2024-02-03T04:05:06Z",
+  };
+}
+
 const happyPath = (url: string) => {
   if (url.endsWith("/projects/")) return { status: 200, body: [projectRow()] };
+  if (url.includes("user-properties")) return { status: 200, body: prefsRecord() };
   return url.includes("/views/") ? { status: 200, body: viewRecord() } : { status: 200, body: emptyIssues() };
 };
 
@@ -147,6 +175,39 @@ describe("saved-view detail route preload", () => {
     expect(await screen.findByRole("region", { name: "Saved view" })).toBeInTheDocument();
     expect(paramsSpy).toHaveBeenCalled();
     expect(searchSpy).toHaveBeenCalled();
+    paramsSpy.mockRestore();
+    searchSpy.mockRestore();
+    resetAppClient();
+  });
+
+  it("offers the whole-list actions in the view's header (ISS-067)", async () => {
+    await loadSavedViewDetail();
+    const paramsSpy = vi.spyOn(Route, "useParams").mockReturnValue(PARAMS as never);
+    const searchSpy = vi.spyOn(Route, "useSearch").mockReturnValue({} as never);
+    const { context } = contextFor(happyPath);
+    // The header renders under the loaded view, so the visit's preload runs
+    // first: it seeds the view and list reads and the empty-card chunk.
+    await runBeforeLoad(context);
+    const Component = Route.options.component;
+    if (!Component) throw new Error("missing component");
+    createAppClient("https://api.test", (async (url: string) => {
+      if (url.endsWith("/api/users/me/profile/")) {
+        return {
+          status: 200,
+          url,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ start_of_the_week: 1 }),
+        };
+      }
+      const { status, body } = happyPath(url);
+      return { status, url, headers: { get: () => null }, text: async () => JSON.stringify(body) };
+    }) as never);
+    render(
+      <QueryClientProvider client={context.queryClient}>
+        <Component />
+      </QueryClientProvider>
+    );
+    expect(await screen.findByRole("button", { name: "List actions" })).toBeInTheDocument();
     paramsSpy.mockRestore();
     searchSpy.mockRestore();
     resetAppClient();

@@ -30,6 +30,7 @@ import {
   DisplayControl,
   IssuesLayoutRoot,
   LazyIssueFilters,
+  ListPageQuickActions,
   ListSkeleton,
   SavedViewEmptyCard,
   ViewLayoutBody,
@@ -309,6 +310,7 @@ function SavedViewBody({
         <>
           {addWorkItem}
           {locked ? null : displayControl}
+          <ListPageQuickActions />
         </>
       }
       displayControl={locked ? undefined : displayControl}
