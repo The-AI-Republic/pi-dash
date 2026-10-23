@@ -1286,6 +1286,10 @@ async fn twin_load_render_bundle(
         Some(id) => twin_bundle_done_payload(tx, id).await?,
         None => None,
     };
+    // A parent run with a NULL payload must render the fallback, never
+    // the ticker payload — so its existence travels separately from the
+    // payload itself (PIDASHCONV-1232).
+    let has_parent_run = parent_run_id.is_some();
     let ticker_parent_payload = {
         let resume: Option<(Option<Uuid>,)> = sqlx::query_as(TICKER_RESUME_SELECT_SQL)
             .bind(issue_id)
@@ -1329,6 +1333,7 @@ async fn twin_load_render_bundle(
             enabled,
         }),
         direct_parent_payload,
+        has_parent_run,
         ticker_parent_payload,
         override_rows,
     })
