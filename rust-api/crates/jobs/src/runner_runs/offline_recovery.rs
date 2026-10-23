@@ -316,8 +316,8 @@ async fn finalize_offline_run(
 }
 
 /// The finalize `UPDATE`: binds in clause order, the id last. `NULL`
-/// columns bind typed nulls (`queue_position` is `int2`, the markers
-/// are `timestamptz`); `Now` binds one `now()` per clause.
+/// columns bind typed nulls (the markers are `timestamptz`); `Now`
+/// binds one `now()` per clause.
 async fn execute_finalize_update(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     values: &finalization::FinalizeValues,
@@ -328,7 +328,6 @@ async fn execute_finalize_update(
     for clause in &values.clauses {
         match &clause.value {
             SetValue::Null => match clause.column {
-                "queue_position" => query = query.bind(None::<i16>),
                 "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
                     query = query.bind(None::<DateTime<Utc>>);
                 }

@@ -250,10 +250,10 @@ pub const SCHEDULER_RUN_INSERT_SQL: &str =
     tool_plan, terminal_hooks_applied_at, terminal_capacity_released_at, prompt, trigger, \
     prompt_manifest, phase_kind, run_config, required_capabilities, thread_id, agent_metadata, \
     lease_expires_at, done_payload, error, refusal_category, llm_model, usage, created_at, \
-    assigned_at, queue_position, started_at, ended_at) \
+    assigned_at, started_at, ended_at) \
     VALUES ($1, $2, NULL, $3, $4, NULL, $5, NULL, $6, NULL, 'queued', $7, 0, NULL, '', $8, $9, \
     NULL, NULL, '', 'scheduler', NULL, '', '{}', '[]', '', '{}', NULL, NULL, '', '', '', '{}', $10, \
-    NULL, NULL, NULL, NULL)";
+    NULL, NULL, NULL)";
 
 /// The scheduler INSERT as executed: [`SCHEDULER_RUN_INSERT_SQL`] plus
 /// `RETURNING` the [`RUN_VIEW_COLUMNS`] projection, like `objects.create`.

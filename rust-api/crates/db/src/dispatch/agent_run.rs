@@ -5,11 +5,11 @@
 //! Ports exactly the `AgentRun` columns dispatch touches
 //! (`apps/api/pi_dash/runner/models.py:872-1035`), as recorded in the
 //! fixture's `dispatch_touched_subset.agent_run`: 22 physical columns
-//! in fixture order. The full model carries 41 columns; the rest
+//! in fixture order. The full model carries 40 columns; the rest
 //! (`owner`, `runner`, `parent_run`, `terminal_*`, `prompt_manifest`,
 //! `phase_kind`, `run_config`, `required_capabilities`, `thread_id`,
 //! `agent_metadata`, `refusal_category`, the `*_tokens` generated
-//! columns, `created_at`, `assigned_at`, `queue_position`, `ended_at`)
+//! columns, `created_at`, `assigned_at`, `ended_at`)
 //! belong to the runner domain (D-13…D-15), which owns these tables —
 //! this sub-issue ports no writes and no runner-owned reads.
 //!

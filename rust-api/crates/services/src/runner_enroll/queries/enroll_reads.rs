@@ -544,8 +544,8 @@ pub fn managed_cap_count_sql() -> String {
 /// `Runner.objects.create(owner, workspace_id, dev_machine, pod, name,
 /// host_label, provisioning, enrolled_at=now())`. `Runner.save()`'s
 /// single-project auto-resolve is a no-op here (`pod` is always set —
-/// `:676-680` 409s otherwise), so this is a plain 30-column `INSERT`
-/// with every column bound (`$1..$30` in [`r_cols::COLUMNS`] order):
+/// `:676-680` 409s otherwise), so this is a plain 29-column `INSERT`
+/// with every column bound (`$1..$29` in [`r_cols::COLUMNS`] order):
 /// `$1` id (fresh uuid4), `$2` owner, `$3` workspace, `$4` dev machine
 /// (or NULL — legacy path), `$5` pod, `$6` name (explicit or
 /// `_next_auto_runner_name`), `$7` host label, `$8` provisioning
@@ -556,8 +556,8 @@ pub fn managed_cap_count_sql() -> String {
 /// at creation, no legacy token), `$17` enrolled_at (`now()`), `$18`
 /// capabilities (`[]`), `$19` status (`'offline'`), `$20-22`
 /// os/arch/version (`''`), `$23` dev_metadata (`{}`), `$24` protocol
-/// version (`1`), `$25-26` heartbeat/free-worktrees (NULL), `$27-28`
-/// created/updated (`now()`), `$29-30` revoked_at (NULL)/reason (`''`).
+/// version (`1`), `$25` heartbeat (NULL), `$26-27`
+/// created/updated (`now()`), `$28-29` revoked_at (NULL)/reason (`''`).
 ///
 /// `IntegrityError` on `runner_unique_name_per_pod` → explicit name:
 /// 409 `runner_name_taken`; auto name: retry (max 5) else 409
@@ -964,7 +964,6 @@ mod tests {
         "dev_metadata",
         "protocol_version",
         "last_heartbeat_at",
-        "free_worktrees",
         "created_at",
         "updated_at",
         "revoked_at",
@@ -1364,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn e7_insert_binds_all_thirty_columns() {
+    fn e7_insert_binds_all_twenty_nine_columns() {
         let sql = runner_insert_sql();
         let cols = RUNNER_COLS
             .iter()
@@ -1375,7 +1374,7 @@ mod tests {
             sql,
             format!(
                 "INSERT INTO \"runner\" ({cols}) VALUES ({})",
-                (1..=30)
+                (1..=29)
                     .map(|i| format!("${i}"))
                     .collect::<Vec<_>>()
                     .join(", "),

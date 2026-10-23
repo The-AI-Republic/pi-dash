@@ -2192,7 +2192,7 @@ impl MoveStore for PoolMoveStore<'_> {
         // The locked row is the parent's pre-cancel snapshot, and the
         // `RunView` projection needs the full row: re-read it in-span,
         // under the held lock. The cancel touched only
-        // status/ended_at/queue_position, so this is the row Python's
+        // status/ended_at, so this is the row Python's
         // mutated in-memory instance describes.
         let parent = creation
             .run(parent_run.id)

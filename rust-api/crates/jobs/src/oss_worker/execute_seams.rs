@@ -195,7 +195,6 @@ impl ExecuteSeams for LiveExecuteSeams {
         for clause in &values.clauses {
             update = match &clause.value {
                 pidash_services::runner_runs::SetValue::Null => match clause.column {
-                    "queue_position" => update.bind(None::<i16>),
                     "terminal_hooks_applied_at" | "terminal_capacity_released_at" => {
                         update.bind(None::<DateTime<Utc>>)
                     }
