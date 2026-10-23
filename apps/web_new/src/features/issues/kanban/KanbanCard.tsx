@@ -77,7 +77,7 @@ export function KanbanCard(props: KanbanCardProps): React.ReactElement {
       data-unconfirmed={unconfirmed ? "true" : undefined}
       className={cn(
         "group/card flex flex-col gap-(--space-1) rounded-(--radius-control) border bg-(--surface) p-(--space-3) text-left",
-        peeked ? "border-(--accent) ring-1 ring-(--accent)" : "border-(--border) hover:border-(--border-strong)",
+        peeked ? "border-(--accent) ring-1 ring-(--accent)" : "border-(--border) hover:border-(--text-muted)",
         unconfirmed ? "animate-pulse" : ""
       )}
     >

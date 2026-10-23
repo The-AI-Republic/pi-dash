@@ -148,6 +148,14 @@ describe("KanbanCard", () => {
     expect(screen.getByTestId("strip")).toHaveAttribute("data-readonly", "true");
   });
 
+  it("draws the resting and hover borders from kit tokens only", () => {
+    setup();
+    const className = screen.getByTestId("kanban-card").className;
+    expect(className).toContain("border-(--border)");
+    expect(className).toContain("hover:border-(--text-muted)");
+    expect(className).not.toContain("--border-strong");
+  });
+
   it("hides the quick actions until hover on a wide viewport and always shows them on narrow", () => {
     narrow.value = false;
     const wide = setup();
