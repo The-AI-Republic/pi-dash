@@ -548,6 +548,55 @@ pub fn lock_run_sql() -> String {
     )
 }
 
+/// Parent resume-handle read for [`clear_run_pin`]: the lazy
+/// `run.parent_run` load (`AgentRun._base_manager.get(pk=...)`), reduced
+/// to the one column the clear consults. Param: `$1` the parent id.
+pub const PARENT_THREAD_ID_SQL: &str =
+    r#"SELECT "agent_run"."thread_id" FROM "agent_run" WHERE "agent_run"."id" = $1 LIMIT 1"#;
+
+/// `run.parent_run.save(update_fields=["thread_id"])` with `thread_id = ""`
+/// (`matcher.py:223-225`). Param: `$1` the parent id.
+pub const CLEAR_PARENT_THREAD_ID_SQL: &str =
+    r#"UPDATE "agent_run" SET "thread_id" = '' WHERE "agent_run"."id" = $1"#;
+
+/// `run.save(update_fields=["pinned_runner"])` with `pinned_runner = None`
+/// (`matcher.py:219,226`). Param: `$1` the run id.
+pub const CLEAR_RUN_PIN_SQL: &str =
+    r#"UPDATE "agent_run" SET "pinned_runner_id" = NULL WHERE "agent_run"."id" = $1"#;
+
+/// `matcher.clear_run_pin` (`matcher.py:203-227`, PDASHOSS01-272): drop the
+/// locked run's pin and the parent's stale resume handle, parent saved
+/// first. Answers the runner id the run had been pinned to (`None`, with
+/// no writes, when it was not pinned). The caller owns the transaction and
+/// the row lock. A set `parent_run_id` whose row is gone answers
+/// `RowNotFound` — Django's `RelatedObjectDoesNotExist` 500.
+pub(crate) async fn clear_run_pin(
+    conn: &mut sqlx::PgConnection,
+    locked: &AgentRun,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    let Some(previous) = locked.pinned_runner_id else {
+        return Ok(None);
+    };
+    if let Some(parent_id) = locked.parent_run_id {
+        let thread_id: String = sqlx::query_scalar(PARENT_THREAD_ID_SQL)
+            .bind(parent_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        if !thread_id.is_empty() {
+            sqlx::query(CLEAR_PARENT_THREAD_ID_SQL)
+                .bind(parent_id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    sqlx::query(CLEAR_RUN_PIN_SQL)
+        .bind(locked.id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Some(previous))
+}
+
 /// Cloud-duplicate stamp (`locked.save(update_fields=[...])`,
 /// `runs.py:588-591`). Params: `$1` now, `$2` reason, `$3` id.
 pub fn cloud_dup_stamp_sql() -> String {
@@ -1216,7 +1265,7 @@ async fn list_runs_inner(
 /// joined issue plus the through-model assignee check, scheduler
 /// standing from the joined binding's project.
 #[allow(clippy::result_large_err)]
-async fn view_facts_for(
+pub(crate) async fn view_facts_for(
     pool: &PgPool,
     actor_id: Uuid,
     guarded: &GuardedRun,
