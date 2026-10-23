@@ -1,13 +1,14 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// One intake request row (parity/specs/intake.md INT-006): the
-// project-scoped id, the status chip (hidden while pending), the title,
-// the created date with its tooltip, the priority marker with its
-// tooltip, the label chips (four or more collapse to one count chip),
-// and the author avatar — the intake identity avatar for
-// system-authored rows. The row is a selection control: activating it
-// selects the request, and the selected row is marked.
+// One intake request row (parity/specs/intake.md INT-006, INT-034): the
+// project-scoped id, the status chip (hidden while pending), the source
+// pill (cloud only), the title, the created date with its tooltip, the
+// priority marker with its tooltip, the label chips (four or more
+// collapse to one count chip), and the author avatar — the intake
+// identity avatar for system-authored rows. The row is a selection
+// control: activating it selects the request, and the selected row is
+// marked.
 
 import { Avatar, Tooltip } from "@pidash/kit";
 import type { IntakeIssueRow, WorkspaceMemberList } from "@pidash/api-client";
@@ -18,6 +19,7 @@ import { PRIORITY_ICONS, PRIORITY_LABELS, PRIORITY_TONES } from "../../../shared
 import { isIntakeIdentityCreator } from "../lib/identity.js";
 import { intakeRowIdLabel } from "../lib/rows.js";
 import { INTAKE_STATUS_LABELS, intakeStatusChipLabel } from "../lib/statuses.js";
+import { IntakeSourcePill } from "./IntakeSourcePill.js";
 
 export interface IntakeRowLabel {
   name: string;
@@ -114,6 +116,7 @@ export function IntakeRow({
             {chip}
           </span>
         )}
+        <IntakeSourcePill source={row.source} />
       </span>
       <h3 data-testid="intake-row-title" title={issue.name} className="text-body truncate text-(--text)">
         {issue.name}

@@ -43,6 +43,13 @@ export const SIDEBAR_TOGGLE_FLAG = "sidebar-toggle";
  * this; the community edition leaves it absent and renders nothing.
  */
 export const ISSUE_DEDUPE_FLAG = "issue-dedupe";
+/**
+ * Intake source indicator (INT-034, parity/specs/intake.md). Rows and the
+ * detail render the request's origin pill only where a build sets this;
+ * the community edition leaves it absent and renders nothing. In-app
+ * requests are the bare default and never show a pill in any edition.
+ */
+export const INTAKE_SOURCE_PILL_FLAG = "intake-source-pill";
 /** Extra settings section contributed by an edition. */
 export interface SettingsSection {
   id: string;

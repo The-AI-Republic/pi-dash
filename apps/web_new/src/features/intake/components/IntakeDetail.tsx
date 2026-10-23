@@ -9,12 +9,18 @@
 // intake update; the permission matrix decides what edits. Arrow keys
 // step between requests unless typing or an overlay owns them; a stale
 // or forbidden id reports missing so the screen falls back to the tab.
-// Triage moves advance through the screen's neighbour callback.
+// Triage moves advance through the screen's neighbour callback. Below
+// the narrow-viewport breakpoint the mobile action header replaces the
+// desktop one, and the shared duplicate seam feeds the detail-time
+// indicator (both cloud-gated; OSS renders neither).
 
 import { INTAKE_STATUS, type IntakeIssueDetail } from "@pidash/api-client";
+import { useNavigate } from "@tanstack/react-router";
 import * as React from "react";
 
+import { edition, ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
 import { useMe } from "../../../core/session/index.js";
+import { copyWorkItemLinkAddress } from "../../../shared/shell/CopyWorkItemLinkButton.js";
 import { workItemPath } from "../../../shared/shell/shareLink.js";
 import { isProjectAdmin, isProjectAuthorized } from "../../projects/index.js";
 import {
@@ -23,6 +29,7 @@ import {
   DetailSkeleton,
   IssueDetailRoot,
   TITLE_SAVE_FAILED_TITLE,
+  useDuplicateMatches,
 } from "../../issues/index.js";
 import { intakeDetailWorkItem, isMissingIntakeDetail, useIntakeDetail } from "../api/detail.js";
 import { useUpdateIntakeIssue } from "../api/mutations.js";
@@ -30,8 +37,12 @@ import { useTriageControls } from "../api/triage.js";
 import { INTAKE_NAV_OVERLAY_SELECTOR, suppressIntakeArrowKey } from "../lib/navigation.js";
 import { isResolvedIntakeStatus, selectIntakeEditability } from "../lib/permissions.js";
 import { IntakeDetailHeader } from "./IntakeDetailHeader.js";
+import { IntakeDuplicateIndicator } from "./IntakeDuplicateIndicator.js";
+import { IntakeMobileHeader } from "./IntakeMobileHeader.js";
 import { IntakeProperties } from "./IntakeProperties.js";
-import { IntakeTriageActions } from "./IntakeTriageActions.js";
+import { IntakeSourcePill } from "./IntakeSourcePill.js";
+import { IntakeTriageActions, IntakeTriageDialogs } from "./IntakeTriageActions.js";
+import { intakeMobileMenuItems } from "./intakeMobileMenuItems.js";
 
 export interface IntakeDetailProps {
   workspaceSlug: string;
@@ -46,6 +57,12 @@ export interface IntakeDetailProps {
   role: number | null;
   onPrev: () => void;
   onNext: () => void;
+  /** Below the shared narrow-viewport breakpoint: the mobile action header (INT-030). */
+  narrow?: boolean | undefined;
+  /** The list overlay is open; reported by the mobile toggle. */
+  listOpen?: boolean | undefined;
+  /** Toggle the list overlay; the mobile header needs it to render. */
+  onToggleList?: (() => void) | undefined;
   /** The id is stale or forbidden; the screen drops it from the address. */
   onMissing: () => void;
   /**
@@ -64,6 +81,9 @@ export function IntakeDetail({
   role,
   onPrev,
   onNext,
+  narrow = false,
+  listOpen = true,
+  onToggleList,
   onMissing,
   onAdvance,
 }: IntakeDetailProps): React.ReactElement | null {
@@ -126,6 +146,9 @@ export function IntakeDetail({
       viewerId={me.data?.id ?? null}
       onPrev={onPrev}
       onNext={onNext}
+      narrow={narrow}
+      listOpen={listOpen}
+      onToggleList={onToggleList}
       onAdvance={onAdvance}
     />
   );
@@ -142,6 +165,9 @@ interface IntakeDetailLoadedProps {
   viewerId: string | null;
   onPrev: () => void;
   onNext: () => void;
+  narrow: boolean;
+  listOpen: boolean;
+  onToggleList: (() => void) | undefined;
   onAdvance: (removedId: string) => boolean;
 }
 
@@ -156,6 +182,9 @@ function IntakeDetailLoaded({
   viewerId,
   onPrev,
   onNext,
+  narrow,
+  listOpen,
+  onToggleList,
   onAdvance,
 }: IntakeDetailLoadedProps): React.ReactElement {
   const titleUpdate = useUpdateIntakeIssue({
@@ -203,23 +232,47 @@ function IntakeDetailLoaded({
     detail.status === INTAKE_STATUS.duplicate && duplicateKey !== null
       ? { issueKey: duplicateKey, href: workItemPath(workspaceSlug, duplicateKey) }
       : null;
+  const navigate = useNavigate();
+  // Detail-time duplicate detection (INT-018): the shared seam reads the
+  // saved title, so viewing never searches a draft. The viewed request
+  // always resembles its own title; only other items count.
+  const duplicates = useDuplicateMatches({
+    workspaceSlug,
+    projectId,
+    title: detail.issue.name,
+    enabled: edition.flags[ISSUE_DEDUPE_FLAG] === true,
+  });
+  const duplicateMatches = duplicates.matches.filter((match) => match.id !== issueId);
+  const mobileMenuEntries = intakeMobileMenuItems({
+    resolved: isResolvedIntakeStatus(detail.status),
+    showTriage: triage.visibility.showTriage,
+    showDelete: triage.visibility.showDelete,
+    snoozed: detail.status === INTAKE_STATUS.snoozed,
+    onSnooze: () => triage.fireAction("snooze"),
+    onUnsnooze: () => triage.fireAction("unsnooze"),
+    onDuplicate: () => triage.fireAction("duplicate"),
+    onAccept: () => triage.fireAction("accept"),
+    onDecline: () => triage.fireAction("decline"),
+    onDelete: () => triage.fireAction("delete"),
+    onCopyLink: () => void copyWorkItemLinkAddress(workspaceSlug, issueKey),
+    onOpenWorkItem: () => void navigate({ to: workItemPath(workspaceSlug, issueKey) }),
+  });
 
   return (
     <div data-testid="intake-detail" tabIndex={-1} className="flex h-full min-h-0 flex-col overflow-y-auto">
-      <IntakeDetailHeader
-        workspaceSlug={workspaceSlug}
-        issueKey={issueKey}
-        resolved={isResolvedIntakeStatus(detail.status)}
-        canCopy={isProjectAuthorized(role)}
-        onPrev={onPrev}
-        onNext={onNext}
-        status={detail.status}
-        snoozedTill={detail.snoozed_till}
-        menuLeadEntries={triage.leadEntries}
-        menuTrailEntries={triage.trailEntries}
-        actions={
-          triage.visibility.showTriage ? (
-            <IntakeTriageActions
+      {narrow && onToggleList !== undefined ? (
+        <>
+          <IntakeMobileHeader
+            listOpen={listOpen}
+            onToggleList={onToggleList}
+            onPrev={onPrev}
+            onNext={onNext}
+            status={detail.status}
+            snoozedTill={detail.snoozed_till}
+            menuItems={mobileMenuEntries}
+          />
+          {triage.visibility.showTriage ? (
+            <IntakeTriageDialogs
               controls={triage}
               workspaceSlug={workspaceSlug}
               projectId={projectId}
@@ -227,9 +280,35 @@ function IntakeDetailLoaded({
               projectIdentifier={projectIdentifier}
               issueId={issueId}
             />
-          ) : undefined
-        }
-      />
+          ) : undefined}
+        </>
+      ) : (
+        <IntakeDetailHeader
+          workspaceSlug={workspaceSlug}
+          issueKey={issueKey}
+          resolved={isResolvedIntakeStatus(detail.status)}
+          canCopy={isProjectAuthorized(role)}
+          onPrev={onPrev}
+          onNext={onNext}
+          status={detail.status}
+          snoozedTill={detail.snoozed_till}
+          menuLeadEntries={triage.leadEntries}
+          menuTrailEntries={triage.trailEntries}
+          actions={
+            triage.visibility.showTriage ? (
+              <IntakeTriageActions
+                controls={triage}
+                workspaceSlug={workspaceSlug}
+                projectId={projectId}
+                projectName={projectName}
+                projectIdentifier={projectIdentifier}
+                issueId={issueId}
+              />
+            ) : undefined
+          }
+        />
+      )}
+      <IntakeDuplicateIndicator matches={duplicateMatches} />
       <IssueDetailRoot
         workspaceSlug={workspaceSlug}
         projectId={projectId}
@@ -240,7 +319,12 @@ function IntakeDetailLoaded({
           saveTitle: (name: string) => titleUpdate.mutateAsync({ issue: { name } }),
           saveDescription: (html: string) => descriptionUpdate.mutateAsync({ issue: { description_html: html } }),
         }}
-        topSlot={<span className="text-meta font-medium text-(--text-muted)">{issueKey}</span>}
+        topSlot={
+          <span className="text-meta inline-flex items-center gap-(--space-2) font-medium text-(--text-muted)">
+            {issueKey}
+            <IntakeSourcePill source={detail.source} />
+          </span>
+        }
         activity={
           <AttachmentsWidget
             workspaceSlug={workspaceSlug}

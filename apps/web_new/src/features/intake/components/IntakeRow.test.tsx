@@ -183,4 +183,9 @@ describe("IntakeRow (INT-006)", () => {
     render(<IntakeRow {...BASE} row={row()} />);
     expect(screen.getByTestId("intake-row")).not.toHaveAttribute("aria-current");
   });
+
+  it("renders no source pill in OSS even with a cloud origin (INT-034)", () => {
+    render(<IntakeRow {...BASE} row={row({ source: "EMAIL" })} />);
+    expect(screen.queryByTestId("intake-source-pill")).toBeNull();
+  });
 });

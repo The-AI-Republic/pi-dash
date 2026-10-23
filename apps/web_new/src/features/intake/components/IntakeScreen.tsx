@@ -1,7 +1,7 @@
 // Copyright (c) Pi Dash contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 // See the LICENSE file for details.
-// Intake screen (parity/specs/intake.md INT-001–012, 031). Reads the
+// Intake screen (parity/specs/intake.md INT-001–012, 030, 031). Reads the
 // project row for the feature gate and the name, then one list read
 // for the active tab, filter set and order. The address is the source
 // of truth for the tab and the selection: the screen validates what it
@@ -18,6 +18,7 @@ import * as React from "react";
 
 import { useMe, useWorkspace } from "../../../core/session/index.js";
 import { useDocumentHead } from "../../../shared/shell/index.js";
+import { useNarrowViewport } from "../../../shared/shell/narrowViewport.js";
 import { usePickerProjectMembers, usePickerWorkspaceMembers } from "../../../shared/pickers/index.js";
 import { useLabels, useWeekStart } from "../../issues/index.js";
 import { useProjectRoles, useProjectRow } from "../../auth/index.js";
@@ -39,12 +40,7 @@ import { DEFAULT_INTAKE_ORDER_VALUE, orderByForOrder, type IntakeOrder } from ".
 import { uniqueIntakeRows } from "../lib/rows.js";
 import { intakeFeatureSettingsHref } from "../lib/paths.js";
 import type { IntakeSearch, IntakeSearchWriteOptions } from "../lib/search.js";
-import {
-  intakeSearchAfterRemove,
-  intakeSearchFor,
-  settleIntakeSearch,
-  withoutSelection,
-} from "../lib/searchWrites.js";
+import { intakeSearchAfterRemove, intakeSearchFor, settleIntakeSearch, withoutSelection } from "../lib/searchWrites.js";
 import type { IntakeTab } from "../lib/tabs.js";
 import { intakeDocumentTitle } from "../lib/title.js";
 import { IntakeGate } from "./IntakeGate.js";
@@ -89,6 +85,11 @@ export function IntakeScreen({
   const gateOff = project.data?.inbox_view === false;
   const ready = project.isSuccess && !gateOff;
   const [today] = React.useState(() => todayUtcIsoDay());
+  // Narrow viewports go single-pane (INT-030): the detail fills the
+  // width and the list rides an overlay the mobile header toggles. The
+  // overlay starts open; picking a row closes it.
+  const narrow = useNarrowViewport();
+  const [mobileListOpen, setMobileListOpen] = React.useState(true);
 
   useDocumentHead({ title: intakeDocumentTitle(project.data?.name), robots: "noindex, nofollow" });
 
@@ -181,9 +182,13 @@ export function IntakeScreen({
   const selectRow = React.useCallback(
     (issueId: string) => {
       onSearchChange(intakeSearchFor(tab, issueId));
+      if (narrow) setMobileListOpen(false);
     },
-    [onSearchChange, tab]
+    [narrow, onSearchChange, tab]
   );
+  const toggleMobileList = React.useCallback(() => {
+    setMobileListOpen((open) => !open);
+  }, []);
   // Previous/next steps (INT-027): the neighbour in display order with
   // wraparound, pushed so back/forward walks them. A step with no rows
   // is a no-op; the detail only mounts while a selection exists.
@@ -281,6 +286,10 @@ export function IntakeScreen({
   const canCreate = (roles.data?.[projectId] ?? null) !== null;
 
   const selectedId = search.inboxIssueId;
+  // With no selection the mobile header is gone, so the overlay stays
+  // open: otherwise a narrow empty tab would strand the list shut with
+  // no toggle to reopen it.
+  const listOpen = !narrow || selectedId === undefined || mobileListOpen;
   return (
     <IntakeShell
       workspaceSlug={workspaceSlug}
@@ -299,6 +308,8 @@ export function IntakeScreen({
       onSelectRow={selectRow}
       onRetry={retry}
       onCreate={onCreate}
+      narrow={narrow}
+      mobileListOpen={listOpen}
       detail={
         selectedId === undefined ? undefined : (
           <React.Suspense fallback={<DetailSkeleton />}>
@@ -311,6 +322,9 @@ export function IntakeScreen({
               role={roles.data?.[projectId] ?? null}
               onPrev={stepPrev}
               onNext={stepNext}
+              narrow={narrow}
+              listOpen={listOpen}
+              onToggleList={toggleMobileList}
               onMissing={dropMissing}
               onAdvance={advanceAfterTriage}
             />

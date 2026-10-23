@@ -91,6 +91,8 @@ export type { CreateFormState, CreateProjectOption } from "./create/createForm.j
 export { useAttachDescriptionAssets } from "./create/createApi.js";
 export { ModalDescription } from "./create/ModalDescription.js";
 export type { ModalDescriptionProps } from "./create/ModalDescription.js";
+export { DEDUPE_DEBOUNCE_MS, DuplicatePanel, NO_MATCHES, useDuplicateMatches } from "./create/dedupe.js";
+export type { DuplicateMatches, DuplicateSearchInput } from "./create/dedupe.js";
 export type { WorkItemCreateDialogProps, WorkItemCreateProject } from "./components/WorkItemCreateDialog.js";
 export type { WorkItemEditTarget } from "./components/WorkItemCreateDialog.js";
 export { liteIssueQueryOptions, loadLiteIssue, parseBrowseKey, resolveShortLink } from "./api/browse.js";

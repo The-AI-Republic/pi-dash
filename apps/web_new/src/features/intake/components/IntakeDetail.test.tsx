@@ -15,6 +15,7 @@ import { ToastHost } from "@pidash/kit";
 import * as React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const navigate = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   Link: ({ to, children, ...rest }: { to: string; children?: React.ReactNode }) => (
@@ -22,9 +23,22 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
       {children}
     </a>
   ),
+  useNavigate: () => navigate,
 }));
 
+const editionHarness = vi.hoisted(() => ({ flags: {} as Record<string, boolean> }));
+vi.mock("../../../core/edition/index.js", async (importOriginal) => {
+  const original = await importOriginal<Record<string, unknown>>();
+  return {
+    ...original,
+    get edition() {
+      return { id: "test", flags: editionHarness.flags };
+    },
+  };
+});
+
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
+import { INTAKE_SOURCE_PILL_FLAG, ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
 import { setSessionClient } from "../../../core/session/queries.js";
 import { getToastManager } from "../../../shared/shell/toaster.js";
 import { IntakeDetail } from "./IntakeDetail.js";
@@ -237,8 +251,9 @@ function versionDetail(hourAgo: string) {
   };
 }
 
-function harness(server: DetailServer, options: { meStatus?: number } = {}) {
+function harness(server: DetailServer, options: { meStatus?: number; searchHits?: unknown[] } = {}) {
   const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+  const searches: string[] = [];
   const conversation = async (url: string, init: TransportInit) => {
     const ok = (body: unknown) => ({
       status: 200,
@@ -247,6 +262,10 @@ function harness(server: DetailServer, options: { meStatus?: number } = {}) {
       text: async () => JSON.stringify(body),
     });
     if (url.endsWith("/auth/get-csrf-token/")) return ok({ csrf_token: "cs" });
+    if (url.includes(`/projects/${PROJECT}/search-issues/`)) {
+      searches.push(url);
+      return ok(options.searchHits ?? []);
+    }
     if (url.includes(`/intake-issues/${ISSUE}/`) && init.method === "GET") {
       if (server.detailStatus >= 400) {
         return { status: server.detailStatus, url, headers: { get: () => null }, text: async () => "{}" };
@@ -286,7 +305,7 @@ function harness(server: DetailServer, options: { meStatus?: number } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   if (options.meStatus === undefined) queryClient.setQueryData(["session", "me"], ME_PAYLOAD);
   queryClient.setQueryData(["session", "profile"], { start_of_the_week: 0 });
-  return { client, queryClient };
+  return { client, queryClient, searches };
 }
 
 function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentProps<typeof IntakeDetail>> = {}) {
@@ -315,6 +334,7 @@ function renderDetail(queryClient: QueryClient, props: Partial<React.ComponentPr
 }
 
 afterEach(() => {
+  editionHarness.flags = {};
   resetAppClient();
   vi.clearAllMocks();
 });
@@ -623,5 +643,155 @@ describe("IntakeDetail triage wiring (INT-020–025)", () => {
     const link = screen.getByTestId("intake-duplicate-of");
     expect(link).toHaveTextContent("APO-3");
     expect(link).toHaveAttribute("href", "/acme/browse/APO-3/");
+  });
+});
+
+describe("IntakeDetail mobile header (INT-030)", () => {
+  function renderNarrow(props: Partial<React.ComponentProps<typeof IntakeDetail>> = {}, detail = detailPayload()) {
+    const server: DetailServer = { detailStatus: 200, detail, writes: [] };
+    const { queryClient } = harness(server);
+    const onToggleList = vi.fn();
+    const rendered = renderDetail(queryClient, { narrow: true, listOpen: true, onToggleList, ...props });
+    return { server, onToggleList, ...rendered };
+  }
+
+  it("renders the mobile header on narrow viewports and toggles the list", async () => {
+    const { onToggleList } = renderNarrow();
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-detail-header")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Request list" }));
+    expect(onToggleList).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the desktop header on narrow viewports without the toggle", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient, { narrow: true });
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-mobile-header")).not.toBeInTheDocument();
+  });
+
+  it("keeps every triage action reachable from the mobile menu", async () => {
+    const user = userEvent.setup();
+    const { server } = renderNarrow();
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Snooze",
+      "Mark as duplicate",
+      "Accept",
+      "Decline",
+      "Delete",
+      "Copy work item link",
+    ]);
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    expect(screen.getByRole("dialog", { name: "Delete work item" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(server.writes).toEqual([]);
+  });
+
+  it("refuses a member accept from the mobile menu with the desktop notice", async () => {
+    const user = userEvent.setup();
+    const { server } = renderNarrow({ role: 15 });
+    render(<ToastHost manager={getToastManager()} />);
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Accept" }));
+    expect(await screen.findByText("Permission denied")).toBeInTheDocument();
+    expect(server.writes).toEqual([]);
+  });
+
+  it("shows only the link and open entries on a resolved request, and opens the work item", async () => {
+    const user = userEvent.setup();
+    renderNarrow({ role: 5 }, detailPayload(1));
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual(["Copy work item link", "Open work item"]);
+    await user.click(screen.getByRole("menuitem", { name: "Open work item" }));
+    expect(navigate).toHaveBeenCalledWith({ to: "/acme/browse/APO-7/" });
+  });
+
+  it("offers a guest an empty mobile menu on an open request", async () => {
+    const user = userEvent.setup();
+    renderNarrow({ role: 5 });
+    expect(await screen.findByTestId("intake-mobile-header")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Request actions" }));
+    expect(await screen.findByRole("menu")).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem")).not.toBeInTheDocument();
+  });
+});
+
+describe("IntakeDetail duplicate detection (INT-018)", () => {
+  function searchHit(id: string, name: string) {
+    return {
+      name,
+      id,
+      start_date: null,
+      sequence_id: 9,
+      project__name: "Atlas",
+      project__identifier: "APO",
+      project_id: PROJECT,
+      workspace__slug: SLUG,
+      state__name: null,
+      state__group: null,
+      state__color: null,
+    };
+  }
+
+  it("renders no indicator and issues no search traffic in OSS", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient, searches } = harness(server);
+    renderDetail(queryClient);
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    // Any debounced lookup would have fired by now; the seam issues none.
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(screen.queryByTestId("intake-duplicate-indicator")).not.toBeInTheDocument();
+    expect(searches).toEqual([]);
+  });
+
+  it("renders the indicator and opens the comparison with the seam on, excluding the viewed request", async () => {
+    const user = userEvent.setup();
+    editionHarness.flags = { [ISSUE_DEDUPE_FLAG]: true };
+    const server: DetailServer = { detailStatus: 200, detail: detailPayload(), writes: [] };
+    const { queryClient, searches } = harness(server, {
+      searchHits: [searchHit(ISSUE, "A request"), searchHit(ADA, "A request followup")],
+    });
+    renderDetail(queryClient);
+    const indicator = await screen.findByTestId("intake-duplicate-indicator");
+    expect(searches).toHaveLength(1);
+    const button = within(indicator).getByRole("button", { name: "1 possible duplicate" });
+    await user.click(button);
+    const panel = within(indicator).getByRole("complementary", { name: "Possible duplicates" });
+    expect(panel).toHaveTextContent("A request followup");
+  });
+});
+
+describe("IntakeDetail source indicator (INT-034)", () => {
+  it("renders no pill in OSS even with a cloud origin", async () => {
+    const server: DetailServer = { detailStatus: 200, detail: { ...detailPayload(), source: "EMAIL" }, writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-source-pill")).not.toBeInTheDocument();
+  });
+
+  it("renders the pill with the flag on and hides the in-app default", async () => {
+    editionHarness.flags = { [INTAKE_SOURCE_PILL_FLAG]: true };
+    const server: DetailServer = { detailStatus: 200, detail: { ...detailPayload(), source: "EMAIL" }, writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    expect(await screen.findByTestId("intake-source-pill")).toHaveTextContent("Email");
+  });
+
+  it("renders no pill for the in-app default even with the flag on", async () => {
+    editionHarness.flags = { [INTAKE_SOURCE_PILL_FLAG]: true };
+    const server: DetailServer = { detailStatus: 200, detail: { ...detailPayload(), source: "IN_APP" }, writes: [] };
+    const { queryClient } = harness(server);
+    renderDetail(queryClient);
+    expect(await screen.findByTestId("intake-detail-header")).toBeInTheDocument();
+    expect(screen.queryByTestId("intake-source-pill")).not.toBeInTheDocument();
   });
 });

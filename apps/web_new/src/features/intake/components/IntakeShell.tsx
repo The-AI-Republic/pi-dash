@@ -5,8 +5,11 @@
 // trail and header sit above a body split into the list pane and the
 // content pane. The screen supplies the request detail for the content
 // pane; with no selection it shows the pick placeholder. While a list
-// read is in flight the header shows the syncing hint (INT-007). The
-// frame owns layout only; the screen owns reads and the address.
+// read is in flight the header shows the syncing hint (INT-007). Below
+// the narrow-viewport breakpoint the frame goes single-pane: the detail
+// fills the width and the list rides an overlay the mobile header
+// toggles (INT-030). The frame owns layout only; the screen owns reads
+// and the address.
 
 import { Button, Spinner } from "@pidash/kit";
 import * as React from "react";
@@ -61,6 +64,10 @@ export interface IntakeShellProps {
   onSelectionChange: React.ComponentProps<typeof IntakeListPane>["onSelectionChange"];
   order: React.ComponentProps<typeof IntakeListPane>["order"];
   onOrderChange: React.ComponentProps<typeof IntakeListPane>["onOrderChange"];
+  /** Below the narrow-viewport breakpoint: single-pane with a list overlay (INT-030). */
+  narrow?: boolean | undefined;
+  /** The list overlay is open; only read while narrow. */
+  mobileListOpen?: boolean | undefined;
 }
 
 export function IntakeShell({
@@ -100,7 +107,42 @@ export function IntakeShell({
   onSelectionChange,
   order,
   onOrderChange,
+  narrow = false,
+  mobileListOpen = true,
 }: IntakeShellProps): React.ReactElement {
+  const listPane = (
+    <IntakeListPane
+      tab={tab}
+      openTotal={openTotal}
+      loading={loading}
+      failed={failed}
+      rows={rows}
+      emptyKind={emptyKind}
+      selectedId={selectedId}
+      onSelectTab={onSelectTab}
+      onSelectRow={onSelectRow}
+      onRetry={onRetry}
+      onCreate={onCreate}
+      projectIdentifier={projectIdentifier}
+      labels={labels}
+      directory={directory}
+      hasNextPage={hasNextPage}
+      loadingMore={loadingMore}
+      onLoadMore={onLoadMore}
+      selection={selection}
+      assigneeOptions={assigneeOptions}
+      createdByOptions={createdByOptions}
+      membersLoading={membersLoading}
+      membersFailed={membersFailed}
+      labelsLoading={labelsLoading}
+      labelsFailed={labelsFailed}
+      today={today}
+      weekStart={weekStart}
+      onSelectionChange={onSelectionChange}
+      order={order}
+      onOrderChange={onOrderChange}
+    />
+  );
   return (
     <section
       aria-label={INTAKE_AREA_LABEL}
@@ -133,41 +175,16 @@ export function IntakeShell({
           ) : null}
         </div>
       </header>
-      <div className="flex min-h-0 flex-1">
-        <IntakeListPane
-          tab={tab}
-          openTotal={openTotal}
-          loading={loading}
-          failed={failed}
-          rows={rows}
-          emptyKind={emptyKind}
-          selectedId={selectedId}
-          onSelectTab={onSelectTab}
-          onSelectRow={onSelectRow}
-          onRetry={onRetry}
-          onCreate={onCreate}
-          projectIdentifier={projectIdentifier}
-          labels={labels}
-          directory={directory}
-          hasNextPage={hasNextPage}
-          loadingMore={loadingMore}
-          onLoadMore={onLoadMore}
-          selection={selection}
-          assigneeOptions={assigneeOptions}
-          createdByOptions={createdByOptions}
-          membersLoading={membersLoading}
-          membersFailed={membersFailed}
-          labelsLoading={labelsLoading}
-          labelsFailed={labelsFailed}
-          today={today}
-          weekStart={weekStart}
-          onSelectionChange={onSelectionChange}
-          order={order}
-          onOrderChange={onOrderChange}
-        />
+      <div className="relative flex min-h-0 flex-1">
+        {narrow ? null : listPane}
         <div data-testid="intake-content-pane" className="min-h-0 min-w-0 flex-1">
           {detail ?? <IntakePlaceholder />}
         </div>
+        {narrow && mobileListOpen ? (
+          <div data-testid="intake-list-overlay" className="absolute inset-y-0 left-0 z-10 flex bg-(--bg)">
+            {listPane}
+          </div>
+        ) : null}
       </div>
     </section>
   );

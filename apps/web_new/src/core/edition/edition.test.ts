@@ -3,7 +3,13 @@
 // See the LICENSE file for details.
 import { describe, expect, it } from "vitest";
 
-import { isAppRailEnabled, isSidebarToggleEnabled, edition } from "./index.js";
+import {
+  INTAKE_SOURCE_PILL_FLAG,
+  ISSUE_DEDUPE_FLAG,
+  isAppRailEnabled,
+  isSidebarToggleEnabled,
+  edition,
+} from "./index.js";
 import { edition as ossEdition } from "./oss.js";
 import type { Edition } from "./types.js";
 
@@ -49,6 +55,11 @@ describe("edition", () => {
 
   it("leaves the workspace layouts slot absent (VIEW-040: OSS renders no selector)", () => {
     expect(edition.slots?.workspaceViewLayouts).toBeUndefined();
+  });
+
+  it("leaves the intake source pill flag absent (INT-034: OSS renders no source indicator)", () => {
+    expect(edition.flags[INTAKE_SOURCE_PILL_FLAG]).toBeUndefined();
+    expect(edition.flags[ISSUE_DEDUPE_FLAG]).toBeUndefined();
   });
 });
 

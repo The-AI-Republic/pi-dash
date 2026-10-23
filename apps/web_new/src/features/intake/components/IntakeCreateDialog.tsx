@@ -8,12 +8,14 @@
 // the description images parked while composing, and either opens the
 // new request or resets for the next one. While the description panel
 // reports work in flight, close, submit and Escape all wait on it with
-// a notice instead of discarding the draft.
+// a notice instead of discarding the draft. Composing also feeds the
+// shared duplicate seam behind the cloud flag (INT-018).
 
 import { Button, Dialog, Input, Switch } from "@pidash/kit";
 import { ISSUE_DESCRIPTION_ENTITY_TYPE } from "@pidash/api-client";
 import * as React from "react";
 
+import { edition, ISSUE_DEDUPE_FLAG } from "../../../core/edition/index.js";
 import { IntakeStatePicker, MemberPicker, PriorityPicker } from "../../../shared/pickers/index.js";
 import { notifyError, notifySuccess } from "../../../shared/shell/index.js";
 import { useAppInstanceBootstrap } from "../../instance/index.js";
@@ -22,6 +24,7 @@ import {
   LabelPicker,
   ModalDescription,
   useAttachDescriptionAssets,
+  useDuplicateMatches,
   useWeekStart,
 } from "../../issues/index.js";
 import { useCreateIntakeRequest } from "../api/create.js";
@@ -32,6 +35,7 @@ import {
   isIntakeTitleSubmittable,
   type IntakeCreateForm,
 } from "../lib/createForm.js";
+import { IntakeDuplicateIndicator } from "./IntakeDuplicateIndicator.js";
 
 export const INTAKE_CREATE_DIALOG_TITLE = "New intake request";
 export const INTAKE_CREATE_SUBMIT_LABEL = "Create request";
@@ -85,6 +89,15 @@ export function IntakeCreateDialog({
   const busy = create.isPending;
   const titleHint = intakeTitleError(form.name);
   const submittable = isIntakeTitleSubmittable(form.name);
+  // Compose-time duplicate detection (INT-018): the shared seam reads
+  // the draft title while the dialog is open. With the flag off (every
+  // OSS build) the hook short-circuits: no read, no indicator.
+  const duplicates = useDuplicateMatches({
+    workspaceSlug,
+    projectId,
+    title: form.name,
+    enabled: open && edition.flags[ISSUE_DEDUPE_FLAG] === true,
+  });
 
   function patch(next: Partial<IntakeCreateForm>): void {
     setForm((current) => ({ ...current, ...next }));
@@ -185,6 +198,7 @@ export function IntakeCreateDialog({
           autoComplete="off"
           data-testid="intake-create-title"
         />
+        <IntakeDuplicateIndicator matches={duplicates.matches} />
         <ModalDescription
           workspaceSlug={workspaceSlug}
           projectId={projectId}
