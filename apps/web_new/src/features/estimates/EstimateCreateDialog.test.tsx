@@ -421,6 +421,7 @@ describe("EstimateCreateDialog validation", () => {
     renderDialog();
     await pickStarter(user, "Custom");
     await editValue(user, 0, "2");
+    expect(within(dialog()).getByText("This value already exists in the set.")).toBeInTheDocument();
     await user.click(within(dialog()).getByRole("button", { name: ESTIMATE_SUBMIT_LABEL }));
     expect(within(dialog()).getByText("This value already exists in the set.")).toBeInTheDocument();
     expect(posts).toHaveLength(0);

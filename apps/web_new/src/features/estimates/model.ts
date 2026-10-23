@@ -185,17 +185,19 @@ export function valueSetProblems(family: EstimateFamily, values: readonly string
       problems.push({ index, message: VALUE_TOO_LONG });
       return;
     }
-    const duplicateKey = numeric ? String(Number(value)) : value;
-    if (seen.has(duplicateKey)) {
+    const parsed = Number(value);
+    // Non-numeric text has no numeric identity, so each such row reports
+    // its own family problem rather than colliding on "NaN".
+    const duplicateKey = numeric ? (Number.isFinite(parsed) ? String(parsed) : undefined) : value;
+    if (duplicateKey !== undefined && seen.has(duplicateKey)) {
       if (!reportedDuplicates.has(duplicateKey)) {
         reportedDuplicates.add(duplicateKey);
         problems.push({ index, message: VALUE_DUPLICATE });
       }
       return;
     }
-    seen.set(duplicateKey, index);
+    if (duplicateKey !== undefined) seen.set(duplicateKey, index);
     if (numeric) {
-      const parsed = Number(value);
       if (!Number.isFinite(parsed)) problems.push({ index, message: VALUE_NOT_NUMBER });
       else if (parsed <= 0) problems.push({ index, message: VALUE_NOT_POSITIVE });
     } else if (!Number.isNaN(Number(value))) {

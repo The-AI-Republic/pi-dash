@@ -196,6 +196,13 @@ describe("value rules", () => {
     expect(valueSetProblems("time", ["90", " 90 "])).toEqual([{ index: 1, message: VALUE_DUPLICATE }]);
   });
 
+  it("reports each non-numeric row instead of treating them as duplicates", () => {
+    expect(valueSetProblems("points", ["abc", "def"])).toEqual([
+      { index: 0, message: VALUE_NOT_NUMBER },
+      { index: 1, message: VALUE_NOT_NUMBER },
+    ]);
+  });
+
   it("compares category duplicates exactly and case-sensitively", () => {
     expect(valueSetProblems("categories", ["Easy", "easy"])).toEqual([]);
     expect(valueSetProblems("categories", ["Easy", "Easy"])).toEqual([{ index: 1, message: VALUE_DUPLICATE }]);

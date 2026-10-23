@@ -109,7 +109,9 @@ export function EstimateCreateDialog({
 
   const problems = valueSetProblems(family, values);
   const blocked = problems.length > 0;
-  const shownProblems = submitted ? problems : [];
+  // Committed rows surface their marker immediately; the row being edited
+  // stays quiet until its draft is committed or submit reveals everything.
+  const shownProblems = submitted ? problems : problems.filter((problem) => problem.index !== editing?.index);
   const firstProblemIndex = shownProblems[0]?.index;
 
   React.useEffect(() => {
