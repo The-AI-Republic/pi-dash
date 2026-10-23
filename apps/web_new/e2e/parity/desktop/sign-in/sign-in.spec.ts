@@ -44,6 +44,7 @@ import {
   uniqueEmail,
   userProfile,
 } from "../../helpers/api";
+import { parityOracleUrl } from "../../helpers/parity-env";
 import { specTags, specTitle } from "../../helpers/tags";
 import { desktopEmit, desktopInvocations, installDesktopMock } from "../tauri-mock";
 
@@ -476,7 +477,7 @@ async function desk013Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   await test.step("the fallback action opens the hosted app through the native opener", async () => {
     // The gate serves the desktop dev bundle with PIDASH_WEB_BASE_URL set
     // to the stack's oracle origin, so the card resolves there.
-    const hosted = process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000";
+    const hosted = parityOracleUrl(process.env);
     await driver.visit("/");
     await expect.poll(() => driver.pageText(), POLL_60).toContain(NEW_UNAVAILABLE_ACTION);
     await driver.page.getByRole("button", { name: NEW_UNAVAILABLE_ACTION, exact: true }).click();

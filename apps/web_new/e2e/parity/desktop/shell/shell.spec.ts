@@ -53,6 +53,7 @@ import {
   sessionValid,
   signInSession,
 } from "../../helpers/api";
+import { parityOracleUrl } from "../../helpers/parity-env";
 import { specTags, specTitle } from "../../helpers/tags";
 import { desktopInvocations, installDesktopMock } from "../tauri-mock";
 
@@ -557,7 +558,7 @@ async function desk019Positive(driver: ParityDriver, seed: ParitySeedFacts): Pro
   const expectedPath = `/${seed.workspaceSlug}/browse/${seq}/`;
   // The gate bakes the stack's oracle origin as the hosted base, so the
   // desktop bundle must hand out that origin — never its own.
-  const hosted = process.env["PARITY_ORACLE_URL"] ?? "http://localhost:13000";
+  const hosted = parityOracleUrl(process.env);
   try {
     await test.step("sign in and grant the clipboard", async () => {
       await enterShellSignedIn(driver, seed.email, seed.password);
