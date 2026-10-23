@@ -67,21 +67,36 @@ describe("parseAdminEntrySearch", () => {
     });
   });
 
-  it("drops empty and mistyped params instead of throwing", () => {
+  it("drops empty and unknown params instead of throwing", () => {
     expect(parseAdminEntrySearch({})).toEqual({});
     expect(
       parseAdminEntrySearch({
         first_name: "",
         last_name: null,
-        company: 42,
         company_name: "",
         email: "",
-        is_telemetry_enabled: false,
-        error_code: 5180,
         error_message: "",
         next: "/elsewhere",
       })
     ).toEqual({});
+  });
+
+  it("reads router-parsed numbers and booleans by their URL spelling", () => {
+    // The router's JSON parser turns `error_code=5180` into a number and
+    // `is_telemetry_enabled=False` stays a string; both must survive so a
+    // numeric rejection is never swallowed (NEWFRONT-457).
+    expect(parseAdminEntrySearch({ error_code: 5180, company: 42, is_telemetry_enabled: false })).toEqual({
+      error_code: "5180",
+      company: "42",
+      is_telemetry_enabled: "false",
+    });
+    expect(parseAdminEntrySearch({ error_code: Number.NaN })).toEqual({});
+    // A literal `true` on the wire parses to a boolean; it keeps its spelling
+    // rather than being dropped like an empty value.
+    expect(parseAdminEntrySearch({ is_telemetry_enabled: true, error_code: false })).toEqual({
+      is_telemetry_enabled: "true",
+      error_code: "false",
+    });
   });
 
   it("keeps a partial search", () => {

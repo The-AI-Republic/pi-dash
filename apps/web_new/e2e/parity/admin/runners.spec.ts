@@ -13,7 +13,11 @@
 // Intended per the row: a Runners page listing every runner
 // newest-first with provisioning, status, versions and heartbeat
 // columns, a provisioning filter and pagination (unmerged on
-// origin/pi-dash/pdashoss01-209 at 79f4241b).
+// origin/pi-dash/pdashoss01-209 at 79f4241b). The new console builds
+// the page to that intent (NEWFRONT-494/518); its backend endpoint is
+// still missing on the base (PDASHOSS01-303), so the page renders the
+// read it actually gets: the table when the endpoint answers, the
+// failure state with its retry when it does not.
 import { test, expect } from "../fixtures";
 import { serverAdminRunnersEndpointStatus, serverAdminSession } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
@@ -27,6 +31,13 @@ test(
     await driver.adminOpenPath("/workspace/");
     await driver.adminWaitForRootBranch("dashboard");
     const facts = await driver.adminRunnersFacts();
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-494): the rail carries the runners area as
+      // its last entry, routing to the console's runners page.
+      expect(facts.sidebarEntryVisible).toBe(true);
+      expect(facts.sidebarHref ?? "").toContain("/runners");
+      return;
+    }
     expect(facts.sidebarEntryVisible).toBe(false);
     expect(facts.sidebarHref).toBe(null);
     const status = await serverAdminRunnersEndpointStatus(await serverAdminSession(seed.email, seed.password));
@@ -39,6 +50,30 @@ test(
   { tag: specTags(["ADM-080"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await driver.adminEnsureSignedIn(seed.email, seed.password);
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-494): the address is a real page. The read
+      // settles into the table (or its empty row) once the backend
+      // serves the endpoint; while PDASHOSS01-303 is open it settles
+      // into the failure state with its retry instead.
+      await driver.adminOpenPath("/runners/");
+      await driver.adminWaitForRootBranch("dashboard");
+      const status = await serverAdminRunnersEndpointStatus(await serverAdminSession(seed.email, seed.password));
+      expect([200, 404]).toContain(status);
+      await test.step("the runners page holds the rail entry and one settled body", async () => {
+        const facts = await driver.adminRunnersPageFacts();
+        expect(facts.pageVisible).toBe(true);
+        expect(facts.title).toBe("Runners");
+        if (status === 200) {
+          expect(facts.tableVisible).toBe(true);
+          expect(facts.errorVisible).toBe(false);
+        } else {
+          expect(facts.errorVisible).toBe(true);
+          expect(facts.tableVisible).toBe(false);
+          expect(facts.retryVisible).toBe(true);
+        }
+      });
+      return;
+    }
     await driver.adminOpenPath("/runners/");
     const facts = await driver.adminNotFoundFacts();
     expect(facts.illustrationVisible).toBe(true);

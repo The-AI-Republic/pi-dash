@@ -14,16 +14,30 @@ import { edition } from "../../core/edition/index.js";
 import { asString } from "../../core/session/index.js";
 import { AdminEntryGate, AdminHomeGuard, type AdminEntrySearch } from "../../features/admin/index.js";
 
+/**
+ * The router's default search parser JSON-parses each value, so the
+ * numeric admin codes (`5180`, `5150`, ...) arrive as numbers and were
+ * dropped by the string guard — every numeric rejection then came back
+ * silent (NEWFRONT-457). Wire values stay verbatim: numbers and
+ * booleans are read by their URL spelling, exactly as the server wrote
+ * them.
+ */
+function asSearchString(raw: unknown): string | undefined {
+  if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+  if (typeof raw === "boolean") return raw ? "true" : "false";
+  return asString(raw);
+}
+
 /** Search schema: unknown or empty params fall back to absent. */
 export function parseAdminEntrySearch(raw: Record<string, unknown>): AdminEntrySearch {
-  const first_name = asString(raw["first_name"]);
-  const last_name = asString(raw["last_name"]);
-  const company = asString(raw["company"]);
-  const company_name = asString(raw["company_name"]);
-  const email = asString(raw["email"]);
-  const is_telemetry_enabled = asString(raw["is_telemetry_enabled"]);
-  const error_code = asString(raw["error_code"]);
-  const error_message = asString(raw["error_message"]);
+  const first_name = asSearchString(raw["first_name"]);
+  const last_name = asSearchString(raw["last_name"]);
+  const company = asSearchString(raw["company"]);
+  const company_name = asSearchString(raw["company_name"]);
+  const email = asSearchString(raw["email"]);
+  const is_telemetry_enabled = asSearchString(raw["is_telemetry_enabled"]);
+  const error_code = asSearchString(raw["error_code"]);
+  const error_message = asSearchString(raw["error_message"]);
   return {
     ...(first_name === undefined ? {} : { first_name }),
     ...(last_name === undefined ? {} : { last_name }),

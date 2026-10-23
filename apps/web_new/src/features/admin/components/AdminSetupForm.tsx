@@ -7,6 +7,12 @@
 // and server errors arrive as redirect query params; numeric codes
 // place like their named counterparts and every echoed field —
 // company included — prefills (NEWFRONT-457 intent).
+//
+// Both show/hide toggles swallow mousedown so pressing one never moves
+// focus: the strength meter mounts and unmounts with the password
+// field's focus, so a focus change on mousedown would reflow the form
+// between press and release and the release would land off the button,
+// silently dropping the toggle (ADM-005).
 
 import { Button, Input } from "@pidash/kit";
 import { Eye, EyeOff } from "lucide-react";
@@ -209,6 +215,7 @@ export function AdminSetupForm({ search }: { search: AdminEntrySearch }): React.
                 tabIndex={-1}
                 data-testid="admin-setup-toggle-password"
                 aria-label={showPassword ? "Hide password" : "Show password"}
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={() => setShowPassword((current) => !current)}
                 className="text-body cursor-pointer text-(--text-muted) hover:text-(--text)"
               >
@@ -235,6 +242,7 @@ export function AdminSetupForm({ search }: { search: AdminEntrySearch }): React.
                 tabIndex={-1}
                 data-testid="admin-setup-toggle-confirm"
                 aria-label={showConfirm ? "Hide password confirmation" : "Show password confirmation"}
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={() => setShowConfirm((current) => !current)}
                 className="text-body cursor-pointer text-(--text-muted) hover:text-(--text)"
               >

@@ -195,6 +195,26 @@ describe("InstanceAppGate", () => {
     expect(screen.queryByTestId("instance-not-ready")).not.toBeInTheDocument();
   });
 
+  it("never issues the startup read behind the administrator entry", async () => {
+    // The admin gate owns the single instance read on /god-mode
+    // (ADM-001/ADM-003): the startup reader's background retry would
+    // otherwise re-read behind that screen, so it is never asked for.
+    globalThis.window.history.replaceState(null, "", "/god-mode/");
+    const seen: string[] = [];
+    renderGate((url) => {
+      seen.push(new URL(url, "https://api.test").pathname);
+      return Promise.resolve({
+        status: 500,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "down" })),
+      });
+    });
+    expect(await screen.findByText("admin entry")).toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(seen).toEqual([]);
+  });
+
   it("lets the administrator entry through on a failed read", async () => {
     globalThis.window.history.replaceState(null, "", "/god-mode/");
     renderGate(() =>

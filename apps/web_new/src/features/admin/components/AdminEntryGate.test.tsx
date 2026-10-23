@@ -9,7 +9,7 @@ import * as React from "react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAppClient, resetAppClient } from "../../../core/api/client.js";
-import { instanceAppKeys } from "../../instance/index.js";
+import { adminKeys } from "../queries.js";
 import { AdminEntryGate, type AdminEntrySearch } from "./AdminEntryGate.js";
 
 function envelope(setupDone: boolean): InstanceBootstrap {
@@ -186,10 +186,34 @@ describe("AdminEntryGate", () => {
     expect(document.querySelector("form")).toBeNull();
   });
 
+  it("branches on the console's once-only read, never the retrying startup reader", async () => {
+    // A failed entry read must stay failed: the startup reader's
+    // background backoff would re-issue it behind the screen (ADM-003).
+    const seen: string[] = [];
+    createAppClient("https://api.test", ((url: string) => {
+      seen.push(new URL(url, "https://api.test").pathname);
+      return Promise.resolve({
+        status: 500,
+        url,
+        headers: { get: () => null },
+        text: () => Promise.resolve(JSON.stringify({ detail: "boom" })),
+      });
+    }) as Transport);
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AdminEntryGate search={{}} />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId("admin-failure")).toBeInTheDocument());
+    expect(seen.filter((path) => path === "/api/instances/")).toHaveLength(1);
+    expect(queryClient.getQueryData(adminKeys.entryBootstrap)).toBeUndefined();
+  });
+
   it("forwards the redirect search to the resolved form", async () => {
     createAppClient("https://api.test", stubTransport([]));
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(instanceAppKeys.bootstrap, { setupDone: false, bootstrap: envelope(false) });
+    queryClient.setQueryData(adminKeys.entryBootstrap, { setupDone: false, bootstrap: envelope(false) });
     render(
       <QueryClientProvider client={queryClient}>
         <AdminEntryGate

@@ -13,9 +13,11 @@
 // Observed behavior notes (paraphrased; the inventory rows carry them
 // at update time): the sidebar lists the settings areas in a fixed
 // order with a name, a one-line description and a route each, and the
-// entry matching the current path carries the highlight; this checkout
+// entry matching the current path carries the highlight; the oracle
 // still lists the image area and has no runners entry (bug:
-// NEWFRONT-493, NEWFRONT-494). A footer control collapses the rail to
+// NEWFRONT-493, NEWFRONT-494), while the new console builds the
+// intended rail (image gone, runners present). A footer control
+// collapses the rail to
 // icons with hover labels and persists the choice locally; narrow
 // viewports collapse it one-way and an outside tap on small screens
 // hides the off-canvas rail again. The sidebar head shows the admin
@@ -54,18 +56,39 @@ import {
   uniqueSlug,
 } from "../helpers/api";
 import { specTags, specTitle } from "../helpers/tags";
-import type { ParityDriver, ParitySeedFacts } from "../drivers/parity-driver";
+import type { ParityDriver, ParitySeedFacts, ParityTarget } from "../drivers/parity-driver";
 
-/** Sidebar entries in render order: name, route slug. */
-const SIDEBAR_ORDER: Array<[string, string]> = [
-  ["General", "general"],
-  ["Email", "email"],
-  ["Authentication", "authentication"],
-  ["Workspaces", "workspace"],
-  ["Artificial intelligence", "ai"],
-  ["Loop", "loop"],
-  ["Images in Pi Dash", "image"],
-];
+/**
+ * Sidebar entries in render order: name, route slug. The oracle still
+ * lists the image area and lacks the runners page; the new console
+ * builds the intended order (no image per main#523, runners per
+ * main#534 — NEWFRONT-493/494), so each target reads its own rail.
+ */
+const SIDEBAR_ORDER: Record<ParityTarget, Array<[string, string]>> = {
+  web: [
+    ["General", "general"],
+    ["Email", "email"],
+    ["Authentication", "authentication"],
+    ["Workspaces", "workspace"],
+    ["Artificial intelligence", "ai"],
+    ["Loop", "loop"],
+    ["Images in Pi Dash", "image"],
+  ],
+  web_new: [
+    ["General", "general"],
+    ["Email", "email"],
+    ["Authentication", "authentication"],
+    ["Workspaces", "workspace"],
+    ["Artificial intelligence", "ai"],
+    ["Loop", "loop"],
+    ["Runners", "runners"],
+  ],
+};
+
+/** The rail this run must show. */
+function sidebarOrder(driver: ParityDriver): Array<[string, string]> {
+  return SIDEBAR_ORDER[driver.target];
+}
 
 /** Local sleep for proving an absence (no refetch, no transport) over a window. */
 function sleep(ms: number): Promise<void> {
@@ -116,14 +139,14 @@ test(
     await openDashboard(driver, seed);
     const facts = await driver.adminSidebarFacts();
     expect(facts.collapsed).toBe(false);
-    expect(facts.entries.map((entry) => entry.name)).toEqual(SIDEBAR_ORDER.map(([name]) => name));
-    for (const [name, slug] of SIDEBAR_ORDER) {
+    expect(facts.entries.map((entry) => entry.name)).toEqual(sidebarOrder(driver).map(([name]) => name));
+    for (const [name, slug] of sidebarOrder(driver)) {
       const entry = facts.entries.find((row) => row.name === name);
       expect(entry?.description).not.toBe("");
       expect(entry?.href).toBe(`/god-mode/${slug}/`);
     }
     // No per-item gating: every entry shows for the signed-in admin.
-    expect(facts.entries).toHaveLength(SIDEBAR_ORDER.length);
+    expect(facts.entries).toHaveLength(sidebarOrder(driver).length);
     const info = await serverAdminInstanceInfo();
     expect(info.isSetupDone).toBe(true);
     expect(info.instanceId).not.toBe("");
@@ -137,9 +160,17 @@ test(
     await openDashboard(driver, seed);
     const facts = await driver.adminSidebarFacts();
     // Intended: no image entry (removal target per main#523) and a
-    // runners entry (target per main#534). Observed: the reverse.
-    expect(facts.entries.some((entry) => entry.name === "Images in Pi Dash")).toBe(true);
-    expect(facts.entries.some((entry) => entry.name === "Runners")).toBe(false);
+    // runners entry (target per main#534). The oracle shows the reverse;
+    // the new console builds the intended rail.
+    const image = facts.entries.some((entry) => entry.name === "Images in Pi Dash");
+    const runners = facts.entries.some((entry) => entry.name === "Runners");
+    if (driver.target === "web_new") {
+      expect(image).toBe(false);
+      expect(runners).toBe(true);
+    } else {
+      expect(image).toBe(true);
+      expect(runners).toBe(false);
+    }
   }
 );
 
@@ -149,7 +180,7 @@ test(
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await openDashboard(driver, seed);
     const before = await serverAdminInstanceInfo();
-    for (const [name, slug] of SIDEBAR_ORDER) {
+    for (const [name, slug] of sidebarOrder(driver)) {
       await driver.adminSidebarFollowEntry(name);
       expect(await driver.adminCurrentPath()).toBe(`/god-mode/${slug}/`);
       const facts = await driver.adminSidebarFacts();
@@ -173,7 +204,9 @@ test(
     expect(facts.collapsed).toBe(true);
     expect(facts.persistedCollapsed).toBe(true);
     // Icons keep their routes; only the labels hide.
-    expect(facts.entries.map((entry) => entry.href)).toEqual(SIDEBAR_ORDER.map(([, slug]) => `/god-mode/${slug}/`));
+    expect(facts.entries.map((entry) => entry.href)).toEqual(
+      sidebarOrder(driver).map(([, slug]) => `/god-mode/${slug}/`)
+    );
     expect(facts.entries.every((entry) => entry.name === "" && entry.description === "")).toBe(true);
     await driver.adminOpenPath("/general/");
     await waitForSidebar(driver);
@@ -184,7 +217,7 @@ test(
     facts = await driver.adminSidebarFacts();
     expect(facts.collapsed).toBe(false);
     expect(facts.persistedCollapsed).toBe(false);
-    expect(facts.entries.map((entry) => entry.name)).toEqual(SIDEBAR_ORDER.map(([name]) => name));
+    expect(facts.entries.map((entry) => entry.name)).toEqual(sidebarOrder(driver).map(([name]) => name));
   }
 );
 
@@ -249,7 +282,7 @@ test(
     // Labeled entries carry no hover tooltip.
     expect(await driver.adminSidebarEntryTooltip("/god-mode/general/", "General")).toBe(null);
     await driver.adminSidebarToggleCollapse();
-    for (const [name, slug] of SIDEBAR_ORDER) {
+    for (const [name, slug] of sidebarOrder(driver)) {
       expect(await driver.adminSidebarEntryTooltip(`/god-mode/${slug}/`, name)).toBe(name);
     }
   }
@@ -577,7 +610,7 @@ test(
   { tag: specTags(["ADM-070"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await openDashboard(driver, seed);
-    for (const [name] of SIDEBAR_ORDER) {
+    for (const [name] of sidebarOrder(driver)) {
       await driver.adminSidebarFollowEntry(name);
       expect(await driver.adminAbsenceFacts()).toEqual({
         draggable: 0,
@@ -625,7 +658,7 @@ test(
   { tag: specTags(["ADM-072"]) },
   async ({ driver, seed }: { driver: ParityDriver; seed: ParitySeedFacts }) => {
     await openDashboard(driver, seed);
-    for (const [name] of SIDEBAR_ORDER) {
+    for (const [name] of sidebarOrder(driver)) {
       await driver.adminSidebarFollowEntry(name);
       expect((await driver.adminAbsenceFacts()).desktopMentions).toBe(0);
     }

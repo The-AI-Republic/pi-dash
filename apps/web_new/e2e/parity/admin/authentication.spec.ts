@@ -29,7 +29,8 @@
 // derive from the origin plus the provider path, and the Gitea help link
 // follows the typed host as of the last form render (a cleared host
 // reads stale until the next render, then falls back to the default
-// host; bug: NEWFRONT-492). An unfinished required field blocks the
+// host; bug: NEWFRONT-492 — the new console follows the draft live). An
+// unfinished required field blocks the
 // submit silently.
 // Loading shows five-bar skeletons on both the landing and the provider
 // body.
@@ -210,11 +211,21 @@ test(
         await expect
           .poll(async () => (await driver.adminLastToast())?.title ?? "", { timeout: 15_000 })
           .toContain("Saving configuration");
-        const locked = await driver.adminAuthLandingFacts();
-        expect(locked.signupDisabled).toBe(true);
-        for (const card of locked.cards) {
-          if (card.toggleOn !== null) expect(card.toggleDisabled).toBe(true);
-        }
+        // The lock is a steady property of the held write, so read it as
+        // one: a single sampling can land between the progress notice and
+        // the re-render that disables the group.
+        await expect
+          .poll(
+            async () => {
+              const facts = await driver.adminAuthLandingFacts();
+              return {
+                signupDisabled: facts.signupDisabled,
+                cardsLocked: facts.cards.filter((card) => card.toggleOn !== null).every((card) => card.toggleDisabled),
+              };
+            },
+            { timeout: 15_000 }
+          )
+          .toEqual({ signupDisabled: true, cardsLocked: true });
         // The held write still lands once the delay lifts.
         await expect.poll(async () => (await driver.adminConfigPatchBodies()).length, { timeout: 15_000 }).toBe(1);
         await expect
@@ -565,7 +576,10 @@ test(
     const before = await snapshotAuth(session);
     try {
       await driver.adminEnsureSignedIn(seed.email, seed.password);
-      await driver.adminDelayConfigFetch(4000);
+      // The new console compiles the provider page on first visit, so a
+      // cold load can outlast a short delay; hold the read long enough
+      // for the skeleton window to be observable there too.
+      await driver.adminDelayConfigFetch(driver.target === "web_new" ? 120_000 : 4000);
       try {
         await driver.adminOpenPath("/authentication/github/");
         // The header shows with a locked toggle while the body is only a skeleton.
@@ -753,14 +767,20 @@ test(
         .poll(async () => driver.adminAuthCopyHelpHref("Callback URI"), { timeout: 15_000 })
         .toBe("https://gitea.parity.invalid/user/settings/applications");
 
-      // Clearing the host leaves the link stale until the next render: a
-      // blocked save attempt (no request, no notice) re-renders the form
-      // and the link falls back to the default host.
+      // Clearing the host: the oracle keeps the old host's link until the
+      // next render (NEWFRONT-492 bug); the new console follows the draft
+      // and falls back to the public host at once.
       await driver.adminStartConfigPatchSpy();
       await driver.adminAuthFormFill({ GITEA_HOST: "" });
-      expect(await driver.adminAuthCopyHelpHref("Callback URI")).toBe(
-        "https://gitea.parity.invalid/user/settings/applications"
-      );
+      if (driver.target === "web_new") {
+        await expect
+          .poll(async () => driver.adminAuthCopyHelpHref("Callback URI"), { timeout: 15_000 })
+          .toBe("https://gitea.com/user/settings/applications");
+      } else {
+        expect(await driver.adminAuthCopyHelpHref("Callback URI")).toBe(
+          "https://gitea.parity.invalid/user/settings/applications"
+        );
+      }
       await driver.adminAuthFormSave();
       await sleep(1500);
       expect(await driver.adminConfigPatchBodies()).toEqual([]);
@@ -1106,7 +1126,8 @@ test(
     const before = await snapshotAuth(session);
     try {
       await driver.adminEnsureSignedIn(seed.email, seed.password);
-      await driver.adminDelayConfigFetch(4000);
+      // Cold compile can outlast a short hold on the new console.
+      await driver.adminDelayConfigFetch(driver.target === "web_new" ? 120_000 : 4000);
       try {
         await driver.adminOpenPath("/authentication/");
         await expect

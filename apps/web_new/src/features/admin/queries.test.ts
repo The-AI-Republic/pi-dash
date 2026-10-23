@@ -12,6 +12,7 @@ import {
   instanceAdminsQueryOptions,
   instanceBootstrapQueryOptions,
   instanceConfigurationsQueryOptions,
+  instanceEntryQueryOptions,
   instanceRunnersQueryOptions,
   instanceWorkspacesQueryOptions,
   loopJobDetailQueryOptions,
@@ -40,6 +41,7 @@ describe("admin keys", () => {
   it("roots the admin subtree outside the member roots", () => {
     expect(adminKeys.root).toEqual(["admin"]);
     expect(adminKeys.bootstrap).toEqual(["admin", "instance", "bootstrap"]);
+    expect(adminKeys.entryBootstrap).toEqual(["admin", "instance", "entry"]);
     expect(adminKeys.admins).toEqual(["admin", "instance", "admins"]);
     expect(adminKeys.csrf).toEqual(["admin", "csrf"]);
     expect(adminKeys.session).toEqual(["admin", "session"]);
@@ -72,6 +74,19 @@ describe("instance bootstrap query", () => {
     expect(options.refetchOnWindowFocus).toBe(false);
     expect(options.refetchOnReconnect).toBe(false);
     expect(options.staleTime).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe("instance entry query", () => {
+  it("reads once for the gate and folds the bare setup flags", async () => {
+    const getJson = vi.fn(async () => ({ is_activated: false, is_setup_done: false }));
+    const options = instanceEntryQueryOptions({ getJson } as never);
+    expect(options.queryKey).toEqual(adminKeys.entryBootstrap);
+    await expect(options.queryFn?.({} as never)).resolves.toEqual({ setupDone: false, bootstrap: null });
+    expect(getJson).toHaveBeenCalledWith("/api/instances/");
+    expect(options.retry).toBe(false);
+    expect(options.refetchInterval).toBe(false);
+    expect(options.refetchOnWindowFocus).toBe(false);
   });
 });
 

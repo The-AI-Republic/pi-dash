@@ -64,6 +64,7 @@ import type {
   AdminNotFoundFacts,
   AdminRootBranch,
   AdminRunnersFacts,
+  AdminRunnersPageFacts,
   AdminSetupFacts,
   AdminSetupFields,
   AdminShortcutProbeFacts,
@@ -36151,7 +36152,7 @@ export class WebDriver implements ParityDriver {
     for (;;) {
       await this.page.waitForTimeout(500);
       const current: string[] = await this.pagesGatingRowTitles();
-      if (current.join(" ") === previous.join(" ")) return current;
+      if (current.join("") === previous.join("")) return current;
       if (Date.now() > deadline) return current;
       previous = current;
     }
@@ -51334,6 +51335,8 @@ export class WebDriver implements ParityDriver {
       telemetryPolicyTarget: (await policy.count()) === 0 ? null : await policy.first().getAttribute("target"),
       saveLabel: (await save.first().innerText()).trim(),
       saveDisabled: await save.first().isDisabled(),
+      // The old app renders no required-name message (NEWFRONT-475 bug).
+      nameError: null,
     };
   }
 
@@ -51477,6 +51480,9 @@ export class WebDriver implements ParityDriver {
       saveDisabled: await save.first().isDisabled(),
       saveLabel: (await save.first().innerText()).trim(),
       testEmailDisabled: await testEmail.first().isDisabled(),
+      // The old app runs the check against entered values, so it carries
+      // no save-first hint (NEWFRONT-477 bug).
+      saveFirstHint: null,
     };
   }
 
@@ -53206,6 +53212,11 @@ export class WebDriver implements ParityDriver {
 
   async adminClearLoopJobDeleteFault(): Promise<void> {
     this.adminLoopJobDeleteFault = "none";
+  }
+
+  async adminRunnersPageFacts(): Promise<AdminRunnersPageFacts> {
+    // The old app has no runners page: every body fact stays absent.
+    return { pageVisible: false, title: "", tableVisible: false, errorVisible: false, retryVisible: false };
   }
 
   async adminRunnersFacts(): Promise<AdminRunnersFacts> {

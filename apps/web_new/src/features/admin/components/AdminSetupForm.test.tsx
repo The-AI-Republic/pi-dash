@@ -178,6 +178,31 @@ describe("AdminSetupForm", () => {
     expect(passwordToggle).toHaveAttribute("aria-label", "Show password");
   });
 
+  it("keeps the toggles pressable while the strength meter collapses on blur", () => {
+    // A strong secret hides the meter on blur, so a mousedown that moved
+    // focus would reflow the form between press and release and swallow
+    // the toggle. Both toggles cancel mousedown, so focus never moves.
+    renderForm();
+    const password = screen.getByLabelText("Password");
+    const passwordToggle = screen.getByTestId("admin-setup-toggle-password");
+    const confirmToggle = screen.getByTestId("admin-setup-toggle-confirm");
+    fireEvent.change(password, { target: { value: STRONG } });
+    fireEvent.focus(password);
+    expect(screen.getByTestId("admin-setup-strength")).toBeInTheDocument();
+
+    expect(fireEvent.mouseDown(passwordToggle)).toBe(false);
+    expect(screen.getByTestId("admin-setup-strength")).toBeInTheDocument();
+    fireEvent.click(passwordToggle);
+    expect(password).toHaveAttribute("type", "text");
+
+    const confirm = screen.getByLabelText("Confirm password");
+    fireEvent.change(confirm, { target: { value: STRONG } });
+    fireEvent.focus(confirm);
+    expect(fireEvent.mouseDown(confirmToggle)).toBe(false);
+    fireEvent.click(confirmToggle);
+    expect(confirm).toHaveAttribute("type", "text");
+  });
+
   it("swallows rejected names and caps lengths", () => {
     renderForm();
     const firstName = screen.getByLabelText("First name");

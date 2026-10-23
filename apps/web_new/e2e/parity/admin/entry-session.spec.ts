@@ -398,12 +398,19 @@ test(
       await driver.adminSetupSubmit();
       await driver.adminWaitForRootBranch("setup");
       const facts = await driver.adminSetupFacts();
-      expect(facts.bannerText).toBeNull();
-      expect(facts.inlineErrors).toEqual({ email: null, password: null });
       expect(facts.values.firstName).toBe("Parity");
       expect(facts.values.lastName).toBe("Admin");
       expect(facts.values.email).toBe(seed.email);
-      expect(facts.values.company).toBe("");
+      if (driver.target === "web_new") {
+        // Intended (NEWFRONT-457): the rejection surfaces its reason and
+        // the company echo survives the round trip.
+        expect(facts.bannerText).not.toBeNull();
+        expect(facts.values.company).toBe("Parity Bug Co");
+      } else {
+        expect(facts.bannerText).toBeNull();
+        expect(facts.inlineErrors).toEqual({ email: null, password: null });
+        expect(facts.values.company).toBe("");
+      }
 
       // The rejection wrote nothing: setup stays undone with no admins.
       expect((await serverAdminInstanceInfo()).isSetupDone).toBe(false);
@@ -541,9 +548,18 @@ test(
 
     // The banner link targets a route that does not exist: following it
     // renders the not-found screen instead of returning to sign-in.
+    // The hrefs are mount-relative, so strip the console mount before
+    // handing them to the path helper.
     const href = (await driver.adminSignInFacts()).mappedBanner?.linkHref ?? null;
+    if (driver.target === "web_new") {
+      // Intended (NEWFRONT-458): the link returns to the sign-in entry.
+      expect(href).toBe("/god-mode/");
+      await driver.adminOpenPath((href ?? "/god-mode/").replace(/^\/god-mode/, ""));
+      await driver.adminWaitForRootBranch("sign-in");
+      return;
+    }
     expect(href).toBe("/god-mode/admin/");
-    await driver.adminOpenPath(href ?? "/god-mode/admin/");
+    await driver.adminOpenPath((href ?? "/god-mode/admin/").replace(/^\/god-mode/, ""));
     const facts = await driver.adminNotFoundFacts();
     expect(facts.illustrationVisible).toBe(true);
     expect(facts.messageVisible).toBe(true);
@@ -688,8 +704,12 @@ test(
     await driver.adminStubNoWorkspaces();
     await driver.adminOpenRoot();
     await driver.adminWaitForRootBranch("dashboard");
+    // The card reads the dashboard's info load, so it lands once that
+    // read settles rather than with the shell.
+    await expect
+      .poll(async () => (await driver.adminFirstWorkspacePopupFacts()).visible, { timeout: 15_000 })
+      .toBe(true);
     const popup = await driver.adminFirstWorkspacePopupFacts();
-    expect(popup.visible).toBe(true);
     expect(popup.createHref).toBe("/god-mode/workspace/create/");
 
     // The create action leads to the create page without clearing the card.
@@ -697,7 +717,9 @@ test(
     expect(await driver.adminCurrentPath()).toBe("/god-mode/workspace/create/");
     await driver.adminOpenPath("/general/");
     await driver.adminWaitForRootBranch("dashboard");
-    expect((await driver.adminFirstWorkspacePopupFacts()).visible).toBe(true);
+    await expect
+      .poll(async () => (await driver.adminFirstWorkspacePopupFacts()).visible, { timeout: 15_000 })
+      .toBe(true);
 
     // Dismissing clears it, and a truthful reload keeps it gone.
     await driver.adminFirstWorkspacePopupDismiss();
