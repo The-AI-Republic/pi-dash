@@ -9,6 +9,7 @@ see NOTE on MAIL_TASKS.)
 """
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from psycopg.rows import dict_row
@@ -304,6 +305,74 @@ def _processed(conn, log_ids) -> bool:
         cur.execute(
             "SELECT count(*) AS n FROM email_notification_logs "
             "WHERE id = ANY(%s::uuid[]) AND processed_at IS NOT NULL",
+            ([str(i) for i in log_ids],),
+        )
+        return cur.fetchone()["n"] == len(log_ids)
+
+
+def _mention_html(mentioned_id) -> str:
+    """Comment HTML with a multi-byte char straddling byte 17 after a tag
+    start (the é sits at bytes 16..18 of the rest after ``<``), plus one
+    real ``<mention-component>`` to rewrite."""
+    return (
+        "<p>Merci beaucoupé pour la revue</p>"
+        f'<mention-component entity_identifier="{mentioned_id}">X</mention-component>'
+    )
+
+
+def test_stack_sends_non_ascii_mention_mail(db_conn, broker_url, smtp_sink):
+    """PIDASHCONV-1284 oracle: non-ASCII mention HTML still delivers.
+
+    The mention slot's ``new_value``/``old_value`` is comment HTML
+    (``notification_task.py``): BeautifulSoup rewrites the component to
+    ``@display_name`` and the mail is sent with ``sent_at`` marked. The
+    Rust replay (``test_rust_replay.py``) mirrors these pins exactly.
+    """
+    chain = seed_helpers.issue_chain(db_conn, "mailnonascii")
+    receiver = seed_helpers.user(db_conn, "contract-nonascii-rcv")
+    mentioned = seed_helpers.user(db_conn, "contract-mentioned")
+    issue_id = str(chain["issue"]["id"])
+    html = _mention_html(mentioned["id"])
+    log_id = seed_helpers.email_log(
+        db_conn,
+        receiver["id"],
+        chain["owner"]["id"],
+        issue_id,
+        data={
+            "issue_activity": {
+                "field": "mention",
+                "old_value": html,
+                "new_value": html,
+                "activity_time": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )["id"]
+    redis_cache.setex(issue_id, "http://localhost")
+    smtp_sink.clear()
+
+    celery_wire.publish(f"{M}.email_notification_task.stack_email_notification")
+    wait_for(
+        lambda: _processed(db_conn, [log_id]),
+        what="stack_email_notification marking processed_at",
+    )
+    delivered = smtp_sink.wait_for_count(1, what="non-ascii mention mail")
+    matches = [m for m in delivered if receiver["email"] in m["rcpt_tos"]]
+    assert matches, "stacked mention mail never arrived"
+    raw = matches[0]["raw"]
+    # ASCII-only markers: the é itself may QP-encode in the raw MIME.
+    assert f"@{mentioned['display_name']}" in raw, "mention not rewritten to @name"
+    assert "mention-component" not in raw, "raw mention-component leaked into the mail"
+    wait_for(
+        lambda: _sent(db_conn, [log_id]),
+        what="send_email_notification marking sent_at",
+    )
+
+
+def _sent(conn, log_ids) -> bool:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT count(*) AS n FROM email_notification_logs "
+            "WHERE id = ANY(%s::uuid[]) AND sent_at IS NOT NULL",
             ([str(i) for i in log_ids],),
         )
         return cur.fetchone()["n"] == len(log_ids)
