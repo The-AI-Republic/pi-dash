@@ -95,9 +95,12 @@ pub const SCHEDULER_SERIALIZER_FIELDS: &[&str] = &[
 ];
 
 /// `SchedulerSerializer.Meta.read_only_fields` (`scheduler.py:93-100`).
+/// `slug` is read-only since PDASHOSS01-319: the server derives it from
+/// the name ([`derive_scheduler_slug`]).
 pub const SCHEDULER_READ_ONLY_FIELDS: &[&str] = &[
     "id",
     "workspace",
+    "slug",
     "source",
     "active_binding_count",
     "created_at",
@@ -251,11 +254,49 @@ pub const RDATE_EXDATE_MAX_LENGTH: usize = 256;
 /// `_validate_color` rejection (`scheduler.py:40-42`).
 pub const COLOR_ERROR: &str = "color must be a 7-character hex string like '#3b82f6'";
 
-/// `validate_slug` rejection (`scheduler.py:131-133`, OSS `main`
-/// `3db73752`, PDASHOSS01-221): a slug already used by another active
-/// scheduler in the workspace. The EXISTS decision needs the database
-/// (queries R7 + handlers); only the message lives here.
-pub const SLUG_UNIQUE_ERROR: &str = "This slug is already in use in this workspace.";
+/// `validate_name` duplicate rejection (`DUPLICATE_NAME_MESSAGE`,
+/// `app/serializers/scheduler.py`, PDASHOSS01-319): the name's derived
+/// slug is already used by another active scheduler in the workspace.
+/// The EXISTS decision needs the database (queries R7 + handlers); only
+/// the message lives here.
+pub const DUPLICATE_NAME_ERROR: &str =
+    "A scheduler with the same name already exists in this workspace.";
+
+/// `validate_name` empty-slug rejection (`NAME_NEEDS_ALNUM_MESSAGE`,
+/// PDASHOSS01-319): the name has no ASCII letter or digit, so it derives
+/// an empty slug.
+pub const NAME_NEEDS_ALNUM_ERROR: &str = "Name must contain at least one letter or digit.";
+
+/// `Scheduler.slug` is `CharField(max_length=64)`
+/// (`SCHEDULER_SLUG_MAX_LENGTH`, `pi_dash/scheduler/slug.py`).
+pub const SCHEDULER_SLUG_MAX_LENGTH: usize = 64;
+
+/// `derive_scheduler_slug` (`pi_dash/scheduler/slug.py`, PDASHOSS01-319):
+/// lowercase, every run of characters outside `a-z`/`0-9` becomes one
+/// `-`, leading/trailing dashes trimmed, capped at 64 characters with a
+/// dash left at the cut trimmed again. `""` when the name has no ASCII
+/// letter or digit. Unicode lowercasing first, like Python `str.lower`
+/// (`'İ'` lowers to `"i\u{307}"`, so it keeps its `i`). The result is
+/// ASCII, so the byte-length cap never splits a character. Checked
+/// against the shared vectors in
+/// `rust-api/fixtures/app_scheduler/serializers/slug_vectors.json`.
+pub fn derive_scheduler_slug(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut pending_dash = false;
+    for ch in name.to_lowercase().chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(ch);
+        } else {
+            pending_dash = true;
+        }
+    }
+    slug.truncate(SCHEDULER_SLUG_MAX_LENGTH);
+    slug.trim_end_matches('-').to_owned()
+}
 
 /// Cross-field pod/project mismatch (`scheduler.py:264-267`).
 pub const POD_PROJECT_ERROR: &str = "pod must belong to the same project as this scheduler install";
@@ -1513,6 +1554,38 @@ mod tests {
         assert_eq!(SCHEDULER_SERIALIZER_FIELDS, expected.as_slice());
     }
 
+    const SLUG_VECTORS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/app_scheduler/serializers/slug_vectors.json"
+    );
+
+    #[test]
+    fn derive_scheduler_slug_matches_shared_vectors() {
+        // Byte copy of `apps/api/pi_dash/scheduler/slug_vectors.json`, the
+        // vectors Django's `derive_scheduler_slug` and the web
+        // `deriveSchedulerSlug` are checked against.
+        let vectors = golden(SLUG_VECTORS);
+        let vectors = vectors.as_array().expect("vectors array");
+        assert!(vectors.len() > 10);
+        for vector in vectors {
+            let name = vector["name"].as_str().expect("name");
+            let slug = vector["slug"].as_str().expect("slug");
+            assert_eq!(derive_scheduler_slug(name), slug, "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn name_error_bodies_are_wire_exact() {
+        assert_eq!(
+            field_error_body("name", DUPLICATE_NAME_ERROR),
+            r#"{"name":["A scheduler with the same name already exists in this workspace."]}"#
+        );
+        assert_eq!(
+            field_error_body("name", NAME_NEEDS_ALNUM_ERROR),
+            r#"{"name":["Name must contain at least one letter or digit."]}"#
+        );
+    }
+
     #[test]
     fn scheduler_read_only_and_render_keys_match_f36_01() {
         let parsed = golden(F36_01);
@@ -1705,21 +1778,6 @@ mod tests {
         assert_eq!(validate_color("#ABCDEF\n"), Ok("#abcdef".to_owned()));
         // Interior whitespace survives the strip and fails.
         assert_eq!(validate_color("#AB CDE"), Err(COLOR_ERROR));
-    }
-
-    #[test]
-    fn slug_unique_error_body_is_wire_exact() {
-        // `validate_slug` (`scheduler.py:131-133`): the duplicate-slug
-        // wire body, byte for byte (captured from `origin/main`,
-        // PIDASHCONV-1066).
-        assert_eq!(
-            SLUG_UNIQUE_ERROR,
-            "This slug is already in use in this workspace."
-        );
-        assert_eq!(
-            field_error_body("slug", SLUG_UNIQUE_ERROR),
-            r#"{"slug":["This slug is already in use in this workspace."]}"#
-        );
     }
 
     #[test]

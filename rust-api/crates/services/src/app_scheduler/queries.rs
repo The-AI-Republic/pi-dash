@@ -18,7 +18,9 @@
 //!   reads, create, PATCH, delete cascade.
 //! - `app/serializers/scheduler.py:113-134` — `validate_slug` R7
 //!   duplicate check (PDASHOSS01-221; absent at the baseline, where a
-//!   duplicate fell through to the `IntegrityError` branch).
+//!   duplicate fell through to the `IntegrityError` branch). Since
+//!   PDASHOSS01-319 `validate_name` runs the same query on the slug
+//!   derived from the name.
 //! - `app/views/scheduler/views.py:163-291` — binding list/detail reads,
 //!   install, PATCH, uninstall.
 //! - `app/serializers/scheduler.py:108` — `active_binding_count`
@@ -128,7 +130,8 @@ pub const ACTIVE_BINDING_COUNT_SQL: &str = "SELECT COUNT(*) AS \"__count\" FROM 
 pub const ACTIVE_BINDING_COUNT_PARAMS: &[&str] = &["scheduler_id"];
 
 /// R7 slug-unique check (`SchedulerSerializer.validate_slug`,
-/// `serializers/scheduler.py:113-134`, OSS `main` `3db73752`): the
+/// `serializers/scheduler.py:113-134`, OSS `main` `3db73752`; since
+/// PDASHOSS01-319 `validate_name`, with `:slug` derived from the name): the
 /// `.exists()` over `Scheduler.objects.filter(workspace=..., slug=...)`
 /// — the soft-delete manager's NULL guard only (no double guard like
 /// R6/BR4), so tombstoned slugs stay reusable, matching the

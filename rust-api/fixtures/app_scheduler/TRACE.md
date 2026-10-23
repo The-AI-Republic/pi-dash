@@ -13,7 +13,7 @@ queries fixtures reference those tables only through SQL + rows.
 
 ## Serializers
 
-- `serializers/scheduler_shapes.golden.json` — F36-01 — `app/serializers/scheduler.py:74-112` (SchedulerSerializer fields :79-92, read-only :93-100, active_binding_count :102-108, color :110-112 + `_validate_color` :37-43); annotation sites `app/views/scheduler/views.py:59-68,99-104,118-123`; id rule `app/serializers/base.py` (BaseSerializer). PIDASHCONV-1066 adds the `validators` note for `validate_slug` (:113-134, OSS main `3db73752`).
+- `serializers/scheduler_shapes.golden.json` — F36-01 — `app/serializers/scheduler.py:74-112` (SchedulerSerializer fields :79-92, read-only :93-100, active_binding_count :102-108, color :110-112 + `_validate_color` :37-43); annotation sites `app/views/scheduler/views.py:59-68,99-104,118-123`; id rule `app/serializers/base.py` (BaseSerializer). PIDASHCONV-1066 adds the `validators` note for `validate_slug` (:113-134, OSS main `3db73752`); PDASHOSS01-319 makes `slug` read-only (derived from the name) and moves the note to `validate_name`. `serializers/slug_vectors.json` is a byte copy of `apps/api/pi_dash/scheduler/slug_vectors.json` (PDASHOSS01-319).
 - `serializers/binding_shapes.golden.json` — F36-02 — `app/serializers/scheduler.py:114-180` (derived fields :115-130, fields :134-160, read-only :161-173, last_run methods :175-179); pod queryset rule :123-127.
 - `serializers/binding_validation.golden.json` — F36-03 — `app/serializers/scheduler.py:37-71,181-268` (`_validate_color` :37-43, `_validate_iso_datetime_list` :46-71, `validate_rrule` :181-198, rdates/exdates :200-204, tzid :206-216, extra_context :218-223, cross-field `validate` :225-268); rrule verdict `bgtasks/_rrule.py:218-265` (recorded as injected-closure I/O per the split-review seam note); error normalization is DRF 3.15.2 `as_serializer_error` (top-level list-wrap, nested-dict passthrough).
 
@@ -31,7 +31,7 @@ queries fixtures reference those tables only through SQL + rows.
 
 ## Handlers
 
-- `handlers/scheduler_io.golden.json` — F36-10 — `app/views/scheduler/views.py:46-157` (list :55-72, create :75-85 incl. IntegrityError race backstop via `app/views/base.py:211-240`, detail GET :95-111, PATCH :114-133, DELETE :136-157); shapes F36-01, SQL F36-04, gates F36-09. PIDASHCONV-1066 repoints both `duplicate_slug` bodies at the R7 field error (`app/serializers/scheduler.py:113-134`, OSS main `3db73752`).
+- `handlers/scheduler_io.golden.json` — F36-10 — `app/views/scheduler/views.py:46-157` (list :55-72, create :75-85 incl. IntegrityError race backstop via `app/views/base.py:211-240`, detail GET :95-111, PATCH :114-133, DELETE :136-157); shapes F36-01, SQL F36-04, gates F36-09. PIDASHCONV-1066 repoints both `duplicate_slug` bodies at the R7 field error (`app/serializers/scheduler.py:113-134`, OSS main `3db73752`); PDASHOSS01-319 replaces them with `duplicate_name` (`validate_name`, slug derived from the name).
 - `handlers/binding_io.golden.json` — F36-11 — `app/views/scheduler/views.py:163-291` (list :172-186, install :189-224, detail GET :237-249, PATCH :252-278, uninstall :281-291); shapes F36-02/F36-03, SQL F36-05, gates F36-09.
 - `handlers/occurrences_io.golden.json` — F36-12 — `app/views/scheduler/occurrences.py:63-208` (project check :78, window :80-103, envelope :201-207); window F36-07, merge F36-08, gates F36-09.
 
