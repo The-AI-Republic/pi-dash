@@ -1,6 +1,6 @@
 {
   "_fixture": "F-SEND",
-  "_method": "executed: .venv-1248 python .scratch1287-gen_bs4.py (bs4 bs4 4.12.3, CPython 3.12.3); cases = probe rounds 1-13 + full html5 table sweep (text + attr contexts, semicolon + nosemi) + numeric sweep; mail slice identical on origin/main and rust-dev at gen time; fixrun1287: +50 review-class cases recorded live (bs4 4.12.3, CPython 3.12.3)",
+  "_method": "executed: .venv-1248 python .scratch1287-gen_bs4.py (bs4 bs4 4.12.3, CPython 3.12.3); cases = probe rounds 1-13 + full html5 table sweep (text + attr contexts, semicolon + nosemi) + numeric sweep; mail slice identical on origin/main and rust-dev at gen time; fixrun1287: +50 review-class cases recorded live (bs4 4.12.3, CPython 3.12.3); fixrun1287b: +31 R1/R1b/R2 cases recorded live (bs4 4.12.3, CPython 3.12.3)",
   "_ported_from": "c494eddb2c652f47a6ed67617990d71637e0ff1a",
   "_sources": [
     "apps/api/pi_dash/bgtasks/email_notification_task.py:130-140"
@@ -58301,6 +58301,161 @@
       "name": "fixrun1287::d8.eqonly",
       "in": "<p>x</p=>tail",
       "out": "<p>xtail</p>"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.dquote",
+      "in": "<p>x</p a= \"y>TAIL",
+      "out": "<p>x</p>TAIL"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.squote",
+      "in": "<p>x</p a= 'y>TAIL",
+      "out": "<p>x</p>TAIL"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.multiws",
+      "in": "<p>x</p a=  \"y>TAIL",
+      "out": "<p>x</p>TAIL"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.tab",
+      "in": "<p>x</p a=\t\"y>TAIL",
+      "out": "<p>x</p>TAIL"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.raw",
+      "in": "<script>x</script a= \"y>TAIL</script>END",
+      "out": "<script>x</script>TAILEND"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.rcdata",
+      "in": "<title>x</title a= \"y>TAIL</title>END",
+      "out": "<title>x</title>TAILEND"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.eof",
+      "in": "<p>x</p a= \"y",
+      "out": "<p>x</p>"
+    },
+    {
+      "name": "fixrun1287b::r1.endtag.terminated",
+      "in": "<p>x</p a= \"b\">TAIL",
+      "out": "<p>x</p>TAIL"
+    },
+    {
+      "name": "fixrun1287b::r1.open.dquote",
+      "in": "<p a= \"y>z</p>",
+      "out": "<p \"y=\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1.open.squote",
+      "in": "<p a= 'y>z</p>",
+      "out": "<p 'y=\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1.open.multiws",
+      "in": "<p a=  \"y>z</p>",
+      "out": "<p \"y=\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1.open.tab",
+      "in": "<p a=\t\"y>z</p>",
+      "out": "<p \"y=\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1.open.nows",
+      "in": "<p a=\"y>z</p>",
+      "out": ""
+    },
+    {
+      "name": "fixrun1287b::r1.open.eof",
+      "in": "<p a= \"y",
+      "out": ""
+    },
+    {
+      "name": "fixrun1287b::r1b.open.prews",
+      "in": "<p a =\"y>z</p>",
+      "out": "<p =\"y=\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1b.open.quoteend",
+      "in": "<p a\"=\"y>z</p>",
+      "out": "<p =\"y=\"\" a\"=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1b.open.multiPrews",
+      "in": "<p ab =\"y>z</p>",
+      "out": "<p =\"y=\"\" ab=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1b.open.multi-nows",
+      "in": "<p ab=\"y>z</p>",
+      "out": ""
+    },
+    {
+      "name": "fixrun1287b::r1b.open.tabprews",
+      "in": "<p a\t=\"y>z</p>",
+      "out": "<p =\"y=\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1b.open.multiattr",
+      "in": "<p b=\"1\" a =\"y>z</p>",
+      "out": "<p =\"y=\"\" a=\"\" b=\"1\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r1b.open.slash",
+      "in": "<p a/= \"y>z</p>",
+      "out": "<p \"y=\"\" ==\"\" a=\"\">z</p>"
+    },
+    {
+      "name": "fixrun1287b::r2.suffix.dd",
+      "in": "<!--a--",
+      "out": "<!--a-->"
+    },
+    {
+      "name": "fixrun1287b::r2.suffix.d",
+      "in": "<!--a-",
+      "out": "<!--a-->"
+    },
+    {
+      "name": "fixrun1287b::r2.suffix.ddbang",
+      "in": "<!--a--!",
+      "out": "<!--a-->"
+    },
+    {
+      "name": "fixrun1287b::r2.suffix.ddd",
+      "in": "<!--a---",
+      "out": "<!--a--->"
+    },
+    {
+      "name": "fixrun1287b::r2.suffix.bare5",
+      "in": "<!-----",
+      "out": "<!----->"
+    },
+    {
+      "name": "fixrun1287b::r2.suffix.bare3",
+      "in": "<!---",
+      "out": "<!-- -->"
+    },
+    {
+      "name": "fixrun1287b::r2.nostrip.x",
+      "in": "<!--a--x",
+      "out": "<!--a--x-->"
+    },
+    {
+      "name": "fixrun1287b::r2.nostrip.sp",
+      "in": "<!--a-- ",
+      "out": "<!--a-- -->"
+    },
+    {
+      "name": "fixrun1287b::r2.nostrip.bang",
+      "in": "<!--!",
+      "out": "<!--!-->"
+    },
+    {
+      "name": "fixrun1287b::r2.nostrip.bare",
+      "in": "<!--",
+      "out": "<!-- -->"
     }
   ]
 }

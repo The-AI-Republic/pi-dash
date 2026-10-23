@@ -846,12 +846,14 @@ impl<'a> Parser<'a> {
                 m += 1;
             }
             let attr_name = self.slice(k, m).to_lowercase();
+            let after_name = m;
             k = m;
             while k < len && is_html_ws(self.bytes[k]) {
                 k += 1;
             }
             let mut value = String::new();
             if k < len && self.bytes[k] == b'=' {
+                let eq_pos = k;
                 k += 1;
                 while k < len && is_html_ws(self.bytes[k]) {
                     k += 1;
@@ -866,10 +868,31 @@ impl<'a> Parser<'a> {
                         n += 1;
                     }
                     if n >= len {
-                        return None;
+                        // Unterminated quote. With post-`=` ws
+                        // consumed, CPython backtracks the ws to empty
+                        // and keeps `=` + empty-bare (`a=""`),
+                        // resuming after the `=` (probed: `<p a= "y>`
+                        // completes). With no post-`=` ws the value
+                        // group matches empty and the scan resumes
+                        // after the attrname — but only past
+                        // attrfind's lookbehind, i.e. a skipped sep
+                        // (pre-`=` ws: `eq_pos > after_name`) or a
+                        // quote-final name (probed: `<p a ="y>` and
+                        // `<p a"="y>` complete, `<p a="y>` drops the
+                        // tag); otherwise the tag is incomplete.
+                        if k > eq_pos + 1 {
+                            k = eq_pos + 1;
+                        } else if eq_pos > after_name
+                            || matches!(self.bytes[after_name - 1], b'"' | b'\'')
+                        {
+                            k = after_name;
+                        } else {
+                            return None;
+                        }
+                    } else {
+                        value = unescape_attr(self.slice(k + 1, n));
+                        k = n + 1;
                     }
-                    value = unescape_attr(self.slice(k + 1, n));
-                    k = n + 1;
                 } else {
                     // Bare: everything to whitespace or `>` (quotes and
                     // `/` included — probed: `a=b'c'`, `value=1/`).
@@ -997,7 +1020,8 @@ impl<'a> Parser<'a> {
     /// `<!--...-->`: ends at the first `-->` or `--!>`
     /// (`commentclose = --!?>` — probed), whichever comes first. With
     /// neither later, `<!-->`/`<!--->` close abruptly (empty);
-    /// otherwise the content runs to EOF (probed).
+    /// otherwise the content runs to EOF minus one trailing `--!`,
+    /// `--` or `-` (probed).
     fn parse_comment(&mut self) {
         let len = self.bytes.len();
         let body = self.pos + 4;
@@ -1030,8 +1054,19 @@ impl<'a> Parser<'a> {
             self.out.push_str("<!-- -->");
             self.pos += 6;
         } else {
+            // Unterminated at EOF: `goahead` end-handling strips one
+            // trailing `--!`, else `--`, else `-` before
+            // `handle_comment` (probed: `<!--a--` → `<!--a-->`,
+            // `<!--a---` → `<!--a--->`, `<!---` → `<!-- -->`).
+            let mut end = len;
+            for suffix in [&b"--!"[..], &b"--"[..], &b"-"[..]] {
+                if end - body >= suffix.len() && self.bytes[end - suffix.len()..end] == *suffix {
+                    end -= suffix.len();
+                    break;
+                }
+            }
             self.out.push_str("<!--");
-            self.emit_opaque(self.slice(body, len));
+            self.emit_opaque(self.slice(body, end));
             self.out.push_str("-->");
             self.pos = len;
         }
@@ -1292,11 +1327,13 @@ fn match_close_name(s: &[u8], name: &str) -> bool {
 ///
 /// Bare quotes never protect `>` (probed: `</p "a>b">` closes at the
 /// inner `>`); only `name="..."` values do (probed: `</p a=">">`
-/// closes at the outer). An unterminated quoted value voids just the
-/// value group (CPython rewinds past the attrname), so the next
-/// attrname needs attrfind's lookbehind — a quote, whitespace or `/`
-/// (probed rewind pair: `</p a="y>` swallows, `</p a ="y>` closes at
-/// the inner `>`).
+/// closes at the outer). An unterminated quoted value backtracks the
+/// post-`=` ws to empty and keeps `=` + empty-bare when ws was
+/// consumed (probed: `</p a= "y>` closes at the inner `>`); with no
+/// ws the value group matches empty (CPython rewinds past the
+/// attrname), so the next attrname needs attrfind's lookbehind — a
+/// quote, whitespace or `/` (probed rewind pair: `</p a="y>`
+/// swallows, `</p a ="y>` closes at the inner `>`).
 fn scan_endtag_junk(bytes: &[u8], mut k: usize) -> Option<usize> {
     let len = bytes.len();
     // Junk always starts at whitespace, `/`, `>` or EOF (where the
@@ -1336,6 +1373,7 @@ fn scan_endtag_junk(bytes: &[u8], mut k: usize) -> Option<usize> {
         if v >= len || bytes[v] != b'=' {
             continue;
         }
+        let eq_pos = v;
         v += 1;
         while v < len && is_html_ws(bytes[v]) {
             v += 1;
@@ -1347,10 +1385,20 @@ fn scan_endtag_junk(bytes: &[u8], mut k: usize) -> Option<usize> {
                 w += 1;
             }
             if w >= len {
-                // Unterminated quote: the value group matches empty,
-                // back after the attrname.
-                k = after_name;
-                prev = prev_after_name;
+                // Unterminated quote: CPython backtracks the
+                // post-`=` ws to empty and keeps `=` + empty-bare
+                // (`a= "y` → `a=""`), so the scan continues after
+                // the ws — but only when ws was actually consumed
+                // (probed: `</p a= "y>` closes inner, `</p a="y>`
+                // swallows). With no ws the value group matches
+                // empty: back after the attrname.
+                if v > eq_pos + 1 {
+                    k = eq_pos + 1;
+                    prev = b'=';
+                } else {
+                    k = after_name;
+                    prev = prev_after_name;
+                }
                 continue;
             }
             prev = q;
@@ -1495,6 +1543,62 @@ mod tests {
     }
 
     #[test]
+    fn endtag_junk_backtracks_post_eq_ws_before_unterminated_quote() {
+        // CPython backtracks the post-`=` ws to empty and keeps `=` +
+        // empty-bare, so the scan continues after the ws and closes at
+        // the inner `>`.
+        assert_eq!(norm("<p>x</p a= \"y>TAIL"), "<p>x</p>TAIL");
+        assert_eq!(norm("<p>x</p a= 'y>TAIL"), "<p>x</p>TAIL");
+        assert_eq!(norm("<p>x</p a=  \"y>TAIL"), "<p>x</p>TAIL");
+        assert_eq!(norm("<p>x</p a=\t\"y>TAIL"), "<p>x</p>TAIL");
+        // Same shape at the raw/RCDATA sites.
+        assert_eq!(
+            norm("<script>x</script a= \"y>TAIL</script>END"),
+            "<script>x</script>TAILEND"
+        );
+        assert_eq!(
+            norm("<title>x</title a= \"y>TAIL</title>END"),
+            "<title>x</title>TAILEND"
+        );
+        // Controls: no post-`=` ws means a full rewind (drops); the
+        // pre-ws-only, terminated and EOF shapes are unchanged.
+        assert_eq!(norm("<p>x</p a= \"b\">TAIL"), "<p>x</p>TAIL");
+        assert_eq!(norm("<p>x</p a= \"y"), "<p>x</p>");
+        assert_eq!(norm("<p>x</p a=\x0b\"y>TAIL"), "<p>x</p>TAIL");
+    }
+
+    #[test]
+    fn open_tag_backtracks_post_eq_ws_before_unterminated_quote() {
+        // The open-tag analog: `a` keeps `=` + empty-bare (`a=""`),
+        // then `"y` parses as a bare attrname and the tag completes
+        // (attrs render sorted).
+        assert_eq!(norm("<p a= \"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
+        assert_eq!(norm("<p a= 'y>z</p>"), "<p 'y=\"\" a=\"\">z</p>");
+        assert_eq!(norm("<p a=  \"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
+        assert_eq!(norm("<p a=\t\"y>z</p>"), "<p \"y=\"\" a=\"\">z</p>");
+        // Controls: no-ws and EOF drop the tag; pre-ws-only and
+        // terminated shapes are unchanged; `\x0b` is a bare value.
+        assert_eq!(norm("<p a=\"y>z</p>"), "");
+        assert_eq!(norm("<p a =\"y>z</p>"), "<p =\"y=\"\" a=\"\">z</p>");
+        assert_eq!(norm("<p a= \"b\">z</p>"), "<p a=\"b\">z</p>");
+        assert_eq!(norm("<p a= \"y"), "");
+        assert_eq!(norm("<p a=\x0b\"y>z</p>"), "<p a='\x0b\"y'>z</p>");
+        // No post-`=` ws: the value group matches empty, so the scan
+        // resumes after the attrname past attrfind's lookbehind — a
+        // skipped pre-`=` sep or a quote-final name completes the tag.
+        assert_eq!(norm("<p a\"=\"y>z</p>"), "<p =\"y=\"\" a\"=\"\">z</p>");
+        assert_eq!(norm("<p a\" =\"y>z</p>"), "<p =\"y=\"\" a\"=\"\">z</p>");
+        assert_eq!(norm("<p ab =\"y>z</p>"), "<p =\"y=\"\" ab=\"\">z</p>");
+        assert_eq!(norm("<p ab=\"y>z</p>"), "");
+        assert_eq!(norm("<p a\t=\"y>z</p>"), "<p =\"y=\"\" a=\"\">z</p>");
+        assert_eq!(
+            norm("<p b=\"1\" a =\"y>z</p>"),
+            "<p =\"y=\"\" a=\"\" b=\"1\">z</p>"
+        );
+        assert_eq!(norm("<p a =\"y"), "");
+    }
+
+    #[test]
     fn raw_close_with_junk_at_eof_drops() {
         assert_eq!(norm("<script>x</script <b"), "<script>x</script>");
         assert_eq!(norm("<style>x</style <b"), "<style>x</style>");
@@ -1534,6 +1638,25 @@ mod tests {
         assert_eq!(norm("<!--a--!>b-->"), "<!--a-->b--&gt;");
         assert_eq!(norm("<!--a--!>TAIL"), "<!--a-->TAIL");
         assert_eq!(norm("<!--x-->TAIL"), "<!--x-->TAIL");
+    }
+
+    #[test]
+    fn unterminated_comment_at_eof_strips_one_suffix() {
+        // `goahead` end-handling strips one trailing `--!`, else `--`,
+        // else `-` before `handle_comment`.
+        assert_eq!(norm("<!--a--"), "<!--a-->");
+        assert_eq!(norm("<!--a-"), "<!--a-->");
+        assert_eq!(norm("<!--a--!"), "<!--a-->");
+        assert_eq!(norm("<!--a---"), "<!--a--->");
+        assert_eq!(norm("<!-----"), "<!----->");
+        assert_eq!(norm("<!---"), "<!-- -->");
+        // Controls: no strip without the suffix at EOF.
+        assert_eq!(norm("<!--a--x"), "<!--a--x-->");
+        assert_eq!(norm("<!--a-- "), "<!--a-- -->");
+        assert_eq!(norm("<!--a-- x"), "<!--a-- x-->");
+        assert_eq!(norm("<!--!"), "<!--!-->");
+        assert_eq!(norm("<!--a"), "<!--a-->");
+        assert_eq!(norm("<!--"), "<!-- -->");
     }
 
     #[test]
